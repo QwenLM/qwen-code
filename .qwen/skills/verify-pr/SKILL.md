@@ -737,9 +737,16 @@ delivered head). `<r>` is this round's number — pick the next integer and
 round. Then run prepare (trusted host metadata); it creates and prints the
 artifact directory `<dir>`, which you record at `--complete`. If prepare fails
 after `--start`, recover with
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>`
-so the head is not stranded in flight (`--repo` is required: `--start` recorded
-it, and every verb refuses an omitted `--repo` once a repo is recorded).
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>`,
+then start the head again
+(`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`)
+and retry prepare — a release alone leaves the head unregistered (it files only
+a push-order hint, not a deferral) and no probe fire will deliver it again.
+`--repo` is required on both: `--start` recorded it, and every verb refuses an
+omitted `--repo` once a repo is recorded. Do not recover with `--complete
+inconclusive` instead — only that verdict increments the retry counter whose
+cap is the terminal not-covered state, so two transient prepare failures would
+retire a head no round examined.
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container
@@ -755,7 +762,8 @@ Exit 3 has several shapes, each with its own reaction:
   **recorded as deferred** and the fire is skipped — the probe's cursor
   advanced past it in the same call, so no second event will arrive. The
   round that owns the blocking head may have finished without `--complete`;
-  if it is no longer running, recover with `--release --head <blocking head>`
+  if it is no longer running, recover with
+  `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>`
   and then start the last deferred head, or the deferral is never delivered.
 - The state lock is held by another invocation: retry shortly; if a killed
   invocation left the `.lock` file beside the state file, remove that lock
@@ -961,9 +969,13 @@ ambiguous rather than verify a guessed PR. Then, in order:
    `<r>` is this round's number; repeat the same value in `--complete`. Then run
    prepare; it creates and prints the artifact directory `<dir>`, which you
    record at `--complete`. If prepare fails after `--start`, recover with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> [--round <r>] --repo <owner>/<repo>`
-   so the head is not stranded in flight (`--repo` is required once `--start`
-   recorded it).
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> [--round <r>] --repo <owner>/<repo>`,
+   then start the head again
+   (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`)
+   and retry prepare — a release alone leaves the head unregistered and no
+   probe fire will deliver it again (`--repo` is required once `--start`
+   recorded it). Do not recover with `--complete inconclusive` instead: it
+   increments the retry counter whose cap is the terminal not-covered state.
    Exit 3 means the file already records `H` as verified or in flight, or
    another head's round is in flight (one round per PR): let that round
    answer instead of starting a duplicate. A cross-head refusal records `H`

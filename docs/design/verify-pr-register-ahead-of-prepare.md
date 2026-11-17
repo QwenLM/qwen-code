@@ -48,12 +48,17 @@ a recoverable in-flight marker rather than a silent drop.
   `--artifact-dir` becomes **optional on `--start`** (stored when given, `null`
   otherwise). The empty/valueless rejection stays. `--start --artifact-dir <dir>`
   remains accepted, so existing callers are unaffected.
-- `completeRound` already records the directory:
-  `dir = artifactDir ?? ownFlight?.artifactDir ?? prior?.artifactDir ?? null`.
-  No change needed there — `--complete --artifact-dir <dir>` records the dir
-  prepare printed; an omitted dir still falls back to the marker/prior.
+- `completeRound`'s directory resolution is unchanged
+  (`dir = artifactDir ?? ownFlight?.artifactDir ?? prior?.artifactDir ?? null` —
+  the marker first, then an earlier verdict, then none), but the PR **adds
+  `artifactDir: dir` to its return value** so the CLI can disclose a null one,
+  and **adds a warning branch in `main()`** that fires when a non-inconclusive
+  completion resolves to no directory (R1-3). `--complete --artifact-dir <dir>`
+  records the dir prepare printed; an omitted dir falls back to the marker's
+  (when the start carried one) or an earlier verdict's.
 - HELP: the `--start` synopsis marks `--artifact-dir` optional and states that
-  registration precedes prepare and the directory is recorded at `--complete`.
+  registration precedes prepare and the directory is recorded at `--complete`;
+  the fallback paragraph names the full chain (marker → earlier verdict → none).
 
 An in-flight entry with a `null` artifact directory is already a valid shape
 (the legacy `inFlightHead` migration produces one), so dedup, deferral, release
@@ -74,9 +79,15 @@ The watch prompt and the manual re-verification step both change to:
 
 New responsibility: because the marker now exists before prepare, a **prepare
 failure after `--start`** must
-`--release --head <H> [--round <r>] --repo <owner>/<repo>` so the head is not
-stranded in flight (`--repo` is required once `--start` recorded it; every verb
-refuses an omitted `--repo` against a recorded repo). Use `--release`, **not**
+`--release --head <H> [--round <r>] --repo <owner>/<repo>` **and then start the
+head again** (`--start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry
+prepare. A release alone is not a recovery: `releaseRound` files only a
+`releasedHeads` push-order hint — explicitly not a deferral, and printed by no
+verb — so the head is left unregistered, and the probe cursor already advanced
+past it, so no fire delivers it again (R1-1 round 2). The release must be paired
+with the restart, exactly as the file's dead-round paragraph pairs them.
+`--repo` is required on both once `--start` recorded it; every verb refuses an
+omitted `--repo` against a recorded repo. Use `--release` + restart, **not**
 `--complete inconclusive`: inconclusive is the only verdict that increments the
 head's retry counter, and the counter's cap is the terminal not-covered state,
 so two transient prepare failures would retire a head no round ever examined
@@ -91,16 +102,22 @@ died during prepare.
   a **positional** pin asserts the registration sentence precedes the
   `Then run prepare` sentence in each section (watch `<headSha>`, manual `<H>`);
   the prepare-failure recovery pin asserts the full `--release` form carries
-  `--repo` (removing `--repo` reds it).
+  `--repo` **and the restart clause** (`--start … --round <r+1>`; removing
+  either reds it); the watch prompt's exit-3 dead-marker bullet is pinned to the
+  full `--release … --repo` form (R2-1).
 - `scripts/tests/verify-pr-watch-state.test.js`: new witnesses driven through
-  the **CLI** (`run(root, …)`, so they exercise `parseArgs` — the only helper
-  code this PR changes) — `--start` without `--artifact-dir` registers in flight
-  with a `null` dir (restoring the requirement reds it); `--complete
---artifact-dir <dir>` records it; `--start --artifact-dir <dir>` still works
-  (backward compatibility); a non-inconclusive `--complete` with no resolved dir
-  prints the no-evidence-directory warning while the inherit-a-start-dir case
-  stays green; a start-before-prepare round with no `--complete` (a prepare
-  kill) then `--release` through the CLI recovers the head (no silent drop).
+  the **CLI** (`run(root, …)`, exercising the helper code this PR changes — the
+  `parseArgs` requirement, `completeRound`'s return field, and `main`'s
+  warning) — `--start` without `--artifact-dir` registers in flight with a
+  `null` dir (restoring the requirement reds it); `--complete --artifact-dir
+  <dir>` records it **and prints no warning**; `--start --artifact-dir <dir>`
+  still works and a dir-less `--complete` inherits the marker's dir **with no
+  warning** (backward compatibility); a replayed completion inherits the prior
+  verdict's dir; a non-inconclusive `--complete` with no resolved dir prints the
+  no-evidence-directory warning (dropping the warning's directory conjunct reds
+  the no-warning assertions, R2-3); a start-before-prepare round with no
+  `--complete` (a prepare kill) then `--release` **and a restart** through the
+  CLI recovers the head (no silent drop).
 
 ## Key design decisions
 
@@ -111,8 +128,9 @@ died during prepare.
   Because the register-ahead marker carries no directory, a non-inconclusive
   completion that resolves to no directory **warns** on stderr that the verdict
   has no evidence directory (R1-3) — disclosing the lost link without breaking
-  the fallback. The HELP states the real fallback (an earlier verdict's dir for
-  the same head, else none) rather than a vacuous "inherits the marker's".
+  the fallback. The HELP states the real fallback chain the code implements:
+  the in-flight marker's directory when the start carried one, else an earlier
+  verdict's directory for the same head, else none.
 - **Backward compatible.** `--start --artifact-dir` still accepted; the change
   only removes a requirement and reorders the contract.
 - **No dedup/defer/release semantic change.** The marker's purpose is

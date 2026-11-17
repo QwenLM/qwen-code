@@ -41,11 +41,13 @@ head 不留痕迹。这朝不认证方向失败（head 永远得不到轮次）�
 - `parseArgs`：去掉 `--start requires --artifact-dir` usage 错误。`--artifact-dir`
   在 `--start` 上变为**可选**（给了就存，否则 `null`）。空值/无值拒绝保留。
   `--start --artifact-dir <dir>` 仍被接受，故既有调用方不受影响。
-- `completeRound` 本就记录目录：`dir = artifactDir ?? ownFlight?.artifactDir ??
-prior?.artifactDir ?? null`。此处无需改动——`--complete --artifact-dir <dir>`
-  记录 prepare 打印的目录；省略目录仍回退到标记/先前判定。
+- `completeRound` 的目录解析不变（`dir = artifactDir ?? ownFlight?.artifactDir ??
+prior?.artifactDir ?? null`——标记优先，再先前判定，再无），但本 PR **在其返回值
+  加 `artifactDir: dir`** 以便 CLI 披露 null，并**在 `main()` 加告警分支**：非
+  inconclusive 完成解析不到目录时触发（R1-3）。`--complete --artifact-dir <dir>`
+  记录 prepare 打印的目录；省略目录回退到标记（start 带了目录时）或先前判定。
 - HELP：`--start` 概要标记 `--artifact-dir` 可选，并说明注册先于 prepare、目录在
-  `--complete` 记录。
+  `--complete` 记录；回退段写明完整链（标记→先前判定→无）。
 
 产物目录为 `null` 的在飞条目本就是合法形状（遗留 `inFlightHead` 迁移即产出其一），
 故去重、deferral、release 与 resting-view 守卫均不变。
@@ -63,27 +65,35 @@ watch prompt 与手动复验步骤均改为：
    ——目录在此记录。
 
 新职责：因标记现在先于 prepare 存在，**`--start` 后 prepare 失败**必须
-`--release --head <H> [--round <r>] --repo <owner>/<repo>`，以免 head 搁浅在飞
-（`--start` 记录了 repo 后 `--repo` 必填；每个动词都对已记录 repo 拒绝省略
-`--repo`）。用 `--release`，**而非** `--complete inconclusive`：inconclusive 是
-唯一增加 head 重试计数的判定，而计数上限即终态（not-covered），故两次瞬时
-prepare 失败会让一个从未跑过轮次的 head 被退役（R1-5）。契约显式说明此点。既有
-死轮恢复（`--start` 后死掉的轮用 `--release`）现在也覆盖 prepare 期间死掉的轮。
+`--release --head <H> [--round <r>] --repo <owner>/<repo>` **并随后重新启动该
+head**（`--start --head <H> --round <r+1> --repo <owner>/<repo>`）再重试 prepare。
+单独 release 不是恢复：`releaseRound` 只写 `releasedHeads` 推序提示——明确不是
+deferral，且无任何动词打印它——故 head 失去记录，而探针游标已越过它，不会再有
+触发投递它（R1-1 第 2 轮）。release 必须与重启成对，正如本文件死轮段落把两者
+成对写出。`--start` 记录 repo 后两者 `--repo` 必填；每个动词都对已记录 repo 拒绝
+省略 `--repo`）。用 `--release` + 重启，**而非** `--complete inconclusive`：
+inconclusive 是唯一增加 head 重试计数的判定，而计数上限即终态（not-covered），
+故两次瞬时 prepare 失败会让一个从未跑过轮次的 head 被退役（R1-5）。契约显式说明
+此点。既有死轮恢复（`--start` 后死掉的轮用 `--release`）现在也覆盖 prepare 期间
+死掉的轮。
 
 ### 钉与见证
 
 - `scripts/tests/qwen-triage-workflow.test.js`：`--start` 命令钉去掉
   `--artifact-dir`；`--complete` 命令钉加上 `--artifact-dir <dir>`；**位置**钉
   断言注册句先于每节的 `Then run prepare` 句（watch 用 `<headSha>`、手动用
-  `<H>`）；prepare 失败恢复钉断言完整 `--release` 形式带 `--repo`（删 `--repo`
-  变红）。
+  `<H>`）；prepare 失败恢复钉断言完整 `--release` 形式带 `--repo` **及重启子句**
+  （`--start … --round <r+1>`；删任一变红）；watch prompt 的 exit-3 死标记条目
+  钉住完整 `--release … --repo` 形式（R2-1）。
 - `scripts/tests/verify-pr-watch-state.test.js`：新见证走 **CLI**（`run(root, …)`，
-  故演练 `parseArgs`——本 PR 在助手唯一改动处）——`--start` 不带 `--artifact-dir`
-  注册在飞且目录 `null`（恢复强制要求变红）；`--complete --artifact-dir <dir>`
-  记录之；`--start --artifact-dir <dir>` 仍可用（向后兼容）；非 inconclusive 的
-  `--complete` 无解析目录时打印无产物目录警告，而继承 start 目录的用例保持绿；
-  先注册后 prepare 无 `--complete`（prepare 被杀）再经 CLI `--release` 恢复 head
-  （无静默丢弃）。
+  演练本 PR 改动的助手代码——`parseArgs` 要求、`completeRound` 返回字段、`main`
+  告警）——`--start` 不带 `--artifact-dir` 注册在飞且目录 `null`（恢复强制要求
+  变红）；`--complete --artifact-dir <dir>` 记录之**且无警告**；`--start
+--artifact-dir <dir>` 仍可用、无目录 `--complete` 继承标记目录**且无警告**
+  （向后兼容）；重放完成继承先前判定目录；非 inconclusive 的 `--complete` 无解析
+  目录时打印无产物目录警告（删警告的目录合取项使无警告断言变红，R2-3）；先注册
+  后 prepare 无 `--complete`（prepare 被杀）再经 CLI `--release` **并重启**恢复
+  head（无静默丢弃）。
 
 ## 关键设计决定
 
@@ -91,7 +101,8 @@ prepare 失败会让一个从未跑过轮次的 head 被退役（R1-5）。契�
   保留 inconclusive/replay 回退路径；契约指示传它。强制会破坏继承先前目录的
   重放完成。因提前注册的标记不带目录，非 inconclusive 的完成若解析不到目录会在
   stderr **警告**该判定无产物目录（R1-3）——披露丢失的链接而不破坏回退。HELP
-  写明真实回退（同 head 更早判定的目录，否则无），而非空洞的「继承标记里的」。
+  写明代码实现的真实回退链：start 带了目录时为在飞标记的目录，否则同 head 更早
+  判定的目录，再无。
 - **向后兼容。** `--start --artifact-dir` 仍接受；改动只移除一个强制要求并重排契约。
 - **不去重/defer/release 语义改动。** 标记的目的是去重/恢复；`null` 目录不影响它。
 

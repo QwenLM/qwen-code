@@ -903,9 +903,10 @@ Register with --start AHEAD of prepare (R17-2): --artifact-dir is optional on
 --start because prepare has not printed the directory yet; a round killed in
 the prepare window then leaves a recoverable in-flight marker, not a silently
 dropped head. Record the directory prepare printed at --complete
-(--artifact-dir <dir>). A completion that omits it inherits an earlier verdict's
-directory for the same head if one exists, and otherwise records none — a
-non-inconclusive verdict then warns that it has no evidence directory.
+(--artifact-dir <dir>). A completion that omits it inherits the in-flight
+marker's directory when the start carried one, else an earlier verdict's
+directory for the same head, else none — a non-inconclusive verdict that
+resolves to none warns that it has no evidence directory.
 --start exits 3 when the head is already verified or any round is in flight
 for the PR (one round per PR). Every verb exits 3 when the state belongs to
 another repo (a PR number is only unique within its repository); an omitted

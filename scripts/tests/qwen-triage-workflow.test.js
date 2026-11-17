@@ -6635,6 +6635,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> [--round <r>] --repo <owner>/<repo>`',
     );
+    // R1-1 (round 2): the manual recovery also pairs release with a restart.
+    expect(flat).toContain(
+      'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
+    );
     // R1-2: a positional pin — registration precedes prepare in this section
     // (an order-insensitive toContain would stay green if --start moved back
     // below prepare).
@@ -6740,6 +6744,19 @@ describe('qwen-triage verify hardening round 2', () => {
     // uses <H>). Removing --repo reds this whole-form pin.
     expect(flat).toContain(
       'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>`',
+    );
+    // R1-1 (round 2): the recovery pairs the release with a restart — a
+    // release alone files only a push-order hint and leaves the head
+    // unregistered. Removing the restart clause reds this pin.
+    expect(flat).toContain(
+      'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
+    );
+    expect(flat).toContain('a release alone leaves the head unregistered');
+    // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
+    // --release form with --repo (anchored on the watch-only continuation, so
+    // the manual twin cannot satisfy it). Removing --repo reds it.
+    expect(flat).toContain(
+      'recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>` and then start the last deferred head, or the deferral is never delivered',
     );
     // R1-2: positional pin — registration precedes prepare in the watch prompt.
     expect(

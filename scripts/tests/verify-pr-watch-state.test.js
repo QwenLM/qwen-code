@@ -3238,6 +3238,8 @@ describe('R17-2 register ahead of prepare', () => {
       'r11',
     ]);
     expect(res.status).toBe(0);
+    // R2-3: a resolved directory must NOT trigger the no-evidence warning.
+    expect(res.stderr).not.toMatch(/no artifact directory/);
     const verified = readState(root, 16866).verifiedHeads.find((e) =>
       sameCommit(e.head, HEAD),
     );
@@ -3258,6 +3260,46 @@ describe('R17-2 register ahead of prepare', () => {
       'merge-ready',
     ]);
     expect(res.status).toBe(0);
+    // R2-3: inheriting the marker's directory is not a null resolution, so no
+    // warning — dropping the warning's directory conjunct reds this.
+    expect(res.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r11');
+  });
+
+  // R2-3: a replayed completion (no in-flight marker) inherits the prior
+  // verdict's directory and prints no warning.
+  it('a replayed completion inherits the prior verdict directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'merge-ready',
+      ]).status,
+    ).toBe(0);
+    // The marker is gone; a second completion for the same head/round replays
+    // against the prior verdict and inherits its directory.
+    const replay = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+    ]);
+    expect(replay.status).toBe(0);
+    expect(replay.stderr).not.toMatch(/no artifact directory/);
     const verified = readState(root, 16866).verifiedHeads.find((e) =>
       sameCommit(e.head, HEAD),
     );
