@@ -48,7 +48,7 @@ public class ContextCompressionService {
         OperationAdmission admitted = admit(
                 principal == null ? null : principal.tenantId(),
                 principal == null ? null : principal.userId(),
-                sessionId, key, revision, principal != null);
+                sessionId, key, revision);
         return publicOperation(admitted.operation(), admitted.replayed());
     }
 
@@ -65,7 +65,7 @@ public class ContextCompressionService {
         OperationAdmission admitted = admit(
                 principal == null ? null : principal.tenantId(),
                 principal == null ? null : principal.userId(),
-                sessionId, key, revision, principal != null);
+                sessionId, key, revision);
         return webOperation(admitted.operation(), admitted.replayed());
     }
 
@@ -74,12 +74,7 @@ public class ContextCompressionService {
     // principal here (R7-1). A null/blank actor keeps the 401 either way.
     private OperationAdmission admit(String tenantId, String actorId,
             String sessionId, String key, Long revision) {
-        return admit(tenantId, actorId, sessionId, key, revision, true);
-    }
-
-    private OperationAdmission admit(String tenantId, String actorId,
-            String sessionId, String key, Long revision, boolean actorVerified) {
-        if (!actorVerified || actorId == null || actorId.isBlank()) {
+        if (actorId == null || actorId.isBlank()) {
             throw new ManagedAgentException(401, "actor_required",
                     "A trusted actor is required.");
         }

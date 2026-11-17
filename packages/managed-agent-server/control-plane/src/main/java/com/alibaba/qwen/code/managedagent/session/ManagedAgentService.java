@@ -1055,27 +1055,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 sessionId, blocks);
     }
 
-    /**
-     * Read-only retry discovery for an embedding caller that must resolve
-     * model authorization before allowing a second attempt. It never
-     * creates a Turn or dispatches work.
-     */
-    public Optional<CommandAdmission> findSubmitTurnReplay(
-            SessionPrincipal principal, String idempotencyKey,
-            String sessionId, List<InputBlock> blocks) {
-        validateIdempotencyKey(idempotencyKey);
-        List<Map<String, Object>> input = inputPolicy.input(blocks, true);
-        String requestDigest = digests.digest(Map.of(
-                "sessionId", sessionId, "input", input));
-        String tenantId = principal == null ? null : principal.tenantId();
-        SessionRecord session = store.requireSession(tenantId, sessionId);
-        inputPolicy.requireSubmitterRole(session, principal);
-        Admission replay = replayForCreator(tenantId, SUBMIT,
-                idempotencyKey, requestDigest, session, principal);
-        return replay == null ? Optional.empty()
-                : Optional.of(response(tenantId, replay));
-    }
-
     // The raw-actor request path keeps its actor verbatim: a principal is
     // built only in the unbound ownership arms, never for a bound Session
     // whose Workspace grants compare the raw actor (R7-1). The trusted
@@ -1662,28 +1641,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         principal == null ? null : principal.userId(),
                         page.worktrees()),
                 nextSessionCursor(page, archiveState, titleQuery), page.hasMore());
-    }
-
-    public WebShellPage<WebShellSession> listOwnedWebShellSessions(
-            SessionPrincipal principal, String cursor, int requestedLimit,
-            String requestedArchiveState, String requestedTitleQuery) {
-        if (principal == null) {
-            throw new ManagedAgentException(401, "actor_required",
-                    "A trusted actor is required.");
-        }
-        String archiveState = archiveState(requestedArchiveState);
-        String titleQuery = titleQuery(requestedTitleQuery);
-        int limit = limit(requestedLimit);
-        SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
-        SessionPage page = store.listOwnedSessions(principal.tenantId(),
-                principal,
-                decoded == null ? null : decoded.createdAt(),
-                decoded == null ? null : decoded.sessionId(), limit,
-                archiveState, titleQuery);
-        return new WebShellPage<>(webShellSessions(page.sessions(),
-                principal.userId(), page.worktrees()),
-                nextSessionCursor(page, archiveState, titleQuery),
-                page.hasMore());
     }
 
     private SessionPage filteredSessions(String tenantId,

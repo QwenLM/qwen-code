@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
@@ -179,20 +180,20 @@ public final class ManagedSessionPrincipal {
         // One statement for the whole authority question (R6-6): the row
         // left-joined with the legacy-creation mark. A present row is the
         // sole authority; only a row-less Session consults the mark, so the
-        // hot unbound read no longer pays a second round trip.
+        // hot unbound read no longer pays a second round trip. The receipt
+        // subquery binds the hashed tenant key so idx_ma_receipt_session
+        // (namespace, tenant_key, session_id) is usable (R1-15).
+        String tenantKey = ManagedSchemaKeys.key(tenantId);
         List<AuthorityRow> rows = jdbc.query(
                 "SELECT p.version, p.user_id, p.actor_present,"
                         + " p.actor_subject_id, (SELECT COUNT(*) FROM"
-                        + " ma_request_receipt r JOIN ma_session s ON"
-                        + " s.tenant_id = r.tenant_id AND s.session_id ="
-                        + " r.session_id WHERE r.tenant_id = ? AND"
-                        + " r.session_id = ? AND r.namespace ="
-                        + " 'SESSION_COMMAND' AND r.operation ="
-                        + " 'CREATE_SESSION' AND s.workspace_id IS NULL"
-                        + " AND r.actor_id IS NOT NULL AND"
+                        + " ma_request_receipt r WHERE r.namespace ="
+                        + " 'SESSION_COMMAND' AND r.tenant_key = ? AND"
+                        + " r.session_id = ? AND r.operation ="
+                        + " 'CREATE_SESSION' AND r.actor_id IS NOT NULL AND"
                         + " LENGTH(r.actor_id) > 0 AND"
-                        + " (s.creator_actor_key IS NULL OR"
-                        + " r.actor_id <> s.creator_actor_key))"
+                        + " (ms.creator_actor_key IS NULL OR"
+                        + " r.actor_id <> ms.creator_actor_key))"
                         + " FROM ma_session ms LEFT JOIN ma_session_principal p"
                         + " ON p.tenant_id = ms.tenant_id AND"
                         + " p.session_id = ms.session_id"
@@ -204,7 +205,7 @@ public final class ManagedSessionPrincipal {
                                         result.getBoolean(3),
                                         result.getString(4)),
                         result.getInt(5)),
-                tenantId, sessionId, tenantId, sessionId);
+                tenantKey, sessionId, tenantId, sessionId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
