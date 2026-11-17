@@ -5,7 +5,7 @@
  */
 
 import { promises as dns } from 'node:dns';
-import { BlockList, isIP, type LookupFunction } from 'node:net';
+import { BlockList, isIP, SocketAddress, type LookupFunction } from 'node:net';
 
 export type NetworkPolicy = 'public' | 'allow-private';
 
@@ -100,33 +100,19 @@ function stripIpv6Brackets(hostname: string): string {
     : hostname;
 }
 
-function parseMappedIpv4(address: string): string | undefined {
-  const suffix = address.toLowerCase().slice('::ffff:'.length);
-  if (isIP(suffix) === 4) return suffix;
-
-  const parts = suffix.split(':');
-  if (
-    parts.length !== 2 ||
-    parts.some((part) => !/^[\da-f]{1,4}$/.test(part))
-  ) {
-    return undefined;
-  }
-  const upper = Number.parseInt(parts[0], 16);
-  const lower = Number.parseInt(parts[1], 16);
-  return `${upper >> 8}.${upper & 0xff}.${lower >> 8}.${lower & 0xff}`;
-}
-
 function addressScope(
   address: string,
   family: number,
 ): 'public' | 'private' | 'blocked' {
+  if (family === 6) {
+    address = new SocketAddress({ address, family: 'ipv6' }).address;
+    if (address.startsWith('::ffff:')) {
+      return addressScope(address.slice('::ffff:'.length), 4);
+    }
+  }
   const type = family === 6 ? 'ipv6' : 'ipv4';
   if (blockedAddresses.check(address, type)) return 'blocked';
   if (privateAddresses.check(address, type)) return 'private';
-  if (family === 6 && address.toLowerCase().startsWith('::ffff:')) {
-    const mapped = parseMappedIpv4(address);
-    return mapped === undefined ? 'blocked' : addressScope(mapped, 4);
-  }
   if (family === 6 && !publicIpv6Addresses.check(address, 'ipv6')) {
     return 'blocked';
   }

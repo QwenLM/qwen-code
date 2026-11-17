@@ -130,8 +130,14 @@ describe('resolveNetworkTarget address policies', () => {
     'ff02::1',
     '64:ff9b::a00:1',
     '2001::1',
+    '2001:1::1',
+    '2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff',
     '2001:db8::1',
     '2002::1',
+    '2002:a00:1::',
+    '2002:7f00:1::',
+    '2002:a9fe:a9fe::',
+    '2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
     '3fff::1',
     'fd00:ec2::254',
     'fd00:0ec2:0000:0000:0000:0000:0000:0254',
@@ -151,6 +157,11 @@ describe('resolveNetworkTarget address policies', () => {
     '100.128.0.1',
     '172.15.255.254',
     '172.32.0.1',
+    '2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+    '2001:200::',
+    '2001:4860:4860::8888',
+    '2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+    '2003::',
     '2606:4700:4700::1111',
     '::ffff:808:808',
   ])('allows public HTTPS but rejects public HTTP at %s', async (address) => {
@@ -208,6 +219,41 @@ describe('resolveNetworkTarget address policies', () => {
       resolveNetworkTarget('https://receiver.test/', 'allow-private'),
     ).rejects.toThrow(NetworkPolicyError);
   });
+
+  it.each([
+    ['::ffff:8.8.8.8', true, true],
+    ['0:0:0:0:0:ffff:808:808', true, true],
+    ['0::ffff:0808:0808', true, true],
+    ['0000:0000:0000:0000:0000:FFFF:8.8.8.8', true, true],
+    ['::ffff:127.0.0.1', false, true],
+    ['0:0:0:0:0:ffff:7f00:1', false, true],
+    ['0::FFFF:127.0.0.1', false, true],
+    ['::ffff:169.254.169.254', false, false],
+    ['0:0:0:0:0:ffff:a9fe:a9fe', false, false],
+    ['0::FFFF:169.254.169.254', false, false],
+  ] as const)(
+    'classifies the raw mapped DNS answer %s without changing the pinned address',
+    async (address, publicAllowed, privateAllowed) => {
+      mockDns([{ address, family: 6 }]);
+      for (const [policy, allowed] of [
+        ['public', publicAllowed],
+        ['allow-private', privateAllowed],
+      ] as const) {
+        const pending = resolveNetworkTarget('https://receiver.test/', policy);
+        if (!allowed) {
+          await expect(pending).rejects.toThrow(NetworkPolicyError);
+          continue;
+        }
+        const target = await pending;
+        expect(target.address).toBe(address);
+        expect(target.family).toBe(6);
+        expect(target.curlResolve).toBe(`receiver.test:443:[${address}]`);
+        const callback = vi.fn();
+        target.lookup('receiver.test', { all: true }, callback);
+        expect(callback).toHaveBeenCalledWith(null, [{ address, family: 6 }]);
+      }
+    },
+  );
 });
 
 describe('resolved connection targets', () => {

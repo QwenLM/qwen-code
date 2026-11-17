@@ -147,15 +147,16 @@ describe('generic webhook delivery', () => {
 
   it('does not reverse acceptance when response cleanup fails', async () => {
     const response = new undici.Response('unused body', { status: 200 });
-    vi.spyOn(response.body!, 'cancel').mockRejectedValue(
-      new Error('private-url'),
-    );
+    const cancel = vi
+      .spyOn(response.body!, 'cancel')
+      .mockRejectedValue(new Error('private-url'));
     vi.mocked(undici.fetch).mockResolvedValueOnce(response);
     const { channel } = make();
     await channel.connect();
     await expect(
       channel.sendMessage('default', 'result'),
     ).resolves.toBeUndefined();
+    expect(cancel).toHaveBeenCalledOnce();
   });
 
   it('bounds stalled cleanup by the total deadline without reversing acceptance', async () => {
@@ -176,6 +177,49 @@ describe('generic webhook delivery', () => {
     await delivery;
     expect(finished).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('settles cleanup entered after the request deadline has already aborted', async () => {
+    vi.useFakeTimers();
+    let releaseDestroy!: () => void;
+    const destroy = vi.spyOn(undici.Agent.prototype, 'destroy').mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseDestroy = resolve;
+      }),
+    );
+    vi.mocked(undici.fetch).mockImplementationOnce(
+      (_url, request) =>
+        new Promise((_resolve, reject) => {
+          request!.signal!.addEventListener(
+            'abort',
+            () => reject(new Error(URL_VALUE)),
+            { once: true },
+          );
+        }),
+    );
+    const { channel } = make();
+    await channel.connect();
+    let finished = false;
+    const rejected = expect(channel.sendMessage('default', 'result'))
+      .rejects.toMatchObject({
+        disposition: 'transient',
+        message:
+          'Generic webhook request timed out; delivery may have been accepted.',
+      })
+      .then(() => {
+        finished = true;
+      });
+    try {
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(destroy).toHaveBeenCalledOnce();
+      expect(finished).toBe(true);
+      channel.disconnect();
+      await channel.waitForDisconnect();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      releaseDestroy();
+      await rejected;
+    }
   });
 
   it.each([
@@ -220,7 +264,7 @@ describe('generic webhook delivery', () => {
     },
   );
 
-  it('accepts the exact serialized byte budget and rejects a larger request before DNS or fetch', async () => {
+  it('accepts the exact byte budget and rejects oversized ASCII and UTF-8 bodies before DNS or fetch', async () => {
     const { channel } = make();
     await channel.connect();
     const text = 'x'.repeat(655_360 - 23);
@@ -232,12 +276,15 @@ describe('generic webhook delivery', () => {
     ).toBe(655_360);
     resolveMock.mockClear();
     vi.mocked(undici.fetch).mockClear();
-    await expect(
-      channel.sendMessage('default', text + '中'),
-    ).rejects.toMatchObject({
-      disposition: 'permanent',
-      message: 'Generic webhook request exceeds the 655,360-byte limit.',
-    });
+    // The second body has fewer UTF-16 units than the limit, but 655,364 bytes.
+    for (const oversized of [text + '中', '中'.repeat(218_447)]) {
+      await expect(
+        channel.sendMessage('default', oversized),
+      ).rejects.toMatchObject({
+        disposition: 'permanent',
+        message: 'Generic webhook request exceeds the 655,360-byte limit.',
+      });
+    }
     expect(resolveMock).not.toHaveBeenCalled();
     expect(undici.fetch).not.toHaveBeenCalled();
   });
@@ -248,6 +295,13 @@ describe('generic webhook delivery', () => {
       /not ready/,
     );
     await channel.connect();
+    await expect(
+      channel.sendMessage(URL_VALUE, 'result'),
+    ).rejects.toMatchObject({
+      disposition: 'permanent',
+      message:
+        'Generic webhook requires its configured destination and non-empty text.',
+    });
     for (const target of [
       { ...TARGET, id: URL_VALUE },
       { ...TARGET, type: 'user' as const },
@@ -270,6 +324,7 @@ describe('generic webhook delivery', () => {
     expect(channel.accepts(sessionTarget, 'loop')).toBe(false);
     expect(channel.accepts(sessionTarget, 'webhook')).toBe(false);
     await expect(channel.sendMessage('default', '  ')).rejects.toThrow();
+    expect(resolveMock).not.toHaveBeenCalled();
     expect(undici.fetch).not.toHaveBeenCalled();
   });
 
@@ -330,6 +385,47 @@ describe('generic webhook delivery', () => {
     );
     await channel.connect();
     await channel.sendMessage('default', 'result');
+  });
+
+  it('keeps disconnect and reconnect pending until the aborted request settles', async () => {
+    let releaseFetch!: () => void;
+    vi.mocked(undici.fetch).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          releaseFetch = () => reject(new Error(URL_VALUE));
+        }),
+    );
+    const { channel } = make();
+    await channel.connect();
+    const rejected = expect(
+      channel.sendMessage('default', 'result'),
+    ).rejects.toThrow('cancelled');
+    await new Promise(setImmediate);
+    expect(undici.fetch).toHaveBeenCalledOnce();
+    channel.disconnect();
+    let drained = false;
+    const drain = channel.waitForDisconnect().then(() => {
+      drained = true;
+    });
+    let connected = false;
+    const reconnect = channel.connect().then(() => {
+      connected = true;
+    });
+    try {
+      await new Promise(setImmediate);
+      expect(vi.mocked(undici.fetch).mock.calls[0]![1]?.signal?.aborted).toBe(
+        true,
+      );
+      expect(drained).toBe(false);
+      expect(connected).toBe(false);
+      releaseFetch();
+      await Promise.all([rejected, drain, reconnect]);
+      expect(drained).toBe(true);
+      expect(connected).toBe(true);
+    } finally {
+      releaseFetch();
+      await Promise.allSettled([rejected, drain, reconnect]);
+    }
   });
 
   it.each([true, false])(

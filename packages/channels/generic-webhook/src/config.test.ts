@@ -110,12 +110,13 @@ describe('generic webhook configuration', () => {
     42,
     null,
   ])('rejects invalid Bearer values without echoing them', (bearerToken) => {
-    expect(() =>
-      parseGenericWebhookConfig({
-        webhookUrl: 'https://receiver.example',
-        bearerToken,
-      }),
-    ).toThrow('Generic webhook Bearer token must be a valid non-empty token.');
+    const config = { webhookUrl: 'https://receiver.example', bearerToken };
+    expect(() => parseGenericWebhookConfig(config)).toThrow(
+      /^Generic webhook Bearer token must be a valid non-empty token\.$/,
+    );
+    expect(String(plugin.management!.validateConfig!(config))).not.toContain(
+      'private-value',
+    );
   });
 
   it('allows references only during management validation and still checks other fields', () => {

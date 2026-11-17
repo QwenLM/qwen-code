@@ -140,6 +140,20 @@ describe('vitest-global-setup prerequisite guard', () => {
     expect(missing[0]).toContain('has not been built');
   });
 
+  it('reports the unbuilt shared network policy before CLI test collection', () => {
+    root = buildFixtureRoot();
+    rmSync(path.join(root, 'packages/network-policy/dist/index.js'), {
+      force: true,
+    });
+
+    const missing = findMissingPrerequisites('packages/cli', root);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain(
+      path.join('packages', 'network-policy', 'dist', 'index.js'),
+    );
+    expect(formatPrerequisiteMessage(missing)).toContain('npm run build');
+  });
+
   it('names the fix command and the git-commit remedy only when applicable', () => {
     const withGenerated = formatPrerequisiteMessage([
       '  - packages/cli/src/generated/git-commit.ts: generated file does not exist',

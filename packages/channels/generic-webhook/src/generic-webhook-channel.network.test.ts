@@ -54,12 +54,26 @@ function track(socket: Duplex) {
   socket.once('close', () => sockets.delete(socket));
 }
 
-async function listen(server: Server, hostname = '127.0.0.1'): Promise<number> {
+async function listen(server: Server, hostname = '127.0.0.1') {
   servers.push(server);
-  server.on('connection', track);
+  let connections = 0;
+  server.on('connection', (socket) => {
+    connections++;
+    track(socket);
+  });
+  // A client may reject the certificate before or after the server finishes
+  // its handshake. Either event proves the TLS peer was actually reached.
+  const tlsAttempted = new Promise<void>((resolve) => {
+    server.once('secureConnection', () => resolve());
+    server.once('tlsClientError', () => resolve());
+  });
   server.listen(0, hostname);
   await once(server, 'listening');
-  return (server.address() as AddressInfo).port;
+  return {
+    port: (server.address() as AddressInfo).port,
+    connections: () => connections,
+    tlsAttempted,
+  };
 }
 
 function make(url: string, proxy?: string) {
@@ -138,7 +152,7 @@ async function receiver(
   const server = tls
     ? createHttpsServer({ key, cert: certificate }, handler)
     : createHttpServer(handler);
-  return { port: await listen(server, hostname), receipts, received };
+  return { ...(await listen(server, hostname)), receipts, received };
 }
 
 async function proxy(
@@ -211,9 +225,10 @@ async function proxy(
     downstream.on('error', () => upstream.destroy());
     downstream.once('close', () => upstream.destroy());
   });
-  const port = await listen(server);
+  const listening = await listen(server);
   return {
-    url: `${tls ? 'https' : 'http'}://proxy-user:proxy-secret@${hostname}:${port}`,
+    ...listening,
+    url: `${tls ? 'https' : 'http'}://proxy-user:proxy-secret@${hostname}:${listening.port}`,
     tunnels,
     expectedAuthorization,
   };
@@ -468,6 +483,9 @@ describe('Generic webhook real network delivery', () => {
       ).rejects.toMatchObject({
         disposition: 'transient',
       });
+      expect(forward?.tunnels ?? []).toHaveLength(useProxy ? 1 : 0);
+      expect(origin.connections()).toBeGreaterThan(0);
+      await origin.tlsAttempted;
       expect(origin.receipts).toEqual([]);
       for (const agent of dispatchers)
         expect(agent).toHaveProperty('destroyed', true);
@@ -517,6 +535,9 @@ describe('Generic webhook real network delivery', () => {
       await expect(
         channel.deliverProactive(target, 'Must remain confidential'),
       ).rejects.toMatchObject({ disposition: 'transient' });
+      const tlsPeer = secureProxy ? forward! : origin;
+      expect(tlsPeer.connections()).toBeGreaterThan(0);
+      await tlsPeer.tlsAttempted;
       expect(origin.receipts).toEqual([]);
       expect(forward?.tunnels ?? []).toHaveLength(route === 'proxy' ? 1 : 0);
       if (proxyLookup) {
