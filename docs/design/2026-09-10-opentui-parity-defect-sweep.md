@@ -1492,15 +1492,20 @@ left alone, and so is every key after the swap runs. The last question tab arms 
 at all, clamped as it is, so it gets no lock; a trailing key there still lands on the row
 it reaches.
 
-ink's question dialog reaches this leak as well, and has no stop for it yet. Its buffer
-notifies the parent from an effect run at commit (`text-buffer.ts`), which delays a
-trailing key's text by one commit rather than dropping it: the answered row stays mounted
-for the whole pause, so the text still reaches the state a multi-select answer is rebuilt
-from, and a model was sent `TealX` for a typed `Teal`. A Space on the answered row inside
-the pause changes a multi-select answer the same way. #17485 gave ink only the lock on a
-second answer; this half stays open in ink and is listed under Follow-ups. Ours writes
-through the setter synchronously, which is what makes a mid-read submit read the live
-text at all, so it needs the explicit stop.
+ink's question dialog reached this leak as well. Its buffer notifies the parent from an
+effect run at commit (`text-buffer.ts`), which delays a trailing key's text by one commit
+rather than dropping it: the answered row stays mounted for the whole pause, so the text
+still reached the state a multi-select answer is rebuilt from, and a model was sent
+`TealX` for a typed `Teal`. A Space on the answered row inside the pause changed a
+multi-select answer the same way. #17485 gave ink the lock on a second answer, and the
+fix for #17670 the rest of the stop: a Space is refused while a swap is armed, the
+submitted text is recorded at the Enter, and for the pause a multi-select field takes no
+keys and is remounted from that recorded text. The remount lands on the commit whose
+effect would have reported a trailing key, so that key never reaches the answer. A
+single-select field stays editable in the pause, where this port settles it after any
+accepted submit; that difference is listed under Follow-ups. Ours writes through the
+setter synchronously, which is what makes a mid-read submit read the live text at all,
+so it needs the explicit stop.
 
 Coverage is eight new unit tests, four in the authentication suite and four in the
 confirmation dialog's, and eight mutations, one per behaviour named below. Each fails
@@ -2929,13 +2934,15 @@ What was verified, and how far the verification reaches:
   the input widget's submit is the only owner of Enter on that row, and a
   second answer inside the pause is dropped as it is here, so the two
   renderers no longer diverge on it.
-- Open: inside ink's 150 ms pause a multi-select answer can still change after
-  it was recorded. A Space on the answered row, or text typed or pasted into
-  its free-text field (also in the same read as the Enter), reaches the state
-  the answer is rebuilt from at Submit (Decision 37). This port refuses those
-  keys while a swap is armed, and settles its free-text field after any
-  accepted submit, single-select included, where ink's single-select field stays
-  editable. ink keeps both for now; the fix is tracked separately from #17485.
+- Closed: inside ink's 150 ms pause a multi-select answer could change after it
+  was recorded. A Space on the answered row, or text typed or pasted into its
+  free-text field (also in the same read as the Enter), reached the state the
+  answer is rebuilt from at Submit (Decision 37). The fix for #17670 refuses
+  those keys while a swap is armed, as this port does.
+- Open: this port settles its free-text field after any accepted submit,
+  single-select included. ink's single-select field stays editable inside the
+  pause, since its answer is kept as recorded and a key there changes nothing
+  the model receives.
 - The stale-read class is closed for cursors and open for everything beside
   them. Decision 41 put the numeric cursors behind a ref mirror — the shared
   select hook and its exposed ref, the composer's completion rows, and each
