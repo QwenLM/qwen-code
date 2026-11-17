@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_139_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_143_100;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -119,7 +119,17 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_139_000;
 // to this bundle; the budget is raised deliberately to make room for that
 // payload and future growth: the warning sits 956 above that measurement and
 // the ceiling 1,956 above it.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_140_000;
+// The `/send` command, its composer chip and session tab copy (ten keys
+// across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
+// 039ed577fb without and with the change. Recording the exchange in the
+// caller (the "To" and "From" lines on a user message, the waiting chip, and
+// the parsing of where a message went; four keys added and one removed,
+// across two locales) adds 1,497 more. Merged with the explain side question
+// above, the branch measured 2,141,606 locally on main 5fc5a98ecc; marking a
+// turn another session's reply starts (its card label, keeping the card in a
+// folded turn, and opening that session from it) brings it to 2,142,326. The
+// warning sits 774 above that measurement and the ceiling 1,774 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_144_100;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
