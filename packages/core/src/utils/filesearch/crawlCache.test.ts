@@ -49,6 +49,27 @@ describe('CrawlCache', () => {
       const key2 = getCacheKey('/foo', 'bar', undefined, undefined, false);
       expect(key1).not.toBe(key2);
     });
+
+    it('distinguishes the project root used for relative results', () => {
+      const root = getCacheKey(
+        '/project/src',
+        '',
+        0,
+        undefined,
+        true,
+        '/project',
+      );
+      const nested = getCacheKey(
+        '/project/src',
+        '',
+        0,
+        undefined,
+        true,
+        '/project/src',
+      );
+      expect(root).not.toBe(nested);
+      expect(nested).toBe(getCacheKey('/project/src', '', 0));
+    });
   });
 
   describe('in-memory cache operations', () => {

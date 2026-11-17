@@ -5,6 +5,8 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import path from 'node:path';
+import * as crawlCache from './crawlCache.js';
 import {
   FileSearchFactory,
   AbortError,
@@ -57,6 +59,45 @@ describe('FileSearch', () => {
     pattern: string,
     options?: Partial<FileSearchOptions>,
   ) => (await init(files, options)).search(pattern);
+
+  it.each([false, true])(
+    'keeps cached directory paths relative to each project root (nested first: %s)',
+    async (nestedFirst) => {
+      tmpDir = await createTmpDir({ src: ['one.ts'] });
+      const options: Omit<FileSearchOptions, 'projectRoot'> = {
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+        cache: true,
+        cacheTtl: 60_000,
+        enableRecursiveFileSearch: false,
+        enableFuzzySearch: false,
+      };
+      const outer = FileSearchFactory.create({
+        ...options,
+        projectRoot: tmpDir,
+      });
+      const inner = FileSearchFactory.create({
+        ...options,
+        projectRoot: path.join(tmpDir, 'src'),
+      });
+      try {
+        await outer.initialize();
+        await inner.initialize();
+        if (nestedFirst) {
+          expect(await inner.search('')).toEqual(['one.ts']);
+          expect(await outer.search('src/')).toEqual(['src/one.ts']);
+        } else {
+          expect(await outer.search('src/')).toEqual(['src/one.ts']);
+          expect(await inner.search('')).toEqual(['one.ts']);
+        }
+        expect(await outer.search('src/')).toEqual(['src/one.ts']);
+        expect(await inner.search('')).toEqual(['one.ts']);
+      } finally {
+        crawlCache.clear();
+      }
+    },
+  );
 
   it('should use .qwenignore rules', async () => {
     const results = await search(

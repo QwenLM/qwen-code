@@ -24,17 +24,20 @@ export const getCacheKey = (
   maxDepth?: number,
   maxFiles?: number,
   useGitignore: boolean = true,
+  cwd: string = directory,
 ): string => {
   const hash = crypto.createHash('sha256');
-  hash.update(directory);
-  hash.update(ignoreContent);
-  hash.update(useGitignore ? 'gitignore' : 'no-gitignore');
-  if (maxDepth !== undefined) {
-    hash.update(String(maxDepth));
-  }
-  if (maxFiles !== undefined) {
-    hash.update(`maxFiles:${maxFiles}`);
-  }
+  // Results are relative to cwd, even when the same directory is crawled.
+  hash.update(
+    JSON.stringify([
+      directory,
+      cwd,
+      ignoreContent,
+      useGitignore,
+      maxDepth,
+      maxFiles,
+    ]),
+  );
   return hash.digest('hex');
 };
 

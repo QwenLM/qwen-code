@@ -1464,6 +1464,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
         options.maxDepth,
         options.maxFiles,
         options.useGitignore !== false,
+        canonicalStatePath(options.cwd),
       )
     : undefined;
 
