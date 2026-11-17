@@ -2222,6 +2222,22 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     return stderr.mock.calls.map((call) => String(call[0])).join('');
   }
 
+  // P6 U3: a dirty managed worktree is snapshotted then deleted, but a capture
+  // failure falls back to preserving the checkout. Either way the work is never
+  // lost — it survives in the checkout (preserve) or in the snapshot archive.
+  function workPreserved(
+    service: SessionService,
+    sessionId: string,
+    worktreePath: string,
+  ): boolean {
+    if (fs.existsSync(worktreePath)) return true;
+    const snap = path.join(
+      path.dirname(service.getWorktreeSessionPath(sessionId)),
+      `${sessionId}.worktree-snapshot.tar.gz`,
+    );
+    return fs.existsSync(snap);
+  }
+
   it('removes the owned checkout and branch on a confirmed delete', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440090';
     const { service, slug, worktreePath } = setupWorktreeSession(sessionId);
@@ -2838,7 +2854,7 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     }
   });
 
-  it('keeps a checkout with tracked changes', async () => {
+  it('preserves the work of a checkout with tracked changes (P6 U3 snapshot or keep)', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-44665544009a';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
     fs.writeFileSync(path.join(worktreePath, 'file.txt'), 'modified\n');
@@ -2851,11 +2867,10 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(fs.existsSync(worktreePath)).toBe(true);
-    expect(warnings()).toContain('uncommitted work');
+    expect(workPreserved(service, sessionId, worktreePath)).toBe(true);
   });
 
-  it('keeps a checkout with never-committed agent files', async () => {
+  it('preserves the work of a checkout with never-committed agent files (P6 U3 snapshot or keep)', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-44665544009e';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
     fs.writeFileSync(path.join(worktreePath, 'draft.ts'), 'export {}\n');
@@ -2868,9 +2883,7 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(fs.existsSync(worktreePath)).toBe(true);
-    expect(fs.existsSync(path.join(worktreePath, 'draft.ts'))).toBe(true);
-    expect(warnings()).toContain('uncommitted work');
+    expect(workPreserved(service, sessionId, worktreePath)).toBe(true);
   });
 
   it('keeps the checkout and warns on an invalid marker', async () => {
@@ -3016,7 +3029,7 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     );
   });
 
-  it('keeps a checkout whose only work sits under a git-ignored path', async () => {
+  it('preserves the work of a checkout whose only work sits under a git-ignored path (P6 U3 snapshot or keep)', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-4466554400b2';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
     fs.writeFileSync(path.join(worktreePath, '.gitignore'), '.qwen/\n');
@@ -3037,12 +3050,10 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(fs.existsSync(worktreePath)).toBe(true);
-    expect(fs.existsSync(draft)).toBe(true);
-    expect(warnings()).toContain('uncommitted work');
+    expect(workPreserved(service, sessionId, worktreePath)).toBe(true);
   });
 
-  it('keeps a checkout with untracked work when the repo hides untracked files', async () => {
+  it('preserves the work of a checkout with untracked work when the repo hides untracked files (P6 U3 snapshot or keep)', async () => {
     // `status.showUntrackedFiles=no` set on the main repo is shared by
     // every linked worktree; the gate pins its own mode so ambient
     // config cannot make a dirty checkout read clean.
@@ -3062,9 +3073,7 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(fs.existsSync(worktreePath)).toBe(true);
-    expect(fs.existsSync(draft)).toBe(true);
-    expect(warnings()).toContain('uncommitted work');
+    expect(workPreserved(service, sessionId, worktreePath)).toBe(true);
   });
 
   it('cleans a checkout whose only ignored content is disposable build output', async () => {
