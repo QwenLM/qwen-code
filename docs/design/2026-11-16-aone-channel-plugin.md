@@ -152,7 +152,7 @@ hosts (it is what the local E2E harness used), not the recommended default.
   `groups` directly in the config. `connect()` runs one posture-resolution
   pass per watched repo (reproducing the base `groupConfigFor` key match
   and the `senders`/`allowedUsers` repo→`*`→empty fallback chains, where an
-  empty allowlist admits nobody) and diagnoses four postures: (1)
+  empty allowlist admits nobody) and diagnoses five postures: (1)
   permissive — open senders on a repo the group gate admits (under
   allowlist a repo with no `groups` entry is rejected `not_allowlisted`
   BEFORE the sender gate, so it is dead, not open, and excluded); (2)
@@ -213,17 +213,19 @@ Per repo:
    the cursor jumps over the aged-out ids — the poll LOGS that jump and
    records a durable `cursor_aged_out` journal event (the loss is
    permanent; the poll itself resolves ok) when it resumes with events to
-   dispatch. The diagnostic fires when the walk missed the cursor and
-   there is something to resume to. For `cursorId > 0` that is always
-   genuine aging. `cursorId === 0` is ambiguous — an empty-window baseline
-   polled recently fills normally (NOT aging; the creation-time floor
-   drops pre-creation events), but a stale empty baseline whose last poll
-   predates the window start DID lose post-creation events to aging — so
-   the two are discriminated by the per-repo last-poll instant
-   (`cursor.lastPoll`), not the cursor value or the channel baseline (a
-   repo added to a mature channel baselines fresh and must not
-   false-positive). A dormant repo with an empty window skips nothing and
-   does not warn. Each repo's slice dispatches at most the
+   dispatch. The diagnostic fires when the walk missed the cursor, there
+   is something to resume to, AND the previous SUCCESSFUL poll predates
+   the window start (`cursor.lastPoll`): that is genuine loss — events
+   since the last observation fell outside the window. The last-poll
+   instant is stamped only at the success exits, so a failed poll (an a1
+   outage) does not count as an observation and cannot silence the
+   diagnostic on recovery. A repo polled continuously within the window
+   (fresh `lastPoll`) lost nothing even if its cursor event aged out (a
+   quiet gap), and a recent empty-window baseline (cursor 0) fills
+   normally — neither is aging. Keying on the last successful poll, not
+   the cursor value or the channel baseline, also keeps a repo added to a
+   mature channel (fresh baseline) from false-positiving. A dormant repo
+   with an empty window skips nothing and does not warn. Each repo's slice dispatches at most the
    oldest 100 events (`DISPATCH_BUDGET`, universal and monotonic — a
    500-event backlog caps at 100 just like a 1200-event one; a poll's
    worst case is repos.length × 100 dispatches); the remainder drains on
@@ -384,29 +386,32 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   (allowlist-dead repos excluded) + all-dead and mixed dead-repo
   diagnostics (every dead repo named) + sender-dead posture (allowlist
   senders with an empty resolved allowedUsers list, repo→`*` fallback) +
-  pairing-open post-approval note + pairing-sender-dead post-approval note
-  - case-normalized groups entry;
-    senderName/chatId fallback on sibling-field type drift; empty-string
-    author skip; durable repo_failed journal record on partial failure;
-    all three stderr sinks sanitized and bounded (poll-failure, per-event
-    dispatch, fetchView — no forged log line); aged-out cursor jump
-    diagnostic (cursor>0 always; cursor-0 discriminated by the last-poll
-    instant — recent empty baseline silent, stale empty baseline diagnosed)
-    with a durable cursor_aged_out journal record (dormant repo silent); a
-    cursor-reached poll reports no aging; descriptor
-    groupPolicy default; repo-path lowercasing. Mutation-witnessed: dedup,
-    per-repo isolation, overflow walk, cursor-reached break, prune save,
-    whitespace fallback, partial-failure cadence, universal budget, platform
-    ceiling, per-poll cache clear, permissive warning, drift diagnostics,
-    midnight window, aging diagnostic, author type guard, durable failure
-    record, warning scope, dead-posture warning, reachability exclusion,
-    mixed dead-repo naming, warning repo naming, case-normalized entry,
-    senderName fallback, chatId fallback, empty-author guard, aging
-    cursorId>0 guard, cursor_aged_out record, sender-dead warning,
-    allowedUsers `*` fallback, pairing-open note, stderr sanitization,
-    all-dead/mixed exclusivity, every-dead-repo naming, pairing-sender-dead
-    note, stale-cursor0 aging, !reachedCursor clause, per-event stderr
-    sanitization, fetchView stderr sanitization.
+  pairing-open post-approval note + pairing-sender-dead post-approval note +
+  case-normalized groups entry;
+  senderName/chatId fallback on sibling-field type drift; empty-string
+  author skip; durable repo_failed journal record on partial failure;
+  all four stderr sinks sanitized and bounded (poll-failure, per-event
+  dispatch, fetchView, unparseable-createdAt — no forged log line);
+  aged-out cursor jump diagnostic gated on the previous successful poll
+  predating the window (a quiet repo or a recent empty baseline is silent;
+  a failed poll does not refresh lastPoll) with a durable cursor_aged_out
+  journal record (dormant repo silent); a cursor-reached poll reports no
+  aging; descriptor groupPolicy default; repo-path lowercasing.
+  Mutation-witnessed: dedup,
+  per-repo isolation, overflow walk, cursor-reached break, prune save,
+  whitespace fallback, partial-failure cadence, universal budget, platform
+  ceiling, per-poll cache clear, permissive warning, drift diagnostics,
+  midnight window, aging diagnostic, author type guard, durable failure
+  record, warning scope, dead-posture warning, reachability exclusion,
+  mixed dead-repo naming, warning repo naming, case-normalized entry,
+  senderName fallback, chatId fallback, empty-author guard, aging
+  lastPoll discriminator, cursor_aged_out record, sender-dead warning,
+  allowedUsers `*` fallback, pairing-open note, stderr sanitization,
+  all-dead/mixed exclusivity, every-dead-repo naming, pairing-sender-dead
+  note, stale-cursor0 aging, !reachedCursor clause, per-event stderr
+  sanitization, fetchView stderr sanitization, failed-poll lastPoll,
+  quiet-repo no aging, mature-channel fresh baseline, createdAt stderr
+  sanitization.
 - Live read-only smoke: real `a1 events repo middleware/tddl5` fetch+parse,
   no dispatch, no writes (env-gated).
 - Full-loop E2E with a stubbed `a1` on PATH (canned whoami/events; comment

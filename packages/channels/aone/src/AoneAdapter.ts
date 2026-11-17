@@ -449,13 +449,17 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
     const sinceStr = localDate(since);
     const untilStr = localDate(until);
 
-    // Capture the PREVIOUS poll instant before recording this one: it
-    // discriminates a cursor-0 repo's two states (recent empty baseline vs
-    // stale empty baseline older than the window). Unknown (a cursor written
-    // before lastPoll existed) is treated as stale — the safe base behavior.
+    // Capture the PREVIOUS successful poll instant: it discriminates genuine
+    // aging (the repo was not successfully polled within the window, so
+    // events since the last observation aged out) from a quiet repo that was
+    // polled continuously and simply received no comments (nothing lost).
+    // Unknown (a cursor written before lastPoll existed) is treated as stale
+    // — the safe base behavior. The instant is stamped only at the SUCCESS
+    // exits below, never here: a poll whose fetch throws must not count as an
+    // observation, or a long a1 outage would keep refreshing it and silence
+    // the aging diagnostic on recovery.
     const prevPollIso = this.cursor.lastPoll?.[repo];
     const prevPollMs = prevPollIso ? Date.parse(prevPollIso) : NaN;
-    (this.cursor.lastPoll ??= {})[repo] = until.toISOString();
 
     const cursorId = this.cursor.repos[repo];
     if (cursorId === undefined) {
@@ -463,6 +467,7 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       // (GitLab first-poll drain precedent). Page 1 is newest-first.
       const page = await this.fetchEventsPage(repo, 1, sinceStr, untilStr);
       this.cursor.repos[repo] = page.reduce((m, e) => Math.max(m, e.id), 0);
+      (this.cursor.lastPoll ??= {})[repo] = until.toISOString();
       this.saveCursor();
       return;
     }
@@ -493,23 +498,20 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       }
     }
 
-    // The cursor event itself aged out of the 3-day window: events between
-    // the cursor and the window's oldest are gone to window aging, and the
-    // cursor will jump over them. Fire when the walk missed the cursor and
-    // there is something to resume to. For cursorId > 0 that is always
-    // genuine aging. cursorId === 0 is ambiguous: an empty-window baseline
-    // polled recently fills normally (no aging — the creation-time floor,
-    // not the window, drops pre-creation events), but a stale empty baseline
-    // older than the window start DID lose post-creation events to aging.
-    // Discriminate by the previous poll instant, not the cursor value or the
-    // channel baseline (a repo added to a mature channel baselines fresh and
-    // must not false-positive). A dormant repo (empty fresh) skips nothing.
-    // The loss is permanent, so leave a durable journal record beside the
-    // stderr line (the poll itself resolves ok).
-    const agedCursor0 =
-      cursorId === 0 &&
-      (Number.isNaN(prevPollMs) || prevPollMs < since.getTime());
-    if (!reachedCursor && fresh.length > 0 && (cursorId > 0 || agedCursor0)) {
+    // The cursor event itself aged out of the 3-day window. Fire only when
+    // the walk missed the cursor, there is something to resume to, AND the
+    // previous successful poll predates the window start (agedOut): that is
+    // genuine loss — events since the last observation fell outside the
+    // window. A repo polled continuously within the window (fresh lastPoll)
+    // lost nothing even if its cursor event aged out (a quiet gap), and a
+    // recent empty-window baseline (cursor 0) fills normally — neither is
+    // aging. Keying on the last successful poll, not the cursor value or the
+    // channel baseline, also keeps a repo added to a mature channel (fresh
+    // baseline) from false-positiving. A dormant repo (empty fresh) skips
+    // nothing. The loss is permanent, so leave a durable journal record
+    // beside the stderr line (the poll itself resolves ok).
+    const agedOut = Number.isNaN(prevPollMs) || prevPollMs < since.getTime();
+    if (!reachedCursor && fresh.length > 0 && agedOut) {
       const resumedFrom = fresh.reduce(
         (m, e) => Math.min(m, e.id),
         fresh[0]!.id,
@@ -545,7 +547,7 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       const createdMs = Date.parse(event.createdAt ?? '');
       if (Number.isNaN(createdMs)) {
         process.stderr.write(
-          `[Channel:${this.name}] unparseable createdAt on event ${event.id} (${String(event.createdAt)}); skipping\n`,
+          `[Channel:${this.name}] unparseable createdAt on event ${event.id} (${sanitizeLogText(String(event.createdAt), 200)}); skipping\n`,
         );
       } else if (createdMs >= this.baselineMs) {
         try {
@@ -564,8 +566,11 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       this.cursor.repos[repo] = event.id;
       this.saveCursor();
     }
-    // Persist the last-poll instant even when no event dispatched (a dormant
-    // repo), so the cursor-0 aging discriminator stays current.
+    // Success exit: stamp the last-poll instant (even when no event
+    // dispatched — a dormant repo) so the aging discriminator stays current.
+    // A poll that threw above never reaches here, so a failed attempt does
+    // not count as an observation.
+    (this.cursor.lastPoll ??= {})[repo] = until.toISOString();
     this.saveCursor();
   }
 

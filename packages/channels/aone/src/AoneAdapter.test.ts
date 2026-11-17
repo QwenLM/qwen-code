@@ -1063,6 +1063,29 @@ describe('AoneChannel', () => {
       stderr.mockRestore();
     });
 
+    it('the unparseable-createdAt stderr is sanitized (R2-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const forged = 'x\n[Channel:test-aone] forged\n' + 'y'.repeat(500);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline at 1001
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 1002, createdAt: forged })]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('unparseable createdAt on event 1002'));
+      expect(line).toBeDefined();
+      // The offending value stays visible but cannot forge a column-0 line.
+      expect(/\n\[Channel:/.test(line!)).toBe(false);
+      expect(line!.length).toBeLessThanOrEqual(300);
+      stderr.mockRestore();
+    });
+
     it('an authorless event is skipped fail-closed but logged (R2-8)', async () => {
       const stderr = vi
         .spyOn(process.stderr, 'write')
@@ -1761,6 +1784,11 @@ describe('AoneChannel', () => {
       ).toBe(false);
       expect(channel.cursor.repos['test/repo']).toBe(1000);
       stderr.mockClear();
+      // Simulate an outage: the last SUCCESSFUL poll was long before the
+      // window start, so events since then aged out. (A continuously-polled
+      // quiet repo has a fresh lastPoll and reports no aging — see the
+      // quiet-repo test below.)
+      channel.cursor.lastPoll['test/repo'] = '2020-01-01T00:00:00.000Z';
       // Resume: the cursor event aged out; all window events are newer.
       installFakeA1({
         events: pagedEvents(
@@ -1799,6 +1827,115 @@ describe('AoneChannel', () => {
       expect(aged.type).toBe('poll');
       expect(aged.detail.cursor).toBe(1000);
       expect(aged.detail.resumedFrom).toBe(2001);
+      stderr.mockRestore();
+    });
+
+    it('a failed poll does not refresh lastPoll, so recovery reports aging (R1-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 0;
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      // An a1 outage: the failing poll must NOT count as an observation, so
+      // lastPoll stays stale (writing it before the fetch would refresh it on
+      // every failed attempt and silence the diagnostic on recovery).
+      installFakeA1({
+        events: () => {
+          throw {
+            code: 1,
+            stdout: JSON.stringify({
+              schemaVersion: 'a1.error/v1',
+              message: 'SYSTEM_FORBIDDEN_ERROR',
+            }),
+            stderr: '',
+          };
+        },
+      });
+      await expect(ch.testPollOnce()).rejects.toThrow();
+      expect(ch.cursor.lastPoll['test/repo']).toBe('2020-01-01T00:00:00.000Z');
+      // Recovery: events created during the outage aged out — report it.
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 10 }), makeEvent({ id: 20 })]),
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      stderr.mockRestore();
+    });
+
+    it('a continuously-polled quiet repo reports no aging loss (R2-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline at 1000
+      // A quiet gap > 3 days: the cursor event aged out of the window, but the
+      // channel kept polling (fresh lastPoll) and no comments existed in the
+      // gap — nothing was lost, so no aging line / durable record.
+      channel.cursor.lastPoll['test/repo'] = new Date(
+        Date.now() - 60_000,
+      ).toISOString();
+      installFakeA1({
+        events: pagedEvents(
+          Array.from({ length: 50 }, (_, i) => makeEvent({ id: 2050 - i })),
+        ),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(50);
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
+      ).toBe(false);
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const content = journal
+        ? readFileSync(join(tempDir, 'channels', String(journal)), 'utf8')
+        : '';
+      expect(content).not.toContain('cursor_aged_out');
+      stderr.mockRestore();
+    });
+
+    it('a repo added to a mature channel baselines fresh, no false aging (R2-3)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      // Mature channel (old baselineAt) but the repo is added now: it
+      // baselines fresh. Keying aging on baselineMs instead of the last poll
+      // would false-positive here (baselineMs predates the window).
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      let events: unknown[] = [];
+      installFakeA1({ events: () => events });
+      await ch.connect();
+      await ch.testPollOnce(); // empty window → cursor 0, fresh lastPoll
+      expect(ch.cursor.repos['test/repo']).toBe(0);
+      events = [makeEvent({ id: 10 }), makeEvent({ id: 20 })];
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(ch.inboundEnvelopes).toHaveLength(2);
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
+      ).toBe(false);
       stderr.mockRestore();
     });
 

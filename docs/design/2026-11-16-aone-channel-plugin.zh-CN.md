@@ -137,7 +137,7 @@ packages/channels/aone/
   发送者行因此都不适用于本插件；操作者直接在配置里写 `groups`。
   `connect()` 对每个监听仓库做**一次 posture 解析**（复现基类
   `groupConfigFor` 的键匹配与 `senders`/`allowedUsers` 的 repo→`*`→空
-  回退链，空 allowlist 谁都不放行），诊断四种姿态：(1) 宽松——group 门
+  回退链，空 allowlist 谁都不放行），诊断五种姿态：(1) 宽松——group 门
   准入的仓库上是 open 发送者（allowlist 下无 `groups` 条目的仓库在
   sender 门之前就被拒 `not_allowlisted`，故是死的、不是 open，被排除）；
   (2) group 层死——allowlist 下**每个**监听仓库都无条目（什么都不派发）
@@ -183,13 +183,14 @@ packages/channels/aone/
    以窗口为界：游标事件本身老化出 3 天窗口时（停机或排空慢于到达），
    遍历遇不到它而结束，游标跳过老化的 id——轮询在带着可派发事件恢复
    时**记录这次跳跃**并落持久 `cursor_aged_out` 台账事件（丢失是永久的；
-   轮询本身记 ok）。该诊断在遍历未命中游标且有可派发事件时触发：
-   `cursorId > 0` 必为真实老化；`cursorId === 0` 有歧义——近期空窗口基线
-   被正常填满**不是**老化（那些事件由建仓时间下限丢弃），但上次轮询早于
-   窗口起点的陈旧空基线**确实**把建仓后事件老化丢失了——故两者按仓库
-   上次轮询时间（`cursor.lastPoll`）区分，而非游标值或频道基线（成熟频道
-   新增的仓库会新鲜基线化，不能误报）。空窗口的休眠仓库什么都没跳过，
-   不告警。
+   轮询本身记 ok）。该诊断在遍历未命中游标、有可派发事件、且**上次成功
+   轮询**早于窗口起点（`cursor.lastPoll`）时触发：这才是真实丢失——上次
+   观测以来的事件落到了窗口之外。lastPoll 只在成功出口写入，故失败轮询
+   （a1 故障）不算观测，不会在恢复时把诊断静默掉。窗口内持续被轮询的仓库
+   （lastPoll 新鲜）即使游标事件老化出窗口也什么都没丢（安静间隙），近期
+   空窗口基线（cursor 0）被正常填满——两者都不是老化。按上次成功轮询而非
+   游标值或频道基线判定，也使成熟频道新增的仓库（新鲜基线）不误报。空窗口
+   的休眠仓库什么都没跳过，不告警。
    每仓库的切片至多派发**最旧的 100 条**（`DISPATCH_BUDGET`，通用且
    单调——500 条积压与 1200 条一样封顶 100；单轮最坏是 仓库数 × 100
    次派发）；余量在后续轮次排空。第 100 页仍满——超出平台可寻址
@@ -323,20 +324,22 @@ descriptor 与 connect 间共享（GitHub `validateRepoFilterConfig` 模式）�
   回退）+ pairing-open 批准后告警 + pairing-sender-dead 批准后告警 +
   大小写归一化的 groups 条目；兄弟
   字段类型漂移时的 senderName/chatId 回落；空串作者跳过；部分失败的
-  持久 repo_failed 台账记录；三处 stderr 均净化有界（轮询失败、逐事件
-  派发、fetchView——不伪造日志行）；游标
-  老化跳跃诊断（cursor>0 必触发；cursor-0 按上次轮询时刻区分——近期空
-  基线静默、陈旧空基线诊断）+ 持久 cursor_aged_out
+  持久 repo_failed 台账记录；四处 stderr 均净化有界（轮询失败、逐事件
+  派发、fetchView、不可解析 createdAt——不伪造日志行）；游标
+  老化跳跃诊断（按上次成功轮询早于窗口判定——安静仓库与近期空基线静默；
+  失败轮询不刷新 lastPoll）+ 持久 cursor_aged_out
   台账记录（休眠仓库静默）；命中游标的轮询不报老化；descriptor groupPolicy 缺省；仓库路径
   小写化。变异见证：去重、逐仓库隔离、溢出走尾、游标命中即停、剪枝
   保存、空白回落、部分失败节奏、通用预算、平台上限、逐轮缓存清空、
   宽松告警、漂移诊断、午夜窗口、老化诊断、作者类型守卫、持久失败
   记录、告警范围、死姿态告警、可达性排除、混合死仓库点名、告警仓库
   点名、大小写归一化条目、senderName 回落、chatId 回落、空串作者
-  守卫、老化 cursorId>0 守卫、cursor_aged_out 记录、sender 层死告警、
+  守卫、老化 lastPoll 判别、cursor_aged_out 记录、sender 层死告警、
   allowedUsers `*` 回退、pairing-open 告警、stderr 净化、全死/混合
   互斥、每个死仓库点名、pairing-sender-dead 告警、陈旧 cursor0 老化、
-  !reachedCursor 子句、逐事件 stderr 净化、fetchView stderr 净化。
+  !reachedCursor 子句、逐事件 stderr 净化、fetchView stderr 净化、
+  失败轮询 lastPoll、安静仓库不报老化、成熟频道新鲜基线、createdAt
+  stderr 净化。
 - 线上只读冒烟：真实 `a1 events repo middleware/tddl5` 拉取+解析，
   不派发、不写（环境变量门控）。
 - 全链路 E2E（PATH 上打桩 a1： canned whoami/events；comment create
