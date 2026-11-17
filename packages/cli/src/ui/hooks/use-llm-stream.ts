@@ -4639,6 +4639,7 @@ export const useLlmStream = (
         turnCancelledRef.current = false;
       }
 
+      const promptIdWasMinted = !prompt_id;
       if (!prompt_id) {
         prompt_id = config.getSessionId() + '########' + getPromptCount();
       }
@@ -4891,14 +4892,30 @@ export const useLlmStream = (
           lastPromptErroredRef.current = false;
         }
 
+        // Every top-level turn that mints a fresh prompt id advances the prompt
+        // counter so the next minted id is unique. Notification and Goal mint
+        // ids too; without the increment their id is reused by the next user
+        // prompt, and the model-availability ledger (keyed on the prompt id)
+        // would let one turn's marks bind the other (R6-1/R7-1). They advance
+        // the counter only when they mint (a continuation reusing an existing id
+        // must not skip one) and do not log a user prompt or reset the thought.
+        if (
+          submitType === SendMessageType.UserQuery ||
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate ||
+          ((submitType === SendMessageType.Notification ||
+            submitType === SendMessageType.Goal) &&
+            promptIdWasMinted)
+        ) {
+          // trigger new prompt event for session stats in CLI
+          startNewPrompt();
+        }
+
         if (
           submitType === SendMessageType.UserQuery ||
           submitType === SendMessageType.Cron ||
           submitType === SendMessageType.Teammate
         ) {
-          // trigger new prompt event for session stats in CLI
-          startNewPrompt();
-
           // log user prompt event for telemetry, only text prompts for now
           if (typeof queryToSend === 'string') {
             logUserPrompt(

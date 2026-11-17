@@ -746,16 +746,15 @@ export class LlmClient {
   // is bound to its owning interaction: every budget entrypoint below is a
   // no-op for an invocation that does not own it.
   private toolExplorationBudgetPromptId: string | undefined;
-  // Prompt ids claimed by background interactions whose ids are unique:
-  // concurrent `/btw` side queries and Teammate sends (both increment the prompt
-  // counter). Their ToolResult/Hook/Steer continuations are resubmitted without
-  // the background flag, so model-availability ledger membership must exclude the
-  // whole interaction by prompt id, not just the first send's messageType.
-  // Entries are inert once the interaction ends (the id is never reused by a
-  // foreground turn), so they persist for the session rather than risking a
-  // too-early clear while a continuation is still draining. Notification is NOT
-  // registered: its id is reused by the next user prompt (see the registration
-  // site, R6-1).
+  // Prompt ids claimed by background interactions: concurrent `/btw` side
+  // queries, Notification and Teammate sends. The CLI advances the prompt
+  // counter for each, so their ids are unique (R6-1/R7-1 root fix). Their
+  // ToolResult/Hook/Steer continuations are resubmitted without the background
+  // flag, so model-availability ledger membership must exclude the whole
+  // interaction by prompt id, not just the first send's messageType. Entries are
+  // inert once the interaction ends (the id is never reused by a foreground
+  // turn), so they persist for the session rather than risking a too-early clear
+  // while a continuation is still draining.
   private readonly backgroundInteractionPromptIds = new Set<string>();
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
@@ -4384,13 +4383,12 @@ export class LlmClient {
       // Register background interactions so their unflagged ToolResult/Hook/
       // Steer continuations stay excluded from the ledger by prompt id (see
       // backgroundInteractionPromptIds), not just the first send's messageType.
-      // Notification is deliberately NOT registered: it does not increment the
-      // prompt counter, so its prompt id is reused by the next user prompt, and
-      // registering it would wrongly drop that foreground turn from the ledger
-      // (R6-1). Its first send is excluded by messageType; making its
-      // continuations excludable requires unique Notification ids (follow-up).
+      // Notification/Teammate/side-query ids are unique: the CLI advances the
+      // prompt counter for each (R6-1/R7-1 root fix), so a registered id is
+      // never reused by a foreground turn and cannot drop it from the ledger.
       if (
         options?.isConcurrentSideQuery ||
+        messageType === SendMessageType.Notification ||
         messageType === SendMessageType.Teammate
       ) {
         this.backgroundInteractionPromptIds.add(prompt_id);
@@ -5210,11 +5208,11 @@ export class LlmClient {
         // Ledger membership is decided here, where the sender is known: the
         // live turn's own sends participate. Notification/Teammate first sends
         // are background, not this turn, and are excluded by messageType.
-        // Teammate and concurrent side queries are additionally registered by
-        // prompt id so their unflagged ToolResult/Hook/Steer continuations stay
-        // excluded (the flag/messageType is only on the first send). Notification
-        // is not registered because its id is reused by the next user prompt
-        // (R6-1); the messageType conjunct is the backstop for its first send.
+        // Notification, Teammate and concurrent side queries are additionally
+        // registered by prompt id so their unflagged ToolResult/Hook/Steer
+        // continuations stay excluded (the flag/messageType is only on the first
+        // send). Their ids are unique (the CLI advances the prompt counter), so
+        // a registered id never drops a foreground turn (R6-1/R7-1).
         messageType !== SendMessageType.Notification &&
           messageType !== SendMessageType.Teammate &&
           !this.backgroundInteractionPromptIds.has(prompt_id),

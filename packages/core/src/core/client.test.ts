@@ -12885,23 +12885,29 @@ Other open files:
         expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
       });
 
-      it('does not drop a user turn whose prompt id a Notification reuses', async () => {
+      it('excludes a Notification and its continuation, not the next user turn', async () => {
         retryChat({
           stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
         });
         mockTurnRunFn.mockImplementation(() => textTurn('response'));
 
-        // Notification first send is excluded by messageType. Notification does
-        // not increment the prompt counter, so the next user prompt reuses this
-        // id; the registry must NOT register it (R6-1).
+        // Notification first send is excluded by messageType and registered.
         await run([{ text: 'notify' }], 'session########8', {
           type: SendMessageType.Notification,
         });
         expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
 
-        // The next user turn reuses the same prompt id and must remain a ledger
-        // member, not be dropped by a stale Notification registration.
-        await run([{ text: 'user' }], 'session########8', {
+        // Its unflagged Hook continuation reuses the Notification's id and must
+        // stay excluded by the registry, or it would rotate the live turn's key.
+        await run([{ text: 'continue' }], 'session########8', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The next user turn mints a NEW id because the CLI advanced the prompt
+        // counter for the Notification (R6-1/R7-1 root fix); it must remain a
+        // ledger member, not be dropped by the Notification registration.
+        await run([{ text: 'user' }], 'session########9', {
           type: SendMessageType.UserQuery,
         });
         expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);

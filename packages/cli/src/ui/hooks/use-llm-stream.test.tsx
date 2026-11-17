@@ -1032,6 +1032,36 @@ describe('useLlmStream', () => {
     });
   });
 
+  it('advances the prompt counter for a minted Notification id (R6-1/R7-1)', async () => {
+    const { mockSendMessageStream } = renderTestHook();
+    await waitFor(() => {
+      expect(
+        mockBackgroundShellRegistry.setNotificationCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
+    });
+    const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+      .calls[0][0] as (displayText: string, modelText: string) => void;
+    act(() => {
+      callback(
+        'Background shell done.',
+        '<task-notification>done</task-notification>',
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        '<task-notification>done</task-notification>',
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({ type: SendMessageType.Notification }),
+      );
+    });
+    // The Notification minted a fresh prompt id, so the counter advances and the
+    // next user prompt cannot reuse that id (R6-1/R7-1 root fix). A Notification
+    // is not a user prompt: no user-prompt telemetry is logged.
+    expect(mockStartNewPrompt).toHaveBeenCalledTimes(1);
+    expect(MockedUserPromptEvent).not.toHaveBeenCalled();
+  });
+
   it('queues background workflow completions for the model loop', async () => {
     const { mockSendMessageStream } = renderTestHook();
     const displayText = 'Background workflow "research" completed.';

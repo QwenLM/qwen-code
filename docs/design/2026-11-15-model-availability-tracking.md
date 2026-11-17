@@ -86,18 +86,17 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     `isSessionTurn` set per `messageType` — true for the turn's own sends
     (user query, retry, tool result, continuations), false for
     `Notification`/`Teammate` (which carry fresh prompt ids). A concurrent
-    `/btw` side query and `Teammate` are additionally excluded by a registry of
-    their prompt ids (`backgroundInteractionPromptIds`): the background
-    flag/messageType is only on the first send, so their unflagged
+    `/btw` side query, `Notification` and `Teammate` are additionally excluded by
+    a registry of their prompt ids (`backgroundInteractionPromptIds`): the
+    background flag/messageType is only on the first send, so their unflagged
     ToolResult/Hook/Steer continuations must be excluded by prompt id too, or
-    they would rotate the live turn's key. Both increment the prompt counter, so
-    their ids are unique; entries persist for the session (the id is never reused
-    by a foreground turn), avoiding a too-early clear while a continuation
-    drains. `Notification` is deliberately NOT registered: it does not increment
-    the prompt counter, so its id is reused by the next user prompt, and
-    registering it would wrongly drop that foreground turn from the ledger
-    (R6-1); its first send is excluded by messageType, and excluding its
-    continuations requires unique Notification ids (follow-up).
+    they would rotate the live turn's key. The CLI advances the prompt counter
+    whenever a `Notification` or `Goal` mints a fresh id, so these ids are unique
+    and a registered id is never reused by a foreground turn (R6-1/R7-1 root
+    fix); entries persist for the session, avoiding a too-early clear while a
+    continuation drains. A `Goal` turn is a ledger member (not registered), but
+    its minted id is likewise unique, so a fallback it exhausts cannot be skipped
+    by a later user turn that never tried it.
     `Turn` takes it as a constructor parameter (default unset) and
     forwards it to the send options only when set. `turnModelRound` builds its
     `Turn` without it because every production caller is a background round (the
