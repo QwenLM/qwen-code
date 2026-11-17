@@ -77,6 +77,18 @@ interface CommandPart {
   end: number;
 }
 
+function commandRanges(
+  command: string,
+  parts: readonly string[],
+): CommandPart[] {
+  let offset = 0;
+  return parts.map((text) => {
+    const start = command.indexOf(text, offset);
+    offset = start + text.length;
+    return { text, start, end: offset };
+  });
+}
+
 async function shellRuleParts(command: string): Promise<CommandPart[]> {
   try {
     let tree = await parseShellCommand(command);
@@ -220,12 +232,7 @@ export async function suggestCommandRules(
   const eligible = eligibleCommands?.map((part) =>
     bash ? removeShellLineContinuations(part) : part,
   );
-  let offset = 0;
-  const rawParts = splitCommands(command).map((text) => {
-    const start = command.indexOf(text, offset);
-    offset = start + text.length;
-    return { text, start, end: offset };
-  });
+  const rawParts = commandRanges(command, splitCommands(command));
   if (rawParts.some((part) => part.start < 0)) return { permissionRules: [] };
   const parts = bash ? await shellRuleParts(command) : rawParts;
   const selected = parts.filter((part) => {
@@ -244,9 +251,16 @@ export async function suggestCommandRules(
     }
     let rules: string[] = [];
     try {
-      rules = (await extractCommandRules(part)).filter(
-        (rule) => !/^[*\s]*$/.test(rule),
-      );
+      const tree = await parseShellCommand(part);
+      const hasError = tree.rootNode.hasError;
+      tree.delete();
+      // A structure-only descriptor-close repair does not certify the
+      // original parse's derived commands. Retain only the literal fallback.
+      if (!hasError) {
+        rules = (await extractCommandRules(part)).filter(
+          (rule) => !/^[*\s]*$/.test(rule),
+        );
+      }
     } catch (error) {
       debugLogger.warn('Failed to extract command rules:', error);
     }
@@ -264,17 +278,26 @@ export async function suggestCommandRules(
   );
   const rules = permissionRules.map(parseRule).filter((rule) => rule !== null);
   const canonicalTool = toolName === 'Bash' ? 'run_shell_command' : 'monitor';
-  const required = eligible
-    ? rawParts
-        .filter((part) => eligible.includes(part.text))
-        .map((part) => part.text)
-    : [command];
+  const matcherParts = commandRanges(
+    command,
+    splitCommandForRules(command, canonicalTool),
+  );
+  if (matcherParts.some((part) => part.start < 0))
+    return { permissionRules: [] };
+  const required = matcherParts.filter(
+    (part) =>
+      !eligible ||
+      rawParts.some(
+        (raw) =>
+          eligible.includes(raw.text) &&
+          raw.start < part.end &&
+          part.start < raw.end,
+      ),
+  );
   // An offered persistent choice must cover the same segments the matcher
   // will score. Never save a partial set that immediately asks again.
   const covered = required.every((part) =>
-    splitCommandForRules(part, canonicalTool).every((segment) =>
-      rules.some((rule) => matchesRule(rule, canonicalTool, segment)),
-    ),
+    rules.some((rule) => matchesRule(rule, canonicalTool, part.text)),
   );
   return { permissionRules: covered ? permissionRules : [] };
 }

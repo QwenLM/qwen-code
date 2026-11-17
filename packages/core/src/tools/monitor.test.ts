@@ -198,6 +198,7 @@ describe('MonitorTool', () => {
 
     vi.clearAllMocks();
     mockRuntimeShell.mockReset();
+    mockExtractCommandRules.mockReset();
     mockOsPlatform.mockReturnValue('linux');
 
     monitorRegistry = new MonitorRegistry();

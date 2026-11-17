@@ -18,6 +18,7 @@ import { isNodeError } from '../utils/errors.js';
 import {
   detectCommandSubstitution,
   getShellConfiguration,
+  hasUnmodeledShellCommandString,
   stripShellCommandNegation,
   stripShellCommandPrefixes,
   stripShellWrapper,
@@ -1099,7 +1100,6 @@ function findOperatorBoundaries(
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
-  const parentheses: Array<'group' | 'substitution' | 'arithmetic'> = [];
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -1126,6 +1126,11 @@ function findOperatorBoundaries(
       escaped = true;
       wordStart = false;
       continue;
+    }
+    // Parameter expansion has its own word grammar, including spaces and
+    // hashes. Keep the remaining text when this scanner cannot certify it.
+    if (!inSingle && ch === '$' && command[i + 1] === '{') {
+      respectComments = false;
     }
     // Only the Bash reading may discard comments; the alternative reading
     // can add operator boundaries, but cannot erase executable text.
@@ -1163,28 +1168,23 @@ function findOperatorBoundaries(
       wordStart = false;
       continue;
     }
-    wordStart = /[ \t\n;&|()<>]/.test(ch);
+    // Only an unquoted, unescaped whitespace boundary certifies a comment.
+    // Operators and closing expansion syntax may still belong to a word.
+    wordStart = /[ \t\n]/.test(ch);
     if (ch === '$') {
       // The second `$` of `$$` (the PID) cannot open `$'…'`.
       dollarPending = !ansiCIntroducer;
       continue;
     }
 
-    if (ch === '(') {
-      parentheses.push(ansiCIntroducer ? 'substitution' : 'group');
-      if (command[i + 1] === '(') {
-        parentheses.push('arithmetic');
-        arithmeticDepth++;
-        i++;
-      }
+    if (ch === '(' && command[i + 1] === '(') {
+      arithmeticDepth++;
+      i++;
       continue;
     }
-    if (ch === ')') {
-      const kind = parentheses.pop();
-      if (kind === 'arithmetic') arithmeticDepth--;
-      // A substitution is still part of the current word; a subshell is a
-      // complete command. Only the latter can start an adjacent comment.
-      wordStart = kind !== 'substitution';
+    if (arithmeticDepth > 0 && ch === ')' && command[i + 1] === ')') {
+      arithmeticDepth--;
+      i++;
       continue;
     }
 
@@ -1212,7 +1212,7 @@ function findOperatorBoundaries(
         continue;
       }
       boundaries.push({ start: i, end: i + op.length, operator: op });
-      wordStart = true;
+      wordStart = op === '\n';
       i += op.length - 1; // -1 because the loop will i++
       break;
     }
@@ -1303,7 +1303,9 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
     const firstWord = tokenizeShellWords(unprefixed)[0];
     if (
       firstWord === 'eval' ||
+      hasUnmodeledShellCommandString(unprefixed) ||
       firstWord?.split('/').at(-1) === 'xargs' ||
+      /^[^\s()]+\s*\(\s*\)/.test(unprefixed) ||
       /^(?:[({]|(?:if|then|elif|else|fi|while|until|for|select|case|esac|do|done|function)(?:\s|$))/.test(
         unprefixed,
       ) ||

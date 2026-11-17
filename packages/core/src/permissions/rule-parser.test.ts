@@ -28,10 +28,10 @@ describe('splitCompoundCommandSegments', () => {
   });
 
   it.each(['(echo hi)#x', '(( 1 ))#x'])(
-    'keeps comments after a complete shell command in %s',
+    'keeps ambiguous adjacent hashes for conservative analysis in %s',
     (command) => {
       expect(splitCompoundCommandSegments(command, true)).toEqual([
-        { command: command.slice(0, command.indexOf('#')), terminator: '' },
+        { command, terminator: '' },
       ]);
     },
   );

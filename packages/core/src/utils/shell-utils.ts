@@ -18,7 +18,10 @@ import {
 } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { resolveWorkspacePath } from './workspaceContext.js';
-import { getShellPrefixCommand } from './shell-command-prefixes.js';
+import {
+  getShellPrefixCommand,
+  SHELL_ASSIGNMENT_PREFIX,
+} from './shell-command-prefixes.js';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -108,7 +111,7 @@ export interface ShellConfiguration {
 }
 
 let cachedBashPath: string | undefined;
-const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const ENV_ASSIGNMENT_REGEX = SHELL_ASSIGNMENT_PREFIX;
 
 /**
  * Attempts to find the Git Bash executable path on Windows.
@@ -1003,6 +1006,42 @@ export function stripShellCommandPrefixes(command: string): string | undefined {
   return tails[start]?.trimStart() ?? trimBashEdgeSeparators(command);
 }
 
+/** Command-string shells that the operation tracker does not unwrap. */
+export function hasUnmodeledShellCommandString(command: string): boolean {
+  let head = takeLeadingToken(command);
+  if (!head) return false;
+  let name = getShellWrapperBase(resolveShellWord(head.token));
+  if (name === 'busybox') {
+    head = takeLeadingToken(head.rest);
+    if (!head || !['sh', 'ash'].includes(resolveShellWord(head.token))) {
+      return false;
+    }
+    name = 'ash';
+  }
+  if (
+    !['dash', 'ksh', 'mksh', 'ash', 'fish', 'csh', 'tcsh'].includes(name ?? '')
+  ) {
+    return false;
+  }
+  let rest = head.rest;
+  for (;;) {
+    const token = takeLeadingToken(rest);
+    if (!token) return false;
+    const word = resolveShellWord(token.token);
+    if (name === 'fish' && /^--(?:init-)?command(?:=|$)/.test(word)) {
+      return true;
+    }
+    if (isMonitorCommandMarker(head.token, word)) return true;
+    if (word === '--' || !isShellWrapperFlagToken(word)) return false;
+    rest = token.rest;
+    if (shellWrapperFlagConsumesOperand(word)) {
+      const operand = takeLeadingToken(rest);
+      if (!operand) return false;
+      rest = operand.rest;
+    }
+  }
+}
+
 export function stripShellWrapper(command: string): string {
   const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
@@ -1865,6 +1904,12 @@ function takeLeadingToken(
       continue;
     }
 
+    if (char === '(') {
+      commandSubstitutionDepth++;
+      idx++;
+      continue;
+    }
+
     if (char === ')' && commandSubstitutionDepth > 0) {
       commandSubstitutionDepth--;
       idx++;
@@ -2578,6 +2623,7 @@ export function detectCommandSubstitution(command: string): boolean {
   let inDoubleQuotes = false;
   let inBackticks = false;
   let inComment = false;
+  let respectComments = true;
   const pendingHeredocs: PendingHeredoc[] = [];
   let i = 0;
 
@@ -2611,7 +2657,7 @@ export function detectCommandSubstitution(command: string): boolean {
     }
 
     if (!inSingleQuotes && !inDoubleQuotes && !inBackticks) {
-      if (!inComment && isCommentStart(i)) {
+      if (!inComment && respectComments && isCommentStart(i)) {
         inComment = true;
         i++;
         continue;
@@ -2644,6 +2690,12 @@ export function detectCommandSubstitution(command: string): boolean {
       }
       i += 2; // Skip the escaped character
       continue;
+    }
+
+    // Parameter expansion has its own word grammar. Once it occurs, preserve
+    // the remaining text rather than treating an internal hash as a comment.
+    if (!inSingleQuotes && char === '$' && nextChar === '{') {
+      respectComments = false;
     }
 
     // Handle quote state changes

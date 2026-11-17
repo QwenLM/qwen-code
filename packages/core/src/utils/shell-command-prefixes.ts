@@ -67,6 +67,9 @@ const PREFIX_COMMANDS = new Set([
 
 export const MAX_SHELL_UNWRAP_DEPTH = 4;
 
+export const SHELL_ASSIGNMENT_PREFIX =
+  /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/;
+
 /** The tracker and permission guard consume the same transparent prefix. */
 export function getShellPrefixCommand(
   tokens: readonly string[],
@@ -117,7 +120,7 @@ export function getShellPrefixCommand(
         if (index >= tokens.length) hasUnsupportedOption = true;
         index++;
       }
-    } else if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+    } else if (SHELL_ASSIGNMENT_PREFIX.test(token)) {
       index++;
     } else {
       break;

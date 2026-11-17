@@ -45,6 +45,7 @@ import {
 import { tokenizeShellWords as tokenize } from '../utils/shell-word-tokenizer.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
+import { removeShellLineContinuations } from './shell-command-syntax.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -2309,6 +2310,7 @@ function walkCompoundCommand(
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
+  command = removeShellLineContinuations(command);
   const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
 
   const ops: ShellOperation[] = [];

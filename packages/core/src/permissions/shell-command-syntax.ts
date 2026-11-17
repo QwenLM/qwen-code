@@ -5,6 +5,7 @@
  */
 
 import { tokenizeShellWords } from '../utils/shell-word-tokenizer.js';
+import { SHELL_ASSIGNMENT_PREFIX } from '../utils/shell-command-prefixes.js';
 
 /** Remove Bash continuations without changing literal single-quoted text. */
 export function removeShellLineContinuations(command: string): string {
@@ -241,7 +242,7 @@ export function staticShellCommand(
       if (
         words.length === 0 &&
         ((piece.text === '!' && piece.bare === '1') ||
-          (/^[A-Za-z_][A-Za-z0-9_]*=/.test(piece.text) &&
+          (SHELL_ASSIGNMENT_PREFIX.test(piece.text) &&
             /^1+$/.test(piece.bare.slice(0, piece.text.indexOf('=') + 1))))
       )
         continue;
@@ -266,8 +267,9 @@ function normalizeRedirectTarget(word: ShellWord, cwd?: string): ShellWord {
     // A leading rule wildcard may already match an absolute path.
     !(text[0] === '*' && bare[0] === '1')
   ) {
-    text = `${cwd}/${text}`;
-    bare = '0'.repeat(cwd.length + 1) + bare;
+    const directory = cwd.endsWith('/') ? cwd : `${cwd}/`;
+    text = directory + text;
+    bare = '0'.repeat(directory.length) + bare;
   }
   // Resolving ".." lexically can change a target after a symlink component.
   const components = [...text.matchAll(/[^/]+/g)].filter(

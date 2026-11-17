@@ -85,7 +85,7 @@ function compoundContexts(
         // Arguments after an expansion cannot identify the command. Preserve
         // leading redirects and quoting while inspecting the static prefix.
         const prefix = tokens
-          .slice(0, dynamic < 0 ? 0 : dynamic)
+          .slice(0, dynamic < 0 ? tokens.length : dynamic)
           .map(
             (word, index) =>
               word
@@ -103,7 +103,9 @@ function compoundContexts(
       const name = first?.replace(/%([0-9a-f]{4})/g, (_, unit: string) =>
         String.fromCharCode(Number.parseInt(unit, 16)),
       );
-      cwdUnknown ||= ['cd', 'pushd', 'popd'].includes(name ?? '');
+      cwdUnknown ||=
+        name === undefined ||
+        ['cd', 'pushd', 'popd', 'source', '.'].includes(name);
     }
     return next;
   });
