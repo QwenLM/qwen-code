@@ -9,7 +9,7 @@ import { access, lstat, open, readFile, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
-import type { Hunk } from 'diff';
+import type { StructuredPatchHunk as Hunk } from 'diff';
 import {
   findGitRoot,
   NO_EXEC_CONFIG,
@@ -1554,6 +1554,28 @@ function isSafeLogRange(range: string): boolean {
     !range.startsWith('..') &&
     /^[A-Za-z0-9_./~^-]+$/.test(range)
   );
+}
+
+/**
+ * Whether `ref` resolves to a commit reachable from HEAD (`git merge-base
+ * --is-ancestor`). False when the ref is unsafe, unknown, or git fails —
+ * callers gate range composition on this, so a failed probe must refuse the
+ * boundary rather than trust it.
+ */
+export async function isGitAncestorOfHead(
+  cwd: string,
+  ref: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return false;
+  if (ref.startsWith('-') || !/^[A-Za-z0-9_./~^-]+$/.test(ref)) return false;
+  const stdout = await runGit(
+    ['merge-base', '--is-ancestor', ref, 'HEAD'],
+    gitRoot,
+    env,
+  );
+  return stdout !== null;
 }
 
 function parseLogRecords(stdout: string): GitLogEntry[] {

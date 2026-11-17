@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.harness.HarnessDiscovery;
 import com.alibaba.qwen.code.managedagent.harness.HarnessPoolConnector;
-import com.alibaba.qwen.code.managedagent.harness.KubernetesHarnessDiscovery;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcHarnessPlacementStore;
@@ -48,16 +47,8 @@ public class HarnessConfiguration {
         BrokerSecurity.checkHarnessTransport(properties, new java.util.ArrayList<>());
         var pool = properties.getHarness().getPool();
         if (pool.isEnabled()) {
-            if ("kubernetes-workspace".equals(properties.getRuntimeBroker().getProvisioner())) {
-                throw new IllegalStateException("Harness pool does not admit CSI resident Runtime ownership");
-            }
             HarnessDiscovery discovery;
-            if ("kubernetes".equals(pool.getDiscovery())) {
-                if (!pool.getInstances().isEmpty()) {
-                    throw new IllegalStateException("Kubernetes Harness discovery cannot combine with static instances");
-                }
-                discovery = new KubernetesHarnessDiscovery(pool, json);
-            } else if ("static".equals(pool.getDiscovery())) {
+            if ("static".equals(pool.getDiscovery())) {
                 if (pool.getInstances().isEmpty() || pool.getInstances().size() > 256) {
                     throw new IllegalStateException("Static Harness pool requires 1..256 instances");
                 }
@@ -70,7 +61,7 @@ public class HarnessConfiguration {
                 }).toList();
                 discovery = () -> new HarnessDiscovery.Snapshot(endpoints, true);
             } else {
-                throw new IllegalStateException("Harness pool discovery must be static or kubernetes");
+                throw new IllegalStateException("Harness pool discovery must be static");
             }
             try {
                 return new com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary(new HarnessPoolConnector(properties, placements, discovery,
