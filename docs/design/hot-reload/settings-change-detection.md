@@ -115,7 +115,7 @@ startWatching(): void {
 }
 ```
 
-`watchTargetDir` is the parent-directory + strict-basename watcher described above (it also demotes back to a bootstrap watcher if `.qwen` itself is removed). `watchParentForDir` arms the `.qwen`-only bootstrap watcher and promotes once `.qwen` appears:
+`watchTargetDir` is the parent-directory + strict-basename watcher described above (it also demotes back to a bootstrap watcher if `.qwen` itself is removed). `watchParentForDir` arms the bootstrap watcher, which lets through only its root and `.qwen`, and promotes once `.qwen` appears:
 
 ```typescript
 private watchParentForDir(scope: SettingScope, settingsPath: string): void {
@@ -314,7 +314,7 @@ settingsWatcher?.addChangeListener(async (events) => {
 
 | Scenario                                 | Handling                                                                                                      |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `.qwen` directory doesn't exist          | **Never created.** Bootstrap-watch the parent (`depth: 0`, `.qwen`-only filter), promote once `.qwen` appears |
+| `.qwen` directory doesn't exist          | **Never created.** Bootstrap-watch the parent (`depth: 0`, root+`.qwen` filter), promote once `.qwen` appears |
 | `.qwen` created after startup            | Bootstrap watcher catches `addDir`, promotes to a target watcher + schedules a refresh                        |
 | `.qwen` deleted after promotion          | Target watcher catches `unlinkDir` → demotes back to a parent bootstrap watcher                               |
 | File deleted                             | `reloadScopeFromDisk` detects `!existsSync`, resets to `{}`, diff triggers `deleted` event                    |
@@ -374,7 +374,7 @@ Mock chokidar (reusing the `skill-manager.test.ts` mock pattern):
 6. **Serialization**: New events during `handleChange` are accumulated, drained after processing completes
 7. **Error isolation**: chokidar errors don't crash; listener exceptions don't affect other listeners; `reloadScopeFromDisk` failures are caught
 8. **Listener timeout**: 30s timeout protection
-9. **Lazy directory watching**: when `.qwen` is missing, `mkdirSync` is never called; a bootstrap watcher is armed on the parent and its `ignored` predicate allows only the `.qwen` entry
+9. **Lazy directory watching**: when `.qwen` is missing, `mkdirSync` is never called; a bootstrap watcher is armed on the parent and its `ignored` predicate allows only the watch root and the `.qwen` entry
 10. **Promote / TOCTOU**: `.qwen` appearing (via `addDir` or the post-arm re-check) closes the bootstrap watcher and opens a target watcher on `.qwen` + schedules a refresh
 11. **Demote / re-create**: removing `.qwen` (`unlinkDir`) re-bootstraps on the parent; a subsequent re-create promotes again
 12. **Generation guard**: a stale callback from an already-closed bootstrap watcher does not create a second target watcher
