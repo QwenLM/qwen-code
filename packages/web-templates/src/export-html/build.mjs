@@ -110,9 +110,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_141_500;
 // 039ed577fb without and with the change, 1,176 above the previous ceiling
 // in that local build. Recording the exchange in the caller (the "To" and
 // "From" lines on a user message, the waiting chip, and the parsing of where
-// a message went, with five more keys across two locales) adds 1,497 more:
-// 2,140,673 locally. The warning sits 827 above that measurement and the
-// ceiling 1,827 above it.
+// a message went; four keys added and one removed, across two locales)
+// adds 1,497 more: 2,140,673 locally. The warning sits 827 above that
+// measurement and the ceiling 1,827 above it.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_142_500;
 
 // Modules that must not be reachable from the document entry, checked against
