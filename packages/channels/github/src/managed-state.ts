@@ -176,9 +176,12 @@ export class ManagedGithubStateStore {
         closeSync(fd);
       }
       renameSync(temporary, this.file);
-    } catch {
+    } catch (error) {
+      // The fixed sentence keeps platform data out of the message, but the fs
+      // error rides on `cause` so the adapter's logs can name ENOSPC/EACCES.
       throw new Error(
         'Managed GitHub state could not be saved; admission stopped.',
+        { cause: error },
       );
     } finally {
       rmSync(temporary, { force: true });

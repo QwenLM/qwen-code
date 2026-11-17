@@ -203,6 +203,17 @@ stage），而不是重放陈旧准入。
   publication-policy 提示词是 Legacy adapter 注入，managed Session 的指令来自
   部署的工作区上下文。
 
+**persist 失败纪律（与 DingTalk 对齐）。** 状态保存失败（ENOSPC/EACCES/只读
+目录）绝不能逃出 `send()`/`submit()` 而丢弃已领取的批量。每个 persist 点都按
+DingTalk 参考的保护方式守卫：出站账本追加在发评论**之前**回滚并放弃该投递
+（账本条目是双发守卫；租约 reconciler 结算为 `unknown`）；回执写入记日志但仍
+上报结果（评论已在 GitHub，服务端 settle 才是持久记录）；settle 移除与孤儿
+移除记日志并把条目留在磁盘，交给下次重启的孤儿重驱。入站准入 settle 回滚其
+触碰的一切（pending、dispatched 环、拒绝连击、停摆标志）并锁存日志，使 claim
+重驱进幂等的 replayed 应答；held-claim、refused-drop、policy-drop 与
+sender-skip 写入记日志而不中断批量。store 抛固定句（状态文件可能含平台数据）
+但把 fs 错误保留在 `cause`，`persistErrorText` 记录 cause 使 errno 可诊断。
+
 ### 状态与所有权
 
 - 状态目录：
@@ -284,6 +295,10 @@ CONNECT 日志点名目标 authority；直连请求会留下空日志）。
   不冻结窗口，瞬态读取失败仍冻结；任何窗口兄弟的不可解析 `updated_at` 冻结
   共享水位；收窄后的 repo allowlist 排除某仓库时其重驱 claim 被丢弃；每个
   台账在恰好上限处被接受；真实定时器 tick 循环尊重高于配置间隔的轮询下限。
+  persist 失败见证（spy 令第 N 次 `store.save` 失败、fs 错误挂在 cause）：
+  出站账本写失败则不发评论且仍发批量的下一投递；回执写失败仍上报
+  `accepted`；settle 移除写失败把条目留在磁盘交给重启的孤儿重驱；准入
+  settle 写失败则回滚使 claim 重驱而非从进程中丢弃。
 - deps 见证对本地 fake GitHub HTTP 端点（真实 Octokit）：分页、`since` 窗口、
   失败分类（401/404/422 确定性，限流/5xx/网络含糊）、代理遍历（CONNECT
   隧道经代理转发）与 disconnect 时 dispatcher 销毁；限流冷却随时钟前进而

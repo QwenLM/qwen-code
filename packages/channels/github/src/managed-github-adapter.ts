@@ -298,6 +298,7 @@ export class ManagedGithubAdapter {
   private registeredGeneration?: number;
   private instanceStalled = false;
   private loggedNoClaimSlot = false;
+  private loggedSettleFailure = false;
 
   constructor(options: ManagedGithubAdapterOptions) {
     this.settings = githubSettings(options.config);
@@ -608,7 +609,16 @@ export class ManagedGithubAdapter {
             `Managed GitHub sender ${senderId} is not allowed; comment ${key} skipped.`,
           );
           this.recordDispatched(key);
-          this.persist();
+          try {
+            this.persist();
+          } catch (error) {
+            // The skip is already applied in memory; disk keeps no claim, so a
+            // restart re-lists the comment and skips it again. Never abort the
+            // poll over the failed write.
+            this.log(
+              `Managed GitHub could not persist the sender skip of ${key}: ${persistErrorText(error)}; a restart re-lists and skips it again.`,
+            );
+          }
           continue;
         }
         const event: ManagedInboundEvent = {
@@ -731,6 +741,10 @@ export class ManagedGithubAdapter {
       const wasHeld = state.pending.some(
         (entry) => entry.eventId === eventId && entry.held === true,
       );
+      const previousPending = state.pending;
+      const previousDispatched = state.cursor.dispatchedComments;
+      const previousRefusals = state.instanceRefusals;
+      const previousStalled = this.instanceStalled;
       state.pending = state.pending.filter(
         (entry) => entry.eventId !== eventId,
       );
@@ -741,7 +755,29 @@ export class ManagedGithubAdapter {
       } else {
         this.liftStallWhenNothingHeld();
       }
-      this.persist();
+      try {
+        this.persist();
+        this.loggedSettleFailure = false;
+      } catch (error) {
+        // The admission answer arrived but the settle never reached disk.
+        // Roll back everything the settle touched so the next tick re-drives
+        // the identical event into the idempotent replayed answer; a
+        // half-settled memory state would drop the claim from this process's
+        // re-drive while disk still holds it (the DingTalk discipline).
+        state.pending = previousPending;
+        state.cursor.dispatchedComments = previousDispatched;
+        state.instanceRefusals = previousRefusals;
+        this.instanceStalled = previousStalled;
+        // Latched: the rollback keeps the claim pending, so every tick
+        // re-drives it and an unlatched line would re-log per claim per tick.
+        if (!this.loggedSettleFailure) {
+          this.loggedSettleFailure = true;
+          this.log(
+            `Managed GitHub could not persist the admission of ${eventId}: ${persistErrorText(error)}; it re-drives on the next tick.`,
+          );
+        }
+        return;
+      }
     } catch (error) {
       const status = (error as { status?: unknown }).status;
       const code = (error as { code?: unknown }).code;
@@ -767,7 +803,16 @@ export class ManagedGithubAdapter {
               state.pending = state.pending.map((p) =>
                 p.eventId === eventId ? { ...p, held: true } : p,
               );
-              this.persist();
+              try {
+                this.persist();
+              } catch (error) {
+                // The hold stays armed in memory for this process; a restart
+                // before the write lands re-arms it after one refusal, which
+                // is the bounded first-occurrence tradeoff, never a loss.
+                this.log(
+                  `Managed GitHub could not persist the held claim ${eventId}: ${persistErrorText(error)}; the stall stays armed in memory.`,
+                );
+              }
             }
             if (!this.instanceStalled) {
               this.instanceStalled = true;
@@ -784,7 +829,16 @@ export class ManagedGithubAdapter {
         state.pending = state.pending.filter((p) => p.eventId !== eventId);
         this.recordDispatched(eventId.slice(GITHUB_EVENT_PREFIX.length));
         this.liftStallWhenNothingHeld();
-        this.persist();
+        try {
+          this.persist();
+        } catch (error) {
+          // The drop is already applied in memory; disk keeps the claim, so a
+          // restart re-drives it into the same deterministic refusal and drops
+          // it again. Never abort the batch over the failed write.
+          this.log(
+            `Managed GitHub could not persist the refused admission of ${eventId}: ${persistErrorText(error)}; a restart re-drives it into the same refusal.`,
+          );
+        }
         return;
       }
       // A lost answer or a transient refusal: the claim, with its persisted
@@ -839,7 +893,15 @@ export class ManagedGithubAdapter {
         );
         this.recordDispatched(entry.eventId.slice(GITHUB_EVENT_PREFIX.length));
         this.liftStallWhenNothingHeld();
-        this.persist();
+        try {
+          this.persist();
+        } catch (error) {
+          // Same shape as the refusal drop: memory applied, disk keeps the
+          // claim, a restart re-drives it into the same policy refusal.
+          this.log(
+            `Managed GitHub could not persist the policy drop of ${entry.eventId}: ${persistErrorText(error)}; a restart re-drives it into the same refusal.`,
+          );
+        }
         continue;
       }
       await this.submit(entry.eventId, entry.event);
@@ -929,11 +991,24 @@ export class ManagedGithubAdapter {
     }
     for (const segment of delivery.segments) {
       if (!this.running) return;
+      const previousOutbound = state.outbound;
       state.outbound = [
         ...state.outbound,
         { deliveryId: delivery.deliveryId, ordinal: segment.ordinal },
       ].slice(-MANAGED_OUTBOUND_LIMIT);
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // The ledger entry is the double-send guard: without it on disk, a
+        // crash after the comment post would re-send on restart. Roll back
+        // and abandon this delivery before the side effect; the lease
+        // reconciler settles it unknown (the DingTalk discipline).
+        state.outbound = previousOutbound;
+        this.log(
+          `Managed GitHub could not persist the outbound ledger for ${delivery.deliveryId}: ${persistErrorText(error)}; the send is abandoned and the lease reconciler settles it.`,
+        );
+        return;
+      }
       let outcome: ManagedReceipt;
       try {
         // One ledger segment is one comment: the producer's 48 KiB UTF-8
@@ -961,7 +1036,17 @@ export class ManagedGithubAdapter {
           candidate.ordinal === segment.ordinal,
       );
       if (entry) entry.receipt = outcome;
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // The send already happened: report the outcome to the control plane
+        // even if the local write failed — the server-side settle is the
+        // durable record, and the orphan re-drive replays the in-memory
+        // receipt until the local write lands (the DingTalk discipline).
+        this.log(
+          `Managed GitHub could not persist the receipt for ${delivery.deliveryId}: ${persistErrorText(error)}; it is still reported and re-driven locally.`,
+        );
+      }
       try {
         await this.controlPlane.receipt(delivery.deliveryId, outcome);
       } catch (error) {
@@ -980,7 +1065,15 @@ export class ManagedGithubAdapter {
             candidate.ordinal === segment.ordinal
           ),
       );
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // The receipt is already reported; disk keeps the entry, so the next
+        // tick's orphan re-drive replays the receipt and removes it again.
+        this.log(
+          `Managed GitHub could not persist the settled segment of ${delivery.deliveryId}: ${persistErrorText(error)}; the orphan re-drive removes it on the next tick.`,
+        );
+      }
       if (outcome.outcome !== 'accepted') return;
     }
   }
@@ -1030,7 +1123,15 @@ export class ManagedGithubAdapter {
       state.outbound = state.outbound.filter(
         (candidate) => candidate !== entry,
       );
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // Disk keeps the entry; the next tick replays the same idempotent
+        // receipt and retries the removal. Never abort the remaining orphans.
+        this.log(
+          `Managed GitHub could not persist the orphan removal of ${entry.deliveryId}: ${persistErrorText(error)}; it re-drives on the next tick.`,
+        );
+      }
     }
   }
 
@@ -1056,6 +1157,14 @@ export class ManagedGithubAdapter {
     this.releaseLock = undefined;
     if (releaseLock) await releaseLock().catch(() => undefined);
   }
+}
+
+// The store rethrows a fixed sentence (the state file may hold platform data)
+// but preserves the fs error on `cause`. Log the cause so ENOSPC, EACCES and a
+// read-only directory are diagnosable instead of hidden behind the sentence.
+// Mirrors the DingTalk adapter's persistErrorText.
+function persistErrorText(error: unknown): string {
+  return String((error as Error).cause ?? error);
 }
 
 function fitSubject(title: string | undefined): string | null {

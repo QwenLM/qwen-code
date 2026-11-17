@@ -259,6 +259,23 @@ the rest of a delivery on any non-accepted segment.
   Legacy adapter injection, and managed Sessions take their instructions from
   the deployment's workspace context.
 
+**Persist-failure discipline (DingTalk parity).** A state-save failure
+(ENOSPC/EACCES/read-only directory) must never escape `send()`/`submit()` and
+abandon an already-claimed batch. Every persist site is guarded exactly as the
+DingTalk reference guards it: the outbound ledger append rolls back and
+abandons the delivery _before_ the comment post (the ledger entry is the
+double-send guard; the lease reconciler settles it `unknown`); the receipt
+write logs but still reports the outcome (the comment is already on GitHub,
+the server-side settle is the durable record); the settle removal and the
+orphan removal log and leave the entry on disk for the next restart's orphan
+re-drive. The inbound admission settle rolls back everything it touched
+(pending, dispatched ring, refusal streak, stall flag) and latches its log so
+the claim re-drives into the idempotent replayed answer; the held-claim,
+refused-drop, policy-drop and sender-skip writes log without aborting the
+batch. The store rethrows a fixed sentence (the state file may hold platform
+data) but preserves the fs error on `cause`, and `persistErrorText` logs the
+cause so the errno is diagnosable.
+
 ### State and ownership
 
 - State directory:
@@ -362,7 +379,13 @@ direct request would leave it empty).
   unparseable `updated_at` on any window sibling holds the shared watermark;
   a re-driven claim is dropped when the narrowed repo allowlist now excludes
   its repo; each ledger is accepted at its exact cap; and the real-timer tick
-  loop honors a poll floor above the configured interval.
+  loop honors a poll floor above the configured interval. Persist-failure
+  witnesses (a spy that fails the Nth `store.save`, fs error on `cause`): a
+  failed outbound ledger write posts nothing and still sends the batch's next
+  delivery; a failed receipt write still reports `accepted`; a failed settle
+  removal keeps the entry on disk for the restart's orphan re-drive; and a
+  failed admission settle rolls back so the claim re-drives instead of being
+  dropped from the process.
 - Deps witnesses against a local fake GitHub HTTP endpoint (real Octokit):
   pagination, `since` window, failure classification (401/404/422 definitive,
   rate-limit/5xx/network ambiguous), proxy traversal (the CONNECT tunnel goes

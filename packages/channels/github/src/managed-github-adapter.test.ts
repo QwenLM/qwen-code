@@ -24,6 +24,7 @@ import {
 } from './managed-github-adapter.js';
 import {
   MANAGED_GITHUB_PENDING_LIMIT,
+  ManagedGithubStateStore,
   type ManagedGithubState,
 } from './managed-state.js';
 
@@ -1807,5 +1808,141 @@ describe('managed GitHub adapter outbound', () => {
     const { adapter, plane } = await connectedAdapter();
     await adapter.disconnect();
     expect(plane.disconnectCalls()).toBe(1);
+  });
+});
+
+// Fail the Nth store.save call (1-based), passing the rest through to the real
+// implementation. The fs error rides on cause exactly as production's store
+// rethrow carries it, so persistErrorText has something to name.
+function failSaveOnCall(n: number) {
+  const original = ManagedGithubStateStore.prototype.save;
+  let calls = 0;
+  return vi
+    .spyOn(ManagedGithubStateStore.prototype, 'save')
+    .mockImplementation(function (
+      this: ManagedGithubStateStore,
+      state: ManagedGithubState,
+    ) {
+      calls += 1;
+      if (calls === n) {
+        throw Object.assign(
+          new Error(
+            'Managed GitHub state could not be saved; admission stopped.',
+          ),
+          { cause: new Error('ENOSPC: no space left on device') },
+        );
+      }
+      return original.call(this, state);
+    });
+}
+
+describe('managed GitHub adapter persist-failure discipline (R1-5)', () => {
+  it('abandons a send whose ledger write fails and still sends the next delivery', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.enqueue([delivery('d-1', 1), delivery('d-2', 1)]);
+    const spy = failSaveOnCall(1); // d-1's ledger append, before its post
+    await adapter.tick();
+    spy.mockRestore();
+    // d-1 posted nothing and reported no receipt: the rollback abandoned it
+    // before the side effect (the lease reconciler settles it unknown). d-2
+    // must still send — the failed write must not escape send().
+    expect(fake.posted.map((entry) => entry.body)).toEqual(['segment 0']);
+    expect(plane.receipts).toEqual([
+      {
+        deliveryId: 'd-2',
+        receipt: {
+          outcome: 'accepted',
+          ordinal: 0,
+          providerMessageId: '9001',
+          acceptedAt: NOW,
+        },
+      },
+    ]);
+    expect(readState(adapter).outbound).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('still reports accepted when the receipt write fails', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.enqueue([delivery('d-1', 1)]);
+    const spy = failSaveOnCall(2); // ledger #1 ok, receipt write #2 fails
+    await adapter.tick();
+    spy.mockRestore();
+    // The comment is already on GitHub; the acceptance is still reported even
+    // though the local receipt write failed.
+    expect(fake.posted).toHaveLength(1);
+    expect(plane.receipts).toEqual([
+      {
+        deliveryId: 'd-1',
+        receipt: {
+          outcome: 'accepted',
+          ordinal: 0,
+          providerMessageId: '9001',
+          acceptedAt: NOW,
+        },
+      },
+    ]);
+    expect(readState(adapter).outbound).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('keeps a settled segment on disk when its removal write fails, then re-drives the receipt on restart', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.plane.enqueue([delivery('d-1', 1)]);
+    const spy = failSaveOnCall(3); // ledger #1, receipt #2 ok; settle removal #3 fails
+    await first.adapter.tick();
+    spy.mockRestore();
+    expect(first.fake.posted).toHaveLength(1);
+    expect(first.plane.receipts).toHaveLength(1);
+    // The removal applied in memory but never reached disk: the entry stays on
+    // disk with its accepted receipt, and the failed write did not escape the
+    // tick.
+    const state = readState(first.adapter);
+    expect(state.outbound).toHaveLength(1);
+    expect(state.outbound[0]!.receipt).toMatchObject({
+      outcome: 'accepted',
+      providerMessageId: '9001',
+    });
+    await first.adapter.disconnect();
+    // Restart loads the disk entry; the orphan re-drive replays the receipt
+    // (never the send) and removes it.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.fake.posted).toHaveLength(0);
+    expect(second.plane.receipts).toHaveLength(1);
+    expect(readState(second.adapter).outbound).toHaveLength(0);
+    await second.adapter.disconnect();
+  });
+
+  it('re-drives an admission whose settle write failed instead of dropping it', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    await first.adapter.disconnect();
+    seedState(first.adapter, (state) => {
+      state.pending = [pendingEntry('github:IC_1', 'alice')];
+    });
+    const second = await connectedAdapter(cwd);
+    const spy = vi
+      .spyOn(ManagedGithubStateStore.prototype, 'save')
+      .mockImplementation(() => {
+        throw Object.assign(
+          new Error(
+            'Managed GitHub state could not be saved; admission stopped.',
+          ),
+          { cause: new Error('ENOSPC: no space left on device') },
+        );
+      });
+    await second.adapter.tick();
+    spy.mockRestore();
+    // Both re-drives in the tick admitted server-side, but neither settle
+    // reached disk; the rollback keeps the claim pending. Without the rollback
+    // the first settle would drop the claim from this process's re-drive and
+    // the second submit would never happen.
+    expect(second.plane.submit).toHaveLength(2);
+    expect(readState(second.adapter).pending).toHaveLength(1);
+    await second.adapter.tick();
+    expect(readState(second.adapter).pending).toHaveLength(0);
+    await second.adapter.disconnect();
   });
 });
