@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -33,7 +34,7 @@ class HostedCleanupDebtStoreTest {
     private static final String WORKSPACE = "workspace-cleanup-debt";
 
     @Autowired
-    private HostedCleanupDebtStore store;
+    private JdbcHostedCleanupDebtStore store;
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -151,13 +152,13 @@ class HostedCleanupDebtStoreTest {
                         + " byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, ?, 'hosted-turn-cleanup', 1, ?, ?,"
                         + " ?, ?, 'REFERENCED', ?)",
-                resourceKey, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), tenant,
+                resourceKey, ManagedSessionStore.sessionScopeKey(tenant, session), tenant,
                 workspace, session, resourceId, body.length, "d", storageKind, body, gmtCreate);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
                         + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
                         + " journal_revision, resource_id, gmt_create, runtime_binding_key)"
                         + " VALUES (?, 'HOSTED_CLEANUP', ?, 1, ?, ?, ?, ?, 1, ?, ?, ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                ManagedSessionStore.sessionScopeKey(tenant, session),
                 ManagedSchemaKeys.key("hosted-cleanup", prompt), resourceKey, tenant, workspace,
                 session, resourceId, gmtCreate, "binding-" + UUID.randomUUID());
     }

@@ -24,15 +24,24 @@
     "lib"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.26.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "ajv": "^8.18.0",
     "commander": "14.0.0",
     "express": "5.1.0",
     "fast-xml-parser": "5.8.0",
     "mobilewright": "^0.0.53",
-    "qs": "^6.15.0",
-    "zod": "^4.1.13",
+    "qs": "6.17.1",
+    "zod": "^4.6.6",
     "zod-to-json-schema": "3.25.0"
+  },
+  "overrides": {
+    "glob@10 || 13": "14.0.6",
+    "minimatch@9 || 10": "11.0.8",
+    "qs": "6.17.1",
+    "fast-uri": "3.1.9",
+    "ip-address": "10.7.4",
+    "hono": "4.13.18",
+    "@hono/node-server": "1.19.19"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",

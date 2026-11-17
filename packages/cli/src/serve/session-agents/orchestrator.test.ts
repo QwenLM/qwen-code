@@ -149,7 +149,14 @@ afterEach(async () => {
   await new Promise((resolve) => setTimeout(resolve, 50));
   Storage.setRuntimeBaseDir(null);
   vi.unstubAllEnvs();
-  await fs.rm(runtimeDir, { recursive: true, force: true });
+  await fs.rm(runtimeDir, {
+    recursive: true,
+    force: true,
+    // A cancelled turn can land its last write while the tree is being
+    // removed; retry instead of failing the test with ENOTEMPTY.
+    maxRetries: 3,
+    retryDelay: 50,
+  });
 });
 
 function harness(

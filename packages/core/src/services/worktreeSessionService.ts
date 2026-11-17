@@ -14,7 +14,11 @@ import { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
-import { isZombie } from '../utils/process-liveness.js';
+import {
+  isZombie,
+  readPidNamespaceId,
+  readProcStartToken,
+} from '../utils/process-liveness.js';
 import {
   readWorktreeSessionMarker,
   writeWorktreeSessionMarker,
@@ -66,6 +70,17 @@ export interface WorktreeSession {
    */
   originalHeadCommit: string;
   /**
+   * The commit the worktree itself was created at (its detached base or
+   * branch tip). Distinct from `originalHeadCommit`, which is the HEAD of
+   * the checkout named by `originalCwd`: when a branch worktree is created
+   * from a session living in a sibling managed worktree, the two differ.
+   * The beyond-base promotion test, exit_worktree and the orphan reaper
+   * read this (falling back to `originalHeadCommit` when absent, for
+   * sidecars written before the field existed). The handoff's
+   * `local_head_moved` gate keeps reading `originalHeadCommit`.
+   */
+  worktreeBase?: string;
+  /**
    * Set on the superseded session's sidecar by a worktree reset: the
    * replacement session this session's worktree ownership moved to. Readers
    * redirect to it (and self-heal their registry) instead of restoring the
@@ -104,6 +119,8 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
       typeof v['workspaceCwd'] === 'string') &&
     typeof v['originalBranch'] === 'string' &&
     typeof v['originalHeadCommit'] === 'string' &&
+    (v['worktreeBase'] === undefined ||
+      typeof v['worktreeBase'] === 'string') &&
     (v['supersededBy'] === undefined ||
       typeof v['supersededBy'] === 'string') &&
     (v['supersedes'] === undefined || typeof v['supersedes'] === 'string')
@@ -656,8 +673,35 @@ async function getRuntimeStatusPathState(
     return 'unknown';
   }
 
+  // A PID number and its proc_start token only identify a process within the
+  // namespace that assigned them. A record written in a different PID
+  // namespace (host + devcontainer with a mounted home, sibling CI containers)
+  // names a PID that resolves to nothing — or to a different process — here,
+  // so comparing proc_start would judge a live foreign session 'dead' and let
+  // its worktree be taken over or deleted. 'unknown' is the safe direction:
+  // isSessionRuntimeActive treats it as active. Records without pid_ns (older
+  // writers, non-Linux) fall through to the proc_start comparison below.
+  if (status.pidNs !== null && status.pidNs !== readPidNamespaceId()) {
+    return 'unknown';
+  }
+
+  const procStartMatches = (): boolean => {
+    if (status.procStart === null) return true;
+    const current = readProcStartToken(status.pid);
+    // An unreadable token degrades to plain liveness rather than declaring a
+    // live session dead; within the same PID namespace (guaranteed by the
+    // pid_ns guard above), only a readable mismatch proves the PID was reused.
+    return current === null || current === status.procStart;
+  };
+
   try {
     process.kill(status.pid, 0);
+    if (!procStartMatches()) {
+      // The PID was recycled by an unrelated process after this record was
+      // written. Liveness alone cannot distinguish that from the original
+      // session (#14288).
+      return 'dead';
+    }
     // A zombie answers `kill(pid, 0)` — the pid still occupies a process-table
     // slot — but the process has exited and will never act again. Reporting
     // it as 'active' keeps a dead session listed as live for as long as its
@@ -672,7 +716,7 @@ async function getRuntimeStatusPathState(
       // Owned by another user. The kernel permission-checks signal 0
       // regardless of the target's state, so a cross-user zombie lands here
       // too and needs the same exclusion.
-      return isZombie(status.pid) ? 'dead' : 'active';
+      return !procStartMatches() || isZombie(status.pid) ? 'dead' : 'active';
     }
     // Any other errno establishes nothing about the pid, and folding it into
     // 'dead' would be the destructive direction: it feeds
@@ -875,10 +919,14 @@ export async function restoreWorktreeContext(
     }
   }
 
+  // '' is the detached managed-worktree convention: no branch to name.
+  const branchFragment = session.worktreeBranch
+    ? `(branch: ${session.worktreeBranch})`
+    : '(detached HEAD)';
   return {
     session,
     contextMessage:
       `[Resumed] Active worktree: "${session.slug}" at ${session.worktreePath} ` +
-      `(branch: ${session.worktreeBranch}). Continue using this path for all file operations.`,
+      `${branchFragment}. Continue using this path for all file operations.`,
   };
 }

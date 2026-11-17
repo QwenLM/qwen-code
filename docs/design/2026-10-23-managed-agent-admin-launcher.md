@@ -2,7 +2,7 @@
 
 [English](2026-10-23-managed-agent-admin-launcher.md) | [简体中文](2026-10-23-managed-agent-admin-launcher.zh-CN.md)
 
-Status: proposed and implemented in the same change.
+Status: proposed and implemented in the same change. The classified jars and the dedicated operator-recovery launcher were later removed by the pre-production single-jar convergence; every command, including operator-recovery, now runs from the executable server jar.
 
 ## Problem
 
@@ -25,7 +25,7 @@ That form does not work for an operator who installed the reference distribution
 ## Non-goals
 
 - Changing any entry point's arguments or behaviour.
-- Removing the classified jars from the module build, or the operator-recovery jar and launcher from the distribution.
+- Removing the classified jars from the module build, or the operator-recovery jar and launcher from the distribution. (Superseded: the pre-production single-jar convergence removed them.)
 - Making a command safe to run online. Each remains an offline procedure with its own preconditions.
 
 ## Design
@@ -100,4 +100,4 @@ Before writing the launcher, the packager reads each class's source under `packa
 
 ## Follow-up work
 
-- Drop the classified jars once the module-build documentation no longer names them.
+- Drop the classified jars once the module-build documentation no longer names them. (Done: the pre-production single-jar convergence dropped all classified jars and the dedicated operator-recovery launcher.)

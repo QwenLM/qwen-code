@@ -14,6 +14,8 @@ Question sorting needs the full candidate time index. Retain scalar metadata in 
 
 ## WebShell and SDK
 
+Place the sorting selector in the session action row, immediately left of multi-select, rather than beside the brand title. Keep both controls aligned as one action group. Expanded embedded layouts that omit New session retain a visible sort-only action row, even when the Projects header is hidden. Collapsed layouts retain the Projects-header fallback where available.
+
 Use the existing scoped dropdown primitives and semantic styles, with English/Chinese labels and a host-scoped persisted preference. Carry sort through primary/secondary workspace, recent and standalone lists, SDK query options and catalog query keys. Live activity overlays may update status/time but must preserve question order. Reset pagination on a sort change. Preserve pinned placement, grouping, archive and current-session selection. Old daemons keep the existing view and do not silently accept an unsupported question sort.
 
 ## Acceptance

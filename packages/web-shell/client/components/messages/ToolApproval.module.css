@@ -35,8 +35,7 @@
    buttons out of it. */
 .floating > .header,
 .floating > .desc,
-.floating > .explainRow,
-.floating > .options {
+.floating > .footer {
   flex-shrink: 0;
 }
 
@@ -83,10 +82,22 @@
   overflow-y: auto;
 }
 
-.explainRow {
+.footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.footerWithExplanation {
   margin: 16px 0 0 24px;
   padding-top: 12px;
   border-top: 1px dashed var(--border);
+}
+
+.explainRow {
+  flex: 0 0 auto;
 }
 
 .explainButton {
@@ -230,12 +241,14 @@
 
 .options {
   display: flex;
+  flex: 0 1 auto;
   flex-direction: row;
   justify-content: flex-end;
-  gap: 16px;
-  margin-top: 24px;
-  padding-left: 0;
   flex-wrap: wrap;
+  gap: 16px;
+  min-width: 0;
+  margin: 0 0 0 auto;
+  padding-left: 0;
 }
 
 .option {
@@ -314,7 +327,9 @@
 
 @media (max-width: 760px) {
   .options {
+    flex: 1 0 100%;
     justify-content: flex-start;
+    margin-left: 0;
   }
 }
 
@@ -326,7 +341,7 @@
 }
 
 .goalApproval > .header,
-.goalApproval > .options,
+.goalApproval > .footer,
 .goalHint,
 .goalFeedback {
   flex-shrink: 0;
@@ -390,8 +405,11 @@
   line-height: 18px;
 }
 
-.goalApproval > .options {
+.goalApproval > .footer {
   margin-top: 8px;
+}
+
+.goalApproval .options {
   gap: 12px;
 }
 

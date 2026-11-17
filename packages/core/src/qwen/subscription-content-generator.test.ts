@@ -14,6 +14,7 @@ import { createSubscriptionContentGenerator } from './subscription-content-gener
 import { SubscriptionOAuthError } from './subscription-oauth-client.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
+import { retryContext } from '../utils/retryContext.js';
 import { resolveModelConfig } from '../models/modelConfigResolver.js';
 import {
   QWEN_SUBSCRIPTION_BASE_URL,
@@ -376,6 +377,30 @@ it('refreshes the rejected token once on 401, preserving the request body', asyn
     enable_thinking: true,
     thinking_budget: 4096,
   });
+});
+
+it('returns the first 401 for a single attempt', async () => {
+  fetchMock
+    .mockResolvedValueOnce(
+      Response.json(
+        { error: { code: 'PROXY_TOKEN_INVALID' } },
+        { status: 401 },
+      ),
+    )
+    .mockResolvedValueOnce(completion());
+  await expect(
+    retryContext.run(
+      {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      },
+      () => generator().generateContent(request, 'prompt'),
+    ),
+  ).rejects.toMatchObject({ status: 401 });
+  expect(session.getAccessToken).toHaveBeenCalledTimes(1);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
 });
 
 it.each([403, 404, 429])(

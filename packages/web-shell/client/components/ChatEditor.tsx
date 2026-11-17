@@ -43,6 +43,17 @@ import type {
   DaemonWorkflowModeStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useWebShellPortalRoot } from '../portalRoot';
+import { useTheme } from '../themeContext';
+import type {
+  WebShellModelPickerContext,
+  WebShellModelPickerItemContext,
+  WebShellModelPickerOptions,
+} from '../model-picker';
+import {
+  isModelPickerOverlayEvent,
+  ModelPickerContent,
+  useModelPickerOverlays,
+} from './ModelPickerContent';
 import {
   useWebShellCustomization,
   type WebShellComposerInput,
@@ -93,7 +104,7 @@ import type {
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
 import { appendUnavailableComposerModels } from '../utils/composerModels';
-import { VoiceButton } from '../voice/VoiceButton';
+import { VoiceButton, type VoiceButtonHandle } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
   VoiceStatusRevision,
@@ -231,6 +242,8 @@ interface ChatEditorProps {
   /** First Esc armed a cancel — the send button shows an "Esc to stop" hint. */
   cancelArmed?: boolean;
   disabled?: boolean;
+  /** Keep the editor editable but reject every submit path. */
+  submitDisabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
@@ -273,6 +286,10 @@ interface ChatEditorProps {
   onOpenWorktrees?: () => void;
   /** Opens the commit history graph. */
   onOpenLog?: () => void;
+  /** "Create branch here" for the session's detached managed worktree. */
+  onCreateWorktreeBranch?: (name: string) => Promise<void>;
+  /** "Hand off" between the session's worktree and the local checkout. */
+  onHandoff?: (to: 'local' | 'worktree') => Promise<void>;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -284,7 +301,6 @@ interface ChatEditorProps {
   workspaceColor?: DaemonSessionGroupPresetColor;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
-  chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
   liveVoicePortalContainer?: HTMLElement | null;
   /**
@@ -307,6 +323,10 @@ interface ChatEditorProps {
   onOpenContextUsage?: () => void;
   contextUsageControls?: ContextCompressionControls;
   modelRefresh?: ModelRefreshState;
+  modelPickerScope?: Pick<
+    WebShellModelPickerContext,
+    'sessionId' | 'workspaceId' | 'workspaceCwd' | 'daemonBaseUrl'
+  >;
   availableModels?: Array<{ id: string; label?: string }>;
   unavailableModels?: readonly WebShellUnavailableModel[];
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
@@ -744,6 +764,7 @@ interface DropdownItem extends ToolbarDropdownItem {
   icon?: ReactNode;
   disabled?: boolean;
   tooltip?: string;
+  danger?: boolean;
 }
 
 function CheckIcon() {
@@ -811,6 +832,128 @@ function getModeListLabel(modeId: string, t: (key: string) => string): string {
   return labels[modeId] ?? getModeLabel(modeId, t);
 }
 
+type ModelPickerContext = Omit<WebShellModelPickerContext, 'overlayContainer'>;
+
+function ToolbarDropdownRow({
+  item,
+  activeId,
+  hasRichItems,
+  hasCheckItems,
+  onSelect,
+  itemTooltipMount,
+  modelPicker,
+  pickerContext,
+  overlayRoot,
+}: {
+  item: DropdownItem;
+  activeId: string;
+  hasRichItems: boolean;
+  hasCheckItems: boolean;
+  onSelect: (id: string) => void;
+  itemTooltipMount?: WebShellUnavailableModelTooltipMount;
+  modelPicker?: WebShellModelPickerOptions;
+  pickerContext?: ModelPickerContext;
+  overlayRoot: HTMLElement | null;
+}) {
+  const [rowElement, setRowElement] = useState<HTMLButtonElement | null>(null);
+  const [customActive, setCustomActive] = useState(false);
+  const selected = item.id === activeId && !item.disabled;
+  const entries = modelPicker?.displayContentByModelId;
+  const mount =
+    entries && Object.hasOwn(entries, item.id) ? entries[item.id] : undefined;
+  const context = useMemo(
+    () =>
+      pickerContext && rowElement
+        ? {
+            ...pickerContext,
+            model: {
+              id: item.id,
+              label: item.label,
+              disabled: Boolean(item.disabled),
+              tooltip: item.tooltip,
+            },
+            isSelected: selected,
+            rowElement,
+          }
+        : undefined,
+    [
+      pickerContext,
+      rowElement,
+      item.id,
+      item.label,
+      item.disabled,
+      item.tooltip,
+      selected,
+    ],
+  );
+  const nativeContent = hasCheckItems ? (
+    <>
+      {hasRichItems && (
+        <span className={styles.dropdownItemIcon}>{item.icon}</span>
+      )}
+      <span className={styles.dropdownItemContent}>
+        <span className={styles.dropdownItemLabel}>{item.label}</span>
+        {item.description && (
+          <span className={styles.dropdownItemDesc}>{item.description}</span>
+        )}
+      </span>
+    </>
+  ) : (
+    item.label
+  );
+  const button = (
+    <button
+      ref={setRowElement}
+      type="button"
+      className={`${styles.dropdownItem} ${selected ? styles.dropdownItemActive : ''} ${item.danger ? styles.dropdownItemDanger : ''} ${customActive ? styles.modelPickerRow : ''}`}
+      title={item.disabled || customActive ? undefined : item.label}
+      aria-label={customActive ? item.label : undefined}
+      aria-disabled={item.disabled || undefined}
+      data-disabled={item.disabled ? '' : undefined}
+      data-web-shell-unavailable-model={item.disabled ? '' : undefined}
+      data-model-id={item.id}
+      onClick={(event) => {
+        if (item.disabled) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        if (!event.defaultPrevented) onSelect(item.id);
+      }}
+    >
+      {context && (mount || customActive) ? (
+        <ModelPickerContent<WebShellModelPickerItemContext>
+          mount={mount}
+          context={context}
+          overlayRoot={overlayRoot}
+          revision={entries}
+          fallback={nativeContent}
+          className={styles.modelPickerContent}
+          onActiveChange={setCustomActive}
+        />
+      ) : (
+        nativeContent
+      )}
+      {hasCheckItems && (
+        <span className={styles.dropdownItemCheck}>
+          {item.disabled ? <LockIcon /> : selected ? <CheckIcon /> : null}
+        </span>
+      )}
+    </button>
+  );
+  return item.disabled ? (
+    <UnavailableModelTooltip
+      enabled={!customActive}
+      model={{ id: item.id, label: item.label, tooltip: item.tooltip }}
+      mount={itemTooltipMount}
+    >
+      {button}
+    </UnavailableModelTooltip>
+  ) : (
+    button
+  );
+}
+
 function ToolbarPopover({
   open,
   items,
@@ -830,6 +973,8 @@ function ToolbarPopover({
   compact = false,
   modePopover = false,
   itemTooltipMount,
+  modelPicker,
+  pickerContext,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -853,6 +998,8 @@ function ToolbarPopover({
   compact?: boolean;
   modePopover?: boolean;
   itemTooltipMount?: WebShellUnavailableModelTooltipMount;
+  modelPicker?: WebShellModelPickerOptions;
+  pickerContext?: ModelPickerContext;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
@@ -864,6 +1011,17 @@ function ToolbarPopover({
   const submenuTriggerRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const returningFromSubmenuRef = useRef(false);
+  const scopeKey = JSON.stringify([
+    pickerContext?.sessionId,
+    pickerContext?.workspaceId,
+    pickerContext?.workspaceCwd,
+    pickerContext?.daemonBaseUrl,
+  ]);
+  const overlayRoot = useModelPickerOverlays(
+    Boolean(modelPicker) && open && (!submenu || submenuOpen),
+  );
+  const isHostOverlayEvent = (event: Event) =>
+    isModelPickerOverlayEvent(overlayRoot, event);
   const hasRichItems = items.some((item) => item.description || item.icon);
   const visibleItems = searchable
     ? filterToolbarDropdownItems(items, searchQuery)
@@ -899,72 +1057,23 @@ function ToolbarPopover({
             : ''
       } ${searchable ? styles.dropdownListConstrained : ''}`}
     >
-      {visibleItems.map((item) => {
-        const button = (
-          <button
-            key={item.disabled ? undefined : item.id}
-            type="button"
-            className={`${styles.dropdownItem} ${
-              item.id === activeId && !item.disabled
-                ? styles.dropdownItemActive
-                : ''
-            }`}
-            title={item.disabled ? undefined : item.label}
-            aria-disabled={item.disabled || undefined}
-            data-disabled={item.disabled ? '' : undefined}
-            data-web-shell-unavailable-model={item.disabled ? '' : undefined}
-            data-model-id={item.id}
-            onClick={(event) => {
-              if (item.disabled) {
-                event.preventDefault();
-                event.stopPropagation();
-                return;
-              }
-              selectionRef.current = true;
-              onSelect(item.id);
-            }}
-          >
-            {hasCheckItems ? (
-              <>
-                {hasRichItems && (
-                  <span className={styles.dropdownItemIcon}>{item.icon}</span>
-                )}
-                <span className={styles.dropdownItemContent}>
-                  <span className={styles.dropdownItemLabel}>{item.label}</span>
-                  {item.description && (
-                    <span className={styles.dropdownItemDesc}>
-                      {item.description}
-                    </span>
-                  )}
-                </span>
-                <span className={styles.dropdownItemCheck}>
-                  {item.disabled ? (
-                    <LockIcon />
-                  ) : item.id === activeId ? (
-                    <CheckIcon />
-                  ) : null}
-                </span>
-              </>
-            ) : (
-              item.label
-            )}
-          </button>
-        );
-        if (!item.disabled) return button;
-        return (
-          <UnavailableModelTooltip
-            key={item.id}
-            model={{
-              id: item.id,
-              label: item.label,
-              tooltip: item.tooltip,
-            }}
-            mount={itemTooltipMount}
-          >
-            {button}
-          </UnavailableModelTooltip>
-        );
-      })}
+      {visibleItems.map((item) => (
+        <ToolbarDropdownRow
+          key={JSON.stringify([scopeKey, item.id])}
+          item={item}
+          activeId={activeId}
+          hasRichItems={hasRichItems}
+          hasCheckItems={hasCheckItems}
+          onSelect={(id) => {
+            selectionRef.current = true;
+            onSelect(id);
+          }}
+          itemTooltipMount={itemTooltipMount}
+          modelPicker={modelPicker}
+          pickerContext={pickerContext}
+          overlayRoot={overlayRoot}
+        />
+      ))}
       {visibleItems.length === 0 && noResultsLabel && (
         <div className={styles.dropdownEmpty} role="status">
           {noResultsLabel(searchQuery)}
@@ -991,6 +1100,16 @@ function ToolbarPopover({
   ) : null;
   const searchableItems = (
     <>
+      {pickerContext && modelPicker?.mountHeader && (
+        <ModelPickerContent
+          key={scopeKey}
+          mount={modelPicker.mountHeader}
+          context={pickerContext}
+          overlayRoot={overlayRoot}
+          revision={modelPicker}
+          className={styles.modelPickerContent}
+        />
+      )}
       {searchable &&
         (searchAction ? (
           <div className={styles.dropdownSearch}>
@@ -1048,12 +1167,19 @@ function ToolbarPopover({
         data-web-shell-reasoning-popover={submenu ? '' : undefined}
         data-web-shell-mode-popover={modePopover ? '' : undefined}
         onClick={(event) => event.stopPropagation()}
+        onEscapeKeyDown={(event) => {
+          if (isHostOverlayEvent(event)) event.preventDefault();
+        }}
         onOpenAutoFocus={(event) => {
           if (!submenu) return;
           event.preventDefault();
           submenuTriggerRef.current?.focus();
         }}
         onPointerDownOutside={(event) => {
+          if (isHostOverlayEvent(event.detail.originalEvent)) {
+            event.preventDefault();
+            return;
+          }
           const target = event.target;
           if (!(target instanceof Element)) return;
           if (target.closest('[data-web-shell-toolbar-popover-trigger]')) {
@@ -1064,6 +1190,10 @@ function ToolbarPopover({
           }
         }}
         onInteractOutside={(event) => {
+          if (isHostOverlayEvent(event.detail.originalEvent)) {
+            event.preventDefault();
+            return;
+          }
           const target = event.target;
           if (
             target instanceof Element &&
@@ -1135,7 +1265,14 @@ function ToolbarPopover({
                   data-web-shell-toolbar-popover
                   data-web-shell-model-submenu
                   onClick={(event) => event.stopPropagation()}
+                  onEscapeKeyDown={(event) => {
+                    if (isHostOverlayEvent(event)) event.preventDefault();
+                  }}
                   onPointerDownOutside={(event) => {
+                    if (isHostOverlayEvent(event.detail.originalEvent)) {
+                      event.preventDefault();
+                      return;
+                    }
                     const target = event.target;
                     if (
                       target instanceof Element &&
@@ -1147,6 +1284,10 @@ function ToolbarPopover({
                     }
                   }}
                   onInteractOutside={(event) => {
+                    if (isHostOverlayEvent(event.detail.originalEvent)) {
+                      event.preventDefault();
+                      return;
+                    }
                     const target = event.target;
                     if (
                       target instanceof Element &&
@@ -1239,7 +1380,11 @@ function ModelReasoningControls({
             <button
               key={effort}
               type="button"
-              className={styles.reasoningEffortRow}
+              className={`${styles.reasoningEffortRow}${
+                reasoning.effort === effort
+                  ? ` ${styles.reasoningEffortRowActive}`
+                  : ''
+              }`}
               aria-pressed={reasoning.effort === effort}
               data-web-shell-effort={effort}
               disabled={!reasoning.enabled || busy || !onSelect}
@@ -1592,6 +1737,7 @@ export const ChatEditor = memo(
       isPreparing = false,
       cancelArmed = false,
       disabled = false,
+      submitDisabled = false,
       placeholderText = 'Type a message...',
       commands,
       skills = [],
@@ -1622,12 +1768,13 @@ export const ChatEditor = memo(
       onOpenCommit,
       onOpenWorktrees,
       onOpenLog,
+      onCreateWorktreeBranch,
+      onHandoff,
       workspaceName,
       workspaceTitle,
       workspaceColor,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
-      chatWidthToggleMin,
       visibleToolbarActions,
       liveVoicePortalContainer,
       contextChipPlacement = 'toolbar',
@@ -1639,6 +1786,7 @@ export const ChatEditor = memo(
       onOpenContextUsage,
       contextUsageControls,
       modelRefresh,
+      modelPickerScope,
       availableModels = [],
       unavailableModels,
       mountUnavailableModelTooltip,
@@ -1710,6 +1858,7 @@ export const ChatEditor = memo(
       fileUploadDirectory,
       fileDropAction,
       composerVariant = 'default',
+      modelPicker,
     } = useWebShellCustomization();
     const [advancedMode, setAdvancedMode] = useState(false);
     const simpleVariantEnabled = composerVariant === 'simple';
@@ -1834,13 +1983,25 @@ export const ChatEditor = memo(
       [onAttachmentPreview, onComposerTagClick],
     );
 
+    const [voiceActive, setVoiceActive] = useState(false);
+    const voiceButtonRef = useRef<VoiceButtonHandle>(null);
+    // Assigned below once insertVoiceText exists; useComposerCore awaits it
+    // before a user-initiated submit so dictation lands in the sent message.
+    const prepareVoiceSubmitRef = useRef<() => Promise<void>>(async () => {});
     const core = useComposerCore({
       onSubmit,
+      // Only install the finalizer while a capture is active (voiceActive
+      // stays true through transcribing), so plain typed sends keep the
+      // synchronous submit path.
+      prepareSubmit: voiceActive
+        ? () => prepareVoiceSubmitRef.current()
+        : undefined,
       onInputTextChange,
       onCycleMode,
       cycleModeOnTab,
       onToggleShortcuts,
       disabled,
+      submitDisabled,
       fileDragEnabled: attachmentsEnabled,
       placeholderText,
       commands,
@@ -1886,6 +2047,30 @@ export const ChatEditor = memo(
     });
 
     const { t, language } = useI18n();
+    const theme = useTheme();
+    const composerId = useId();
+    const pickerContext = useMemo<ModelPickerContext>(
+      () => ({
+        composerId,
+        sessionId: modelPickerScope?.sessionId,
+        workspaceId: modelPickerScope?.workspaceId,
+        workspaceCwd: modelPickerScope?.workspaceCwd,
+        daemonBaseUrl: modelPickerScope?.daemonBaseUrl,
+        currentModelId: currentModel || undefined,
+        language,
+        theme,
+      }),
+      [
+        composerId,
+        modelPickerScope?.sessionId,
+        modelPickerScope?.workspaceId,
+        modelPickerScope?.workspaceCwd,
+        modelPickerScope?.daemonBaseUrl,
+        currentModel,
+        language,
+        theme,
+      ],
+    );
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
@@ -2231,6 +2416,7 @@ export const ChatEditor = memo(
           label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
+          danger: id === 'yolo',
         })),
       [availableModes, t],
     );
@@ -2340,8 +2526,8 @@ export const ChatEditor = memo(
     const toolbarEndRef = useRef<HTMLDivElement>(null);
     const toolbarRightCustomRef = useRef<HTMLDivElement>(null);
     const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
+    const widthToggleRef = useRef<HTMLButtonElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
-    const [voiceActive, setVoiceActive] = useState(false);
     const pendingVoiceInsertRef = useRef<{
       text: string;
       sessionId: string | undefined;
@@ -2370,6 +2556,16 @@ export const ChatEditor = memo(
       } else {
         insertVoiceText(text);
       }
+    };
+    // A send must include the active dictation: finalize the capture and
+    // insert its transcript before the submit reads the draft. Insert
+    // directly rather than through the deferred simple-mode path — the
+    // submit follows in the same continuation, so there is no review step
+    // that needs the editor revealed first.
+    prepareVoiceSubmitRef.current = async () => {
+      const text = await voiceButtonRef.current?.flush();
+      const trimmed = text?.trim();
+      if (trimmed) insertVoiceText(trimmed);
     };
     useLayoutEffect(() => {
       const pending = pendingVoiceInsertRef.current;
@@ -2443,26 +2639,6 @@ export const ChatEditor = memo(
       if (!glowRoot || !inputEl) return undefined;
       return attachComposerGlow(glowRoot, inputEl);
     }, [editorViewRef]);
-
-    useEffect(() => {
-      const container = containerRef.current;
-      const minWidth = chatWidthToggleMin;
-      if (!container || minWidth === undefined) {
-        setWidthToggleFits(false);
-        return;
-      }
-
-      const update = () => {
-        setWidthToggleFits(
-          container.getBoundingClientRect().width >= minWidth - 50,
-        );
-      };
-      update();
-
-      const resizeObserver = new ResizeObserver(update);
-      resizeObserver.observe(container);
-      return () => resizeObserver.disconnect();
-    }, [chatWidthToggleMin]);
 
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -2614,7 +2790,19 @@ export const ChatEditor = memo(
       [onSelectModel, core, modelControlsDisabled, modelItems],
     );
     const showCancelButton = isRunning && !core.hasContent;
-    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
+    // While a dictation is active the send intent wins over the stop role:
+    // on touch layouts Send is the only submit path, so the button must send
+    // (queue) the dictation, not cancel the turn. The separate stop button
+    // below stays reachable during dictation, and desktop keeps Escape.
+    const stopAffordance = showCancelButton && !voiceActive;
+    // Stopping a running agent is unrelated to submit finalization: a voice
+    // flush may hold submitPreparing for up to a minute, and the stop buttons
+    // must stay usable throughout (mobile/simple have no other composer exit).
+    const cancelPreparing = isPreparing || core.pendingImageBatchCount > 0;
+    const composerPreparing = cancelPreparing || core.submitPreparing;
+    // With an empty draft during a run the submit button doubles as the Stop
+    // control; finalization must not take that affordance away.
+    const submitLoading = composerPreparing && !stopAffordance;
 
     const {
       searchMode,
@@ -2868,6 +3056,8 @@ export const ChatEditor = memo(
             onOpenCommit={onOpenCommit}
             onOpenWorktrees={onOpenWorktrees}
             onOpenLog={onOpenLog}
+            onCreateWorktreeBranch={onCreateWorktreeBranch}
+            onHandoff={onHandoff}
           >
             <button
               type="button"
@@ -2994,10 +3184,25 @@ export const ChatEditor = memo(
         const gap = Math.ceil(
           Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0,
         );
+        const toolbarWidth = Math.floor(toolbar.getBoundingClientRect().width);
+        const rightWidth = Math.ceil(
+          toolbarRight.getBoundingClientRect().width,
+        );
+        const rightGap =
+          Number.parseFloat(getComputedStyle(toolbarRight).columnGap) || 0;
+        const toggle = widthToggleRef.current;
+        // Exclude the toggle so its own visibility cannot affect the result.
+        const toggleSpace = toggle
+          ? toggle.getBoundingClientRect().width + rightGap
+          : 0;
+        setWidthToggleFits(
+          toolbarWidth - currentLeadingWidth - rightWidth + toggleSpace - gap >=
+            50,
+        );
         const availableWidth = getToolbarExpansionBudget({
-          toolbarWidth: Math.floor(toolbar.getBoundingClientRect().width),
+          toolbarWidth,
           leadingWidth: currentLeadingWidth,
-          rightWidth: Math.ceil(toolbarRight.getBoundingClientRect().width),
+          rightWidth,
           currentExpansionWidth,
           gap,
         });
@@ -3266,6 +3471,8 @@ export const ChatEditor = memo(
                   <button
                     className={`${styles.toolBtn} ${styles.modeToolBtn} ${
                       showModeLabel ? '' : styles.toolBtnCompact
+                    } ${
+                      currentMode === 'yolo' ? styles.modeToolBtnDanger : ''
                     }`}
                     data-web-shell-mode-button
                     disabled={
@@ -3509,6 +3716,8 @@ export const ChatEditor = memo(
                 }}
                 onSelect={handleModelSelect}
                 itemTooltipMount={mountUnavailableModelTooltip}
+                modelPicker={modelPicker}
+                pickerContext={pickerContext}
                 tooltip={modelLabel}
                 showCheck
                 searchable
@@ -3600,6 +3809,7 @@ export const ChatEditor = memo(
           widthToggleFits &&
           showToolbarAction('widthMode') && (
             <button
+              ref={widthToggleRef}
               className={`${styles.toolBtn} ${styles.widthModeBtn}`}
               data-hide-during-mobile-voice
               onClick={(e) => {
@@ -3816,6 +4026,7 @@ export const ChatEditor = memo(
                   }}
                 >
                   <VoiceButton
+                    ref={voiceButtonRef}
                     disabled={disabled}
                     onActiveChange={setVoiceActive}
                     target={voiceTarget}
@@ -3825,52 +4036,54 @@ export const ChatEditor = memo(
                 </span>
               </>
             )}
-            {(isMobile || isSimple) && isRunning && core.hasContent && (
-              <button
-                type="button"
-                className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
-                disabled={composerPreparing || !onCancel}
-                data-web-shell-composer-stop
-                aria-label={t('composerMobile.stop')}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onCancel?.();
-                }}
-              >
-                <StopIcon />
-              </button>
-            )}
+            {(isMobile || isSimple) &&
+              isRunning &&
+              (core.hasContent || voiceActive) && (
+                <button
+                  type="button"
+                  className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
+                  disabled={cancelPreparing || !onCancel}
+                  data-web-shell-composer-stop
+                  aria-label={t('composerMobile.stop')}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onCancel?.();
+                  }}
+                >
+                  <StopIcon />
+                </button>
+              )}
             <button
               className={
-                composerPreparing || showCancelButton
+                submitLoading || stopAffordance
                   ? `${styles.sendBtn} ${styles.sendBtnRunning}${
                       cancelArmed ? ` ${styles.sendBtnArmed}` : ''
                     }`
                   : styles.sendBtn
               }
               disabled={
-                composerPreparing
+                submitLoading
                   ? true
-                  : showCancelButton
+                  : stopAffordance
                     ? !onCancel
-                    : !core.canSubmit
+                    : core.submitBlocked || (!core.hasContent && !voiceActive)
               }
               data-web-shell-composer-submit
               onClick={(e) => {
                 e.stopPropagation();
-                if (composerPreparing) {
+                if (submitLoading) {
                   return;
                 }
-                if (showCancelButton) {
+                if (stopAffordance) {
                   onCancel?.();
                   return;
                 }
                 core.submitText();
               }}
               aria-label={
-                composerPreparing
+                submitLoading
                   ? t('common.loading')
-                  : showCancelButton
+                  : stopAffordance
                     ? cancelArmed && !isMobile
                       ? t('stream.cancelArmed')
                       : t(isMobile ? 'composerMobile.stop' : 'stream.cancel')
@@ -3882,9 +4095,9 @@ export const ChatEditor = memo(
                   : undefined
               }
             >
-              {composerPreparing ? (
+              {submitLoading ? (
                 <LoadingIcon />
-              ) : showCancelButton ? (
+              ) : stopAffordance ? (
                 cancelArmed && !isMobile ? (
                   <span className={styles.escLabel} aria-hidden="true">
                     Esc
@@ -4823,7 +5036,7 @@ export const ChatEditor = memo(
                 <Button
                   variant="outline"
                   className="min-h-11"
-                  disabled={composerPreparing || !onCancel}
+                  disabled={cancelPreparing || !onCancel}
                   onClick={onCancel}
                 >
                   {t('composerMobile.stop')}

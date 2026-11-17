@@ -8,6 +8,10 @@ import {
   restoreSessionSources,
   type SessionSourcesRestoreState,
 } from './session-sources.js';
+import {
+  restoreGeneratedUiStates,
+  type GeneratedUiStateRestore,
+} from './generated-ui-state.js';
 
 import { Storage } from '../config/storage.js';
 import {
@@ -25,12 +29,15 @@ import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import {
+  isGeneratedUiStateRecord,
   isTranscriptConversationRecord,
   prepareTranscriptRecords,
+  selectActiveGeneratedUiStateRecordUuids,
 } from '../utils/transcript-records.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
   ChatRecord,
+  CustomTitleRecordPayload,
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
@@ -74,7 +81,10 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
-import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  moveSessionPrSidecar,
+  readSessionPrsDetailed,
+} from './session-pr-service.js';
 import {
   moveSessionTitleSidecar,
   readSessionTitleSidecar,
@@ -424,6 +434,7 @@ export interface RemoveSessionOptions {
   assertStorageUnchanged?: () => Promise<void>;
   assertCanMutate?: () => void;
   assertCleanupOwned?: () => void;
+  onlyIfSubSessionStartup?: boolean;
 }
 
 export interface ArchiveSessionsResult {
@@ -3539,6 +3550,48 @@ export class SessionService {
     return restoreSessionSources(records, sessionId);
   }
 
+  /** The latest saved view state per Generated UI card on the active branch. */
+  async readGeneratedUiStates(
+    sessionId: string,
+  ): Promise<GeneratedUiStateRestore> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`))
+      throw new Error('Invalid session ID');
+    const filePath = this.getSessionFilePath(sessionId, 'active');
+    try {
+      await fs.promises.stat(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        return { states: new Map(), maxRevision: 0 };
+      return { unavailable: true };
+    }
+    const { records, complete } =
+      await jsonl.readLinesWithIntegrity<ChatRecord>(filePath, Infinity);
+    if (!complete) return { unavailable: true };
+    if (
+      records[0] &&
+      !(await this.sessionBelongsToCurrentProject(
+        records[0].sessionId,
+        records[0].cwd,
+      ))
+    )
+      throw new Error('Session workspace does not match');
+    const prepared = prepareTranscriptRecords(records);
+    const activeUuids = prepared.records.map((record) => record.uuid);
+    if (
+      prepared.diagnostics.some(
+        ({ code, recordId }) =>
+          code === 'history_gap' ||
+          code === 'parent_cycle' ||
+          (code === 'conflicting_parent_uuid' &&
+            recordId !== undefined &&
+            activeUuids.includes(recordId)),
+      )
+    ) {
+      return { unavailable: true };
+    }
+    return restoreGeneratedUiStates(records, activeUuids);
+  }
+
   async readRestoreProjection(
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
@@ -3699,6 +3752,29 @@ export class SessionService {
       await this.cleanupRemovedSessionStateInternal(sessionId, options, false);
     }
     return removed;
+  }
+
+  async removeUnusedSubSession(
+    sessionId: string,
+    assertStillClosed: () => void,
+  ): Promise<boolean> {
+    const lease = await this.acquireSessionWriterLease(sessionId, {
+      processKind: 'daemon',
+      reclaimPolicy: 'local',
+    });
+    try {
+      return await this.removeSession(sessionId, {
+        onlyIfSubSessionStartup: true,
+        assertStorageUnchanged: () => lease.assertOwnedAndUnchanged(),
+        assertCanMutate: () => {
+          assertStillClosed();
+          lease.assertCleanupOwned();
+        },
+        assertCleanupOwned: () => lease.assertCleanupOwned(),
+      });
+    } finally {
+      await lease.release();
+    }
   }
 
   async removeSessionTranscriptForLifecycle(
@@ -3876,6 +3952,76 @@ export class SessionService {
       const physicalSnapshot =
         await this.resolveMaintainableSessionSnapshot(sessionId);
       if (physicalSnapshot.location === undefined) return false;
+      if (options.onlyIfSubSessionStartup) {
+        const [identity] = physicalSnapshot.identities;
+        // A fresh child has only a few small startup records. Preserve any
+        // history we cannot prove consists entirely of those records.
+        if (
+          physicalSnapshot.location !== 'active' ||
+          identity.size > 64 * 1024
+        ) {
+          return false;
+        }
+        let complete = true;
+        const records = await jsonl.read<Partial<ChatRecord> | null>(
+          identity.filePath,
+          { onIncompleteRead: () => (complete = false) },
+        );
+        if (
+          !complete ||
+          !records.length ||
+          records.some((record) => {
+            if (record?.sessionId !== sessionId || record.type !== 'system') {
+              return true;
+            }
+            if (record.subtype === 'custom_title') {
+              const title = record.systemPayload as
+                | CustomTitleRecordPayload
+                | undefined;
+              return title?.titleSource !== 'auto';
+            }
+            return (
+              record.subtype !== 'parent_session' &&
+              record.subtype !== 'session_source' &&
+              record.subtype !== 'session_execution_engine' &&
+              record.subtype !== 'session_model' &&
+              record.subtype !== 'session_approval_mode'
+            );
+          })
+        ) {
+          return false;
+        }
+        const titlePath = this.getSessionTitleSidecarPathForState(
+          sessionId,
+          'active',
+        );
+        if (
+          readSessionTitleSidecar(titlePath)?.source !== 'auto' &&
+          fs.lstatSync(titlePath, { throwIfNoEntry: false })
+        ) {
+          return false;
+        }
+        const organization = Storage.runWithResolvedRuntimeBaseDir(
+          this.storage.getRuntimeBaseDir(),
+          () => new SessionOrganizationService(this.projectRoot),
+        );
+        if (
+          (await organization.hasStoredSessionOrganization(sessionId)) !== false
+        ) {
+          return false;
+        }
+        for (const state of ['active', 'archived'] as const) {
+          const bindings = await readSessionPrsDetailed(
+            this.getPrSessionPathForState(sessionId, state),
+          );
+          if (
+            bindings.status === 'invalid' ||
+            (bindings.status === 'ok' && bindings.prs.length > 0)
+          ) {
+            return false;
+          }
+        }
+      }
       if (
         expectedLocation !== undefined &&
         (physicalSnapshot.location !== expectedLocation ||
@@ -4639,10 +4785,7 @@ export class SessionService {
     {
       let lastRetained: string | null = null;
       for (const record of preFilterRecords) {
-        if (
-          retainedUuids.has(record.uuid) &&
-          !isSessionArtifactRecord(record)
-        ) {
+        if (retainedUuids.has(record.uuid) && !isForkSideRecord(record)) {
           lastRetained = record.uuid;
         } else {
           nearestRetainedPredecessor.set(record.uuid, lastRetained);
@@ -4652,7 +4795,7 @@ export class SessionService {
     const forked: ChatRecord[] = [
       ...(sourceRecord ? [sourceRecord] : []),
       ...sourceRecords.map((record) => {
-        const isArtifactRecord = isSessionArtifactRecord(record);
+        const isSideRecord = isForkSideRecord(record);
         let systemPayload = remapSystemPayloadForFork(
           record,
           sourceSessionId,
@@ -4688,7 +4831,7 @@ export class SessionService {
               }
             : {}),
           parentUuid:
-            isArtifactRecord &&
+            isSideRecord &&
             record.parentUuid !== null &&
             retainedUuids.has(record.parentUuid)
               ? record.parentUuid
@@ -4698,7 +4841,7 @@ export class SessionService {
             messageUuid: record.uuid,
           },
         };
-        if (!isArtifactRecord) {
+        if (!isSideRecord) {
           prevUuid = record.uuid;
         }
         return next;
@@ -5359,7 +5502,8 @@ function remapSystemPayloadForFork(
       | undefined;
     if (
       payload?.uiEvent?.['event.name'] === 'request_lifecycle' ||
-      payload?.uiEvent?.['event.name'] === 'tool_lifecycle'
+      payload?.uiEvent?.['event.name'] === 'tool_lifecycle' ||
+      payload?.uiEvent?.['event.name'] === 'hook_lifecycle'
     ) {
       const event = payload.uiEvent;
       return {
@@ -5367,7 +5511,8 @@ function remapSystemPayloadForFork(
         uiEvent: {
           ...event,
           sessionId: newSessionId,
-          ...(event['event.name'] === 'request_lifecycle'
+          ...(event['event.name'] === 'request_lifecycle' ||
+          event['event.name'] === 'hook_lifecycle'
             ? {
                 promptId:
                   typeof event['promptId'] === 'string' &&
@@ -5405,6 +5550,14 @@ function remapSystemPayloadForFork(
   return record.systemPayload;
 }
 
+/**
+ * Side records hang beside the active tail without moving it: session
+ * artifacts and Generated UI view state. A fork keeps their attachment.
+ */
+function isForkSideRecord(record: ChatRecord): boolean {
+  return isSessionArtifactRecord(record) || isGeneratedUiStateRecord(record);
+}
+
 function includeActiveSideArtifactRecords(
   records: ChatRecord[],
   activeRecords: ChatRecord[],
@@ -5412,12 +5565,11 @@ function includeActiveSideArtifactRecords(
   const activeByUuid = new Map(
     activeRecords.map((record) => [record.uuid, record]),
   );
-  const artifactUuids = new Set(
-    selectActiveSideArtifactRecordUuids(
-      records,
-      activeRecords.map((record) => record.uuid),
-    ),
-  );
+  const activeUuids = activeRecords.map((record) => record.uuid);
+  const artifactUuids = new Set([
+    ...selectActiveSideArtifactRecordUuids(records, activeUuids),
+    ...selectActiveGeneratedUiStateRecordUuids(records, activeUuids),
+  ]);
   const selected: ChatRecord[] = [];
   for (const record of records) {
     const activeRecord = activeByUuid.get(record.uuid);
@@ -5513,7 +5665,8 @@ export function replayUiTelemetryFromConversation(
     if (
       uiEvent &&
       uiEvent['event.name'] !== 'request_lifecycle' &&
-      uiEvent['event.name'] !== 'tool_lifecycle'
+      uiEvent['event.name'] !== 'tool_lifecycle' &&
+      uiEvent['event.name'] !== 'hook_lifecycle'
     ) {
       uiTelemetryService.addEvent(uiEvent as UiEvent, sessionId);
     }

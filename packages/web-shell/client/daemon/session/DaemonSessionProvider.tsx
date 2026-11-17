@@ -26,6 +26,7 @@ import {
   type SetStateAction,
   useSyncExternalStore,
 } from 'react';
+import { flushSync } from 'react-dom';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonClient,
@@ -102,6 +103,10 @@ import {
 } from '../../mcpAppHostContext.js';
 import { createTrajectoryLiveStore } from '../../trajectory/trajectory-live-store.js';
 import { TrajectoryLiveContext } from '../../trajectory/trajectory-live-context.js';
+import {
+  HookStatisticsContext,
+  type HookStatisticsSource,
+} from '../../components/messages/hook-statistics-context.js';
 import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
@@ -1381,6 +1386,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const createSessionRequestRef = useRef(createSessionRequest);
   createSessionRequestRef.current = createSessionRequest;
   const [promptStatus, setPromptStatus] = useState<DaemonPromptStatus>('idle');
+  const promptStatusRef = useRef(promptStatus);
+  promptStatusRef.current = promptStatus;
   const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
     initialRestoreSessionId,
   );
@@ -2003,6 +2010,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const maySettleToIdle = (
         target = session ?? sessionRef.current ?? connectionRef.current,
       ) => {
+        const pendingLoad = pendingSessionLoadRef.current;
+        if (
+          pendingLoad?.reconcilePromptActivity &&
+          pendingLoad.sessionId === target?.sessionId &&
+          (pendingLoad.sessionContext?.kind !== 'workspace' ||
+            pendingLoad.sessionContext.cwd === target?.workspaceCwd)
+        ) {
+          return false;
+        }
         if (
           hasCurrentSessionActivePrompt() ||
           connectionRef.current.backgroundTurn
@@ -2665,6 +2681,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }
               return;
             }
+            if (
+              attemptedLoad?.reconcilePromptActivity &&
+              getDaemonActivePrompt(nextSession) !== false
+            ) {
+              daemonActivePromptRef.current = undefined;
+            }
             if (attemptedLoad?.replaySource === 'memory') {
               const episode = liveJournalRepairRef.current;
               const freshReplayEvents = [
@@ -2725,6 +2747,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const previousSessionId = lastSessionIdRef.current;
             if (previousSessionId !== nextSession.sessionId) {
               clearNotices();
+            }
+            // Commit the load-embedded artifact snapshot in its own render
+            // before the replay injects, so the session-level header entry
+            // paints ahead of the conversation body. Only the artifact fields
+            // are touched; catchingUp and the rest of the connection state are
+            // left to the existing replay/attach logic below.
+            if (nextSession.restoredArtifacts !== undefined) {
+              flushSync(() => {
+                setConnection((current) => ({
+                  ...current,
+                  sessionId: nextSession.sessionId,
+                  restoredArtifacts: nextSession.restoredArtifacts,
+                  restoredArtifactsSessionId: nextSession.sessionId,
+                }));
+              });
             }
             // Defer store.reset() until right before replay dispatch
             // (after the await below) so that reset + dispatch share a
@@ -3478,6 +3515,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               current.sessionId === activeSession.sessionId
                 ? current.goalState
                 : undefined,
+            restoredArtifacts: activeSession.restoredArtifacts,
+            restoredArtifactsSessionId: activeSession.sessionId,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
@@ -5477,6 +5516,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     () =>
       createDaemonSessionActions({
         getClient: () => workspaceClientRef.current,
+        getPromptStatus: () => promptStatusRef.current,
         store,
         sessionRef,
         activePromptsRef,
@@ -5526,7 +5566,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           workspaceCwd?: string,
           overrides?: Pick<
             CreateSessionRequest,
-            'approvalMode' | 'sourceType' | 'worktree' | 'branch'
+            | 'approvalMode'
+            | 'sourceType'
+            | 'worktree'
+            | 'branch'
+            | 'startupConfig'
           >,
         ) => {
           const client =
@@ -5553,6 +5597,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               : {}),
             ...(overrides?.branch !== undefined
               ? { branch: overrides.branch }
+              : {}),
+            ...(overrides?.startupConfig
+              ? { startupConfig: overrides.startupConfig }
               : {}),
           };
           const requestClientId = clientId
@@ -6044,6 +6091,46 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
 
   const appSession = sessionRef.current;
+  const hookStatistics = useMemo<HookStatisticsSource | undefined>(() => {
+    const session = appSession;
+    if (
+      !session ||
+      !session.workspaceCwd ||
+      session.sessionId !== connection.sessionId
+    )
+      return undefined;
+    const workspace =
+      connection.sessionContext?.kind === 'workspace'
+        ? connection.sessionContext.cwd
+        : undefined;
+    return {
+      sessionId: session.sessionId,
+      navigation: turnNavigationStore,
+      async readPage(promptId, options) {
+        if (sessionRef.current !== session)
+          throw new Error('Hook session changed');
+        const client = workspace
+          ? session.client.workspaceByCwd(workspace)
+          : session.client;
+        const page = await client.getSessionTurnHooksPage(
+          session.sessionId,
+          promptId,
+          {
+            ...options,
+            clientId: session.clientId,
+          },
+        );
+        if (sessionRef.current !== session)
+          throw new Error('Hook session changed');
+        return page;
+      },
+    };
+  }, [
+    appSession,
+    connection.sessionId,
+    connection.sessionContext,
+    turnNavigationStore,
+  ]);
   const generatedUi = appSession?.session?.generatedUi;
   const generatedUiClientId = appSession?.clientId;
   const generatedUiEventEpoch = appSession?.eventEpoch;
@@ -6199,7 +6286,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                                 <DaemonPromptSettlementContext.Provider
                                   value={subscribeToPromptSettlement}
                                 >
-                                  {children}
+                                  <HookStatisticsContext.Provider
+                                    value={hookStatistics}
+                                  >
+                                    {children}
+                                  </HookStatisticsContext.Provider>
                                 </DaemonPromptSettlementContext.Provider>
                               </DaemonTranscriptHistoryContext.Provider>
                             </DaemonSessionOwnerGuardContext.Provider>

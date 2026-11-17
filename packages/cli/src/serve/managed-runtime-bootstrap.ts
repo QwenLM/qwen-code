@@ -257,6 +257,49 @@ function markerDocument(
   return marker as unknown as SshStorageMarker;
 }
 
+/**
+ * The host's stable machine identity, or undefined when it cannot be read.
+ *
+ * Returning undefined rather than throwing is what keeps an unreadable source
+ * inside this module's own refusal: the caller already refuses an absent
+ * identity with `ssh_runtime_identity_conflict`, and the protocol boundary maps
+ * anything else to `ssh_runtime_state_unavailable`. A raw ENOENT from here
+ * therefore reported the wrong failure — "state is unavailable" for what is
+ * actually a host that cannot prove a stable identity, with the real cause
+ * buried in a message the caller is told not to trust.
+ *
+ * Both sources are genuinely absent on real hosts, not just in theory: minimal
+ * container images ship no /etc/machine-id at all (systemd writes it at first
+ * boot, and a container never boots systemd), and the ephemeral CI pool runs
+ * exactly such an image. Eight jobs across four unrelated PRs failed on it —
+ * #16975 records the signature. ioreg can fail the same way on macOS: it may be
+ * missing, refuse to run, or time out, and a truncated read yields no match.
+ *
+ * A refusal is the correct outcome in every one of those cases. The identity is
+ * what binds a storage marker to one host, so an unreadable source must not be
+ * papered over with a substitute — a random or hostname-derived value would let
+ * a marker written on one host verify on another.
+ */
+async function readMachineIdentity(): Promise<string | undefined> {
+  try {
+    if (process.platform === 'linux')
+      return (await fs.readFile('/etc/machine-id', 'utf8')).trim();
+    return /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(
+      execFileSync(
+        '/usr/sbin/ioreg',
+        ['-rd1', '-c', 'IOPlatformExpertDevice'],
+        {
+          encoding: 'utf8',
+          timeout: 5_000,
+          maxBuffer: MAX_BYTES,
+        },
+      ),
+    )?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
 export async function inspectSshStorage(
   root: string,
 ): Promise<SshStorageIdentity> {
@@ -272,17 +315,7 @@ export async function inspectSshStorage(
   if (!stat.isDirectory() || stat.birthtimeNs <= 0n)
     refuse('Storage directory has no independent birth identity.');
   await fs.access(root, constants.R_OK | constants.W_OK | constants.X_OK);
-  const machine = hostId
-    ? undefined
-    : process.platform === 'linux'
-      ? (await fs.readFile('/etc/machine-id', 'utf8')).trim()
-      : /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(
-          execFileSync(
-            '/usr/sbin/ioreg',
-            ['-rd1', '-c', 'IOPlatformExpertDevice'],
-            { encoding: 'utf8', timeout: 5_000, maxBuffer: MAX_BYTES },
-          ),
-        )?.[1];
+  const machine = hostId ? undefined : await readMachineIdentity();
   if (!hostId) {
     if (!machine || machine.length > 256)
       refuse('Stable host identity is unavailable.');

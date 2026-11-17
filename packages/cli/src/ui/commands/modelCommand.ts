@@ -39,6 +39,10 @@ import {
 import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
 import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
 import {
+  modelAuthPolicyError,
+  switchPrimaryModel,
+} from '../models/primary-model-switch.js';
+import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
 } from '../voice/voice-model.js';
@@ -174,7 +178,9 @@ async function switchMainModel(
   persistSelection = true,
 ): Promise<string> {
   if (parsed.authType) {
-    await config.switchModel(
+    await switchPrimaryModel(
+      config,
+      settings,
       parsed.authType,
       parsed.modelId,
       parsed.authType === AuthType.QWEN_OAUTH &&
@@ -201,7 +207,7 @@ async function switchMainModel(
     return parsed.modelId;
   }
 
-  await config.switchModel(currentAuthType, parsed.modelId, undefined);
+  await switchPrimaryModel(config, settings, currentAuthType, parsed.modelId);
   if (persistSelection) {
     persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
     persistSetting(settings, 'model.baseUrl', '', scopeOverride);
@@ -1128,10 +1134,13 @@ export const modelCommand: SlashCommand = {
         ...persistScopeSpread(scopeOverride),
       };
     }
-    if (
-      modelName &&
-      (parsed.authType ?? authType) === AuthType.QWEN_SUBSCRIPTION
-    ) {
+    const requestedAuthType = parsed.authType ?? authType;
+    const policyError =
+      modelName && modelAuthPolicyError(settings, requestedAuthType);
+    if (policyError) {
+      return { type: 'message', messageType: 'error', content: policyError };
+    }
+    if (modelName && requestedAuthType === AuthType.QWEN_SUBSCRIPTION) {
       context.ui.addItem(
         { type: MessageType.INFO, text: t('Loading models from provider…') },
         Date.now(),

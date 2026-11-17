@@ -44,7 +44,7 @@ class ManagedMessagePagingTest {
         ManagedSchema.initialize(source);
         jdbc = new CountingJdbc(source);
         store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
         view = new TransactionTemplate(new DataSourceTransactionManager(source));
         view.setReadOnly(true);
         view.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
@@ -214,14 +214,6 @@ class ManagedMessagePagingTest {
                 key, scope, "tenant", "session", bytes.length, WorkspaceEvidenceResources.digest(bytes), bytes);
         jdbc.update("UPDATE ma_message SET body_resource_key=? WHERE item_id=?", key, id(1));
         return key;
-    }
-
-    @Test
-    void refusesPrivateCsiSessionsWithoutBorrowingTheirJournalAsMessages() {
-        seed(2, false);
-        jdbc.update("UPDATE ma_session SET tool_profile='csi-files-retirement/1' WHERE tenant_id=? AND session_id=?",
-                "tenant", "session");
-        assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("private CSI");
     }
 
     @Test

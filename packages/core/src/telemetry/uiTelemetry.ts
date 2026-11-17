@@ -74,16 +74,38 @@ export interface SkillMetrics {
 
 export interface GenerationTimingSample {
   model: string;
+  /** From sending the request to its first visible output. */
   ttftMs: number;
+  /** From the first to the last visible output. */
   generationDurationMs: number;
+  /** Reasoning counted once. */
   outputTokens: number;
 }
 
 export interface GenerationMetrics {
   timedRequests: number;
+  /** Summed over every timed request. */
   totalTtftMs: number;
+  /**
+   * Generation time of the requests whose window is at least 100 ms. Older
+   * clients divide `totalThroughputOutputTokens` by it, so its meaning stays.
+   */
   totalGenerationDurationMs: number;
+  /** Output tokens of the same requests as `totalGenerationDurationMs`. */
   totalThroughputOutputTokens: number;
+  /** Generation time summed over every timed request, like `totalTtftMs`. */
+  totalTimedGenerationDurationMs: number;
+  /**
+   * Output tokens, reasoning counted once, of the timed requests that
+   * reported any. Output speed divides them by `totalOutputSpeedDurationMs`.
+   */
+  totalOutputSpeedTokens: number;
+  /**
+   * TTFT plus generation time of the same requests as
+   * `totalOutputSpeedTokens`: each one's time from sending it to its last
+   * visible output.
+   */
+  totalOutputSpeedDurationMs: number;
   last?: GenerationTimingSample;
 }
 
@@ -122,8 +144,9 @@ export interface RequestTimingSample {
   /** Event time, epoch ms. */
   at: number;
   ttftMs: number;
-  /** Generation window; below 100 ms it measures no output rate. */
+  /** From the first to the last visible output. */
   generationMs: number;
+  /** Reasoning counted once. */
   outputTokens: number;
   /** Subagent that issued the request; absent for the main conversation. */
   source?: string;
@@ -296,14 +319,20 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   byName: {},
 });
 
-/** Shortest generation window that counts toward output speed. */
-const MIN_THROUGHPUT_WINDOW_MS = 100;
+/**
+ * Shortest generation window in the legacy `totalGenerationDurationMs` and
+ * `totalThroughputOutputTokens` sums.
+ */
+const LEGACY_MIN_THROUGHPUT_WINDOW_MS = 100;
 
 const createInitialGenerationMetrics = (): GenerationMetrics => ({
   timedRequests: 0,
   totalTtftMs: 0,
   totalGenerationDurationMs: 0,
   totalThroughputOutputTokens: 0,
+  totalTimedGenerationDurationMs: 0,
+  totalOutputSpeedTokens: 0,
+  totalOutputSpeedDurationMs: 0,
 });
 
 const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
@@ -798,14 +827,23 @@ export class UiTelemetryService extends EventEmitter {
       return;
     }
 
+    // Reasoning counted once: the time to the first visible output can be
+    // spent on reasoning that some providers report apart from the output.
+    const outputTokens = getEventBillableOutputTokens(event);
     const accumulateGeneration = (generation: GenerationMetrics) => {
       generation.timedRequests++;
       generation.totalTtftMs += ttftMs;
-      // A window this short means the output arrived in a burst, so dividing
-      // the whole response's tokens by it reads as thousands of tokens/s.
-      if (generationDurationMs >= MIN_THROUGHPUT_WINDOW_MS) {
+      generation.totalTimedGenerationDurationMs += generationDurationMs;
+      if (generationDurationMs >= LEGACY_MIN_THROUGHPUT_WINDOW_MS) {
         generation.totalGenerationDurationMs += generationDurationMs;
         generation.totalThroughputOutputTokens += event.output_token_count;
+      }
+      // Output speed includes TTFT, so a burst of visible output cannot
+      // shrink its time to zero. A request without reported output tokens
+      // would add time but no tokens, so it stays out.
+      if (outputTokens > 0) {
+        generation.totalOutputSpeedTokens += outputTokens;
+        generation.totalOutputSpeedDurationMs += ttftMs + generationDurationMs;
       }
     };
 
@@ -822,7 +860,7 @@ export class UiTelemetryService extends EventEmitter {
           at: eventTime(event),
           ttftMs,
           generationMs: generationDurationMs,
-          outputTokens: event.output_token_count,
+          outputTokens,
           ...(event.subagent_name ? { source: event.subagent_name } : {}),
         },
         MAX_TIMING_SAMPLES,
@@ -832,7 +870,7 @@ export class UiTelemetryService extends EventEmitter {
       model: event.model,
       ttftMs,
       generationDurationMs,
-      outputTokens: event.output_token_count,
+      outputTokens,
     };
   }
 

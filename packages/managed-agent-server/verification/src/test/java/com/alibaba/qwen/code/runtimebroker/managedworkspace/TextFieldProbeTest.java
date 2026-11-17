@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.managedworkspace;
 
-import com.alibaba.qwen.code.runtimebroker.workspace.GrantedWorkspaceAccessPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -22,9 +21,6 @@ class TextFieldProbeTest {
                 "ws-a", 1, "storage-a", text, WorkspaceState.ACTIVE,
                 "policy:a", "config:a"));
         probe("actorId", mismatches, text -> new WorkspaceActor(TENANT, text));
-        probe("grant actorId", mismatches,
-                text -> GrantedWorkspaceAccessPolicy.builder().grant(TENANT,
-                        text, "ws-a", WorkspaceAccess.READER));
 
         assertEquals(List.of(), mismatches);
     }

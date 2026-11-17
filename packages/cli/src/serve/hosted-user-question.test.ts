@@ -534,7 +534,9 @@ it.each(scenarios)(
         });
         expect(acquire).toHaveBeenCalledTimes(1);
         const saved = await findHostedApprovalContinuation(session, promptId);
-        expect(saved?.plan.runtime.provisionerKind).toBe('local-process');
+        expect(saved?.plan.runtime).toMatchObject({
+          provisionerKind: 'local-process',
+        });
         expect(
           session.authority
             .eventsInSequenceRange(1, session.authority.committedSequence)

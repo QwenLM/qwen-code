@@ -61,6 +61,7 @@ import {
 import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { Content, Part } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { LoopEventBus } from '@qwen-code/qwen-code-core/event-bus/bus.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { EventEmitter, getEventListeners } from 'node:events';
 import {
@@ -4178,6 +4179,77 @@ describe('runNonInteractive', () => {
     },
   );
 
+  it.each(bothLoops)(
+    'records the result of a tool call the run cancelled ($loop)',
+    async ({ shared }) => {
+      if (shared) useSharedLoopWithModToolHooks();
+      setupMetricsMock();
+      const recordToolResult = vi.fn();
+      (
+        mockConfig as Config & {
+          getChatRecordingService: () => {
+            recordToolResult: typeof recordToolResult;
+            finalize: ReturnType<typeof vi.fn>;
+            flush: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getChatRecordingService = () => ({
+        recordToolResult,
+        finalize: vi.fn(),
+        flush: vi.fn().mockResolvedValue(undefined),
+      });
+      const controller = new AbortController();
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: { callId: string; name: string }) => {
+          controller.abort();
+          const error = new Error('Tool call cancelled by user.');
+          return {
+            callId: request.callId,
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { error: error.message },
+                },
+              },
+            ],
+            resultDisplay: error.message,
+            error,
+            errorType: ToolErrorType.EXECUTION_FAILED,
+            executionStatus: 'cancelled',
+          };
+        },
+      );
+      const request = (callId: string): ServerLlmStreamEvent => ({
+        type: LlmEventType.ToolCallRequest,
+        value: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-cancel',
+        },
+      });
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([request('cancelled-1')]),
+      );
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Use a tool',
+        'prompt-cancel',
+        { abortController: controller },
+      ).catch(() => undefined);
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+      expect(
+        recordToolResult.mock.calls.map((call) => call[1]?.callId),
+      ).toEqual(['cancelled-1']);
+    },
+  );
+
   describe('managed memory settlement on terminal paths', () => {
     let finishMemory: (count: number) => void;
     let rejectMemory: (error: Error) => void;
@@ -8247,6 +8319,78 @@ describe('runNonInteractive', () => {
       expect(close).toHaveBeenCalled();
     },
   );
+
+  describe('event-bus agent loop opt-in', () => {
+    const answerStream = () =>
+      createStreamFromEvents([
+        { type: LlmEventType.Content, value: 'Answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]);
+
+    it.each([false, true])(
+      'runs the shared loop on the bus only when the flag is on (bus=%s)',
+      async (bus) => {
+        setupMetricsMock();
+        Object.assign(mockConfig, {
+          isUnifiedAgentLoopEnabled: vi.fn(() => true),
+          isEventBusAgentLoopEnabled: vi.fn(() => bus),
+        });
+        // Execution marker: the bus path publishes loop events, the
+        // procedural shared loop never touches the bus.
+        const publishSpy = vi.spyOn(LoopEventBus.prototype, 'publish');
+        mockLlmClient.sendMessageStream.mockReturnValueOnce(answerStream());
+
+        await expect(
+          runNonInteractive(mockConfig, mockSettings, 'Hello', 'prompt-bus'),
+        ).resolves.toBe(0);
+
+        expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+        // Headless must resolve both switches for the 'headless' surface.
+        expect(
+          (
+            mockConfig as unknown as {
+              isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            }
+          ).isUnifiedAgentLoopEnabled,
+        ).toHaveBeenCalledWith('headless');
+        expect(
+          (
+            mockConfig as unknown as {
+              isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            }
+          ).isEventBusAgentLoopEnabled,
+        ).toHaveBeenCalledWith('headless');
+        if (bus) {
+          expect(publishSpy).toHaveBeenCalled();
+        } else {
+          expect(publishSpy).not.toHaveBeenCalled();
+        }
+        const stdout = processStdoutSpy.mock.calls
+          .map(([chunk]) => String(chunk))
+          .join('');
+        expect(stdout).toContain('Answer');
+      },
+    );
+
+    it('leaves the legacy loop untouched when only the bus flag is on', async () => {
+      setupMetricsMock();
+      Object.assign(mockConfig, {
+        isUnifiedAgentLoopEnabled: () => false,
+        isEventBusAgentLoopEnabled: () => true,
+      });
+      const publishSpy = vi.spyOn(LoopEventBus.prototype, 'publish');
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(answerStream());
+
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'Hello', 'prompt-bus-only'),
+      ).resolves.toBe(0);
+
+      expect(publishSpy).not.toHaveBeenCalled();
+    });
+  });
 
   describe.each([false, true])('Mod turns (shared loop: %s)', (shared) => {
     beforeEach(() => {

@@ -48,7 +48,9 @@ npm run typecheck
   Generation Metrics section.
 - A non-streaming response does not invent TTFT or TPS.
 - A stream with no user-visible content does not create a timing sample.
-- A zero generation duration displays TPS as unavailable instead of Infinity.
+- A response without output tokens displays TPS as unavailable instead of
+  `0 tok/s`. Since #16714, TPS includes TTFT, so a zero generation duration
+  still has a rate; see `2026-11-09-output-speed-full-request.md`.
 - Internal prompts do not replace the latest user-visible generation sample.
 - `/stats daily`, `/stats monthly`, and `/stats export` remain unchanged.
 

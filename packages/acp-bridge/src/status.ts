@@ -305,6 +305,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
     'qwen/control/session/managed-conversation-binding/commit',
   sessionManagedConversationBindingRelease:
     'qwen/control/session/managed-conversation-binding/release',
+  resolveSubSessionWorkspace: 'qwen/control/resolve-sub-session-workspace',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
    * `create_sub_session` tool, running inside a child's agent turn, asks the
@@ -675,6 +676,8 @@ export interface ServeSessionContextStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /** Whether the session can durably accept a daemon completion notification. */
+  canAcceptBackgroundNotifications?: boolean;
   recovery?: {
     kind:
       | 'clean'
@@ -1284,11 +1287,28 @@ export interface ServeSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
+     * whose window is at least 100 ms. With `totalThroughputOutputTokens` it
+     * gives the generation-window rate that clients before
+     * `totalOutputSpeedDurationMs` show.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
+    /**
+     * Time from the first to the last visible output, summed over every timed
+     * request like `totalTtftMs`. Absent from older daemons.
+     */
+    totalTimedGenerationDurationMs?: number;
+    /**
+     * Output tokens, reasoning counted once, of the timed requests that
+     * reported any. Absent from older daemons.
+     */
+    totalOutputSpeedTokens?: number;
+    /**
+     * TTFT plus generation time of the requests in `totalOutputSpeedTokens`:
+     * output speed divides the tokens by it. Absent from older daemons.
+     */
+    totalOutputSpeedDurationMs?: number;
   };
   /**
    * Most recent timed, non-internal responses (oldest first, at most 200).
@@ -1299,8 +1319,14 @@ export interface ServeSessionStatsModelMetrics {
     /** Event time, epoch ms. */
     at: number;
     ttftMs: number;
-    /** Generation window; below 100 ms it measures no output rate. */
+    /**
+     * From the first to the last visible output. Output speed divides
+     * `outputTokens` by `ttftMs + generationMs`; for a daemon without
+     * `generation.totalOutputSpeedDurationMs`, by `generationMs` when it is at
+     * least 100 ms.
+     */
     generationMs: number;
+    /** Reasoning counted once; older daemons sent the provider's count. */
     outputTokens: number;
     /** Subagent that issued the request; absent for the main conversation. */
     source?: string;
@@ -1407,10 +1433,10 @@ export interface ServeWorkspaceMemoryFile {
    */
   content?: string;
   /**
-   * True when the served text is not the file's full content: either
-   * `content` stops at the daemon's read cap, or the read raced a
-   * concurrent write (byte count differed from `bytes`, in which case
-   * `content` is omitted entirely).
+   * Present and true when `content` stops at the daemon's read cap, the
+   * read raced a concurrent write, or the on-disk bytes are not BOM-free
+   * UTF-8. `content` is omitted for the latter two cases; retrying
+   * unchanged bytes cannot repair an encoding issue.
    */
   truncated?: boolean;
 }

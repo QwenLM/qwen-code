@@ -14,7 +14,7 @@
 
 本地新任务使用内置 `qwen-code` Agent，将每个已配置模型作为独立 `modelId` 发布，不再注册会以编译后询问策略限制权限菜单的自定义 AgentDefinition。保留定义模型和工具配置白名单，使已有自定义 Session 可用；管理路由继续不对外开放。
 
-通过已鉴权的同源 `/managed/boot` 返回 `{agentId: "qwen-code",modelId,label}` 预设，独立客户端验证模型选项唯一后传入 provider，并兼容原有 `{agentId,label}` 预设。新任务分别选择宿主目录模型和审批策略；创建请求通过能力检查后，在首轮之前同时保存这两项选择。已有 Session 使用独立的 Java Session 模型目录及其空闲状态、版本和 Workspace 授权校验。模型固定解析与缓存凭据继续由 Hosted Harness 负责。boot、定义和模型目录均不包含凭据、提供方 URL 或签名材料。
+通过已鉴权的同源 `/managed/boot` 返回 `{agentId: "qwen-code",modelId,label}` 预设，独立客户端验证模型选项唯一后传入 provider，并兼容原有 `{agentId,label}` 预设。新任务分别选择宿主目录模型和审批策略；创建请求通过能力检查后，在首轮之前同时保存这两项选择。已有 Session 使用独立的 Java Session 模型目录及其版本、Workspace 授权、生命周期/恢复与未结算上下文校验；正在运行的回合或待处理审批不会阻止为后续回合保存选择。模型固定解析与缓存凭据继续由 Hosted Harness 负责。boot、定义和模型目录均不包含凭据、提供方 URL 或签名材料。
 
 ## 约束与风险
 

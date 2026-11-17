@@ -18,5 +18,5 @@ public interface ChildWorkspaceProvider {
      */
     public Path storageRoot(ContextBinding binding);
 
-    public ChildWorktreeGit git();
+    public ChildWorktreeOperations git();
 }

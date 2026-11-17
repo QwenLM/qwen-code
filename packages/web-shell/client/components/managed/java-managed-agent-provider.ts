@@ -116,6 +116,7 @@ export function createJavaManagedAgentProvider(
     request: {
       agentId: string;
       modelId?: string;
+      memoryStoreId?: string;
       workspaceId: string;
       cwdRelative: string;
       text?: string;
@@ -140,6 +141,9 @@ export function createJavaManagedAgentProvider(
           ? {}
           : { worktree: request.worktree }),
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
+        ...(request.memoryStoreId === undefined
+          ? {}
+          : { memoryStoreId: request.memoryStoreId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
         ...(request.extensionPins === undefined
           ? {}
@@ -173,6 +177,31 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
+    sideQueries: {
+      context: (sessionId, options) =>
+        client.sideQueryContext(sessionId, options.signal),
+      create: (sessionId, request, options) =>
+        client.createSideQuery(
+          sessionId,
+          request,
+          options.idempotencyKey,
+          options.signal,
+        ),
+      list: (sessionId, options) =>
+        client.listSideQueries(
+          { sessionId, cursor: options.cursor, limit: options.limit },
+          options.signal,
+        ),
+      get: (sessionId, queryId, options) =>
+        client.getSideQuery(sessionId, queryId, options.signal),
+      stream: (sessionId, queryId, options) =>
+        client.streamSideQuery(
+          { sessionId, queryId, afterRevision: options.afterRevision },
+          options.signal,
+        ),
+      cancel: (sessionId, queryId, options) =>
+        client.cancelSideQuery(sessionId, queryId, options.signal),
+    },
     userMessages: {
       query: (sessionId, options) =>
         client.queryUserMessages(sessionId, options.signal),
@@ -282,6 +311,9 @@ export function createJavaManagedAgentProvider(
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
     },
+    clientFiles: {
+      transport: () => client.clientFilesTransport(),
+    },
     extensions: {
       storageScope: options.productScope?.trim()
         ? storageKey(options)
@@ -314,6 +346,17 @@ export function createJavaManagedAgentProvider(
           workspaceId,
           metadata,
           source,
+          request.signal,
+        ),
+      runtimeSkillCandidates: (sessionId, request) =>
+        client.getRuntimeSkillCandidates(sessionId, request.signal),
+      runtimeSkillSnapshot: (sessionId, input, request) =>
+        client.snapshotRuntimeSkill(sessionId, input, request.signal),
+      importRuntimeSkill: (sessionId, input, request) =>
+        client.importRuntimeSkill(
+          sessionId,
+          input,
+          request.idempotencyKey,
           request.signal,
         ),
       lookupPackageOperation: (workspaceId, kind, key, request) =>
@@ -779,6 +822,12 @@ export function createJavaManagedAgentProvider(
       get: (sessionId, itemId, request) =>
         client.getToolDetails(sessionId, itemId, request.signal),
     },
+    terminal: {
+      ticket: (sessionId, terminalId, request) =>
+        client.terminalTicket(sessionId, terminalId, request.signal),
+      webSocketUrl: (sessionId, terminalId) =>
+        client.terminalWebSocketUrl(sessionId, terminalId),
+    },
     toolResults: {
       canDownload: saveArtifact !== undefined,
       getResult: (sessionId, itemId, request) =>
@@ -883,6 +932,7 @@ export function createJavaManagedAgentProvider(
               {
                 agentId,
                 modelId,
+                memoryStoreId,
                 workspaceId,
                 cwdRelative,
                 approvalMode,
@@ -897,6 +947,7 @@ export function createJavaManagedAgentProvider(
                 {
                   agentId,
                   modelId,
+                  memoryStoreId,
                   workspaceId,
                   cwdRelative,
                   approvalMode,
@@ -988,6 +1039,9 @@ export function createJavaManagedAgentProvider(
           idempotencyKey: command.idempotencyKey,
           agentId,
           title: titleFor(request.text),
+          ...(request.memoryStoreId === undefined
+            ? {}
+            : { memoryStoreId: request.memoryStoreId }),
           input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
@@ -1148,6 +1202,14 @@ function toSessionSummary(
         ? { diagnostics: true }
         : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
+      ...(session.capabilities?.btw === true ? { btw: true } : {}),
+      ...(session.capabilities?.recap === true ? { recap: true } : {}),
+      ...(session.capabilities?.terminal !== undefined
+        ? { terminal: session.capabilities.terminal }
+        : {}),
+      ...(session.capabilities?.clientFiles === true
+        ? { clientFiles: true }
+        : {}),
       canSend:
         sessionActive &&
         !active &&

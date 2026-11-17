@@ -3,9 +3,8 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -40,7 +39,7 @@ class ManagedSnapshotPoolTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified, tenant_key, session_key, session_scope_key) VALUES ('tenant', 'session', 'qwen-code', 0, 0, ?, ?, ?)",
                 ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session"));
+                ManagedSessionStore.sessionScopeKey("tenant", "session"));
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, covered_sequence, gmt_modified) VALUES ('tenant', 'session', 'SESSION', X'', 1, 1, 0)");
     }
 
@@ -55,7 +54,7 @@ class ManagedSnapshotPoolTest {
                 + "first_sequence,last_sequence,gmt_create,gmt_modified,parts_json)"
                 + " VALUES ('tenant','session','item','turn','message','assistant','completed','{}',1,1,0,0,'[]')");
         var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(),
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(),
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var view = new TransactionTemplate(new DataSourceTransactionManager(source));
         view.setReadOnly(true);
@@ -66,29 +65,9 @@ class ManagedSnapshotPoolTest {
     }
 
     @Test
-    void retainedPrivatePinPreventsReleasedBodyCollection() {
-        var manager = new DataSourceTransactionManager(source);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
-        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,session_id,resource_id,kind,schema_version,"
-                + "byte_length,sha256,storage_kind,inline_bytes,state,gmt_create,retention_until)"
-                + " VALUES (?,?,'tenant','session','released','managed-message-parts',1,2,?,'MYSQL_INLINE',?,'REFERENCED',0,0)",
-                ManagedSchemaKeys.key(scope, "released"), scope, "a".repeat(64), new byte[] {91, 93});
-        jdbc.update("UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW);
-        jdbc.update("UPDATE ma_session SET runtime_request_key = ?", "a".repeat(64));
-        var resources = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource");
-        var refs = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE_REF.columns() + " FROM ma_resource_ref");
-        var collector = new ManagedProjectionResourceCollector(jdbc, manager);
-        assertThat(collector.runOnce()).isFalse();
-        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource"))
-                .usingRecursiveComparison()
-                .isEqualTo(resources);
-        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE_REF.columns() + " FROM ma_resource_ref")).isEqualTo(refs);
-    }
-
-    @Test
     void readsSessionAndStreamCountersWithOneConnection() {
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThat(store.findSession("tenant", "session").orElseThrow().lastSequence()).isEqualTo(1);
         assertThat(store.findSessionById("session")).isPresent();
     }
