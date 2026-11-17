@@ -13,7 +13,8 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
  * written in the current conversation, plus the (mtime, size) snapshot at
  * the time of that operation. It exists so that Edit / WriteFile can
  * verify the model is editing a file it has actually seen, and so that
- * repeated full Reads of an unchanged file can be short-circuited.
+ * repeated full Reads, and repeated identical offset/limit Reads, of an
+ * unchanged file can be short-circuited.
  *
  * This is a pure in-memory data structure. Callers are responsible for
  * `fs.stat`-ing the file and passing the resulting Stats in — the cache
@@ -52,11 +53,10 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
  */
 
 /**
- * A reproducible read view: `'full'` for the entire current content,
- * `{ offset, limit }` for an exact line range as the request asked it
- * (offset is the 0-based line index; `limit` undefined means open-ended).
+ * An exact line range as an explicit request asked for it (offset is the
+ * 0-based line index; `limit` undefined means open-ended).
  */
-export type FileReadRange = 'full' | { offset: number; limit?: number };
+export type FileReadRange = { offset: number; limit?: number };
 
 /** A single tracked file. Mutated in place by {@link FileReadCache}. */
 export interface FileReadEntry {
@@ -152,12 +152,9 @@ export interface FileReadEntry {
    */
   readResidentInHistory: boolean;
   /**
-   * The view the most recent read produced, when that read yielded a
-   * reproducible text payload: `'full'` for an untruncated no-args
-   * read, `{ offset, limit }` for a ranged read whose request was
-   * fully satisfied, `undefined` when the most recent read was
-   * cap-truncated, non-text, or page-based (PDF) — views whose bytes
-   * cannot be quoted back verbatim on a later identical request.
+   * The request range of the most recent read when it was an explicit
+   * offset/limit text read; `undefined` when the most recent read was a
+   * no-args read, non-text, or page-based (PDF).
    *
    * With {@link lastReadRangeResident} this gates the ranged-read half
    * of the ReadFile fast-path: a repeat Read with the same offset/limit
@@ -189,8 +186,7 @@ export type FileReadCheckResult =
 export type FileReadRecordOpts = {
   full: boolean;
   cacheable: boolean;
-  truncated?: boolean;
-  range?: { offset: number; limit?: number };
+  range?: FileReadRange;
 };
 
 export class FileReadCache {
@@ -248,14 +244,9 @@ export class FileReadCache {
    * match against `lastReadRange`, so a read never receives a
    * placeholder for a view it did not produce.
    *
-   *  - `truncated` — the character/byte cap cut the body short of the
-   *    requested view (`contentLengthTruncated` from the read
-   *    pipeline). A cap-truncated view is never recorded as a quotable
-   *    range: the cap is a session setting, not a file property, so the
-   *    on-disk fingerprint cannot promise the same cut on a later read.
-   *  - `range`     — the request's `{ offset, limit }` on a ranged
-   *    read; recorded as {@link FileReadEntry.lastReadRange} when the
-   *    read was cacheable and not cap-truncated.
+   *  - `range`     — the request's `{ offset, limit }` on an explicit
+   *    ranged read (omit it for no-args and page reads); recorded as
+   *    {@link FileReadEntry.lastReadRange} when the read was cacheable.
    *
    * When `stats.ino` is `0` the read is not stored and the returned
    * entry is **detached**: it describes this read for the immediate
@@ -273,7 +264,7 @@ export class FileReadCache {
       entry.readResidentInHistory = opts.full;
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
-      entry.lastReadRange = FileReadCache.viewOf(opts);
+      entry.lastReadRange = opts.cacheable ? opts.range : undefined;
       entry.lastReadRangeResident = entry.lastReadRange !== undefined;
       return entry;
     }
@@ -315,15 +306,9 @@ export class FileReadCache {
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
     }
-    entry.lastReadRange = FileReadCache.viewOf(opts);
+    entry.lastReadRange = opts.cacheable ? opts.range : undefined;
     entry.lastReadRangeResident = entry.lastReadRange !== undefined;
     return entry;
-  }
-
-  /** The reproducible view this read produced, if any. */
-  private static viewOf(opts: FileReadRecordOpts): FileReadRange | undefined {
-    if (!opts.cacheable || opts.truncated) return undefined;
-    return opts.full ? 'full' : opts.range;
   }
 
   /**
@@ -405,8 +390,9 @@ export class FileReadCache {
    * history — its read/edit/write output was blanked by idle
    * microcompaction.
    *
-   * Surgical alternative to {@link clear} for microcompaction: only
-   * {@link FileReadEntry.readResidentInHistory} is disarmed; the
+   * Surgical alternative to {@link clear} for microcompaction: only the
+   * residency flags ({@link FileReadEntry.readResidentInHistory} and
+   * {@link FileReadEntry.lastReadRangeResident}) are disarmed; the
    * fingerprint / `lastReadAt` / `lastReadCacheable` that
    * read-before-write depends on are preserved (that is the issue
    * #4239 fix).

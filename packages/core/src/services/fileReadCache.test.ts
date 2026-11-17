@@ -487,19 +487,8 @@ describe('FileReadCache', () => {
       expect(entry.lastReadRangeResident).toBe(true);
     });
 
-    it('records full for an untruncated whole-file read', () => {
+    it('records no view for a no-args read', () => {
       const entry = read('/x/foo.ts', makeStats());
-      expect(entry.lastReadRange).toBe('full');
-      expect(entry.lastReadRangeResident).toBe(true);
-    });
-
-    it('records no view for cap-truncated reads', () => {
-      const entry = read('/x/foo.ts', makeStats(), {
-        full: false,
-        cacheable: true,
-        truncated: true,
-        range,
-      });
       expect(entry.lastReadRange).toBeUndefined();
       expect(entry.lastReadRangeResident).toBe(false);
     });
@@ -517,7 +506,8 @@ describe('FileReadCache', () => {
     it('lets the most recent read overwrite the view', () => {
       read('/x/foo.ts', makeStats(), { full: false, cacheable: true, range });
       const entry = read('/x/foo.ts', makeStats());
-      expect(entry.lastReadRange).toBe('full');
+      expect(entry.lastReadRange).toBeUndefined();
+      expect(entry.lastReadRangeResident).toBe(false);
     });
 
     it('markReadEvictedFromHistory disarms the ranged view too', () => {

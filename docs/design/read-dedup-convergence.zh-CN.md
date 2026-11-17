@@ -17,17 +17,18 @@
 
 ### 1. 占位文案：preview 的底句 + main 的恢复路径
 
-新文案：`Wasted call — file <path> unchanged since your last Read. Refer to that earlier tool_result instead. If you cannot retrieve that earlier result (e.g. after context compaction) or suspect the file was modified outside the read/edit tools, re-read with explicit offset/limit.`
+新文案：`Wasted call — file <path> unchanged since it was last read in this conversation. Refer to that earlier content instead. If you cannot retrieve it (e.g. after context compaction) or suspect the file was modified outside the read/edit tools, re-read with a different offset/limit.`
 
-追加句是功能性的而非礼貌性的：不带参数的重读会再次满足 fast-path 条件、返回同一条占位符，因此显式 `offset`/limit 重读是脱离去重循环的唯一出口；compaction 例子点出 "refer to that earlier tool_result" 必然失效的唯一场景。去掉任子句（preview 文案的现状）会让模型没有退路。
+追加句是功能性的而非礼貌性的：不带参数的重读、以及重复同一个 `offset`/`limit`，都会再次满足 fast-path 条件、返回同一条占位符，因此只有与上一次不同的请求形态才能脱离去重循环，占位符必须写明 "different"；compaction 例子点出 "refer to that earlier content" 必然失效的唯一场景。去掉任一子句（preview 文案的现状）会让模型没有退路。
+
+文案写 "earlier content" 而不是 "earlier tool_result"：缓存也会被 `@` 附件（拼进用户消息）和 write_file 结果置为驻留，模型持有的内容并不总是 Read 的 tool_result。
 
 ### 2. 区间读去重，附加于现有整读半区之上
 
-- 读管线新增 `contentLengthTruncated`，与既有合并标志 `isTruncated` 分离：后者对"请求被完整满足的显式切片"也为真，无法区分"上限截断了视图"与"请求本身要的是切片"。
-- `FileReadEntry` 新增记录视图：`lastReadRange`（`'full'` | `{ offset, limit }` | `undefined`）与 `lastReadRangeResident`。仅对纯文本、未被上限截断的读记录视图；pages（PDF）读不记录，因为页视图与行区间不在同一轴上。最近一次读覆盖视图。
-- fast-path 的整读半区保持字节级不变（sticky `lastReadWasFull` + `readResidentInHistory`），新增区间半区：视图精确相等 + `lastReadRangeResident`。两个半区都保留 mtime+size 新鲜指纹、`lastReadCacheable`、写新于读三项检查。
+- `FileReadEntry` 新增记录视图：`lastReadRange`（`{ offset, limit }` | `undefined`）与 `lastReadRangeResident`。仅对带显式 `offset`/`limit` 的纯文本读记录视图；无参数读、pages（PDF）读、以及产出正文为空的读（offset 越过 EOF，唯一输出是模型应再次收到的诊断）不记录（整文件视图已有各自的 sticky 标志，页视图不是行区间）。最近一次读覆盖视图。
+- fast-path 的整读半区保持字节级不变（sticky `lastReadWasFull` + `readResidentInHistory`），新增区间半区，仅对带显式 `offset`/`limit` 的请求生效：视图精确相等 + `lastReadRangeResident`。两个半区都保留 mtime+size 新鲜指纹、`lastReadCacheable`、写新于读三项检查。
 - `markReadEvictedFromHistory` / `markAllReadsEvictedFromHistory` 同时解除两个驻留标志，清空区间读结果与清空整读结果一样杀死其回引资格。
-- 被上限截断的视图永不记录：上限是会话设置而非文件属性，磁盘指纹无法承诺后续读得到同样的截断位置。
+- 被输出上限截断的视图与其他视图一样记录。两个上限都在构造 `Config` 时固定，同一请求读同一份未变字节得到同样的截断结果，模型已持有的正是该正文（含 "Showing lines …" 提示）。
 
 ### 3. 延后到 follow-up issue 的两项及理由
 
@@ -42,7 +43,7 @@
 
 ## 验收
 
-- `fileReadCache.test.ts`：满足的区间读与未截断整读记录视图；上限截断、非文本读不记录；最近读覆盖；两个 evict helper 解除区间驻留。
-- `read-file.test.ts`：相同区间重读返回占位符且不回显字节；不同区间返回内容；首视图被上限截断则永不去重；整读插在两次区间读之间时先重发一次再恢复去重；evict 后重发字节。
+- `fileReadCache.test.ts`：区间读记录视图；无参数读、非文本读不记录；最近读覆盖；两个 evict helper 解除区间驻留。
+- `read-file.test.ts`：相同区间重读返回占位符且不回显字节；不同区间返回内容（即占位符的逃生路径）；被截断的无参数读不会使显式 `{offset: 0}` 请求命中；整读插在两次区间读之间时先重发一次再恢复去重；evict 后重发字节。
 - 五个钉住旧文案的测试文件改断言新文案。
 - 既有整读、evict、嵌套读、二进制、microcompaction 套件保持全绿。

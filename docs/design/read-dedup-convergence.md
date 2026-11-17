@@ -17,17 +17,18 @@ A line-by-line audit found preview gaps (mtime-only fingerprint, no auto-memory 
 
 ### 1. Placeholder wording: preview's base plus main's recovery path
 
-New text: `Wasted call — file <path> unchanged since your last Read. Refer to that earlier tool_result instead. If you cannot retrieve that earlier result (e.g. after context compaction) or suspect the file was modified outside the read/edit tools, re-read with explicit offset/limit.`
+New text: `Wasted call — file <path> unchanged since it was last read in this conversation. Refer to that earlier content instead. If you cannot retrieve it (e.g. after context compaction) or suspect the file was modified outside the read/edit tools, re-read with a different offset/limit.`
 
-The appended sentence is functional, not polite: a no-args re-read satisfies the fast-path conditions again and would return the same placeholder, so an explicit `offset`/limit re-read is the only escape from the dedup loop. The compaction example names the one case where "refer to that earlier tool_result" is guaranteed to fail. Dropping either clause (as preview's wording does) leaves the model with no recovery path.
+The appended sentence is functional, not polite: a no-args re-read, and a repeat of the same `offset`/`limit`, both satisfy the fast-path conditions again and would return the same placeholder, so only a request shape that differs from the last one escapes the dedup loop, and the placeholder must say "different". The compaction example names the one case where "refer to that earlier content" is guaranteed to fail. Dropping either clause (as preview's wording does) leaves the model with no recovery path.
+
+The wording says "earlier content", not "earlier tool_result": the cache is also armed by `@` attachments (spliced into the user message) and by write_file results, so the content the model holds is not always a Read tool_result.
 
 ### 2. Ranged-read dedup, additive to the existing full-read half
 
-- The read pipeline gains `contentLengthTruncated`, separated from the existing combined `isTruncated`: the latter is also true for an explicit `offset`/`limit` slice whose request was fully satisfied, so it cannot distinguish "the cap cut the view" from "the request asked for a slice".
-- `FileReadEntry` gains a recorded view: `lastReadRange` (`'full'` | `{ offset, limit }` | `undefined`) plus `lastReadRangeResident`. A view is recorded only for cacheable (plain-text), non-cap-truncated reads; page-based (PDF) reads record none because a page view is not a line range. The most recent read overwrites the view.
-- The fast-path keeps the full-read half byte-identical (sticky `lastReadWasFull` + `readResidentInHistory`) and adds a ranged half: exact view equality plus `lastReadRangeResident`. Both halves keep the fresh mtime+size fingerprint, `lastReadCacheable`, and write-newer-than-read checks.
+- `FileReadEntry` gains a recorded view: `lastReadRange` (`{ offset, limit }` | `undefined`) plus `lastReadRangeResident`. A view is recorded only for cacheable (plain-text) reads that carried an explicit `offset`/`limit`; no-args reads, page-based (PDF) reads and reads that produced an empty body (offset past EOF, whose only output is a diagnostic the model should get again) record none (the whole-file view already has its own sticky flags, and a page view is not a line range). The most recent read overwrites the view.
+- The fast-path keeps the full-read half byte-identical (sticky `lastReadWasFull` + `readResidentInHistory`) and adds a ranged half, taken only for requests that carry an explicit `offset`/`limit`: exact view equality plus `lastReadRangeResident`. Both halves keep the fresh mtime+size fingerprint, `lastReadCacheable`, and write-newer-than-read checks.
 - `markReadEvictedFromHistory` / `markAllReadsEvictedFromHistory` disarm both residency flags together, so blanking a ranged result kills its quote-back exactly as it kills the whole-file one.
-- Cap-truncated views are never recorded: the cap is a session setting, not a file property, so the on-disk fingerprint cannot promise the same cut on a later read.
+- A view cut by the output caps is recorded like any other. Both caps are fixed when the `Config` is built, so the same request over the same unchanged bytes yields the same cut, and the model already holds exactly that body (including the "Showing lines …" hint).
 
 ### 3. Deferred to follow-up issues, with reasons
 
@@ -42,7 +43,7 @@ The appended sentence is functional, not polite: a no-args re-read satisfies the
 
 ## Acceptance
 
-- `fileReadCache.test.ts`: view recorded for satisfied ranged reads and untruncated full reads; no view for cap-truncated, non-text reads; most-recent-read overwrite; both eviction helpers disarm the ranged view.
-- `read-file.test.ts`: identical ranged Read returns the placeholder without echoing bytes; a different range serves content; a cap-truncated first view never dedups; a full Read between ranged Reads re-emits once before dedup resumes; eviction re-emits bytes.
+- `fileReadCache.test.ts`: view recorded for ranged reads; no view for no-args and non-text reads; most-recent-read overwrite; both eviction helpers disarm the ranged view.
+- `read-file.test.ts`: identical ranged Read returns the placeholder without echoing bytes; a different range serves content, which is the placeholder's escape; a truncated no-args Read never arms an explicit `{offset: 0}` request; a full Read between ranged Reads re-emits once before dedup resumes; eviction re-emits bytes.
 - The five test files that pinned the old placeholder string assert the new wording.
 - Existing full-read, eviction, nested-read, binary, and microcompaction suites stay green.

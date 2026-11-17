@@ -34,7 +34,6 @@ import {
   FileReadOpenError,
   type FileReadSource,
 } from '../utils/file-read-source.js';
-import type { FileReadRange } from '../services/fileReadCache.js';
 import { parsePDFPageRange, PDF_MAX_PAGES_PER_READ } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
@@ -256,24 +255,17 @@ class ReadFileToolInvocation extends BaseToolInvocation<
           status.entry.lastReadAt > status.entry.lastWriteAt)
       ) {
         const entry = status.entry;
-        const requestRange: FileReadRange = isFullRead
-          ? 'full'
-          : {
-              offset: this.params.offset ?? 0,
-              limit: this.params.limit ?? undefined,
-            };
         // Full reads quote the sticky whole-file view; ranged reads quote
-        // only the exact view the last read produced. Both halves require
-        // that view still in history (issue #4239: idle microcompaction
-        // disarms the resident flags when it blanks the result).
-        const hit =
-          requestRange === 'full'
-            ? entry.lastReadWasFull && entry.readResidentInHistory
-            : entry.lastReadRangeResident &&
-              entry.lastReadRange !== undefined &&
-              entry.lastReadRange !== 'full' &&
-              entry.lastReadRange.offset === requestRange.offset &&
-              entry.lastReadRange.limit === requestRange.limit;
+        // only the exact offset/limit the last read produced. Both halves
+        // require that view still in history (issue #4239: idle
+        // microcompaction disarms the resident flags when it blanks the
+        // result).
+        const hit = isFullRead
+          ? entry.lastReadWasFull && entry.readResidentInHistory
+          : entry.lastReadRangeResident &&
+            entry.lastReadRange !== undefined &&
+            entry.lastReadRange.offset === (this.params.offset ?? 0) &&
+            entry.lastReadRange.limit === (this.params.limit ?? undefined);
         if (hit) {
           debugLogger.debug('hit', { path: absPath });
           return this.unchangedResult(absPath);
@@ -370,14 +362,17 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       cache.recordRead(absPath, recordStats, {
         full: isFullRead && !result.isTruncated,
         cacheable,
-        truncated: result.contentLengthTruncated === true,
+        // An empty body (offset past EOF) carries only a diagnostic the
+        // model should get again, so it is never a quotable view.
         range:
-          this.params.pages === undefined
-            ? {
+          isFullRead ||
+          this.params.pages !== undefined ||
+          result.llmContent === ''
+            ? undefined
+            : {
                 offset: this.params.offset ?? 0,
                 limit: this.params.limit ?? undefined,
-              }
-            : undefined,
+              },
       });
       this.recordedStats = recordStats;
       // Reading into a program does not prove the full text reached history.
@@ -619,19 +614,26 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   /**
    * Build the placeholder ToolResult returned when the cache indicates
-   * the file has not changed since the model last fully read it. The
-   * placeholder is intentionally explicit about its assumptions so the
-   * model can decide whether to trust it:
+   * the file has not changed since the model last read the requested view
+   * (the whole file, or the exact offset/limit). The placeholder is
+   * intentionally explicit about its assumptions so the model can decide
+   * whether to trust it:
    *
-   *  1. The full content was emitted *earlier in this conversation*.
-   *     If the conversation has been compacted, summarised, or the
-   *     model is a subagent receiving a transformed transcript, the
-   *     prior content may no longer be retrievable — the model should
-   *     re-read with explicit offset/limit in that case.
+   *  1. The content reached the conversation *earlier* — as a Read result,
+   *     but also possibly via an `@` attachment or a write_file call, so
+   *     the wording must not claim a specific tool_result. If the
+   *     conversation has been compacted, summarised, or the model is a
+   *     subagent receiving a transformed transcript, that content may no
+   *     longer be retrievable — the model should re-read with a
+   *     different offset/limit in that case.
    *  2. External mutations the cache cannot observe (shell writes via
    *     run_shell_command, MCP tool writes, other processes touching
    *     the file) will not appear here as `stale`. If the model
-   *     suspects drift, it should re-read with explicit offset/limit.
+   *     suspects drift, it should re-read with a different offset/limit.
+   *
+   * "Different" is load-bearing: a no-args Read and a repeat of the same
+   * offset/limit both satisfy the fast-path again, so only a request
+   * shape that differs from the last one escapes it.
    *
    * No `logFileOperation` is emitted on this path: the file_unchanged
    * fast-path bypasses the read pipeline entirely, and the existing
@@ -644,11 +646,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       makeRelative(absPath, this.config.getTargetDir()),
     );
     const llmContent =
-      `Wasted call — file ${relativePath} unchanged since your last Read. ` +
-      `Refer to that earlier tool_result instead. If you cannot retrieve ` +
-      `that earlier result (e.g. after context compaction) or suspect the ` +
-      `file was modified outside the read/edit tools, re-read with ` +
-      `explicit offset/limit.`;
+      `Wasted call — file ${relativePath} unchanged since it was last read ` +
+      `in this conversation. Refer to that earlier content instead. If you ` +
+      `cannot retrieve it (e.g. after context compaction) or suspect the ` +
+      `file was modified outside the read/edit tools, re-read with a ` +
+      `different offset/limit.`;
     return {
       llmContent,
       returnDisplay: `Unchanged: ${relativePath}`,
