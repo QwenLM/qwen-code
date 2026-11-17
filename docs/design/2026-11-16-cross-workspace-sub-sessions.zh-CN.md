@@ -2,7 +2,7 @@
 
 [English](2026-11-16-cross-workspace-sub-sessions.md) | [简体中文](2026-11-16-cross-workspace-sub-sessions.zh-CN.md)
 
-状态：第 1 步随本文档实现；第 2、3 步为提议。
+状态：第 1、2 步已实现；第 3 步为提议。
 
 ## 问题
 
@@ -56,21 +56,29 @@ standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 d
 
 子会话记录调用方为父会话，深度限制会拒绝子会话继续创建子会话。完成通知的 task id 是新会话的 id，第 1 步每次启动都会新建会话，因此该 id 唯一。
 
-## 第 2 步：给调用方自己建的会话发后续 prompt（提议）
+## 第 2 步：给调用方自己建的会话发后续 prompt
 
-`create_sub_session` 新增 `sessionId`。该会话必须是这个调用方建的：它记录的父会话就是调用方。这条血缘是持久化的，所以在 daemon 重启后依然成立。启动器在该会话所属 workspace 的 bridge 上恢复它：如果它还活着就附加上去，否则从对话记录恢复。prompt 排在正在运行的那一轮后面，启动器按自己的 prompt id 等待或观察这一轮。发送 prompt 前会再次应用第 1 步的审批规则。这里每条完成通知都需要自己的 task id，因为调用方会从同一个会话收到多条通知，而接收方会把重复的 task id 当作已经收到的通知。
+`create_sub_session` 新增 `sessionId`；如果该会话在另一个 workspace 里，要同时指定 `workspace`。`model` 和 `name` 只对新会话有意义，所以不能与 `sessionId` 同时使用。
 
-不是调用方建的会话仍然不可触及。给它们发 prompt，相当于把另一个会话的模型文本作为用户输入放进去；要和它们交流，仍然使用不带用户权限的 `send_message`。由于子会话不能再委派，调用方和它的子会话不可能形成环，所以不需要 daemon 级的委派记录。回滚永远不会关闭或删除被复用的会话。
+**哪些会话。** 该会话必须是这个调用方建的：它记录的父会话就是调用方，并且不带来源标记。侧任务和定时任务的运行也会把它们来自的会话记为父会话，但它们是由人或定时器启动的，带有 `side_task` 或 `scheduled_task_run:` 来源。启动器在动这个会话之前先检查这一点：会话还活着就看活跃条目，已经被空闲回收的就读它对话记录开头的创建记录。这条血缘是持久化的，所以在 daemon 重启后依然成立。调用方自己、已归档的会话和 standalone 会话都会被拒绝。不是调用方建的会话仍然不可触及：给它们发 prompt，相当于把另一个会话的模型文本作为用户输入放进去；要和它们交流，仍然使用不带用户权限的 `send_message`。
+
+**批准。** 指定了 workspace 的后续 prompt 要满足第 1 步对该 workspace 的全部要求：单次批准（确认内容里也会写出目标会话）、信任与实例代次检查，以及审批规则。审批规则按接收请求时目标会话的模式计算。如果需要收紧，等追问开始自己的轮次时才切换。在调用方自己 workspace 里的后续 prompt 沿用工具通常的权限流程，会话保留它自己的模式，和在该 workspace 新建的子会话一样。
+
+**执行这一轮。** 启动器在该会话所属 workspace 的 bridge 上恢复它：如果它还活着就附加上去，否则从对话记录恢复。归档协调器覆盖查验血缘、恢复和入队。prompt 排在正在运行的轮次后面。等待期间只统计带有自己 prompt id 的输出，所以已经在运行的那一轮或后台轮次都不会被误当成这一轮。后续 prompt 保留会话原来的名字，失败的后续 prompt 永远不会关闭或删除这个会话。恢复会给会话附加一个 client；启动器处理完这一轮后会释放它，所以后续 prompt 不会让附加不断累积，只为这次后续 prompt 而恢复的会话在没有剩余工作时会再次关闭。
+
+**回报。** 每个用 `sent` 发出的后续 prompt 都会回报，无论在哪个 workspace；和跨 workspace 的 `sent` 启动一样，这要求调用方开启了对话记录。新建会话的 `sent` 启动会等到 prompt 开始执行再返回，这是立即发生的；后续 prompt 排进队列就返回。启动器最多等待结果 30 分钟。ACP 写入开始前超时会阻止派发并发布失败终态。如果写入已经开始，超时只结束结果等待，后续 prompt 继续等当前 ACP 请求结束。轮到它时各项检查依然会执行，拒绝时会以失败的完成通知回报。如果追问失败后没有其它可执行的排队 prompt，bridge 会释放前一轮的 Todo Stop Guard 等待。它的后台任务 id 是 `<sessionId>:<promptId>`，而不是会话 id：调用方会从同一个会话收到多条完成通知，而接收方会把重复的任务 id 当作已经收到的通知。启动器会返回这个 id，调用方会话会记录它，这样 Todo Stop Guard 就能把这条完成通知和发起它的工作关联起来。工具描述也会告诉调用方的模型：结果会自动回来，不要让子会话再回报，否则结果会送达两次。
+
+由于子会话不能再委派，调用方和它的子会话不可能形成环，所以不需要 daemon 级的委派记录。
 
 ## 第 3 步：Web Shell（提议）
 
 会话页上的"发送到会话"操作会打开一个选择器：选一个已注册的 workspace，再选"新会话"或本会话在那里建过的某个会话，然后填写消息。发送走与工具相同的 daemon 路径，以当前打开的会话作为调用方，使用 `sent` 模式。目标会话在分屏中打开（分屏已经支持其它 workspace 的会话），它的回复就在那里流式显示。这一轮结束时，发起的会话也会收到完成通知，所以结果在两处都能看到。
 
-## 文件（第 1 步）
+## 文件
 
-- `packages/core/src/tools/create-sub-session.ts`：新参数、校验和描述。
+- `packages/core/src/tools/create-sub-session.ts`：新参数、校验、描述和批准文本，以及后续 prompt 结果的措辞。
 - ACP 会话的派发器和 bridge 的请求校验（`packages/cli/src/acp-integration/session/Session.ts`、`packages/acp-bridge/src/bridgeOptions.ts`、`bridgeClient.ts`）：传递该字段。派发器还会把 daemon 的拒绝原因传给工具：携带原因的 RPC 错误到达会话时是一个普通对象，它的 message 只有 "Internal error"，工具以前会把它打印成 `[object Object]`。
-- `packages/cli/src/serve/create-sub-session.ts`：调用方一侧的检查、交给目标启动器、审批规则、通知路由。
+- `packages/cli/src/serve/create-sub-session.ts`：调用方一侧的检查、交给目标启动器、审批规则、通知路由，以及后续 prompt 的路径（血缘检查、恢复、释放 client、任务 id、按 prompt id 匹配）。
 - `packages/cli/src/serve/run-qwen-serve.ts`：按 workspace 注册每个启动器，并把解析函数交给各启动器。
 - 工具的用户文档。
 
@@ -82,9 +90,13 @@ standalone 和 Live 调用方不能指定 workspace。它们的子会话位于 d
 
 ## 待定问题
 
+- 用 `first-turn` 发出的后续 prompt 最多等待五分钟，而一个忙碌的会话可能让它在队列里待得更久。这次等待超时不会撤回 prompt，所以它之后仍会执行，也不会回报结果。无法确定排队时间时可用 `sent`。
+
 - 是否所有 `sent` 子会话都应该在完成时通知调用方，而不仅是指定了 workspace 的那些？这样工具的行为更一致，但会给现有的发出就不管的调用多加一轮自动对话。
 
-## 验证（第 1 步）
+## 验证
 
 - 单元测试覆盖按绝对路径和 id 解析，拒绝未知和不受信的目标和调用方，深度限制，在目标 bridge 派发、在调用方 bridge 通知，指定 workspace 时旧授权仍需单次确认，读取实际审批模式，拒绝不兼容模式和启动期间的模式变更，以及目标 runtime 停止时通知取消。
 - 端到端验证使用两个受信 workspace。从 A 在 B 中新建子会话，通过 `first-turn` 读取 B 的 `QWEN.md`，再验证 `sent` 在 A 中收到通知。通过 A 的子会话链接打开 B。指定不受信目标应收到拒绝与可用 workspace 列表。
+- 第 2 步单元测试：后续 prompt 只返回带有自己 prompt id 的输出；`sent` 后续 prompt 以 `<sessionId>:<promptId>` 回报，并释放它附加的 client；发给忙碌会话的 `sent` 后续 prompt 排进队列就返回，轮到它时被拒的会以失败回报；已回收子会话的血缘从对话记录读取；别的会话、调用方自己、侧任务、定时任务运行、Live 调用方，以及无法接收 `sent` 完成通知的调用方，都在会话被触碰之前被拒绝；失败的后续 prompt 不会关闭会话；在另一个 workspace 的后续 prompt 在该 workspace 的 bridge 上、以委派后的模式运行。
+- 第 2 步端到端：用 `first-turn` 追问 B 里的子会话，再在 daemon 重启后用 `sent` 追问，看到 B 带着之前几轮的上下文作答；在子会话执行长轮次时追问，只拿到新一轮的文本；调用方没有建过的会话会被拒绝。
