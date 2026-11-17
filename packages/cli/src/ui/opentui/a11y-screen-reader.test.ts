@@ -284,3 +284,40 @@ describe('ScreenReaderOutputWriter (ink append-only parity)', () => {
     expect(dynamicWrites[0]).toMatch(/^a {2,}b$/);
   });
 });
+
+describe('ScreenReaderOutputWriter C1 boundary', () => {
+  const payloads = [
+    ['OSC clipboard', '\u009d52;c;QUFBQQ==\u009c'],
+    ['OSC title', '\u009d0;untrusted-title\u009c'],
+    ['DCS', '\u0090untrusted-body\u009c'],
+    ['APC', '\u009funtrusted-body\u009c'],
+    ['PM', '\u009euntrusted-body\u009c'],
+    ['SOS', '\u0098untrusted-body\u009c'],
+    ['standalone ST', 'left\u009cright'],
+    [
+      'every C1 code point',
+      String.fromCodePoint(
+        ...Array.from({ length: 32 }, (_, index) => 0x80 + index),
+      ),
+    ],
+  ] as const;
+
+  describe.each(['static', 'dynamic'] as const)('%s output', (mode) => {
+    it.each(payloads)(
+      'does not forward C1 controls from %s content',
+      (_name, payload) => {
+        const chunks: string[] = [];
+        const writer = new ScreenReaderOutputWriter((chunk) => {
+          chunks.push(chunk);
+        });
+        if (mode === 'static') writer.appendStatic(payload);
+        else writer.updateDynamic(payload);
+        const forwardedControls = Array.from(
+          chunks.join(''),
+          (character) => character.codePointAt(0)!,
+        ).filter((codePoint) => codePoint >= 0x80 && codePoint <= 0x9f);
+        expect(forwardedControls).toEqual([]);
+      },
+    );
+  });
+});

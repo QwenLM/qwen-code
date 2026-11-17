@@ -12,6 +12,8 @@ classic 与 preview 安装器是不同路线。变更前两个 preview 脚本均
 
 ## 目标与边界
 
+> 历史读屏合同：下文的 Ink 回退、strict 拒绝及 helper 尚未接线描述保留早期设计与证据。对于 [PR #17500](https://github.com/QwenLM/qwen-code/pull/17500) 中的候选，[Native 读屏接线设计](2026-11-17-native-screen-reader-wiring.zh-CN.md) 在其明确范围内取代上述特定限制。这不表示尚未合并的候选已在 main 可用，也不取代历史结果或其他分发、平台限制。
+
 保持 OpenTUI 0.5.10 与 shipping Bun 1.4.4。保持 Node 作为 npm launcher 和包管理解释器、既有监督交接、默认 Ink、读屏回退与更新器所有权。不引入 runtime selector、全局 Bun 要求、启动下载、新发布包族、通用测试框架、Windows npm 私有 Bun 或 musl 支持。
 
 将永久真实布局验收、有边界的 preview 失败保护修复、双向链接的测试计划及精确源码/产物凭据作为一个完整审查批次。每个交付 PR 对实际 base 的新增加删除不超过 6000 行。不删唯一断言，也不把每个平台或场景拆成独立 PR 来凑上限。

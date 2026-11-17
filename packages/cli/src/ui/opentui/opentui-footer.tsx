@@ -149,7 +149,9 @@ export function OpenTuiLoadingIndicator({
   if (screenReader)
     return (
       <text>
-        {waiting ? 'Waiting for confirmation' : 'Working. Escape to cancel.'}
+        {waiting
+          ? t('Waiting for confirmation')
+          : t('Working. Escape to cancel.')}
       </text>
     );
 
@@ -326,24 +328,41 @@ export function OpenTuiFooter({
   // under the composer with nothing above it. The queued-message segment sits
   // beside the warning rather than inside the hint it replaces, so it stays.
   if (screenReader) {
-    return (
-      <text>
-        {exitHint ??
+    const segments: Array<[string, string | null]> = exitHint
+      ? [
+          ['exit', exitHint],
+          ['queue', queuedHint],
+        ]
+      : [
+          ['sandbox', sandboxLabel ?? ''],
+          ...statusLines.map((line, index): [string, string] => [
+            `status-${index}`,
+            line,
+          ]),
+          ['context', contextLabel],
           [
-            sandboxLabel,
+            'worktree',
             activeWorktree && !settings.merged.ui?.hideBuiltinWorktreeIndicator
               ? `Worktree: ${activeWorktree.branch} (${activeWorktree.slug})`
               : '',
+          ],
+          [
+            'workflow',
             workflowMode?.requested
               ? workflowMode.effective
                 ? 'Workflow mode: on'
                 : 'Workflow mode: on (unavailable)'
               : '',
-            hintParts.map((part) => part.text).join(''),
-          ]
-            .filter(Boolean)
-            .join('\n')}
-      </text>
+          ],
+          ['mode', modeHint.map((part) => part.text).join('')],
+          ['queue', queuedHint],
+        ];
+    return (
+      <box flexDirection="column">
+        {segments.map(([key, text]) =>
+          text ? <text key={key}>{text}</text> : null,
+        )}
+      </box>
     );
   }
   if (exitHint) {

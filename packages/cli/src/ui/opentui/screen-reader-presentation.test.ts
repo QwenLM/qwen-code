@@ -30,6 +30,14 @@ vi.mock('@opentui/core', () => {
   class EditBufferRenderable extends TextBufferRenderable {
     focused = false;
     cursorOffset = 0;
+    getTextRange(start: number, end: number): string {
+      if ([...this.plainText].some((char) => char.codePointAt(0)! > 127)) {
+        throw new Error(
+          'Configure a captured native prefix for non-ASCII fixtures',
+        );
+      }
+      return this.plainText.slice(start, end);
+    }
   }
   class TextareaRenderable extends EditBufferRenderable {
     placeholder = '';
@@ -76,6 +84,8 @@ import {
   readScreenReaderControls,
 } from './screen-reader-presentation.js';
 import { ScreenReaderOutputWriter } from './a11y-screen-reader.js';
+import type { LiveAssistantItem } from './live-session-model.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 function text(value: string) {
   const node = Object.assign(Object.create(TextBufferRenderable.prototype), {
@@ -98,6 +108,141 @@ function box(children: Renderable[]) {
 }
 
 describe('screen-reader semantic presentation', () => {
+  it.each([
+    ['user', '用户'],
+    ['assistant', '助手'],
+    ['thinking', '思考'],
+    ['tool', '工具'],
+    ['task', '任务'],
+    ['image', '图像'],
+    ['compaction', '压缩'],
+    ['info', '信息'],
+    ['error', '错误'],
+    ['warning', '警告'],
+    ['retry', '重试'],
+    ['stop-hook', '停止钩子'],
+    ['away-recap', '离开摘要'],
+    ['user-shell', '用户命令'],
+    ['advisor', '顾问'],
+    ['arena-agent', '竞技场智能体'],
+    ['arena-session', '竞技场会话'],
+    ['goal', '目标'],
+  ])(
+    'localizes the actual %s history label without changing its body or identity',
+    async (kind, label) => {
+      await setLanguageAsync('zh');
+      try {
+        const row = box([text('Original user content')]);
+        row.id = `screen-reader-item-${kind}:entry`;
+        const history = box([row]);
+        history.id = 'screen-reader-history';
+        const root = box([history]);
+        const events = new EventEmitter();
+        let output = '';
+        const presentation = new ScreenReaderPresentation(
+          new ScreenReaderOutputWriter((chunk) => {
+            output += chunk;
+          }),
+        );
+        presentation.setHistory({}, [{ kind, id: 'entry' }]);
+        const stop = presentation.observeFrames(events, () => root);
+        try {
+          events.emit('frame');
+          expect(output).toBe(`${label}：Original user content\n`);
+          expect(row.id).toBe(`screen-reader-item-${kind}:entry`);
+        } finally {
+          stop();
+        }
+      } finally {
+        await setLanguageAsync('en');
+      }
+    },
+  );
+
+  it('localizes semantic announcements without changing user text, owner dedupe or protected reads', async () => {
+    await setLanguageAsync('zh');
+    try {
+      const caret = text(' ');
+      caret.id = 'screen-reader-caret-active-5';
+      const field = box([text('> '), text('hello'), caret, text('world')]);
+      field.id = 'screen-reader-input-line';
+      expect(readScreenReaderControls(field)).toBe(
+        '输入已聚焦。光标：5\n> hello world',
+      );
+      const secret = box([]);
+      secret.id = 'screen-reader-protected-input';
+      Object.defineProperty(secret, 'getChildren', {
+        value: () => {
+          throw new Error('secret children');
+        },
+      });
+      expect(readScreenReaderControls(secret)).toBe('受保护的输入');
+      const native = Object.create(
+        EditBufferRenderable.prototype,
+      ) as EditBufferRenderable;
+      Object.defineProperties(native, {
+        id: { value: '' },
+        visible: { value: true },
+        isDestroyed: { value: false },
+        focused: { value: true },
+        plainText: { value: '你好🙂' },
+        cursorOffset: { value: 6 },
+        getTextRange: { value: () => '你好🙂' },
+      });
+      expect(readScreenReaderControls(native)).toBe(
+        '已聚焦的输入：你好🙂\n光标：3',
+      );
+      const toggle = text('User label');
+      toggle.id = 'screen-reader-auth-toggle-focused-on';
+      expect(readScreenReaderControls(toggle)).toBe(
+        '已聚焦，开关已开启：User label',
+      );
+      const choice = text('User choice');
+      choice.id = 'screen-reader-selected-option';
+      let output = '';
+      const events = new EventEmitter();
+      const row = box([text('User body')]);
+      row.id = 'screen-reader-item-assistant:reply';
+      const history = box([row]);
+      history.id = 'screen-reader-history';
+      const dialog = box([choice]);
+      dialog.id = 'screen-reader-dialog';
+      const root = box([history, dialog]);
+      const presentation = new ScreenReaderPresentation(
+        new ScreenReaderOutputWriter((chunk) => {
+          output += chunk;
+        }),
+      );
+      const owner = {};
+      presentation.setHistory(owner, [{ kind: 'assistant', id: 'reply' }]);
+      const stop = presentation.observeFrames(events, () => root);
+      try {
+        events.emit('frame');
+        expect(output).toContain('对话框\n');
+        expect(output).toContain('已选择 User choice');
+        const first = output;
+        choice.id = 'screen-reader-unselected-option';
+        events.emit('frame');
+        expect(output).toBe(first);
+        Object.defineProperty(row.getChildren()[0], 'plainText', {
+          value: 'Corrected user body',
+          configurable: true,
+        });
+        events.emit('frame');
+        expect(output).toContain('修订 助手：Corrected user body');
+        dialog.id = '';
+        events.emit('frame');
+        expect(output).toContain('对话框已关闭。');
+        presentation.setHistory(owner, []);
+        expect(output).toContain('对话已清空。');
+      } finally {
+        stop();
+      }
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
   it('reads real selection state without using colors, and excludes hidden controls', () => {
     const selected = Object.assign(Object.create(SelectRenderable.prototype), {
       options: [
@@ -122,6 +267,54 @@ describe('screen-reader semantic presentation', () => {
     );
   });
 
+  it.each([
+    ['question-tab', '▸ Q2', '  Q2', 'Q2'],
+    ['question-tab', '▸ ▸ Deploy', '  ▸ Deploy', '▸ Deploy'],
+    ['submit-tab', '▸ Submit', ' Submit', 'Submit'],
+    ['attachment', '> a.txt', '📎 a.txt', 'a.txt'],
+    ['attachment', '> > user.txt', '📎 > user.txt', '> user.txt'],
+  ])(
+    'normalizes only the known %s marker across selection',
+    (kind, active, inactive, label) => {
+      const row = text(active);
+      row.id = `screen-reader-selected-${kind}`;
+      const events = new EventEmitter();
+      let output = '';
+      const presentation = new ScreenReaderPresentation(
+        new ScreenReaderOutputWriter((chunk) => {
+          output += chunk;
+        }),
+      );
+      presentation.observeFrames(events, () => box([row]));
+      events.emit('frame');
+      expect(output).toBe(`Selected ${label}\n`);
+      row.id = `screen-reader-unselected-${kind}`;
+      Object.defineProperty(row, 'plainText', {
+        value: inactive,
+        configurable: true,
+      });
+      events.emit('frame');
+      expect(output).toBe(`Selected ${label}\n`);
+    },
+  );
+
+  it('announces only explicitly disabled producer options as disabled', () => {
+    const disabled = text('Marketplaces');
+    disabled.id = 'screen-reader-unselected-option-disabled';
+    expect(readScreenReaderControls(disabled)).toBe('Disabled Marketplaces');
+    const enabled = text('Add new');
+    enabled.id = 'screen-reader-unselected-option';
+    expect(readScreenReaderControls(enabled)).toBe('Add new');
+    disabled.id = 'screen-reader-selected-option-disabled';
+    Object.defineProperty(disabled, 'plainText', {
+      value: '› Marketplaces',
+      configurable: true,
+    });
+    expect(readScreenReaderControls(disabled)).toBe(
+      'Selected Disabled Marketplaces',
+    );
+  });
+
   it('does not invent selection for user-controlled arrow text', () => {
     expect(readScreenReaderControls(text('› user text'))).toBe('› user text');
     expect(readScreenReaderControls(text('───'))).toBe('───');
@@ -140,6 +333,65 @@ describe('screen-reader semantic presentation', () => {
       'Focused Input: hello\nCursor: 2',
     );
     expect(input.plainText).toBe('hello');
+  });
+
+  it.each([
+    { phase: 'end', offset: 6, prefix: '你好🙂', codePoints: 3 },
+    { phase: 'home', offset: 0, prefix: '', codePoints: 0 },
+    { phase: 'right', offset: 2, prefix: '你', codePoints: 1 },
+  ])(
+    'announces the captured public native prefix position at $phase',
+    ({ offset, prefix, codePoints }) => {
+      const getTextRange = vi.fn((start: number, end: number) => {
+        expect(start).toBe(0);
+        expect(end).toBe(offset);
+        return prefix;
+      });
+      const input = Object.assign(
+        Object.create(EditBufferRenderable.prototype),
+        {
+          plainText: '你好🙂',
+          cursorOffset: offset,
+          focused: true,
+          visible: true,
+          isDestroyed: false,
+          id: '',
+          getTextRange,
+        },
+      ) as EditBufferRenderable;
+      expect(readScreenReaderControls(input)).toBe(
+        `Focused Input: 你好🙂\nCursor: ${codePoints}`,
+      );
+      expect(getTextRange).toHaveBeenCalledExactlyOnceWith(0, offset);
+      expect(input.cursorOffset).toBe(offset);
+    },
+  );
+
+  it('prunes a protected native editor before reading its value, cursor or native range', () => {
+    const input = Object.assign(Object.create(EditBufferRenderable.prototype), {
+      id: 'screen-reader-protected-input',
+      visible: true,
+      isDestroyed: false,
+      focused: true,
+    }) as EditBufferRenderable;
+    Object.defineProperties(input, {
+      plainText: {
+        get: () => {
+          throw new Error('secret value');
+        },
+      },
+      cursorOffset: {
+        get: () => {
+          throw new Error('secret cursor');
+        },
+      },
+      getTextRange: {
+        value: () => {
+          throw new Error('secret prefix');
+        },
+      },
+    });
+    expect(readScreenReaderControls(input)).toBe('Protected input');
   });
 
   it('identifies the actual empty composer placeholder without treating a suggestion as submitted text', () => {
@@ -161,6 +413,39 @@ describe('screen-reader semantic presentation', () => {
     const field = box([text('> '), text('hello'), text(' '), text('world')]);
     field.id = 'screen-reader-input-line';
     expect(readScreenReaderControls(field)).toBe('> hello world');
+  });
+
+  it('announces actual software input focus and ASCII caret while retaining inline spaces', () => {
+    const caret = text(' ');
+    caret.id = 'screen-reader-caret-active-5';
+    const field = box([text('> '), text('hello'), caret, text('world')]);
+    field.id = 'screen-reader-input-line';
+    expect(readScreenReaderControls(field)).toBe(
+      'Focused input. Cursor: 5\n> hello world',
+    );
+    caret.id = 'screen-reader-caret-inactive-5';
+    expect(readScreenReaderControls(field)).toBe(
+      'Unfocused input.\n> hello world',
+    );
+    field.id = 'screen-reader-protected-input';
+    Object.defineProperty(field, 'getChildren', {
+      value: () => {
+        throw new Error('protected children must not be read');
+      },
+    });
+    expect(readScreenReaderControls(field)).toBe('Protected input');
+  });
+
+  it('reads explicit advanced toggle focus and checked state independently of color', () => {
+    const toggle = text('Enable thinking');
+    toggle.id = 'screen-reader-auth-toggle-focused-on';
+    expect(readScreenReaderControls(toggle)).toBe(
+      'Focused Toggle on: Enable thinking',
+    );
+    toggle.id = 'screen-reader-auth-toggle-unfocused-off';
+    expect(readScreenReaderControls(toggle)).toBe(
+      'Toggle off: Enable thinking',
+    );
   });
 
   it('keeps inline spaces while pruning hidden and protected child values', () => {
@@ -232,7 +517,7 @@ describe('screen-reader semantic presentation', () => {
     expect(output).not.toContain('\u001b');
   });
 
-  it('publishes actual history subtree text once, preserves rewritten content, and resets the owner', () => {
+  it('publishes settled assistant subtree text once without replaying streaming prefixes, and resets the owner', () => {
     let output = '';
     const events = new EventEmitter();
     const row = box([text('Mod rewritten Hel')]);
@@ -247,21 +532,34 @@ describe('screen-reader semantic presentation', () => {
     );
     presentation.observeFrames(events, () => root);
     const ownerA = {};
-    presentation.setHistory(ownerA, [{ kind: 'assistant', id: 'reply' }]);
+    const item: LiveAssistantItem = {
+      kind: 'assistant',
+      id: 'reply',
+      text: 'Canonical text is not the displayed Mod text',
+      streaming: true,
+    };
+    presentation.setHistory(ownerA, [item]);
     expect(output).toBe('');
     events.emit('frame');
-    expect(output).toBe('assistant: Mod rewritten Hel\n');
+    expect(output).toBe('');
     Object.defineProperty(row.getChildren()[0], 'plainText', {
       value: 'Mod rewritten Hello',
       configurable: true,
     });
+    presentation.setHistory(ownerA, [item]);
     events.emit('frame');
+    expect(output).toBe('');
+    Object.defineProperty(row.getChildren()[0], 'plainText', {
+      value: 'Mod rewritten Hello world!',
+      configurable: true,
+    });
+    const settled: LiveAssistantItem = { ...item, streaming: false };
+    presentation.setHistory(ownerA, [settled]);
+    events.emit('frame');
+    expect(output).toBe('assistant: Mod rewritten Hello world!\n');
     const done = output;
     events.emit('frame');
     expect(output).toBe(done);
-    expect(output).toBe(
-      'assistant: Mod rewritten Hel\nRevision assistant: Mod rewritten Hello\n',
-    );
     presentation.setHistory(ownerA, []);
     expect(output).toContain('Conversation cleared.');
     presentation.setHistory({}, [{ kind: 'assistant', id: 'reply' }]);
@@ -269,7 +567,9 @@ describe('screen-reader semantic presentation', () => {
     presentation.setHistory(ownerA, [{ kind: 'assistant', id: 'reply' }]);
     events.emit('frame');
     expect(output).not.toContain('\nlo\n');
-    expect(output.match(/^assistant: Mod rewritten Hello$/gm)).toHaveLength(2);
+    expect(
+      output.match(/^assistant: Mod rewritten Hello world!$/gm),
+    ).toHaveLength(3);
   });
 
   it('announces a same-ID correction without repeating unchanged controls, and resets control cache for a new owner', () => {
@@ -348,6 +648,75 @@ describe('screen-reader semantic presentation', () => {
     queued();
     expect(output).not.toContain('stale');
     expect(events.listenerCount('frame')).toBe(0);
+  });
+
+  it.each(['tool', 'thinking'])(
+    'waits for %s settlement while leaving the real permission dialog live',
+    (kind) => {
+      let output = '';
+      const events = new EventEmitter();
+      const row = box([text('partial body')]);
+      row.id = `screen-reader-item-${kind}:pending`;
+      const history = box([row]);
+      history.id = 'screen-reader-history';
+      const dialog = text('Allow execution of actual command?');
+      dialog.id = 'screen-reader-dialog';
+      const presentation = new ScreenReaderPresentation(
+        new ScreenReaderOutputWriter((chunk) => {
+          output += chunk;
+        }),
+      );
+      const owner = {};
+      presentation.setHistory(owner, [{ kind, id: 'pending', done: false }]);
+      presentation.observeFrames(events, () => box([history, dialog]));
+      events.emit('frame');
+      expect(output).toContain('Allow execution of actual command?');
+      expect(output).not.toContain('partial body');
+      presentation.setHistory(owner, [{ kind, id: 'pending', done: true }]);
+      events.emit('frame');
+      events.emit('frame');
+      expect(output.match(/partial body/g)).toHaveLength(1);
+    },
+  );
+
+  it('announces the actual mounted range on navigation and rejects stale range rows after clear or owner replacement', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const range = text('History items 1-1 of 2');
+    range.id = 'screen-reader-history-window';
+    const first = text('first actual row');
+    first.id = 'screen-reader-item-user:first';
+    const last = text('last actual row');
+    last.id = 'screen-reader-item-user:last';
+    const history = box([range, first]);
+    history.id = 'screen-reader-history';
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    presentation.observeFrames(events, () => box([history]));
+    const owner = {};
+    presentation.setHistory(owner, [
+      { kind: 'user', id: 'first' },
+      { kind: 'user', id: 'last' },
+    ]);
+    events.emit('frame');
+    Object.assign(range, { plainText: 'History items 2-2 of 2' });
+    history.getChildren()[1] = last;
+    events.emit('frame');
+    Object.assign(range, { plainText: 'History items 1-1 of 2' });
+    history.getChildren()[1] = first;
+    events.emit('frame');
+    expect(output.match(/History items 1-1 of 2/g)).toHaveLength(2);
+    expect(output.match(/user: first actual row/g)).toHaveLength(1);
+    expect(output).toContain('user: last actual row');
+    presentation.setHistory(owner, []);
+    const cleared = output;
+    events.emit('frame');
+    presentation.setHistory({}, []);
+    events.emit('frame');
+    expect(output).toBe(cleared);
   });
 
   it('sanitizes the actual permission description without reading secret hidden content or invoking actions', () => {

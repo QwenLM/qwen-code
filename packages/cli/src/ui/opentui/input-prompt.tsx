@@ -2454,6 +2454,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             return (
               <box
                 key={`${suggestion.value}-${originalIndex}`}
+                id={
+                  isActive
+                    ? 'screen-reader-selected-suggestion'
+                    : 'screen-reader-unselected-suggestion'
+                }
                 flexDirection="row"
               >
                 <box width={2} flexShrink={0}>

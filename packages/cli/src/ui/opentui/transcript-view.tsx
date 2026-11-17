@@ -688,11 +688,8 @@ export function OpenTuiTranscriptView({
         rootRef.current = el as Renderable | null;
       }}
     >
-      <box height={screenReader ? 0 : win.topPad} flexShrink={0} />
-      {(screenReader
-        ? visibleItems
-        : visibleItems.slice(win.start, win.end)
-      ).map((item) => {
+      <box height={win.topPad} flexShrink={0} />
+      {visibleItems.slice(win.start, win.end).map((item) => {
         const key = itemKey(item);
         return (
           <box
@@ -739,7 +736,19 @@ export function OpenTuiTranscriptView({
           </box>
         );
       })}
-      <box height={screenReader ? 0 : win.bottomPad} flexShrink={0} />
+      <box height={win.bottomPad} flexShrink={0} />
+      {screenReader && visibleItems.length > 0 && (
+        <text id="screen-reader-history-window">
+          {t(
+            'History items {{start}}-{{end}} of {{total}}. Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
+            {
+              start: String(win.start + 1),
+              end: String(win.end),
+              total: String(visibleItems.length),
+            },
+          )}
+        </text>
+      )}
     </box>
   );
 }

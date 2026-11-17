@@ -316,7 +316,10 @@ const mocks = vi.hoisted(() => {
       if (type === 'box' || type === 'text') {
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            ...(key === undefined ? {} : { key }),
+            'data-id': (config as { id?: string } | null)?.id,
+          },
           children,
         );
       }
@@ -2376,6 +2379,42 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     expect(editor.plainText).toBe('/cd /tmp/a ');
   });
 
+  it.each(['/', '@'])(
+    'marks the actual active ordinary %s completion',
+    async (prefix) => {
+      mocks.state.fileSearchResults = ['first.txt', 'second.txt'];
+      mocks.state.fileSearchDelay = Promise.resolve();
+      mocks.state.sessionSuggestions = [];
+      mocks.state.extensionSuggestions = [];
+      await renderWithCommands([
+        { name: 'model', description: 'First', kind: 'built-in' },
+        { name: 'theme', description: 'Second', kind: 'built-in' },
+      ]);
+      await typeText(prefix);
+      await act(async () => {});
+      await act(async () => {});
+      expect(document.body.textContent).toContain(
+        prefix === '/' ? 'model' : 'first.txt',
+      );
+      const selected = document.querySelector(
+        '[data-id="screen-reader-selected-suggestion"]',
+      );
+      expect(selected).not.toBeNull();
+      expect(selected?.textContent).toContain(
+        prefix === '/' ? 'model' : 'first.txt',
+      );
+      const previous = selected?.textContent;
+      await pressKey('down');
+      expect(selected?.getAttribute('data-id')).toBe(
+        'screen-reader-unselected-suggestion',
+      );
+      expect(
+        document.querySelector('[data-id="screen-reader-selected-suggestion"]')
+          ?.textContent,
+      ).not.toBe(previous);
+    },
+  );
+
   it('submitOnAccept suggestions submit `/<value>` on Enter', async () => {
     const submitted: string[] = [];
     await renderWithCommands(
@@ -3236,6 +3275,25 @@ describe('composer admission and attachment ownership', () => {
     expect(screen.getByText('> clipboard-test.png')).toBeTruthy();
     expect(currentEditor().plainText).toBe('/mod');
     expect(submit).not.toHaveBeenCalled();
+  });
+
+  it('provides actual attachment state with the unchanged filename', async () => {
+    const { container } = renderPrompt({ screenReader: true });
+    await press('v', true);
+    const attachment = container.querySelector(
+      '[data-id="screen-reader-unselected-attachment"]',
+    );
+    expect(attachment?.textContent).toBe('📎 clipboard-test.png');
+    await press('up');
+    expect(attachment?.getAttribute('data-id')).toBe(
+      'screen-reader-selected-attachment',
+    );
+    expect(attachment?.textContent).toBe('> clipboard-test.png');
+    await press('return');
+    expect(attachment?.getAttribute('data-id')).toBe(
+      'screen-reader-unselected-attachment',
+    );
+    expect(attachment?.textContent).toBe('📎 clipboard-test.png');
   });
 
   it('selects an attachment without completion and Enter only deselects it', async () => {

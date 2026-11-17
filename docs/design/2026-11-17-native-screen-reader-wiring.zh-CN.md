@@ -4,7 +4,7 @@
 
 ## 状态与问题
 
-基于 main fdd 的 CLI 候选已完成本地验证，与信号或 watcher 改动独立。build、typecheck、lint、格式和 bundle 通过，21 个完整测试文件共 1,148 项通过。四个有界真实 PTY 用例通过：Native screen-reader 基础交互、工具批准与历史、普通图形回归、安装后的 Node26 → 私有 Bun screen-reader 交互。它们仅资格化下列流程，不代表全部无障碍或最终已合并 main 候选。真实 VoiceOver/NVDA 验收仍为 NOT_RUN。
+历史初始检查点：基于 main fdd 的 CLI 候选完成了本地验证，与信号或 watcher 改动独立。这些结果属于较早候选，后续变更需要各自验证。build、typecheck、lint、格式和 bundle 通过，21 个完整测试文件共 1,148 项通过。四个有界真实 PTY 用例通过：Native screen-reader 基础交互、工具批准与历史、普通图形回归、安装后的 Node26 → 私有 Bun screen-reader 交互。它们仅资格化下列流程，不代表全部无障碍或最终已合并 main 候选。真实 VoiceOver/NVDA 验收仍为 NOT_RUN。
 
 Root 较早的全局 qwen 0.22.0 基线完成 screen-reader /help、返回输入、输入标记及 quit，自然退出 0，未请求模型（71824/34a6850）；它校准现有 Ink 行为，不证明实验性 Native selector 支持。
 
@@ -39,7 +39,7 @@ Root 较早的全局 qwen 0.22.0 基线完成 screen-reader /help、返回输入
 
 真实 entry 为其 renderer 拥有唯一 `ScreenReaderPresentation` 与 writer。在公开完成帧读取语义 getter（`TextBufferRenderable.plainText`、编辑值/光标、`MarkdownRenderable.content`、select 选项/index、table content），不读取已绘制 cell buffer，也不解释颜色。现有 shell、composer、dialog 保持输入及权限动作所有权；绑定真实选中状态的明确 ID 标记自定义 tab/option，用户文本中的箭头不能推断为选中。
 
-现有 transcript 组件仍是历史呈现来源，包括 Mod 替换、工具结果、警告、图像文字占位及 help notice。screen-reader 模式挂载所有历史条目，不丢弃 viewport 外 owner。kind/ID/tool segment 身份绑定精确语义子树；不重复输出未变文字，同 ID 变化以明确 Revision 标签追加完整语义文字。不写任意字符串后缀，因为按行输出会把单词拆碎（Hel → Hello）。持续流可能重复前缀，须由真实 PTY 与 reader 可用性验证决定是否可接受，不能据此宣称完整无障碍。保留原卡片级展开及内容限制，不是无限制导出。本候选只使用新 writer 的 appendStatic，历史和控件均不擦行。控件在 Config/session 范围按真实 renderable owner 比较，只追加改变的语义值，抑制未变选项和 spinner/计时动画；dialog 打开/关闭及真实焦点返回 prompt 有明确反馈。API-key 输入与 sensitive extension setting 在遍历子树之前输出 Protected input，不读取其值；原 preview 的 API-key/header mask 保留。
+现有 transcript 组件仍是历史呈现来源，包括 Mod 替换、工具结果、警告、图像文字占位及 help notice。screen-reader 模式复用现有行窗口和 spacer，包括最多 400 个原生挂载条目的兜底限制；完整历史仍保留在会话模型。沿用 Shift+Up/Down、PageUp/Down、Ctrl+Home/End 滚动命令，在同一 scrollbox 中访问历史且不移动输入焦点，窗口变化时播报实际条目范围。对话框、待批准权限和已聚焦 shell 保留其按键。较早消息在对应窗口挂载时仍从原 Mod 渲染子树读取，不另建 formatter。kind/ID/tool segment 身份绑定精确语义子树；不重复输出未变文字。assistant 正文等待 streaming=false，thinking/tool 正文等待 done=true，再于已完成帧播报当前完整语义子树一次；原取消/错误结算保留已产出的部分文字。结算后同 ID 的实质编辑仍可追加带 Revision 标签的完整内容。不写任意字符串后缀，因为按行输出会把单词拆碎（Hel → Hello）。活动工具输出不反复回放，其真实权限对话框和 working 控件仍保持可用。历史键盘导航的真实 PTY 与 reader 可用性仍须验证，不能据此宣称完整无障碍。保留原卡片级展开及内容限制，不是无限制导出。本候选只使用新 writer 的 appendStatic，历史和控件均不擦行。控件在 Config/session 范围按真实 renderable owner 比较，只追加改变的语义值，抑制未变选项和 spinner/计时动画；dialog 打开/关闭及真实焦点返回 prompt 有明确反馈。API-key 输入与 sensitive extension setting 在遍历子树之前输出 Protected input，不读取其值；原 preview 的 API-key/header mask 保留。
 复用已有 Native 按键解析和输入/提交模型。可打印文本、光标/编辑键、Enter、Tab/方向键、Escape 与退出必须到达图形路径相同的应用 callback。批准/拒绝必须恰好结算原 pending 请求一次，不能从输出通道推断批准。
 
 screen-reader 分支将现有真实 controller/renderable 树保留在内存，不能在 plain writer 旁写出图形输出。`screenMode: main-screen`、`useMouse: false` 和 passthrough external output 是公开 OpenTUI 选项，但本身不能证明输出非破坏性。公开组件见证先资格化 memory 通道，下列真实 entry 用例验证了 writer 与实际状态/动作在有界流程中共存，不证明每个可达交互或 terminal 组合。不能伪造 WriteStream 或调用私有 renderer 实现来强行达成；若必要流程无法使用公开 0.5.10 通道，应在该发布边界保留 Ink，并精确记录缺少的能力交上游评审。
@@ -85,8 +85,12 @@ writer 清洗不可信 model/tool 转义。本候选不调用 updateDynamic/clea
 
 旧候选曾重复播报 `/quit`。后续候选（源码 71b98f88a9f7eb7241b8f3bf0497243edabe7b0f，入口 e0acc54e80fd5b18bdfadb183d9dc58c4bc7542f6b43dfc36695080424dae816）的回归及正常检查通过（355 项相关测试及构建、类型检查、lint 和 bundle）；新 strict Native 工具/历史 PTY 流程观察到退出调用与摘要各播报一次，保留真实批准的 shell 文件效果及三次已关闭模型 HTTP 响应，并在 helper 前自然退出（新 owned PTY：自然退出 0，无 helper 终止）。原重复结果保留，不据此宣称全部历史或真实 reader 可用性。
 
-Root 仍拥有以下后续项：完整流式修订可能重复前缀；clear/resume、真实 reader 可用性、长历史及其他平台仍待验收。不能用全局文本去重吞掉有意重复的消息。发布边界与这些呈现取舍需维护者评审，不得据此宣称完整 screen-reader parity。
+Root 仍拥有以下后续项：clear/resume、真实 reader 可用性、长历史及其他平台仍待验收。不能用全局文本去重吞掉有意重复的消息。发布边界与这些呈现取舍需维护者评审，不得据此宣称完整 screen-reader parity。
 
 install、build、typecheck、测试和公开 PTY 均由 Root 执行。真实辅助设备可能需要用户或设备会话，未取得不能宣称通过。维护者评审应决定呈现兼容性和发布边界，而不是让可审查候选停留 Draft 的理由。
 
 开放问题：生产交互/可读性覆盖、现有卡片展开及动态更新的可用性，以及首批支持哪些真实 reader/terminal 组合？本提案不代表全部 a11y 通过。
+
+### 评审修正检查点
+
+已真实复现两项回归（23133/181354）：活动 assistant 前缀在结算前被播报，以及 2,500 条历史绕过原生挂载上限。上述修正复用真实结算字段和既有窗口/导航模型。组合修正候选通过 13 个完整文件的 1,033 项测试，以及完整 build、typecheck、lint 和 bundle，包括 16 项内存 C1 边界用例及 transcript 生产者到 presentation 的回归。应用自有语义模板与 18 种历史角色标签使用既有九语言加载器，真实中文提示输入/光标流程已通过。同一 source-bundle 的五组 Native 流程在 helper 清理前自然退出 0：2,500 条记录恢复、首中末导航、清空后新会话身份，真实工具授权与历史，未保存密钥输入保护与撤销，普通图形交互，中文 Unicode 光标播报 3/0/1。独立英文 Unicode 用例虽然观测到正确的 3/0/1、一次 quit 播报及摘要，却未满足原五秒自然 PTY 退出条件。一次带身份观察的诊断自然退出而未重现该失败，不能据此关闭原生命周期失败或判定原因。较早的 UI 多出一项（2,501，而磁盘仍为原 2,500 条）尚未分类；两次清空观察器错误与产品改动分别保留。真实 reader 可用性、生命周期稳定性、支持平台、最终安装产物及最终合并 main 候选仍待完成。

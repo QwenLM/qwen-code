@@ -114,7 +114,11 @@ import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
-import type { KeyEvent, BoxRenderable } from '@opentui/core';
+import type {
+  KeyEvent,
+  BoxRenderable,
+  ScrollBoxRenderable,
+} from '@opentui/core';
 import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import { keyToAnsi } from '../hooks/keyToAnsi.js';
 import {
@@ -802,6 +806,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   }, [shellFocused]);
 
   const controlsRef = useRef<BoxRenderable | null>(null);
+  const historyScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const [controlsHeight, setControlsHeight] = useState(0);
   const shellColumns = Math.max(1, Math.floor(terminalWidth * 0.89));
   const shellRows = Math.max(1, terminalHeight - controlsHeight - 10);
@@ -882,6 +887,37 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // keeps only the Windows bare-Tab fallback — the one route that has to know
   // whether Tab was already spent on a completion.
   useKeyboard((key: KeyEvent) => {
+    const historyScroll = historyScrollRef.current;
+    if (
+      props.screenReader &&
+      historyScroll &&
+      key.eventType !== 'release' &&
+      !shellFocused &&
+      !dialog &&
+      !activeModal &&
+      !activeToolCall &&
+      !mcpApproval.isMcpApprovalDialogOpen &&
+      !hooksApproval.isProjectHooksApprovalDialogOpen
+    ) {
+      let consumed = true;
+      if (matchesCommand(Command.SCROLL_UP, key)) historyScroll.scrollBy(-1);
+      else if (matchesCommand(Command.SCROLL_DOWN, key))
+        historyScroll.scrollBy(1);
+      else if (matchesCommand(Command.PAGE_UP, key))
+        historyScroll.scrollBy(-Math.max(1, historyScroll.viewport.height));
+      else if (matchesCommand(Command.PAGE_DOWN, key))
+        historyScroll.scrollBy(Math.max(1, historyScroll.viewport.height));
+      else if (matchesCommand(Command.SCROLL_HOME, key))
+        historyScroll.scrollTo(0);
+      else if (matchesCommand(Command.SCROLL_END, key))
+        historyScroll.scrollTo(historyScroll.scrollHeight);
+      else consumed = false;
+      if (consumed) {
+        key.preventDefault();
+        key.stopPropagation();
+        return;
+      }
+    }
     if (shellFocused && handleShellKey(key)) {
       key.preventDefault();
       key.stopPropagation();
@@ -1801,6 +1837,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             of them can write the composer's focus — that is a React prop — so
             a click there changes nothing. */}
         <scrollbox
+          ref={(el) => {
+            historyScrollRef.current = el as ScrollBoxRenderable | null;
+          }}
           flexGrow={1}
           flexShrink={1}
           minHeight={0}

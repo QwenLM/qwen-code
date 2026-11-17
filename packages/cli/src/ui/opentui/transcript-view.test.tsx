@@ -20,10 +20,46 @@ import { AgentStatus } from '@qwen-code/qwen-code-core';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
 // native FFI — unavailable in the test runtime. Stub the graphics surface.
-vi.mock('@opentui/core', () => ({
-  SyntaxStyle: { fromStyles: () => ({}) },
-  MouseButton: { LEFT: 0 },
-}));
+vi.mock('@opentui/core', () => {
+  class Renderable {
+    id = '';
+    visible = true;
+    isDestroyed = false;
+    children: Renderable[] = [];
+    getChildren() {
+      return this.children;
+    }
+    findDescendantById(id: string): Renderable | undefined {
+      for (const child of this.children) {
+        if (child.id === id) return child;
+        const found = child.findDescendantById(id);
+        if (found) return found;
+      }
+      return undefined;
+    }
+  }
+  class TextBufferRenderable extends Renderable {
+    plainText = '';
+  }
+  class MarkdownRenderable extends Renderable {
+    content = '';
+  }
+  class EditBufferRenderable extends TextBufferRenderable {}
+  class TextareaRenderable extends EditBufferRenderable {}
+  class SelectRenderable extends Renderable {}
+  class TextTableRenderable extends Renderable {}
+  return {
+    SyntaxStyle: { fromStyles: () => ({}) },
+    MouseButton: { LEFT: 0 },
+    Renderable,
+    TextBufferRenderable,
+    MarkdownRenderable,
+    EditBufferRenderable,
+    TextareaRenderable,
+    SelectRenderable,
+    TextTableRenderable,
+  };
+});
 
 const mocks = vi.hoisted(() => {
   /** How many opentui elements the JSX runtime has been asked for. A frame that
@@ -142,6 +178,15 @@ import {
   projectItemToStreamEvent,
 } from './item-projection.js';
 import { ToolCallStatus, type HistoryItem } from '../types.js';
+import { MAX_MOUNTED_ITEMS } from './transcript-window.js';
+import { EventEmitter } from 'node:events';
+import {
+  Renderable,
+  TextBufferRenderable,
+  MarkdownRenderable,
+} from '@opentui/core';
+import { ScreenReaderPresentation } from './screen-reader-presentation.js';
+import { ScreenReaderOutputWriter } from './a11y-screen-reader.js';
 import type {
   LiveAssistantItem,
   LiveHistoryItem,
@@ -1448,6 +1493,40 @@ describe('OpenTuiTranscriptView scroll host', () => {
     text: `TURN_${String(index).padStart(4, '0')}`,
   }));
 
+  it('keeps screen-reader first, middle and latest windows reachable without mounting the full model', () => {
+    const view = mountHosted({
+      rows: Array.from({ length: session.length }, () => 2),
+      screenReader: true,
+    });
+    const mounted = () =>
+      view.container.querySelectorAll('[data-id^="screen-reader-item-"]')
+        .length;
+    try {
+      expect(mounted()).toBeLessThanOrEqual(MAX_MOUNTED_ITEMS);
+      expect(view.container.textContent).toContain('TURN_1999');
+      view.host.scrollTop = Math.max(
+        0,
+        view.host.scrollHeight - view.host.viewport.height,
+      );
+      view.frame();
+      expect(view.scrollListeners()).toBe(1);
+      expect(view.container.textContent).toContain('TURN_1999');
+      view.jump(0);
+      expect(mounted()).toBeLessThanOrEqual(MAX_MOUNTED_ITEMS);
+      expect(view.container.textContent).toContain('TURN_0000');
+      view.jump(3000);
+      expect(mounted()).toBeLessThanOrEqual(MAX_MOUNTED_ITEMS);
+      expect(view.container.textContent).toContain('TURN_1000');
+      expect(view.container.textContent).toContain('History items');
+      view.jump(Number.MAX_SAFE_INTEGER);
+      expect(mounted()).toBeLessThanOrEqual(MAX_MOUNTED_ITEMS);
+      expect(view.container.textContent).toContain('TURN_1999');
+      expect(session).toHaveLength(2000);
+    } finally {
+      view.unmount();
+    }
+  });
+
   function mountHosted(opts: {
     /** Rows each turn's box is laid out at. `0` means laid out empty: Yoga
      *  computes 0 while the reported height is clamped to 1. */
@@ -1457,6 +1536,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
     /** The height prop, deliberately separate from the host's own viewport. */
     propRows?: number;
     width?: number;
+    screenReader?: boolean;
     thoughtsExpanded?: boolean;
     modRows?: TranscriptViewProps['modRows'];
     itemRows?: (text: string) => number | undefined;
@@ -1470,6 +1550,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
     const view = render(
       <OpenTuiTranscriptView
         items={items}
+        screenReader={opts.screenReader}
         availableWidth={width}
         availableTerminalHeight={propRows}
         thoughtsExpanded={thoughtsExpanded}
@@ -1572,6 +1653,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
         view.rerender(
           <OpenTuiTranscriptView
             items={items}
+            screenReader={opts.screenReader}
             availableWidth={width}
             availableTerminalHeight={propRows}
             thoughtsExpanded={thoughtsExpanded}
@@ -2639,8 +2721,8 @@ describe('canonical compact group boundaries', () => {
   });
 });
 
-it('keeps every semantic history owner mounted in screen-reader mode beyond the graphical viewport', () => {
-  const items: LiveHistoryItem[] = Array.from({ length: 60 }, (_, index) => ({
+it('bounds screen-reader native history mounts while retaining the latest item', () => {
+  const items: LiveHistoryItem[] = Array.from({ length: 2500 }, (_, index) => ({
     kind: 'user',
     id: `reader-${index}`,
     text: `Readable item ${index}`,
@@ -2652,9 +2734,153 @@ it('keeps every semantic history owner mounted in screen-reader mode beyond the 
       availableTerminalHeight={18}
     />,
   );
-  expect(view.container.textContent).toContain('Readable item 0');
-  expect(view.container.textContent).toContain('Readable item 59');
-  expect(
-    view.container.querySelectorAll('[data-id^="screen-reader-item-"]'),
-  ).toHaveLength(60);
+  try {
+    expect(
+      view.container.querySelectorAll('[data-id^="screen-reader-item-"]')
+        .length,
+    ).toBeLessThanOrEqual(MAX_MOUNTED_ITEMS);
+    expect(view.container.textContent).toContain('Readable item 2499');
+  } finally {
+    view.unmount();
+  }
+});
+
+it('localizes the screen-reader history range without translating user content', async () => {
+  const { setLanguageAsync } = await import('../../i18n/index.js');
+  await setLanguageAsync('zh');
+  const items: LiveHistoryItem[] = [
+    {
+      kind: 'user',
+      id: 'localized-range',
+      text: 'Untranslated user body',
+    },
+  ];
+  const view = render(
+    <OpenTuiTranscriptView
+      screenReader
+      items={items}
+      availableTerminalHeight={18}
+    />,
+  );
+  try {
+    expect(view.container.textContent).toContain('历史记录 1-1，共 1 条。');
+    expect(view.container.textContent).toContain('Untranslated user body');
+    expect(view.container.textContent).toContain(
+      '按 Shift+上/下或 PageUp/PageDown 阅读历史；按 Ctrl+Home/End 跳到最早/最新。',
+    );
+  } finally {
+    view.unmount();
+    await setLanguageAsync('en');
+  }
+});
+
+it('publishes actual Mod markdown and distinct replay tool producers through presentation', () => {
+  // Read the actual host output, including IDs and Markdown content, rather
+  // than constructing the producer/consumer key convention again in the test.
+  const publicNode = (element: Element): Renderable => {
+    const prototype =
+      element.tagName === 'MARKDOWN'
+        ? MarkdownRenderable.prototype
+        : element.tagName === 'SPAN'
+          ? TextBufferRenderable.prototype
+          : Renderable.prototype;
+    return Object.assign(Object.create(prototype), {
+      id: element.getAttribute('data-id') ?? '',
+      visible: true,
+      isDestroyed: false,
+      content: element.getAttribute('content') ?? '',
+      plainText: element.textContent ?? '',
+      children:
+        element.tagName === 'MARKDOWN' || element.tagName === 'SPAN'
+          ? []
+          : [...element.children].map(publicNode),
+    }) as Renderable;
+  };
+  const group = (id: number, result: string): HistoryItem => ({
+    id,
+    type: 'tool_group',
+    batchId: `batch-${id}`,
+    tools: [
+      {
+        callId: 'same-wire',
+        name: 'run_shell_command',
+        description: 'owned command',
+        status: ToolCallStatus.Success,
+        resultDisplay: result,
+        confirmationDetails: undefined,
+      },
+    ],
+  });
+  const tools = projectHistoryToStreamEvents(
+    [
+      group(9101, 'FIRST_DISTINCT_TOOL_RESULT'),
+      group(9102, 'SECOND_DISTINCT_TOOL_RESULT'),
+    ],
+    {},
+  ).reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+  const items: readonly LiveHistoryItem[] = [
+    {
+      kind: 'assistant',
+      id: 'actual-mod-reply',
+      text: 'ORIGINAL_BODY',
+      streaming: false,
+    },
+    ...tools,
+  ];
+  const mod = vi
+    .spyOn(modRowHooks, 'useModRow')
+    .mockImplementation((_config, _sessionId, input) =>
+      input
+        ? {
+            ...(input.props as ModAssistantMessageProps),
+            text: '**MOD_OWNED_BODY**',
+          }
+        : undefined,
+    );
+  const view = render(
+    <OpenTuiTranscriptView
+      screenReader
+      items={items}
+      availableTerminalHeight={60}
+      modRows={{ config: {} as Config, sessionId: 'owned-session' }}
+    />,
+  );
+  const events = new EventEmitter();
+  let output = '';
+  const presentation = new ScreenReaderPresentation(
+    new ScreenReaderOutputWriter((chunk) => {
+      output += chunk;
+    }),
+  );
+  const history = Object.assign(Object.create(Renderable.prototype), {
+    id: 'screen-reader-history',
+    visible: true,
+    isDestroyed: false,
+    children: [] as Renderable[],
+  }) as Renderable & { children: Renderable[] };
+  // Entry's container is outside this transcript producer.
+  const root = Object.assign(Object.create(Renderable.prototype), {
+    id: '',
+    visible: true,
+    isDestroyed: false,
+    children: [history],
+  }) as Renderable;
+  const stop = presentation.observeFrames(events, () => root);
+  try {
+    presentation.setHistory({}, items);
+    history.children = [...view.container.children].map(publicNode);
+    events.emit('frame');
+    expect(output).toContain('MOD_OWNED_BODY');
+    expect(output).not.toContain('**MOD_OWNED_BODY**');
+    expect(output).not.toContain('ORIGINAL_BODY');
+    expect(output.split('FIRST_DISTINCT_TOOL_RESULT')).toHaveLength(2);
+    expect(output.split('SECOND_DISTINCT_TOOL_RESULT')).toHaveLength(2);
+    const first = output;
+    events.emit('frame');
+    expect(output).toBe(first);
+  } finally {
+    stop();
+    view.unmount();
+    mod.mockRestore();
+  }
 });

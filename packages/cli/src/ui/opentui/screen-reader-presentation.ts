@@ -15,6 +15,29 @@ import {
 } from '@opentui/core';
 import type { ScreenReaderOutputWriter } from './a11y-screen-reader.js';
 import { markdownToPlainText } from './a11y-plain-text.js';
+import { cpLen } from '../utils/textUtils.js';
+import { t } from '../../i18n/index.js';
+
+const HISTORY_ROLE_LABELS = new Set([
+  'user',
+  'assistant',
+  'thinking',
+  'tool',
+  'task',
+  'image',
+  'compaction',
+  'info',
+  'error',
+  'warning',
+  'retry',
+  'stop-hook',
+  'away-recap',
+  'user-shell',
+  'advisor',
+  'arena-agent',
+  'arena-session',
+  'goal',
+]);
 
 interface ControlRow {
   owner: Renderable;
@@ -23,9 +46,27 @@ interface ControlRow {
 
 function inputLineText(node: Renderable): string {
   if (!node.visible || node.isDestroyed) return '';
-  if (node.id === 'screen-reader-protected-input') return 'Protected input';
+  if (node.id === 'screen-reader-protected-input') return t('Protected input');
   if (node instanceof TextBufferRenderable) return node.plainText;
   return node.getChildren().map(inputLineText).join('');
+}
+
+function inputCaret(node: Renderable): RegExpExecArray | null {
+  if (
+    !node.visible ||
+    node.isDestroyed ||
+    node.id === 'screen-reader-protected-input'
+  )
+    return null;
+  const own = /^screen-reader-caret-(active|inactive)-(\d+)$/.exec(
+    node.id ?? '',
+  );
+  if (own) return own;
+  for (const child of node.getChildren()) {
+    const found = inputCaret(child);
+    if (found) return found;
+  }
+  return null;
 }
 
 /** Reads public semantic values, never the painted cell buffer or colors. */
@@ -33,9 +74,16 @@ function controlRows(node: Renderable): ControlRow[] {
   if (!node.visible || node.isDestroyed || node.id === 'screen-reader-history')
     return [];
   if (node.id === 'screen-reader-protected-input')
-    return [{ owner: node, text: 'Protected input' }];
-  if (node.id === 'screen-reader-input-line')
-    return [{ owner: node, text: inputLineText(node) }];
+    return [{ owner: node, text: t('Protected input') }];
+  if (node.id === 'screen-reader-input-line') {
+    const caret = inputCaret(node);
+    const focus = caret
+      ? caret[1] === 'active'
+        ? `${t('Focused input. Cursor: {{position}}', { position: caret[2] })}\n`
+        : `${t('Unfocused input.')}\n`
+      : '';
+    return [{ owner: node, text: focus + inputLineText(node) }];
+  }
   let text: string;
   if (node instanceof EditBufferRenderable) {
     const value = node.plainText;
@@ -45,16 +93,33 @@ function controlRows(node: Renderable): ControlRow[] {
       typeof placeholder === 'string'
         ? placeholder
         : placeholder?.chunks.map((chunk) => chunk.text).join('');
-    text = `${node.focused ? 'Focused ' : ''}${node.id === 'screen-reader-prompt' ? 'Prompt' : 'Input'}: ${value}${!value && hint ? `\nPlaceholder: ${hint}` : ''}${node.focused ? `\nCursor: ${node.cursorOffset}` : ''}`;
+    const label =
+      node.id === 'screen-reader-prompt'
+        ? node.focused
+          ? 'Focused Prompt: {{value}}'
+          : 'Prompt: {{value}}'
+        : node.focused
+          ? 'Focused Input: {{value}}'
+          : 'Input: {{value}}';
+    text = t(label, { value });
+    if (!value && hint)
+      text += `\n${t('Placeholder: {{value}}', { value: hint })}`;
+    if (node.focused)
+      text += `\n${t('Cursor: {{position}}', {
+        position: String(cpLen(node.getTextRange(0, node.cursorOffset))),
+      })}`;
   } else if (node instanceof MarkdownRenderable) {
     text = markdownToPlainText(node.content);
   } else if (node instanceof TextBufferRenderable) {
     text = node.plainText;
   } else if (node instanceof SelectRenderable) {
     text = node.options
-      .map(
-        (option, index) =>
-          `${index === node.getSelectedIndex() ? 'Selected ' : ''}${index + 1}. ${option.name}${option.description ? `: ${option.description}` : ''}`,
+      .map((option, index) =>
+        index === node.getSelectedIndex()
+          ? t('Selected {{value}}', {
+              value: `${index + 1}. ${option.name}${option.description ? `: ${option.description}` : ''}`,
+            })
+          : `${index + 1}. ${option.name}${option.description ? `: ${option.description}` : ''}`,
       )
       .join('\n');
   } else if (node instanceof TextTableRenderable) {
@@ -74,13 +139,48 @@ function controlRows(node: Renderable): ControlRow[] {
       return rows;
     text = rows.map((row) => row.text).join('\n');
   }
-  if (node.id?.startsWith('screen-reader-selected-')) {
+  const toggle =
+    /^screen-reader-auth-toggle-(focused|unfocused)-(on|off)$/.exec(
+      node.id ?? '',
+    );
+  if (toggle)
+    text = t(
+      toggle[1] === 'focused'
+        ? toggle[2] === 'on'
+          ? 'Focused Toggle on: {{value}}'
+          : 'Focused Toggle off: {{value}}'
+        : toggle[2] === 'on'
+          ? 'Toggle on: {{value}}'
+          : 'Toggle off: {{value}}',
+      { value: text },
+    );
+  const selected = node.id?.startsWith('screen-reader-selected-');
+  if (selected || node.id?.startsWith('screen-reader-unselected-')) {
     text = text.trim().replace(/\s*\n\s*/g, ' ');
-    if (!node.id.includes('tab') && !node.id.endsWith('category'))
+    if (
+      node.id === 'screen-reader-selected-question-tab' ||
+      node.id === 'screen-reader-selected-submit-tab'
+    ) {
+      text = text.replace(/^▸\s+/, '');
+    } else if (
+      node.id === 'screen-reader-selected-attachment' ||
+      node.id === 'screen-reader-unselected-attachment'
+    ) {
+      text = text.replace(/^(?:>|📎)\s+/, '');
+    } else if (
+      selected &&
+      !node.id?.includes('tab') &&
+      !node.id?.endsWith('category')
+    ) {
       text = text.replace(/^[›❯▸>]\s+/, '');
-    text = `Selected ${text}`;
-  } else if (node.id?.startsWith('screen-reader-unselected-'))
-    text = text.trim().replace(/\s*\n\s*/g, ' ');
+    }
+    if (
+      node.id === 'screen-reader-selected-option-disabled' ||
+      node.id === 'screen-reader-unselected-option-disabled'
+    )
+      text = t('Disabled {{value}}', { value: text });
+    if (selected) text = t('Selected {{value}}', { value: text });
+  }
   return text.trim() ? [{ owner: node, text }] : [];
 }
 
@@ -94,6 +194,8 @@ interface HistoryOwnerItem {
   kind: string;
   id: string;
   renderId?: string;
+  streaming?: boolean;
+  done?: boolean;
 }
 
 function historyKey(item: HistoryOwnerItem): string {
@@ -105,6 +207,7 @@ export class ScreenReaderPresentation {
   private history = new Map<string, string>();
   private controls = new Map<Renderable, string>();
   private dialogOpen = false;
+  private historyWindow = '';
   private items: readonly HistoryOwnerItem[] = [];
 
   constructor(private readonly writer: ScreenReaderOutputWriter) {}
@@ -116,9 +219,11 @@ export class ScreenReaderPresentation {
       this.history.clear();
       this.controls.clear();
       this.dialogOpen = false;
+      this.historyWindow = '';
     }
     if (!items.length && hadHistory)
-      this.writer.appendStatic('Conversation cleared.');
+      this.writer.appendStatic(t('Conversation cleared.'));
+    if (!items.length) this.historyWindow = '';
     this.items = items;
     const current = new Set(items.map((item) => historyKey(item)));
     for (const key of this.history.keys())
@@ -126,8 +231,17 @@ export class ScreenReaderPresentation {
   }
 
   private publishHistory(root: Renderable): void {
+    if (!this.items.length) return;
     const historyRoot = root.findDescendantById('screen-reader-history');
     if (!historyRoot) return;
+    const range = historyRoot.findDescendantById(
+      'screen-reader-history-window',
+    );
+    const rangeText = range ? readScreenReaderControls(range) : '';
+    if (rangeText && rangeText !== this.historyWindow) {
+      this.historyWindow = rangeText;
+      this.writer.appendStatic(rangeText);
+    }
     const nodes = new Map<string, Renderable>();
     const collect = (node: Renderable): void => {
       if (node.id?.startsWith('screen-reader-item-')) nodes.set(node.id, node);
@@ -135,15 +249,26 @@ export class ScreenReaderPresentation {
     };
     collect(historyRoot);
     for (const item of this.items) {
+      if (
+        (item.kind === 'assistant' && item.streaming === true) ||
+        ((item.kind === 'thinking' || item.kind === 'tool') &&
+          item.done === false)
+      )
+        continue;
       const key = historyKey(item);
       const node = nodes.get(`screen-reader-item-${key}`);
       if (!node) continue;
       const body = readScreenReaderControls(node);
-      const text = body ? `${item.kind}: ${body}` : '';
+      const role = HISTORY_ROLE_LABELS.has(item.kind)
+        ? t(item.kind)
+        : item.kind;
+      const text = body ? t('{{role}}: {{value}}', { role, value: body }) : '';
       const previous = this.history.get(key) ?? '';
       if (text === previous) continue;
       this.history.set(key, text);
-      this.writer.appendStatic(previous ? `Revision ${text}` : text);
+      this.writer.appendStatic(
+        previous ? t('Revision {{value}}', { value: text }) : text,
+      );
     }
   }
 
@@ -162,20 +287,23 @@ export class ScreenReaderPresentation {
       const dialogOpen = Boolean(
         root?.findDescendantById('screen-reader-dialog'),
       );
-      if (dialogOpen && !this.dialogOpen) this.writer.appendStatic('Dialog');
+      if (dialogOpen && !this.dialogOpen) this.writer.appendStatic(t('Dialog'));
       if (!dialogOpen && this.dialogOpen) {
         const prompt = root?.findDescendantById('screen-reader-prompt');
         this.writer.appendStatic(
           prompt instanceof EditBufferRenderable && prompt.focused
-            ? 'Dialog closed. Focus: prompt.'
-            : 'Dialog closed.',
+            ? t('Dialog closed. Focus: prompt.')
+            : t('Dialog closed.'),
         );
       }
       this.dialogOpen = dialogOpen;
       const current = new Map<Renderable, string>();
       for (const row of root ? controlRows(root) : []) {
         const previous = this.controls.get(row.owner);
-        if (row.text !== previous && previous !== `Selected ${row.text}`)
+        if (
+          row.text !== previous &&
+          previous !== t('Selected {{value}}', { value: row.text })
+        )
           this.writer.appendStatic(row.text);
         current.set(row.owner, row.text);
       }

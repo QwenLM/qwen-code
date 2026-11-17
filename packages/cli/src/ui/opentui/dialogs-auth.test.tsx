@@ -66,6 +66,9 @@ const mocks = vi.hoisted(() => {
           type === 'box' ? 'div' : 'span',
           {
             ...(key === undefined ? null : { key }),
+            ...((config as { id?: string }).id
+              ? { 'data-screen-reader-id': (config as { id?: string }).id }
+              : null),
             ...(bg === undefined ? null : { 'data-bg': bg }),
             ...(fg === undefined ? null : { 'data-fg': fg }),
             ...((config as { id?: string }).id ===
@@ -1682,6 +1685,66 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     ).toBeTruthy();
     expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
     expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
+  });
+
+  it('marks the real ASCII caret and Models custom/search focus without changing field values', async () => {
+    await runToModelsStep();
+    await typeText('abc');
+    await press('left');
+    const fields = () => [...document.querySelectorAll('[data-field-text]')];
+    expect(
+      fields()[0].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-2"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      fields()[1].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-inactive-0"]',
+      ),
+    ).not.toBeNull();
+    await press('tab');
+    expect(
+      fields()[0].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-inactive-2"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      fields()[1].querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-0"]',
+      ),
+    ).not.toBeNull();
+    expect(fields()[0].textContent).toBe('abc');
+  });
+
+  it('marks the actual advanced toggle focus and boolean state', async () => {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('down');
+    await press('down');
+    await press('return'); // main: Custom Provider → protocol
+    await press('return'); // protocol → API selection
+    await press('return'); // API → base URL
+    await typeText('https://api.example.com/v1');
+    await press('return'); // base URL → API key
+    await typeText('sk-test');
+    await press('return'); // API key → models
+    await typeText('test-model');
+    await press('return'); // models → advanced config
+    expect(
+      screen.getByText(/Optional: configure advanced generation settings/),
+    ).toBeTruthy();
+    const focused = () =>
+      document.querySelector(
+        '[data-screen-reader-id^="screen-reader-auth-toggle-focused-"]',
+      )!;
+    expect(focused().textContent).toContain('Enable thinking');
+    const before = focused().getAttribute('data-screen-reader-id');
+    await press('space');
+    expect(focused().getAttribute('data-screen-reader-id')).not.toBe(before);
+    expect(focused().textContent).toContain('Enable thinking');
+    await press('down');
+    expect(focused().textContent).toContain('Enable modality');
   });
 
   it('clears the custom-model-ID field on Ctrl+C before the step submits', async () => {

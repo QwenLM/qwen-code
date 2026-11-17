@@ -365,10 +365,17 @@ function FieldText({
   active?: boolean;
 }) {
   if (value.length === 0 && placeholder) {
-    if (!active) return <text fg={C.dim}>{placeholder}</text>;
+    if (!active)
+      return (
+        <text id={`screen-reader-caret-inactive-${caret}`} fg={C.dim}>
+          {placeholder}
+        </text>
+      );
     return (
       <>
-        <text bg={C.accent}>{placeholder.slice(0, 1)}</text>
+        <text id={`screen-reader-caret-active-${caret}`} bg={C.accent}>
+          {placeholder.slice(0, 1)}
+        </text>
         <text fg={C.dim}>{placeholder.slice(1)}</text>
       </>
     );
@@ -383,9 +390,13 @@ function FieldText({
           highlight says which field the caret is in. Dropping it while inactive
           would print a value one character shorter than the one held. */}
       {active ? (
-        <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>
+        <text id={`screen-reader-caret-active-${caret}`} bg={C.accent}>
+          {sanitizeTerminalText(spans.at) || ' '}
+        </text>
       ) : (
-        <text fg={C.text}>{sanitizeTerminalText(spans.at)}</text>
+        <text id={`screen-reader-caret-inactive-${caret}`} fg={C.text}>
+          {sanitizeTerminalText(spans.at)}
+        </text>
       )}
       {after ? <text fg={C.text}>{after}</text> : null}
     </>
@@ -1137,7 +1148,10 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         {t('Optional: configure advanced generation settings.')}
       </text>
       <box flexDirection="row" marginTop={1} paddingLeft={2}>
-        <text fg={rowFg(0)}>
+        <text
+          id={`screen-reader-auth-toggle-${focusedConfigIndex === 0 ? 'focused' : 'unfocused'}-${thinkingEnabled ? 'on' : 'off'}`}
+          fg={rowFg(0)}
+        >
           {`${cursor(0)} ${checkmark(thinkingEnabled)} ${t('Enable thinking')}`}
         </text>
       </box>
@@ -1149,7 +1163,10 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         </text>
       </box>
       <box flexDirection="row" marginTop={1} paddingLeft={2}>
-        <text fg={rowFg(1)}>
+        <text
+          id={`screen-reader-auth-toggle-${focusedConfigIndex === 1 ? 'focused' : 'unfocused'}-${modalityEnabled ? 'on' : 'off'}`}
+          fg={rowFg(1)}
+        >
           {`${cursor(1)} ${checkmark(modalityEnabled)} ${t('Enable modality')}`}
         </text>
       </box>
@@ -1161,15 +1178,19 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
       {modalityEnabled && (
         <box flexDirection="row" paddingLeft={6}>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 2 ? 'focused' : 'unfocused'}-${modalityImage ? 'on' : 'off'}`}
             fg={rowFg(2)}
           >{`${cursor(2)} ${checkmark(modalityImage)} Image  `}</text>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 3 ? 'focused' : 'unfocused'}-${modalityVideo ? 'on' : 'off'}`}
             fg={rowFg(3)}
           >{`${cursor(3)} ${checkmark(modalityVideo)} Video  `}</text>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 4 ? 'focused' : 'unfocused'}-${modalityAudio ? 'on' : 'off'}`}
             fg={rowFg(4)}
           >{`${cursor(4)} ${checkmark(modalityAudio)} Audio  `}</text>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 5 ? 'focused' : 'unfocused'}-${modalityPdf ? 'on' : 'off'}`}
             fg={rowFg(5)}
           >{`${cursor(5)} ${checkmark(modalityPdf)} PDF`}</text>
         </box>

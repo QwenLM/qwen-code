@@ -642,11 +642,7 @@ export function DialogSelect<TItem extends DialogListItem<unknown>>(
         return (
           <box
             key={item.key}
-            id={
-              isSelected
-                ? 'screen-reader-selected-option'
-                : 'screen-reader-unselected-option'
-            }
+            id={`screen-reader-${isSelected ? 'selected' : 'unselected'}-option${item.disabled ? '-disabled' : ''}`}
             flexDirection="row"
             onMouseOver={() => {
               if (!item.disabled) onHover?.(itemIndex);
