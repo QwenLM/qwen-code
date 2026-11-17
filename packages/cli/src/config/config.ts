@@ -2005,6 +2005,12 @@ export async function loadCliConfig(
     // maximally restrictive, so they keep manual approval rather than the
     // AUTO default that normal sessions now get.
     approvalMode = ApprovalMode.DEFAULT;
+  } else if (isAcpMode) {
+    // ACP hosts a client that answers `session/request_permission`. AUTO
+    // auto-approves in-workspace writes (and read-only shell) with no
+    // round-trip, which looks like YOLO to the client. Default to ask so
+    // restrictive ACP sessions actually emit permission requests.
+    approvalMode = ApprovalMode.DEFAULT;
   } else {
     approvalMode = ApprovalMode.AUTO;
   }
@@ -2039,6 +2045,11 @@ export async function loadCliConfig(
     throw err;
   }
 
+  // Interactive vs TUI is decided by isInteractiveInvocation (equivalent to
+  // the previous inlined priority list: -i, then query/prompt, then TTY).
+  // ACP keeps interactive=false under piped stdio: permission frames come from
+  // the approval-mode default above (and getExperimentalZedIntegration
+  // exemptions), not from overloading this TTY/TUI flag.
   const interactive = isInteractiveInvocation(argv);
   // ── Unified permissions construction ─────────────────────────────────────
   // All permission sources are merged here, before constructing Config.

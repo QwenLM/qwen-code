@@ -2774,11 +2774,13 @@ describe('AgentTool', () => {
           vi.mocked(config.isTrustedFolder).mockReturnValue(true);
           const check = grant(wt, false);
           await run(fix(wt));
-          expect(childConfig().getApprovalMode()).toBe(AUTO_EDIT);
+          // Usual trusted-folder default is Auto (classifier-mediated),
+          // not AutoEdit — same resolveSubagentApprovalMode rule as ACP.
+          expect(childConfig().getApprovalMode()).toBe(AUTO);
           check.mockResolvedValue(true);
           await run(fix(wt));
           expect(check).toHaveBeenCalledOnce();
-          expect(childConfig(1).getApprovalMode()).toBe(AUTO_EDIT);
+          expect(childConfig(1).getApprovalMode()).toBe(AUTO);
         },
       );
 
@@ -2794,7 +2796,7 @@ describe('AgentTool', () => {
           vi.mocked(config.isTrustedFolder).mockReturnValue(true);
           const check = grant(wt, true);
           await run(fix(other));
-          expect(childConfig().getApprovalMode()).toBe(AUTO_EDIT);
+          expect(childConfig().getApprovalMode()).toBe(AUTO);
           Object.assign(config, { getPrePlanMode: () => DEFAULT });
           vi.mocked(config.getApprovalMode).mockReturnValue(PLAN);
           await run(fix(wt));
@@ -2818,7 +2820,7 @@ describe('AgentTool', () => {
               new AbortController().signal,
             ),
           );
-          expect(childConfig(1).getApprovalMode()).toBe(AUTO_EDIT);
+          expect(childConfig(1).getApprovalMode()).toBe(AUTO);
         },
       );
 
@@ -2830,7 +2832,7 @@ describe('AgentTool', () => {
           const check = grant(wt, true);
           builtin({ isBuiltin: false });
           await run(fix(wt));
-          expect(childConfig().getApprovalMode()).toBe(AUTO_EDIT);
+          expect(childConfig().getApprovalMode()).toBe(AUTO);
           expect(check).not.toHaveBeenCalled();
         },
       );
@@ -2896,9 +2898,9 @@ describe('AgentTool', () => {
             writeMeta.mockRestore();
             expect(meta).toMatchObject({
               resumeBlockedReason: expect.stringMatching(/never continued/),
-              resolvedApprovalMode: AUTO_EDIT,
+              resolvedApprovalMode: AUTO,
               persistedCliFlags: expect.objectContaining({
-                approvalMode: AUTO_EDIT,
+                approvalMode: AUTO,
               }),
             });
             const live = backgroundFixAt(wt)!;
@@ -3093,11 +3095,11 @@ describe('AgentTool', () => {
           vi.mocked(config.isTrustedFolder).mockReturnValue(true);
           const check = grant(wt, true);
           await run(review(wt));
-          expect(childConfig().getApprovalMode()).toBe(AUTO_EDIT);
+          expect(childConfig().getApprovalMode()).toBe(AUTO);
           // A background agent asks no one; it must not reach YOLO through
           // a foreground agent it starts in the worktree.
           await runIn(fix(wt), 'background-parent');
-          expect(childConfig(1).getApprovalMode()).toBe(AUTO_EDIT);
+          expect(childConfig(1).getApprovalMode()).toBe(AUTO);
           expect(check).not.toHaveBeenCalled();
         },
       );
@@ -4411,7 +4413,7 @@ describe('AgentTool', () => {
       expect(mockHookSystem.fireSubagentStartEvent).toHaveBeenCalledWith(
         expect.stringContaining('file-search-'),
         'file-search',
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         // The composed foreground signal, not the caller's.
         expect.any(AbortSignal),
       );
@@ -4481,7 +4483,7 @@ describe('AgentTool', () => {
       '/test/transcript',
       'Task completed successfully',
       stopHookActive,
-      PermissionMode.AutoEdit,
+      PermissionMode.Auto,
       expect.any(AbortSignal),
     ];
 
@@ -5177,6 +5179,10 @@ describe('AgentTool', () => {
       'omits parent attribution and unknown usage for external agents (background=%s)',
       async (background) => {
         const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+        // Residency is exercised under an AUTO parent: a DEFAULT parent in a
+        // trusted folder now resolves the child to AUTO, which needs the
+        // child-only permission lease and therefore is not kept resident.
+        vi.mocked(config.getApprovalMode).mockReturnValue(AUTO);
         loadAs({ executor: { kind: 'acp', command: 'claude' } });
         const result = await externalTask(background);
         expect(textOf(result)).toContain(
@@ -5228,8 +5234,8 @@ describe('AgentTool', () => {
       ['codex', AUTO, 'yolo', YOLO],
       ['codex', AUTO, 'default', DEFAULT],
       ['codex', YOLO, 'default', YOLO],
-      ['acp', DEFAULT, undefined, AUTO_EDIT],
-      [undefined, DEFAULT, undefined, AUTO_EDIT],
+      ['acp', DEFAULT, undefined, AUTO],
+      [undefined, DEFAULT, undefined, AUTO],
     ] as const)(
       'resolves %s parent=%s override=%s to %s at the child runtime',
       async (kind, parentMode, approvalMode, expectedMode) => {
@@ -5527,6 +5533,10 @@ describe('AgentTool', () => {
     });
 
     it('keeps runtime resources while idle and cleans them when disposed', async () => {
+      // Residency is exercised under an AUTO parent: a DEFAULT parent in a
+      // trusted folder now resolves the child to AUTO, which needs the
+      // child-only permission lease and therefore is not kept resident.
+      vi.mocked(config.getApprovalMode).mockReturnValue(AUTO);
       await launch();
       const agentId = registeredAgentId();
       await untilCompleted();
@@ -5544,6 +5554,10 @@ describe('AgentTool', () => {
     });
 
     const continueResident = async () => {
+      // Residency is exercised under an AUTO parent: a DEFAULT parent in a
+      // trusted folder now resolves the child to AUTO, which needs the
+      // child-only permission lease and therefore is not kept resident.
+      vi.mocked(config.getApprovalMode).mockReturnValue(AUTO);
       await launch();
       await untilCompleted(1);
       const completed = resident();
@@ -5594,6 +5608,10 @@ describe('AgentTool', () => {
     });
 
     it('reports capacity before restarting a resident runtime', async () => {
+      // Residency is exercised under an AUTO parent: a DEFAULT parent in a
+      // trusted folder now resolves the child to AUTO, which needs the
+      // child-only permission lease and therefore is not kept resident.
+      vi.mocked(config.getApprovalMode).mockReturnValue(AUTO);
       await launch();
       await untilCompleted(1);
       mockRegistry.canStartBackgroundAgent.mockReturnValue(false);
@@ -5843,7 +5861,7 @@ describe('AgentTool', () => {
         ),
         'Monitor done',
         false,
-        PermissionMode.AutoEdit,
+        PermissionMode.Auto,
         undefined,
       );
       expect(mockAgent.execute).not.toHaveBeenCalled();
@@ -5943,7 +5961,7 @@ describe('AgentTool', () => {
           ),
           'Monitor done',
           false,
-          PermissionMode.AutoEdit,
+          PermissionMode.Auto,
           expect.any(AbortSignal),
         );
       });
@@ -6283,7 +6301,7 @@ describe('AgentTool', () => {
           agentType: 'file-search',
           description: 'Search files',
           persistedCliFlags: expect.objectContaining({
-            approvalMode: 'auto-edit',
+            approvalMode: 'auto',
             bare: false,
             sandbox: null,
             screenReader: false,
@@ -7012,8 +7030,12 @@ describe('resolveSubagentApprovalMode', () => {
     'should allow agent-declared mode to override plan parent': [
       [PLAN, 'auto-edit', true, P.AutoEdit],
     ],
-    'should default to auto-edit when parent is default and folder is trusted':
-      [[DEFAULT, undefined, true, P.AutoEdit]],
+    // Auto (classifier-mediated), not AutoEdit: an ACP parent now boots
+    // DEFAULT, and AutoEdit would skip the classifier then hard-deny
+    // background subagent non-read-only shell.
+    'should default to auto when parent is default and folder is trusted': [
+      [DEFAULT, undefined, true, P.Auto],
+    ],
     'should default to parent mode when parent is default and folder is untrusted':
       [[DEFAULT, undefined, false, P.Default]],
     // `bubble` needs confirmation like `default`, so it is Default in any

@@ -10089,6 +10089,7 @@ describe('Session', () => {
           ),
           completion: 'sent',
           name: expect.stringMatching(/^Review PRs · \d{2}-\d{2} \d{2}:\d{2}$/),
+          approvalMode: 'auto',
           sourceType: 'default',
           sourceId: 'scheduled_task_run:task-1',
           model: 'qwen-max(openai)',
@@ -10104,6 +10105,123 @@ describe('Session', () => {
     });
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      name: 'no pin',
+      settingsApprovalMode: undefined,
+      effectiveMode: ApprovalMode.DEFAULT,
+      restricted: false,
+      revision: 0,
+      expected: 'auto',
+    },
+    {
+      name: 'plan pin',
+      settingsApprovalMode: 'plan',
+      effectiveMode: ApprovalMode.PLAN,
+      restricted: false,
+      revision: 0,
+      expected: 'plan',
+    },
+    {
+      name: 'default pin',
+      settingsApprovalMode: 'default',
+      effectiveMode: ApprovalMode.DEFAULT,
+      restricted: false,
+      revision: 0,
+      expected: 'default',
+    },
+    {
+      name: 'plan pin despite live yolo',
+      settingsApprovalMode: 'plan',
+      effectiveMode: ApprovalMode.YOLO,
+      restricted: false,
+      revision: 1,
+      expected: 'plan',
+    },
+    {
+      name: 'explicit set_mode default',
+      settingsApprovalMode: undefined,
+      effectiveMode: ApprovalMode.DEFAULT,
+      restricted: false,
+      revision: 1,
+      expected: 'default',
+    },
+    {
+      name: 'restricted',
+      settingsApprovalMode: 'plan',
+      effectiveMode: ApprovalMode.DEFAULT,
+      restricted: true,
+      revision: 0,
+      expected: 'default',
+    },
+  ])(
+    'dispatches a per-run scheduled task with $name → $expected',
+    async ({
+      settingsApprovalMode,
+      effectiveMode,
+      restricted,
+      revision,
+      expected,
+    }) => {
+      const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+      const scheduler = {
+        hasPendingWork: true,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(
+          (
+            callback: (job: {
+              id: string;
+              prompt: string;
+              cronExpr: string;
+              lastFiredAt: number;
+              sessionMode: 'per_run';
+            }) => void,
+          ) => {
+            callback({
+              id: 'task-1',
+              prompt: 'review the next PR',
+              cronExpr: '0 * * * *',
+              lastFiredAt: 123,
+              sessionMode: 'per_run',
+            });
+          },
+        ),
+        stop: vi.fn(),
+        annotateRunSession,
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(effectiveMode);
+      mockConfig.getApprovalModeRevision = vi.fn().mockReturnValue(revision);
+      mockConfig.isSafeMode = vi.fn().mockReturnValue(restricted);
+      mockConfig.getBareMode = vi.fn().mockReturnValue(false);
+      if (settingsApprovalMode !== undefined) {
+        Object.assign(mockSettings.merged, {
+          tools: { approvalMode: settingsApprovalMode },
+        });
+      } else {
+        // Ensure a prior case's pin does not leak into a later no-pin case.
+        Object.assign(mockSettings.merged, { tools: {} });
+      }
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        sessionId: 'child-session',
+      });
+
+      session.startCronScheduler();
+
+      await vi.waitFor(() => {
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          SERVE_CONTROL_EXT_METHODS.createSubSession,
+          expect.objectContaining({
+            approvalMode: expected,
+            callerSessionId: 'test-session-id',
+          }),
+        );
+      });
+    },
+  );
 
   it('titles a gated per-run fire’s fresh session from the task prompt, not the gate’s text', async () => {
     const annotateRunSession = vi.fn().mockResolvedValue(undefined);
@@ -23201,8 +23319,39 @@ describe('Session', () => {
         {
           prompt: 'p',
           completion: 'first-turn',
+          approvalMode: ApprovalMode.AUTO,
           workspace: '/x',
           workspaceGeneration: 'generation-x',
+          callerSessionId: 'test-session-id',
+        },
+      );
+    });
+
+    it('forwards unattended approvalMode together with a target workspace', async () => {
+      Object.assign(mockSettings.merged, { tools: { approvalMode: 'plan' } });
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      expect(spawn).toBeTypeOf('function');
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        sessionId: 'child-id',
+        workspaceCwd: '/repos/b',
+      });
+      await expect(
+        spawn?.({
+          prompt: 'p',
+          completion: 'first-turn',
+          workspace: 'b-id',
+          workspaceGeneration: 'generation-b',
+        }),
+      ).resolves.toEqual({ sessionId: 'child-id', workspaceCwd: '/repos/b' });
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: 'p',
+          completion: 'first-turn',
+          approvalMode: ApprovalMode.PLAN,
+          workspace: 'b-id',
+          workspaceGeneration: 'generation-b',
           callerSessionId: 'test-session-id',
         },
       );
@@ -44567,6 +44716,209 @@ describe('Session', () => {
       } finally {
         runWithRuntimeBaseDirSpy.mockRestore();
       }
+    });
+
+    describe('approval mode session/request_permission', () => {
+      function mockWriteFileTool(execute: ReturnType<typeof vi.fn>) {
+        const onConfirm = vi.fn().mockResolvedValue(undefined);
+        return {
+          name: core.ToolNames.WRITE_FILE,
+          kind: core.Kind.Edit,
+          build: vi.fn().mockReturnValue({
+            params: { file_path: 'notes.txt', content: 'hi' },
+            getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+            getConfirmationDetails: vi.fn().mockResolvedValue({
+              type: 'edit',
+              title: 'Create notes.txt',
+              fileName: 'notes.txt',
+              filePath: 'notes.txt',
+              fileDiff: '+hi',
+              originalContent: '',
+              newContent: 'hi',
+              onConfirm,
+            }),
+            getDescription: vi.fn().mockReturnValue('Write notes.txt'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute,
+          }),
+        };
+      }
+
+      function mockShellTool(execute: ReturnType<typeof vi.fn>) {
+        const onConfirm = vi.fn().mockResolvedValue(undefined);
+        return {
+          name: core.ToolNames.SHELL,
+          kind: core.Kind.Execute,
+          build: vi.fn().mockReturnValue({
+            params: { command: 'rm notes.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+            getConfirmationDetails: vi.fn().mockResolvedValue({
+              type: 'exec',
+              title: 'Run rm',
+              command: 'rm notes.txt',
+              rootCommand: 'rm',
+              onConfirm,
+            }),
+            getDescription: vi.fn().mockReturnValue('rm notes.txt'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute,
+          }),
+        };
+      }
+
+      function promptWithToolCall(name: string, args: Record<string, unknown>) {
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [{ id: 'call-1', name, args }],
+              },
+            },
+          ]),
+        );
+        return session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'do the tool' }],
+        });
+      }
+
+      it('requests ACP permission for write_file in default mode before executing', async () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'wrote',
+          returnDisplay: 'wrote',
+        });
+        mockToolRegistry.getTool.mockReturnValue(mockWriteFileTool(execute));
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+
+        let resolvePermission!: (value: {
+          outcome: { outcome: 'selected'; optionId: string };
+        }) => void;
+        vi.mocked(mockClient.requestPermission).mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              resolvePermission = resolve;
+            }),
+        );
+
+        const prompt = promptWithToolCall(core.ToolNames.WRITE_FILE, {
+          file_path: 'notes.txt',
+          content: 'hi',
+        });
+        await vi.waitFor(() => {
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        });
+        expect(execute).not.toHaveBeenCalled();
+
+        resolvePermission({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        await prompt;
+
+        expect(execute).toHaveBeenCalledOnce();
+      });
+
+      it('requests ACP permission for shell in auto-edit mode before executing', async () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'ok',
+          returnDisplay: 'ok',
+        });
+        mockToolRegistry.getTool.mockReturnValue(mockShellTool(execute));
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.AUTO_EDIT);
+
+        let resolvePermission!: (value: {
+          outcome: { outcome: 'selected'; optionId: string };
+        }) => void;
+        vi.mocked(mockClient.requestPermission).mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              resolvePermission = resolve;
+            }),
+        );
+
+        const prompt = promptWithToolCall(core.ToolNames.SHELL, {
+          command: 'rm notes.txt',
+        });
+        await vi.waitFor(() => {
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        });
+        expect(execute).not.toHaveBeenCalled();
+
+        resolvePermission({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        await prompt;
+
+        expect(execute).toHaveBeenCalledOnce();
+      });
+
+      it('does not request ACP permission for write_file in yolo mode', async () => {
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'wrote',
+          returnDisplay: 'wrote',
+        });
+        mockToolRegistry.getTool.mockReturnValue(mockWriteFileTool(execute));
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+
+        await promptWithToolCall(core.ToolNames.WRITE_FILE, {
+          file_path: 'notes.txt',
+          content: 'hi',
+        });
+
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        expect(execute).toHaveBeenCalledOnce();
+      });
+
+      it('honors session/set_mode default after a yolo session and waits for permission', async () => {
+        let mode = ApprovalMode.YOLO;
+        mockConfig.getApprovalMode = vi.fn(() => mode);
+        mockConfig.setApprovalMode = vi.fn((next: ApprovalMode) => {
+          mode = next;
+        });
+        const execute = vi.fn().mockResolvedValue({
+          llmContent: 'wrote',
+          returnDisplay: 'wrote',
+        });
+        mockToolRegistry.getTool.mockReturnValue(mockWriteFileTool(execute));
+
+        await session.setMode({
+          sessionId: 'test-session-id',
+          modeId: 'default',
+        });
+        expect(mode).toBe(ApprovalMode.DEFAULT);
+
+        let resolvePermission!: (value: {
+          outcome: { outcome: 'selected'; optionId: string };
+        }) => void;
+        vi.mocked(mockClient.requestPermission).mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              resolvePermission = resolve;
+            }),
+        );
+
+        const prompt = promptWithToolCall(core.ToolNames.WRITE_FILE, {
+          file_path: 'notes.txt',
+          content: 'hi',
+        });
+        await vi.waitFor(() => {
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        });
+        expect(execute).not.toHaveBeenCalled();
+
+        resolvePermission({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        });
+        await prompt;
+
+        expect(execute).toHaveBeenCalledOnce();
+      });
     });
 
     it('hides allow-always options when confirmation already forbids them', async () => {
