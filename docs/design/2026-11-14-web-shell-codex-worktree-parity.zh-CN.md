@@ -240,7 +240,9 @@ worktree-branch 路由带繁忙门（`branch_while_prompt_active`）。能力标
   的），已前移的本地 HEAD 以 `local_head_moved` 拒绝——checkout 会把用户
   自己超出 base 的提交从工作树中删掉。与本地检出冲突
   的快照在还原本地检出后以 `handoff_snapshot_conflict` 拒绝——绝不留下冲突
-  标记。先携带工作：命名 worktree 分支在本地检出 checkout；detached 且有
+  标记。无法从 worktree 捕获的快照，或非冲突的应用失败（如索引不可写），
+  以 `handoff_carry_failed` 拒绝——这是未能落地的携带，区别于待解决的内容。
+  先携带工作：命名 worktree 分支在本地检出 checkout；detached 且有
   超出 base 的 commit 时先建分支（`name`，否则 `worktree-<slug>`）；detached
   停在 base 且无工作则不携带。先 detach worktree 释放分支——git 禁止同一
   分支同时在两个 worktree 检出。worktree 的未提交改动以 `git stash create`

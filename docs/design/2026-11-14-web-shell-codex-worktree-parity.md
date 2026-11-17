@@ -290,7 +290,10 @@ Capability: `session_worktree_handoff_v1`.
   the user's own ahead-of-base commit from the working tree. A snapshot that
   conflicts with the local checkout is refused with
   `handoff_snapshot_conflict` after restoring the local checkout — never
-  left as conflict markers. Carry the work first: a named worktree branch
+  left as conflict markers. A snapshot that cannot be captured from the
+  worktree, or a non-conflict apply failure (e.g. an unwritable index), is
+  refused with `handoff_carry_failed` — a carry that could not land, distinct
+  from content to resolve. Carry the work first: a named worktree branch
   is checked out in the local checkout; a detached worktree with commits
   beyond base gets a branch first (`name`, else `worktree-<slug>`); a
   detached worktree at base with no work carries nothing. The worktree is
