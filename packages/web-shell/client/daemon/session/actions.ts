@@ -1213,6 +1213,11 @@ export function createDaemonSessionActions({
               : undefined,
           loadingTranscript: undefined,
           catchingUp: undefined,
+          // The failed target stays visible (sessionId + workspaceCwd
+          // above), but its click-time count must not outlive the load:
+          // no snapshot or cache entry will ever retire it on this path.
+          artifactCountHint: undefined,
+          artifactCountHintSessionId: undefined,
         }));
       }
       throw error;

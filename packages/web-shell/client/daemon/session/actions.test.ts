@@ -3689,6 +3689,42 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection().artifactCountHintSessionId).toBeUndefined();
   });
 
+  it('retires the click-time artifact count hint when the load fails', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection, pendingSessionLoadRef } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+        },
+        session: existingSession,
+      });
+
+    const load = actions.loadSession('session-b', { artifactCountHint: 4 });
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.reject(new Error('load failed'));
+
+    await expect(load).rejects.toThrow('load failed');
+    // The failed target stays visible for the error state, but its count
+    // must not outlive the load: no snapshot or cache entry will ever
+    // retire the hint on the failure path.
+    expect(getConnection()).toMatchObject({
+      sessionId: 'session-b',
+      error: 'load failed',
+    });
+    expect(getConnection().artifactCountHint).toBeUndefined();
+    expect(getConnection().artifactCountHintSessionId).toBeUndefined();
+  });
+
   it('drops workspace previews when switching to a standalone target', () => {
     const existingSession = createMockSession('session-a');
     const { actions, getConnection } = createActionsHarness({
