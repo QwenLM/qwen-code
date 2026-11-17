@@ -1242,7 +1242,12 @@ describe('fetchGitDiff untracked counting', () => {
 });
 
 describe('parseStatusBranchLine', () => {
-  const main = { branch: 'main', detached: false, hasUpstream: true };
+  const main = {
+    branch: 'main',
+    detached: false,
+    hasHead: true,
+    hasUpstream: true,
+  };
   it.each([
     [
       'parses branch with upstream and ahead/behind',
@@ -1275,12 +1280,12 @@ describe('parseStatusBranchLine', () => {
     [
       'detects a detached HEAD',
       '## HEAD (no branch)',
-      { branch: null, detached: true, hasUpstream: false },
+      { branch: null, detached: true, hasHead: true, hasUpstream: false },
     ],
     [
       'returns empty for a non-header line',
       ' M src/foo.ts',
-      { branch: null, detached: false, hasUpstream: false },
+      { branch: null, detached: false, hasHead: false, hasUpstream: false },
     ],
   ])('%s', (_title, line, expected) => {
     expect(parseStatusBranchLine(line)).toEqual({
@@ -1300,13 +1305,17 @@ describe('parseStatusBranchLine', () => {
   });
 
   it('reads the branch from an unborn / initial-commit header', () => {
+    // hasHead:false is the single fact the worktree-eligibility gate rests
+    // on; pin it explicitly so flipping the arm cannot stay green.
     expect(parseStatusBranchLine('## No commits yet on main')).toMatchObject({
       branch: 'main',
       detached: false,
+      hasHead: false,
     });
     expect(parseStatusBranchLine('## Initial commit on dev')).toMatchObject({
       branch: 'dev',
       detached: false,
+      hasHead: false,
     });
   });
 });
@@ -1378,6 +1387,7 @@ describe('getGitWorkingTreeStatus', () => {
     expect(status).toEqual({
       branch: 'main',
       detached: false,
+      hasHead: true,
       hasUpstream: false,
       ahead: 0,
       behind: 0,
