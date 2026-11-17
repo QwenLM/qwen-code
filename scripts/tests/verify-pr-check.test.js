@@ -5,7 +5,12 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
+  accessSync,
+  chmodSync,
+  constants,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -22,6 +27,7 @@ import {
   checkArtifacts,
   checkBoundary,
   checkMutationCoverage,
+  isFilesystemRoot,
 } from '../../scripts/verify-pr-check.mjs';
 
 const SCRIPT = fileURLToPath(
@@ -2480,5 +2486,337 @@ describe('round-15 witnesses', () => {
     );
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/does not contain the artifact directory/);
+  });
+});
+
+describe('R17-1 / R2-1 trust-boundary witnesses', () => {
+  // The trust refusal must fail closed on the layouts the path-string test
+  // missed, and a hard link must not let a PR-writable snapshot judge its own
+  // waiver. The alias guard is the link count: a freshly written host copy has
+  // exactly one name, so a second name means the round may control the file —
+  // wherever the source lives, readable or not (R1-1, R1-2). The link count
+  // still does not prove the host wrote a single-link file, so the content
+  // digest prepare printed host-side binds the bytes (R2-1).
+  const populate = (dir) => {
+    const files = validFiles({});
+    mkdirSync(join(dir, 'evidence'), { recursive: true });
+    writeFileSync(join(dir, 'report.md'), files.report);
+    writeFileSync(join(dir, 'verdict.txt'), files.verdict);
+    writeFileSync(join(dir, 'assertions.json'), files.assertions);
+    writeFileSync(join(dir, 'boundary.json'), files.boundary);
+    writeFileSync(join(dir, 'boundary-gate.json'), files.boundaryGate);
+    writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
+  };
+  const snapshot = JSON.stringify({
+    repo: 'QwenLM/qwen-code',
+    pr: 7,
+    headRefOid: HEAD,
+  });
+  const run = (args) =>
+    spawnSync(process.execPath, [SCRIPT, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+  // The derived-'/' witnesses need a real, writable root-level /tmp; CI routes
+  // os.tmpdir() elsewhere, so they must not rely on it (R1-3).
+  const rootTmpUsable = (() => {
+    try {
+      accessSync('/tmp', constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  const cloneLayout = (prefix) => {
+    const base = mkdtempSync(join(tmpdir(), prefix));
+    tmpDirs.push(base);
+    const clone = join(base, 'clone');
+    const dir = join(clone, 'tmp', 'pr7-verify-20261115-000000');
+    mkdirSync(dir, { recursive: true });
+    populate(dir);
+    return { base, clone, dir };
+  };
+
+  it.skipIf(process.platform === 'win32' || !rootTmpUsable)(
+    'refuses a host copy when the round dir sits directly under root-level tmp',
+    () => {
+      // Literal root-level /tmp so the fallback trustRoot is '/'. The snapshot
+      // is a genuine one-link host copy OUTSIDE the artifact dir, so only the
+      // root-aware path predicate can refuse it — not the link count.
+      const dir = mkdtempSync('/tmp/pr7-verify-r17a-');
+      tmpDirs.push(dir);
+      populate(dir);
+      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17a-host-'));
+      tmpDirs.push(base);
+      const host = join(base, 'host-snapshot.json');
+      writeFileSync(host, snapshot);
+      const res = run(['--context', host, dir]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/contains every path/);
+      // Derived-root remedy is to move the dir, not to pass --context-root
+      // (no clone can contain it) — R1-4.
+      expect(res.stderr).toMatch(/move the artifact dir/);
+      expect(res.stderr).not.toMatch(/pass the PR clone path/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a hard-link alias of the round context planted outside the root',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-r17b-');
+      writeFileSync(join(dir, 'context.json'), snapshot);
+      const outside = join(base, 'host-copy.json');
+      linkSync(join(dir, 'context.json'), outside);
+      const res = run(['--context', outside, '--context-root', clone, dir]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/hard link/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a hard-link alias sourced from the clone verify-context sibling',
+    () => {
+      // R1-1: the source is outside the artifact dir, so a one-directory walk
+      // would miss it; the link count catches it regardless of source path.
+      const { base, clone, dir } = cloneLayout('verify-pr-r17b2-');
+      const siblingDir = join(clone, 'tmp', 'verify-context');
+      mkdirSync(siblingDir, { recursive: true });
+      writeFileSync(join(siblingDir, 'pr7.json'), snapshot);
+      const outside = join(base, 'host-copy.json');
+      linkSync(join(siblingDir, 'pr7.json'), outside);
+      const res = run(['--context', outside, '--context-root', clone, dir]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/hard link/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a hard-link alias whose in-dir source is unreadable',
+    () => {
+      // R1-2 / F1: the source sits under a chmod-000 subdirectory. The link
+      // count refuses without reading that directory, so hiding it cannot help.
+      const { base, clone, dir } = cloneLayout('verify-pr-r17b3-');
+      const hidden = join(dir, 'hidden');
+      mkdirSync(hidden, { recursive: true });
+      writeFileSync(join(hidden, 'planted.json'), snapshot);
+      const outside = join(base, 'host-copy.json');
+      linkSync(join(hidden, 'planted.json'), outside);
+      chmodSync(hidden, 0o000);
+      try {
+        const res = run(['--context', outside, '--context-root', clone, dir]);
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/hard link/);
+      } finally {
+        chmodSync(hidden, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a hard-link alias under the fallback trust root',
+    () => {
+      // No --context-root: the alias is refused with the derived root too.
+      const { base, dir } = cloneLayout('verify-pr-r17b4-');
+      writeFileSync(join(dir, 'context.json'), snapshot);
+      const outside = join(base, 'host-copy.json');
+      linkSync(join(dir, 'context.json'), outside);
+      const res = run(['--context', outside, dir]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/hard link/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts a genuine host-held snapshot outside the root (no false alias)',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-r17c-');
+      const outside = join(base, 'host-snapshot.json');
+      writeFileSync(outside, snapshot);
+      const res = run(['--context', outside, '--context-root', clone, dir]);
+      expect(res.status).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts a host copy that only shares the clone name prefix',
+    () => {
+      // A bare startsWith(root) would falsely refuse this sibling (M7).
+      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17c2-'));
+      tmpDirs.push(base);
+      const clone = join(base, 'qwen-code');
+      const dir = join(clone, 'tmp', 'pr7-verify-20261115-000000');
+      mkdirSync(dir, { recursive: true });
+      populate(dir);
+      const beside = join(base, 'qwen-code-verify');
+      mkdirSync(beside, { recursive: true });
+      const host = join(beside, 'pr7.json');
+      writeFileSync(host, snapshot);
+      const res = run(['--context', host, '--context-root', clone, dir]);
+      expect(res.status).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a --context-root of / is a usage error that names the clone remedy',
+    () => {
+      const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17d-'));
+      tmpDirs.push(base);
+      const host = join(base, 'host-snapshot.json');
+      writeFileSync(host, snapshot);
+      const res = run(['--context', host, '--context-root', '/', dir]);
+      expect(res.status).toBe(2);
+      expect(res.stderr).toMatch(/filesystem root/);
+      expect(res.stderr).toMatch(/pass the PR clone path/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a --context-root of / is a usage error even without --context (R2-2)',
+    () => {
+      const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+      const res = run(['--context-root', '/', dir]);
+      expect(res.status).toBe(2);
+      expect(res.stderr).toMatch(/filesystem root/);
+    },
+  );
+
+  // R2-1: a single link does not prove the host wrote the snapshot. The round
+  // can rewrite the bytes through an in-clone alias then unlink it (link count
+  // back to 1), or write a fresh single-link file at a writable path. The
+  // content digest prepare printed host-side is what binds the provenance.
+  const sha256 = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
+  const forged = JSON.stringify({
+    repo: 'QwenLM/qwen-code',
+    pr: 17185,
+    headRefOid: 'c'.repeat(40),
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses coords rewritten through an in-clone alias then unlinked (R2-1 B)',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-r2-1b-');
+      const host = join(base, 'host-snapshot.json');
+      writeFileSync(host, snapshot);
+      const digest = sha256(snapshot);
+      const inDir = join(dir, 'linked-host.json');
+      linkSync(host, inDir);
+      writeFileSync(inDir, forged); // rewrites the shared inode, host included
+      unlinkSync(inDir); // link count back to 1
+      const res = run([
+        '--context',
+        host,
+        '--context-sha256',
+        digest,
+        '--context-root',
+        clone,
+        dir,
+      ]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/does not match --context-sha256/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a fresh single-link file written at a writable path (R2-1 E)',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-r2-1e-');
+      const genuine = join(base, 'genuine.json');
+      writeFileSync(genuine, snapshot);
+      const digest = sha256(snapshot);
+      const writable = join(base, 'round-writable');
+      mkdirSync(writable, { recursive: true });
+      const planted = join(writable, 'ctx.json');
+      writeFileSync(planted, forged);
+      const res = run([
+        '--context',
+        planted,
+        '--context-sha256',
+        digest,
+        '--context-root',
+        clone,
+        dir,
+      ]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/does not match --context-sha256/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts a genuine host copy whose bytes match the digest (R2-1 control)',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-r2-1c-');
+      const host = join(base, 'host-snapshot.json');
+      writeFileSync(host, snapshot);
+      const res = run([
+        '--context',
+        host,
+        '--context-sha256',
+        sha256(snapshot),
+        '--context-root',
+        clone,
+        dir,
+      ]);
+      expect(res.status).toBe(0);
+    },
+  );
+
+  it('rejects --context-sha256 without --context as a usage error', () => {
+    const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+    const res = run(['--context-sha256', sha256(snapshot), dir]);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--context-sha256 binds a --context snapshot/);
+  });
+
+  it('rejects a malformed --context-sha256 value', () => {
+    const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+    const res = run(['--context', 'x.json', '--context-sha256', 'nothex', dir]);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--context-sha256 requires the 64-hex digest/);
+  });
+
+  it('refuses a missing context with a diagnostic, not a crash (R3-3)', () => {
+    const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+    const missing = join(dir, '..', `nonexistent-${Date.now()}.json`);
+    const res = run([
+      '--context',
+      missing,
+      '--context-sha256',
+      sha256(snapshot),
+      dir,
+    ]);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(
+      /missing or unreadable; cannot verify it against --context-sha256/,
+    );
+  });
+
+  it('discloses when a context is accepted without a digest binding', () => {
+    const { base, clone, dir } = cloneLayout('verify-pr-disclose-');
+    const host = join(base, 'host-snapshot.json');
+    writeFileSync(host, snapshot);
+    const res = run(['--context', host, '--context-root', clone, dir]);
+    expect(res.status).toBe(0);
+    expect(res.stdout).toMatch(
+      /no --context-sha256 binding; provenance rests on the path\/link checks alone/,
+    );
+  });
+});
+
+// Runs on every lane (not Unix-gated): the drive-root arm must be exercised
+// even where the CLI root witnesses skip (R5-2).
+describe('isFilesystemRoot', () => {
+  it('treats a POSIX root and a Windows drive root as filesystem roots', () => {
+    expect(isFilesystemRoot('/')).toBe(true);
+    expect(isFilesystemRoot('C:\\')).toBe(true);
+    expect(isFilesystemRoot('C:/')).toBe(true);
+    expect(isFilesystemRoot('d:\\')).toBe(true);
+  });
+
+  it('does not treat a non-root path as a filesystem root', () => {
+    expect(isFilesystemRoot('/tmp')).toBe(false);
+    expect(isFilesystemRoot('C:\\Users')).toBe(false);
+    expect(isFilesystemRoot('C:')).toBe(false);
+    expect(isFilesystemRoot('')).toBe(false);
   });
 });

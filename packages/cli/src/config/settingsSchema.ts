@@ -396,7 +396,7 @@ const SETTINGS_SCHEMA = {
         minimum: 1,
         maximum: 1024,
         description:
-          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
+          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers, including sessions in other workspaces that start sub-sessions in this one.',
         showInDialog: false,
       },
       sessionPrWatch: {
@@ -4638,7 +4638,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as boolean | undefined,
         unsetToggleValue: true,
         description:
-          'Run sessions on the shared agent loop. When unset, each surface uses its own default: headless sessions (`-p` and stream-json) and the Ink TUI run on the shared loop, while ACP sessions (Zed, VS Code, Web Shell, channels), OpenTUI, subagents and the Hosted Harness keep their own loop (experimental there). `true` runs all of them on the shared loop (the Hosted Harness runs its model rounds on it while keeping its journaled tool dispatch), and `false` keeps all of them, headless and the Ink TUI included, on their own loop. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation, hosted). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+          'Run sessions on the shared agent loop. When unset, each surface uses its own default: headless sessions (`-p` and stream-json), the Ink TUI and subagents run on the shared loop, while ACP sessions (Zed, VS Code, Web Shell, channels), OpenTUI and the Hosted Harness keep their own loop (experimental there). `true` runs all of them on the shared loop (the Hosted Harness runs its model rounds on it while keeping its journaled tool dispatch), and `false` keeps all of them, headless, the Ink TUI and subagents included, on their own loop. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation, hosted). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
       eventBusAgentLoop: {
@@ -4648,7 +4648,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run the shared agent loop on the event-bus architecture (experimental). Applies to the surfaces that run on the shared agent loop: headless sessions (`-p` and stream-json) and the Ink TUI by default, and ACP sessions (Zed, VS Code, Web Shell, channels), OpenTUI and subagents when experimental.unifiedAgentLoop is enabled; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+          'Run the shared agent loop on the event-bus architecture (experimental). Applies to the surfaces that run on the shared agent loop: headless sessions (`-p` and stream-json), the Ink TUI and subagents by default, and ACP sessions (Zed, VS Code, Web Shell, channels) and OpenTUI when experimental.unifiedAgentLoop is enabled; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
       agentCollaboration: {
@@ -4856,10 +4856,26 @@ const SETTINGS_SCHEMA = {
     description:
       'Configuration for general-purpose git worktrees created by the ' +
       'CLI (the `enter_worktree` tool, the `agent isolation: "worktree"` ' +
-      'parameter, and the startup `--worktree` flag). Does NOT affect ' +
-      'Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.',
+      'parameter, and the startup `--worktree` flag) and for Web Shell ' +
+      'session worktrees. Does NOT affect Agent Arena worktrees — see ' +
+      '`agents.arena.worktreeBaseDir` for those.',
     showInDialog: false,
     properties: {
+      defaultForNewSessions: {
+        type: 'boolean',
+        label: 'Default Worktree For New Web Shell Sessions',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: true,
+        description:
+          'When true (the default), a new Web Shell session in a trusted ' +
+          'Git workspace starts in an isolated worktree: the composer ' +
+          'defaults to Worktree mode and the worktree is created when the ' +
+          'first message is sent. Set to false to default to the current ' +
+          'branch instead. Only affects the Web Shell composer default; ' +
+          'explicit mode selection and the daemon API are unchanged.',
+        showInDialog: false,
+      },
       symlinkDirectories: {
         type: 'array',
         label: 'Symlink Directories Into Worktrees',

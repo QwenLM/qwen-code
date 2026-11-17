@@ -6403,11 +6403,23 @@ async function runQwenServeImpl(
     // from a child's agent turn and (for 'first-turn') return its result.
     // Dynamic-imported (not at module scope) so the serve fast-path bundle
     // closure check doesn't trace create-sub-session's transitive deps.
-    const [{ createSubSessionLauncher }, scheduledTaskRoutes] =
-      await Promise.all([
-        import('./create-sub-session.js'),
-        import('./routes/scheduled-tasks.js'),
-      ]);
+    const [
+      { createSubSessionLauncher, createSubSessionWorkspaceIndex },
+      scheduledTaskRoutes,
+    ] = await Promise.all([
+      import('./create-sub-session.js'),
+      import('./routes/scheduled-tasks.js'),
+    ]);
+    // Lets a session's sub-session run in another registered workspace.
+    const subSessionWorkspaces = createSubSessionWorkspaceIndex(
+      () => workspaceRegistryForPersistence.current,
+    );
+    const getSubSessionArchiveCoordinator = () =>
+      (
+        (runtimeApp ?? runtimeAppForCleanup)?.locals as
+          | { sessionArchiveCoordinator?: SessionArchiveCoordinator }
+          | undefined
+      )?.sessionArchiveCoordinator;
     const { sessionAttachmentsRoots } = await import(
       './session-attachments-root.js'
     );
@@ -6462,11 +6474,15 @@ async function runQwenServeImpl(
     // brings its own options.
     const subSessionLauncher = createSubSessionLauncher({
       getBridge: () => bridgeRef,
+      getArchiveCoordinator: getSubSessionArchiveCoordinator,
       boundWorkspace,
       runtimeBaseDir: primarySessionRuntimeBaseDir,
       ...subSessionConcurrencyCapsFromSettings(
         runtimeBootSettings?.merged.serve ?? {},
       ),
+      resolveWorkspace: subSessionWorkspaces.resolve,
+      isTrusted: (bridge) =>
+        subSessionWorkspaces.isTrusted(boundWorkspace, bridge),
     });
     const attachmentsRoots = sessionAttachmentsRoots(
       boundWorkspace,
@@ -6493,6 +6509,7 @@ async function runQwenServeImpl(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onResolveSubSessionWorkspace: subSessionLauncher.resolveDestination,
         onCreateCurrentSessionScheduledTask:
           createCurrentSessionScheduledTaskHandler(
             boundWorkspace,
@@ -6996,10 +7013,6 @@ async function runQwenServeImpl(
     // (primary + secondaries). Called during shutdown so no new sub-sessions
     // are admitted while bridges are being torn down.
     const subSessionStoppers: Array<() => void> = [];
-    const subSessionStoppersByRuntime = new WeakMap<
-      WorkspaceRuntime,
-      () => void
-    >();
     const runtimeCleanupPromises = new WeakMap<
       WorkspaceRuntime,
       Promise<void>
@@ -7116,11 +7129,15 @@ async function runQwenServeImpl(
         | undefined;
       const secondarySubSessionLauncher = createSubSessionLauncher({
         getBridge: () => secondaryBridgeRef,
+        getArchiveCoordinator: getSubSessionArchiveCoordinator,
         boundWorkspace: workspaceInput.cwd,
         runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
         ...subSessionConcurrencyCapsFromSettings(
           secondarySettings?.merged.serve ?? {},
         ),
+        resolveWorkspace: subSessionWorkspaces.resolve,
+        isTrusted: (bridge) =>
+          subSessionWorkspaces.isTrusted(workspaceInput.cwd, bridge),
       });
       const secondaryAttachmentsRoots = sessionAttachmentsRoots(
         workspaceInput.cwd,
@@ -7143,6 +7160,8 @@ async function runQwenServeImpl(
         sessionAttachmentsFallbackRoot: secondaryAttachmentsRoots.fallback,
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onResolveSubSessionWorkspace:
+          secondarySubSessionLauncher.resolveDestination,
         onCreateCurrentSessionScheduledTask:
           createCurrentSessionScheduledTaskHandler(
             workspaceInput.cwd,
@@ -7445,9 +7464,9 @@ async function runQwenServeImpl(
           boundWorkspaces: [workspaceInput.cwd],
         }),
       };
-      subSessionStoppersByRuntime.set(
+      subSessionWorkspaces.register(
         secondaryRuntime,
-        secondarySubSessionLauncher.stop,
+        secondarySubSessionLauncher,
       );
       workspaceRuntimes.push(secondaryRuntime);
     }
@@ -7458,6 +7477,10 @@ async function runQwenServeImpl(
         scanUnindexedOwners: deps.bridge !== undefined,
       });
     workspaceRegistryForPersistence.current = workspaceRegistry;
+    subSessionWorkspaces.register(
+      workspaceRegistry.primary,
+      subSessionLauncher,
+    );
     const workspaceVoiceCoordinator = new WorkspaceVoiceCoordinator();
 
     core.registerDaemonGaugeCallbacks({
@@ -8127,6 +8150,7 @@ async function runQwenServeImpl(
         | undefined;
       const wsSubSessionLauncher = createSubSessionLauncher({
         getBridge: () => wsBridgeRef,
+        getArchiveCoordinator: getSubSessionArchiveCoordinator,
         boundWorkspace: cwd,
         runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
         ...(provenance === 'live-conversation'
@@ -8151,6 +8175,8 @@ async function runQwenServeImpl(
         ...subSessionConcurrencyCapsFromSettings(
           wsSettings?.merged.serve ?? {},
         ),
+        resolveWorkspace: subSessionWorkspaces.resolve,
+        isTrusted: (bridge) => subSessionWorkspaces.isTrusted(cwd, bridge),
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
@@ -8175,6 +8201,7 @@ async function runQwenServeImpl(
           sessionAttachmentsFallbackRoot: wsAttachmentsRoots.fallback,
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onResolveSubSessionWorkspace: wsSubSessionLauncher.resolveDestination,
           onCreateCurrentSessionScheduledTask:
             createCurrentSessionScheduledTaskHandler(
               cwd,
@@ -8537,7 +8564,7 @@ async function runQwenServeImpl(
             boundWorkspaces: [...runtimeBoundWorkspaces].sort(),
           }),
       };
-      subSessionStoppersByRuntime.set(wsRuntime, wsSubSessionLauncher.stop);
+      subSessionWorkspaces.register(wsRuntime, wsSubSessionLauncher);
       if (provenance === 'existing' && !buildOptions?.snapshot) {
         const latest = await trustPolicy.readDaemonTrustPolicySnapshot();
         if (latest.revision !== snapshot.revision) {
@@ -8552,7 +8579,6 @@ async function runQwenServeImpl(
                 // Continue removing the stale unpublished runtime.
               }
             });
-          subSessionStoppersByRuntime.delete(wsRuntime);
           removeArrayValue(subSessionStoppers, wsSubSessionLauncher.stop);
           removeArrayValue(runtimeBridges, wsBridge);
           removeArrayValue(internalRuntimeBridgesForCleanup, wsBridge);
@@ -8835,9 +8861,11 @@ async function runQwenServeImpl(
             );
           }
           const stopSubSessions =
-            subSessionStoppersByRuntime.get(runtimeToDrain);
+            subSessionWorkspaces.getLauncher(runtimeToDrain)?.stop;
           try {
-            stopSubSessions?.();
+            stopSubSessions?.(
+              reason === 'daemon_shutdown' ? undefined : 'workspace_stopped',
+            );
           } catch {
             // Continue to bridge teardown.
           }
@@ -8952,7 +8980,6 @@ async function runQwenServeImpl(
             bridgeStopped = true;
           } finally {
             if (bridgeStopped) {
-              subSessionStoppersByRuntime.delete(runtimeToDrain);
               if (stopSubSessions) {
                 removeArrayValue(subSessionStoppers, stopSubSessions);
               }
@@ -9297,10 +9324,6 @@ async function runQwenServeImpl(
       app.locals as { subSessionStoppers?: Array<() => void> }
     ).subSessionStoppers = subSessionStoppers;
     subSessionStoppers.push(subSessionLauncher.stop);
-    subSessionStoppersByRuntime.set(
-      workspaceRegistry.primary,
-      subSessionLauncher.stop,
-    );
     if (workspaceTrustHotReloadAvailable) {
       const [
         { createWorkspaceTrustReconciler },

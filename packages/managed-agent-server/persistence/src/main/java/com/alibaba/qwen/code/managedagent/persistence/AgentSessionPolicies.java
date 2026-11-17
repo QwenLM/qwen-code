@@ -63,7 +63,6 @@ final class AgentSessionPolicies {
     private final JdbcManagedSessionSkills creationSkills;
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
-    private final ResidentWorkspaces residentWorkspaces;
 
     AgentSessionPolicies(AgentEventJournal eventJournal,
             AgentSessionQueries sessionQueries,
@@ -83,8 +82,7 @@ final class AgentSessionPolicies {
             JdbcManagedAgentDefinitionStore definitions,
             JdbcManagedSessionSkills creationSkills,
             boolean workspaceFilesEnabled,
-            boolean workspaceShellEnabled,
-            ResidentWorkspaces residentWorkspaces) {
+            boolean workspaceShellEnabled) {
         this.eventJournal = eventJournal;
         this.sessionQueries = sessionQueries;
         this.storeRows = storeRows;
@@ -104,7 +102,6 @@ final class AgentSessionPolicies {
         this.creationSkills = creationSkills;
         this.workspaceFilesEnabled = workspaceFilesEnabled;
         this.workspaceShellEnabled = workspaceShellEnabled;
-        this.residentWorkspaces = residentWorkspaces;
     }
 
     static final Pattern DEFINITION_REVISION = Pattern.compile(
@@ -225,7 +222,7 @@ final class AgentSessionPolicies {
         }
         if (!WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
                 || !workspaceFilesEnabled || !workspaceShellEnabled && WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                || isSshWorkspace(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
+                || isSshWorkspace(session.workspace())
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null) {
             throw new ManagedAgentException(409, "unsupported_feature", "MCP management is unavailable.");
         }

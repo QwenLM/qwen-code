@@ -61,6 +61,7 @@ import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { ReportedArtifactRegistration } from './ReportedArtifactRegistration';
 import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
+import { isNamedSubSessionApproval } from '../adapters/toolClassification';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type {
@@ -970,6 +971,7 @@ export function ChatPane({
           !enabled &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
+          !isNamedSubSessionApproval(approval) &&
           (modeId === 'yolo' ||
             (modeId === 'auto-edit' && approval.toolKind === 'edit'))
         ) {
@@ -2075,6 +2077,7 @@ export function ChatPane({
                   onPause={() => runGoalControl('pause')}
                   onResume={() => runGoalControl('resume')}
                   onClear={() => runGoalControl('clear')}
+                  onOpenGoals={onOpenGoals}
                 />
               )}
             </div>

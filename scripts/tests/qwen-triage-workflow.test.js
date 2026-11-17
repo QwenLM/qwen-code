@@ -6939,8 +6939,46 @@ describe('qwen-triage verify hardening round 2', () => {
     // Whitespace flattening keeps the line-continuation backslash. The trust
     // root is host-provided (--context-root), not derived from git (R14-1).
     const checker = flat.indexOf(
-      'verify-pr-check.mjs" \\ --context ~/.cache/qwen-verify/pr<n>/pr.json \\ --context-root "<pr-clone>" "$rd"',
+      'verify-pr-check.mjs" \\ --context ~/.cache/qwen-verify/pr<n>/pr.json \\ --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" \\ --context-root "<pr-clone>" "$rd"',
     );
+    // The snapshot's bytes are bound to the digest prepare printed host-side;
+    // a path/link-count check alone cannot prove the host wrote the copy
+    // (R2-1). Assert on the raw skill: the sed pattern's double spaces are
+    // significant and the flattened view collapses them.
+    expect(verifySkill).toContain(
+      "sed -n 's/^  context-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > ~/.cache/qwen-verify/pr<n>/pr.sha256",
+    );
+    // R3-2: the digest must be captured and passed on every documented
+    // spelling, and an empty digest must fail at step 1 where the cause is
+    // visible — not at step 7 after the container has run.
+    expect(verifySkill).toContain(
+      'grep -Eq \'^[0-9a-f]{64}$\' ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no valid context-sha256; see prepare.log" >&2; exit 1; }',
+    );
+    // R5-3: clear last round's log/digest and gate on prepare's own exit status,
+    // so a failed cd/prepare cannot certify a stale snapshot.
+    expect(verifySkill).toContain(
+      'rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256',
+    );
+    expect(verifySkill).toContain(
+      '|| { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }',
+    );
+    // R5-1 structural: the authoritative snapshot is written straight to a host
+    // destination outside the clone, not copied out of the PR-writable tree.
+    expect(verifySkill).toContain(
+      '--context-out ~/.cache/qwen-verify/pr<n>/pr.json',
+    );
+    // Both checker overview spellings carry the binding flag.
+    expect(
+      verifySkill.split(
+        'verify-pr-check.mjs --context <host snapshot> --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" <artifact dir>',
+      ).length - 1,
+    ).toBeGreaterThanOrEqual(2);
+    // Both prepare overview spellings point at the step-1 digest capture.
+    // Count on the flattened view: one spelling wraps between "snapshot" and
+    // "digest", so a raw toContain would pin only the other (R4-1).
+    expect(
+      flat.split('plus the `sed` that captures the snapshot digest').length - 1,
+    ).toBeGreaterThanOrEqual(2);
     expect(stop).toBeGreaterThan(-1);
     expect(symlinkGuard).toBeGreaterThan(-1);
     expect(clear).toBeGreaterThan(-1);

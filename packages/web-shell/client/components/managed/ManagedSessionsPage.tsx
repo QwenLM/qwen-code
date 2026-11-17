@@ -295,42 +295,51 @@ export function ManagedSessionsPage({
   return <p role="status">{t('managed.unavailable')}</p>;
 }
 
-const FAILURE_MESSAGES: Record<string, readonly [string, string]> = {
+const FAILURE_MESSAGES: Record<string, readonly [string, string, string]> = {
   model_payment_required: [
     'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
     '模型接口要求支付（HTTP 402），可能是余额不足或计费受限。请检查供应商账户余额与计费状态后重试。',
+    'Требуется оплата API модели (HTTP 402). Перед повтором проверьте баланс и биллинг аккаунта поставщика.',
   ],
   model_authentication_failed: [
     'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
     '模型接口鉴权失败（HTTP 401）。请检查供应商凭据配置。',
+    'Ошибка аутентификации API модели (HTTP 401). Проверьте настроенные учётные данные поставщика.',
   ],
   model_access_denied: [
     'Model API access denied (HTTP 403). Check the provider account and model permissions.',
     '模型接口拒绝访问（HTTP 403）。请检查供应商账户与模型访问权限。',
+    'Доступ к API модели запрещён (HTTP 403). Проверьте аккаунт поставщика и права на модель.',
   ],
   model_request_timeout: [
     'The model API request timed out. Try again later.',
     '模型接口请求超时，请稍后重试。',
+    'Запрос к API модели превысил время ожидания. Попробуйте позже.',
   ],
   model_rate_limited: [
     'Model API rate limit exceeded (HTTP 429). Wait and try again later.',
     '模型接口触发限流（HTTP 429），请稍后重试。',
+    'Превышен лимит запросов API модели (HTTP 429). Подождите и попробуйте позже.',
   ],
   model_request_rejected: [
     'The model API rejected the request. Check the model configuration and input.',
     '模型接口拒绝了请求，请检查模型配置与输入内容。',
+    'API модели отклонил запрос. Проверьте конфигурацию модели и входные данные.',
   ],
   model_service_unavailable: [
     'The model API service is unavailable. Try again later.',
     '模型接口服务暂不可用，请稍后重试。',
+    'Сервис API модели недоступен. Попробуйте позже.',
   ],
   model_request_failed: [
     'Model API request failed. Check the server logs for this session before retrying.',
     '模型接口请求失败，请根据当前会话检查服务日志后再重试。',
+    'Запрос к API модели не удался. Перед повтором проверьте журналы сервера для этой сессии.',
   ],
   hosted_turn_failed: [
     'The turn failed. Check the server logs for this session to identify the cause.',
     '本轮执行失败，请根据当前会话检查服务日志以定位具体原因。',
+    'Ход не удался. Проверьте журналы сервера для этой сессии, чтобы найти причину.',
   ],
 };
 
@@ -1175,7 +1184,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? '此会话暂不支持 BTW/回顾。'
-            : 'BTW/recap is unavailable for this session.',
+            : language === 'ru'
+              ? 'BTW/обзор недоступны для этой сессии.'
+              : 'BTW/recap is unavailable for this session.',
         );
         return;
       }
@@ -1187,7 +1198,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? 'BTW 仅支持文本问题，/recap 不接受参数。'
-            : 'BTW accepts text only; /recap accepts no arguments.',
+            : language === 'ru'
+              ? 'BTW принимает только текст; /recap не принимает аргументы.'
+              : 'BTW accepts text only; /recap accepts no arguments.',
         );
         return;
       }
@@ -1200,7 +1213,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? '此会话暂不支持 BTW/回顾生成。'
-            : 'BTW/recap generation is unavailable for this session.',
+            : language === 'ru'
+              ? 'Генерация BTW/обзора недоступна для этой сессии.'
+              : 'BTW/recap generation is unavailable for this session.',
         );
         return;
       }
@@ -1414,8 +1429,9 @@ function ManagedSessionsContent({
       summary.capabilities.inputAttachments === true && worktreeReady;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const failureMessage = summary?.failure
-    ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
-      summary.failure.message)
+    ? (FAILURE_MESSAGES[summary.failure.code]?.[
+        language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0
+      ] ?? summary.failure.message)
     : undefined;
   const cancel = useCallback(async () => {
     const abort = lifetime.current;
@@ -1454,7 +1470,11 @@ function ManagedSessionsContent({
             size="sm"
             onClick={() => sideQueries.show('recap')}
           >
-            {language === 'zh-CN' ? '回顾' : 'Recap'}
+            {language === 'zh-CN'
+              ? '回顾'
+              : language === 'ru'
+                ? 'Обзор'
+                : 'Recap'}
           </Button>
         )}
       </>
@@ -2759,7 +2779,9 @@ function ManagedSessionsContent({
                           description:
                             language === 'zh-CN'
                               ? '私下继续追问当前会话'
-                              : 'Ask a private follow-up',
+                              : language === 'ru'
+                                ? 'Задать частный уточняющий вопрос'
+                                : 'Ask a private follow-up',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -2772,7 +2794,9 @@ function ManagedSessionsContent({
                           description:
                             language === 'zh-CN'
                               ? '回顾已完成的对话'
-                              : 'Recap the completed conversation',
+                              : language === 'ru'
+                                ? 'Обзор завершённого разговора'
+                                : 'Recap the completed conversation',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
