@@ -598,10 +598,19 @@ export interface DaemonGitWorktreeRemoveResult {
   directoryRemains?: true;
 }
 
-/** Response from `POST /workspaces/:workspace/git/checkout`. */
+/** Response from `POST /workspaces/:workspace/git/checkout` (2xx body). */
 export interface DaemonGitCheckoutResult {
   branch: string;
   detached: boolean;
+  /**
+   * SHA of the auto-stash entry kept by a successful `stash` checkout.
+   * The entry holds the pre-switch changes; restore it manually with
+   * `git stash apply` when wanted. A 409 failure whose entry survives
+   * with a known SHA (a failed restore, or a parked-operation refusal
+   * after the push) carries the same field in its ERROR body
+   * (`{ error, message, stashSha }`), not in this interface.
+   */
+  stashSha?: string;
 }
 
 /** Response from `POST /workspaces/:workspace/git/push`. */
@@ -1584,6 +1593,13 @@ export interface DaemonSessionState {
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
   artifactWarnings?: string[];
+  /**
+   * Restored artifact snapshot embedded by newer daemons so clients can surface
+   * a session-level artifact entry before the replay renders. Absent on older
+   * daemons and on sessions with no artifacts; clients fall back to
+   * `GET /session/:id/artifacts`.
+   */
+  artifacts?: DaemonSessionArtifact[];
   /** True when persisted replay could only be reconstructed partially. */
   partial?: true;
   /** Diagnostic for a partial persisted replay. */
@@ -6338,6 +6354,22 @@ export interface ExtensionRefreshResponse {
   refreshed: number;
   failed: number;
 }
+
+/** One Generated UI card's saved view state; revision 0 means never saved. */
+export interface DaemonGeneratedUiState {
+  cardId: string;
+  revision: number;
+  value: unknown;
+}
+
+/**
+ * Outcome of saving view state. `stale` carries the current revision and value
+ * when another view saved first; `too_large` reports the size limit in bytes.
+ */
+export type DaemonGeneratedUiStateWriteResult =
+  | { outcome: 'saved'; cardId: string; revision: number }
+  | { outcome: 'stale'; cardId: string; revision: number; value: unknown }
+  | { outcome: 'too_large'; cardId: string; limitBytes: number };
 
 export interface DaemonMcpAppToolCall {
   serverName: string;

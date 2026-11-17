@@ -10,6 +10,8 @@ guest 状态。本设计在同一浏览器页面中为符合条件的内置 Gene
 
 普通 MCP Apps 和手动安装的扩展保持原有生命周期。刷新、关闭页面、导出和派生会话
 不会保存或转移活实例。不持久化交互快照，不新增 daemon 路由或协议字段。
+卡片主动保存的值属于另一套机制，见
+[generated-ui-view-state.zh-CN.md](generated-ui-view-state.zh-CN.md)。
 
 ## 身份与归属
 
