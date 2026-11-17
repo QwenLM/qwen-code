@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { plural } from '../utils/plural.js';
+import { plural, ruPlural } from '../utils/plural.js';
 
 export const MESSAGE_DELETION_MESSAGES_EN: Record<
   string,
@@ -66,4 +66,38 @@ export const MESSAGE_DELETION_MESSAGES_ZH: Record<
     '无法安全匹配此消息对应的历史记录，请刷新后重试。',
   'messageDelete.reloadFailed':
     '消息已删除，但历史重载失败。请重新加载会话以刷新其余消息。',
+};
+
+export const MESSAGE_DELETION_MESSAGES_RU: Record<
+  string,
+  string | ((vars?: Record<string, string | number>) => string)
+> = {
+  'messageDelete.commandFailed': 'Команда не выполнена.',
+  'messageDelete.entry': 'Удалить сообщения',
+  'messageDelete.selected': (vars) =>
+    `${vars?.['count'] ?? 0} ${ruPlural(vars?.['count'], 'группа выбрана', 'группы выбраны', 'групп выбрано')}`,
+  'messageDelete.delete': 'Удалить выбранное',
+  'messageDelete.confirm': 'Удалить безвозвратно',
+  'messageDelete.confirmTitle': (vars) =>
+    `Удалить ${vars?.['count'] ?? 0} ${ruPlural(vars?.['count'], 'группу сообщений', 'группы сообщений', 'групп сообщений')}?`,
+  'messageDelete.confirmDescription':
+    'Это безвозвратно удалит выбранные исходные сообщения из истории. Существующие сводки, эффекты команд и файлы проекта сохраняются. Информация, уже попавшая в сводку, может по-прежнему влиять на будущие ответы.',
+  'messageDelete.selectGroup': 'Выбрать группу сообщений',
+  'messageDelete.processing': 'Обработка…',
+  'messageDelete.failed':
+    'Не удалось удалить сообщения. Перезагрузите и попробуйте снова.',
+  'messageDelete.unsupported':
+    'Удаление сохранённых сообщений для этой сессии не поддерживается.',
+  'messageDelete.conflict':
+    'История сессии изменилась. Снова выберите сообщения перед удалением.',
+  'messageDelete.reopenRequired':
+    'Сообщения удалены. Откройте эту сессию заново, прежде чем отправлять следующее сообщение.',
+  'messageDelete.busy':
+    'Сессия обрабатывает ход. Повторите, когда он завершится.',
+  'messageDelete.invalidHistory':
+    'В этой истории нет надёжных идентификаторов, необходимых для безопасного удаления выбранных сообщений.',
+  'messageDelete.unavailable':
+    'Это сообщение нельзя безопасно сопоставить с сохранённой историей. Перезагрузите и попробуйте снова.',
+  'messageDelete.reloadFailed':
+    'Сообщения удалены, но историю не удалось перезагрузить. Перезагрузите сессию, чтобы обновить оставшиеся сообщения.',
 };

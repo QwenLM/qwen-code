@@ -10,6 +10,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { requestToast } from '../components/ToastHost';
+import { ReportedArtifactRegistration } from '../components/ReportedArtifactRegistration';
+import { WebShellPortalRootContext } from '../portalRoot';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
@@ -91,7 +93,13 @@ function artifact(id: string): DaemonSessionArtifact {
 
 function TestHost() {
   latestState = useSessionArtifacts();
-  return null;
+  // Mirrors App's composition: the registration runs in a child rendered
+  // inside the portal-root provider, not in the hook above it.
+  return React.createElement(ReportedArtifactRegistration, {
+    registered: latestState.artifacts,
+    hydrated: latestState.hydrated,
+    refresh: latestState.refresh,
+  });
 }
 
 async function renderHookHost() {
@@ -218,6 +226,67 @@ describe('useSessionArtifacts', () => {
     expect(sdkMock.actions.addArtifact).toHaveBeenCalledTimes(1);
     expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(2);
     expect(requestToast).not.toHaveBeenCalled();
+  });
+
+  it('scopes the registration failure toast to the shell root in the App composition (F1)', async () => {
+    // App calls useSessionArtifacts in its body, ABOVE the portal-root
+    // provider it returns; the registration must run in a child inside the
+    // provider or its failure toast reads an unpopulated context. Moving the
+    // registration back into the hook nulls the third argument here.
+    const shellRoot = document.createElement('div');
+    shellRoot.setAttribute('data-web-shell-root', '');
+    document.body.appendChild(shellRoot);
+    try {
+      sdkMock.actions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+      sdkMock.actions.addArtifact.mockRejectedValue(new Error('offline'));
+      sdkMock.blocks = [
+        {
+          id: 'export-result',
+          kind: 'assistant',
+          text: 'Exported',
+          meta: {
+            source: 'slash_command',
+            sessionArtifacts: [
+              {
+                kind: 'html',
+                storage: 'workspace',
+                title: 'first',
+                workspacePath: 'first.html',
+              },
+            ],
+          },
+        },
+      ];
+      function AppShapeHost() {
+        const state = useSessionArtifacts();
+        return React.createElement(
+          WebShellPortalRootContext.Provider,
+          { value: shellRoot },
+          React.createElement(ReportedArtifactRegistration, {
+            registered: state.artifacts,
+            hydrated: state.hydrated,
+            refresh: state.refresh,
+          }),
+        );
+      }
+      container = document.createElement('div');
+      document.body.appendChild(container);
+      root = createRoot(container);
+      await act(async () => {
+        root?.render(React.createElement(AppShapeHost));
+      });
+      // Exactly one registration instance: re-adding the registration inside
+      // useSessionArtifacts (above the provider) would fire a second, unscoped
+      // toast alongside this one.
+      expect(requestToast).toHaveBeenCalledTimes(1);
+      expect(requestToast).toHaveBeenCalledWith(
+        'error',
+        'artifact.registrationFailed',
+        shellRoot,
+      );
+    } finally {
+      shellRoot.remove();
+    }
   });
 
   it('loads new sessions and reuses a previous session result', async () => {
@@ -778,5 +847,112 @@ describe('useSessionArtifacts', () => {
     expect(latestState?.artifacts.map((item) => item.id)).toEqual([
       'reconciled-artifact',
     ]);
+  });
+
+  it('shows the load-embedded snapshot while catching up, then the live fetch wins', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+      catchingUp: true,
+      restoredArtifacts: [artifact('early-artifact')],
+      restoredArtifactsSessionId: 'session-a',
+    };
+    const liveLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts.mockReturnValueOnce(liveLoad.promise);
+
+    await renderHookHost();
+    // The gated fetch is blocked by catchingUp, but the embedded snapshot is
+    // already visible so a session-level entry can render before the replay.
+    expect(sdkMock.actions.loadArtifacts).not.toHaveBeenCalled();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
+
+    sdkMock.connection.catchingUp = false;
+    await rerenderHookHost();
+    expect(sdkMock.actions.loadArtifacts).toHaveBeenCalledTimes(1);
+    // The snapshot still supplies the list while the gated fetch is in flight,
+    // so the panel must not flip to a skeleton (early-list -> spinner flicker).
+    expect(latestState?.loading).toBe(false);
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
+    await act(async () => {
+      liveLoad.resolve({ artifacts: [artifact('live-artifact')] });
+      await liveLoad.promise;
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'live-artifact',
+    ]);
+  });
+
+  it('does not leak the previous session snapshot after an optimistic switch to a session without artifacts', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+      catchingUp: true,
+      restoredArtifacts: [artifact('a-only')],
+      restoredArtifactsSessionId: 'session-a',
+    };
+    await renderHookHost();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual(['a-only']);
+
+    // Optimistic switch: sessionId moves to B while the snapshot still carries
+    // A's id (the provider spreads ...current). B has no artifacts, so no new
+    // snapshot lands and the gated fetch stays blocked by catchingUp.
+    sdkMock.connection = {
+      ...sdkMock.connection,
+      sessionId: 'session-b',
+    };
+    await rerenderHookHost();
+    expect(latestState?.artifacts).toEqual([]);
+  });
+
+  it('keeps the load-embedded snapshot when the first gated fetch fails', async () => {
+    sdkMock.connection = {
+      status: 'connected',
+      sessionId: 'session-a',
+      capabilities: { features: ['session_artifacts'] },
+      catchingUp: true,
+      restoredArtifacts: [artifact('early-artifact')],
+      restoredArtifactsSessionId: 'session-a',
+    };
+    const failedLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts.mockReturnValueOnce(failedLoad.promise);
+
+    await renderHookHost();
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
+
+    // Catch-up clears and the gated fetch rejects once (a daemon restart or a
+    // transient 5xx at exactly the moment this feature exploits). The snapshot
+    // must keep showing: a cached [] would shadow it for the hook's whole life,
+    // since ?? does not fall through on a defined empty array.
+    sdkMock.connection.catchingUp = false;
+    await rerenderHookHost();
+    await act(async () => {
+      failedLoad.reject(new Error('Failed to fetch'));
+      await failedLoad.promise.catch(() => undefined);
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'early-artifact',
+    ]);
+
+    // A *successful* fetch still wins over the snapshot — even an empty one,
+    // because success records a hydrated owner (the fix keys on that, not on
+    // the snapshot's presence alone).
+    const recoveryLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts.mockReturnValueOnce(recoveryLoad.promise);
+    sdkMock.artifactsVersion = 1;
+    await rerenderHookHost();
+    await act(async () => {
+      recoveryLoad.resolve({ artifacts: [] });
+      await recoveryLoad.promise;
+    });
+    expect(latestState?.artifacts).toEqual([]);
+    expect(latestState?.hydrated).toBe(true);
   });
 });

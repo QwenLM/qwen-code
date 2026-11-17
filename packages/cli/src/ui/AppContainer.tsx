@@ -300,8 +300,8 @@ import {
   MAIN_CONTENT_HEIGHT_RESERVATION,
   STATIC_EXTRA_HEIGHT,
 } from './utils/layoutUtils.js';
+import { CTRL_EXIT_PROMPT_DURATION_MS } from './utils/platformConstants.js';
 
-const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 // Startup gate for the goal runtime: under session-writer lease contention
 // getGoalRuntimeReady() can stay pending forever; bound it so the command
 // registry still loads and the TUI stays usable (see waitForGoalRuntime).
@@ -1272,13 +1272,13 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Restore the transcript before Mod diagnostics, without making input
-      // or Mod startup wait for asynchronous session recovery. Reply rows are
-      // offered only where the viewport can draw a committed row again; the
-      // terminal scrollback cannot.
+      // or Mod startup wait for asynchronous session recovery. Reply and
+      // thinking rows are offered only where the viewport can draw a committed
+      // row again; the terminal scrollback cannot.
       void getInteractiveModSession(config)
         ?.initialize(
           useTerminalBuffer
-            ? ['AbovePrompt', 'AssistantMessage']
+            ? ['AbovePrompt', 'AssistantMessage', 'Thinking']
             : ['AbovePrompt'],
           { prompts: true, runsPrompts: true },
         )
@@ -5006,7 +5006,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setPressedOnce(true);
         timerRef.current = setTimeout(() => {
           setPressedOnce(false);
-        }, 500);
+        }, CTRL_EXIT_PROMPT_DURATION_MS);
         return;
       }
 
