@@ -204,10 +204,13 @@ clicked, using the list data the sidebar already holds.
   shows while the session is live. Ephemeral artifacts die with the daemon
   lifetime, so the count correctly drops to the restorable count when the
   session goes cold. The seed and the library-removal write count the set a
-  cold open actually restores: legacy local-published html artifacts without
-  a preview snapshot are dropped on restore and excluded from the derived
-  count (`isRestorablePersistedArtifact`, keyed off the preview snapshot id
-  so real published snapshots stay counted).
+  cold open actually restores: published `file:` locators without a preview
+  snapshot are dropped on restore — whatever their kind or id — and excluded
+  from the derived count. The exclusion is one shared predicate
+  (`isNonSnapshotPublishedFileUrl` in core) called by both the bridge's
+  restorable count and the core seed (`isRestorablePersistedArtifact`), so
+  the two definitions cannot drift; it is keyed off the preview snapshot id
+  so real published snapshots stay counted.
 - **Public via the core barrel.** The sidecar helpers are exported from
   `packages/core/src/index.ts` because the session-list consumer reads them
   through its existing barrel import (a legacy-allowlisted file). They are a
@@ -240,7 +243,7 @@ clicked, using the list data the sidebar already holds.
 - `packages/core/src/index.ts` (barrel export of the sidecar module).
 - `packages/core/src/services/session-artifact-persistence.ts` (payload field,
   normalization, fork strip, shared journal-authority warning predicate,
-  rebuild warning threading).
+  rebuild warning threading, shared restorable-set predicate).
 - `packages/core/src/services/chatRecordingService.ts` (sidecar writes).
 - `packages/core/src/services/sessionService.ts` (path helper, load seed and
   library guard sharing the journal-authority gate, library removal update,
@@ -296,14 +299,16 @@ clicked, using the list data the sidebar already holds.
   record-level damage warnings including change-level drops, tolerated
   per-artifact skips, all-refused journals refused by the seed and the
   library guard alike), in both active and archived states, from event and
-  snapshot (fork) records, counting the cold-restorable set (legacy
-  local-published html excluded, real preview snapshots kept); library
+  snapshot (fork) records, counting the cold-restorable set (non-snapshot
+  published file locators excluded via the shared bridge/core predicate,
+  real preview snapshots kept); library
   removal update (restorable-survivor arithmetic, single and batch, stale
   ids in the requested batch);
   archive/delete/conflict handling; working-directory relocation; store
   `count()` including the decrement after a removal; `toSessionSummary`
   include/omit and the pending-restore marker (`artifactCountPending` keeps
-  the row visible and the merge keeps the sidecar count); the ACP boundary
+  the row visible and the merge keeps the sidecar count, and a rejecting
+  rewind restore clears it); the ACP boundary
   carries the stamped count to the recorder and the ACP session/list
   projection carries the count and the marker; enrichment on all list paths,
   including a mid-scan abort (per-iteration checks, interrupted scan not

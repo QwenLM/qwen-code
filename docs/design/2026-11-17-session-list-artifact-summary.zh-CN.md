@@ -167,9 +167,11 @@
   会恢复出来的那些。live 摘要存 live 公开数量（含 ephemeral），与会话 live
   时头部显示的一致。ephemeral 产物随 daemon 生命周期消亡，因此会话变冷时
   数量正确回落到可恢复数量。播种与库删除写入按冷打开实际恢复的集合计数：
-  无预览快照的旧本地 published html 产物在恢复时被丢弃，不计入派生数量
-  （`isRestorablePersistedArtifact`，以预览快照 id 为准，真正的 published
-  快照仍计入）。
+  无预览快照的 published `file:` 定位符在恢复时被丢弃——不论 kind 或 id——
+  不计入派生数量。排除判定是 core 的共享谓词
+  （`isNonSnapshotPublishedFileUrl`），bridge 的可恢复计数与 core 播种
+  （`isRestorablePersistedArtifact`）共同调用，两份定义不会漂移；以预览
+  快照 id 为准，真正的 published 快照仍计入。
 - **经 core barrel 公开。** sidecar 助手从 `packages/core/src/index.ts`
   导出，因为 session-list 消费方经其既有 barrel 导入读取（历史豁免清单
   文件）。这是公开 API 承诺：签名变更必须顾及下游消费方。
@@ -194,7 +196,8 @@
 - `packages/core/src/services/session-artifact-summary-sidecar.ts`（新增）。
 - `packages/core/src/index.ts`（sidecar 模块的 barrel 导出）。
 - `packages/core/src/services/session-artifact-persistence.ts`（payload
-  字段、规范化、fork 剥离、共享的 journal 权威性警告判定、重建告警导出）。
+  字段、规范化、fork 剥离、共享的 journal 权威性警告判定、重建告警导出、
+  共享可恢复集合判定）。
 - `packages/core/src/services/chatRecordingService.ts`（sidecar 写入）。
 - `packages/core/src/services/sessionService.ts`（路径助手、共用 journal
   权威性门的 load 播种与库守卫、库删除更新、archive 移动、delete 移除、
@@ -242,11 +245,13 @@
   sidecar）；load 播种及其权威性门（历史链缺口、含变更级丢弃的记录级损坏
   警告、被容忍的单产物级跳过、全拒绝日志被播种与库守卫同样拒绝），active
   与 archived 两态、event 与 snapshot（fork）记录、按冷启动可恢复集合计数
-  （旧本地 published html 排除、真正预览快照保留）；库删除更新（可恢复
+  （无快照 published file 定位符经 bridge/core 共享谓词排除、真正预览快照
+  保留）；库删除更新（可恢复
   幸存者算术，单个与批量、请求批次含陈旧 id）；
   archive/delete/冲突处理；工作目录搬迁；store `count()` 含删除后递减；
   `toSessionSummary` 携带/省略与恢复中标记（`artifactCountPending` 保持行
-  可见、合并保留 sidecar 计数）；ACP 边界把盖章数量带到 recorder、ACP
+  可见、合并保留 sidecar 计数、rewind 恢复抛错时清理）；ACP 边界把盖章
+  数量带到 recorder、ACP
   session/list 投影携带数量与标记；全部
   列表路径的增强（含扫描中途 abort 的逐次检查与被中断扫描不进缓存、单会话
   抛错读取被包容）；合并丢弃陈旧数量；乐观 hint 键控、清空与加载失败退役；
