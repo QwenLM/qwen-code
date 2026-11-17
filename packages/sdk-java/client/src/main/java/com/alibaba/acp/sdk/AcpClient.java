@@ -161,6 +161,12 @@ public class AcpClient {
                     .addContextValue("loadSessionRequest", loadSessionRequest);
         }
         logger.debug("loadSessionResponse: {}", loadSessionResponse);
+        if (loadSessionResponse.getError() != null) {
+            throw new SessionLoadException("load session error")
+                    .addContextValue("loadSessionRequest", loadSessionRequest)
+                    .addContextValue("loadSessionRequestParams", loadSessionRequestParams)
+                    .addContextValue("loadSessionResponse", loadSessionResponse);
+        }
         session = new Session(transport, loadSessionRequestParams);
         return session;
     }

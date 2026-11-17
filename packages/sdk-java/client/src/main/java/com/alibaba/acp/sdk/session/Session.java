@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -115,12 +116,20 @@ public class Session {
 
         String requestMessage = promptRequest.toString();
         logger.debug("send_prompt to agent: {}", requestMessage);
+        AtomicReference<Error> promptError = new AtomicReference<>();
         transport.inputWaitForMultiLine(requestMessage, (String line) -> {
             logger.debug("received_message from agent: {}", line);
             if (line == null) {
                 return true;
             }
             Message message = this.toMessage(line);
+            if (message instanceof Response && promptRequest.getId().equals(message.getId())) {
+                Error error = ((Response<?>) message).getError();
+                if (error != null) {
+                    promptError.set(error);
+                    return true;
+                }
+            }
             if (message instanceof PromptResponse) {
                 logger.debug("rcv prompt_turn_end for prompt {}", prompts);
                 if (promptEndEventConsumer != null) {
@@ -186,6 +195,11 @@ public class Session {
                 return false;
             }
         });
+        // Report outside the transport callback so its asynchronous reader cannot swallow the failure.
+        Error error = promptError.get();
+        if (error != null) {
+            throw new IOException("Agent prompt failed (" + error.getCode() + "): " + error.getMessage());
+        }
     }
 
     /**
