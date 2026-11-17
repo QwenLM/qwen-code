@@ -332,6 +332,24 @@ describe('validManagedWecomState', () => {
         withEvent({ ...inbound('e1'), replyContext: { chatId: '' } }),
       ),
     ).toBe(false);
+    // send() gates the whole delivery on replyContext.senderId (senderAllowed);
+    // a context missing it would load and settle the reply rejected silently.
+    expect(
+      validManagedWecomState(
+        withEvent({
+          ...inbound('e1'),
+          replyContext: { chatId: 'c', botId: 'bot-1' },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedWecomState(
+        withEvent({
+          ...inbound('e1'),
+          replyContext: { chatId: 'c', senderId: '' },
+        }),
+      ),
+    ).toBe(false);
     // No over-rejection: the intact carriers the adapter actually writes load.
     expect(validManagedWecomState(withEvent(inbound('e1')))).toBe(true);
   });

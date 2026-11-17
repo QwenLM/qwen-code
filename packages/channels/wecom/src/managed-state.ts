@@ -108,9 +108,11 @@ export function validManagedWecomState(
         entry.event.scope.kind === 'chat_thread' &&
         // The nested carriers are load-bearing too: resubmitPending submits the
         // whole event (the base contract fixes scope.senderId to null) and
-        // send() addresses the reply through replyContext.chatId. Presence-only
+        // send() addresses the reply through replyContext.chatId and gates the
+        // whole delivery on replyContext.senderId (senderAllowed). Presence-only
         // checks would load a hand-repaired state whose claim is then refused
-        // (scope) or whose reply settles rejected with no chatId (replyContext).
+        // (scope) or whose reply settles rejected — silently, with no startup
+        // refusal naming the file — when chatId or senderId is missing.
         entry.event.scope.senderId === null &&
         typeof entry.event.scope.chatId === 'string' &&
         entry.event.scope.chatId.length > 0 &&
@@ -122,6 +124,10 @@ export function validManagedWecomState(
         typeof (entry.event.replyContext as { chatId?: unknown }).chatId ===
           'string' &&
         (entry.event.replyContext as { chatId: string }).chatId.length > 0 &&
+        typeof (entry.event.replyContext as { senderId?: unknown }).senderId ===
+          'string' &&
+        (entry.event.replyContext as { senderId: string }).senderId.length >
+          0 &&
         (entry.inputId === undefined || typeof entry.inputId === 'string') &&
         // held is persisted and re-read at startup; the stall re-arm reads
         // truthiness while the lift and the probe sort require === true, so a
