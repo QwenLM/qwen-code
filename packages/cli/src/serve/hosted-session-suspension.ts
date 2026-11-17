@@ -32,6 +32,8 @@ export interface SessionSuspension {
   lastActivity: number;
   idleTimer?: ReturnType<typeof setTimeout>;
   teardownAttempts: number;
+  /** Re-arms the idle timer; installed by the route surface at load. */
+  rearm?: () => void;
 }
 
 export function createSuspension(now: number): SessionSuspension {
@@ -165,6 +167,8 @@ export interface SuspensionAttemptDeps {
   readonly now?: () => number;
   readonly waitMs?: number;
   readonly retryCap?: number;
+  /** Test seam: the backoff base, one second in production. */
+  readonly retryBaseMs?: number;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly random?: () => number;
 }
@@ -191,6 +195,7 @@ export async function runSuspensionAttempt(
   const sleep = deps.sleep ?? defaultSleep;
   const waitMs = deps.waitMs ?? HOSTED_SUSPEND_WORK_WAIT_MS;
   const retryCap = deps.retryCap ?? HOSTED_SUSPEND_TEARDOWN_RETRY_CAP;
+  const retryBaseMs = deps.retryBaseMs ?? 1000;
   const random = deps.random ?? Math.random;
   const attemptStart = now();
   const revert = (): SuspensionAttemptOutcome => {
@@ -210,7 +215,10 @@ export async function runSuspensionAttempt(
   }
   if (suspension.admittedWork > 0 || deps.liveWork()) return revert();
   if (await deps.pendingInputs()) return revert();
-  if (suspension.gate !== 'closing') return 'reverted';
+  // Read through the refusal helper: the mark and any external
+  // escalation happened inside calls TypeScript cannot narrow through.
+  if (suspensionRefusalCode(suspension) !== 'hosted_session_closing')
+    return 'reverted';
   markSuspensionTeardown(suspension);
   for (;;) {
     try {
@@ -229,7 +237,7 @@ export async function runSuspensionAttempt(
       // cap bounds the wait, never proves the teardown did not happen.
       await sleep(
         Math.round(
-          1000 * 2 ** (suspension.teardownAttempts - 1) * (1 + random()),
+          retryBaseMs * 2 ** (suspension.teardownAttempts - 1) * (1 + random()),
         ),
       );
     }

@@ -687,6 +687,11 @@ async function app(
   withBroker = false,
   instanceId?: string,
   extensionPackages = true,
+  suspensionOptions?: {
+    idleSuspendMs?: number;
+    suspendRetryBaseMs?: number;
+    suspendRetryCap?: number;
+  },
 ) {
   const result = express();
   result.use(express.json());
@@ -711,6 +716,7 @@ async function app(
     contract,
     state.root,
     withBroker ? { baseUrl: 'http://127.0.0.1:1', token: 'test' } : undefined,
+    suspensionOptions,
   );
   const listener = createServer(result);
   listeners.add(listener);
@@ -45805,5 +45811,214 @@ describe('client files registration route', () => {
         peer.closeAllConnections();
       });
     }
+  });
+});
+
+// Phase 1 of the stateless Hosted Harness design: an idle Session drains
+// its non-terminal owners and seals its writer, and the next load cold-opens
+// it. The gate refuses work while a teardown converges and keeps refusing
+// after an uncertain one, until operator recovery.
+describe('idle suspension', () => {
+  beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
+    resetManagedRuntimeDispatchGatesForTest();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
+      ownerSessionId: SESSION_ID,
+      snapshots: [],
+      files: {},
+    });
+    state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
+    state.toolResults = null;
+    state.ownershipReleases.length = 0;
+    state.assertWritable.mockReset();
+    state.assertWritable.mockResolvedValue(undefined);
+    state.authorizeLifecycle.mockReset();
+    state.authorizeLifecycle.mockResolvedValue(undefined);
+    state.setLifecycleAuthority.mockReset();
+    state.authorizeOrdinary.mockReset();
+    state.authorizeOrdinary.mockResolvedValue(undefined);
+    state.model.mockReset();
+    state.publicationRequest.mockReset();
+    state.model.mockImplementation(async () => ({
+      text: 'hello back',
+      model: 'test-model',
+    }));
+  });
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
+    });
+
+  async function createIdleSession(server: Server): Promise<string> {
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    return created.body.clientId as string;
+  }
+
+  const statusOf = (server: Server, clientId: string) =>
+    headers(supertest(server).get(`/session/${SESSION_ID}/status`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+
+  const loadSession = (server: Server) =>
+    headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+      managedSessionStore: store(),
+    });
+
+  const isActivationRelease = (records: readonly unknown[]) =>
+    (
+      records as Array<{
+        managedSession?: { kind?: string; payload?: { phase?: string } };
+      }>
+    ).some(
+      (record) =>
+        record.managedSession?.kind === 'activation.changed' &&
+        record.managedSession?.payload?.phase === 'released',
+    );
+
+  it('suspends an idle session and cold-opens it on the next load', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 150 });
+    const clientId = await createIdleSession(server);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+    const load = await loadSession(server);
+    expect(load.status).toBe(200);
+    expect((await statusOf(server, load.body.clientId)).status).toBe(200);
+  });
+
+  it('an admitted mutation resets the idle timer', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 300 });
+    const clientId = await createIdleSession(server);
+    await sleep(200);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/title`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ title: 'still here' })
+      .expect(200);
+    // Past the original deadline (300ms + ≤10% jitter), before the one
+    // the title re-armed (≥500ms from the create).
+    await sleep(200);
+    expect((await statusOf(server, clientId)).status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it('a parked input keeps the session resident', async () => {
+    const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+    const clientId = await createIdleSession(server);
+    state.model.mockRejectedValueOnce(
+      new HostedToolRecoveryRequiredError(new Error('store gone')),
+    );
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await statusOf(server, clientId);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    await sleep(400);
+    const status = await statusOf(server, clientId);
+    expect(status.status).toBe(200);
+    expect(status.body.recoveryBlocked).toBe(true);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  it('a converging teardown answers closing to routes and loads alike', async () => {
+    const server = await app(false, undefined, true, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 10,
+      suspendRetryCap: 2,
+    });
+    const clientId = await createIdleSession(server);
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = false;
+    state.appendFault = async (_journal, records, _append) => {
+      if (isActivationRelease(records) && !stalled) {
+        stalled = true;
+        await stall;
+      }
+      return false;
+    };
+    await vi.waitFor(
+      async () => {
+        expect(stalled).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+    const refused = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/title`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ title: 'too late' });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_session_closing');
+    const loadRefused = await loadSession(server);
+    expect(loadRefused.status).toBe(409);
+    expect(loadRefused.body.code).toBe('hosted_session_closing');
+    release();
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it('an uncertain teardown escalates and keeps the gate past the resident', async () => {
+    const server = await app(false, undefined, true, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 5,
+      suspendRetryCap: 2,
+    });
+    const clientId = await createIdleSession(server);
+    state.appendFault = async (_journal, records, _append) => {
+      if (isActivationRelease(records)) throw new Error('store gone');
+      return false;
+    };
+    await vi.waitFor(
+      async () => {
+        const load = await loadSession(server);
+        expect(load.status).toBe(409);
+        expect(load.body.code).toBe('hosted_session_teardown_blocked');
+      },
+      { timeout: 5000 },
+    );
+    // The resident is gone but the registry gate survives it: reads and
+    // loads alike meet the non-transient refusal, never a silent 404 that
+    // would let an ordinary load re-open the wedged Session.
+    const status = await statusOf(server, clientId);
+    expect(status.status).toBe(409);
+    expect(status.body.code).toBe('hosted_session_teardown_blocked');
   });
 });

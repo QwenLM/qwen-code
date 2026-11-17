@@ -353,6 +353,18 @@ import {
   type PendingSessionInput,
 } from './hosted-wake-intake.js';
 import {
+  HOSTED_IDLE_SUSPEND_MS,
+  admitSuspensionWork,
+  armIdleSuspension,
+  beginSuspensionClose,
+  createSuspension,
+  recordSuspensionActivity,
+  releaseSuspensionWork,
+  runSuspensionAttempt,
+  suspensionRefusalCode,
+  type SessionSuspension,
+} from './hosted-session-suspension.js';
+import {
   HostedLoopSession,
   LOOP_INPUT_SOURCE,
   type HostedLoopClassifier,
@@ -770,6 +782,12 @@ function sessionReloadStableOwnerIds(session: HostedSession): Set<string> {
 interface HostedSession {
   placement?: HostedHarnessPlacement;
   poolAccepting?: () => boolean;
+  /**
+   * The idle-suspension state shared with the route-level registry. The
+   * registry entry outlives this resident when a teardown's outcome is
+   * uncertain; this field is only the resident's handle to it.
+   */
+  suspension?: SessionSuspension;
   ownershipRelease?: {
     operationId: string;
     proof?: HostedHarnessReleaseReceipt['commitProof'];
@@ -872,6 +890,8 @@ interface HostedSession {
   readonly childConsumption: Set<string>;
   /** H5: the Session's channel routes and deliveries, on every profile. */
   channels?: HostedChannelSession;
+  /** Pending channel reply-plan retries; live work that blocks suspension. */
+  replyPlanRetries?: Map<string, ReturnType<typeof setTimeout>>;
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
@@ -1091,6 +1111,16 @@ function compressionFor(session: HostedSession): HostedContextCompression {
       : {}),
     onCompactionCommitted: () => session.loops?.resetResolverCache(),
   }));
+}
+
+// Turn completion is activity: a Session that just settled a Turn earns a
+// full residency period before idle suspension may consider it. Top-level
+// so every driver's settle site can call it with the session alone.
+function noteSessionActivity(session: HostedSession): void {
+  const suspension = session.suspension;
+  if (!suspension || suspension.gate !== 'open') return;
+  recordSuspensionActivity(suspension, Date.now());
+  suspension.rearm?.();
 }
 
 function compressionBusy(session: HostedSession): boolean {
@@ -2721,6 +2751,7 @@ function runSettleProjection(
     })
     .finally(() => {
       session.active = undefined;
+      noteSessionActivity(session);
     });
 }
 
@@ -3791,6 +3822,7 @@ async function startHostedRecoveredTurn(
     .finally(() => {
       if (timer) clearTimeout(timer);
       session.active = undefined;
+      noteSessionActivity(session);
     });
   await ready;
   liftRecoveryBlock(session);
@@ -4576,6 +4608,11 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
+  options?: {
+    idleSuspendMs?: number;
+    suspendRetryBaseMs?: number;
+    suspendRetryCap?: number;
+  },
 ): {
   owns: (id: string) => boolean;
   accepting: () => boolean;
@@ -4597,6 +4634,28 @@ export function registerHostedHarnessSessionRoutes(
   };
   if (brokerOptions) brokerOptions = { ...brokerOptions, mountHandbacks };
   const sessions = new Map<string, HostedSession>();
+  // Idle-suspension gates, keyed by Session id beside the residents: an
+  // uncertain teardown keeps refusing loads after its resident is gone,
+  // so the gate cannot live on the resident object alone.
+  const suspensions = new Map<string, SessionSuspension>();
+  // The idle period is a candidate constant, not a configuration: only a
+  // shorter test value is accepted, so the variable can never disable
+  // suspension (same pattern as QWEN_E2E_DROP_LOAD_REPLY below).
+  const idleSuspendMs = (() => {
+    const testValue = Number(process.env['QWEN_E2E_IDLE_SUSPEND_MS']);
+    if (
+      Number.isFinite(testValue) &&
+      testValue > 0 &&
+      testValue < HOSTED_IDLE_SUSPEND_MS
+    )
+      return testValue;
+    const optionValue = options?.idleSuspendMs;
+    return optionValue !== undefined &&
+      optionValue > 0 &&
+      optionValue < HOSTED_IDLE_SUSPEND_MS
+      ? optionValue
+      : HOSTED_IDLE_SUSPEND_MS;
+  })();
   const opening = new Set<string>();
   const unresolvedOpenings = new Set<string>();
   let initialReconciliations = 0;
@@ -4725,6 +4784,10 @@ export function registerHostedHarnessSessionRoutes(
     operationId: string,
   ): Promise<HostedHarnessReleaseReceipt | undefined> {
     if (!session.placement || !instance || instance.accepting) return undefined;
+    // Drain and suspension mark in synchronous sections; whichever marks
+    // first wins, the other refuses.
+    const gated = suspensions.get(sessionId);
+    if (gated && gated.gate !== 'open') return undefined;
     if (!session.ownershipRelease) {
       if (
         instance.inFlightMutations ||
@@ -4797,6 +4860,199 @@ export function registerHostedHarnessSessionRoutes(
       throw cause;
     }
   }
+
+  // Idle suspension, phase 1 of the stateless Hosted Harness design
+  // (docs/design/2026-11-16-managed-stateless-harness.md). The state
+  // machine lives in hosted-session-suspension.ts; this block supplies
+  // eligibility, the synchronous mark, and the non-terminal teardown.
+
+  const suspensionFor = (sessionId: string): SessionSuspension => {
+    let suspension = suspensions.get(sessionId);
+    if (!suspension) {
+      suspension = createSuspension(Date.now());
+      suspensions.set(sessionId, suspension);
+    }
+    return suspension;
+  };
+
+  const armFor = (sessionId: string): void => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    const suspension = suspensionFor(sessionId);
+    session.suspension = suspension;
+    const onTimeout = () => {
+      void attemptSuspend(sessionId).catch((cause) => {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Session ${sessionId} suspension attempt failed: ${String(cause)}`,
+        );
+      });
+    };
+    suspension.rearm = () =>
+      armIdleSuspension(suspension, { idleMs: idleSuspendMs, onTimeout });
+    suspension.rearm();
+  };
+
+  const noteActivity = (sessionId: string): void => {
+    const suspension = suspensions.get(sessionId);
+    if (!suspension || suspension.gate !== 'open') return;
+    recordSuspensionActivity(suspension, Date.now());
+    suspension.rearm?.();
+  };
+
+  // Live work only. The persistent owners (hooks, mcp, publishers) are
+  // teardown targets the next load re-acquires, not residency pins; the
+  // runtime lease is released by teardown step 3. Instance-wide terms are
+  // not per-Session eligibility.
+  const suspensionLiveWork = (session: HostedSession): boolean =>
+    session.active !== undefined ||
+    session.recoveredTurn !== undefined ||
+    session.blocked ||
+    session.lifecycle !== undefined ||
+    session.mcpBusy === true ||
+    session.hooksBusy === true ||
+    session.mcpRecovering > 0 ||
+    compressionBusy(session) ||
+    session.fileHistoryOwed !== undefined ||
+    hasHostedCleanupDebt(session.managed) ||
+    session.childConsumption.size > 0 ||
+    (session.messageOperations?.size ?? 0) > 0 ||
+    unsettledInputs(session).size > 0 ||
+    session.heldRuntimeTurns.size > 0 ||
+    session.automations?.hasPendingGateReleases === true ||
+    session.extensionBootstrapPending === true ||
+    (session.replyPlanRetries?.size ?? 0) > 0 ||
+    session.ownershipRelease !== undefined ||
+    session.clientFiles !== undefined ||
+    [...(session.shell?.monitorLoops?.values() ?? [])].some(
+      (loop) => loop.live,
+    ) ||
+    [...(session.backgroundLane?.monitorLoops?.values() ?? [])].some(
+      (loop) => loop.live,
+    ) ||
+    ['child_run', 'monitor_run'].some((domain) =>
+      session.managed.authority
+        .extensionRecordsInDomain(domain as 'child_run' | 'monitor_run')
+        .some(
+          (entry) =>
+            !['settled', 'failed', 'cancelled'].includes(entry.run.state),
+        ),
+    ) ||
+    (session.mcp !== undefined &&
+      isHostedWorkspacePublicShellProfile(session.toolProfile) &&
+      session.lifecycleProtocolVersion !== 2);
+
+  const attemptSuspend = async (sessionId: string): Promise<void> => {
+    const session = sessions.get(sessionId);
+    const suspension = suspensions.get(sessionId);
+    if (!session || !suspension) return;
+    const broker = brokerOptions;
+    // Capped retries resume at the failed step: only precise retries of
+    // the same operations are allowed past the irreversible boundary.
+    const done = {
+      wake: false,
+      owners: false,
+      lease: false,
+      publishers: false,
+      writer: false,
+    };
+    const outcome = await runSuspensionAttempt(suspension, {
+      pendingInputs: async () =>
+        pendingSessionInputs(
+          session.managed.authority.eventsInSequenceRange(
+            1,
+            session.managed.authority.committedSequence,
+          ),
+        ).length > 0,
+      markClosing: (attemptStart) => {
+        if (
+          suspensionLiveWork(session) ||
+          suspension.lastActivity > attemptStart ||
+          session.ownershipRelease !== undefined ||
+          session.lifecycle !== undefined ||
+          session.mcpClosing === true ||
+          instance?.accepting === false
+        )
+          return false;
+        if (!beginSuspensionClose(suspension)) return false;
+        // The wake pump reads mcpClosing through wakeBusy(), so internal
+        // wake work obeys the same gate as the routes.
+        session.mcpClosing = true;
+        return true;
+      },
+      liveWork: () => suspensionLiveWork(session),
+      teardown: async () => {
+        if (!done.wake) {
+          session.monitorWake?.close();
+          done.wake = true;
+        }
+        if (!done.owners) {
+          await session.hooks?.close({ terminal: false });
+          await session.mcp?.close({ terminal: false });
+          done.owners = true;
+        }
+        if (!done.lease) {
+          if (await releaseLeaseNow(session, false))
+            throw new Error('Runtime lease release is unproven.');
+          if (broker) await retryHostedCleanup(session, broker, true);
+          else if (hasHostedCleanupDebt(session.managed))
+            throw new Error('Runtime cleanup remains owed.');
+          done.lease = true;
+        }
+        if (!done.publishers) {
+          for (const timer of session.replyPlanRetries?.values() ?? [])
+            clearTimeout(timer);
+          session.replyPlanRetries?.clear();
+          await session.shell?.publisher?.close();
+          await session.backgroundLane?.publisher?.close();
+          done.publishers = true;
+        }
+        if (!done.writer) {
+          // Outside the authority serial queue: the renewal runs inside
+          // it, so waiting from within would deadlock.
+          await session.managed.stopRenewal();
+          await session.managed.releaseActivation();
+          // The memoized seal: a retry reconciles this same seal.
+          await session.managed.authority.close();
+          done.writer = true;
+        }
+        // Only after every step confirmed: stopLocal fences the seal
+        // reconciliation requests too, so it must come last.
+        await session.stores!.stopLocal();
+        for (const stop of session.streams) stop();
+      },
+      removeResident: () => {
+        sessions.delete(sessionId);
+        unresolvedOpenings.delete(sessionId);
+      },
+      rearm: () => {
+        // A reverted attempt never reached teardown; release the wake
+        // hold the mark set. No close can race this: the gate refuses
+        // detach/delete while closing.
+        session.mcpClosing = false;
+        armFor(sessionId);
+      },
+      retryBaseMs: options?.suspendRetryBaseMs,
+      retryCap: options?.suspendRetryCap,
+    });
+    if (outcome === 'suspended') {
+      // Drop the registry entry only if no reload already reused it.
+      if (suspensions.get(sessionId) === suspension && !sessions.has(sessionId))
+        suspensions.delete(sessionId);
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${sessionId} suspended idle.`,
+      );
+    } else if (outcome === 'blocked') {
+      // The resident is gone but the teardown may have failed before its
+      // last steps: no callback may restart work on a removed object.
+      // stopLocal stays uncalled — the original client still owes the
+      // seal reconciliation.
+      for (const stop of session.streams) stop();
+      void session.managed.stopRenewal().catch(() => undefined);
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${sessionId} teardown needs operator recovery.`,
+      );
+    }
+  };
 
   function startOwnershipDrain(): void {
     if (ownershipDrainTimer || ownershipDrainStopped) return;
@@ -5044,6 +5300,15 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     const sessionId = create ? body?.['sessionId'] : req.params['id'];
+    // The suspension gate covers every open() path — create, ordinary,
+    // passive, driven recovery, MCP-management — before any resident
+    // reuse or writer acquisition. The load route is registered before
+    // the session middleware, so the middleware alone cannot gate it.
+    if (typeof sessionId === 'string') {
+      const gated = suspensions.get(sessionId);
+      const refusal = gated ? suspensionRefusalCode(gated) : undefined;
+      if (refusal) return error(res, 409, refusal);
+    }
     let agentDefinition: HostedAgentDefinition | undefined;
     let modelConfigDigest: string | undefined;
     let memoryStoreId: string | undefined;
@@ -6703,6 +6968,7 @@ export function registerHostedHarnessSessionRoutes(
           session.blocked = true;
         }
         sessions.set(sessionId, session);
+        armFor(sessionId);
         sendAttachment(res, sessionId, session);
         return;
       }
@@ -7409,7 +7675,10 @@ export function registerHostedHarnessSessionRoutes(
             // backing-off delays, and a later detach falls back to the
             // open-path reconcile instead of a silent missing reply
             // (R8 P2).
-            const replyPlanRetries = new Map<string, NodeJS.Timeout>();
+            const replyPlanRetries = (session.replyPlanRetries ??= new Map<
+              string,
+              NodeJS.Timeout
+            >());
             const scheduleReplyPlanRetry = (
               turnId: string,
               delayMs: number,
@@ -7539,6 +7808,7 @@ export function registerHostedHarnessSessionRoutes(
       if (pinned) session.approval = pinned;
       if (session.extensionBootstrapPending) {
         sessions.set(sessionId, session);
+        armFor(sessionId);
         sendAttachment(res, sessionId, session);
         return;
       }
@@ -8361,6 +8631,7 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       sessions.set(sessionId, session);
+      armFor(sessionId);
       if (acceptingWork()) compressionFor(session).resume();
       // H6c: a settle → settle-revision crash window closes here. It runs
       // beside the pump's first turn: the funnel serializes its commits and
@@ -8475,6 +8746,19 @@ export function registerHostedHarnessSessionRoutes(
 
   app.use('/session/:id', async (req, res, next) => {
     const session = sessions.get(req.params['id']);
+    const suspension = suspensions.get(req.params['id']);
+    if (suspension) {
+      const refusal = suspensionRefusalCode(suspension);
+      if (refusal) return error(res, 409, refusal);
+      // Request-scoped work is counted until the response closes,
+      // including client disconnects; async tails that outlive the
+      // response (turns, message operations, loops) are caught by the
+      // live-work recheck after the bounded wait.
+      if (req.method !== 'GET' && req.path !== '/heartbeat') {
+        admitSuspensionWork(suspension);
+        res.on('close', () => releaseSuspensionWork(suspension));
+      }
+    }
     if (instance && session && req.method !== 'GET') {
       if (!identity(req, sessions, req.method === 'DELETE'))
         return error(res, 404, 'hosted_session_not_found');
@@ -8610,11 +8894,16 @@ export function registerHostedHarnessSessionRoutes(
           // claimed cleanup revision reaches the store with the claim,
           // and nothing after it inherits noise.
           res.locals['lifecycleRestoreAuthority'] = previousAuthority;
+          noteActivity(req.params['id']);
           return next();
         }
         return ordinaryAuthorizationError(res, cause);
       }
     }
+    // Admitted mutations reset the idle timer; reads, heartbeats and
+    // refused requests never do.
+    if (req.method !== 'GET' && req.path !== '/heartbeat')
+      noteActivity(req.params['id']);
     next();
   });
 
@@ -9580,6 +9869,7 @@ export function registerHostedHarnessSessionRoutes(
           }
         }
         session.active = undefined;
+        noteSessionActivity(session);
         // A settled prompt Turn is a natural retry pacing — but only for a
         // lease a terminal route already owes the Broker. A lease a passive
         // takeover merely adopted must stay owed for the next takeover's
@@ -12667,6 +12957,7 @@ export function registerHostedHarnessSessionRoutes(
         if (!session.blocked) releaseRecoveredRuntime(session);
         else await toolTurn?.releaseForRecoveryBlock();
         session.active = undefined;
+        noteSessionActivity(session);
         void toolTurn?.close().catch((cause: unknown) => {
           session.blocked = true;
           writeStderrLineSafe(
@@ -12873,6 +13164,7 @@ export function registerHostedHarnessSessionRoutes(
           if (session.commands === undefined) {
             void (async () => {
               session.active = undefined;
+              noteSessionActivity(session);
               throw new Error('Command wait checkpoint has no command funnel.');
             })();
           } else {
@@ -13236,6 +13528,7 @@ export function registerHostedHarnessSessionRoutes(
         )
           liftRecoveryBlock(session);
         session.active = undefined;
+        noteSessionActivity(session);
       }
     })();
   });
@@ -13784,6 +14077,7 @@ export function registerHostedHarnessSessionRoutes(
       })
       .finally(() => {
         session.active = undefined;
+        noteSessionActivity(session);
       });
   });
   app.post('/session/:id/title', (req, res) => {
@@ -14359,6 +14653,7 @@ export function registerHostedHarnessSessionRoutes(
               }
             } finally {
               session.active = undefined;
+              noteSessionActivity(session);
             }
           };
           // A wake pump pass holds no turn slot while it reads, projects
