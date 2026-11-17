@@ -594,7 +594,7 @@ never appeared, and its own review tab then listed that question as
 unanswered. At the time, matching ink would have reproduced a defect rather than
 the experience, so the divergence was recorded and the scenario was rearranged to
 exercise the free-text row on the last question, where the tab index clamps and
-both legs arrive at the review tab together. ink has since been fixed (#17444):
+both legs arrive at the review tab together. ink is fixed by #17485, which closes #17444:
 the input widget's submit is the only owner of Enter on that row, so one
 keystroke advances one tab on both legs, and the scenario no longer needs to sit
 on the last question.
@@ -631,8 +631,9 @@ it inline, and a second answer landing inside that pause used to overwrite the
 scheduled swap's handle without clearing it. Both timers then fired, each
 advancing one tab, so the question between them was skipped without ever being
 drawn — the same failure this decision exists to remove, reached by a different
-route. ink cannot cancel that swap either: it calls `setTimeout` without keeping
-the handle, so it carries the orphan as well. The ref this renderer already holds
+route. ink could not cancel that swap either: it called `setTimeout` without keeping
+the handle, so it carried the orphan as well, until #17485 gave it the same lock
+and arrow cancel (Decision 34). The ref this renderer already holds
 to clear the timer on unmount makes the cancel one line. A test answers one
 question twice inside the pause and asserts the next question still arrives; it
 fails with the clear taken back out. Two Enters within 150 milliseconds is a fast
@@ -1333,7 +1334,7 @@ The question dialog answers a question, pauses 150 ms so the tick on the row jus
 answered is visible, then swaps to the next one. ink scheduled that swap and never
 called it off: neither a second answer inside the pause nor a left or right arrow of
 the user's own cleared the timer, so two swaps could run and the question between them
-was never drawn. ink has since gained the same lock and arrow cancel (#17444). The
+was never drawn. ink has since gained the same lock and arrow cancel (#17485). The
 port inherited the old behaviour, and the review round caught it on the
 arrow case — the user had navigated to a question and the dialog took it away again
 a tenth of a second later.
@@ -1351,7 +1352,7 @@ with the dead cancel. The same 150 ms pause, the same clamping at the last tab, 
 same tick-before-swap are kept. ink used to lack the lock and was recorded as having a
 defect of its own rather than reproduced; the double-fire the acceptance matrix had
 already watched on ink's leg was the same defect seen from outside. ink now has the same
-lock and the same arrow cancel (#17444).
+lock and the same arrow cancel (#17485).
 
 The arrow is pinned by a mutation of its own: a right arrow that lands during a pending
 pause keeps the question it moved to, and removing that cancel fails this test alone. The
@@ -2920,7 +2921,7 @@ What was verified, and how far the verification reaches:
   between them. Each answer advanced a tab, so on a multi-question dialog the
   question after the one being answered was skipped without ever being drawn,
   and the review tab reported it as unanswered. This was observed on a real
-  run, not inferred. Decision 21 did not follow it. ink was fixed in #17444:
+  run, not inferred. Decision 21 did not follow it. ink was fixed in #17485, which closes #17444:
   the input widget's submit is the only owner of Enter on that row, and a
   second answer inside the pause is dropped as it is here, so the two
   renderers no longer diverge on it.
