@@ -2889,8 +2889,10 @@ describe('subagent.ts', () => {
             const { scope, emitter } = await createScope({ max_turns: 3 });
             vi.stubEnv(
               'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
-              shared ? '1' : undefined,
+              shared ? '1' : '0',
             );
+            const turn = vi.spyOn(Turn.prototype, 'run');
+            vi.mocked(runAgentLoop).mockClear();
             const controller = new AbortController();
             vi.useFakeTimers();
             const watchdog = attachStallWatchdog(emitter, controller, 350);
@@ -2916,6 +2918,15 @@ describe('subagent.ts', () => {
               await vi.advanceTimersByTimeAsync(440);
               await run;
               expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+              // Pin the arm identity: the shared arm runs each round through
+              // runAgentLoop/Turn, the forced-off arm never touches them, so a
+              // future default flip cannot silently turn this into shared-vs-
+              // shared.
+              const rounds = shared
+                ? mockSendMessageStream.mock.calls.length
+                : 0;
+              expect(turn).toHaveBeenCalledTimes(rounds);
+              expect(vi.mocked(runAgentLoop)).toHaveBeenCalledTimes(rounds);
               expect(watchdog.stalled()).toBe(false);
               expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
               expect(scope.getFinalText()).toBe('Done.');
@@ -3654,7 +3665,7 @@ describe('subagent.ts', () => {
           for (const { shared, kernel } of LOOPS) {
             vi.stubEnv(
               'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
-              shared ? '1' : undefined,
+              shared ? '1' : '0',
             );
             vi.stubEnv(
               'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
