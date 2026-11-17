@@ -506,11 +506,12 @@ test('hover details preserve a focused search field @smoke', async ({
 });
 
 test.describe('shadow portal details', () => {
-  // #17063 authored a 120s budget for this double boot — beforeEach on '/',
-  // then the shadow-DOM harness page — and the #17067 squash dropped it.
-  // describe-scoped so the raise covers the beforeEach boot. It buys boot
-  // time only: a background session refresh can still remount the row and
-  // drop focus to <body>, failing the post-close assertion on its own.
+  // Boots the app twice (beforeEach on '/', then the shadow-DOM harness),
+  // which one-core contention stretches past the suite's 60s ceiling.
+  // describe-scoped so the 120s covers the beforeEach boot. #17063 raised it,
+  // #17067 withdrew the raise when its failure proved to be a deterministic
+  // More-locator timeout; this re-lands it for boot cost only — a background
+  // refresh can still remount the row and drop focus to <body>.
   test.describe.configure({ timeout: 120_000 });
 
   test('shadow portal details keep focus in the overview after hover replacement @smoke', async ({
