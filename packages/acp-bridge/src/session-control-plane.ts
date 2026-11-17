@@ -172,6 +172,7 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -11925,6 +11926,7 @@ export function createSessionControlPlane(
                   }
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
                   delete meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+                  delete meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
                   delete meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
                   // Channel classification is authenticated channel-worker
                   // metadata; the daemon prompt route validates the worker
@@ -11969,6 +11971,10 @@ export function createSessionControlPlane(
                   if (context?.expectedApprovalMode !== undefined) {
                     meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY] =
                       context.expectedApprovalMode;
+                  }
+                  if (context?.approvalModeBeforeStart !== undefined) {
+                    meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY] =
+                      context.approvalModeBeforeStart;
                   }
                   const attachmentReferences = dispatchBlocks.filter(
                     isSessionAttachmentReference,

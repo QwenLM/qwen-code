@@ -115,6 +115,7 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
@@ -17320,6 +17321,7 @@ describe('createAcpSessionBridge', () => {
             'qwen-code/private-parent-capability': 'forged-capability',
             [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
             [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: 'yolo',
+            [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: 'auto',
           },
         },
         undefined,
@@ -17328,6 +17330,7 @@ describe('createAcpSessionBridge', () => {
           promptId: 'server-prompt',
           modelPrompt: trustedModelPrompt,
           expectedApprovalMode: ApprovalMode.DEFAULT,
+          approvalModeBeforeStart: ApprovalMode.YOLO,
         },
       );
 
@@ -17341,6 +17344,7 @@ describe('createAcpSessionBridge', () => {
         },
         [DAEMON_MODEL_PROMPT_META_KEY]: trustedModelPrompt,
         [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: ApprovalMode.DEFAULT,
+        [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: ApprovalMode.YOLO,
       });
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen-code/invocation'],
@@ -17362,6 +17366,7 @@ describe('createAcpSessionBridge', () => {
           _meta: {
             [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
             [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: 'yolo',
+            [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: 'auto',
           },
         },
         undefined,
@@ -17373,6 +17378,11 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[1]?._meta?.[
           DAEMON_EXPECTED_APPROVAL_MODE_META_KEY
+        ],
+      ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[1]?._meta?.[
+          DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY
         ],
       ).toBeUndefined();
 

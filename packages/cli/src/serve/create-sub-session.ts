@@ -69,7 +69,10 @@ import {
 import { normalizeSessionIdForLookup } from '../config/session-id.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
-import type { SessionArchiveCoordinator } from './server/session-archive.js';
+import {
+  resolveSessionIdForRestore,
+  type SessionArchiveCoordinator,
+} from './server/session-archive.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 import {
   WorkspaceGenerationClosedError,
@@ -1089,10 +1092,7 @@ export function createSubSessionLauncher(
         `${boundWorkspace}. If it lives in another workspace, also pass that ` +
         '`workspace`.',
     );
-    if (
-      normalizeSessionIdForLookup(sessionId) ===
-      normalizeSessionIdForLookup(callerSessionId)
-    ) {
+    if (sessionId === normalizeSessionIdForLookup(callerSessionId)) {
       throw notOwn;
     }
     let metadata:
@@ -1111,14 +1111,14 @@ export function createSubSessionLauncher(
       };
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
-      const read = () =>
-        new SessionService(boundWorkspace).readCreationMetadataIfReadable(
-          sessionId,
+      const service = new SessionService(boundWorkspace, { runtimeBaseDir });
+      const storedId = await resolveSessionIdForRestore(service, sessionId);
+      if (storedId !== undefined) {
+        metadata = await service.readCreationMetadataIfReadable(
+          storedId,
           'active',
         );
-      metadata = runtimeBaseDir
-        ? await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, read)
-        : await read();
+      }
     }
     if (
       metadata?.parentSessionId === undefined ||
@@ -1180,7 +1180,11 @@ export function createSubSessionLauncher(
         throw new Error('This session cannot follow up a sub-session.');
       }
     }
-    const reusing = info.sessionId !== undefined;
+    const followUpSessionId =
+      info.sessionId === undefined
+        ? undefined
+        : normalizeSessionIdForLookup(info.sessionId);
+    const reusing = followUpSessionId !== undefined;
     if (reusing && !remote && info.completion === 'sent') {
       // The completion comes back as a background turn, which the caller
       // can only take while it records its chat.
@@ -1273,16 +1277,16 @@ export function createSubSessionLauncher(
       ? AbortSignal.any([stopAc.signal, dispatchAbort.signal])
       : undefined;
 
-    try {
-      const promptId = randomUUID();
-      let lastEventId!: number;
-      let turn!: ReturnType<AcpSessionBridge['sendPrompt']>;
-      let promptAdmission: Promise<void> | undefined;
+    const promptId = randomUUID();
+    let lastEventId!: number;
+    let turn!: ReturnType<AcpSessionBridge['sendPrompt']>;
+    let promptAdmission: Promise<void> | undefined;
+    const prepareAndQueue = async (): Promise<BridgeSession> => {
       let sub: BridgeSession;
-      if (reusing) {
+      if (followUpSessionId !== undefined) {
         sub = await resumeOwnSubSession(
           bridge,
-          info.sessionId!,
+          followUpSessionId,
           info.callerSessionId,
         );
         // The bridge keys the session by the id it resumed, which can differ
@@ -1350,21 +1354,20 @@ export function createSubSessionLauncher(
         | {
             assertCanDispatch(): void;
             expectedApprovalMode: ApprovalMode;
+            approvalModeBeforeStart?: ApprovalMode;
           }
         | undefined;
       if (remote) {
         let childApproval = await readApprovalMode(bridge, sessionId);
-        if (childApproval.mode === undefined) {
+        const originalMode = childApproval.mode;
+        if (originalMode === undefined) {
           throw new Error(
             'The sub-session did not report its approval mode; it was not used.',
           );
         }
         remote.assertCurrent();
-        const mode = delegatedApprovalMode(
-          remote.approvalMode,
-          childApproval.mode,
-        );
-        if (mode !== childApproval.mode) {
+        const mode = delegatedApprovalMode(remote.approvalMode, originalMode);
+        if (!reusing && mode !== originalMode) {
           const change = await bridge.setSessionApprovalMode(sessionId, mode, {
             persist: false,
           });
@@ -1384,6 +1387,9 @@ export function createSubSessionLauncher(
             childApproval.assertCurrent();
           },
           expectedApprovalMode: mode,
+          ...(reusing && mode !== originalMode
+            ? { approvalModeBeforeStart: originalMode }
+            : {}),
         };
         dispatchApproval.assertCanDispatch();
       }
@@ -1434,6 +1440,9 @@ export function createSubSessionLauncher(
             onPromptAdmitted,
             onPromptDispatched,
             dispatchSignal,
+            ...(reusing && info.completion === 'sent'
+              ? { deadlineMs: sentModeDrainTimeoutMs }
+              : {}),
             ...(named
               ? {
                   onPromptWriteStarted: () => {
@@ -1447,6 +1456,24 @@ export function createSubSessionLauncher(
         );
         queuedTurn = turn;
       }
+      return sub;
+    };
+
+    try {
+      let sub: BridgeSession;
+      if (followUpSessionId === undefined) {
+        sub = await prepareAndQueue();
+      } else {
+        const coordinator = getArchiveCoordinator?.();
+        if (!coordinator) {
+          throw new Error('Session archive coordinator is unavailable.');
+        }
+        sub = await coordinator.runSharedMany(
+          [followUpSessionId],
+          prepareAndQueue,
+        );
+      }
+      const sessionId = sub.sessionId;
 
       // The result comes from the event stream (turn_error surfaces failures);
       // swallow the promise so it can't raise an unhandled rejection, but log

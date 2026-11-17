@@ -132,6 +132,7 @@ function makeFakeBridge(opts?: {
     promptId?: string;
     text: string;
     expectedApprovalMode?: ApprovalMode;
+    approvalModeBeforeStart?: ApprovalMode;
   }> = [];
   const names: Array<{
     sessionId: string;
@@ -338,6 +339,8 @@ function makeFakeBridge(opts?: {
         dispatchSignal?: AbortSignal;
         assertCanDispatch?: () => void;
         expectedApprovalMode?: ApprovalMode;
+        approvalModeBeforeStart?: ApprovalMode;
+        deadlineMs?: number;
       },
     ) => {
       capturedPromptId = ctx?.promptId ?? '';
@@ -353,6 +356,9 @@ function makeFakeBridge(opts?: {
           ...(ctx?.expectedApprovalMode
             ? { expectedApprovalMode: ctx.expectedApprovalMode }
             : {}),
+          ...(ctx?.approvalModeBeforeStart
+            ? { approvalModeBeforeStart: ctx.approvalModeBeforeStart }
+            : {}),
         });
         if (opts?.sendPromptRejects) {
           return Promise.reject(new Error(opts.sendPromptRejects));
@@ -362,9 +368,22 @@ function makeFakeBridge(opts?: {
         return new Promise(() => {});
       };
       if (!opts?.sendPromptRejects) ctx?.onPromptAdmitted?.();
-      return opts?.beforeQueuedDispatch
-        ? opts.beforeQueuedDispatch().then(dispatch)
-        : dispatch();
+      if (!opts?.beforeQueuedDispatch) return dispatch();
+      const queue = opts.beforeQueuedDispatch();
+      if (ctx?.deadlineMs === undefined) return queue.then(dispatch);
+      return new Promise((resolve, reject) => {
+        let expired = false;
+        const timer = setTimeout(() => {
+          expired = true;
+          reject(new Error('Prompt deadline exceeded'));
+        }, ctx.deadlineMs);
+        void queue
+          .then(() => {
+            clearTimeout(timer);
+            if (!expired) resolve(dispatch());
+          })
+          .catch(reject);
+      });
     },
     closeSession: (sessionId: string) => {
       closes.push(sessionId);
@@ -3337,6 +3356,8 @@ describe('sub-session workspace index', () => {
 describe('following up a sub-session', () => {
   const WS = '/tmp/ws';
   const WS_B = '/tmp/ws-b';
+  const archiveCoordinator = new SessionArchiveCoordinator();
+  const getArchiveCoordinator = () => archiveCoordinator;
   /** A chunk stamped with the prompt that produced it, as the bridge does. */
   const chunkFor = (promptId: string, text: string): FakeEvent =>
     ({ ...chunk(text), promptId }) as FakeEvent;
@@ -3347,7 +3368,6 @@ describe('following up a sub-session', () => {
 
   function ownChild(opts?: {
     parent?: string;
-    notLive?: boolean;
     sourceTypes?: Record<string, string>;
     sourceIds?: Record<string, string>;
     sendPromptRejects?: string;
@@ -3358,7 +3378,6 @@ describe('following up a sub-session', () => {
       restoredCallerParents: { kid: opts?.parent ?? 'caller' },
       approvalModes: { caller: 'default', kid: 'yolo' },
       resumable: ['kid'],
-      ...(opts?.notLive ? { notLive: ['kid'] } : {}),
       ...(opts?.sourceTypes ? { callerSourceTypes: opts.sourceTypes } : {}),
       ...(opts?.sourceIds ? { sourceIds: opts.sourceIds } : {}),
       ...(opts?.sendPromptRejects
@@ -3378,6 +3397,7 @@ describe('following up a sub-session', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      getArchiveCoordinator,
     });
     return { fake, launcher };
   }
@@ -3448,17 +3468,94 @@ describe('following up a sub-session', () => {
   });
 
   it('reads the lineage of a reaped sub-session from its transcript', async () => {
+    const sessionId = 'abcdef00-0000-4000-8000-000000000001';
+    const storedId = sessionId.toUpperCase();
+    const resolve = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValue(storedId);
     const read = vi
       .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
       .mockResolvedValue({ parentSessionId: 'caller' });
     try {
-      const { fake, launcher } = ownChild({ notLive: true });
-      await followUp(launcher);
-      expect(read).toHaveBeenCalledWith('kid', 'active');
-      expect(fake.resumes).toHaveLength(1);
+      const fake = makeFakeBridge({
+        notLive: [sessionId],
+        resumable: [sessionId],
+        events: (pid) => [chunkFor(pid, 'ok'), turnComplete(pid)],
+      });
+      const launcher = createSubSessionLauncher({
+        getBridge: () => fake.bridge,
+        boundWorkspace: WS,
+        getArchiveCoordinator,
+      });
+      await followUp(launcher, 'first-turn', storedId);
+      expect(resolve).toHaveBeenCalledWith(sessionId);
+      expect(read).toHaveBeenCalledWith(storedId, 'active');
+      expect(fake.resumes).toEqual([
+        { sessionId, workspaceCwd: WS, parentSessionId: 'caller' },
+      ]);
+    } finally {
+      read.mockRestore();
+      resolve.mockRestore();
+    }
+  });
+
+  it('refuses an unresolved ID before reading transcript metadata', async () => {
+    const sessionId = 'unknown/child';
+    const fake = makeFakeBridge({ notLive: [sessionId] });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      getArchiveCoordinator,
+    });
+    const read = vi.spyOn(
+      SessionService.prototype,
+      'readCreationMetadataIfReadable',
+    );
+    try {
+      await expect(followUp(launcher, 'first-turn', sessionId)).rejects.toThrow(
+        'is not a sub-session this session created',
+      );
+      expect(read).not.toHaveBeenCalled();
+      expect(fake.resumes).toEqual([]);
     } finally {
       read.mockRestore();
     }
+  });
+
+  it('normalizes a UUID before looking up the live child', async () => {
+    const sessionId = 'abcdef00-0000-4000-8000-000000000001';
+    const fake = makeFakeBridge({
+      restoredCallerParents: { [sessionId]: 'caller' },
+      resumable: [sessionId],
+      events: (pid) => [chunkFor(pid, 'ok'), turnComplete(pid)],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      getArchiveCoordinator,
+    });
+    await expect(
+      followUp(launcher, 'first-turn', sessionId.toUpperCase()),
+    ).resolves.toMatchObject({ sessionId, result: 'ok' });
+    expect(fake.resumes[0]?.sessionId).toBe(sessionId);
+  });
+
+  it('refuses a follow-up during archive before restoring or queueing', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const fake = makeFakeBridge({
+      restoredCallerParents: { kid: 'caller' },
+      resumable: ['kid'],
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      getArchiveCoordinator: () => coordinator,
+    });
+    await coordinator.runExclusiveMany(['kid'], async () => {
+      await expect(followUp(launcher)).rejects.toThrow(/archiv/i);
+      expect(fake.resumes).toEqual([]);
+      expect(fake.prompts).toEqual([]);
+    });
   });
 
   it.each([
@@ -3513,6 +3610,7 @@ describe('following up a sub-session', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      getArchiveCoordinator,
     });
     expect((await followUp(launcher, 'first-turn', 'KID')).sessionId).toBe(
       'kid',
@@ -3534,6 +3632,7 @@ describe('following up a sub-session', () => {
     const launcherB = createSubSessionLauncher({
       getBridge: () => b.bridge,
       boundWorkspace: WS_B,
+      getArchiveCoordinator,
     });
     const launcherA = createSubSessionLauncher({
       getBridge: () => a.bridge,
@@ -3574,7 +3673,7 @@ describe('following up a sub-session', () => {
     const a = makeFakeBridge({ approvalModes: { caller: 'default' } });
     const b = makeFakeBridge({
       restoredCallerParents: { kid: 'caller' },
-      approvalModes: { kid: 'default' },
+      approvalModes: { kid: 'yolo' },
       resumable: ['kid'],
       // The session is busy: this prompt starts only once its turn ends.
       beforeQueuedDispatch: () => queue,
@@ -3583,6 +3682,7 @@ describe('following up a sub-session', () => {
     const launcherB = createSubSessionLauncher({
       getBridge: () => b.bridge,
       boundWorkspace: WS_B,
+      getArchiveCoordinator,
     });
     const launcherA = createSubSessionLauncher({
       getBridge: () => a.bridge,
@@ -3607,8 +3707,13 @@ describe('following up a sub-session', () => {
     });
     expect(res).toMatchObject({ sessionId: 'kid', workspaceCwd: WS_B });
     expect(b.prompts).toEqual([]);
+    expect(b.modeChanges).toEqual([]);
     releaseQueue();
     await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
+    expect(b.prompts[0]).toMatchObject({
+      expectedApprovalMode: 'default',
+      approvalModeBeforeStart: 'yolo',
+    });
     expect(a.notifications[0]!.notification).toMatchObject({
       taskId: res.taskId,
       status: 'completed',
@@ -3631,6 +3736,7 @@ describe('following up a sub-session', () => {
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      getArchiveCoordinator,
     });
     await followUp(launcher, 'sent');
     releaseQueue();
@@ -3641,6 +3747,35 @@ describe('following up a sub-session', () => {
     expect(fake.notifications[0]!.notification.modelText).toContain(
       'The workspace target changed.',
     );
+  });
+
+  it('sent: an expired follow-up cannot dispatch after the previous turn', async () => {
+    let releaseQueue!: () => void;
+    const queue = new Promise<void>((resolve) => (releaseQueue = resolve));
+    const coordinator = new SessionArchiveCoordinator();
+    const fake = makeFakeBridge({
+      restoredCallerParents: { kid: 'caller' },
+      resumable: ['kid'],
+      beforeQueuedDispatch: () => queue,
+      blockAfterEvents: true,
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      getArchiveCoordinator: () => coordinator,
+      sentModeDrainTimeoutMs: 10,
+    });
+    const result = await followUp(launcher, 'sent');
+    // Prompt completion does not hold the shared archive lock.
+    await coordinator.runExclusiveMany(['kid'], async () => {});
+    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+    expect(fake.notifications[0]?.notification).toMatchObject({
+      taskId: result.taskId,
+      status: 'failed',
+    });
+    releaseQueue();
+    await queue;
+    expect(fake.prompts).toEqual([]);
   });
 
   it('never closes a reused session when the launch fails', async () => {
@@ -3665,6 +3800,7 @@ describe('following up a sub-session', () => {
     const launcherB = createSubSessionLauncher({
       getBridge: () => b.bridge,
       boundWorkspace: WS_B,
+      getArchiveCoordinator,
     });
     const launcherA = createSubSessionLauncher({
       getBridge: () => a.bridge,
@@ -3696,11 +3832,12 @@ describe('following up a sub-session', () => {
       expect.objectContaining({ sessionId: 'kid', workspaceCwd: WS_B }),
     ]);
     expect(a.resumes).toEqual([]);
-    expect(b.modeChanges).toEqual([{ sessionId: 'kid', mode: 'default' }]);
+    expect(b.modeChanges).toEqual([]);
     expect(b.prompts).toEqual([
       expect.objectContaining({
         sessionId: 'kid',
         expectedApprovalMode: 'default',
+        approvalModeBeforeStart: 'yolo',
       }),
     ]);
   });

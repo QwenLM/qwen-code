@@ -153,14 +153,15 @@ authority, remains the way to talk to them.
 **Approval.** A follow-up that names a workspace goes through everything step
 1 requires for that workspace: the one-time approval, which also names the
 session, the trust and generation checks, and the approval rule, applied to
-the session as it is now, so a mode someone loosened since is brought back
-in line or refused. A follow-up in the caller's own workspace keeps the
-tool's usual permission flow, and the session keeps its own mode, as a new
-sub-session in that workspace does.
+the target mode at admission. If the rule tightens the mode, the change
+takes effect when the follow-up starts its turn. A follow-up in the caller's
+own workspace uses the tool's usual permission flow and keeps the session's
+mode, as a new sub-session in that workspace does.
 
 **Running the turn.** The launcher resumes the session on its workspace's
 bridge, which attaches if it is live and restores it from its transcript if
-not, and queues the prompt behind any turn the session is running. While
+not. The archive coordinator covers lineage lookup, restore, and prompt
+admission. The prompt queues behind any running turn. While
 waiting it counts only output stamped with its own prompt id, so a turn that
 was already running, or a background turn, is never taken for this one. A
 follow-up keeps the session's name, and a failed follow-up never closes or
@@ -172,10 +173,10 @@ to run.
 **Reporting back.** Every follow-up sent with `sent` reports back, in either
 workspace, and needs chat recording in the caller to do so, as a `sent`
 launch into another workspace does. A `sent` launch that creates a session waits
-until its prompt is dispatched, which is immediate; a follow-up may sit
-behind a running turn for as long as that turn takes, so it returns once
-the prompt is queued. The guards still run when the turn comes, and a
-prompt they refuse then is reported as a failed completion. A follow-up's
+until its prompt is dispatched. A follow-up returns once the prompt is
+queued. Its 30-minute deadline covers both queueing and execution. Expiry
+in the queue prevents execution. The guards still run when the turn comes,
+and a prompt they refuse is reported as a failed completion. A follow-up's
 background task id is
 `<sessionId>:<promptId>`, not the session id: a caller receives several
 completions from one session, and the receiving session treats a repeated
@@ -229,9 +230,9 @@ result shows in both places.
 ## Open questions
 
 - A `first-turn` follow-up waits at most five minutes, and a busy session can
-  hold it in the queue past that. The prompt is not withdrawn (the bridge has
-  no way to), so it still runs later, and nothing reports its result. The
-  caller sees the timeout and can follow up again or use `sent`.
+  hold it in the queue past that. This wait does not withdraw the prompt,
+  so it still runs later, and nothing reports its result. Use `sent` when
+  the queue delay is uncertain.
 
 - Should every `sent` sub-session notify its caller, not only one that names
   a workspace? That would make the tool consistent, but it would change
