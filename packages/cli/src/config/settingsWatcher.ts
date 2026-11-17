@@ -152,6 +152,8 @@ export class SettingsWatcher {
   private watchTargetDir(scope: SettingScope, settingsPath: string): void {
     const dir = path.dirname(settingsPath);
     const targetBasename = path.basename(settingsPath);
+    const resolvedDir = path.resolve(dir);
+    const resolvedSettingsPath = path.resolve(settingsPath);
     const gen = this.bumpGeneration(scope);
 
     try {
@@ -160,7 +162,11 @@ export class SettingsWatcher {
         depth: 0,
         ignored: (filePath: string, stats?: fs.Stats) => {
           if (stats && !stats.isFile() && !stats.isDirectory()) return true;
-          return false;
+          const resolvedPath = path.resolve(filePath);
+          return (
+            resolvedPath !== resolvedDir &&
+            resolvedPath !== resolvedSettingsPath
+          );
         },
       })
         .on('all', (event: string, changedPath: string) => {

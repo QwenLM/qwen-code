@@ -598,16 +598,17 @@ export interface DaemonGitWorktreeRemoveResult {
   directoryRemains?: true;
 }
 
-/** Response from `POST /workspaces/:workspace/git/checkout`. */
+/** Response from `POST /workspaces/:workspace/git/checkout` (2xx body). */
 export interface DaemonGitCheckoutResult {
   branch: string;
   detached: boolean;
   /**
-   * SHA of the auto-stash entry kept by a `stash` checkout — on success,
-   * and on a failure response (409) whose entry survives with a known SHA
-   * (a failed restore, or a parked-operation refusal after the push).
+   * SHA of the auto-stash entry kept by a successful `stash` checkout.
    * The entry holds the pre-switch changes; restore it manually with
-   * `git stash apply` when wanted.
+   * `git stash apply` when wanted. A 409 failure whose entry survives
+   * with a known SHA (a failed restore, or a parked-operation refusal
+   * after the push) carries the same field in its ERROR body
+   * (`{ error, message, stashSha }`), not in this interface.
    */
   stashSha?: string;
 }
