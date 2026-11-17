@@ -35,7 +35,10 @@ import type {
   ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
-import type { SkillInfo } from '../completions/slashCompletion';
+import type {
+  SkillInfo,
+  SlashArgumentCompleter,
+} from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
 import type {
   DaemonReasoningControls,
@@ -252,6 +255,8 @@ interface ChatEditorProps {
   skillsLoadError?: boolean;
   skillsLoaded?: boolean;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Completes arguments the static subcommand trees cannot (`/send`). */
+  slashArgumentCompleter?: SlashArgumentCompleter;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => boolean;
@@ -286,6 +291,10 @@ interface ChatEditorProps {
   onOpenWorktrees?: () => void;
   /** Opens the commit history graph. */
   onOpenLog?: () => void;
+  /** "Create branch here" for the session's detached managed worktree. */
+  onCreateWorktreeBranch?: (name: string) => Promise<void>;
+  /** "Hand off" between the session's worktree and the local checkout. */
+  onHandoff?: (to: 'local' | 'worktree') => Promise<void>;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -1742,6 +1751,7 @@ export const ChatEditor = memo(
       skillsLoadError = false,
       skillsLoaded = false,
       slashCommandCategoryOrder,
+      slashArgumentCompleter,
       autoSubmitSlashCommands = false,
       queuedMessages = [],
       onPopQueuedMessages,
@@ -1764,6 +1774,8 @@ export const ChatEditor = memo(
       onOpenCommit,
       onOpenWorktrees,
       onOpenLog,
+      onCreateWorktreeBranch,
+      onHandoff,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -2004,6 +2016,7 @@ export const ChatEditor = memo(
         Boolean(onSkillsOpenChange) &&
         (!skillsLoaded || skillsLoading || skillsLoadError),
       slashCommandCategoryOrder,
+      slashArgumentCompleter,
       autoSubmitSlashCommands,
       queuedMessages,
       onPopQueuedMessages,
@@ -3050,6 +3063,8 @@ export const ChatEditor = memo(
             onOpenCommit={onOpenCommit}
             onOpenWorktrees={onOpenWorktrees}
             onOpenLog={onOpenLog}
+            onCreateWorktreeBranch={onCreateWorktreeBranch}
+            onHandoff={onHandoff}
           >
             <button
               type="button"

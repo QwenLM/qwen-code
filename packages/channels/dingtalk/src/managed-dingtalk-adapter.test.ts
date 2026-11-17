@@ -384,7 +384,13 @@ describe('managed DingTalk adapter inbound', () => {
     await adapter.disconnect();
   });
 
-  it('a webhook-less frame admitted on the cache refreshes recency (R3-4)', async () => {
+  // The fill drives 780 fsync-backed state writes, so disk latency decides the
+  // runtime: the same sequence measured 1.6ms and 14ms per write minutes apart
+  // on one host, and 38ms per write outlasts the old flat 30s (#17558). No timer
+  // or network wait here, so a generous ceiling costs no fail-fast.
+  it('a webhook-less frame admitted on the cache refreshes recency (R3-4)', async (ctx) => {
+    // Pin the ceiling: a dropped third argument must fail here, not in CI.
+    expect(ctx.task.timeout).toBe(120_000);
     const { adapter, fake } = await connectedAdapter();
     const hook = (session: string): string =>
       `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
@@ -430,7 +436,7 @@ describe('managed DingTalk adapter inbound', () => {
     const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
     expect(Object.hasOwn(persisted.webhooks, 'conv-0')).toBe(true);
     await adapter.disconnect();
-  }, 30_000);
+  }, 120_000);
 
   it('a __proto__ conversationId with its own webhook is admitted and cached as an own key (R3-5)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();

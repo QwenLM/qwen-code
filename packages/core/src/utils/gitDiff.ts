@@ -1194,6 +1194,8 @@ export interface GitWorkingTreeStatus {
   branch: string | null;
   /** `true` for a detached HEAD (branch holds no name). */
   detached: boolean;
+  /** `false` for an unborn HEAD (no commits yet): no worktree base exists. */
+  hasHead: boolean;
   /** `true` when the branch tracks an upstream. */
   hasUpstream: boolean;
   /** Commits ahead of upstream (0 without an upstream). */
@@ -1266,6 +1268,8 @@ export async function getGitWorkingTreeStatus(
 interface StatusBranchLine {
   branch: string | null;
   detached: boolean;
+  /** false for an unborn HEAD (no commits yet): no worktree base exists. */
+  hasHead: boolean;
   hasUpstream: boolean;
   ahead: number;
   behind: number;
@@ -1274,6 +1278,7 @@ interface StatusBranchLine {
 const NO_BRANCH: StatusBranchLine = {
   branch: null,
   detached: false,
+  hasHead: false,
   hasUpstream: false,
   ahead: 0,
   behind: 0,
@@ -1290,11 +1295,11 @@ export function parseStatusBranchLine(line: string): StatusBranchLine {
   let desc = line.slice(3);
 
   if (desc.startsWith('HEAD (no branch)')) {
-    return { ...NO_BRANCH, detached: true };
+    return { ...NO_BRANCH, detached: true, hasHead: true };
   }
   const unborn = desc.match(/^(?:No commits yet|Initial commit) on (.+)$/);
   if (unborn) {
-    return { ...NO_BRANCH, branch: unborn[1] ?? null };
+    return { ...NO_BRANCH, branch: unborn[1] ?? null, hasHead: false };
   }
 
   let ahead = 0;
@@ -1318,6 +1323,7 @@ export function parseStatusBranchLine(line: string): StatusBranchLine {
   return {
     branch: branch || null,
     detached: false,
+    hasHead: true,
     hasUpstream,
     ahead,
     behind,
@@ -1554,6 +1560,28 @@ function isSafeLogRange(range: string): boolean {
     !range.startsWith('..') &&
     /^[A-Za-z0-9_./~^-]+$/.test(range)
   );
+}
+
+/**
+ * Whether `ref` resolves to a commit reachable from HEAD (`git merge-base
+ * --is-ancestor`). False when the ref is unsafe, unknown, or git fails —
+ * callers gate range composition on this, so a failed probe must refuse the
+ * boundary rather than trust it.
+ */
+export async function isGitAncestorOfHead(
+  cwd: string,
+  ref: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return false;
+  if (ref.startsWith('-') || !/^[A-Za-z0-9_./~^-]+$/.test(ref)) return false;
+  const stdout = await runGit(
+    ['merge-base', '--is-ancestor', ref, 'HEAD'],
+    gitRoot,
+    env,
+  );
+  return stdout !== null;
 }
 
 function parseLogRecords(stdout: string): GitLogEntry[] {

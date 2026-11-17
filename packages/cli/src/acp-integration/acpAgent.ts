@@ -190,6 +190,10 @@ import {
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  GeneratedUiStateError,
+  GeneratedUiStateService,
+} from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { isDeepStrictEqual } from 'node:util';
@@ -403,7 +407,10 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
-import { parseSessionExternalRecordParams } from './session-external-record-params.js';
+import {
+  MAX_EXTERNAL_RECORD_TEXT_LENGTH,
+  parseSessionExternalRecordParams,
+} from './session-external-record-params.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
@@ -511,6 +518,8 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -680,6 +689,8 @@ const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
 const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
+const GENERATED_UI_STATE_GET_METHOD = 'qwen/session/generated-ui/state/get';
+const GENERATED_UI_STATE_SET_METHOD = 'qwen/session/generated-ui/state/set';
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -7372,6 +7383,9 @@ class QwenAgent implements Agent {
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
+    const suppliedApprovalMode = meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+    const suppliedModeBeforeStart =
+      meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     const submittedPrompt =
       this.privateParentState === 'trusted'
@@ -7385,6 +7399,8 @@ class QwenAgent implements Agent {
     const suppliedChannelDelivery = meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
+    delete meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+    delete meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete meta[SUBMITTED_PROMPT_META_KEY];
@@ -7437,6 +7453,36 @@ class QwenAgent implements Agent {
       suppliedChannelDelivery !== undefined
     ) {
       meta[DAEMON_CHANNEL_DELIVERY_META_KEY] = suppliedChannelDelivery;
+    }
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedApprovalMode !== undefined
+    ) {
+      const expectedMode = APPROVAL_MODES.find(
+        (mode) => mode === suppliedApprovalMode,
+      );
+      if (expectedMode === undefined) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid trusted ACP approval mode',
+        );
+      }
+      meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY] = expectedMode;
+    }
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedModeBeforeStart !== undefined
+    ) {
+      const modeBeforeStart = APPROVAL_MODES.find(
+        (mode) => mode === suppliedModeBeforeStart,
+      );
+      if (modeBeforeStart === undefined || suppliedApprovalMode === undefined) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid trusted ACP approval mode before turn start',
+        );
+      }
+      meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY] = modeBeforeStart;
     }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
@@ -9377,6 +9423,8 @@ class QwenAgent implements Agent {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
+      canAcceptBackgroundNotifications:
+        config.getChatRecordingService() !== undefined,
       recovery,
       state: {
         _meta: {
@@ -10192,6 +10240,26 @@ class QwenAgent implements Agent {
 
       return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
+      if (
+        method === GENERATED_UI_STATE_GET_METHOD ||
+        method === GENERATED_UI_STATE_SET_METHOD
+      ) {
+        if (!(error instanceof GeneratedUiStateError)) {
+          debugLogger.error(
+            '[ACP] Generated UI state ext-method error:',
+            error,
+          );
+        }
+        return {
+          stateError:
+            error instanceof GeneratedUiStateError
+              ? { code: error.code, message: error.message }
+              : {
+                  code: 'state_unavailable',
+                  message: 'View state operation failed',
+                },
+        };
+      }
       if (
         [
           'qwen/session/sources/list',
@@ -12341,6 +12409,36 @@ class QwenAgent implements Agent {
           arguments: args as Record<string, unknown>,
         });
       }
+      case GENERATED_UI_STATE_GET_METHOD:
+      case GENERATED_UI_STATE_SET_METHOD: {
+        if (!this.isTrustedManagedParent()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'View state requires a trusted private ACP parent',
+          );
+        }
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !sessionId) {
+          throw RequestError.invalidParams(undefined, 'Invalid sessionId');
+        }
+        const service = this.sessionOrThrow(sessionId)
+          .getConfig()
+          .getGeneratedUiStateService();
+        if (!service)
+          throw new GeneratedUiStateError(
+            'state_unavailable',
+            'View state is unavailable without chat recording',
+          );
+        if (method === GENERATED_UI_STATE_GET_METHOD)
+          return { ...(await service.get(params['cardId'])) };
+        return {
+          ...(await service.set(
+            params['cardId'],
+            params['baseRevision'],
+            params['value'],
+          )),
+        };
+      }
       case 'qwen/session/sources/list':
       case 'qwen/session/sources/upsert':
       case 'qwen/session/sources/remove':
@@ -12753,6 +12851,14 @@ class QwenAgent implements Agent {
         const kind = params['kind'];
         const toolUseId = params['toolUseId'];
         const label = params['label'];
+        const fromSession = params['fromSession'];
+        const sourceSessionId = isObjectRecord(fromSession)
+          ? fromSession['sessionId']
+          : undefined;
+        const sourceWorkspaceCwd = isObjectRecord(fromSession)
+          ? fromSession['workspaceCwd']
+          : undefined;
+        const sentMessageContext = params['sentMessageContext'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -12827,15 +12933,57 @@ class QwenAgent implements Agent {
             'Invalid background notification label',
           );
         }
+        if (
+          fromSession !== undefined &&
+          (typeof sourceSessionId !== 'string' ||
+            !sourceSessionId ||
+            sourceSessionId.length > 256 ||
+            typeof sourceWorkspaceCwd !== 'string' ||
+            !sourceWorkspaceCwd ||
+            sourceWorkspaceCwd.length > 4_096)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification source session',
+          );
+        }
+        const closingTag = '</task-notification>';
+        if (
+          sentMessageContext !== undefined &&
+          (fromSession === undefined ||
+            typeof sentMessageContext !== 'string' ||
+            sentMessageContext.length > MAX_EXTERNAL_RECORD_TEXT_LENGTH ||
+            !modelText.startsWith('<task-notification>') ||
+            !modelText.endsWith(closingTag))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification sent message context',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const result = await session.enqueueBackgroundNotification({
           displayText,
           modelText,
+          ...(typeof sentMessageContext === 'string'
+            ? { sentMessageContext }
+            : {}),
           taskId,
           status,
           kind,
           ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
           ...(typeof label === 'string' ? { label } : {}),
+          ...(typeof sourceSessionId === 'string' &&
+          typeof sourceWorkspaceCwd === 'string'
+            ? {
+                structured: {
+                  fromSession: {
+                    sessionId: sourceSessionId,
+                    workspaceCwd: sourceWorkspaceCwd,
+                  },
+                },
+              }
+            : {}),
         });
         return { sessionId, accepted: result.accepted };
       }
@@ -17036,6 +17184,7 @@ class QwenAgent implements Agent {
     }
     if (!provisionalWorkspace && chatRecording !== false) {
       this.bindSessionSourceService(config);
+      this.bindGeneratedUiStateService(config);
     }
     // A hidden agent session the session-agents orchestrator planned. Looked
     // up before `initialize()` so the session is marked before its tools are
@@ -17175,6 +17324,28 @@ class QwenAgent implements Agent {
       void this.surfaceMcpFailuresWhenReady(config);
     }
     return config;
+  }
+
+  private bindGeneratedUiStateService(config: Config): void {
+    if (!this.isTrustedManagedParent() || !config.getChatRecordingService())
+      return;
+    config.setGeneratedUiStateServiceFactory(() => {
+      const sessionId = config.getSessionId();
+      const recording = config.getChatRecordingService();
+      const sessions = config.getSessionService();
+      return new GeneratedUiStateService({
+        load: async () => {
+          if (!recording) return { unavailable: true };
+          await recording.flush();
+          return sessions.readGeneratedUiStates(sessionId);
+        },
+        persist: async (payload, generation) => {
+          if (!recording) throw new Error('Chat recording unavailable');
+          await recording.recordGeneratedUiState(payload, generation);
+        },
+        branchGeneration: () => recording?.getBranchGeneration() ?? 0,
+      });
+    });
   }
 
   private bindSessionSourceService(config: Config): void {
@@ -17824,6 +17995,7 @@ class QwenAgent implements Agent {
           await config.activateProvisionalWorkspace();
           this.assertManagedSessionAdmission(this.hostExecutionEngine);
           this.bindSessionSourceService(config);
+          this.bindGeneratedUiStateService(config);
           await config.registerSessionSourceTool();
           await config.getLlmClient().setTools();
           this.setupFileSystem(config);

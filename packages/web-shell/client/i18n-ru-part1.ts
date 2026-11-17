@@ -522,6 +522,13 @@ export const RU_PART1: Record<
   'branchPicker.section.remote': 'Удалённые',
   'branchPicker.section.tags': 'Теги',
   'branchPicker.checkedOut': (v) => `Переключено на ${v?.branch ?? ''}`,
+  'branchPicker.checkoutBlocked':
+    'Переключение блокируют незафиксированные изменения',
+  'branchPicker.checkoutStash': 'Отложить изменения в stash и переключиться',
+  'branchPicker.checkoutDiscard': 'Отбросить изменения и переключиться…',
+  'branchPicker.checkoutDiscardGo': 'Отбросить и переключиться',
+  'branchPicker.checkoutStashKept': (v) =>
+    `Переключено на ${v?.branch ?? ''}. Ваши изменения сохранены в записи stash ${String(v?.sha ?? '').slice(0, 12) || '(см. git stash list)'} — восстановите их командой git stash apply, когда потребуется.`,
   'branchPicker.createdBranch': (v) => `Создана ветка ${v?.branch ?? ''}`,
   'branchPicker.pushSuccess': 'Успешно отправлено',
   'branchPicker.pullSuccess': 'Успешно обновлено',
