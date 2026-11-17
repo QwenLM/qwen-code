@@ -71,6 +71,27 @@ describe('FileReadCache', () => {
     expect(cache.getClearGeneration()).toBe(generation + 1);
   });
 
+  it('keeps recovered-write baseline state across inode replacement until a text Read', () => {
+    const original = makeStats();
+    read('/x/file', original);
+    const replaced = makeStats({ ino: 101, mtimeMs: 2_000_000 });
+    cache.recordWrite('/x/file', replaced, { readBaselineNeedsRefresh: true });
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(true);
+    expect(fresh(replaced).readResidentInHistory).toBe(false);
+    expect(fresh(replaced).lastReadWasFull).toBe(false);
+    cache.recordWrite('/x/file', replaced);
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(true);
+    read('/x/file', replaced, { full: false, cacheable: false });
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(true);
+    read('/x/file', replaced, { full: false, cacheable: true });
+    expect(fresh(replaced).readBaselineNeedsRefresh).toBe(false);
+    expect(fresh(replaced).lastReadWasFull).toBe(false);
+    expect(fresh(replaced).readResidentInHistory).toBe(false);
+    read('/x/file', replaced);
+    expect(fresh(replaced).lastReadWasFull).toBe(true);
+    expect(fresh(replaced).readResidentInHistory).toBe(true);
+  });
+
   describe('inodeKey', () => {
     it('combines dev and ino into a stable string', () => {
       expect(FileReadCache.inodeKey(makeStats({ dev: 7, ino: 99 }))).toBe(

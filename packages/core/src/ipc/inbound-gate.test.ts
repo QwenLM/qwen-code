@@ -2309,3 +2309,52 @@ describe('a gate for a process hosting several sessions', () => {
     );
   });
 });
+
+describe('a host that cannot present a held message', () => {
+  const VOICE: PeerControllerIdentity = { id: 'c_0123abcd', label: 'voice' };
+
+  function hostWithoutHolds(policy?: unknown) {
+    return recordingGate({
+      admission: unmeteredAdmission(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => policy as InboundPolicy | undefined,
+      presentsHolds: false,
+    });
+  }
+
+  it('refuses what it would have held, and parks nothing', () => {
+    for (const policy of [undefined, 'hold', 'not-a-policy']) {
+      const host = hostWithoutHolds(policy);
+      // Another review class, no class at all, an explicit hold and a
+      // value nobody recognizes would each be held by a host that can
+      // show one.
+      expect(host.gate.admit(bypassing())).toBe('refused');
+      expect(host.gate.admit(frame())).toBe('refused');
+      expect(host.gate.getHeld()).toEqual([]);
+      expect(host.delivered).toEqual([]);
+      expect(host.statuses).toEqual(['refused', 'refused']);
+    }
+  });
+
+  it('still delivers what the gate accepts without a review', () => {
+    const host = hostWithoutHolds();
+    const peer = prompting();
+    const own = frame();
+    const controlled = frame();
+    expect(host.gate.admit(peer)).toBe('accept');
+    expect(host.gate.admit(own, { selfSent: true })).toBe('accept');
+    expect(
+      host.gate.admit(controlled, { selfSent: false, controller: VOICE }),
+    ).toBe('accept');
+    expect(host.delivered).toEqual([peer, own, controlled]);
+    expect(host.statuses).toEqual(['delivered', 'delivered', 'delivered']);
+  });
+
+  it('repeats the refusal for a re-sent id', () => {
+    const host = hostWithoutHolds();
+    const f = bypassing();
+    host.gate.admit(f);
+    expect(host.gate.admit(f)).toBe('refused');
+    expect(host.statuses).toEqual(['refused', 'refused']);
+  });
+});
