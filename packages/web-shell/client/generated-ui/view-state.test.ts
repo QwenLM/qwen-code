@@ -161,6 +161,25 @@ describe('one card’s saved state', () => {
     expect(h.writes[1]!.write).toEqual({ baseRevision: 0, value: 2 });
   });
 
+  it('does not report a revert as saved after a write loses its response', async () => {
+    const h = harness({ revision: 1, value: 'start' });
+    await h.coordinator.load();
+    h.coordinator.save('changed');
+    h.writes[0]!.reply.reject(new Error('Response lost'));
+    await vi.waitFor(() => expect(h.statuses.at(-1)).toBe('failed'));
+
+    h.coordinator.save('start');
+    expect(h.writes[1]!.write).toEqual({ baseRevision: 1, value: 'start' });
+    h.writes[1]!.reply.resolve({
+      outcome: 'stale',
+      cardId: CARD,
+      revision: 2,
+      value: 'changed',
+    });
+    await vi.waitFor(() => expect(h.statuses.at(-1)).toBe('stale'));
+    expect(h.statuses).not.toContain('saved');
+  });
+
   it('reports a load failure and then saves nothing', async () => {
     const h = harness();
     vi.mocked(h.store.get).mockRejectedValueOnce(new Error('503'));
@@ -170,16 +189,23 @@ describe('one card’s saved state', () => {
     expect(h.store.set).not.toHaveBeenCalled();
   });
 
-  it('lets a remounted card read only after the earlier write landed', async () => {
+  it('lets a remounted card read only after the earlier writes landed', async () => {
     const h = harness();
     await h.coordinator.load();
     h.coordinator.save(1);
+    h.coordinator.save(2);
     const remounted = new ViewStateCoordinator(h.store, CARD, () => {});
     const loading = remounted.load();
-    await Promise.resolve();
+    h.writes[0]!.reply.resolve({ outcome: 'saved', cardId: CARD, revision: 1 });
+    await vi.waitFor(() => expect(h.writes).toHaveLength(2));
     expect(h.store.get).toHaveBeenCalledTimes(1);
-    await h.saved(0, 1);
-    await loading;
+    vi.mocked(h.store.get).mockResolvedValueOnce({
+      cardId: CARD,
+      revision: 2,
+      value: 2,
+    });
+    await h.saved(1, 2);
+    await expect(loading).resolves.toBe(2);
     expect(h.store.get).toHaveBeenCalledTimes(2);
   });
 

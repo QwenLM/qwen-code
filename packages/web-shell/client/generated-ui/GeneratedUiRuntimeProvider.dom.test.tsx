@@ -27,6 +27,7 @@ import {
   useGeneratedUiRetention,
 } from './GeneratedUiRuntimeProvider';
 import { instanceKey, resourceKey } from './instance-store';
+import { VIEW_STATE_LOAD, VIEW_STATE_SAVE } from './view-state';
 
 interface BridgeMock {
   capabilities?: unknown;
@@ -41,6 +42,10 @@ interface BridgeMock {
     params: { name: string; arguments?: Record<string, unknown> },
     extra: { signal: AbortSignal },
   ) => Promise<unknown>;
+  fallbackRequestHandler?: (request: {
+    method: string;
+    params?: Record<string, unknown>;
+  }) => Promise<unknown>;
   connect: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
   sendSandboxResourceReady: ReturnType<typeof vi.fn>;
@@ -1106,6 +1111,65 @@ describe('GeneratedUiRuntimeProvider eligibility and authority', () => {
     expect(activeBridges()).toEqual([bridge]);
     expect(bridge.sendToolResult).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['initially folded', 'folded before loading'])(
+    'restores persistence after a card is %s',
+    async (visibility) => {
+      const h = setup();
+      const cardId = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+      const card = {
+        surface: 'main',
+        toolId: 'call-a',
+        display: appDisplay({
+          toolResult: { _meta: { 'qwen/generated-ui': { cardId } } },
+        }),
+      };
+      const get = vi.fn().mockResolvedValue({ cardId, revision: 5, value: 1 });
+      const set = vi.fn().mockResolvedValue({
+        outcome: 'saved',
+        cardId,
+        revision: 6,
+      });
+      const tools = {
+        sessionId: h.source.sessionId,
+        callTool: vi.fn(),
+        viewState: { get, set },
+      };
+      if (visibility === 'folded before loading')
+        await h.render({ cards: [card], tools });
+      await h.render({ cards: [{ ...card, visible: false }], tools });
+      const folded = activeBridges()[0];
+      await initialize(folded);
+      await act(async () => {
+        await expect(
+          folded.fallbackRequestHandler!({ method: VIEW_STATE_LOAD }),
+        ).rejects.toThrow('inactive');
+      });
+      expect(get).not.toHaveBeenCalled();
+
+      await h.render({ cards: [card], tools });
+      const opened = activeBridges()[0];
+      expect(opened).not.toBe(folded);
+      await initialize(opened);
+      await act(async () => {
+        await expect(
+          opened.fallbackRequestHandler!({ method: VIEW_STATE_LOAD }),
+        ).resolves.toEqual({ value: 1 });
+        await opened.fallbackRequestHandler!({
+          method: VIEW_STATE_SAVE,
+          params: { value: 2 },
+        });
+      });
+      expect(set).toHaveBeenCalledWith(cardId, { baseRevision: 5, value: 2 });
+
+      await h.render({ cards: [{ ...card, visible: false }], tools });
+      await expect(
+        h.store().getEntries()[0].tools.viewState!.get(cardId),
+      ).rejects.toThrow('inactive');
+      await h.render({ cards: [card], tools });
+      expect(activeBridges()).toEqual([opened]);
+    },
+  );
 
   it.each(['folded', 'hidden-surface'])(
     'revokes %s cards without remounting their runtime',

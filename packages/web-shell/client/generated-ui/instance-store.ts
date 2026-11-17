@@ -53,6 +53,7 @@ export interface GeneratedUiInstance {
   canMessage: boolean;
   token?: object;
   lease?: Lease;
+  reloadOnGrant?: boolean;
   leaseGeneration?: number;
   parkedAt?: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -234,6 +235,11 @@ export class GeneratedUiInstanceStore {
       reset: slot.reset,
     };
     entry.leaseGeneration = entry.lease.generation;
+    if (entry.reloadOnGrant) {
+      entry.reloadOnGrant = false;
+      entry.id = ++this.generation;
+      this.changed();
+    }
   }
 
   attach(
@@ -287,6 +293,7 @@ export class GeneratedUiInstanceStore {
         runtime: undefined!,
       };
       const instance = entry;
+      let viewStateRead = false;
       entry.tools = {
         sessionId: entry.sessionId,
         callTool: async (request, signal) => {
@@ -308,7 +315,13 @@ export class GeneratedUiInstanceStore {
         ...(slot.tools?.viewState
           ? {
               viewState: {
-                get: async (cardId) => this.viewState(instance).get(cardId),
+                get: async (cardId) => {
+                  // The App reads only once at startup. Retry with a new frame
+                  // if that read happened while the card had no active lease.
+                  if (this.current(instance)) viewStateRead = true;
+                  else if (!viewStateRead) instance.reloadOnGrant = true;
+                  return this.viewState(instance).get(cardId);
+                },
                 set: async (cardId, write) =>
                   this.viewState(instance).set(cardId, write),
               },

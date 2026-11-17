@@ -47,6 +47,10 @@ export function generatedUiCardId(toolResult: unknown): string | undefined {
 // still landing, or its first save would be rejected as stale.
 const writes = new Map<string, Promise<void>>();
 
+async function waitForWrites(key: string): Promise<void> {
+  while (writes.has(key)) await writes.get(key);
+}
+
 /**
  * One mounted card's saved state. Saves are sent as soon as the previous one
  * settles, so only changes made while a write is in flight are coalesced.
@@ -73,7 +77,7 @@ export class ViewStateCoordinator {
 
   async load(): Promise<unknown> {
     try {
-      await writes.get(this.key);
+      await waitForWrites(this.key);
       const state = await this.store.get(this.cardId);
       this.revision = state.revision;
       this.saved = JSON.stringify(state.value ?? null);
@@ -111,7 +115,7 @@ export class ViewStateCoordinator {
   async clear(): Promise<boolean> {
     this.pending = undefined;
     this.stale = true;
-    await writes.get(this.key);
+    await waitForWrites(this.key);
     const clearing = (async () => {
       const state = await this.store.get(this.cardId);
       if (state.value === null) return true;
@@ -158,7 +162,10 @@ export class ViewStateCoordinator {
             status = 'stale';
           } else status = 'too_large';
         },
-        () => {},
+        () => {
+          // The write may have landed even if its response didn't arrive.
+          this.saved = undefined;
+        },
       )
       .finally(() => {
         this.inFlight = undefined;

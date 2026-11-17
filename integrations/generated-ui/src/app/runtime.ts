@@ -25,6 +25,16 @@ const BRIDGE = `(() => {
   const stringify = JSON.stringify;
   const create = Object.create;
   const freeze = Object.freeze;
+  const objectPrototype = Object.prototype;
+  const getPrototypeOf = Object.getPrototypeOf;
+  const setPrototypeOf = Object.setPrototypeOf;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const ownKeys = Reflect.ownKeys;
+  const isArray = Array.isArray;
+  const isFinite = Number.isFinite;
+  const WeakMapType = WeakMap;
+  const mapGet = WeakMap.prototype.get;
+  const mapSet = WeakMap.prototype.set;
   const apply = Reflect.apply;
   const charCodeAt = String.prototype.charCodeAt;
   const hasOwn = Object.prototype.hasOwnProperty;
@@ -108,6 +118,35 @@ const BRIDGE = `(() => {
     if (inputs[id]) inputs[id].value = value;
     else inputs[id] = {value: value, checked: false};
   };
+  function stateCopy(value, seen) {
+    if (value === null || typeof value === 'string' ||
+        typeof value === 'boolean' || isFinite(value)) return value;
+    if (typeof value !== 'object') throw new TypeErrorType(stateValueError);
+    const previous = apply(mapGet, seen, [value]);
+    if (previous) return previous;
+
+    const array = isArray(value);
+    const proto = getPrototypeOf(value);
+    if (!array && proto !== objectPrototype && proto !== null)
+      throw new TypeErrorType(stateValueError);
+    const names = ownKeys(value);
+    const length = array ? getOwnPropertyDescriptor(value, 'length').value : names.length;
+    if (array && names.length !== length + 1)
+      throw new TypeErrorType(stateValueError);
+
+    // Read only data properties and give the copy no inherited toJSON hooks.
+    const copy = array ? setPrototypeOf([], null) : create(null);
+    apply(mapSet, seen, [value, copy]);
+    for (let i = 0; i < length; i++) {
+      const key = array ? i : names[i];
+      const field = getOwnPropertyDescriptor(value, key);
+      if (typeof key === 'symbol' || !field?.enumerable ||
+          !apply(hasOwn, field, ['value'])) throw new TypeErrorType(stateValueError);
+      copy[key] = stateCopy(field.value, seen);
+    }
+    return copy;
+  }
+  const stateValueError = 'ui.state.set needs a JSON value.';
   const uiState = create(null);
   uiState.get = function() {
     if (failed) fail();
@@ -115,9 +154,7 @@ const BRIDGE = `(() => {
   };
   uiState.set = function(value) {
     if (failed) fail();
-    const json = stringify(value);
-    if (typeof json !== 'string')
-      throw new TypeErrorType('ui.state.set needs a JSON value.');
+    const json = stringify(stateCopy(value, new WeakMapType()));
     if (byteLength(json) > ${MAX_STATE_BYTES})
       throw new RangeErrorType('ui.state.set value exceeds 16 KiB.');
     state = json;

@@ -528,6 +528,20 @@ describe('UiRuntime', () => {
     it.each([
       ['undefined', 'undefined', /JSON value/],
       ['a function', '() => 1', /JSON value/],
+      ['a non-finite number', 'NaN', /JSON value/],
+      ['a nested undefined', '{ x: undefined }', /JSON value/],
+      ['a sparse array', '[, 1]', /JSON value/],
+      ['a map', 'new Map()', /JSON value/],
+      ['a date', 'new Date(0)', /JSON value/],
+      ['an object with toJSON', '{ toJSON: () => 1 }', /JSON value/],
+      [
+        'a getter that replaces its own field',
+        `({ get x() {
+          Object.defineProperty(this, 'x', { value: 1 });
+          return 1;
+        } })`,
+        /JSON value/,
+      ],
       [
         'a cycle',
         '(() => { const a = {}; a.a = a; return a; })()',
@@ -538,11 +552,23 @@ describe('UiRuntime', () => {
       const runtime = createRuntime();
       const { patches, state } = runtime.initialize(
         `try { ui.state.set(${value}); ui.text('out', 'set'); }
-         catch (error) { ui.text('out', error.message); }`,
+         catch (error) { ui.text('out', error.message); }
+         ui.text('saved', String(ui.state.get()));`,
         {},
+        '42',
       );
       expect(state).toBeUndefined();
       expect(patches[0]?.value).toMatch(error);
+      expect(patches[1]?.value).toBe('42');
+    });
+
+    it('saves plain data without invoking inherited serialization hooks', () => {
+      const { state } = createRuntime().initialize(
+        `Object.prototype.toJSON = Array.prototype.toJSON = () => 1;
+         ui.state.set({ items: [2, { enabled: true }], label: '✓' });`,
+        {},
+      );
+      expect(state).toBe('{"items":[2,{"enabled":true}],"label":"✓"}');
     });
 
     it('fails the round for an uncaught state error', () => {

@@ -169,9 +169,6 @@ export class ViewController {
           ) {
             throw new Error('Invalid execution result.');
           }
-          // The Worker already holds this state, even if the round's patches
-          // are dropped below.
-          if (response.state !== undefined) this.state.save(response.state);
           this.observeInputs(this.surface.inputs());
           const preApplyInputRevision = this.inputRevision;
           const outcome = this.surface.apply(response.patches, request.inputs);
@@ -179,6 +176,8 @@ export class ViewController {
             this.stop();
             return;
           }
+          // Persist only validated rounds, including superseded patches.
+          if (response.state !== undefined) this.state.save(response.state);
           this.observeInputs(outcome.inputs);
           if (outcome.kind === 'superseded') {
             this.lastUpdate = 'superseded';

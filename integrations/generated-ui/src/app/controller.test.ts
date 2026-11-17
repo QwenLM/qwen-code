@@ -617,6 +617,21 @@ describe('current applied parameter snapshots', () => {
       expect(h.state().lastUpdate).toBe('superseded');
     });
 
+    it('keeps the saved state when the view rejects a round', async () => {
+      const save = vi.fn();
+      const h = harness({ load: async () => '1', save });
+      await h.controller.receive(createShowResult(document));
+      h.complete(1);
+      h.controller.event(event);
+      h.surface.apply.mockImplementationOnce(() => {
+        throw new Error('A view update referenced a missing element.');
+      });
+      h.reply({ sequence: 2, patches: [], execution: 'handled', state: '2' });
+
+      expect(h.state().phase).toBe('error');
+      expect(save).not.toHaveBeenCalled();
+    });
+
     it('starts without state when loading fails', async () => {
       const h = harness({
         load: vi.fn().mockRejectedValue(new Error('unavailable')),
