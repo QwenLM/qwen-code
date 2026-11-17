@@ -99,11 +99,7 @@ function truncateContext(
 
 function compactConversation(history: readonly Content[]): string {
   const dialogue = history.flatMap((entry, index) => {
-    if (
-      (entry.role !== 'user' && entry.role !== 'model') ||
-      (entry.role === 'user' &&
-        entry.parts?.some((part) => part.functionResponse))
-    ) {
+    if (entry.role !== 'user' && entry.role !== 'model') {
       return [];
     }
     const text = (entry.parts ?? [])

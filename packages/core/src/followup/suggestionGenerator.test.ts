@@ -330,6 +330,49 @@ describe('generatePromptSuggestion', () => {
     ).toContain('Do not edit or deploy.');
   });
 
+  it.each(['before', 'after'] as const)(
+    'retains the latest request with a tool response %s its text',
+    async (position) => {
+      mockBaseLlm();
+      const response = {
+        functionResponse: {
+          name: 'repaired_tool',
+          response: { output: 'same-entry tool payload' },
+        },
+      };
+      const text = { text: 'Latest request: inspect only; do not deploy.' };
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'Old request' }] },
+        { role: 'model', parts: [{ text: 'Old answer' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'old_tool',
+                response: { error: 'old-turn evidence' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: position === 'before' ? [response, text] : [text, response],
+        },
+        { role: 'model', parts: [{ text: 'I will inspect the report.' }] },
+      ];
+      const before = structuredClone(history);
+      await suggest({ history, enableCacheSharing: false });
+
+      const context = mockRunSideQuery.mock.calls[0][1].contents[0].parts[0]
+        .text as string;
+      expect(context).toContain(`User: ${text.text}`);
+      expect(context).not.toMatch(/old_tool|old-turn evidence/);
+      expect(context).not.toContain('same-entry tool payload');
+      expect(history).toEqual(before);
+    },
+  );
+
   it('summarizes only current-turn tool results without forwarding protocol blocks or large payloads', async () => {
     mockBaseLlm();
     const history: Content[] = [
