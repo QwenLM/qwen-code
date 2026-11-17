@@ -220,13 +220,14 @@ describe('voice service', () => {
   });
 
   it('omits same-scope voice values while preserving changed settings', () => {
+    // Persisted strings are broader than the schema's literal empty defaults.
     const settings = makeSettings({
       user: {
         voiceModel: 'qwen3-asr-flash',
         general: {
           voice: { enabled: false, mode: 'tap', language: 'english' },
         },
-      },
+      } as unknown as Settings,
     });
     const writes = buildWorkspaceVoiceSettingsWrites(settings, {
       voiceModel: 'qwen3-asr-flash',
@@ -257,10 +258,13 @@ describe('voice service', () => {
   });
 
   it('compares raw voice values instead of environment-expanded settings', () => {
+    const userSettings = {
+      general: { voice: { language: '${VOICE_LANGUAGE}' } },
+    };
     const settings = makeSettings({
-      user: { general: { voice: { language: '${VOICE_LANGUAGE}' } } },
+      user: userSettings as unknown as Settings,
     });
-    settings.user.settings.general!.voice!.language = 'english';
+    userSettings.general.voice.language = 'english';
     const writes = buildWorkspaceVoiceSettingsWrites(settings, {
       language: 'english',
     });
