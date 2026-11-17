@@ -120,7 +120,8 @@ final class JournalCheckpointValidation {
     Long priorCheckpointResourceRevision(String tenant, String workspace, String session,
             String resourceId, long maximum) {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        List<Long> origins = jdbc.query("SELECT x.owner_revision FROM ma_resource_ref x JOIN ma_session_journal_tx t"
+        // Repeated checkpoint references otherwise favor a Session-wide owner-index scan in H2.
+        List<Long> origins = jdbc.query("SELECT x.owner_revision FROM ma_resource_ref x USE INDEX (idx_ma_ref_resource) JOIN ma_session_journal_tx t"
                         + " ON t.tenant_id = x.tenant_id AND t.workspace_id = x.workspace_id AND t.session_id = x.session_id"
                         + " AND t.journal_revision = x.owner_revision WHERE x.resource_key = ? AND x.session_scope_key = ?"
                         + " AND x.tenant_id = ? AND x.workspace_id = ? AND x.session_id = ? AND x.resource_id = ?"

@@ -35,6 +35,9 @@ export const aboutCommand: SlashCommand = {
         `Qwen Code v${systemInfo.cliVersion}`,
         `Model: ${systemInfo.modelVersion}`,
         `Fast Model: ${systemInfo.fastModel ?? 'not set'}`,
+        ...(systemInfo.agentLoop
+          ? [`Agent Loop: ${systemInfo.agentLoop}`]
+          : []),
         `Auth: ${authLabel}`,
         `Platform: ${systemInfo.osPlatform} ${systemInfo.osArch} (${systemInfo.osRelease})`,
         `Node.js: ${systemInfo.nodeVersion}`,

@@ -84,6 +84,6 @@ resident 运行时词表仅包含 `read_file`、`write_file`、`edit`；模型�
 
 ## 参考
 
-- [常驻部署](../../deploy/k2-resident/README.zh-CN.md)与[有界空闲退役](2026-10-20-k2-physical-retirement-progress.zh-CN.md)。
+- [常驻部署](../../packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident/README.zh-CN.md)与[有界空闲退役](2026-10-20-k2-physical-retirement-progress.zh-CN.md)。
 - [Kubernetes 删除语义](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/)：强制删除不等待进程终止。
 - [Kubernetes 节点关机](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/)：节点异常与强制 detach 需要特殊处理；设置 out-of-service taint 前需确认节点已经关机或断电。

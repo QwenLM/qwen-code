@@ -47,7 +47,7 @@ public class ManagedLocalConfiguration {
                 || !"local-process".equals(broker.getProvisioner())
                 || !broker.isDurableLocalProcess() || !broker.isVerifiedWorkspaceRecoveryEnabled()
                 || broker.getSsh().isEnabled() || !broker.getSsh().getNodes().isEmpty()
-                || !broker.getWorkspaceMounts().isEmpty() || !broker.getResidentWorkspaces().isEmpty()
+                || !broker.getWorkspaceMounts().isEmpty()
                 || !directory.resolve("runtime").toString().equals(broker.getStateDirectory())
                 || !directory.resolve("legacy").toString().equals(broker.getWorkspaceCwd())
                 || !directory.resolve("workspaces").toString().equals(broker.getWorkspaceCreationRoot())) {
