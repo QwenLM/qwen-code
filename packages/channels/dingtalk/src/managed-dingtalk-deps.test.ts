@@ -17,6 +17,26 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+// A fetch double that answers after a fixed delay and rejects on abort, like a
+// real fetch. The abort listener is load-bearing: a double that resolved on
+// abort would let a shared budget truncate the tail on the wire while every
+// assertion here still passed. Shared so the two witnesses that depend on it
+// cannot drift apart.
+const latencyFetch = (latencyMs: number) =>
+  vi.fn(
+    (_url: string, init: { signal: AbortSignal }) =>
+      new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(
+          () => resolve(jsonResponse({ errcode: 0 })),
+          latencyMs,
+        );
+        init.signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('aborted'));
+        });
+      }),
+  );
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -501,19 +521,7 @@ describe('managed DingTalk webhook per-chunk send budget (#17173 R10)', () => {
       expect(chunks.length).toBeGreaterThanOrEqual(3);
       // A real fetch rejects on abort; a mock that ignored the signal would
       // let a shared budget pass this witness unnoticed.
-      const fetchMock = vi.fn(
-        (_url: string, init: { signal: AbortSignal }) =>
-          new Promise<Response>((resolve, reject) => {
-            const timer = setTimeout(
-              () => resolve(jsonResponse({ errcode: 0 })),
-              20_000,
-            );
-            init.signal.addEventListener('abort', () => {
-              clearTimeout(timer);
-              reject(new Error('aborted'));
-            });
-          }),
-      );
+      const fetchMock = latencyFetch(20_000);
       vi.stubGlobal('fetch', fetchMock);
       const { sendWebhook } = createManagedDingtalkDeps();
       let settled = false;
@@ -546,54 +554,63 @@ describe('managed DingTalk webhook per-chunk send budget (#17173 R10)', () => {
 });
 
 describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () => {
-  // A 48 KiB heading-dense segment splits into 24 chunks — the most any of 33
-  // swept shapes produced at the segment bound. Each chunk must answer inside
-  // its own 30s budget or that budget aborts it, so a completing send is under
-  // 24 × 30s = 720s and an aggregate ceiling at or above 720s could never fire
-  // on a reachable segment. The rows span that band up to 29999ms per chunk,
-  // where the last chunk starts at 689977ms; only a ceiling in the ~23ms
-  // window above that start escapes them.
+  // Two fixtures at the 48 KiB segment bound, because the chunk count depends
+  // on the markdown shape and no hand-derived maximum stays true: heading-dense
+  // text packs ~2000 units per chunk (24 chunks), while paragraphs sized just
+  // over half the 3800-unit target fit one per chunk (25 chunks, 47548 bytes).
+  // The splitter's own amplification predicate admits up to 52 parts, so the
+  // rows are built at the observed bound rather than at a derived ceiling.
   //
-  // Every row must deliver all 24 chunks. A send that outlives the claim lease
-  // is reconciled to unknown, but a late receipt moves unknown → partial →
-  // delivered, so the ledger converges while the tail keeps arriving; refusing
-  // the tail strands it instead (#17529 has the trace).
+  // Each chunk must answer inside its own 30s budget or that budget aborts it,
+  // so the slowest reachable send here is 25 × 29999ms = 749975ms with its last
+  // chunk starting at 719976ms. Every row must deliver all of its chunks: a
+  // send that outlives the claim lease is reconciled to unknown, but a late
+  // receipt moves unknown → partial → delivered, so the ledger converges while
+  // the tail keeps arriving; refusing the tail strands it instead (#17529 has
+  // the trace).
   it.each([
-    { latency: 1_000, total: 24, relation: 'inside' },
-    { latency: 15_000, total: 360, relation: 'inside' },
-    { latency: 20_000, total: 480, relation: 'inside' },
-    { latency: 24_500, total: 588, relation: 'inside' },
-    { latency: 25_000, total: 600, relation: 'at' },
-    { latency: 29_000, total: 696, relation: 'past' },
-    { latency: 29_999, total: 719.976, relation: 'past' },
+    { shape: 'heading', want: 24, latency: 1_000, total: 24, rel: 'inside' },
+    { shape: 'heading', want: 24, latency: 15_000, total: 360, rel: 'inside' },
+    { shape: 'heading', want: 24, latency: 20_000, total: 480, rel: 'inside' },
+    { shape: 'heading', want: 24, latency: 24_500, total: 588, rel: 'inside' },
+    { shape: 'heading', want: 24, latency: 25_000, total: 600, rel: 'at' },
+    { shape: 'heading', want: 24, latency: 29_000, total: 696, rel: 'past' },
+    {
+      shape: 'heading',
+      want: 24,
+      latency: 29_999,
+      total: 719.976,
+      rel: 'past',
+    },
+    {
+      shape: 'paragraph',
+      want: 25,
+      latency: 29_999,
+      total: 749.975,
+      rel: 'past',
+    },
   ])(
-    'a 24-chunk segment at $latency ms per chunk ($total s, $relation the 600s lease) delivers all 24',
-    async ({ latency }) => {
+    'a $want-chunk $shape segment at $latency ms per chunk ($total s, $rel the 600s lease) delivers all $want',
+    async ({ shape, want, latency }) => {
       vi.useFakeTimers();
       try {
-        let text = '';
-        while (text.length < 48 * 1024 - 200) {
-          text += `#### h${text.length}\n`;
+        let text: string;
+        if (shape === 'paragraph') {
+          // 25 paragraphs of 1900 units: two would exceed the 3800-unit target,
+          // so each chunk carries exactly one. 47548 bytes, inside the bound.
+          text = Array.from({ length: 25 }, () => 'x'.repeat(1_900)).join(
+            '\n\n',
+          );
+        } else {
+          text = '';
+          while (text.length < 48 * 1024 - 200) {
+            text += `#### h${text.length}\n`;
+          }
         }
+        expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(48 * 1024);
         const chunks = splitChunks(text);
-        expect(chunks.length).toBe(24);
-        // A real fetch rejects on abort. This mock must too, or a ceiling
-        // re-added as a shared AbortController would truncate the tail on the
-        // wire while the mock still resolved — and lowering the per-chunk
-        // budget below a row's latency would go unnoticed as well.
-        const fetchMock = vi.fn(
-          (_url: string, init: { signal: AbortSignal }) =>
-            new Promise<Response>((resolve, reject) => {
-              const timer = setTimeout(
-                () => resolve(jsonResponse({ errcode: 0 })),
-                latency,
-              );
-              init.signal.addEventListener('abort', () => {
-                clearTimeout(timer);
-                reject(new Error('aborted'));
-              });
-            }),
-        );
+        expect(chunks.length).toBe(want);
+        const fetchMock = latencyFetch(latency);
         vi.stubGlobal('fetch', fetchMock);
         const { sendWebhook } = createManagedDingtalkDeps();
         let failure: unknown;
@@ -606,7 +623,7 @@ describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () 
         await vi.advanceTimersByTimeAsync(chunks.length * latency);
         await sending;
         expect(failure).toBeUndefined();
-        expect(fetchMock).toHaveBeenCalledTimes(chunks.length);
+        expect(fetchMock).toHaveBeenCalledTimes(want);
         expect(vi.getTimerCount()).toBe(0);
       } finally {
         vi.useRealTimers();
