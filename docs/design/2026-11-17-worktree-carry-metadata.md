@@ -1,5 +1,7 @@
 # Worktree carry metadata: let the reaper exclude the carried overlay (R9-6)
 
+[English](2026-11-17-worktree-carry-metadata.md) | [简体中文](2026-11-17-worktree-carry-metadata.zh-CN.md)
+
 - Status: proposed (first deliverable of #17237)
 - Builds on: `2026-11-14-web-shell-codex-worktree-parity.md` (D3 dirty carry, D6 handoff, D7 snapshots)
 - Tracks: #17237 "Carry metadata for the reaper (R9-6, deferred from #17228)"
@@ -150,7 +152,10 @@ is unchanged in this deliverable.
 
 ## Out of scope (later #17237 phases)
 
-- P6 retention + snapshot/restore (design D7): `worktree.maxRetained`,
-  snapshot-before-delete, restore on reopen; the retention sweep reads the
-  sidecar (and `carriedPaths`) there.
+- P6 retention sweep (U4) and restore-on-reopen (U5), design D7: the
+  count-based `worktree.maxRetained` sweep and the affordance that reads the
+  snapshot back. Snapshot-before-delete (U3) **ships in this PR** (D4); the
+  sweep and the restore reader are the remaining P6 units. Until U5 lands, the
+  archive is keyed by `sessionId` in the chats dir and named in the cleanup log;
+  until U4 lands, nothing prunes it.
 - P7 configurable worktree root (`worktree.root`).

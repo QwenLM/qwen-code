@@ -1,5 +1,7 @@
 # Worktree retention + snapshot/restore (P6)
 
+[English](2026-11-17-worktree-retention-snapshots.md) | [简体中文](2026-11-17-worktree-retention-snapshots.zh-CN.md)
+
 - Status: proposed (#17237, after the R9-6 carry-metadata deliverable)
 - Builds on: `2026-11-14-web-shell-codex-worktree-parity.md` D7 (snapshots are
   work archives), D3 (dirty carry), and `2026-11-17-worktree-carry-metadata.md`
@@ -83,20 +85,32 @@ missing-`.git` capture rejection (no archive), and a `core.fsmonitor` exec canar
 ### U2 — `worktree.maxRetained` setting
 
 Add `worktree.maxRetained` (number, default 15, `0` disables count-based
-auto-deletion) to the worktree settings block (`settingsSchema.ts`), served to
-Web Shell like `defaultForNewSessions`. Schema freshness gate + capabilities
-envelope baselines updated (the pinned-baseline rule). i18n label/description.
+auto-deletion) to the worktree settings block (`settingsSchema.ts`). Schema
+freshness gate updated; i18n label/description pre-added. The key is **declared
+now but served/rendered/consumed when U4 lands**: the Web Shell settings drift
+invariant requires every served key to have a rendered row, and the retention
+sweep that reads the value is U4. Adding it to `WEB_SHELL_SETTINGS` before the
+row and the consumer exist would break that invariant (and leave a setting
+nothing reads), so U4 wires the allowlist entry, the UI row, and the sweep
+together.
 
 ### U3 — Archive/delete trigger: snapshot-then-delete
 
 When a managed session worktree is removed by session archive/delete
 (`executeWorktreeCleanup` and the archive flow), capture a snapshot (U1) before
-removal, then remove regardless of dirty state — the snapshot preserves the
-work. This lifts the `worktreeHasWork` refusal for **managed session
-worktrees only**; tool/agent worktrees keep the existing refusal semantics.
-The snapshot path is recorded so reopen can find it (U5). A capture failure
-falls back to the current preserve behavior (fail-closed: never delete without
-a durable snapshot).
+removal, then attempt removal — the snapshot preserves the dirty work, so the
+`worktreeHasWork` refusal is lifted for **managed session worktrees only**;
+tool/agent worktrees keep the existing refusal semantics. Removal is still
+delegated to `removeUserWorktree`, which refuses a checkout carrying commits no
+ref reaches (the default managed worktree is detached): in that case the
+snapshot is written but the checkout is preserved (`unmerged commits`), so
+"remove regardless of dirty state" holds for dirty content, not for unmerged
+commits. A capture failure also falls back to preserve (fail-closed: never
+delete without a durable snapshot); a state the snapshot cannot represent
+faithfully — staged content differing from the worktree, a non-UTF-8 deleted
+path — likewise refuses capture and preserves. The archive is keyed by
+`sessionId` in the chats dir and named in a cleanup log line; the reopen-restore
+affordance (U5) reads it back by that key.
 
 ### U4 — Retention sweep
 
@@ -123,10 +137,16 @@ Implementation notes (investigated):
   (`bridge.getSessionSummary` answers) or whose chat is pinned
   (session-organization `isPinned`). Active/pinned worktrees never count toward
   the deletion candidates.
-- **Deletion** reuses the U3 path: build a `WorktreeCleanupPlan` and call
-  `executeWorktreeCleanup` (snapshot-then-delete, fail-closed). The sweep itself
-  takes the worktree ownership lock per candidate (`acquireWorktreeOwnershipOp`)
-  so it cannot race a restore/reset.
+- **Deletion** reuses the U3 snapshot-then-remove mechanics, but NOT
+  `executeWorktreeCleanup` verbatim: that function's contract is "the session
+  record and sidecar were already deleted" (the delete path). The sweep keeps
+  the record and sidecar (the chat survives; only its worktree is reclaimed), so
+  it needs a variant that snapshots, removes the checkout, and then records the
+  removed-plus-snapshot state on the surviving sidecar (a `worktreeRemoved` flag
+  plus the archive key) that U5 reads to offer restore. Calling the delete-only
+  function unchanged would leave a sidecar naming a removed checkout with no
+  record of the snapshot. The sweep takes the worktree ownership lock per
+  candidate (`acquireWorktreeOwnershipOp`) so it cannot race a restore/reset.
 - **Trigger**: a daemon periodic sweep (alongside the session reaper) reading
   `worktree.maxRetained` from the workspace settings; `0` short-circuits. Keep
   it fail-closed: any enumeration/read error skips the candidate, never deletes.

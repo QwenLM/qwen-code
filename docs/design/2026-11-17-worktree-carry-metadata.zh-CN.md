@@ -1,5 +1,7 @@
 # Worktree 搬运元数据：让回收器排除搬运覆盖层（R9-6）
 
+[English](2026-11-17-worktree-carry-metadata.md) | [简体中文](2026-11-17-worktree-carry-metadata.zh-CN.md)
+
 - 状态：提议（#17237 的首个交付项）
 - 基于：`2026-11-14-web-shell-codex-worktree-parity.md`（D3 dirty 携带、D6 handoff、D7 快照）
 - 跟踪：#17237「Carry metadata for the reaper (R9-6, deferred from #17228)」
@@ -114,6 +116,8 @@ skip-worktree 下的会话编辑读作工作而非干净。存在 `carriedEntrie
 
 ## 范围外（#17237 后续阶段）
 
-- P6 保留 + 快照/恢复（设计 D7）：`worktree.maxRetained`、删除前快照、重开恢复；
-  保留清扫在那里读取 sidecar（及 `carriedPaths`）。
+- P6 保留清扫（U4）与重开恢复（U5），设计 D7：按数量的 `worktree.maxRetained`
+  清扫与读回快照的入口。删除前快照（U3）**已在本 PR 落地**（D4）；清扫与恢复读取方
+  是 P6 剩余单元。U5 落地前，归档按 `sessionId` 键存于 chats 目录并在清理日志中点名；
+  U4 落地前，无清理方修剪它。
 - P7 可配置 worktree 根（`worktree.root`）。

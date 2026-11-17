@@ -1797,12 +1797,15 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
   });
 
   it('a late-arriving ignored file still preserves', async () => {
+    // Commit the ignore rule in the source so .gitignore is not itself work;
+    // the only new content is the ignored file, isolating the ignored-entry
+    // detection (the collapsed --ignored=matching probe must list it).
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), '*.secret\n');
+    git(repoRoot, 'add', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
     await makeDirty(repoRoot);
     const { worktree, carriedEntries } = await createCarried('r96-ignored');
-    await fs.writeFile(path.join(worktree.path, '.gitignore'), '*.secret\n');
     await fs.writeFile(path.join(worktree.path, 'late.secret'), 'hidden\n');
-    // .gitignore itself is non-carried untracked work; the ignored file is
-    // caught by the ls-files --others probe even though status omits it.
     await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
       true,
     );
@@ -1933,5 +1936,54 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
       true,
     );
+  });
+
+  it('nested ignored disposable output is waived, not read as work (R2-1)', async () => {
+    // Monorepo-style nested build output: a file-level ignored listing would
+    // read packages/app/node_modules/x/y.js as work (and could overflow the
+    // capture buffer); the collapsed ignored geometry waives the directory.
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), 'node_modules/\n');
+    git(repoRoot, 'add', '.gitignore');
+    git(repoRoot, 'commit', '-qm', 'ignore', '--no-verify');
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-nested');
+    await fs.mkdir(
+      path.join(worktree.path, 'packages', 'app', 'node_modules', 'x'),
+      { recursive: true },
+    );
+    await fs.writeFile(
+      path.join(worktree.path, 'packages', 'app', 'node_modules', 'x', 'y.js'),
+      '//\n',
+    );
+    // Pristine carried overlay + nested ignored disposable output → clean.
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      false,
+    );
+  });
+
+  it('a clean sparse-checkout worktree is not stranded by skip-worktree (R1-5)', async () => {
+    await fs.mkdir(path.join(repoRoot, 'cone'));
+    await fs.mkdir(path.join(repoRoot, 'other'));
+    await fs.writeFile(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+    // A non-cone SUBdirectory file gets the skip-worktree bit; cone mode always
+    // includes root-level files, so the out-of-cone file must be nested.
+    await fs.writeFile(path.join(repoRoot, 'other', 'b.txt'), 'b\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'sparse', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r96-sparse', 'main');
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    git(wt, 'sparse-checkout', 'init', '--cone');
+    git(wt, 'sparse-checkout', 'set', 'cone');
+    expect(git(wt, 'ls-files', '-v')).toContain('S other/b.txt');
+    // skip-worktree stamps every out-of-cone path; sparse-checkout makes them
+    // legitimate, so a clean sparse worktree must read clean, not "has work".
+    await expect(worktreeHasWork(wt)).resolves.toBe(false);
+    // assume-unchanged is never set by sparse-checkout: hiding an edit under
+    // it still reads as work even in a sparse worktree.
+    git(wt, 'update-index', '--assume-unchanged', 'cone/a.txt');
+    await fs.writeFile(path.join(wt, 'cone', 'a.txt'), 'hidden\n');
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
   });
 });

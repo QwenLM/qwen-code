@@ -1,5 +1,7 @@
 # Worktree 保留 + 快照/恢复（P6）
 
+[English](2026-11-17-worktree-retention-snapshots.md) | [简体中文](2026-11-17-worktree-retention-snapshots.zh-CN.md)
+
 - 状态：提议（#17237，继 R9-6 搬运元数据交付项之后）
 - 基于：`2026-11-14-web-shell-codex-worktree-parity.md` D7（快照是工作归档）、
   D3（dirty 携带），及 `2026-11-17-worktree-carry-metadata.md`（R9-6，sidecar
@@ -59,15 +61,22 @@ untracked 往返；未暂存/暂存删除与 rename 源在重建 HEAD 上重新�
 ### U2 — `worktree.maxRetained` 设置
 
 给 worktree 设置块（`settingsSchema.ts`）加 `worktree.maxRetained`（number，缺省 15，
-`0` 关闭按数量自动删除），像 `defaultForNewSessions` 一样伺服给 Web Shell。更新 schema
-新鲜度门 + capabilities 信封基线（钉死基线规则）。i18n 标签/描述。
+`0` 关闭按数量自动删除）。更新 schema 新鲜度门；i18n 标签/描述预先加入。该键**现在声明，
+但待 U4 落地时才伺服/渲染/消费**：Web Shell 设置漂移不变量要求每个被伺服的键都有渲染行，
+而读取该值的保留清扫是 U4。在渲染行与消费方存在之前就把它加入 `WEB_SHELL_SETTINGS` 会
+破坏该不变量（并留下一个无人读取的设置），故 U4 把允许清单条目、UI 行与清扫一并接线。
 
 ### U3 — 归档/删除触发：先快照再删除
 
 托管会话 worktree 被会话归档/删除移除时（`executeWorktreeCleanup` 与归档流），移除前
-捕获快照（U1），然后无论 dirty 状态如何都移除——快照保存了 work。这对**仅托管会话
-worktree** 解除 `worktreeHasWork` 拒绝；工具/agent worktree 保留现有拒绝语义。记录快照
-路径以便重开查找（U5）。捕获失败回退到当前保留行为（fail-closed：未获持久快照绝不删除）。
+捕获快照（U1），然后尝试移除——快照保存了 dirty work，故对**仅托管会话 worktree** 解除
+`worktreeHasWork` 拒绝；工具/agent worktree 保留现有拒绝语义。移除仍委托
+`removeUserWorktree`，它拒绝携带无 ref 可达 commit 的检出（缺省托管 worktree 是
+detached）：此时快照已写但检出被保留（`unmerged commits`），故「无论 dirty 状态都移除」
+对 dirty 内容成立，对未合并 commit 不成立。捕获失败同样回退保留（fail-closed：未获持久
+快照绝不删除）；快照无法忠实表示的状态——暂存内容与工作树不同、非 UTF-8 删除路径——
+同样拒绝捕获并保留。归档按 `sessionId` 键存于 chats 目录并在清理日志中点名；
+重开恢复入口（U5）按该键读回。
 
 ### U4 — 保留清扫
 
@@ -86,9 +95,12 @@ worktree** 解除 `worktreeHasWork` 拒绝；工具/agent worktree 保留现有�
   会话记录已删时回退 sidecar/快照时间戳。降序排序，保留前 `maxRetained` 个，其余最旧优先清扫。
 - **保护**：跳过会话仍在 bridge 活跃（`bridge.getSessionSummary` 有答）或 chat 置顶
   （session-organization `isPinned`）的 worktree。活跃/置顶 worktree 绝不计入删除候选。
-- **删除**复用 U3 路径：构造 `WorktreeCleanupPlan` 调 `executeWorktreeCleanup`（先快照再删除，
-  fail-closed）。清扫本身对每个候选取 worktree 所有权锁（`acquireWorktreeOwnershipOp`），
-  以免与 restore/reset 竞态。
+- **删除**复用 U3 的先快照再移除机制，但**不**原样调 `executeWorktreeCleanup`：后者的
+  契约是「会话记录与 sidecar 已删」（删除路径）。清扫保留记录与 sidecar（chat 仍在，仅
+  回收其 worktree），故需要一个变体：快照、移除检出、然后在留存的 sidecar 上记录
+  「已移除＋快照」状态（`worktreeRemoved` 标志＋归档键），供 U5 读取以提供恢复。原样调
+  删除专用函数会留下一个指向已移除检出、却无快照记录的 sidecar。清扫对每个候选取
+  worktree 所有权锁（`acquireWorktreeOwnershipOp`），以免与 restore/reset 竞态。
 - **触发**：daemon 周期清扫（与会话 reaper 并列），从 workspace 设置读 `worktree.maxRetained`；
   `0` 短路。保持 fail-closed：任何枚举/读取错误跳过候选，绝不删除。
 - 测试：按数量排序保留最近 N、`0` 关闭、活跃/置顶受保护、超限最旧优先先快照再删除、枚举错误跳过。

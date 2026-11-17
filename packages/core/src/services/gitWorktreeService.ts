@@ -231,8 +231,14 @@ export async function computeCarriedIdentities(
  * Whether the index hides any path's worktree changes from `git status` via
  * an assume-unchanged (lowercase tag) or skip-worktree (`S`) bit. Such a bit
  * lets a session edit read clean, so a predicate gating a destructive sink
- * must refuse it. Pins the worktree's own `.git` (no upward discovery) and
- * is fail-closed: any read error or stderr output counts as hidden.
+ * must refuse it — with one exception: `git sparse-checkout` legitimately
+ * stamps skip-worktree on every out-of-cone path (and a linked worktree
+ * inherits the sparse index), so refusing `S` unconditionally would strand
+ * every worktree of a sparse repository forever. assume-unchanged is never
+ * set by sparse-checkout, so it always refuses; skip-worktree refuses only
+ * when sparse-checkout is not enabled. Pins the worktree's own `.git` (no
+ * upward discovery) and is fail-closed: any read error or stderr output
+ * counts as hidden.
  */
 async function hasHiddenIndexBit(worktreePath: string): Promise<boolean> {
   try {
@@ -250,9 +256,23 @@ async function hasHiddenIndexBit(worktreePath: string): Promise<boolean> {
       );
       return true;
     }
+    let sawSkipWorktree = false;
     for (const entry of stdout.split('\0')) {
       if (entry.length === 0) continue;
-      if (/^(?:S|[a-z])/.test(entry)) return true;
+      const tag = entry[0];
+      if (/[a-z]/.test(tag)) return true;
+      if (tag === 'S') sawSkipWorktree = true;
+    }
+    if (sawSkipWorktree) {
+      const sparse = await runGitCapture(worktreePath, [
+        ...NO_EXEC_CONFIG,
+        'config',
+        '--bool',
+        'core.sparseCheckout',
+      ])
+        .then(({ stdout: out }) => out.trim())
+        .catch(() => 'false');
+      if (sparse !== 'true') return true;
     }
     return false;
   } catch (error) {
@@ -407,17 +427,20 @@ function carriedEntryMatches(
  * Carried-aware variant of {@link worktreeHasWork}: a checkout whose only
  * content is the pristine recorded carried overlay reads clean, while any
  * non-carried work — and any session change to a carried path — still
- * preserves it (R9-6). Two-probe form: file-level raw `status -z` (untracked
- * directories not collapsed, non-ASCII paths not C-quoted) plus
- * `ls-files --others -z`, which lists ignored files too, so a late-arriving
- * ignored file the status probe misses still preserves the checkout. The
- * carried waiver is content-aware: a carried path is exempt only while its
- * current state matches the carry-time identity ({@link carriedEntryMatches}),
- * because path equality alone cannot distinguish the original carried copy
- * from a later edit, stage, or delete of the same path. The reaper's
- * session-marker / disposable-output / symlink waivers apply on top of the
- * carried exemption for non-carried entries. Fail-closed like the base
- * predicate: any read error or stderr output counts as work.
+ * preserves it (R9-6). One collapsed probe, `status --porcelain
+ * --untracked-files=all --ignored=matching -z`: non-ignored untracked files
+ * stay file-level (so a carried path matches exactly and non-ASCII paths are
+ * not C-quoted), while ignored entries collapse to directories — the same
+ * geometry the base predicate uses, so a large `node_modules` does not
+ * enumerate file-level and overflow the capture buffer, and nested ignored
+ * disposable output is waived exactly as capture excludes it. The carried
+ * waiver is content-aware: a carried path is exempt only while its current
+ * state matches the carry-time identity ({@link carriedEntryMatches}), because
+ * path equality alone cannot distinguish the original carried copy from a
+ * later edit, stage, or delete of the same path. The reaper's session-marker /
+ * disposable-output / symlink waivers apply on top of the carried exemption
+ * for non-carried entries. Fail-closed like the base predicate: any read error
+ * or stderr output counts as work.
  */
 async function hasNonCarriedWork(
   worktreePath: string,
@@ -433,12 +456,21 @@ async function hasNonCarriedWork(
         (e) => [e.path, e],
       ),
     );
+    // One collapsed probe: --ignored=matching lists ignored entries (dirs
+    // collapsed, so a large node_modules does not enumerate file-level and
+    // overflow the capture buffer), --untracked-files=all keeps non-ignored
+    // untracked files file-level so a carried path matches exactly, and -z
+    // keeps raw bytes (no C-quoting of non-ASCII paths). This mirrors the base
+    // predicate's ignored geometry, so nested ignored disposable output
+    // (`packages/app/node_modules/`) is waived here exactly as capture
+    // excludes it.
     const { stdout, stderr } = await runGitCapture(worktreePath, [
       ...NO_EXEC_CONFIG,
       '--no-optional-locks',
       'status',
       '--porcelain',
       '--untracked-files=all',
+      '--ignored=matching',
       '-z',
     ]);
     if (stderr.trim().length > 0) {
@@ -464,7 +496,8 @@ async function hasNonCarriedWork(
         waived = 'carried-overlay';
       } else if (
         (status === '!!' || status === '??') &&
-        entry === WORKTREE_SESSION_FILE
+        (entry === WORKTREE_SESSION_FILE ||
+          WORKTREE_SESSION_TMP_PATTERN.test(entry))
       ) {
         waived = 'session-marker';
       } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
@@ -479,42 +512,6 @@ async function hasNonCarriedWork(
       debugLogger.debug(
         `worktreeHasWork: waiving ${status} ${entry} (${waived}) at ${worktreePath}`,
       );
-    }
-    // status (without --ignored) does not list ignored files; ls-files
-    // --others does, file-level. Any non-carried, non-waived other — including
-    // a late-arriving ignored file — preserves the checkout. A carried other
-    // is untracked here, so it must still match its carried content identity.
-    const others = await runGitCapture(worktreePath, [
-      ...NO_EXEC_CONFIG,
-      '--no-optional-locks',
-      'ls-files',
-      '--others',
-      '-z',
-    ]);
-    if (others.stderr.trim().length > 0) {
-      debugLogger.debug(
-        `worktreeHasWork: carried ls-files probe at ${worktreePath} reported on stderr, treating as work: ${others.stderr.trim()}`,
-      );
-      return true;
-    }
-    for (const entry of others.stdout.split('\0')) {
-      if (entry.length === 0) continue;
-      const stored = carried.get(entry);
-      if (stored !== undefined) {
-        if (!carriedEntryMatches(stored, current.get(entry), '??')) {
-          return true;
-        }
-        continue;
-      }
-      if (
-        entry === WORKTREE_SESSION_FILE ||
-        WORKTREE_SESSION_TMP_PATTERN.test(entry) ||
-        isDisposableIgnoredEntry(entry) ||
-        (await isSymlinkEntry(worktreePath, entry))
-      ) {
-        continue;
-      }
-      return true;
     }
     return false;
   } catch (error) {

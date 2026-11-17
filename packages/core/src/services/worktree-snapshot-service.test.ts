@@ -427,6 +427,90 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     },
   );
 
+  it('refuses capture when staged content differs from the worktree (N1)', async () => {
+    // git add stages A, then the worktree is edited to B (status MM). The tar
+    // would hold only B; the staged A lives only in the index, so the capture
+    // must refuse and let the caller preserve the checkout.
+    await fs.writeFile(path.join(worktree, 'committed.txt'), 'staged-A\n');
+    git(worktree, 'add', 'committed.txt');
+    await fs.writeFile(path.join(worktree, 'committed.txt'), 'worktree-B\n');
+    await expect(
+      buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-mm',
+        slug: 'mm',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+        branch: 'main',
+      }),
+    ).rejects.toThrow(/staged content differs/);
+  });
+
+  it('excludes nested ignored disposable output from the archive (R2-1)', async () => {
+    await fs.writeFile(path.join(worktree, '.gitignore'), 'node_modules/\n');
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore', '--no-verify');
+    await fs.mkdir(
+      path.join(worktree, 'packages', 'app', 'node_modules', 'x'),
+      { recursive: true },
+    );
+    await fs.writeFile(
+      path.join(worktree, 'packages', 'app', 'node_modules', 'x', 'y.js'),
+      '//\n',
+    );
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-nested',
+      slug: 'nested',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      branch: 'main',
+    });
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-nested',
+    );
+    await expect(
+      fs.access(
+        path.join(restored, 'packages', 'app', 'node_modules', 'x', 'y.js'),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('refuses restore deletion paths naming .git, the marker, or escaping the root (R2-4)', async () => {
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-confine',
+      slug: 'confine',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      branch: 'main',
+    });
+    const { snapshotPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const restored = path.join(root, 'restored-confine');
+    git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+    for (const bad of [
+      '.git',
+      '.git/config',
+      WORKTREE_SESSION_FILE,
+      '../escape.txt',
+    ]) {
+      const meta = {
+        ...m,
+        version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+        createdAt: Date.now(),
+        dirty: { tracked: 0, untracked: 0, deleted: [bad] },
+      };
+      await expect(
+        restoreWorktreeSnapshot(snapshotPath, restored, meta),
+      ).rejects.toThrow();
+    }
+  });
+
   // F3: the exclusion must match the gate's ignored-only geometry — a
   // tracked or non-ignored file under a regenerable directory name is work
   // and must be archived, not silently dropped.

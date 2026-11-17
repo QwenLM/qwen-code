@@ -77,22 +77,38 @@ function isSafeRelativePath(p: string): boolean {
 }
 
 /**
+ * The ignored disposable output the has-work gate waives, split into collapsed
+ * directory entries (trailing slash) and individual ignored files. Built from
+ * a directory-collapsed `git ls-files --others --ignored --exclude-standard
+ * --directory` listing so a large `node_modules` does not enumerate file-level
+ * and overflow the capture buffer.
+ */
+interface DisposableIgnoredMatcher {
+  dirs: string[];
+  files: ReadonlySet<string>;
+}
+
+/**
  * Whether a worktree-relative path is excluded from the snapshot. `.git`
  * (the worktree link file or a real dir) and the session marker are always
- * excluded. A regenerable directory segment is excluded only when git
- * reports the path ignored — the same geometry the has-work gate waives —
- * so a tracked or non-ignored file under `dist/` (or `node_modules/`,
- * `coverage/`) is archived rather than silently dropped.
+ * excluded. A path is excluded as regenerable output only when it is an
+ * ignored disposable file or sits under an ignored disposable directory —
+ * the same geometry the has-work gate waives — so a tracked or non-ignored
+ * file under `dist/` (or `node_modules/`, `coverage/`) is archived rather than
+ * silently dropped, while nested ignored output (`packages/app/node_modules/`)
+ * is excluded exactly as the gate waives it.
  */
 function isExcludedFromSnapshot(
   relativePath: string,
-  ignored: ReadonlySet<string>,
+  matcher: DisposableIgnoredMatcher,
 ): boolean {
   const norm = relativePath.replace(/^\.\//, '').replace(/\/$/, '');
   if (norm.length === 0) return false;
   if (norm === '.git' || norm.startsWith('.git/')) return true;
   if (norm === WORKTREE_SESSION_FILE) return true;
-  return isDisposableIgnoredEntry(norm) && ignored.has(norm);
+  if (matcher.files.has(norm)) return true;
+  const withSlash = `${norm}/`;
+  return matcher.dirs.some((dir) => withSlash.startsWith(dir));
 }
 
 async function atomicWriteFile(
@@ -154,6 +170,19 @@ export async function buildWorktreeSnapshotMeta(
     if (record.length === 0) continue;
     const xy = record.slice(0, 2);
     const entry = record.slice(3);
+    // The archive captures the worktree, not the index. When a path has a
+    // staged change (X is a status letter, not ' ' or '?') AND the worktree
+    // differs from the index (Y is not ' '), the staged version exists only
+    // in the index — the worktree tar would not contain it, and deleting the
+    // checkout would lose it (e.g. `git add` then keep editing → `MM`). The
+    // snapshot cannot represent that state faithfully, so refuse the capture
+    // and let the caller preserve the checkout. Full index-state capture is
+    // part of the restore affordance (P6 U5).
+    if (xy[0] !== ' ' && xy[0] !== '?' && xy[1] !== ' ') {
+      throw new Error(
+        `Worktree snapshot meta: staged content differs from the worktree at ${entry}; the index cannot be represented faithfully`,
+      );
+    }
     // A rename/copy record is followed by a second NUL-separated record
     // naming the source path. A rename deletes the source; a copy keeps it.
     if (xy[0] === 'R' || xy[0] === 'C') {
@@ -196,9 +225,11 @@ export async function captureWorktreeSnapshot(
 ): Promise<WorktreeSnapshotPaths> {
   const { worktreePath, snapshotDir, meta } = options;
   await fs.access(path.join(worktreePath, '.git'));
-  // The ignored set the exclusion geometry consults: file-level, so a
-  // tracked or non-ignored file under a regenerable directory name is not
-  // mistaken for disposable output.
+  // The ignored disposable output the exclusion geometry consults, listed
+  // directory-collapsed so a large node_modules does not enumerate file-level
+  // and overflow the capture buffer. Only ignored entries are disposable
+  // candidates: a tracked or non-ignored file under a regenerable directory
+  // name is absent from this listing and is archived.
   const ignoredOut = await runGit(worktreePath, [
     ...NO_EXEC_CONFIG,
     '--no-optional-locks',
@@ -206,9 +237,20 @@ export async function captureWorktreeSnapshot(
     '--others',
     '--ignored',
     '--exclude-standard',
+    '--directory',
     '-z',
   ]);
-  const ignored = new Set(ignoredOut.split('\0').filter((p) => p.length > 0));
+  const ignoredEntries = ignoredOut.split('\0').filter((p) => p.length > 0);
+  const matcher: DisposableIgnoredMatcher = {
+    dirs: ignoredEntries.filter(
+      (e) => e.endsWith('/') && isDisposableIgnoredEntry(e),
+    ),
+    files: new Set(
+      ignoredEntries.filter(
+        (e) => !e.endsWith('/') && isDisposableIgnoredEntry(e),
+      ),
+    ),
+  };
   await fs.mkdir(snapshotDir, { recursive: true });
   const base = path.join(snapshotDir, `${meta.sessionId}.worktree-snapshot`);
   const snapshotPath = `${base}.tar.gz`;
@@ -222,7 +264,7 @@ export async function captureWorktreeSnapshot(
         gzip: true,
         portable: true,
         noMtime: true,
-        filter: (p) => !isExcludedFromSnapshot(p, ignored),
+        filter: (p) => !isExcludedFromSnapshot(p, matcher),
       },
       ['.'],
     ),

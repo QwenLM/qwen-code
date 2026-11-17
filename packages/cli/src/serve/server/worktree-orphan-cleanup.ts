@@ -456,11 +456,20 @@ export async function executeWorktreeCleanup(
         baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
         branch: sidecar.worktreeBranch,
       });
-      await captureWorktreeSnapshot({
+      const { snapshotPath } = await captureWorktreeSnapshot({
         worktreePath: plan.lockKey,
         snapshotDir: path.dirname(plan.sidecarPath),
         meta,
       });
+      // Name the archive so the snapshot is discoverable after the record and
+      // sidecar are gone. It is keyed by sessionId in the chats dir; the
+      // reopen-restore affordance (P6 U5) reads it back by that key, and the
+      // retention sweep (P6 U4) prunes it.
+      logWarning(
+        `worktree cleanup snapshotted checkout action=delete session=${safeLogValue(
+          sessionId,
+        )} snapshot=${safeLogValue(snapshotPath)}`,
+      );
     } catch (error) {
       logWorktreeCleanupPreserve(
         sessionId,

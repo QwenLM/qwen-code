@@ -316,4 +316,24 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
       'session-edit\n',
     );
   });
+
+  it('preserves a checkout whose staged content differs from the worktree (N1)', async () => {
+    const plan = await planFor('mm-preserve');
+    // Stage A then edit the worktree to B (status AM/MM): the staged A lives
+    // only in the index, which the worktree tar cannot represent. The capture
+    // must refuse so the checkout (and its index) is preserved, not deleted.
+    fs.writeFileSync(path.join(plan.lockKey, 'file.txt'), 'staged-A\n');
+    git(plan.lockKey, 'add', 'file.txt');
+    fs.writeFileSync(path.join(plan.lockKey, 'file.txt'), 'worktree-B\n');
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.existsSync(path.join(plan.lockKey, 'file.txt'))).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(repoParent, 'session-mm-preserve.worktree-snapshot.tar.gz'),
+      ),
+    ).toBe(false);
+  });
 });

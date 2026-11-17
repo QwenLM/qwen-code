@@ -2253,6 +2253,37 @@ describe('POST /session/:id/worktree-handoff', () => {
     ).toBe(true);
   });
 
+  it('persists carriedEntries in the sidecar after a carry handoff (R2-2)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    writeFileSync(
+      path.join(fixture.workspaceDir, 'README.md'),
+      'dirty-tracked\n',
+    );
+    git(fixture.workspaceDir, 'add', 'README.md');
+    writeFileSync(path.join(fixture.workspaceDir, 'note.txt'), 'untracked\n');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    expect(res.status).toBe(200);
+    // The R9-6 exemption depends on this persistence: removing the writer
+    // would leave the sidecar without the overlay and strand the checkout.
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('valid');
+    if (sidecar.state === 'valid') {
+      const entries = sidecar.session.carriedEntries ?? [];
+      const paths = entries.map((e) => e.path);
+      expect(paths).toContain('README.md');
+      expect(paths).toContain('note.txt');
+      for (const e of entries) {
+        expect(typeof e.executable).toBe('boolean');
+        expect(e.hash === null || typeof e.hash === 'string').toBe(true);
+      }
+    }
+  });
+
   it('refuses a conflicting snapshot with handoff_snapshot_conflict and restores the local checkout', async () => {
     const fixture = makeFixture();
     fixture.writeTranscript();
