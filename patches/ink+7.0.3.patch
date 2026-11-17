@@ -383,10 +383,10 @@ index cc849f0..25d6b33 100644
  //# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
-index ef659f3..1beca9b 100644
+index ef659f3..f455704 100644
 --- a/node_modules/ink/build/ink.js
 +++ b/node_modules/ink/build/ink.js
-@@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
+@@ -17,6 +17,7 @@
  import logUpdate from './log-update.js';
  import { bsu, esu, shouldSynchronize } from './write-synchronized.js';
  import instances from './instances.js';
@@ -394,7 +394,52 @@ index ef659f3..1beca9b 100644
  import App from './components/App.js';
  import { accessibilityContext as AccessibilityContext } from './components/AccessibilityContext.js';
  import { resolveFlags, } from './kitty-keyboard.js';
-@@ -160,6 +161,7 @@ export default class Ink {
+@@ -124,6 +125,44 @@
+     else if (typeof throttledValue.cancel === 'function') {
+         throttledValue.cancel();
+     }
++};
++const createRenderScheduler = (render, interval) => {
++    let lastRender = -Infinity;
++    let timer;
++    let pending = false;
++    const invoke = () => {
++        if (timer !== undefined) {
++            clearTimeout(timer);
++        }
++        timer = undefined;
++        pending = false;
++        lastRender = performance.now();
++        render();
++    };
++    const schedule = () => {
++        pending = true;
++        const remaining = interval - (performance.now() - lastRender);
++        if (remaining <= 0) {
++            invoke();
++        }
++        else if (timer === undefined) {
++            timer = setTimeout(invoke, Math.ceil(remaining));
++        }
++    };
++    schedule.flush = () => {
++        if (pending) {
++            invoke();
++        }
++    };
++    schedule.cancel = () => {
++        if (timer !== undefined) {
++            clearTimeout(timer);
++        }
++        timer = undefined;
++        pending = false;
++        lastRender = -Infinity;
++    };
++    return schedule;
+ };
+ export default class Ink {
+     /**
+@@ -160,6 +199,7 @@
      kittyProtocolEnabled = false;
      cancelKittyDetection;
      nextRenderCommit;
@@ -402,7 +447,19 @@ index ef659f3..1beca9b 100644
      constructor(options) {
          autoBind(this);
          this.options = options;
-@@ -196,6 +198,12 @@ export default class Ink {
+@@ -185,10 +225,7 @@
+             this.throttledOnRender = undefined;
+         }
+         else {
+-            const throttled = throttle(this.onRender, renderThrottleMs, {
+-                leading: true,
+-                trailing: true,
+-            });
++            const throttled = createRenderScheduler(this.onRender, renderThrottleMs);
+             this.rootNode.onRender = () => {
+                 this.hasPendingThrottledRender = true;
+                 throttled();
+@@ -196,6 +233,12 @@
              this.throttledOnRender = throttled;
          }
          this.rootNode.onImmediateRender = this.onRender;
@@ -415,7 +472,7 @@ index ef659f3..1beca9b 100644
          this.rootNode.onStaticChange = this.handleStaticChange;
          this.log = logUpdate.create(options.stdout, {
              incremental: options.incrementalRendering,
-@@ -317,7 +325,16 @@ export default class Ink {
+@@ -317,7 +360,16 @@
              this.nextRenderCommit = undefined;
          }
          const startTime = performance.now();
@@ -433,7 +490,7 @@ index ef659f3..1beca9b 100644
          this.options.onRender?.({ renderTime: performance.now() - startTime });
          // If <Static> output isn't empty, it means new children have been added to it
          const hasStaticOutput = staticOutput && staticOutput !== '\n';
-@@ -642,6 +659,7 @@ export default class Ink {
+@@ -642,6 +694,7 @@
          this.alternateScreen = this.resolveAlternateScreenOption(enabled, this.interactive);
          if (this.alternateScreen) {
              this.writeBestEffort(this.options.stdout, ansiEscapes.enterAlternativeScreen);
@@ -441,7 +498,7 @@ index ef659f3..1beca9b 100644
              this.writeBestEffort(this.options.stdout, hideCursorEscape);
          }
      }
-@@ -688,6 +706,7 @@ export default class Ink {
+@@ -688,6 +741,7 @@
          return this.nextRenderCommit.promise;
      }
      renderInteractiveFrame(output, outputHeight, staticOutput) {
@@ -449,7 +506,7 @@ index ef659f3..1beca9b 100644
          const hasStaticOutput = staticOutput !== '';
          const isTty = this.options.stdout.isTTY;
          // Detect fullscreen: output fills or exceeds terminal height.
-@@ -707,7 +726,7 @@ export default class Ink {
+@@ -707,7 +761,7 @@
              if (sync) {
                  this.options.stdout.write(bsu);
              }
@@ -458,6 +515,13 @@ index ef659f3..1beca9b 100644
              this.lastOutput = output;
              this.lastOutputToRender = outputToRender;
              this.lastOutputHeight = outputHeight;
+@@ -809,4 +863,4 @@
+         this.kittyProtocolEnabled = true;
+     }
+ }
+-//# sourceMappingURL=ink.js.map
+\ No newline at end of file
++//# sourceMappingURL=ink.js.map
 diff --git a/node_modules/ink/build/log-update.js b/node_modules/ink/build/log-update.js
 index cdb5fc4..cd10dc2 100644
 --- a/node_modules/ink/build/log-update.js

@@ -12752,8 +12752,12 @@ describe('useLlmStream', () => {
       ]);
 
       await act(async () => {
+        vi.advanceTimersByTime(8);
+      });
+
+      await act(async () => {
         releaseNextChunk();
-        await vi.advanceTimersByTimeAsync(16);
+        await vi.advanceTimersByTimeAsync(8);
       });
 
       expect(result.current.pendingHistoryItems).toEqual([

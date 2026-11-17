@@ -3243,6 +3243,7 @@ export const useLlmStream = (
         : undefined;
       const bufferedEvents: BufferedStreamEvent[] = [];
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      let lastStreamFlushAt: number | undefined;
 
       const discardBufferedStreamEvents = () => {
         if (flushTimer) {
@@ -3250,6 +3251,7 @@ export const useLlmStream = (
           flushTimer = null;
         }
         bufferedEvents.length = 0;
+        lastStreamFlushAt = undefined;
       };
 
       const flushBufferedStreamEvents = () => {
@@ -3261,6 +3263,7 @@ export const useLlmStream = (
         if (bufferedEvents.length === 0) {
           return;
         }
+        lastStreamFlushAt = performance.now();
 
         while (bufferedEvents.length > 0) {
           const nextEvent = bufferedEvents.shift()!;
@@ -3381,9 +3384,22 @@ export const useLlmStream = (
           return;
         }
 
+        const remaining =
+          lastStreamFlushAt === undefined
+            ? STREAM_UPDATE_THROTTLE_MS
+            : Math.max(
+                0,
+                lastStreamFlushAt +
+                  STREAM_UPDATE_THROTTLE_MS -
+                  performance.now(),
+              );
+        if (remaining === 0) {
+          flushBufferedStreamEvents();
+          return;
+        }
         flushTimer = setTimeout(() => {
           flushBufferedStreamEvents();
-        }, STREAM_UPDATE_THROTTLE_MS);
+        }, Math.ceil(remaining));
       };
 
       const handleStreamEvent = (
