@@ -524,6 +524,25 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
+  it('seeds the restorable set the bridge restores, not the raw rebuild', async () => {
+    // A non-html published file: locator without a preview snapshot is
+    // refused by the bridge on restore whatever its kind or id; the seed
+    // must exclude it too, or the count flips between the seed and the
+    // next durable event stamp for the session's life.
+    const kept = persistedArtifact('https://example.com/kept-link');
+    const dropped: PersistedSessionArtifact = {
+      ...persistedArtifact('file:///tmp/legacy/report.pdf'),
+      storage: 'published',
+    };
+    writeTranscript([userRecord(), artifactEventRecord([kept, dropped])]);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
+
   it('does not zero-heal a correct sidecar from an all-refused journal', async () => {
     // Every artifact record is refused (forward payload version): the
     // rebuild yields no snapshot, but the damage warnings must still reach

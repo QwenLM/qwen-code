@@ -843,7 +843,7 @@ describe('journal authority and restorable-set predicates', () => {
     expect(hasDisqualifyingArtifactJournalWarning([])).toBe(false);
   });
 
-  it('drops legacy local-published html but keeps real preview snapshots', () => {
+  it('drops non-snapshot published file locators but keeps real preview snapshots', () => {
     const sessionId = 'predicate-session';
     const base = {
       retention: 'restorable',
@@ -862,7 +862,24 @@ describe('journal authority and restorable-set predicates', () => {
       title: 'Legacy',
       url: legacyUrl,
     };
-    expect(isRestorablePersistedArtifact(sessionId, legacy)).toBe(false);
+    expect(isRestorablePersistedArtifact(legacy)).toBe(false);
+    // The bridge refuses EVERY non-snapshot published file locator on
+    // restore, whatever its kind or id — a narrower seed rule would flip
+    // the row's count between the seed and the next durable event stamp.
+    expect(
+      isRestorablePersistedArtifact({
+        ...legacy,
+        kind: 'link',
+        title: 'Legacy link',
+        url: 'file:///tmp/legacy/report.pdf',
+      }),
+    ).toBe(false);
+    expect(
+      isRestorablePersistedArtifact({
+        ...legacy,
+        id: 'pre-stable-id-scheme',
+      }),
+    ).toBe(false);
     const previewId = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
     const preview: PersistedSessionArtifact = {
       ...base,
@@ -879,7 +896,7 @@ describe('journal authority and restorable-set predicates', () => {
         'qwen.published.sha256': 'a'.repeat(64),
       },
     };
-    expect(isRestorablePersistedArtifact(sessionId, preview)).toBe(true);
+    expect(isRestorablePersistedArtifact(preview)).toBe(true);
     const link: PersistedSessionArtifact = {
       ...base,
       id: stableSessionArtifactId(sessionId, 'url:https://example.com/x'),
@@ -889,9 +906,9 @@ describe('journal authority and restorable-set predicates', () => {
       title: 'Link',
       url: 'https://example.com/x',
     };
-    expect(isRestorablePersistedArtifact(sessionId, link)).toBe(true);
+    expect(isRestorablePersistedArtifact(link)).toBe(true);
     expect(
-      isRestorablePersistedArtifact(sessionId, {
+      isRestorablePersistedArtifact({
         ...link,
         retention: 'ephemeral',
       }),

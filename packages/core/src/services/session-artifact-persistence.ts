@@ -368,40 +368,40 @@ export function rebuildSessionArtifactSnapshot(
 }
 
 /**
- * The set a cold open actually restores: the journal rebuild minus the
- * legacy local-published html artifacts the bridge drops on restore
- * (published `file:` URL, no preview snapshot, identity-matched). The
- * derived sidecar count must describe this set, not the raw rebuild —
+ * Published `file:` locators without a web-preview snapshot. The bridge
+ * refuses every one of them on restore — whatever its kind or id — via
+ * the URL validation (allowFile is false for them), and excludes them
+ * from the payload's restorable count. Shared by the bridge's count and
+ * the derived sidecar seed so the two definitions cannot drift: a
+ * narrower seed rule would flip the row's count between the seed and the
+ * next durable event stamp for the session's life.
+ */
+export function isNonSnapshotPublishedFileUrl(
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  if (artifact.storage !== 'published') return false;
+  if (getWebPreviewSnapshotId(artifact) !== undefined) return false;
+  try {
+    return new URL(artifact.url ?? '').protocol === 'file:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The set a cold open actually restores: non-ephemeral artifacts minus
+ * the non-snapshot published file locators the bridge drops on restore.
+ * The derived sidecar count must describe this set, not the raw rebuild —
  * otherwise a legacy journal over-counts the row for the session's life.
- * Keyed off getWebPreviewSnapshotId: a real published web-preview
- * snapshot stays counted.
+ * A real published web-preview snapshot stays counted.
  */
 export function isRestorablePersistedArtifact(
-  sessionId: string,
   artifact: PersistedSessionArtifact,
 ): boolean {
-  if (artifact.retention === 'ephemeral') return false;
-  if (
-    artifact.storage === 'published' &&
-    artifact.kind === 'html' &&
-    getWebPreviewSnapshotId(artifact) === undefined
-  ) {
-    let isFileUrl = false;
-    try {
-      isFileUrl = new URL(artifact.url ?? '').protocol === 'file:';
-    } catch {
-      isFileUrl = false;
-    }
-    const identityKey = sessionArtifactIdentityKey(artifact);
-    if (
-      isFileUrl &&
-      identityKey !== undefined &&
-      artifact.id === stableSessionArtifactId(sessionId, identityKey)
-    ) {
-      return false;
-    }
-  }
-  return true;
+  return (
+    artifact.retention !== 'ephemeral' &&
+    !isNonSnapshotPublishedFileUrl(artifact)
+  );
 }
 
 /**

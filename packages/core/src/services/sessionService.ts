@@ -3567,7 +3567,7 @@ export class SessionService {
       (state.snapshot?.artifacts ?? []).filter(
         (artifact) =>
           !requestedIds.has(artifact.id) &&
-          isRestorablePersistedArtifact(sessionId, artifact),
+          isRestorablePersistedArtifact(artifact),
       ).length,
     );
     const retainedSnapshots = new Set(
@@ -3821,12 +3821,13 @@ export class SessionService {
       gaps.length === 0 &&
       !hasDisqualifyingArtifactJournalWarning(artifactJournalWarnings)
     ) {
-      // Count the set a cold open restores, not the raw rebuild: legacy
-      // local-published html artifacts are dropped on restore and must
-      // not inflate the row's count.
+      // Count the set a cold open restores, not the raw rebuild: the
+      // bridge drops non-snapshot published file locators on restore
+      // (whatever their kind or id) and they must not inflate the row's
+      // count — the same shared predicate the bridge's own count uses.
       const count =
         artifactSnapshot?.artifacts.filter((artifact) =>
-          isRestorablePersistedArtifact(sessionId, artifact),
+          isRestorablePersistedArtifact(artifact),
         ).length ?? 0;
       const summaryPath = this.getArtifactSummaryPathForState(sessionId, state);
       const existing = readSessionArtifactSummarySidecar(summaryPath);
