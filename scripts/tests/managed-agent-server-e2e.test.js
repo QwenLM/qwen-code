@@ -3490,7 +3490,13 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toMatch(/Loop sidecar discriminators drifted/);
     // The classifier answer matches the block schema, not the tool name, so
     // other structured side queries are not mis-answered with an invalid allow.
+    // The decision lives in the executable classifierBlockAnswer helper, which
+    // the fake calls; the helper is exercised below against block and non-block
+    // schemas so an additive fallback that re-creates the mis-answer reddens.
     expect(source).toMatch(/'shouldBlock' in blockProperties/);
+    expect(source).toMatch(
+      /const blockAnswer = classifierBlockAnswer\(blockProperties\)/,
+    );
     // The create -> list lifecycle claim: cron_list must echo the created
     // prompt; a mere tool result must not pass.
     expect(source).toMatch(/includes\('\/loop check the deploy'\)/);
@@ -3502,6 +3508,17 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(source).toMatch(/Retired cron schedule \$\{createdScheduleId\}\./);
     expect(source).toMatch(/cron_create printed no automation id/);
+    // The fake model's delete fixture extracts the minted id from the create
+    // tool result by structured call id — not a fabricated id, not a substring
+    // of the delete fixture's own 'loop-cron-created' argument. The
+    // assertion-side createdScheduleId pin above does not cover this fake-side
+    // extraction; pin it so a broken fake extraction reddens the fast suite.
+    expect(source).toMatch(
+      /const createdId = \/asch_\[0-9a-f\]\{32\}\/\.exec\(createResultText\)/,
+    );
+    expect(source).toMatch(
+      /entry\.role === 'tool' && entry\.tool_call_id === 'loop-cron-create'/,
+    );
     // The reported count is the witnessed calls, not the cumulative flattened
     // tool-message length (every chat-completions body repeats prior results).
     expect(source).toMatch(/cronToolResults: cronCallIds\.filter\(/);
@@ -3515,6 +3532,45 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(source).not.toMatch(/\.includes\(callId\)/);
     expect(source).not.toMatch(/serialized\.includes\('loop-cron-/);
+  });
+
+  // The classifier narrowing is executed, not just pinned as text: a plain
+  // revert (answer by tool name) AND an additive fallback (answer shouldBlock
+  // for any respond_in_schema) both re-create the mis-answer of unrelated side
+  // queries. The non-block directions below redden under either mutation.
+  it('executes the classifier block-schema narrowing against hostile schemas', () => {
+    const { classifierBlockAnswer } = load(
+      ['classifierBlockAnswer'],
+      'classifierBlockAnswer',
+    )();
+    // Stage 1 block schema: only shouldBlock is permitted.
+    expect(classifierBlockAnswer({ shouldBlock: { type: 'boolean' } })).toEqual(
+      {
+        shouldBlock: false,
+      },
+    );
+    // Stage 2 block schema adds thinking/reason.
+    expect(
+      classifierBlockAnswer({
+        shouldBlock: { type: 'boolean' },
+        thinking: { type: 'string' },
+        reason: { type: 'string' },
+      }),
+    ).toEqual({ shouldBlock: false, thinking: '', reason: '' });
+    // Non-block side queries (title, tool-use summary, next speaker) must NOT
+    // be answered with a schema-invalid allow — an additive fallback reddens
+    // these directions.
+    expect(
+      classifierBlockAnswer({ title: { type: 'string' } }),
+    ).toBeUndefined();
+    expect(
+      classifierBlockAnswer({ summary: { type: 'string' } }),
+    ).toBeUndefined();
+    expect(
+      classifierBlockAnswer({ nextSpeaker: { type: 'string' } }),
+    ).toBeUndefined();
+    expect(classifierBlockAnswer(undefined)).toBeUndefined();
+    expect(classifierBlockAnswer({})).toBeUndefined();
   });
 
   // The loop-fire arm attests a real scheduled fire: the scanner's fired

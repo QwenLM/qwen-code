@@ -71,15 +71,15 @@ Use this path only for inputs with a leading interval token or a trailing "every
 
 Supported suffixes: `s` (seconds, rounded up to nearest minute, min 1), `m` (minutes), `h` (hours), `d` (days). Convert:
 
-| Interval pattern   | Cron expression        | Notes                                     |
-| ------------------ | ---------------------- | ----------------------------------------- |
-| `Nm` where N <= 59 | `*/N * * * *`          | every N minutes                           |
-| `Nm` where N >= 60 | `0 */H * * *`          | round to hours (H = N/60, must divide 24) |
-| `Nh` where N <= 23 | `0 */N * * *`          | every N hours                             |
-| `Nd`               | `0 0 */N * *`          | every N days at midnight local            |
-| `Ns`               | treat as `ceil(N/60)m` | cron minimum granularity is 1 minute      |
+| Interval pattern   | Cron expression        | Notes                                          |
+| ------------------ | ---------------------- | ---------------------------------------------- |
+| `Nm` where N <= 59 | `*/N * * * *`          | every N minutes                                |
+| `Nm` where N >= 60 | `0 */H * * *`          | round to hours (H = N/60, must divide 24)      |
+| `Nh` where N <= 23 | `0 */N * * *`          | every N hours                                  |
+| `Nd`               | `0 0 */N * *`          | midnight local on days 1, 1+N, … of each month |
+| `Ns`               | treat as `ceil(N/60)m` | cron minimum granularity is 1 minute           |
 
-If the interval does not cleanly divide its unit (for example `7m` gives uneven gaps at `:56` to `:00`, or `90m` is 1.5 hours which cron cannot express), pick the nearest clean interval and tell the user what you rounded to before scheduling.
+If the interval does not cleanly divide its unit (for example `7m` gives uneven gaps at `:56` to `:00`, or `90m` is 1.5 hours which cron cannot express), pick the nearest clean interval and tell the user what you rounded to before scheduling. `Nd` is a day-of-month step, not a rolling N-day cadence: it fires on days 1, 1+N, 1+2N, … and resets at each month start, so the gap across a month boundary is shorter than N days (for example `*/2` fires on the 31st then the 1st). Tell the user this when scheduling `Nd` with N > 1.
 
 ### Action
 

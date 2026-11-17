@@ -28,8 +28,13 @@
  * See docs/design/2026-11-14-managed-loop-skill-asset.md.
  */
 
+/** The creator surfaces a Managed profile declares — the single source the
+ * parity tests iterate, so an added or removed profile cannot drift across
+ * hand-kept lists. */
+export const MANAGED_LOOP_PROFILES = ['union', 'cron', 'wakeup'] as const;
+
 /** The creator surface a Managed profile declares. */
-export type ManagedLoopProfile = 'union' | 'cron' | 'wakeup';
+export type ManagedLoopProfile = (typeof MANAGED_LOOP_PROFILES)[number];
 
 export interface ManagedLoopSkill {
   description: string;
@@ -106,11 +111,14 @@ function managedFixedInterval(section: string): string {
     'that it runs until cancelled (a Managed schedule does not expire), and that they can cancel with CronDelete (include the job ID).',
   );
   // Managed cron_create defaults the timezone to UTC; "midnight local" is wrong
-  // unless the model passes the user's IANA zone.
+  // unless the model passes the user's IANA zone. `0 0 */N * *` is a
+  // day-of-month step (days 1, 1+N, … resetting at each month start), not a
+  // rolling N-day cadence — the source table and its caveat say so, and the
+  // managed wording keeps that accurate.
   out = sub(
     out,
-    '| `Nd`               | `0 0 */N * *`          | every N days at midnight local            |',
-    "| `Nd`               | `0 0 */N * *`          | every N days at midnight UTC (pass the user's IANA `timezone` for local midnight) |",
+    '| `Nd`               | `0 0 */N * *`          | midnight local on days 1, 1+N, … of each month |',
+    "| `Nd`               | `0 0 */N * *`          | midnight UTC on days 1, 1+N, … of each month (pass the user's IANA `timezone` for local midnight) |",
   );
   return out;
 }
@@ -409,14 +417,29 @@ export function buildManagedLoopSkill(
       'Managed loop body still claims the workspace project file.',
     );
   }
-  // Cron fires expand no sentinel at all; the union and wakeup bodies may keep
-  // only the wakeup-expanded -dynamic forms.
-  const sentinel =
-    profile === 'cron' ? /<<[^>]+>>/ : /<<loop\.md>>|<<autonomous-loop>>/;
-  if (sentinel.test(body)) {
-    throw new Error(
-      `Managed ${profile} loop body teaches a non-expanding sentinel.`,
-    );
-  }
+  assertSentinelsExpanded(body, profile);
   return { description, body };
+}
+
+/** The only sentinels a Managed body may teach: the wakeup-expanded -dynamic
+ * forms. An allow-list, not a deny-list of known non-expanding forms, so a
+ * newly added sentinel ships red instead of slipping through. Cron fires
+ * expand no sentinel at all. Kept a top-level pure declaration so the parity
+ * test can execute it against a hostile body. */
+const EXPANDING_SENTINELS: ReadonlySet<string> = new Set([
+  '<<loop.md-dynamic>>',
+  '<<autonomous-loop-dynamic>>',
+]);
+
+export function assertSentinelsExpanded(
+  body: string,
+  profile: ManagedLoopProfile,
+): void {
+  for (const sentinel of body.match(/<<[^>]+>>/g) ?? []) {
+    if (profile === 'cron' || !EXPANDING_SENTINELS.has(sentinel)) {
+      throw new Error(
+        `Managed ${profile} loop body teaches a non-expanding sentinel: ${sentinel}.`,
+      );
+    }
+  }
 }

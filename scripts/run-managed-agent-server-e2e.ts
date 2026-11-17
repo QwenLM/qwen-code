@@ -2707,6 +2707,28 @@ function assertScheduledFireWitness(
   return { occurrenceKey };
 }
 
+// The classifier side-query answer for a respond_in_schema tool's properties,
+// or undefined when the schema is not the block schema. Other structured side
+// queries (title, tool-use summary, next speaker) also emit respond_in_schema;
+// answering them with {shouldBlock:false} is schema-invalid and would silently
+// mis-answer a real feature, so a non-block schema must yield undefined — never
+// a fallback allow. Kept a top-level pure declaration so the meta-test can
+// execute it against both block and non-block schemas (an additive fallback
+// that re-creates the mis-answer reddens the non-block direction).
+function classifierBlockAnswer(
+  blockProperties: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (blockProperties === undefined || !('shouldBlock' in blockProperties)) {
+    return undefined;
+  }
+  // Answer with the stage's own schema exactly: stage 1 permits only
+  // shouldBlock (additionalProperties is false), stage 2 adds thinking/reason.
+  const answer: Record<string, unknown> = { shouldBlock: false };
+  if ('thinking' in blockProperties) answer['thinking'] = '';
+  if ('reason' in blockProperties) answer['reason'] = '';
+  return answer;
+}
+
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
 const failoverSecondMarker = 'MANAGED_SESSION_FAILOVER_SECOND_TURN';
 const bigOutputSource = 'abcdefghijklmnopqrstu长😀'.repeat(
@@ -3035,22 +3057,16 @@ try {
             };
           }
         | undefined;
-      // Match the block schema, not the tool name: other structured side
-      // queries (title, tool-use summary, next speaker) also emit
-      // respond_in_schema, and a {shouldBlock:false} answer is schema-invalid
-      // for them — it would silently mis-answer a real feature.
+      // Match the block schema, not the tool name (classifierBlockAnswer):
+      // other structured side queries (title, tool-use summary, next speaker)
+      // also emit respond_in_schema and must not be mis-answered with a
+      // schema-invalid allow.
       const blockProperties = schemaTool?.function?.parameters?.properties;
-      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
-        // Answer with the stage's own schema exactly: stage 1 permits only
-        // shouldBlock (additionalProperties is false), stage 2 adds
-        // thinking/reason. Extra keys fail validation and report the
-        // classifier unavailable, denying cron_create unreviewed.
-        const answer: Record<string, unknown> = { shouldBlock: false };
-        if ('thinking' in blockProperties) answer['thinking'] = '';
-        if ('reason' in blockProperties) answer['reason'] = '';
+      const blockAnswer = classifierBlockAnswer(blockProperties);
+      if (blockAnswer !== undefined) {
         return {
           toolCalls: [
-            fakeToolCall('respond_in_schema', answer, 'loop-classifier'),
+            fakeToolCall('respond_in_schema', blockAnswer, 'loop-classifier'),
           ],
         };
       }
@@ -3153,13 +3169,15 @@ try {
           }
         | undefined;
       const blockProperties = schemaTool?.function?.parameters?.properties;
-      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
-        const answer: Record<string, unknown> = { shouldBlock: false };
-        if ('thinking' in blockProperties) answer['thinking'] = '';
-        if ('reason' in blockProperties) answer['reason'] = '';
+      const blockAnswer = classifierBlockAnswer(blockProperties);
+      if (blockAnswer !== undefined) {
         return {
           toolCalls: [
-            fakeToolCall('respond_in_schema', answer, 'loop-fire-classifier'),
+            fakeToolCall(
+              'respond_in_schema',
+              blockAnswer,
+              'loop-fire-classifier',
+            ),
           ],
         };
       }

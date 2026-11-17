@@ -10,6 +10,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildManagedLoopSkill,
+  assertSentinelsExpanded,
+  MANAGED_LOOP_PROFILES,
   type ManagedLoopProfile,
 } from './managed-loop-skill.js';
 import { parseSkillContent } from '../../skill-load.js';
@@ -63,7 +65,7 @@ function loopMdSection(body: string): string {
 describe('managed loop skill parity', () => {
   const { body, description } = bundled();
 
-  it.each(['union', 'cron', 'wakeup'] as const)(
+  it.each(MANAGED_LOOP_PROFILES)(
     'the committed %s sidecar equals the generator output byte-for-byte',
     (profile) => {
       // Regenerate after editing SKILL.md:
@@ -113,7 +115,7 @@ describe('managed loop skill parity', () => {
   });
 
   it('no body claims the workspace project loop.md file', () => {
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
       const b = asset(profile).body;
       expect(b).not.toContain('`.qwen/loop.md` (project)');
       expect(b).not.toContain('project wins');
@@ -185,7 +187,7 @@ describe('managed loop skill parity', () => {
   });
 
   it('no body says midnight local (Managed defaults to UTC)', () => {
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
       expect(asset(profile).body).not.toContain('midnight local');
     }
     expect(asset('cron').body).toContain('midnight UTC');
@@ -222,7 +224,7 @@ describe('managed loop skill parity', () => {
 
   it('rejects an unclassified bundled section instead of silently dropping it', () => {
     const withNewSection = `${body}\n## What to do on failure\n\nNew guidance.\n`;
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
       expect(() =>
         buildManagedLoopSkill(profile, withNewSection, description),
       ).toThrow(/Unclassified bundled loop section: What to do on failure/);
@@ -245,7 +247,7 @@ describe('managed loop skill parity', () => {
       '# /loop — run a prompt repeatedly\n\n<<autonomous-loop>>',
     );
     expect(mutated).not.toBe(body);
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
       expect(() =>
         buildManagedLoopSkill(profile, mutated, description),
       ).toThrow(/non-expanding sentinel/);
@@ -280,7 +282,7 @@ describe('managed loop skill parity', () => {
       '5. **Stop keyword**: a new rule.\n\nExamples:',
     );
     expect(mutated).not.toBe(body);
-    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+    for (const profile of MANAGED_LOOP_PROFILES) {
       expect(() =>
         buildManagedLoopSkill(profile, mutated, description),
       ).toThrow(
@@ -311,5 +313,56 @@ describe('managed loop skill parity', () => {
     expect(() => buildManagedLoopSkill('cron', mutated, description)).toThrow(
       /short-reminder marker/,
     );
+  });
+
+  it('the bundled Parsing section keeps the full rule inventory', () => {
+    // The drift guard checks source→body coverage, so a rule DELETED from the
+    // bundled source is invisible to it (fewer rules to carry). Pin the rule
+    // inventory itself so deleting a rule reddens here instead of silently
+    // shrinking the contract.
+    const start = body.indexOf('## Parsing');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const rest = body.slice(start);
+    const next = rest.indexOf('\n## ', 1);
+    const section = next < 0 ? rest : rest.slice(0, next);
+    const rules = [...section.matchAll(/^\d+\. \*\*([^*]+)\*\*/gm)].map(
+      (match) => match[1],
+    );
+    expect(rules).toEqual([
+      'Empty input',
+      'Leading interval token',
+      'Trailing "every" clause',
+      'Prompt-only input',
+    ]);
+  });
+
+  it('the sentinel guard is an allow-list, so a new sentinel ships red', () => {
+    // Only the two wakeup-expanded -dynamic forms may appear in a union or
+    // wakeup body; cron may carry none. A deny-list of known non-expanding
+    // forms would let a newly added sentinel slip through.
+    expect(() =>
+      assertSentinelsExpanded(
+        'uses <<loop.md-dynamic>> and <<autonomous-loop-dynamic>>',
+        'union',
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertSentinelsExpanded('uses <<loop.md-dynamic>>', 'wakeup'),
+    ).not.toThrow();
+    expect(() =>
+      assertSentinelsExpanded('no sentinels here', 'cron'),
+    ).not.toThrow();
+    expect(() =>
+      assertSentinelsExpanded('teaches <<brand-new-sentinel>>', 'union'),
+    ).toThrow(/non-expanding sentinel: <<brand-new-sentinel>>/);
+    expect(() =>
+      assertSentinelsExpanded('teaches <<brand-new-sentinel>>', 'wakeup'),
+    ).toThrow(/non-expanding sentinel/);
+    expect(() =>
+      assertSentinelsExpanded('teaches <<loop.md>>', 'union'),
+    ).toThrow(/non-expanding sentinel/);
+    expect(() =>
+      assertSentinelsExpanded('teaches <<loop.md-dynamic>>', 'cron'),
+    ).toThrow(/non-expanding sentinel/);
   });
 });
