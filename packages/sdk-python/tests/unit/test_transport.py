@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import subprocess
 import sys
@@ -8,7 +9,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from qwen_code_sdk.transport import (
+    _PROCESS_STREAM_LIMIT,
     ProcessTransport,
     _resolve_windows_command,
     build_cli_arguments,
@@ -474,6 +477,56 @@ async def _collect_transport_messages(transport: ProcessTransport) -> list[Any]:
 
 
 @pytest.mark.asyncio
+async def test_long_stderr_line_does_not_fail_stdout_or_process_exit(
+    tmp_path: Path,
+) -> None:
+    diagnostic_size = _PROCESS_STREAM_LIMIT + 1024 * 1024
+    script_path = tmp_path / "long_stderr.py"
+    script_path.write_text(
+        "import json, sys\n"
+        f"sys.stderr.buffer.write(b'x' * {diagnostic_size} + b'\\n')\n"
+        "sys.stderr.flush()\n"
+        "print(json.dumps({'completed': True}), flush=True)\n",
+        encoding="utf-8",
+    )
+    diagnostics: list[str] = []
+    transport = ProcessTransport(
+        QueryOptions(
+            path_to_qwen_executable=str(script_path), stderr=diagnostics.append
+        )
+    )
+    try:
+        await transport.start()
+        messages = await asyncio.wait_for(_collect_transport_messages(transport), 5)
+        assert messages == [{"completed": True}]
+        assert sum(len(part) for part in diagnostics) == diagnostic_size
+        assert all(part and set(part) == {"x"} for part in diagnostics)
+        assert transport.exit_error is None
+    finally:
+        with contextlib.suppress(ValueError):
+            await transport.close()
+
+
+@pytest.mark.asyncio
+async def test_long_stderr_chunks_preserve_utf8_blank_lines_and_eof() -> None:
+    diagnostics: list[str] = []
+    reader = asyncio.StreamReader(limit=4)
+    process = DummyProcess()
+    process.stderr = reader
+    transport = ProcessTransport(QueryOptions(stderr=diagnostics.append))
+    transport._process = process
+    task = asyncio.create_task(transport._forward_stderr())
+    reader.feed_data(b"aaaa\xe2")
+    await asyncio.sleep(0)
+    reader.feed_data(b"\x82\xac\n\nlast\xe2")
+    reader.feed_eof()
+    await task
+
+    assert "".join(diagnostics) == "aaaa\u20aclast\ufffd"
+    assert "" in diagnostics
+
+
+@pytest.mark.asyncio
 async def test_transport_preserves_missing_executable_error(tmp_path: Path) -> None:
     transport = ProcessTransport(
         QueryOptions(path_to_qwen_executable=str(tmp_path / "missing-qwen"))
@@ -676,13 +729,6 @@ async def test_stderr_callback_exceptions_do_not_fail_transport() -> None:
         async def readline(self) -> bytes:
             return b""
 
-    class FakeStderr:
-        def __init__(self) -> None:
-            self._lines = iter([b"error message\n", b""])
-
-        async def readline(self) -> bytes:
-            return next(self._lines, b"")
-
     transport_module = __import__(
         "qwen_code_sdk.transport",
         fromlist=["ProcessTransport"],
@@ -709,7 +755,9 @@ async def test_stderr_callback_exceptions_do_not_fail_transport() -> None:
 
         def __init__(self) -> None:
             self.stdout = FakeStdout()
-            self.stderr = FakeStderr()
+            self.stderr = asyncio.StreamReader()
+            self.stderr.feed_data(b"error message\n")
+            self.stderr.feed_eof()
 
         async def wait(self) -> int:
             return 0

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import errno
 import json
 import ntpath
@@ -131,11 +132,20 @@ class ProcessTransport:
         if self._process is None or self._process.stderr is None:
             return
 
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         while True:
-            chunk = await self._process.stderr.readline()
-            if not chunk:
+            at_eof = False
+            try:
+                chunk = await self._process.stderr.readuntil(b"\n")
+            except asyncio.LimitOverrunError as error:
+                # Drain oversized diagnostics in chunks so the child can keep writing.
+                chunk = await self._process.stderr.readexactly(error.consumed)
+            except asyncio.IncompleteReadError as error:
+                chunk = error.partial
+                at_eof = True
+            text = decoder.decode(chunk, final=at_eof).rstrip("\n")
+            if not chunk and not text:
                 return
-            text = chunk.decode("utf-8", errors="replace").rstrip("\n")
             try:
                 if self._options.stderr is not None:
                     self._options.stderr(text)
@@ -143,6 +153,8 @@ class ProcessTransport:
                     print(text, file=sys.stderr)
             except Exception:
                 print(text, file=sys.stderr)
+            if at_eof:
+                return
 
     def write(self, data: str) -> None:
         if self._closed:

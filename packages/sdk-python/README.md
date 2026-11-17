@@ -299,6 +299,9 @@ The `context` argument includes `cancel_event`, `suggestions`, and
 `blocked_path` when the CLI provides a path-specific permission target.
 `can_use_tool` must be an `async def` callback accepting
 `(tool_name, tool_input, context)`. `stderr` must accept a single `str`.
+Diagnostics normally arrive one line at a time without the trailing newline.
+A line exceeding the subprocess stream limit is delivered in chunks so it cannot
+stop the CLI from writing output. UTF-8 characters are preserved across chunks.
 
 ### Handling `ask_user_question`
 
