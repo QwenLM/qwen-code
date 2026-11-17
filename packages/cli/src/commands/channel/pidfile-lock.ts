@@ -22,9 +22,15 @@ function sleepSync(ms: number): void {
 export function withChannelPidfileLock<T>(
   filePath: string,
   operation: () => T,
+  options: { dirMode?: number } = {},
 ): T {
   const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, {
+      recursive: true,
+      ...(options.dirMode !== undefined ? { mode: options.dirMode } : {}),
+    });
+  }
 
   let release: (() => void) | undefined;
   for (let attempt = 0; ; attempt += 1) {

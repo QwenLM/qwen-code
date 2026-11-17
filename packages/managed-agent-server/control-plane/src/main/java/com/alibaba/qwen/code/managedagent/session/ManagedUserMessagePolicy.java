@@ -57,6 +57,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // has its own, narrower rule (requireCancellerRole/Shape).
     void requireSubmitterRole(SessionRecord session,
             String actorId) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId, workspaces);
         if (session.workspace() != null
                 && !workspaces.accessOf(session.tenantId(), actorId,
                         session.workspace().getWorkspaceId())
@@ -146,6 +147,7 @@ public class ManagedUserMessagePolicy implements UserMessagePolicy {
     // shape gates or the creator-keyed facts the family's domain 409.
     void requireLegacyWorkspace(SessionRecord session,
             String actorId) {
+        ManagedWorkspaceRegistry.requireSessionVisibility(session, actorId, workspaces);
         if (session.workspace() != null) {
             // A tombstone is invisible to every actor shape, as the reads
             // answer: the fence stands above the role split, whose 403/409

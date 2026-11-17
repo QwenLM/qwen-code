@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.qwen.code.runtimebroker.persistence.FaultGateRig;
-import com.alibaba.qwen.code.runtimebroker.provisioning.FaultGateBroker;
+import com.alibaba.qwen.code.runtimebroker.provisioning.local.FaultGateBroker;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;

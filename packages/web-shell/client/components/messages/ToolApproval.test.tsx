@@ -596,6 +596,77 @@ describe('ToolApproval accessibility', () => {
     expect(command?.textContent).toBe('ls -la');
   });
 
+  it.each(['inline', 'floating'] as const)(
+    'renders the resolved workspace and complete prompt in the %s approval body',
+    (variant) => {
+      const workspace = `/repos/${'nested-directory/'.repeat(20)}destination`;
+      const prompt =
+        'Summarize the README.\n'.repeat(10) + 'Include the version.';
+      const approvalText = `Workspace: "${workspace}"\n\n${prompt}`;
+      const adapted = extractPendingPermission([
+        {
+          id: 'permission-delegation',
+          kind: 'permission',
+          requestId: 'request-delegation',
+          sessionId: 'session-delegation',
+          title: `[first-turn] in "${workspace}": Summarize the README…`,
+          options: [
+            {
+              optionId: 'proceed_once',
+              label: 'Allow once',
+              raw: { kind: 'allow_once' },
+            },
+            {
+              optionId: 'cancel',
+              label: 'Reject',
+              raw: { kind: 'reject_once' },
+            },
+          ],
+          toolCall: {
+            kind: 'other',
+            _meta: { toolName: 'create_sub_session' },
+            rawInput: { workspace: 'repo-b-id', prompt },
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: approvalText },
+              },
+            ],
+          },
+          preview: { kind: 'generic' },
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ])!;
+      render();
+      act(() =>
+        root!.render(
+          <I18nProvider language="en">
+            <ToolApproval
+              request={adapted}
+              variant={variant}
+              onConfirm={onConfirm}
+            />
+          </I18nProvider>,
+        ),
+      );
+
+      expect(
+        container!.querySelector(`pre.${styles.content}`)?.textContent,
+      ).toBe(approvalText);
+      expect(adapted.rawInput?.workspace).toBe('repo-b-id');
+      act(() =>
+        optionButtons()
+          .find((button) => button.dataset.optionId === 'proceed_once')!
+          .click(),
+      );
+      expect(onConfirm).toHaveBeenCalledExactlyOnceWith(
+        'request-delegation',
+        'proceed_once',
+      );
+    },
+  );
+
   it('neutralises bidi and C0 controls in the rendered command block', () => {
     // Mirrors what `toManagedPermissionRequest` produces for an exec tool
     // (`rawInput: tool.args` + `contentIsInput: true`), i.e. the shape from
@@ -751,6 +822,80 @@ describe('ToolApproval accessibility', () => {
     expect(contentPre.getAttribute('title')).toBe(rendered);
   });
 
+  it('neutralises bidi and C0 controls in the goal approval body', () => {
+    const craftedObjective = [
+      'Outcome: Audit \u202eopen PRs.',
+      'Done when: Every PR has \u001b[31mevidence\u001b[0m\u0007.',
+      'Must not: Push or comment.',
+    ].join('\n');
+    render(false, {
+      ...goalRequest,
+      id: 'crafted-goal',
+      rawInput: { objective: craftedObjective },
+      content: [{ type: 'text', text: craftedObjective }],
+    });
+
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const describedText = panel
+      .getAttribute('aria-describedby')!
+      .split(' ')
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' ');
+    expect(describedText).not.toContain('\u202e');
+    expect(describedText).not.toContain('\u001b');
+    expect(describedText).not.toContain('\u0007');
+    expect(describedText).toContain('Audit \\u202eopen PRs.');
+
+    switchGoalTab('full');
+    const fullText = container!.querySelector(
+      '[role="tabpanel"][data-state="active"]',
+    )!.textContent!;
+    expect(fullText).not.toContain('\u202e');
+    expect(fullText).not.toContain('\u001b');
+    expect(fullText).not.toContain('\u0007');
+    expect(fullText).toContain('Audit \\u202eopen PRs.');
+  });
+
+  it('neutralises controls in the goal replacement notice', () => {
+    const craftedNotice = 'Replace paused goal\u202e with this one?\u001b[31m';
+    render(false, {
+      ...goalRequest,
+      id: 'crafted-goal-notice',
+      rawInput: { objective: goalObjective },
+      content: [{ type: 'text', text: `${craftedNotice}\n\n${goalObjective}` }],
+    });
+
+    const notice = container!.querySelector('[class*="goalNotice"]')!;
+    expect(notice.textContent).toBe(
+      'Replace paused goal\\u202e with this one?\\u001b[31m',
+    );
+  });
+
+  it('neutralises controls in the edit diff path', () => {
+    const craftedPath = 'src/\u202eevil\u001b[31m\u0007.ts';
+    render(false, {
+      id: 'req-crafted-diff',
+      toolName: 'edit',
+      title: 'Edit',
+      content: [
+        {
+          type: 'diff',
+          path: craftedPath,
+          oldText: 'before',
+          newText: 'after',
+        },
+      ],
+      options: [
+        { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+
+    const path = container!.querySelector('[aria-label="File diff"]')!
+      .parentElement!.parentElement!.firstElementChild!;
+    expect(path.textContent).toBe('src/\\u202eevil\\u001b[31m\\u0007.ts');
+  });
+
   it('renders exec warnings alongside the command block', () => {
     const adapted = extractPendingPermission([
       {
@@ -848,6 +993,22 @@ describe('ToolApproval accessibility', () => {
     pressKey(popover, '1');
     pressKey(popover, 'Escape');
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it('sizes the explanation popover with a width utility instead of w-72', async () => {
+    render(undefined, execRequest, undefined, 'en', async function* () {});
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+
+    const popover = document.body.querySelector<HTMLElement>(
+      '[data-slot="popover-content"]',
+    )!;
+    expect(popover.className).toContain('w-[min(480px,calc(100vw-32px))]');
+    expect(popover.className).not.toContain('w-72');
   });
 
   it('only offers explanations for Shell commands', () => {

@@ -1,5 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronRightIcon, RefreshCwIcon } from 'lucide-react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import {
+  CircleAlertIcon,
+  CircleCheckIcon,
+  ChevronRightIcon,
+  RefreshCwIcon,
+  TriangleAlertIcon,
+} from 'lucide-react';
 import type {
   DaemonSessionActions,
   DaemonSessionStatsModelMetrics,
@@ -19,8 +31,24 @@ import {
   TooltipTrigger,
 } from '../ui/tooltip';
 import styles from './TokenUsagePanel.module.css';
+import {
+  SpeedSpread,
+  TokenUsageTrend,
+  sampleSpeed,
+  type TrendSeries,
+} from './TokenUsageTrend';
+import {
+  formatCompact,
+  inputTokens,
+  outputSpeed,
+  outputTokens,
+  summarizeSessionUsage,
+  totalTokens,
+} from './tokenUsageTotals';
 
 const POLL_INTERVAL_MS = 2_000;
+/** Distinct series colors; later models share a neutral color. */
+const MODEL_COLOR_COUNT = 6;
 
 interface TokenUsagePanelProps {
   sessionActions?: DaemonSessionActions;
@@ -31,31 +59,22 @@ interface ModelEntry {
   key: string;
   label: string;
   metrics: DaemonSessionStatsModelMetrics;
-}
-
-function inputTokens(tokens: DaemonSessionStatsModelMetrics['tokens']): number {
-  return tokens.prompt > 0 ? tokens.prompt : tokens.cached;
-}
-
-function totalTokens(tokens: DaemonSessionStatsModelMetrics['tokens']): number {
-  const input = inputTokens(tokens);
-  return tokens.total > 0
-    ? Math.max(tokens.total, input + tokens.candidates)
-    : input + tokens.candidates + tokens.thoughts;
-}
-
-function outputTokens(
-  tokens: DaemonSessionStatsModelMetrics['tokens'],
-): number {
-  return Math.max(0, totalTokens(tokens) - inputTokens(tokens));
+  /** Color slot by first use, so a model keeps its color as ranks change. */
+  color: string;
 }
 
 function flattenModels(
   models: Record<string, DaemonSessionStatsModelMetrics>,
 ): ModelEntry[] {
+  // The daemon serializes models in first-request order.
   return Object.entries(models)
     .filter(([, m]) => m.api.totalRequests > 0)
-    .map(([key, metrics]) => ({ key, label: key, metrics }))
+    .map(([key, metrics], index) => ({
+      key,
+      label: key,
+      metrics,
+      color: index < MODEL_COLOR_COUNT ? String(index) : 'other',
+    }))
     .sort(
       (a, b) => totalTokens(b.metrics.tokens) - totalTokens(a.metrics.tokens),
     );
@@ -65,17 +84,31 @@ function formatCount(n: number): string {
   return n.toLocaleString('en-US');
 }
 
-/** Compact token counts: 1,390,000 → "1.39M", 199,076 → "199.1K". */
-function formatCompact(n: number): string {
-  if (n >= 999_995_000) return trimZeros((n / 1_000_000_000).toFixed(2)) + 'B';
-  if (n >= 999_950) return trimZeros((n / 1_000_000).toFixed(2)) + 'M';
-  if (n >= 1_000) return trimZeros((n / 1_000).toFixed(1)) + 'K';
-  return String(n);
+interface RequestOutcome {
+  requests: number;
+  failed: number;
 }
 
-function trimZeros(value: string): string {
-  return value.replace(/\.?0+$/, '');
+function successRate({ requests, failed }: RequestOutcome): number {
+  return requests > 0 ? ((requests - failed) / requests) * 100 : 100;
 }
+
+function formatRate(rate: number): string {
+  return rate === 100 ? '100%' : `${Math.min(rate, 99.9).toFixed(1)}%`;
+}
+
+type OutcomeLevel = 'ok' | 'warning' | 'error';
+
+function outcomeLevel(rate: number): OutcomeLevel {
+  if (rate === 100) return 'ok';
+  return rate >= 90 ? 'warning' : 'error';
+}
+
+const OUTCOME_ICONS = {
+  ok: CircleCheckIcon,
+  warning: TriangleAlertIcon,
+  error: CircleAlertIcon,
+} as const;
 
 export function TokenUsagePanel({
   sessionActions,
@@ -197,18 +230,26 @@ function TokenUsageBody({
 }) {
   const { t } = useI18n();
   const entries = flattenModels(status.models);
-  const totals = entries.reduce(
-    (acc, e) => {
-      acc.prompt += inputTokens(e.metrics.tokens);
-      acc.cached += e.metrics.tokens.cached;
-      acc.output += outputTokens(e.metrics.tokens);
-      acc.thoughts += e.metrics.tokens.thoughts;
-      acc.total += totalTokens(e.metrics.tokens);
-      return acc;
-    },
-    { prompt: 0, cached: 0, output: 0, thoughts: 0, total: 0 },
-  );
+  const totals = summarizeSessionUsage(status);
+  const legacySpeed = totals.legacySpeed;
   const grandTotal = totals.total;
+  const trendSeries: TrendSeries[] = entries
+    .map((entry) => ({
+      key: entry.key,
+      label: entry.label,
+      color: entry.color,
+      samples: entry.metrics.timingSamples ?? [],
+      legacySpeed,
+      failures: entry.metrics.failures?.recent ?? [],
+    }))
+    .filter((s) => s.samples.length > 0 || s.failures.length > 0);
+  // One scale for every card's spread so their positions compare directly.
+  const speedScaleMax = Math.max(
+    0,
+    ...trendSeries.flatMap((s) =>
+      s.samples.map((sample) => sampleSpeed(sample, legacySpeed) ?? 0),
+    ),
+  );
   // Keep legacy daemon responses correctly ordered when total is omitted.
   const subagentEntries = [...(status.sources ?? [])].sort(
     (a, b) => totalTokens(b.tokens) - totalTokens(a.tokens),
@@ -270,18 +311,31 @@ function TokenUsageBody({
           output={totals.output}
           cached={totals.cached}
           thoughts={totals.thoughts}
+          outcome={{ requests: totals.requests, failed: totals.failed }}
+          generation={totals.generation}
+          legacySpeed={legacySpeed}
         />
       </div>
 
+      {trendSeries.length > 0 && (
+        <section className={`${styles.section} ${styles.modelSection}`}>
+          <TokenUsageTrend series={trendSeries} />
+        </section>
+      )}
+
       <section className={`${styles.section} ${styles.modelSection}`}>
         <h3 className={styles.sectionTitle}>{t('tokenUsage.models')}</h3>
+        {entries.length > 1 && (
+          <ModelShares entries={entries} grandTotal={grandTotal} />
+        )}
         <div className={styles.modelList}>
-          {entries.map((entry, index) => (
+          {entries.map((entry) => (
             <ModelCard
               key={entry.key}
               entry={entry}
               grandTotal={grandTotal}
-              rank={index + 1}
+              legacySpeed={legacySpeed}
+              speedScaleMax={speedScaleMax}
             />
           ))}
         </div>
@@ -334,14 +388,94 @@ function TokenUsageBody({
   );
 }
 
+function ModelShares({
+  entries,
+  grandTotal,
+}: {
+  entries: ModelEntry[];
+  grandTotal: number;
+}) {
+  const { t } = useI18n();
+  const shares = entries.map((entry) => ({
+    entry,
+    share:
+      grandTotal > 0
+        ? (totalTokens(entry.metrics.tokens) / grandTotal) * 100
+        : 0,
+  }));
+  return (
+    <div className={styles.modelShares} data-testid="token-usage-model-shares">
+      <div
+        className={styles.shareStack}
+        role="img"
+        aria-label={t('tokenUsage.modelSharesLabel')}
+      >
+        {shares.map(({ entry, share }) =>
+          share > 0 ? (
+            <div
+              key={entry.key}
+              className={styles.shareSegment}
+              data-share-color={entry.color}
+              style={{ flexGrow: share }}
+            />
+          ) : null,
+        )}
+      </div>
+      <ul className={styles.shareLegend}>
+        {shares.map(({ entry, share }) => (
+          <li key={entry.key} data-share-color={entry.color}>
+            <span className={styles.shareSwatch} aria-hidden="true" />
+            <span className={styles.shareLegendName} title={entry.key}>
+              {entry.label}
+            </span>
+            <span className={styles.shareLegendValue}>{share.toFixed(1)}%</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Success rate, or `detail` in its place, behind a status icon. */
+function SuccessRateValue({
+  outcome,
+  detail,
+}: {
+  outcome: RequestOutcome;
+  detail?: string;
+}) {
+  const { t } = useI18n();
+  const rate = successRate(outcome);
+  const level = outcomeLevel(rate);
+  const Icon = OUTCOME_ICONS[level];
+  return (
+    <span
+      className={styles.outcome}
+      data-level={level}
+      title={
+        detail ??
+        t('tokenUsage.successDetail', {
+          failed: formatCount(outcome.failed),
+          requests: formatCount(outcome.requests),
+        })
+      }
+    >
+      <Icon size={12} aria-hidden="true" />
+      {detail ?? formatRate(rate)}
+    </span>
+  );
+}
+
 function ModelCard({
   entry,
   grandTotal,
-  rank,
+  legacySpeed,
+  speedScaleMax,
 }: {
   entry: ModelEntry;
   grandTotal: number;
-  rank: number;
+  legacySpeed: boolean;
+  speedScaleMax: number;
 }) {
   const { t } = useI18n();
   const m = entry.metrics;
@@ -350,23 +484,28 @@ function ModelCard({
   const avgLatency =
     m.api.totalRequests > 0 ? m.api.totalLatencyMs / m.api.totalRequests : 0;
   const { generation } = m;
+  const speed = outputSpeed(generation, legacySpeed);
+  // Averaged over the same requests as TTFT so the two add up to their
+  // latency; Avg latency also counts failed, internal and non-streamed
+  // requests. An older daemon only sums the windows of its output speed.
+  const generationTotal =
+    generation?.totalTimedGenerationDurationMs ??
+    generation?.totalGenerationDurationMs;
+  const showGeneration =
+    speed !== undefined ||
+    (generationTotal !== undefined && generationTotal > 0);
   const timing =
     generation && generation.timedRequests > 0
       ? {
           ttft: generation.totalTtftMs / generation.timedRequests,
-          // Averaged over the same requests as TTFT so the two add up to
-          // their latency; Avg latency also counts failed, internal
-          // and non-streamed requests.
           generation:
-            generation.totalGenerationDurationMs / generation.timedRequests,
-          speed:
-            generation.totalGenerationDurationMs > 0
-              ? generation.totalThroughputOutputTokens /
-                (generation.totalGenerationDurationMs / 1000)
+            showGeneration && generationTotal !== undefined
+              ? generationTotal / generation.timedRequests
               : undefined,
+          speed,
         }
       : undefined;
-  const stats = [
+  const stats: Array<{ label: string; value: string; node?: ReactNode }> = [
     ...(timing
       ? [
           {
@@ -381,6 +520,10 @@ function ModelCard({
                     rate: timing.speed.toFixed(1),
                   }),
                 },
+              ]
+            : []),
+          ...(timing.generation !== undefined
+            ? [
                 {
                   label: t('tokenUsage.generation'),
                   value: formatDuration(timing.generation),
@@ -393,25 +536,64 @@ function ModelCard({
       label: t('tokenUsage.requests'),
       value: formatCount(m.api.totalRequests),
     },
+    {
+      label: t('tokenUsage.successRate'),
+      value: formatRate(
+        successRate({
+          requests: m.api.totalRequests,
+          failed: m.api.totalErrors,
+        }),
+      ),
+      node: (
+        <SuccessRateValue
+          outcome={{ requests: m.api.totalRequests, failed: m.api.totalErrors }}
+        />
+      ),
+    },
     { label: t('tokenUsage.avgLatency'), value: formatDuration(avgLatency) },
   ];
   return (
-    <div className={styles.modelCard} data-color={(rank - 1) % 5}>
+    <div className={styles.modelCard} data-color={entry.color}>
       <div className={styles.modelHeader}>
         <div className={styles.modelName} title={entry.key}>
           {entry.label}
         </div>
       </div>
       <dl className={styles.modelStats}>
-        {stats.map(({ label, value }) => (
+        {stats.map(({ label, value, node }) => (
           <div key={label}>
             <dt title={label}>{label}</dt>
-            <dd title={value}>{value}</dd>
+            <dd title={value}>{node ?? value}</dd>
           </div>
         ))}
       </dl>
+      {m.timingSamples && (
+        <SpeedSpread
+          samples={m.timingSamples}
+          legacy={legacySpeed}
+          scaleMax={speedScaleMax}
+        />
+      )}
+      {m.failures && Object.keys(m.failures.byKind).length > 0 && (
+        <FailureKinds byKind={m.failures.byKind} />
+      )}
       <TokenDetails tokens={m.tokens} />
       <ShareBar share={share} />
+    </div>
+  );
+}
+
+function FailureKinds({ byKind }: { byKind: Record<string, number> }) {
+  const { t } = useI18n();
+  const text = t('tokenUsage.failuresByKind', {
+    kinds: Object.entries(byKind)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([kind, count]) => `${kind} ×${formatCount(count)}`)
+      .join(' · '),
+  });
+  return (
+    <div className={styles.failureKinds} title={text}>
+      {text}
     </div>
   );
 }
@@ -455,13 +637,20 @@ function TokenSummary({
   output,
   cached,
   thoughts,
+  outcome,
+  generation,
+  legacySpeed,
 }: {
   input: number;
   output: number;
   cached: number;
   thoughts: number;
+  outcome: RequestOutcome;
+  generation: NonNullable<DaemonSessionStatsModelMetrics['generation']>;
+  legacySpeed: boolean;
 }) {
   const { t } = useI18n();
+  const speed = outputSpeed(generation, legacySpeed);
   return (
     <dl className={styles.overview}>
       <div className={styles.summaryMetric}>
@@ -489,6 +678,46 @@ function TokenSummary({
           </span>
         </dd>
       </div>
+      <div className={styles.summaryMetric}>
+        <dt
+          className={styles.summaryLabel}
+          title={t('tokenUsage.successRateHint')}
+        >
+          {t('tokenUsage.successRate')}
+        </dt>
+        <dd>
+          <strong className={styles.summaryValue}>
+            {formatRate(successRate(outcome))}
+          </strong>
+          <span className={styles.summaryCaption}>
+            <SuccessRateValue
+              outcome={outcome}
+              detail={t('tokenUsage.successDetail', {
+                failed: formatCount(outcome.failed),
+                requests: formatCount(outcome.requests),
+              })}
+            />
+          </span>
+        </dd>
+      </div>
+      {speed !== undefined && (
+        <div className={styles.summaryMetric}>
+          <dt className={styles.summaryLabel}>{t('tokenUsage.outputSpeed')}</dt>
+          <dd>
+            <strong className={styles.summaryValue}>
+              {speed.toFixed(1)}
+              <span className={styles.summaryUnit}> tok/s</span>
+            </strong>
+            <span className={styles.summaryCaption}>
+              {t('tokenUsage.firstTokenDetail', {
+                duration: formatDuration(
+                  generation.totalTtftMs / generation.timedRequests,
+                ),
+              })}
+            </span>
+          </dd>
+        </div>
+      )}
     </dl>
   );
 }

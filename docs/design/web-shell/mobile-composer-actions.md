@@ -21,22 +21,26 @@ override; narrow desktop windows keep desktop editing.
 Remove the legacy touch action grid and simulated Tab/Esc/left/right keys. Keep add,
 model, approval, dictation, and send controls. Hide the width toggle on touch;
 retain the context-usage control when enabled by the host. Put workspace
-selection and Git controls
-in a separate context row so starting a task in a particular workspace or
-branch remains possible. The row's measured height, two lines when it wraps,
-is added to the composer's height cap, so it does not come out of the
-attachments' room when a soft keyboard shrinks the viewport. The rows stack
-without overlapping touch targets.
+selection and Git controls on the leading side of the editing row, with hide
+keyboard and expand on the trailing side. Long workspace names truncate within
+the available space; multiple context controls may wrap within their group.
+Retain the group's measured height allowance in the composer's height cap, so
+context controls and wrapping host actions do not come out of the attachments'
+room when a soft keyboard shrinks the viewport.
+Context and editing controls must not overlap.
 Preserve host-provided toolbar slots.
 
 Use 44px touch targets and wrap controls on very narrow viewports rather than
-clip them. Keep Plan as an active-state chip. While a turn runs, stop remains
+clip them. Center toolbar icons in their targets and remove extra gaps within
+the mobile toolbar groups, including the context-usage button. Keep Plan as an
+active-state chip. While a turn runs, stop remains
 available alongside send when there is a draft; stopping never clears that
 draft. Voice capture retains its existing reduced toolbar and hides the context and
 editing rows.
 
 Add a small editing row with expand and, while the textarea is focused, hide
-keyboard. Its leading slots stay free unless there is something contextual to
+keyboard. Its leading slots contain workspace/Git controls when present and
+otherwise stay free unless there is something contextual to
 show: the labelled history button when the host has no Add entry, and the
 Shell toggle. Recall goes through the history search panel, which lists and
 filters past inputs. One-entry-at-a-time stepping is not offered on touch,

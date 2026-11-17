@@ -94,14 +94,20 @@ export function createThreadsHttpApi(
   return {
     // No `provider`: a v2 remote reports which programs it has, and the
     // coordinator adds an agent per program once it heartbeats. The
-    // coordinator's own budget is two sequential 20 s remote legs, so the
-    // caller owns a deadline that outlasts it instead of inheriting the
-    // SDK's 30 s REST timeout.
+    // coordinator's own budget is two sequential remote legs, 20 s and 90 s,
+    // so the caller owns a deadline that outlasts it instead of inheriting
+    // the SDK's 30 s REST timeout.
     connectRemoteHost: (input) =>
       post('/hosts/remote-connect', input, {
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(120_000),
       }),
-    joinCoordinator: (input) => post('/hosts/connect', input),
+    // Likewise: this daemon probes its programs, enrolls and sends up to
+    // three heartbeats (up to 10 s each), saves the connection, which can
+    // wait about 13.5 s for its lock, and probes its programs again. Past the
+    // SDK's 30 s, a join that already spent its token would be reported as
+    // failed.
+    joinCoordinator: (input) =>
+      post('/hosts/connect', input, { signal: AbortSignal.timeout(90_000) }),
     listAgents: () => request('/agents'),
     createJoinToken: (supersedesHostId) =>
       post('/hosts/enrollment', supersedesHostId ? { supersedesHostId } : {}),

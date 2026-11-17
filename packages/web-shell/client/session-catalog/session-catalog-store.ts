@@ -116,6 +116,7 @@ export function getSessionCatalogQueryKey(query: SessionCatalogQuery): string {
   return JSON.stringify([
     query.routeKind,
     query.workspaceCwd,
+    options?.sortBy ?? 'updatedAt',
     options?.pageSize ?? null,
     options?.cursor ?? null,
     options?.archiveState ?? null,
@@ -124,6 +125,7 @@ export function getSessionCatalogQueryKey(query: SessionCatalogQuery): string {
     options?.parentSessionId ?? null,
     options?.sourceType ?? null,
     options?.sourceId ?? null,
+    options?.liveOnly ?? null,
   ]);
 }
 
@@ -904,7 +906,10 @@ export class SessionCatalogStore {
         };
       });
       if (!changed) continue;
-      if (activityAdvanced) {
+      if (
+        activityAdvanced &&
+        entry.query.options.sortBy !== 'lastUserPromptAt'
+      ) {
         sessions.sort((a, b) =>
           compareSessionsByActivity(
             entry.query.options.view === 'organized',

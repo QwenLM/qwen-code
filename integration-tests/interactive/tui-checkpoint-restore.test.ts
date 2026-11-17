@@ -21,6 +21,7 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer, fakeToolCall } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
+import { createUntil } from './wait.js';
 import {
   InteractiveSession,
   sendAboutUntilRendered,
@@ -31,13 +32,7 @@ const renderer = pickE2eRenderer();
 const runtime = resolveE2eCliCommand(renderer);
 const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
-async function until(check: () => boolean, reason: string) {
-  const deadline = Date.now() + 15000;
-  while (!check()) {
-    if (Date.now() >= deadline) throw new Error(reason);
-    await new Promise((done) => setTimeout(done, 100));
-  }
-}
+const until = createUntil(15_000);
 
 it(`H11a real model edit creates, hot-restores and cold-resumes its product checkpoint without resurrecting discarded context (${runtime}+${renderer})`, async () => {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-h11a-')));
@@ -511,8 +506,8 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
     }
     facts.realPostToolHookEvents = observedHooks;
     json(join(evidence, 'real-post-tool-hook-events.json'), observedHooks);
-    expect(JSON.stringify(restoredToolResults[0].content)).toContain(
-      JSON.stringify(edited).slice(1, -1),
+    expect(JSON.stringify(restoredToolResults[0].content)).not.toContain(
+      'Showing lines',
     );
     expect(JSON.stringify(messages)).not.toContain(
       'Tool execution result was not recorded',
@@ -610,6 +605,26 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
     );
     expect(coldToolResults).toHaveLength(1);
     expect(coldToolResults[0].content).toEqual(restoredToolResults[0].content);
+    // The edited bytes live in the original tool-call arguments; slim success
+    // results must remain paired with that call through both restore paths.
+    for (const wire of [messages, coldMessages]) {
+      const calls = (
+        wire as Array<{
+          role?: string;
+          tool_calls?: Array<{
+            id: string;
+            function: { name: string; arguments: string };
+          }>;
+        }>
+      )
+        .filter((message) => message.role === 'assistant')
+        .flatMap((message) => message.tool_calls ?? [])
+        .filter((call) => call.id === originalEditId);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].function.name).toBe('edit');
+      expect(JSON.parse(calls[0].function.arguments)).toEqual(editArgs);
+    }
+
     expect(
       JSON.stringify(coldToolResults[0].content).split(newMarker),
     ).toHaveLength(2);

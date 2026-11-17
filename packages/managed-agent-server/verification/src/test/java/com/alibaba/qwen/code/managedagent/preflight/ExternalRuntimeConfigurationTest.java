@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.preflight;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalHttpRuntimeClient;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalHttpRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalRuntimeProvisioner;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.mock.env.MockEnvironment;
@@ -97,17 +97,19 @@ class ExternalRuntimeConfigurationTest {
                 URI.create("https://provider.invalid/"), "replace-with-a-long-random-token", Duration.ofSeconds(1)));
     }
 
-    @Test
-    void preflightDoesNotRequireWorkerCwdOrLocalStateDirectory(@TempDir Path directory) {
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"external-scratch,true", "external-scratch,false",
+        "external-workspace,true", "external-workspace,false"})
+    void preflightDoesNotRequireWorkerCwdOrLocalStateDirectory(String kind, boolean enabled, @TempDir Path directory) {
         Path missing = directory.resolve("worker-only");
         assertFalse(Files.exists(missing));
         var checks = ManagedAgentPreflight.checks(new String[] {
-                "--qwen.managed-agent.runtime-broker.provisioner=external-scratch",
+                "--qwen.managed-agent.runtime-broker.provisioner=" + kind,
                 "--qwen.managed-agent.runtime-broker.workspace-cwd=" + missing,
                 "--qwen.managed-agent.runtime-broker.state-directory=",
                 "--qwen.managed-agent.harness.enabled=false",
                 "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
-                "--qwen.managed-agent.runtime-broker.enabled=true",
+                "--qwen.managed-agent.runtime-broker.enabled=" + enabled,
                 "--qwen.managed-agent.runtime-broker.port=0",
                 "--qwen.managed-agent.runtime-broker.workspace-id=scratch",
                 "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
@@ -142,7 +144,7 @@ class ExternalRuntimeConfigurationTest {
                 .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT", "7")
                 .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT", "90");
         var notes = new ArrayList<ManagedAgentPreflight.Check>();
-        ManagedAgentPreflight.loadConfiguration(environment, List.of(), notes);
+        ManagedAgentPreflight.loadDefaults(environment, notes);
         var properties = ManagedAgentPreflight.bind(environment, notes);
         assertTrue(notes.isEmpty(), notes.toString());
         return properties;
@@ -170,7 +172,34 @@ class ExternalRuntimeConfigurationTest {
                 broker.detail());
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var error = assertThrows(IllegalStateException.class, properties::validateForPreflight);
-        assertTrue(error.getMessage().contains("storage provisioning prerequisite"), error.getMessage());
+        assertTrue(error.getMessage().contains("Hosted Workspace files require"), error.getMessage());
+    }
+
+    @Test
+    void filesOnlyExternalConfigurationRequiresCompleteServicesWithoutLocalMountFallback() {
+        var properties = properties("external-workspace");
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        assertTrue(properties.isExternalWorkspaceFilesConfigured());
+        assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight.toolPathCheck(properties).status());
+        properties.validateForPreflight();
+        List<Consumer<ManagedAgentProperties>> forbidden = List.of(
+                p -> p.getHarness().setEnabled(false), p -> p.getSessionStore().setEnabled(false),
+                p -> p.getRuntimeBroker().setEnabled(false), p -> p.getHarness().setWorkspaceShellEnabled(true),
+                p -> p.getManagedExtensions().setEnabled(true), p -> p.getRuntimeBroker().setChildWorkspacesEnabled(true),
+                p -> p.getRuntimeBroker().setWorkspaceMounts(List.of(
+                        new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/not-mounted"))),
+                p -> p.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true));
+        for (var configure : forbidden) {
+            var invalid = properties("external-workspace");
+            invalid.getHarness().setEnabled(true);
+            invalid.getSessionStore().setEnabled(true);
+            invalid.getHarness().setWorkspaceFilesEnabled(true);
+            configure.accept(invalid);
+            assertFalse(invalid.isExternalWorkspaceFilesConfigured());
+            assertThrows(IllegalStateException.class, invalid::validateForPreflight);
+        }
     }
 
     @Test
@@ -190,9 +219,8 @@ class ExternalRuntimeConfigurationTest {
                 .stream().filter(check -> check.name().equals("external-prerequisite"))
                 .findFirst().orElseThrow();
         assertEquals(ManagedAgentPreflight.Status.WARN, warn.status());
-        assertTrue(warn.detail().contains("cannot execute Hosted tools or close a Session yet"),
-                warn.detail());
-        assertTrue(warn.detail().contains("every placement fails closed"), warn.detail());
+        assertTrue(warn.detail().contains("files are disabled or incompletely configured"), warn.detail());
+        assertTrue(warn.detail().contains("new Hosted files Sessions fail closed"), warn.detail());
         assertTrue(ManagedAgentPreflight.brokerChecks(scratchProperties()).stream()
                         .noneMatch(check -> check.name().equals("external-prerequisite")),
                 "the scratch profile is not a prerequisite");
@@ -202,10 +230,11 @@ class ExternalRuntimeConfigurationTest {
     void anUnknownExternalKindStillFailsClosed() {
         var broker = brokerCheck(properties("external-workspace-typo"));
         assertEquals(ManagedAgentPreflight.Status.FAIL, broker.status());
-        assertTrue(broker.detail().contains("unknown provisioner external-workspace-typo"),
+        assertTrue(broker.detail().contains("Runtime provider is not installed: external-workspace-typo"),
                 broker.detail());
-        assertTrue(broker.fix().contains("external-scratch"), broker.fix());
-        assertTrue(broker.fix().contains("external-workspace"), broker.fix());
+        assertTrue(broker.detail().contains("external-scratch"), broker.detail());
+        assertTrue(broker.detail().contains("external-workspace"), broker.detail());
+        assertTrue(broker.fix().contains("provider JAR"), broker.fix());
     }
 
     @Test

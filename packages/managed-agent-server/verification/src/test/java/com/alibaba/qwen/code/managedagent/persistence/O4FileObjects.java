@@ -38,6 +38,18 @@ class O4FileObjects implements ToolPublicationObjectStore {
             throw new IllegalStateException("Test GET failed", error);
         }
     }
+    @Override public InputStream openRange(String key, long offset, long length, Runnable guard) {
+        guard.run();
+        try {
+            byte[] bytes = Files.readAllBytes(path(key));
+            if (offset < 0 || length < 0 || offset + length > bytes.length) {
+                throw new IllegalArgumentException("Invalid object range");
+            }
+            return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+        } catch (IOException error) {
+            throw new IllegalStateException("Test GET failed", error);
+        }
+    }
     @Override public void deleteIfPresent(String key) {
         try {
             Files.deleteIfExists(path(key));

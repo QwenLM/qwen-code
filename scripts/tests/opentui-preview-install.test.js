@@ -58,6 +58,14 @@ function tree(root) {
   return entries;
 }
 
+// Windows shells create their own %USERPROFILE%\AppData folders on first run;
+// only file contents are an installer's to preserve.
+function filesIn(root) {
+  return Object.fromEntries(
+    Object.entries(tree(root) ?? {}).filter(([, row]) => row.sha256),
+  );
+}
+
 function put(file, content, executable = false) {
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, content);
@@ -93,12 +101,19 @@ function fixture() {
     TMP: path.join(root, 'tmp'),
     TEMP: path.join(root, 'tmp'),
     ...(windows
-      ? { SystemRoot: process.env.SystemRoot, ComSpec: process.env.ComSpec }
+      ? {
+          SystemRoot: process.env.SystemRoot,
+          ComSpec: process.env.ComSpec,
+          // PowerShell writes its own startup cache under these. Keep it out of
+          // the home tree whose contents the assertions attribute to installers.
+          APPDATA: path.join(root, 'appdata', 'Roaming'),
+          LOCALAPPDATA: path.join(root, 'appdata', 'Local'),
+        }
       : { LC_ALL: 'C' }),
   };
   const initialPath = process.env.PATH;
   const initialProtected = tree(protectedRoot);
-  const initialHome = tree(path.join(root, 'home'));
+  const initialHome = filesIn(path.join(root, 'home'));
   const entry = (base) => path.join(base, 'bin', windows ? 'qwen.cmd' : 'qwen');
   const seed = (base, marker) => {
     put(
@@ -115,16 +130,10 @@ function fixture() {
   const oldTree = tree(live);
   const launch = () => {
     const result = windows
-      ? checked(
-          powershell,
-          [
-            '-NoProfile',
-            '-NonInteractive',
-            '-Command',
-            `& ${psQuote(entry(live))}; exit $LASTEXITCODE`,
-          ],
-          { env },
-        )
+      ? // A .cmd cannot be spawned directly; route it through cmd.exe. Going via
+        // PowerShell's `&` plus `exit $LASTEXITCODE` returns before the batch
+        // child writes its output and leaves the process holding qwen.cmd.
+        checked(entry(live), [], { env, shell: true })
       : checked(entry(live), [], { env });
     expect(result.status).toBe(0);
     return result.stdout.trim();
@@ -223,7 +232,7 @@ function fixture() {
     },
     assertProtected() {
       expect(tree(protectedRoot)).toEqual(initialProtected);
-      expect(tree(path.join(root, 'home'))).toEqual(initialHome);
+      expect(filesIn(path.join(root, 'home'))).toEqual(initialHome);
       expect(process.env.PATH).toBe(initialPath);
       expect(readFileSync(path.join(dir, 'outside-preview-data'), 'utf8')).toBe(
         'PRESERVE_SIBLING\n',

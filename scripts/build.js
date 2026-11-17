@@ -25,32 +25,41 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
-// Install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
-if (!existsSync(join(root, 'node_modules'))) {
-  execSync('corepack pnpm install --frozen-lockfile', {
-    stdio: 'inherit',
-    cwd: root,
-  });
-}
-
-// The root postinstall applies patches/ink+7.0.3.patch, and packages/cli
-// compiles against ink types only that patch adds: an install that skipped
-// lifecycle scripts fails the build with ~50 errors that all blame ink. The
-// patch creates frame-controller.d.ts, which pristine ink@7.0.3 lacks.
-const inkFrameController = join(
-  root,
-  'node_modules/ink/build/frame-controller.d.ts',
-);
-if (!existsSync(inkFrameController)) {
-  execSync('npm run postinstall', { stdio: 'inherit', cwd: root });
-  if (!existsSync(inkFrameController)) {
-    console.error(
-      'build: patches/ink+7.0.3.patch is not applied to node_modules/ink, so\n' +
-        'packages/cli cannot typecheck against it. Run "npm run postinstall"\n' +
-        'and resolve what patch-package reports.',
-    );
-    process.exit(1);
+// Shared with the incremental CI build (scripts/ci-build-cache.mjs), which
+// rebuilds only changed workspaces and so never reaches the rest of this file.
+const preflight = () => {
+  // Install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
+  if (!existsSync(join(root, 'node_modules'))) {
+    execSync('corepack pnpm install --frozen-lockfile', {
+      stdio: 'inherit',
+      cwd: root,
+    });
   }
+
+  // The root postinstall applies patches/ink+7.0.3.patch, and packages/cli
+  // compiles against ink types only that patch adds: an install that skipped
+  // lifecycle scripts fails the build with ~50 errors that all blame ink. The
+  // patch creates frame-controller.d.ts, which pristine ink@7.0.3 lacks.
+  const inkFrameController = join(
+    root,
+    'node_modules/ink/build/frame-controller.d.ts',
+  );
+  if (!existsSync(inkFrameController)) {
+    execSync('npm run postinstall', { stdio: 'inherit', cwd: root });
+    if (!existsSync(inkFrameController)) {
+      console.error(
+        'build: patches/ink+7.0.3.patch is not applied to node_modules/ink, so\n' +
+          'packages/cli cannot typecheck against it. Run "npm run postinstall"\n' +
+          'and resolve what patch-package reports.',
+      );
+      process.exit(1);
+    }
+  }
+};
+
+preflight();
+if (process.argv.includes('--preflight')) {
+  process.exit(0);
 }
 
 // build all workspaces/packages in dependency order

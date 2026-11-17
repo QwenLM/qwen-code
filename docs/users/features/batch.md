@@ -124,6 +124,11 @@ qwen batch cancel <task-id>              # partial results are still billed
 qwen batch clean <task-id>               # delete the local record (cancels nothing)
 ```
 
+`check` reports the output cap frozen from the selected model's settings,
+including `max_tokens`, `max_completion_tokens`, and `max_new_tokens`. It
+reports `provider default` when no output cap is set. A plan's
+`maxOutputTokens` can override that cap for a run.
+
 `collect` reports each item as:
 
 - **delivered** — written to its target;

@@ -52,12 +52,12 @@ public final class ManagedEventEnvelopes {
     private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
 
     public static final String KIND_WAKE_REQUESTED = "wake.requested";
-    // Ordered (the failure message joins it) — the frozen contract's 20-kind
-    // vocabulary in fixture order.
+    // Ordered (the failure message joins it) — the journal vocabulary
+    // in fixture order.
     public static final List<String> KINDS = List.of(
             "input.accepted", KIND_WAKE_REQUESTED, "activation.changed",
             "model.attempt", "message.committed", "tool.intent",
-            "action.changed", "tool.receipt", "checkpoint.committed",
+            "action.changed", "tool.receipt", "tool.measured", "checkpoint.committed",
             "context.compacted", "cancel.requested", "turn.settled",
             "config.bound", "lifecycle.changed", "domain.committed",
             "message.delta", "message.retracted", "operation.replayed",
@@ -332,7 +332,7 @@ public final class ManagedEventEnvelopes {
     /**
      * ECMAScript Number::toString (radix 10) faithfully, so the digest matches
      * the TypeScript side byte-for-byte. The thresholds are the spec's:
-     * decimal form while 1e-6 ≤ |x| < 1e21, exponential outside it.
+     * decimal form while 1e-6 ≤ |x| &lt; 1e21, exponential outside it.
      */
     public static String jsNumberToString(double d) {
         if (d == 0) {

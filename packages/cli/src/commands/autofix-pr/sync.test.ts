@@ -92,6 +92,11 @@ import {
   writeState,
   type AutofixPrState,
 } from './state.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 describe('runSync (real git, bare remote)', () => {
   let base: string;
@@ -256,7 +261,7 @@ describe('runSync (real git, bare remote)', () => {
     const old = new Date(Date.now() - 5 * 60_000);
     utimesSync(paths.fixPath, old, old);
     mocks.live = { ...mocks.live!, state: 'CLOSED' };
-    expect(() => runSync(7)).toThrow(/closed/);
+    expect(() => runSync(7)).toThrow(refused('pr_closed', /closed/));
     expect(existsSync(paths.fixPath)).toBe(true);
   });
 
@@ -265,7 +270,9 @@ describe('runSync (real git, bare remote)', () => {
     const old = new Date(Date.now() - 5 * 60_000);
     utimesSync(paths.fixPath, old, old);
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
-    expect(() => runSync(7)).toThrow(/watched by another session/);
+    expect(() => runSync(7)).toThrow(
+      refused('watched_elsewhere', /watched by another session/),
+    );
     expect(existsSync(paths.fixPath)).toBe(true);
   });
 
@@ -426,6 +433,15 @@ describe('runSync (real git, bare remote)', () => {
       dropped: 1,
     });
     expect(worktreeHead()).toBe(again);
+  });
+
+  it('keeps uncommitted changes from a head the author rewrote, for --discard to clear', () => {
+    writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
+    forcePushFromElsewhere('rewritten.txt');
+    expect(() => runSync(7)).toThrow(
+      refused('worktree_dirty', /uncommitted changes/),
+    );
+    expect(existsSync(join(paths.worktreePath, 'stray.txt'))).toBe(true);
   });
 
   it('follows the author rolling back a push the watch made, so the next push cannot restore it', () => {
@@ -1005,6 +1021,138 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(repo, 'rev-parse', 'mine')).toBe(featSha);
   });
 
+  it('with --discard answers synced: false for a worktree git cannot switch back', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    // The watch's branch checked out in another worktree: git refuses to
+    // check it out twice. The worktree cannot be cleaned (the round stops),
+    // and a refusal of `discard` would only ask for the same again.
+    run(repo, 'worktree', 'add', '-q', join(base, 'other-wt'), paths.branch);
+    expect(runSync(7, true)).toEqual({
+      synced: false,
+      headSha: featSha,
+      moved: false,
+      reason: expect.stringMatching(
+        /could not switch it back: qwen-autofix\/pr-7 is checked out in .*other-wt\. .*worktree remove .*other-wt/,
+      ),
+    });
+    // The cleanup it names last could not delete the branch either: the
+    // reason does not send the user there first.
+    expect(runSync(7, true).reason).not.toMatch(/cleanup 7 --force/);
+  });
+
+  // What holds the branch decides what frees it: `git worktree remove`
+  // refuses a locked worktree and one whose `.git` is gone, and `git
+  // worktree prune` drops a stale record but not a locked one. The git
+  // commands the reason gives, run by a shell as printed from outside the
+  // clone, let the next round through, wherever the holder is: its path
+  // quoted, spaces, quotes and a newline in it are one argument. POSIX shell
+  // syntax, run by `sh`.
+  const holders: Array<[string, (holder: string) => void, RegExp, RegExp]> = [
+    ['a checkout', () => {}, /\. Switch that checkout/, /worktree prune/],
+    [
+      'a directory deleted by hand',
+      (holder) => rmSync(holder, { recursive: true, force: true }),
+      /nothing is checked out there any more\. Drop its record with `git -C '.*' worktree prune`/,
+      /worktree remove|Switch that checkout/,
+    ],
+    [
+      'a checkout whose .git is deleted',
+      (holder) => rmSync(join(holder, '.git')),
+      /nothing is checked out there any more\. Drop its record with `git -C '.*' worktree prune`/,
+      /worktree remove|Switch that checkout/,
+    ],
+    [
+      'a locked checkout',
+      (holder) => run(repo, 'worktree', 'lock', holder),
+      /, which is locked\. Unlock it \(`git -C '.*' worktree unlock '[^`]*'`\), then switch that checkout/,
+      /worktree prune/,
+    ],
+    [
+      'a locked directory deleted by hand',
+      (holder) => {
+        run(repo, 'worktree', 'lock', holder);
+        rmSync(holder, { recursive: true, force: true });
+      },
+      /, a locked worktree git still records .*\. Unlock it \(`git -C '.*' worktree unlock '[^`]*'`\), then drop its record with `git -C '.*' worktree prune`/,
+      /worktree remove|Switch that checkout/,
+    ],
+  ];
+  it
+    .skipIf(process.platform === 'win32')
+    .each(
+      holders.flatMap(([name, ...rest]) => [
+        [name, 'other-wt', ...rest] as const,
+        [
+          `${name} at a path with spaces and quotes`,
+          `other wt "q" it's`,
+          ...rest,
+        ] as const,
+        [`${name} at a path with a newline`, 'other\nwt', ...rest] as const,
+      ]),
+    )(
+    'with --discard says how to free a branch held by %s',
+    (_name, dirName, damage, says, saysNot) => {
+      run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+      const holder = join(base, dirName);
+      run(repo, 'worktree', 'add', '-q', holder, paths.branch);
+      damage(holder);
+      const { synced, reason } = runSync(7, true);
+      expect(synced).toBe(false);
+      expect(reason).toMatch(says);
+      expect(reason).not.toMatch(saysNot);
+      const commands = [...String(reason).matchAll(/`(git -C [^`]+)`/g)];
+      expect(commands.length).toBeGreaterThan(0);
+      for (const [, command] of commands) {
+        execFileSync('sh', ['-c', command], {
+          cwd: tmpdir(),
+          env: { ...process.env, GIT_CONFIG_GLOBAL: gitConfig },
+          stdio: 'pipe',
+        });
+      }
+      expect(runSync(7, true)).toMatchObject({
+        synced: true,
+        headSha: featSha,
+      });
+    },
+  );
+
+  it('with --discard asks only for a switch of the clone checkout that holds the branch', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    // git removes no main worktree: switching it is all there is.
+    run(repo, 'switch', '-q', paths.branch);
+    const { synced, reason } = runSync(7, true);
+    expect(synced).toBe(false);
+    expect(reason).toMatch(
+      /is checked out in .*\. Switch that checkout to another branch; until then/,
+    );
+    expect(reason).not.toMatch(/worktree (?:remove|prune|unlock)/);
+    run(repo, 'switch', '-q', 'main');
+    expect(runSync(7, true)).toMatchObject({ synced: true, headSha: featSha });
+  });
+
+  it('with --discard sends to cleanup a switch git refuses for no other checkout', () => {
+    run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
+    // A lock git left behind stops the switch; no worktree holds the branch.
+    writeFileSync(
+      run(
+        paths.worktreePath,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-path',
+        'index.lock',
+      ),
+      '',
+    );
+    expect(runSync(7, true)).toEqual({
+      synced: false,
+      headSha: featSha,
+      moved: false,
+      reason: expect.stringMatching(
+        /could not switch it back; remove the watch with `qwen autofix-pr cleanup 7 --force` and prepare it again\.$/,
+      ),
+    });
+  });
+
   it('with --discard takes the worktree back to the watch branch from one a fix switched to', () => {
     run(paths.worktreePath, 'switch', '-q', '-c', 'fix/ci');
     const theirs = commitIn(paths.worktreePath, 'on-fix-branch.txt');
@@ -1021,7 +1169,9 @@ describe('runSync (real git, bare remote)', () => {
   it('refuses to move or reset a worktree with uncommitted changes', () => {
     pushFromElsewhere('theirs.txt');
     writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
-    expect(() => runSync(7)).toThrow(/uncommitted changes/);
+    expect(() => runSync(7)).toThrow(
+      refused('worktree_dirty', /uncommitted changes/),
+    );
     forcePushFromElsewhere('rewritten.txt');
     expect(() => runSync(7)).toThrow(/uncommitted changes/);
     expect(worktreeHead()).toBe(featSha);
@@ -1427,7 +1577,9 @@ describe('runSync (real git, bare remote)', () => {
       mocks.afterFetch = () => {
         run(repo, 'switch', '-q', 'main');
       };
-      expect(() => runSync(7)).toThrow(/branch main checked out/);
+      expect(() => runSync(7)).toThrow(
+        refused('worktree_dirty', /branch main checked out/),
+      );
       // Neither branch advanced.
       expect(run(repo, 'rev-parse', 'feat')).toBe(featSha);
       expect(run(repo, 'rev-parse', 'main')).toBe(mainBefore);

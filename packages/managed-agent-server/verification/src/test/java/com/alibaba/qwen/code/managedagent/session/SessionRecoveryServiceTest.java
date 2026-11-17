@@ -7,7 +7,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,7 +56,7 @@ class SessionRecoveryServiceTest {
                 "tenant", "session", "MANAGED_SESSION", "READY", null);
         when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
         when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of());
-        service = new SessionRecoveryService(sessions, store, coordinator, harness, new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(jdbc), mock(ManagedSessionStore.class));
+        service = new SessionRecoveryService(sessions, store, coordinator, harness, new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(jdbc), mock(JdbcManagedSessionStore.class));
     }
 
     @Test
@@ -115,6 +115,34 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.nextTurnAllowed()).isFalse();
         assertThat(recovery.actions().recheck()).isTrue();
         verify(harness).inspectRecovery("tenant", "session", "private-prompt");
+        verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void aStoppedHarnessExposesItsUnsettledInputInsteadOfRunningWork() {
+        turn("RUNNING", AgentStateStore.HARNESS_RECOVERY_BLOCKED);
+        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                .thenReturn(new RecoveryStatus("awaiting_evidence", "inputs_unsettled",
+                        "private-prompt", false, false, false));
+        var recovery = service.projection(session, "actor");
+        assertThat(recovery).isNotNull();
+        assertThat(recovery.state()).isEqualTo("awaiting_evidence");
+        assertThat(recovery.reasonCode()).isEqualTo("inputs_unsettled");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.actions().recheck()).isFalse();
+        assertThat(recovery.actions().cancel()).isTrue();
+        verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void aHarnessResultStillWaitsForTheOriginalControlPlaneTurnToSettle() {
+        turn("RUNNING", AgentStateStore.HARNESS_RECOVERY_BLOCKED);
+        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                .thenReturn(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("recovering");
+        assertThat(recovery.reasonCode()).isEqualTo("turn_settlement_pending");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
         verifyNoInteractions(coordinator);
     }
 

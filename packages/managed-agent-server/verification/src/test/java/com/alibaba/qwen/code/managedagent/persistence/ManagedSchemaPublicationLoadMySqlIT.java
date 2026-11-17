@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
@@ -13,6 +14,7 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.io.InputStream;
 import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.List;
@@ -63,7 +65,7 @@ class ManagedSchemaPublicationLoadMySqlIT {
                 var properties = new ManagedAgentProperties();
                 properties.getToolPublication().setGcEnabled(true);
                 properties.getToolPublication().setDeletionGrace(java.time.Duration.ZERO);
-                String sessionScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, HEALTHY);
+                String sessionScope = ManagedSessionStore.sessionScopeKey(TENANT, HEALTHY);
                 String scope = ManagedSchemaKeys.key("capture-scope");
                 String publication = "capture";
                 String operationId = "capture-gc-" + ManagedSchemaKeys.key(scope, publication);
@@ -71,7 +73,7 @@ class ManagedSchemaPublicationLoadMySqlIT {
                         ManagedSchemaKeys.key(publication), operationId);
                 jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
                                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
-                                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, write_evidence, accepted_complete)"
+                                + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete)"
                                 + " VALUES (?, ?, ?, 'workspace', ?, ?, ?, 'capture-id', '{}', ?, ?, 'FENCED',"
                                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE)",
                         scope, ManagedSchemaKeys.key(TENANT), TENANT, HEALTHY, publication,
@@ -85,6 +87,16 @@ class ManagedSchemaPublicationLoadMySqlIT {
                 jdbc.update("UPDATE ma_operation SET session_scope_key = ?, publication_id = ? WHERE operation_key = ?",
                         sessionScope, publication, operationKey);
                 ToolPublicationObjectStore unusedObjects = new ToolPublicationObjectStore() {
+                    @Override
+                    public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                        guard.run();
+                        try (InputStream full = open(key)) {
+                            byte[] bytes = full.readAllBytes();
+                            return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                        } catch (java.io.IOException error) {
+                            throw new IllegalStateException(error);
+                        }
+                    }
                     @Override public void putIfAbsent(String key, byte[] bytes) { throw new AssertionError("No object write is expected"); }
                     @Override public java.io.InputStream open(String key) { throw new AssertionError("No object read is expected"); }
                     @Override public void validateConfiguration() { }
@@ -159,7 +171,7 @@ class ManagedSchemaPublicationLoadMySqlIT {
                 jdbc.update("INSERT INTO ma_read_lease (lease_id, tenant_key, session_key, retirement_generation, expires_at)"
                                 + " VALUES ('held-reader', ?, ?, 0, ?)", ManagedSchemaKeys.key(TENANT), readerKey,
                         ToolPublicationRetentionStore.now(jdbc) + 600_000);
-                String unknownScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, "unknown-put");
+                String unknownScope = ManagedSessionStore.sessionScopeKey(TENANT, "unknown-put");
                 String unknownTarget = ManagedSchemaKeys.key("original-object");
                 String unknownKey = ManagedSchemaKeys.operationKey(OperationKind.OBJECT_PUT, unknownScope, unknownTarget, "put");
                 insertOperation(jdbc, unknownKey, unknownScope, "put", "OBJECT_PUT", "unknown-put", unknownTarget, "UNKNOWN", 0);
@@ -171,7 +183,7 @@ class ManagedSchemaPublicationLoadMySqlIT {
                 assertThat(jdbc.queryForObject("SELECT failure_code FROM ma_operation WHERE session_id = ?"
                         + " AND operation_kind = 'SESSION_RESOURCE_GC'", String.class, "unknown-put")).isEqualTo("put_unresolved");
 
-                String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, HEALTHY);
+                String scope = ManagedSessionStore.sessionScopeKey(TENANT, HEALTHY);
                 String proofKey = ManagedSchemaKeys.operationKey(OperationKind.WORKSPACE_OPERATOR_RECOVERY, scope, scope, "proof");
                 insertOperation(jdbc, proofKey, scope, "proof", "WORKSPACE_OPERATOR_RECOVERY", HEALTHY, scope, "SUCCEEDED",
                         ManagedSchemaTime.NEVER_DUE_MILLIS);

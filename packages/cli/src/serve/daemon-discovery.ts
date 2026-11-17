@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   getGlobalQwenDirLite,
+  isFullyQualifiedPath,
   resolveConfigPathLite,
 } from '../config/storage-paths-lite.js';
 
@@ -43,6 +44,8 @@ export interface DaemonDiscoveryRecord {
    * Absent on records written before this field existed.
    */
   startupWorkspaces?: string[];
+  /** Resolved configured Conversations root, retained across daemon restart. */
+  conversationsDir?: string;
   /** Whether the Web Shell was enabled at startup. */
   web?: boolean;
   /** Whether `--require-auth` was set at startup. */
@@ -232,6 +235,10 @@ function isValidRecord(value: unknown): value is DaemonDiscoveryRecord {
         record['startupWorkspaces'].every(
           (workspace) => typeof workspace === 'string' && workspace.length > 0,
         ))) &&
+    (record['conversationsDir'] === undefined ||
+      (typeof record['conversationsDir'] === 'string' &&
+        !record['conversationsDir'].includes('\0') &&
+        isFullyQualifiedPath(record['conversationsDir']))) &&
     (record['web'] === undefined || typeof record['web'] === 'boolean') &&
     (record['requireAuth'] === undefined ||
       typeof record['requireAuth'] === 'boolean') &&

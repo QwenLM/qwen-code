@@ -137,16 +137,63 @@ const COPY = {
     'desktopRelay.error.denied': '请求在这台电脑上被拒绝。',
     'desktopRelay.error.unreachable': '无法连接到这台电脑上的桌面中继。',
   },
-  // Not translated yet — same partial-catalog policy as the ru table in
-  // i18n.tsx (#13391): ru reuses the EN copy.
-  ru: EN_COPY,
+  ru: {
+    'desktopRelay.title': 'Этот компьютер',
+    'desktopRelay.trigger': 'Использовать этот компьютер',
+    'desktopRelay.hint':
+      'Позволяет этой сессии выполнять код на этом компьютере, видеть и управлять его экраном — для Computer Use. Каждое подключение вы подтверждаете в диалоге на этом компьютере.',
+    'desktopRelay.connect': 'Подключить этот компьютер',
+    'desktopRelay.disconnect': 'Отключить',
+    'desktopRelay.checkAgain': 'Проверить снова',
+    'desktopRelay.copy': 'Скопировать команду',
+    'desktopRelay.copied': 'Скопировано',
+    'desktopRelay.setupHint':
+      'Если не установлено, один раз выполните это в терминале на этом компьютере, затем проверьте снова. Если уже установлено, проверьте ошибки подключения браузера. Регистрируется macOS launchd socket; в фоне ничего не остаётся работать.',
+    'desktopRelay.approveHint':
+      'Подтвердите запрос в диалоге, который открылся на этом компьютере.',
+    'desktopRelay.otherSessionHint':
+      'Этот компьютер подключён к другой сессии. Подключение здесь заменит то соединение.',
+    'desktopRelay.needsSessionHint':
+      'Сначала запустите сессию. Подключение привязывается ровно к одной сессии.',
+    'desktopRelay.status.checking': 'Проверка…',
+    'desktopRelay.status.permissionRequired': 'Требуется разрешение браузера',
+    'desktopRelay.status.missing': 'Реле не обнаружено',
+    'desktopRelay.status.unknown': 'Статус подключения неизвестен',
+    'desktopRelay.unknownHint':
+      'Если ранее было подключение, та сессия всё ещё может управлять этим компьютером. Чтобы запросить локальное отключение без браузера или сети, запустите установленное реле в терминале на этом компьютере (для своей установки скорректируйте путь к исполняемому файлу и добавьте --home <dir>):',
+    'desktopRelay.status.idle': 'Не подключено',
+    'desktopRelay.status.awaitingApproval': 'Ожидание подтверждения',
+    'desktopRelay.status.connecting': 'Подключение…',
+    'desktopRelay.status.connected': 'Подключено',
+    'desktopRelay.status.otherSession': 'Используется другой сессией',
+    'desktopRelay.status.failed': 'Ошибка',
+    'desktopRelay.status.unavailable': 'Здесь недоступно',
+    'desktopRelay.status.needsSession': 'Ожидание сессии',
+    'desktopRelay.blocker.insecureContext':
+      'Браузеры разрешают доступ к этому компьютеру только с защищённой страницы. Откройте Web Shell по https или перенаправьте порт демона через SSH и откройте http://localhost:<port>.',
+    'desktopRelay.blocker.unsupportedDaemon':
+      'Этот демон не объявляет обратный канал инструментов (client_mcp_over_ws). Запустите его с QWEN_SERVE_CLIENT_MCP_OVER_WS=1.',
+    'desktopRelay.blocker.workspaceIneligible':
+      'Рабочая область этого разговора не может использовать этот компьютер (недоверенная или live-область).',
+    'desktopRelay.blocker.workspaceResolving':
+      'Пока неизвестно, к какой рабочей области относится этот разговор.',
+    'desktopRelay.permissionHint':
+      'Разрешите доступ к локальной сети для этого сайта в запросе браузера или в настройках сайта, затем проверьте снова.',
+    'desktopRelay.error.denied': 'Запрос был отклонён на этом компьютере.',
+    'desktopRelay.error.unreachable':
+      'Не удалось связаться с настольным реле на этом компьютере.',
+  },
 } as const;
 
 type CopyKey = keyof (typeof COPY)['en'];
 
 function useDesktopRelayCopy(): (key: CopyKey) => string {
   const { language } = useI18n();
-  return useCallback((key: CopyKey) => COPY[language][key], [language]);
+  // The provider is typed to the shipped languages, but the runtime value is
+  // not checked: a locale without a dictionary must fall back to English
+  // instead of crashing the whole shell on the first lookup.
+  const copy = COPY[language] ?? COPY.en;
+  return useCallback((key: CopyKey) => copy[key], [copy]);
 }
 
 export interface DesktopRelayStatus {

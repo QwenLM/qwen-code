@@ -544,14 +544,6 @@ export function ContextUsageMessage({
               tokens={breakdown.messages}
             />
           )}
-          {hasTokenCount && (breakdown.unattributed ?? 0) > 0 && (
-            <CategoryRow
-              {...categoryProps}
-              label={t('contextUsage.unattributed')}
-              tokens={breakdown.unattributed!}
-              symbolClassName={styles.secondary}
-            />
-          )}
         </div>
       </details>
       {!hasDetails ? (

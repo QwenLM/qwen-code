@@ -52,6 +52,7 @@ import {
 } from './state.js';
 import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
 import { checkoutHoldsWork, isAncestor, networkGit } from './worktree.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 export interface PrView {
   number: number;
@@ -512,7 +513,12 @@ function runInPlacePrepare(
   ) as RepoView;
   const viewer = currentUser();
   const refusal = eligibilityError(pr, repo, viewer);
-  if (refusal) throw new Error(refusal);
+  if (refusal) {
+    throw new AutofixPrRefusal(
+      pr.state === 'OPEN' ? 'failed' : 'pr_closed',
+      refusal,
+    );
+  }
   const canPush = authorCanPush(args.repo, pr.author?.login ?? '', viewer);
   const { remote, pushTarget } = remotesFor(
     host,
@@ -822,7 +828,12 @@ export function runPrepare(args: PrepareArgs): void {
   ) as RepoView;
   const viewer = currentUser();
   const refusal = eligibilityError(pr, repo, viewer);
-  if (refusal) throw new Error(refusal);
+  if (refusal) {
+    throw new AutofixPrRefusal(
+      pr.state === 'OPEN' ? 'failed' : 'pr_closed',
+      refusal,
+    );
+  }
   const headOwner = pr.headRepositoryOwner!.login;
   const headName = pr.headRepository!.name;
   // Asked before anything is fetched or made: a refusal leaves nothing

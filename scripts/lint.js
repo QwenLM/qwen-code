@@ -106,8 +106,35 @@ export function getCachedArchiveInstaller({
       if ! cp "${cacheArchive}" "${localArchive}" 2>/dev/null \
         || ! verify_sha256 "${localArchive}" "${expectedSha256}"; then
         rm -f "${localArchive}"
-        curl -fsSL --retry 2 --retry-connrefused --connect-timeout 10 --max-time 90 \
-          -o "${localArchive}" "${downloadUrl}"
+        download_attempt=1
+        download_max_attempts=3
+        # curl --retry discards partial output before retrying, so keep our own
+        # loop and resume at the bytes already received. The rm -f above leaves
+        # no file, so attempt 1 starts at offset 0; the 33/36 branch drops the
+        # partial so a mirror answering a ranged request with 200 resets to
+        # offset 0 instead of re-sending the same offset until the budget is
+        # spent. The budget is per archive (3 x --max-time 90 + 15s backoff), so
+        # a step provisioning both archives inside one 5-minute step can still
+        # cut the second one off, as curl --retry 2 could before this loop.
+        while :; do
+          set -- -fsSL --connect-timeout 10 --max-time 90 --continue-at -
+          if curl "$@" -o "${localArchive}" "${downloadUrl}"; then
+            break
+          else
+            curl_status=$?
+          fi
+          if [ "$curl_status" -eq 33 ] || [ "$curl_status" -eq 36 ]; then
+            rm -f "${localArchive}"
+          fi
+          if [ "$download_attempt" -ge "$download_max_attempts" ]; then
+            echo "Linter download failed after ${'${download_max_attempts}'} attempts (curl exit $curl_status): ${downloadUrl}" >&2
+            exit "$curl_status"
+          fi
+          delay=$((download_attempt * 5))
+          echo "Linter download failed (curl exit $curl_status); retrying in ${'${delay}'}s..." >&2
+          sleep "$delay"
+          download_attempt=$((download_attempt + 1))
+        done
         verify_sha256 "${localArchive}" "${expectedSha256}"
         ${archiveCheck}
         cache_tmp=''

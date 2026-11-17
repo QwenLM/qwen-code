@@ -441,6 +441,8 @@ export interface LspSocketOptions {
  * Configuration for an LSP server instance.
  */
 export interface LspServerConfig {
+  /** Set by the loader, never from configuration JSON. */
+  source?: 'workspace' | 'extension';
   /** Unique name identifier for the server */
   name: string;
   /** List of languages this server handles */

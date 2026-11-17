@@ -5,6 +5,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { getManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
+import { MANAGED_MODEL_STATISTICS_KINDS } from '@qwen-code/qwen-code-core/managed-runtime/managed-model-statistics.js';
 import type { Content } from '@google/genai';
 import { llmPreparedProviderPin } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import {
@@ -39,9 +41,18 @@ import {
   type HookInput,
 } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
+import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { applyHostedModelPin } from './hosted-harness-model.js';
 import type { HostedAgentDefinition } from './hosted-agent-definition.js';
+import {
+  excludedHostedPrompts,
+  filterHostedTurnHistory,
+  isExcludedHostedRecord,
+  normalizeHostedTurnRecords,
+} from './hosted-turn-history.js';
+import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
 
 const debugLogger = createDebugLogger('HOSTED_CONTEXT_COMPRESSION');
@@ -73,6 +84,7 @@ interface CompressionOptions {
   session: ManagedSession;
   cwd: string;
   agentDefinition?: HostedAgentDefinition;
+  modelConfig?: HostedModelConfigReader;
   instructions: () => Promise<string>;
   busy: () => boolean;
   hasPendingHooks: () => boolean;
@@ -81,6 +93,9 @@ interface CompressionOptions {
     operationId: string,
     fields: HookInput,
   ) => Promise<unknown>;
+  /** A route-driven compaction is fresh context too: the loop resolver must
+   * re-deliver the full guidance on the next fire, not a dangling reminder. */
+  onCompactionCommitted?: () => void;
 }
 
 export interface HostedCompressionStatus {
@@ -204,26 +219,24 @@ export class HostedContextCompression {
           .filter((event) => event.kind === 'turn.settled')
           .map((event) => event.payload['turnId']),
       );
-      const unanswered = new Set(
-        session.authority
-          .eventsInSequenceRange(1, historyCutSequence)
-          .filter(
-            (event) =>
-              event.kind === 'turn.settled' &&
-              ['error', 'cancelled'].includes(String(event.payload['outcome'])),
-          )
-          .map((event) => event.payload['turnId']),
+      const projected =
+        await session.sink.projectModelRecords(historyCutSequence);
+      const unanswered = excludedHostedPrompts(
+        session.authority.eventsInSequenceRange(1, historyCutSequence),
+        projected,
       );
-      const history = await session.sink.projectModelHistory({
-        throughSequence: historyCutSequence,
-        includeRecord: (entry) =>
-          (entry.type === 'system' || settled.has(entry.daemonPromptId)) &&
-          !(entry.type === 'user' && unanswered.has(entry.daemonPromptId)),
+      const records = normalizeHostedTurnRecords(projected, unanswered);
+      const history = buildSessionHistoryFromConversation({
+        messages: records.filter(
+          (entry) =>
+            entry.subtype === 'chat_compression' ||
+            ((entry.type === 'system' || settled.has(entry.daemonPromptId)) &&
+              !isExcludedHostedRecord(entry, unanswered)),
+        ),
       });
-      history.apiHistory = history.apiHistory.filter(
-        (entry) =>
-          entry.role !== 'user' ||
-          !unanswered.has(getApiHistoryPromptId(entry)),
+      history.apiHistory = filterHostedTurnHistory(
+        history.apiHistory,
+        unanswered,
       );
       const instructions = await this.options.instructions();
       const config = await this.createConfig(intent, instructions).catch(() => {
@@ -260,7 +273,9 @@ export class HostedContextCompression {
       if (this.options.busy())
         throw new HostedCompressionRefusal('session_context_busy');
       const record: HistoryMaintenance = {
-        schemaVersion: 1,
+        ...(getManagedSessionDiagnostics(this.options.session.authority)
+          ? { schemaVersion: 2 as const, modelStatsRef: null }
+          : { schemaVersion: 1 as const }),
         kind: 'context_compression',
         operationId: intent.operationId,
         expectedCompactionRevision: intent.expectedCompactionRevision,
@@ -349,25 +364,40 @@ export class HostedContextCompression {
       sessionId:
         this.options.session.authority.sessionHeader.sessionKey.sessionId,
     } as CliArgs;
+    const sessionModelConfig = await this.options.modelConfig?.();
+    if (
+      sessionModelConfig &&
+      intent.modelSelection &&
+      sessionModelConfig.model !== intent.modelSelection.modelId
+    ) {
+      throw new Error('Session model configuration conflicts.');
+    }
     const config = await loadCliConfig(
       settings.merged,
       argv,
       this.options.cwd,
       undefined,
-      undefined,
+      getSeparatedHookSettings(settings),
       undefined,
       undefined,
       undefined,
       true,
-      { toolInvocationGuard: () => ({ allowed: false }) },
+      {
+        toolInvocationGuard: () => ({ allowed: false }),
+        lspDisabled: true,
+        ...(sessionModelConfig
+          ? { modelConfiguration: sessionModelConfig }
+          : {}),
+      },
     );
     try {
-      await applyHostedModelPin(
-        config,
-        intent.modelSelection
-          ? { id: intent.modelSelection.modelId }
-          : this.options.agentDefinition?.model,
-      );
+      if (!sessionModelConfig)
+        await applyHostedModelPin(
+          config,
+          intent.modelSelection
+            ? { id: intent.modelSelection.modelId }
+            : this.options.agentDefinition?.model,
+        );
       config.setUserMemory(instructions);
       await config.initialize({
         skipHooks: true,
@@ -428,6 +458,38 @@ export class HostedContextCompression {
     },
   ): Promise<void> {
     const session = this.options.session;
+    const diagnostics = getManagedSessionDiagnostics(session.authority);
+    const commit = () => this.commitOwned(record, compaction);
+    return diagnostics ? diagnostics.serialCommit(commit) : commit();
+  }
+
+  private async commitOwned(
+    record: HistoryMaintenance,
+    compaction?: {
+      summaryRef: ManagedSessionDurableRef;
+      compactionId: string;
+      fromSequence: number;
+      toSequence: number;
+      replacedMessageIds: string[];
+    },
+  ): Promise<void> {
+    const session = this.options.session;
+    const diagnostics = getManagedSessionDiagnostics(session.authority);
+    if (
+      record.schemaVersion === 2 &&
+      record.modelStatsRef === null &&
+      (record.phase === 'candidate' ||
+        record.phase === 'settled' ||
+        record.run.state === 'recovery_blocked') &&
+      diagnostics
+    ) {
+      record = {
+        ...record,
+        modelStatsRef: await diagnostics.publish(
+          MANAGED_MODEL_STATISTICS_KINDS.snapshot,
+        ),
+      };
+    }
     const revision =
       session.authority.extensionRecord(
         'history_maintenance',
@@ -446,6 +508,15 @@ export class HostedContextCompression {
   }
 
   private async execute(initial: HistoryMaintenance): Promise<void> {
+    const diagnostics =
+      initial.schemaVersion === 2
+        ? getManagedSessionDiagnostics(this.options.session.authority)
+        : undefined;
+    const run = () => this.executeOwned(initial);
+    return diagnostics ? diagnostics.run('compression', run) : run();
+  }
+
+  private async executeOwned(initial: HistoryMaintenance): Promise<void> {
     let current = initial;
     let config: Awaited<ReturnType<typeof loadCliConfig>> | undefined;
     const signal = new AbortController().signal;
@@ -503,6 +574,7 @@ export class HostedContextCompression {
             } satisfies PersistedCandidate);
             current = { ...current, phase: 'candidate', candidateRef };
             await this.commit(current);
+            current = this.record(current.operationId)!;
           },
         });
         if (
@@ -541,7 +613,8 @@ export class HostedContextCompression {
         systemPayload: {
           info: candidate.info,
           compressedHistory: candidate.newHistory,
-          summaryPrefixLength: candidate.newHistory.length,
+          summaryPrefixLength:
+            candidate.info.summaryPrefixLength ?? candidate.newHistory.length,
           completedToolCallIds: request.completedToolCallIds,
           promptIds: candidate.promptIds,
           contextPrefixLength: candidate.contextPrefixLength,
@@ -571,6 +644,7 @@ export class HostedContextCompression {
             .map((event) => event.payload['messageId'] as string),
         },
       );
+      this.options.onCompactionCommitted?.();
     } catch (cause) {
       if (this.options.session.authority.writesStopped) throw cause;
       const actual = this.record(current.operationId);

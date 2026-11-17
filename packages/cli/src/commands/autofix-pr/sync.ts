@@ -47,8 +47,10 @@ import {
   networkGit,
   networkGitEnv,
   requireWorktree,
+  SwitchBackRefused,
 } from './worktree.js';
 import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 export interface SyncOutcome {
   synced: boolean;
@@ -114,7 +116,28 @@ function syncLocked(
       `an in-place watch never discards the user's checkout (${worktree}); commit or stash what it holds, or end the watch with \`qwen autofix-pr cleanup ${prNumber}\``,
     );
   }
-  requireWorktree(paths, prNumber, root, discard, trustAnchor(state), inPlace);
+  try {
+    requireWorktree(
+      paths,
+      prNumber,
+      root,
+      discard,
+      trustAnchor(state),
+      inPlace,
+    );
+  } catch (err) {
+    // Git refused to take the worktree back to the watch's branch: it
+    // cannot be cleaned, as one still dirty after discarding is not.
+    if (err instanceof SwitchBackRefused) {
+      return {
+        synced: false,
+        headSha: state.lastKnownHeadSha,
+        moved: false,
+        reason: err.message,
+      };
+    }
+    throw err;
+  }
 
   const known = state.lastKnownHeadSha;
   // The state with the PR's base as GitHub names it now.
@@ -127,7 +150,8 @@ function syncLocked(
   const fetchPrHead = (): string => {
     const live = liveDestination(state, prNumber);
     if (live.state !== 'OPEN') {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'pr_closed',
         `PR #${prNumber} is ${live.state.toLowerCase()}; there is no head to follow.`,
       );
     }
@@ -172,7 +196,8 @@ function syncLocked(
   if (inPlace) {
     const nowBranch = gitOpt('-C', worktree, 'symbolic-ref', '-q', 'HEAD');
     if (nowBranch !== `refs/heads/${state.branch}`) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'worktree_dirty',
         `${worktree} has ${nowBranch ? `branch ${nowBranch.replace(/^refs\/heads\//, '')}` : 'a detached HEAD'} checked out, not ${state.branch}; switch it back before pushing or syncing.`,
       );
     }
@@ -240,7 +265,8 @@ function syncLocked(
       };
     }
     if (hasUncommittedChanges(worktree)) {
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'worktree_dirty',
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
       );
     }
@@ -281,7 +307,8 @@ function syncLocked(
           reason: `${worktree} has uncommitted changes; commit or stash them before the round moves it to the new PR head.`,
         };
       }
-      throw new Error(
+      throw new AutofixPrRefusal(
+        'worktree_dirty',
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
       );
     }

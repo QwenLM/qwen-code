@@ -88,6 +88,9 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
       protected getResponseSourceLabel(_sessionId: string): string | undefined {
         return responseSourceLabelRef.current;
       }
+      protected isProactivePromptTurn(_sessionId: string): boolean {
+        return false;
+      }
       protected formatMarkdownAttributedText(
         text: string,
         sourceLabel?: string,

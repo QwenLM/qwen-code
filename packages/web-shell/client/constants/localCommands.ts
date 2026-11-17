@@ -11,7 +11,10 @@ type Translate = ReturnType<typeof useI18n>['t'];
  */
 export function getLocalCommands(
   t: Translate,
-  options: { sideTaskAvailable?: boolean } = {},
+  options: {
+    sideTaskAvailable?: boolean;
+    subscriptionAvailable?: boolean;
+  } = {},
 ): CommandInfo[] {
   const commands: CommandInfo[] = [
     { name: 'help', description: t('local.help') },
@@ -48,6 +51,15 @@ export function getLocalCommands(
     { name: 'delete', description: t('local.delete') },
     { name: 'release', description: t('local.release') },
     { name: 'auth', description: t('local.auth') },
+    ...(options.subscriptionAvailable
+      ? [
+          { name: 'logout', description: t('subscription.signOutDescription') },
+          {
+            name: 'upgrade',
+            description: t('subscription.upgradeDescription'),
+          },
+        ]
+      : []),
     {
       name: 'approval-mode',
       description: t('local.approvalMode'),
@@ -165,6 +177,7 @@ const BUILTIN_COMMAND_DESCRIPTION_KEYS: Record<string, string> = {
   init: 'local.init',
   insight: 'local.insight',
   lsp: 'local.lsp',
+  pr: 'local.pr',
   remember: 'local.remember',
   summary: 'local.summary',
   workflows: 'local.workflows',

@@ -3,9 +3,9 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -77,7 +77,7 @@ class ManagedTurnQueryTest {
     private ManagedAgentStore store;
 
     @Autowired
-    private ManagedWorkspaceRegistry registry;
+    private JdbcManagedWorkspaceRegistry registry;
 
     @ParameterizedTest
     @ValueSource(longs = {1_000, 2_000})
@@ -140,9 +140,9 @@ class ManagedTurnQueryTest {
         assertThat(latest).containsKey(sessionId);
         var freshSession = new FreshSessionBeforeExecute(
                 jdbc.getDataSource(), "environment.turn_id) IN (");
-        var recompiling = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
+        var recompiling = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(
                 new ManagedSchemaJdbcTemplate(freshSession),
-                objectMapper, Clock.systemUTC(), ignored -> {}, registry, new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+                objectMapper, Clock.systemUTC(), ignored -> {}, registry, new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
         assertThat(recompiling.findLatestEnvironmentEvents(tenant, latest)
                 .get(sessionId))

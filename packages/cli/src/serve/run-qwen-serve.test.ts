@@ -157,6 +157,7 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     maxSessions: 20,
     maxPendingPromptsPerSession: 5,
     eventRingSize: 8_000,
+    eventRingMaxBytes: 8 * 1024 * 1024,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
     maxJournalEvents: 10_000,
     maxJournalBytes: 8 * 1024 * 1024,
@@ -731,6 +732,7 @@ it('marks only the live-conversation bridge with the Conversations provenance en
         workspace,
         maxSessions: 1,
         serveWebShell: false,
+        eventRingMaxBytes: 1_234_567,
       },
       {
         bridge: makeRuntimeBridge(),
@@ -758,6 +760,7 @@ it('marks only the live-conversation bridge with the Conversations provenance en
     expect((marked?.[0] as { boundWorkspace?: string }).boundWorkspace).toBe(
       canonicalRoot,
     );
+    expect(marked?.[0].eventRingMaxBytes).toBe(1_234_567);
     for (const call of createBridge.mock.calls) {
       const overrides = overridesOf(call);
       if (overrides?.[MARKER] === '1') continue;
@@ -1401,6 +1404,204 @@ describe('workspace skill settings persistence', () => {
     expect(deps?.persistDisabledSkillsBatch).toBeDefined();
     return deps!;
   };
+
+  it('persists User batches once, preserves unrelated settings, and skips no-op writes', async () => {
+    writeSkillSettings(['workspace-only'], ['pdf', 'rust:pdf']);
+    const settingsPath = path.join(qwenHome, 'settings.json');
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        skills: {
+          disabled: ['pdf', 'rust:pdf'],
+          defaultDisabled: ['rust:pdf', 'other'],
+        },
+        ui: { theme: 'Default' },
+      }),
+    );
+    const { persistUserSkillsActivation: persist } =
+      await captureSkillPersistence([]);
+    const save = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValues',
+    );
+    const guard = vi.fn();
+    await expect(
+      persist!(workspace, ['rust:pdf', 'future'], { state: 'enabled' }, guard),
+    ).resolves.toMatchObject({
+      outcomes: [
+        { skillName: 'rust:pdf', changed: true },
+        { skillName: 'future', changed: true },
+      ],
+    });
+    expect(JSON.parse(fs.readFileSync(settingsPath, 'utf8'))).toEqual({
+      $version: 4,
+      skills: {
+        disabled: ['pdf'],
+        defaultDisabled: ['other'],
+        enabled: ['rust:pdf', 'future'],
+      },
+      ui: { theme: 'Default' },
+    });
+    const before = fs.statSync(settingsPath).mtimeMs;
+    await expect(
+      persist!(workspace, ['RUST:PDF', 'future'], { state: 'enabled' }),
+    ).resolves.toEqual({
+      outcomes: [
+        { skillName: 'RUST:PDF', changed: false },
+        { skillName: 'future', changed: false },
+      ],
+      settingsChanges: [],
+    });
+    expect(fs.statSync(settingsPath).mtimeMs).toBe(before);
+    expect(save).toHaveBeenCalledOnce();
+    expect(guard).toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        fs.readFileSync(path.join(workspace, '.qwen/settings.json'), 'utf8'),
+      ),
+    ).toEqual({ $version: 4, skills: { disabled: ['workspace-only'] } });
+  });
+
+  it.each([{ value: 'pdf' }, { value: [null] }])(
+    'ignores malformed User Skill lists without rewriting unrelated lists: %j',
+    async ({ value }) => {
+      writeSkillSettings([]);
+      const settingsPath = path.join(qwenHome, 'settings.json');
+      fs.writeFileSync(
+        settingsPath,
+        JSON.stringify({
+          skills: { disabled: value, defaultDisabled: value, enabled: value },
+        }),
+      );
+      const { persistUserSkillsActivation: persist } =
+        await captureSkillPersistence([]);
+
+      await expect(
+        persist!(workspace, ['future'], { state: 'enabled' }),
+      ).resolves.toEqual({
+        outcomes: [{ skillName: 'future', changed: true }],
+        settingsChanges: [{ key: 'skills.enabled', value: ['future'] }],
+      });
+      expect(JSON.parse(fs.readFileSync(settingsPath, 'utf8')).skills).toEqual({
+        disabled: value,
+        defaultDisabled: value,
+        enabled: ['future'],
+      });
+    },
+  );
+
+  it('serializes User Skill mutations with other primary User settings writes', async () => {
+    writeSkillSettings([]);
+    const deps = await captureSkillPersistence([]);
+    await Promise.all([
+      deps.persistUserSkillsActivation!(workspace, ['alpha'], {
+        state: 'disabled',
+      }),
+      deps.persistUserSkillsActivation!(workspace, ['beta'], {
+        state: 'enabled',
+      }),
+      deps.persistSetting!(
+        workspace,
+        settingsRuntime.SettingScope.User,
+        'ui.theme',
+        'Default',
+      ),
+      deps.persistUserSkillsActivation!(workspace, ['alpha'], {
+        state: 'disabled',
+        mode: 'default',
+      }),
+    ]);
+    expect(
+      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8')),
+    ).toMatchObject({
+      skills: { enabled: ['beta'], defaultDisabled: ['alpha'] },
+      ui: { theme: 'Default' },
+    });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
+        .skills.disabled,
+    ).toBeUndefined();
+  });
+
+  it('finishes a User write while an already-started workspace catalog read is blocked', async () => {
+    writeSkillSettings([]);
+    let resolveCatalog!: (status: ServeWorkspaceSkillsStatus) => void;
+    const catalog = new Promise<ServeWorkspaceSkillsStatus>((resolve) => {
+      resolveCatalog = resolve;
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const query = vi.fn(() => {
+      markStarted();
+      return catalog;
+    });
+    const original = workspaceServiceRuntime.createDaemonWorkspaceService;
+    vi.spyOn(
+      workspaceServiceRuntime,
+      'createDaemonWorkspaceService',
+    ).mockImplementation((deps) =>
+      original({
+        ...deps,
+        workspaceSkillsStatusProvider: undefined,
+        queryWorkspaceStatus: query as unknown as QueryWorkspaceStatusFn,
+      }),
+    );
+    const deps = await captureSkillPersistence([]);
+    expect(query).not.toHaveBeenCalled();
+    const workspaceWrite = deps.persistDisabledSkills!(
+      workspace,
+      'rust:pdf',
+      true,
+    );
+    try {
+      await started;
+      await expect(
+        Promise.race([
+          deps.persistUserSkillsActivation!(workspace, ['future'], {
+            state: 'disabled',
+          }).then(() => 'written'),
+          new Promise((resolve) => setTimeout(() => resolve('blocked'), 1000)),
+        ]),
+      ).resolves.toBe('written');
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+        ).skills.disabled,
+      ).toEqual(['future']);
+    } finally {
+      resolveCatalog({
+        v: 1,
+        workspaceCwd: workspace,
+        initialized: true,
+        skills: [skillStatus('rust:pdf', 'project')],
+      });
+      await workspaceWrite;
+    }
+  });
+
+  it('rejects a closed generation at the commit guard without persisting', async () => {
+    writeSkillSettings([]);
+    const { persistUserSkillsActivation: persist } =
+      await captureSkillPersistence([]);
+    const before = fs.readFileSync(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+    const guard = vi
+      .fn()
+      .mockImplementationOnce(() => undefined)
+      .mockImplementation(() => {
+        throw new Error('generation closed');
+      });
+    await expect(
+      persist!(workspace, ['future'], { state: 'disabled' }, guard),
+    ).rejects.toThrow('generation closed');
+    expect(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8')).toBe(
+      before,
+    );
+  });
 
   it('uses catalog identity for a non-extension skill whose name contains a colon', async () => {
     writeSkillSettings(['rust:chat', 'chat']);
@@ -4956,6 +5157,144 @@ describe('validatePolicyConfig (#4335 boot validation)', () => {
   });
 });
 
+describe('runQwenServe Conversations directory configuration', () => {
+  let temporary: string;
+  let workspace: string;
+  let handle: RunHandle | undefined;
+
+  beforeEach(() => {
+    temporary = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-conversations-root-')),
+    );
+    workspace = path.join(temporary, 'project');
+    fs.mkdirSync(workspace);
+    vi.stubEnv('HOME', temporary);
+    vi.stubEnv('USERPROFILE', temporary);
+    vi.stubEnv('QWEN_HOME', path.join(temporary, '.qwen'));
+    vi.stubEnv('QWEN_CONVERSATIONS_DIR', undefined);
+    resetServeFastPathHomeEnvBootstrapForTesting();
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    vi.mocked(createDaemonUpdateRestarter).mockClear();
+  });
+
+  afterEach(async () => {
+    await handle?.close();
+    handle = undefined;
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    resetServeFastPathHomeEnvBootstrapForTesting();
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.rmSync(temporary, { recursive: true, force: true });
+  });
+
+  it.each(['default', 'environment', 'option'] as const)(
+    'pins the %s root before asynchronous boot, without creating it, and preserves it for restart',
+    async (source) => {
+      const expectedRoot =
+        source === 'default'
+          ? path.join(temporary, 'Documents', 'Qwen Code', 'Conversations')
+          : path.join(temporary, `${source} conversations`);
+      const laterRoot = path.join(temporary, 'later-root');
+      vi.stubEnv(
+        'QWEN_CONVERSATIONS_DIR',
+        source === 'option'
+          ? 'invalid-relative-environment-root'
+          : source === 'environment'
+            ? expectedRoot
+            : undefined,
+      );
+      let selectedWorkspace: ConversationWorkspace | undefined;
+      const originalCreateServeApp = serverModule.createServeApp;
+      vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+        selectedWorkspace = args[2]?.liveConversationWorkspace;
+        return originalCreateServeApp(...args);
+      });
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: 'localhost',
+          mode: 'http-bridge',
+          workspace,
+          serveWebShell: false,
+          ...(source === 'option' ? { conversationsDir: expectedRoot } : {}),
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          daemonLogBaseDir: path.join(temporary, 'debug'),
+          updateRestartArgv: ['serve'],
+          bindHostnameLookup: async () => {
+            vi.stubEnv('QWEN_CONVERSATIONS_DIR', laterRoot);
+            return { address: '127.0.0.1', family: 4 };
+          },
+        },
+      );
+      expect(selectedWorkspace?.rootPath).toBe(expectedRoot);
+      expect(fs.existsSync(expectedRoot)).toBe(false);
+      expect(fs.existsSync(laterRoot)).toBe(false);
+      expect(
+        readDaemonDiscoveries().entries.find(
+          (entry) => entry.record.port === Number(new URL(handle!.url).port),
+        )?.record,
+      ).toMatchObject({ conversationsDir: expectedRoot });
+      expect(createDaemonUpdateRestarter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({
+            QWEN_CONVERSATIONS_DIR: expectedRoot,
+          }),
+        }),
+      );
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+    },
+  );
+
+  it.each([
+    ['option', ''],
+    ['option', 'relative-root'],
+    ['option', null],
+    ['environment', ''],
+    ['environment', 'relative-root'],
+  ] as const)(
+    'rejects invalid %s root %j before listening',
+    async (source, root) => {
+      if (source === 'environment') vi.stubEnv('QWEN_CONVERSATIONS_DIR', root!);
+      const listen = vi.spyOn(net.Server.prototype, 'listen');
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace,
+            ...(source === 'option'
+              ? { conversationsDir: root as string }
+              : {}),
+          },
+          { bridge: makeRuntimeBridge() },
+        ),
+      ).rejects.toThrow(
+        /Conversations directory.*fully qualified absolute path/,
+      );
+      expect(listen).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reserves the environment-selected root from ordinary workspace registration', async () => {
+    const root = path.join(temporary, 'configured-root');
+    fs.mkdirSync(root, { mode: 0o700 });
+    vi.stubEnv('QWEN_CONVERSATIONS_DIR', root);
+    const listen = vi.spyOn(net.Server.prototype, 'listen');
+    await expect(
+      runQwenServe({
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: root,
+      }),
+    ).rejects.toThrow(/reserved for Conversations/);
+    expect(listen).not.toHaveBeenCalled();
+  });
+});
+
 /**
  * Integration test: verify daemon logger is initialized and written to
  * during `runQwenServe` boot + shutdown. Uses a fake bridge to avoid
@@ -6068,6 +6407,7 @@ describe('runQwenServe telemetry validation', () => {
         workspace: [primary, secondary],
         maxSessions: 1,
         eventRingSize: 1234,
+        eventRingMaxBytes: 1_234_567,
         compactedReplayMaxBytes: 1024,
         channelIdleTimeoutMs: 60_000,
         sessionRestoreTimeoutMs: 90_000,
@@ -6126,6 +6466,7 @@ describe('runQwenServe telemetry validation', () => {
         channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
+        eventRingMaxBytes: 1_234_567,
         sessionRestoreTimeoutMs: 90_000,
         sessionPromptSettledCloseGraceMs: 5_000,
         permissionPolicy: 'local-only',
@@ -6135,6 +6476,7 @@ describe('runQwenServe telemetry validation', () => {
         channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
+        eventRingMaxBytes: 1_234_567,
         sessionRestoreTimeoutMs: 90_000,
         sessionPromptSettledCloseGraceMs: 5_000,
         permissionPolicy: 'local-only',
@@ -6553,6 +6895,7 @@ describe('runQwenServe paired execution engines', () => {
         restoreAskUserQuestion: true,
         maxPendingPromptsPerSession: 7,
         eventRingSize: 1234,
+        eventRingMaxBytes: 1_234_567,
         compactedReplayMaxBytes: 2_345_678,
         maxJournalEvents: 3456,
         maxJournalBytes: 4_567_890,
@@ -6594,6 +6937,9 @@ describe('runQwenServe paired execution engines', () => {
       expect(scratch.status).toBe(201);
       const scratchCwd = ((await scratch.json()) as { cwd: string }).cwd;
       expect(createBridge).toHaveBeenCalledTimes(4);
+      for (const [options] of createBridge.mock.calls) {
+        expect(options.eventRingMaxBytes).toBe(1_234_567);
+      }
       const factoryStorage = spawnFactoryStorage();
       return {
         options: createBridge.mock.calls.map(([options]) => options),
@@ -8626,6 +8972,14 @@ describe('runQwenServe pre-listen bridge option validation', () => {
     ['maxTotalSessions', Number.NaN, /maxTotalSessions/],
     ['maxTotalSessions', -1, /maxTotalSessions/],
     ['maxTotalSessions', 1.5, /maxTotalSessions/],
+    ['eventRingMaxBytes', 0, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', -1, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', 1.5, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', Number.NaN, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', Number.POSITIVE_INFINITY, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', Number.NEGATIVE_INFINITY, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', Number.MAX_SAFE_INTEGER + 1, /eventRingMaxBytes/],
+    ['eventRingMaxBytes', 256 * 1024 * 1024 + 1, /eventRingMaxBytes/],
     ['eventRingSize', 0, /eventRingSize/],
     ['eventRingSize', 1.5, /eventRingSize/],
     ['eventRingSize', Number.POSITIVE_INFINITY, /eventRingSize/],
@@ -8643,6 +8997,8 @@ describe('runQwenServe pre-listen bridge option validation', () => {
       tmpDir = fs.realpathSync(
         fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bridge-opt-')),
       );
+      const listen = vi.spyOn(net.Server.prototype, 'listen');
+      const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
       const stdoutWrites: string[] = [];
       vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
         stdoutWrites.push(String(chunk));
@@ -8659,6 +9015,8 @@ describe('runQwenServe pre-listen bridge option validation', () => {
         }),
       ).rejects.toThrow(message);
       expect(stdoutWrites.join('')).not.toContain('qwen serve listening on');
+      expect(listen).not.toHaveBeenCalled();
+      expect(createBridge).not.toHaveBeenCalled();
     },
   );
 
@@ -14035,6 +14393,37 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it.each([undefined, 1, 1024 * 1024, 256 * 1024 * 1024])(
+    'advertises resolved eventRingMaxBytes=%s before runtime startup',
+    async (eventRingMaxBytes) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ring-bytes-')),
+      );
+      const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+        serveOptions: { eventRingMaxBytes, serveWebShell: false },
+      });
+      try {
+        const resolved = eventRingMaxBytes ?? 8 * 1024 * 1024;
+        expect(createBridge).not.toHaveBeenCalled();
+        const response = await fetch(`${handle.url}/daemon/status`, {
+          headers: { Authorization: 'Bearer secret-token' },
+        });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({
+          limits: { eventRingMaxBytes: resolved },
+          runtime: { loading: true },
+        });
+        await fetch(`${handle.url}/health`);
+        await handle.runtimeReady;
+        expect(createBridge.mock.calls[0]?.[0].eventRingMaxBytes).toBe(
+          resolved,
+        );
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
   it('reports bootstrap status and capabilities when fast path resolves on listen', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
@@ -14093,6 +14482,7 @@ describe('runQwenServe runtime startup failures', () => {
           'capabilities',
           'daemon_status',
           'workspace_settings',
+          'user_skill_activation',
           'workspace_reload',
           'workspace_acp_preheat',
           'workspace_acp_status',
@@ -14195,6 +14585,7 @@ describe('runQwenServe runtime startup failures', () => {
           maxPendingPromptsPerSession: 5,
           listenerMaxConnections: 256,
           eventRingSize: 8_000,
+          eventRingMaxBytes: 8 * 1024 * 1024,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,

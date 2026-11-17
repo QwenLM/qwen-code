@@ -422,9 +422,9 @@ describe('ArenaManager', () => {
           undefined,
           'headless',
           getBuiltInOutputStyle('Concise'),
-          manager['config'],
           true,
           false,
+          { searchConfig: manager['config'] },
         );
       }
 

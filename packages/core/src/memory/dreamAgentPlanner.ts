@@ -9,6 +9,7 @@ import {
   runForkedAgent,
   type ForkedAgentResult,
 } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import {
@@ -196,7 +197,9 @@ export async function planManagedAutoMemoryDreamByAgent(
   });
 
   if (result.status === 'failed') {
-    throw new Error(result.terminateReason || 'Dream agent failed');
+    throw new Error(
+      terminateReasonMessage(result.terminateReason, 'Dream agent failed'),
+    );
   }
 
   if (result.status === 'cancelled') {
@@ -206,7 +209,10 @@ export async function planManagedAutoMemoryDreamByAgent(
     // aborted dream as a normal completion (which would overwrite the
     // user-cancelled record with 'completed' + bump dream metadata).
     throw new Error(
-      result.terminateReason || 'Dream agent cancelled before completion',
+      terminateReasonMessage(
+        result.terminateReason,
+        'Dream agent cancelled before completion',
+      ),
     );
   }
 

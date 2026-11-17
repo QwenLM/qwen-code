@@ -16,7 +16,7 @@ class HarnessOwnershipTest {
         assertFalse(HarnessOwnership.sharesRuntimeSessions(request("workspace", null, "local-process", null, PROFILE)));
         assertFalse(HarnessOwnership.sharesRuntimeSessions(request("workspace", null, "legacy", null, PROFILE)));
         assertFalse(HarnessOwnership.sharesRuntimeSessions(request("workspace", null, "static", null, PROFILE)));
-        assertFalse(HarnessOwnership.sharesRuntimeSessions(request("workspace", null, "kubernetes-workspace", "storage", PROFILE)));
+        assertFalse(HarnessOwnership.sharesRuntimeSessions(request("workspace", null, "external-workspace", "storage", PROFILE)));
         assertFalse(HarnessOwnership.sharesRuntimeSessions(
                 request("workspace", null, "local-process", "storage", "sha256:" + "b".repeat(64))));
         assertFalse(HarnessOwnership.sharesRuntimeSessions(null));

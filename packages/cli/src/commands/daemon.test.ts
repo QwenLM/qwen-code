@@ -4,17 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawn } from 'node:child_process';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import type { Argv } from 'yargs';
+import yargs, { type Argv } from 'yargs';
 
 const sanitizeTerminalText = vi.hoisted(() =>
   vi.fn((value: string) => value.replace(/\p{Cc}/gu, '')),
 );
 
 vi.mock('../ui/utils/textUtils.js', () => ({ sanitizeTerminalText }));
+
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
+  spawn: vi.fn(() => {
+    throw new Error('unexpected daemon spawn');
+  }),
+}));
 
 // A record only names a process inside the namespace it was written in, so
 // the decision table is pinned against a fixed local namespace here.
@@ -107,6 +115,44 @@ describe('qwen daemon command', () => {
     );
   });
 
+  it('rejects repeated Conversations roots before spawning a daemon', async () => {
+    const tempDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-start-root-'),
+    );
+    const exitCode = process.exitCode;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.stubEnv('QWEN_HOME', tempDir);
+    vi.stubEnv('QWEN_RUNTIME_DIR', tempDir);
+    vi.mocked(spawn).mockClear();
+    try {
+      await yargs([])
+        .exitProcess(false)
+        .fail(false)
+        .command(daemonCommand)
+        .parseAsync([
+          'daemon',
+          'start',
+          '--workspace',
+          tempDir,
+          '--conversations-dir',
+          path.join(tempDir, 'root-a'),
+          '--conversations-dir',
+          path.join(tempDir, 'root-b'),
+        ]);
+
+      expect(process.exitCode).toBe(1);
+      expect(stderr.mock.calls.map(([text]) => String(text)).join('')).toBe(
+        'qwen daemon: pass --conversations-dir once.\n',
+      );
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      process.exitCode = exitCode;
+      stderr.mockRestore();
+      vi.unstubAllEnvs();
+      await fsp.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   describe('restart', () => {
     const cli = '/opt/qwen/index.js';
     const plan = (
@@ -176,6 +222,38 @@ describe('qwen daemon command', () => {
       );
       expect(result.error).toContain('did not record its startup workspaces');
       expect(result.stopArgs).toBeUndefined();
+    });
+
+    it('preserves the recorded Conversations root over a changed restart environment', () => {
+      const conversationsDir = path.resolve('persistent', 'conversations root');
+      const result = plan(
+        recorded({ conversationsDir }),
+        {},
+        {
+          QWEN_CONVERSATIONS_DIR: path.resolve('different-root'),
+        },
+      );
+      expect(result.error).toBeUndefined();
+      const optionIndex = result.startArgs!.indexOf('--conversations-dir');
+      expect(optionIndex).toBeGreaterThan(-1);
+      expect(result.startArgs![optionIndex + 1]).toBe(conversationsDir);
+      expect(result.env?.['QWEN_CONVERSATIONS_DIR']).toBe(
+        path.resolve('different-root'),
+      );
+    });
+
+    it('keeps environment-based selection for older records without a Conversations root', () => {
+      const conversationsDir = path.resolve('legacy-launch-root');
+      const result = plan(
+        recorded(),
+        {},
+        {
+          QWEN_CONVERSATIONS_DIR: conversationsDir,
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.startArgs).not.toContain('--conversations-dir');
+      expect(result.env?.['QWEN_CONVERSATIONS_DIR']).toBe(conversationsDir);
     });
 
     it('names the defaults it assumes for an older single-workspace record', () => {
@@ -622,6 +700,22 @@ describe('qwen daemon command', () => {
       '--workspace',
       '/repo',
     ]);
+  });
+
+  it('forwards the Conversations root as one argument when starting a daemon', () => {
+    const conversationsDir = path.resolve('persistent', 'conversations root');
+    const { args } = buildDaemonStartArgs({
+      entry: '/opt/qwen/index.js',
+      port: 4170,
+      hostname: '127.0.0.1',
+      workspaces: ['/repo'],
+      conversationsDir,
+      web: true,
+      requireAuth: false,
+    });
+    const optionIndex = args.indexOf('--conversations-dir');
+    expect(optionIndex).toBeGreaterThan(-1);
+    expect(args[optionIndex + 1]).toBe(conversationsDir);
   });
 
   it('formats a start summary with the bound port', () => {

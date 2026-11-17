@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -10,7 +11,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ManagedToolResultProjectorTest {
     @Test
     void disabledTickDoesNoWorkAndEnabledTickStopsAfterEightClaims() {
-        var store = org.mockito.Mockito.mock(ManagedToolResultStore.class);
+        var store = org.mockito.Mockito.mock(JdbcManagedToolResultStore.class);
         var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
         var factory = new org.springframework.beans.factory.support.StaticListableBeanFactory();
         var projector =
@@ -20,13 +21,13 @@ class ManagedToolResultProjectorTest {
                                 org.mockito.Mockito.mock(
                                         org.springframework.jdbc.core.JdbcTemplate.class),
                                 factory.getBeanProvider(ToolPublicationDataStore.class),
-                                org.mockito.Mockito.mock(ManagedArtifactReader.class),
+                                org.mockito.Mockito.mock(ToolPublicationArtifactReader.class),
                                 org.mockito.Mockito.mock(
                                         com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy.class),
                                 properties));
         projector.tick();
         org.mockito.Mockito.verifyNoInteractions(store);
-        var claim = new ManagedToolResultStore.Claim(null, 1);
+        var claim = new JdbcManagedToolResultStore.Claim(null, 1);
         org.mockito.Mockito.when(store.claim()).thenReturn(java.util.Optional.of(claim));
         org.mockito.Mockito.doNothing().when(projector).project(claim);
         properties.getArtifacts().setEnabled(true);
@@ -37,7 +38,7 @@ class ManagedToolResultProjectorTest {
 
     @Test
     void contendedTenantGuardSkipsThePassInsteadOfEscapingTheScheduler() {
-        var store = org.mockito.Mockito.mock(ManagedToolResultStore.class);
+        var store = org.mockito.Mockito.mock(JdbcManagedToolResultStore.class);
         var properties = new com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties();
         properties.getArtifacts().setEnabled(true);
         var factory = new org.springframework.beans.factory.support.StaticListableBeanFactory();
@@ -47,7 +48,7 @@ class ManagedToolResultProjectorTest {
                         org.mockito.Mockito.mock(
                                 org.springframework.jdbc.core.JdbcTemplate.class),
                         factory.getBeanProvider(ToolPublicationDataStore.class),
-                        org.mockito.Mockito.mock(ManagedArtifactReader.class),
+                        org.mockito.Mockito.mock(ToolPublicationArtifactReader.class),
                         org.mockito.Mockito.mock(
                                 com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy.class),
                         properties);
@@ -96,9 +97,9 @@ class ManagedToolResultProjectorTest {
 
     @Test
     void scopedIdentityEncodingIsStableAndUnambiguous() {
-        assertThat(com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.identity("result", "1", "tenant-1", "workspace-1", "session-1", "execution-1"))
+        assertThat(ManagedToolResultStore.identity("result", "1", "tenant-1", "workspace-1", "session-1", "execution-1"))
                 .isEqualTo("result_2cfafc7d888110d51e955a9816b826fe3fd617141bbf38748bf6116b0efc5d69");
-        assertThat(com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.identity("result", "1", "a", "bc"))
-                .isNotEqualTo(com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.identity("result", "1", "ab", "c"));
+        assertThat(ManagedToolResultStore.identity("result", "1", "a", "bc"))
+                .isNotEqualTo(ManagedToolResultStore.identity("result", "1", "ab", "c"));
     }
 }

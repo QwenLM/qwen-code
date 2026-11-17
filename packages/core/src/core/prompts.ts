@@ -542,6 +542,7 @@ function buildDefaultBasePrompt(
   todoWriteEnabled = false,
   codeModeOnly = false,
   surface?: PromptToolSurface,
+  identityOverride: string | null = null,
 ): string {
   // A style with `keepCodingInstructions: false` drops exactly the
   // software-engineering workflow section; every other section, including the
@@ -567,7 +568,7 @@ When you create a todo list:
   // variant applies only to the default identity sentence — the override is
   // distributor-owned wording we must not rewrite.
   const coreIdentity =
-    resolveCoreIdentityOverride() ??
+    identityOverride ??
     getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
   const hasBashSearch = isBashSearchAvailable(searchConfig);
   const toolGuidance = getToolGuidanceSection(
@@ -744,6 +745,31 @@ export function resolveMainSessionOutputStyle(config: {
   return resolveEffectiveOutputStyle(style, resolveInteractionMode(config));
 }
 
+export interface CoreSystemPromptSource {
+  systemMdPath: string;
+  systemPrompt?: string;
+  identity: string | null;
+}
+
+export function loadCoreSystemPromptSource(): CoreSystemPromptSource {
+  const systemMdEnabled = isSystemMdActive();
+  const resolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+  const systemMdPath =
+    systemMdEnabled && !resolution.isSwitch && resolution.value
+      ? resolution.value
+      : path.resolve(path.join(QWEN_DIR, 'system.md'));
+  if (systemMdEnabled && !fs.existsSync(systemMdPath)) {
+    throw new Error(`missing system prompt file '${systemMdPath}'`);
+  }
+  return {
+    systemMdPath,
+    ...(systemMdEnabled
+      ? { systemPrompt: fs.readFileSync(systemMdPath, 'utf8') }
+      : {}),
+    identity: systemMdEnabled ? null : resolveCoreIdentityOverride(),
+  };
+}
+
 /**
  * Builds the stable base system prompt (identity, mandates, tool guidance).
  *
@@ -758,8 +784,6 @@ export function resolveMainSessionOutputStyle(config: {
  * @param interactionMode - Interactive vs. headless prompt variant.
  * @param outputStyle - Active output style, layered onto the base prompt.
  *   Ignored when `QWEN_SYSTEM_MD` replaces the base prompt (see below).
- * @param searchConfig - Config whose resolved search surface the prompt should
- *   describe.
  * @param todoWriteEnabled - Whether the default prompt may advertise Todo.
  * @param codeModeOnly - Whether the model's only callable ordinary tool is
  *   `exec`, which selects the code-mode tool guidance and worked examples.
@@ -770,45 +794,26 @@ export function getCoreSystemPrompt(
   appendInstruction?: string,
   interactionMode: SystemPromptInteractionMode = 'interactive',
   outputStyle?: OutputStyleDefinition | null,
-  searchConfig?: object | boolean,
   todoWriteEnabled = false,
   codeModeOnly = false,
   // Trailing options object rather than an eighth positional parameter: this
   // function is re-exported from the package root and its arity is asserted by
   // callers' tests (#12032).
-  options?: PromptToolSurface,
+  options?: PromptToolSurface & {
+    source?: CoreSystemPromptSource;
+    searchConfig?: object;
+  },
 ): string {
-  const effectiveSearchConfig =
-    typeof searchConfig === 'boolean' ? undefined : searchConfig;
-  const effectiveTodoWriteEnabled =
-    typeof searchConfig === 'boolean' ? searchConfig : todoWriteEnabled;
-  const effectiveCodeModeOnly =
-    typeof searchConfig === 'boolean' ? todoWriteEnabled : codeModeOnly;
+  const source = options?.source;
   const effectiveOutputStyle = resolveEffectiveOutputStyle(
     outputStyle,
     interactionMode,
   );
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
-  const systemMdEnabled = isSystemMdActive();
-  let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
-
-  if (systemMdEnabled) {
-    // Resolve the environment variable to get either a path or a switch value.
-    const systemMdResolution = resolvePathFromEnv(
-      process.env['QWEN_SYSTEM_MD'],
-    );
-
-    // We update systemMdPath to this new custom path.
-    if (!systemMdResolution.isSwitch && systemMdResolution.value) {
-      systemMdPath = systemMdResolution.value;
-    }
-
-    // require file to exist when override is enabled
-    if (!fs.existsSync(systemMdPath)) {
-      throw new Error(`missing system prompt file '${systemMdPath}'`);
-    }
-  }
+  const promptSource = source ?? loadCoreSystemPromptSource();
+  const systemMdEnabled = promptSource.systemPrompt !== undefined;
+  const systemMdPath = promptSource.systemMdPath;
 
   const interaction = getInteractionModePrompt(interactionMode);
   // A QWEN_SYSTEM_MD override replaces the base prompt verbatim and is
@@ -822,15 +827,16 @@ export function getCoreSystemPrompt(
   // default-prompt branch and are ignored whenever `QWEN_SYSTEM_MD` is in
   // effect (including empty-file clear).
   const basePrompt = systemMdEnabled
-    ? fs.readFileSync(systemMdPath, 'utf8')
+    ? promptSource.systemPrompt!
     : buildDefaultBasePrompt(
         interaction,
         model,
         effectiveOutputStyle,
-        effectiveSearchConfig,
-        effectiveTodoWriteEnabled,
-        effectiveCodeModeOnly,
+        options?.searchConfig,
+        todoWriteEnabled,
+        codeModeOnly,
         options,
+        promptSource.identity,
       );
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
@@ -840,7 +846,11 @@ export function getCoreSystemPrompt(
 
   // Check if the feature is enabled. This proceeds only if the environment
   // variable is set and is not explicitly '0' or 'false'.
-  if (writeSystemMdResolution.value && !writeSystemMdResolution.isDisabled) {
+  if (
+    !source &&
+    writeSystemMdResolution.value &&
+    !writeSystemMdResolution.isDisabled
+  ) {
     const writePath = writeSystemMdResolution.isSwitch
       ? systemMdPath
       : writeSystemMdResolution.value;
@@ -857,10 +867,11 @@ export function getCoreSystemPrompt(
             interaction,
             model,
             undefined,
-            effectiveSearchConfig,
-            effectiveTodoWriteEnabled,
-            effectiveCodeModeOnly,
+            options?.searchConfig,
+            todoWriteEnabled,
+            codeModeOnly,
             options,
+            promptSource.identity,
           ),
     );
   }

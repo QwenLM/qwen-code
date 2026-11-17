@@ -21,6 +21,7 @@ import {
   type WorkspaceAgentRuntimeView,
   type WorkspaceAgentSummaryView,
 } from './ThreadsPage';
+import { connectExistingWith, joinCoordinatorWith } from './add-runtime-dialog';
 import { AgentCreatePage } from '../agents/AgentCreatePage';
 import { useI18n } from '../../i18n';
 import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
@@ -104,6 +105,9 @@ export function AgentsRoute({
       : initialView,
   );
   const [pending, setPending] = useState(false);
+  // A join or remote connect from a runtime dialog in flight. Apart from
+  // `pending`, which another action could clear meanwhile.
+  const [connecting, setConnecting] = useState(false);
   // Set while the New agent page is open; may name the runtime to preselect.
   const [creatingAgent, setCreatingAgent] = useState<
     { hostId?: string } | undefined
@@ -274,20 +278,18 @@ export function AgentsRoute({
         runtimes={runtimes}
         onConnectRemoteHost={
           connectRemoteHost
-            ? (input) => mutate(() => connectRemoteHost(input))
+            ? connectExistingWith(mutate, connectRemoteHost, setConnecting)
             : undefined
         }
         onJoinCoordinator={
+          // Errors stay in the dialog, beside the link that caused them.
           joinCoordinator
-            ? async (input) => {
-                // Errors stay in the dialog, beside the link that caused them.
-                await joinCoordinator(input);
-                return true;
-              }
+            ? joinCoordinatorWith(joinCoordinator, setConnecting)
             : undefined
         }
         onMentionAgent={onMentionAgent}
         pending={pending}
+        connecting={connecting}
         onDeleteAgent={(id) => void mutate(() => client.deleteAgent(id))}
         onSetAgentEnabled={(id, enabled) =>
           void mutate(() => client.setAgentEnabled(id, enabled))

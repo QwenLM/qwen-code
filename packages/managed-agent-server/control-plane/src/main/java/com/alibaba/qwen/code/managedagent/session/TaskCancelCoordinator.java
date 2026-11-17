@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.session;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.TaskCancelOutcome;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
@@ -34,13 +34,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -109,7 +105,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
     private static final Set<String> BACKGROUND_TASK_KINDS = Set.of(
             "background_shell", "monitor");
 
-    private final AgentStateStore store;
+    private final SessionLifecycleStore store;
     private final ManagedExtensionRecordStore records;
     private final HarnessConnector harness;
     private final RuntimeBrokerOperations broker;
@@ -117,22 +113,16 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
     private final Clock clock;
     private final ManagedAgentSettings.Dispatch dispatch;
     private final Duration attemptDeadline;
-    private final String owner = UUID.randomUUID().toString();
-    private final Set<String> active = ConcurrentHashMap.newKeySet();
-    private final ScheduledExecutorService renewals =
-            Executors.newSingleThreadScheduledExecutor(task -> {
-                Thread thread = new Thread(task, "task-cancel-renewal");
-                thread.setDaemon(true);
-                return thread;
-            });
+    private final LeaseRenewalRunner runner =
+            new LeaseRenewalRunner("task-cancel-renewal");
 
     @PreDestroy
     void stopRenewals() {
-        renewals.shutdownNow();
+        runner.close();
     }
 
     @Autowired
-    public TaskCancelCoordinator(AgentStateStore store,
+    public TaskCancelCoordinator(SessionLifecycleStore store,
             ManagedExtensionRecordStore records, HarnessConnector harness,
             ObjectProvider<RuntimeBrokerOperations> broker,
             @Qualifier("managedAgentExecutor") ExecutorService executor, @Qualifier("managedAgentClock") Clock clock,
@@ -156,7 +146,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
                 : ATTEMPT_DEADLINE;
     }
 
-    TaskCancelCoordinator(AgentStateStore store,
+    TaskCancelCoordinator(SessionLifecycleStore store,
             ManagedExtensionRecordStore records, HarnessConnector harness,
             RuntimeBrokerOperations broker, ExecutorService executor,
             Clock clock, ManagedAgentSettings properties,
@@ -177,17 +167,10 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
 
     public void dispatch(String tenantId, String sessionId,
             String operationId) {
-        String key = tenantId + "\n" + sessionId + "\n" + operationId;
-        if (!active.add(key)) {
-            return;
-        }
-        executor.execute(() -> {
-            try {
-                deliver(tenantId, sessionId, operationId);
-            } finally {
-                active.remove(key);
-            }
-        });
+        runner.dispatchOnce(
+                executor,
+                LeaseRenewalRunner.scopedKey(tenantId, sessionId, operationId),
+                () -> deliver(tenantId, sessionId, operationId));
     }
 
     @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
@@ -268,25 +251,23 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
 
     private void deliver(String tenantId, String sessionId,
             String operationId) {
+        String owner = runner.owner();
         OperationRecord claimed = store.claimOperation(tenantId, sessionId,
                 operationId, owner, dispatch.getLeaseDuration()).orElse(null);
         if (claimed == null) {
             return;
         }
-        long period = Math.max(1, dispatch.getLeaseDuration().toMillis() / 3);
-        ScheduledFuture<?> renewal = renewals.scheduleWithFixedDelay(() -> {
-            try {
-                store.renewLifecycleOperation(tenantId, sessionId,
+        long period = LeaseRenewalRunner.renewalPeriodMillis(
+                dispatch.getLeaseDuration());
+        // A lost lease fails the guarded settlement writes below.
+        var renewal = runner.startFixedDelay(
+                period,
+                () -> store.renewLifecycleOperation(tenantId, sessionId,
                         operationId, owner, claimed.claimGeneration(),
-                        dispatch.getLeaseDuration());
-            } catch (RuntimeException ignored) {
-                // A lost lease fails the guarded settlement writes below.
-            }
-        }, period, period, TimeUnit.MILLISECONDS);
-        try {
+                        dispatch.getLeaseDuration()),
+                ignored -> {});
+        try (renewal) {
             deliverClaimed(claimed);
-        } finally {
-            renewal.cancel(false);
         }
     }
 
@@ -336,7 +317,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
             retryOrPark(claimed, "the stop request is not committed yet");
             return;
         }
-        if (!store.settleTaskCancel(tenantId, sessionId, operationId, owner,
+        if (!store.settleTaskCancel(tenantId, sessionId, operationId, runner.owner(),
                 claimed.claimGeneration(), verdict.outcome(), 0)) {
             LOG.warn("Task cancel was claimed by another worker tenant={}"
                     + " session={} operation={}", tenantId, sessionId,
@@ -486,7 +467,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
 
     private void park(OperationRecord operation, String failure) {
         boolean parked = store.settleTaskCancel(operation.tenantId(),
-                operation.sessionId(), operation.operationId(), owner,
+                operation.sessionId(), operation.operationId(), runner.owner(),
                 operation.claimGeneration(),
                 TaskCancelOutcome.recoveryBlocked(UNCONFIRMED),
                 Math.addExact(clock.millis(), PARKED_RECHECK.toMillis()));
@@ -507,7 +488,7 @@ public class TaskCancelCoordinator implements AcceptanceEvidence {
                 dispatch.getRetryInitialDelay(), dispatch.getRetryMaxDelay(),
                 operation.attemptCount());
         store.retryOperation(operation.tenantId(), operation.sessionId(),
-                operation.operationId(), owner, operation.claimGeneration(),
+                operation.operationId(), runner.owner(), operation.claimGeneration(),
                 Math.addExact(clock.millis(), delay));
         LOG.debug("Task cancel will retry operation={} failure={}",
                 operation.operationId(), failure);

@@ -11,6 +11,32 @@ import { matchTurnEvent } from '../src/daemon/DaemonClient.js';
 import { normalizeDaemonEvent } from '../src/daemon/ui/normalizer.js';
 
 describe('daemon transcript rewind', () => {
+  it('retains subscription quota display context through normalization and replay', () => {
+    const subscriptionQuota = {
+      type: 'subscription_quota',
+      memberType: 'pro',
+      resetAt: 1800000000,
+    };
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session',
+        message: 'quota fallback',
+        subscriptionQuota,
+      },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'error',
+      text: 'quota fallback',
+      data: { subscriptionQuota },
+    });
+  });
   it.each([
     { v: 1, type: 'session_rewound', data: {} },
     { v: 1, type: 'session_update', data: { sessionId: 'other-session' } },
@@ -1131,4 +1157,294 @@ it('preserves local command identity on read-only status results', () => {
     state.blocks.every((block) => block.id.startsWith('local-command:tools:')),
   ).toBe(true);
   expect(new Set(state.blocks.map((block) => block.id)).size).toBe(2);
+});
+
+describe('tool name carried only by the lifecycle metadata', () => {
+  const producerFrame = (patch: Record<string, unknown> = {}) => ({
+    v: 1 as const,
+    id: 1,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call_update' as const,
+        toolCallId: 'call-1',
+        _meta: {
+          toolLifecycle: {
+            v: 1,
+            kind: 'tool',
+            sessionId: 'session',
+            executionId: 'exec-1',
+            callId: 'call-1',
+            toolName: 'read_file',
+            phase: 'ended',
+            executionStatus: 'success',
+            startedAt: 100,
+            endedAt: 120,
+            executionDurationMs: 20,
+            outcome: 'success',
+          },
+        },
+        ...patch,
+      },
+    },
+  });
+  const createdFrame = {
+    v: 1 as const,
+    id: 0,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call' as const,
+        toolCallId: 'call-1',
+        status: 'in_progress',
+      },
+    },
+  };
+
+  it('names an existing block from the producer lifecycle frame', () => {
+    const created = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(createdFrame),
+      { now: 1 },
+    );
+    expect(created.blocks).toHaveLength(1);
+    expect(created.blocks[0]).toMatchObject({ kind: 'tool', title: 'Tool' });
+
+    const named = reduceDaemonTranscriptEvents(
+      created,
+      normalizeDaemonEvent(producerFrame()),
+      { now: 2 },
+    );
+    expect(named.blocks).toHaveLength(1);
+    expect(named.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'read_file',
+      // The human-readable title is never replaced by the bare tool name.
+      title: 'Tool',
+    });
+  });
+
+  it('keeps an explicit title and _meta.toolName ahead of the lifecycle name', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        producerFrame({
+          status: 'completed',
+          title: 'Output retained',
+          _meta: {
+            toolLifecycle: producerFrame().data.update._meta.toolLifecycle,
+            toolName: 'explicit_tool',
+          },
+        }),
+      ),
+      { now: 1 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'explicit_tool',
+      title: 'Output retained',
+    });
+  });
+
+  it('does not rename an already-named block from a later lifecycle frame', () => {
+    const explicit = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        producerFrame({
+          status: 'completed',
+          title: 'Output retained',
+          _meta: {
+            toolLifecycle: producerFrame().data.update._meta.toolLifecycle,
+            toolName: 'explicit_tool',
+          },
+        }),
+      ),
+      { now: 1 },
+    );
+    const afterLifecycle = reduceDaemonTranscriptEvents(
+      explicit,
+      // The lifecycle stream normally ends after the result frame; the name
+      // must not overwrite the explicit one.
+      normalizeDaemonEvent(producerFrame()),
+      { now: 2 },
+    );
+    expect(afterLifecycle.blocks).toHaveLength(1);
+    expect(afterLifecycle.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'explicit_tool',
+      title: 'Output retained',
+    });
+  });
+
+  it('drops a lifecycle name that fails the v1 validator when a status rides along', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(
+        producerFrame({
+          status: 'completed',
+          title: 'Output retained',
+          _meta: {
+            // Schema bump: the metadata-only arm already rejects `v !== 1`;
+            // the status-bearing path must make the same decision.
+            toolLifecycle: {
+              ...producerFrame().data.update._meta.toolLifecycle,
+              v: 2,
+            },
+          },
+        }),
+      ),
+      { now: 1 },
+    );
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      title: 'Output retained',
+    });
+    expect(state.blocks[0].toolName).toBeUndefined();
+  });
+
+  // Producer-shaped create frame: the literal `createTranscriptToolCallStartUpdate`
+  // emits (title + content + locations + kind + rawInput + `_meta.toolName`).
+  const startFrame = {
+    v: 1 as const,
+    id: 2,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call' as const,
+        toolCallId: 'call-1',
+        status: 'pending',
+        title: 'Read file',
+        content: [],
+        locations: [],
+        kind: 'read',
+        rawInput: {},
+        _meta: { toolName: 'read_file', provenance: 'builtin' },
+      },
+    },
+  };
+  const lifecycleFrame = (phase: 'started' | 'ended') => ({
+    v: 1 as const,
+    id: 3,
+    type: 'session_update' as const,
+    data: {
+      update: {
+        sessionUpdate: 'tool_call_update' as const,
+        toolCallId: 'call-1',
+        _meta: {
+          toolLifecycle: {
+            v: 1,
+            kind: 'tool',
+            sessionId: 'session',
+            executionId: 'exec-1',
+            callId: 'call-1',
+            toolName: 'read_file',
+            phase,
+            executionStatus: phase === 'ended' ? 'success' : 'running',
+            startedAt: 100,
+            ...(phase === 'ended'
+              ? {
+                  endedAt: 120,
+                  executionDurationMs: 20,
+                  outcome: 'success',
+                }
+              : {}),
+          },
+        },
+      },
+    },
+  });
+
+  it('a name-only frame for an unseen call id creates no card and a later create frame still builds one', () => {
+    const attached = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(lifecycleFrame('started')),
+      { now: 1 },
+    );
+    // Name-only frames never create a card, even for an unseen call id.
+    expect(attached.blocks).toHaveLength(0);
+
+    const created = reduceDaemonTranscriptEvents(
+      attached,
+      normalizeDaemonEvent(startFrame),
+      { now: 2 },
+    );
+    expect(created.blocks).toHaveLength(1);
+    expect(created.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'read_file',
+      title: 'Read file',
+    });
+  });
+
+  it('seeds the late name when the status frame carries none', () => {
+    const attached = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent(lifecycleFrame('started')),
+      { now: 1 },
+    );
+    const completed = reduceDaemonTranscriptEvents(
+      attached,
+      normalizeDaemonEvent({
+        v: 1 as const,
+        id: 4,
+        type: 'session_update' as const,
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update' as const,
+            toolCallId: 'call-1',
+            status: 'completed',
+          },
+        },
+      }),
+      { now: 2 },
+    );
+    expect(completed.blocks).toHaveLength(1);
+    expect(completed.blocks[0]).toMatchObject({
+      kind: 'tool',
+      toolName: 'read_file',
+      title: 'read_file',
+      status: 'completed',
+    });
+  });
+
+  it('bounds the parked names and evicts the oldest first', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    for (let i = 0; i < 257; i += 1) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          v: 1 as const,
+          id: 100 + i,
+          type: 'session_update' as const,
+          data: {
+            update: {
+              sessionUpdate: 'tool_call_update' as const,
+              toolCallId: `call-${i}`,
+              _meta: {
+                toolLifecycle: {
+                  v: 1,
+                  kind: 'tool',
+                  sessionId: 'session',
+                  executionId: `exec-${i}`,
+                  callId: `call-${i}`,
+                  toolName: 'read_file',
+                  phase: 'started',
+                  executionStatus: 'running',
+                  startedAt: 100,
+                },
+              },
+            },
+          },
+        }),
+        { now: 2 },
+      );
+    }
+    const parked = Object.keys(state.pendingToolNameByCallId);
+    expect(parked).toHaveLength(256);
+    // Oldest first: `call-0` is evicted, the newest entry survives.
+    expect(state.pendingToolNameByCallId['call-0']).toBeUndefined();
+    expect(state.pendingToolNameByCallId['call-256']).toBe('read_file');
+    // Parking a name must never create a card on its own.
+    expect(state.blocks).toHaveLength(0);
+  });
 });

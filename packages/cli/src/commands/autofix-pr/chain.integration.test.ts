@@ -45,10 +45,12 @@ import yargs from 'yargs';
 
 const mocks = vi.hoisted(() => ({
   stdout: vi.fn((_line: string) => {}),
+  stderr: vi.fn((_line: string) => {}),
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mocks.stdout,
+  writeStderrLine: mocks.stderr,
   writeStderrLineSafe: () => {},
 }));
 
@@ -65,7 +67,7 @@ const FAKE_GH = fileURLToPath(
   new URL('./__fixtures__/fake-gh.mjs', import.meta.url),
 );
 
-type Conclusion = 'SUCCESS' | 'FAILURE';
+type Conclusion = 'SUCCESS' | 'FAILURE' | 'TIMED_OUT';
 
 interface Job {
   id: number;
@@ -120,7 +122,8 @@ interface World {
     comments: Comment[];
   }>;
   nextId: number;
-  /** The next comment POST reaches GitHub, and its answer is lost. */
+  /** The next write (a comment, a re-run) reaches GitHub, and its answer
+   * is lost. */
   loseNextAnswer?: boolean;
 }
 
@@ -186,9 +189,12 @@ describe.skipIf(process.platform === 'win32')(
         .filter((args) => args.includes('--method') || args[0] === 'run')
         .map((args) => args.join(' '));
 
-    /** One helper, parsed by yargs as the CLI parses it: what it printed. */
+    /** One helper, parsed by yargs as the CLI parses it: what it printed.
+     * A refusal — exit 1, and its JSON line last on stderr — rejects, with
+     * the line's fields on the error. */
     async function cli(...argv: string[]): Promise<Output[]> {
       mocks.stdout.mockClear();
+      mocks.stderr.mockClear();
       // Each helper runs in a process of its own: no host carries over.
       setGhHost(undefined);
       await yargs()
@@ -199,6 +205,13 @@ describe.skipIf(process.platform === 'win32')(
           throw error ?? new Error(message);
         })
         .parseAsync(['autofix-pr', ...argv]);
+      if (process.exitCode === 1) {
+        process.exitCode = undefined;
+        const refusal = JSON.parse(
+          String(mocks.stderr.mock.calls.at(-1)?.[0]),
+        ) as { refused: string; next: string; message: string };
+        throw Object.assign(new Error(refusal.message), refusal);
+      }
       return mocks.stdout.mock.calls.map(
         ([line]) => JSON.parse(line) as Output,
       );
@@ -270,7 +283,7 @@ describe.skipIf(process.platform === 'win32')(
     }
 
     /** A workflow run on `sha`: a job per name, finished unless it is
-     * `IN_PROGRESS`. */
+     * `IN_PROGRESS`, and a failed one with `log`. */
     function ci(
       sha: string,
       runId: number,
@@ -289,7 +302,7 @@ describe.skipIf(process.platform === 'win32')(
             ...(result === 'IN_PROGRESS'
               ? { status: 'IN_PROGRESS' as const }
               : { status: 'COMPLETED' as const, conclusion: result }),
-            ...(result === 'FAILURE' ? { log } : {}),
+            ...(result === 'FAILURE' || result === 'TIMED_OUT' ? { log } : {}),
           })),
         });
       });
@@ -590,8 +603,13 @@ describe.skipIf(process.platform === 'win32')(
       updateWorld((world) => {
         world.loseNextAnswer = true;
       });
-      await expect(cli('reply', '7', plan, '--task', id)).rejects.toThrow(
-        /HTTP 502/,
+      // A reply that failed is still owed: the skill runs it again.
+      await expect(cli('reply', '7', plan, '--task', id)).rejects.toMatchObject(
+        {
+          refused: 'failed',
+          next: 'retry',
+          message: expect.stringMatching(/HTTP 502/),
+        },
       );
       expect(await cli('reply', '7', plan, '--task', id)).toMatchObject([
         { adopted: 1, posted: [{ kind: 'summary' }] },
@@ -742,7 +760,7 @@ describe.skipIf(process.platform === 'win32')(
       const { events } = await snapshot('--task', id);
       expect(events).toMatchObject([{ type: 'ci_failed', runId: 11 }]);
       const key = events[0]['key'] as string;
-      expect(key).not.toBe(`test@${head}@#110`);
+      expect(key).toBe(`test@${head}@#100001`);
       await cli('ci-log', '7', '11', '--task', id);
       const [refused] = await cli('rerun', '7', '11', '--task', id);
       expect(refused).toMatchObject({ rerun: false, checks: ['test'] });
@@ -765,6 +783,90 @@ describe.skipIf(process.platform === 'win32')(
 
       expect(writes()).toEqual([
         'run rerun 11 --failed -R o/r',
+        'api --method POST repos/o/r/issues/7/comments --input -',
+      ]);
+      expectPushes([]);
+      expect(checkoutState()).toBe(checkoutBefore);
+    });
+
+    it('re-runs a job that timed out once, counting the re-run whose answer was lost', async () => {
+      const head = prHead();
+      const timedOut =
+        'The job has exceeded the maximum execution time of 10m0s\n';
+      ci(head, 12, { e2e: 'TIMED_OUT', lint: 'SUCCESS' }, timedOut);
+      await prepare();
+      const { gate: gateCommand, task: id } = await schedule();
+
+      // The start's round: the job hung, and the fix agent answered
+      // `rerun`. GitHub re-runs it, and its answer is lost on the way back.
+      await cli('sync', '7', '--task', id);
+      const first = `e2e@${head}@#120`;
+      expect((await snapshot('--task', id)).events).toMatchObject([
+        { type: 'ci_failed', check: 'e2e', key: first },
+      ]);
+      expect(await cli('ci-log', '7', '12', '--task', id)).toMatchObject([
+        { jobs: ['e2e'] },
+      ]);
+      updateWorld((world) => {
+        world.loseNextAnswer = true;
+      });
+      await expect(cli('rerun', '7', '12', '--task', id)).rejects.toMatchObject(
+        {
+          refused: 'rerun_failed',
+          next: 'needs_human',
+          message: expect.stringMatching(
+            /\(or its answer was lost; the re-run is counted\): .*failed to rerun: HTTP 502/,
+          ),
+        },
+      );
+      // Not re-run for sure: the skill leaves it for a person.
+      const lost = writePlan({
+        summary: { body: 'e2e timed out; its re-run got no answer.' },
+        handledChecks: [first],
+        needsHuman: [`${first}: no answer to its re-run`],
+      });
+      expect(await cli('reply', '7', lost, '--task', id)).toMatchObject([
+        { posted: [{ kind: 'summary' }], handledChecks: 1 },
+      ]);
+      expect(await gate(gateCommand)).toEqual([]);
+      // The re-run went ahead all the same, and timed out again.
+      finish(12, 'e2e', 'TIMED_OUT', timedOut);
+
+      // The gate wakes a round, and the re-run whose answer was lost was
+      // the head's one.
+      expect(await gate(gateCommand)).toMatchObject([
+        { action: 'fix', events: [{ type: 'ci_failed', runId: 12 }] },
+      ]);
+      await cli('sync', '7', '--task', id);
+      const { events } = await snapshot('--task', id);
+      expect(events).toMatchObject([{ type: 'ci_failed', check: 'e2e' }]);
+      // The re-run's own attempt, the job it queued.
+      const key = events[0]['key'] as string;
+      expect(key).toBe(`e2e@${head}@#100001`);
+      await cli('ci-log', '7', '12', '--task', id);
+      const [refused] = await cli('rerun', '7', '12', '--task', id);
+      expect(refused).toMatchObject({ rerun: false, checks: ['e2e'] });
+      expect(refused['reason']).toMatch(/re-run on this head already/);
+
+      const plan = writePlan({
+        summary: { body: 'e2e times out again after a re-run.' },
+        handledChecks: [key],
+        needsHuman: [`${key}: times out again after a re-run`],
+      });
+      expect(await cli('reply', '7', plan, '--task', id)).toMatchObject([
+        { posted: [{ kind: 'summary' }], handledChecks: 1 },
+      ]);
+      expect(await gate(gateCommand)).toEqual([]);
+      expect(await cli('status', '7')).toMatchObject([
+        {
+          watches: [{ pushes: 0, needsHuman: [{ sha: head }, { sha: head }] }],
+        },
+      ]);
+      expect(await cli('cleanup', '7')).toMatchObject([{ removed: true }]);
+
+      expect(writes()).toEqual([
+        'run rerun 12 --failed -R o/r',
+        'api --method POST repos/o/r/issues/7/comments --input -',
         'api --method POST repos/o/r/issues/7/comments --input -',
       ]);
       expectPushes([]);
@@ -1012,9 +1114,11 @@ describe.skipIf(process.platform === 'win32')(
           authorCanPush: false,
           resumed: false,
         });
-        await expect(cli('schedule', '7')).rejects.toThrow(
-          /only --once is available/,
-        );
+        await expect(cli('schedule', '7')).rejects.toMatchObject({
+          refused: 'failed',
+          next: 'report',
+          message: expect.stringMatching(/only --once is available/),
+        });
         expect(await cli('cleanup', '7')).toMatchObject([{ removed: true }]);
       }
 

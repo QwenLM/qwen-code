@@ -11,6 +11,7 @@ import {
   getCustomSystemPrompt,
   getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
+  loadCoreSystemPromptSource,
   resolvePathFromEnv,
   getCompressionPrompt,
   resolveInteractionMode,
@@ -78,7 +79,6 @@ const corePrompt = (o: PromptOpts = {}) =>
     o.append,
     o.mode,
     o.style,
-    undefined,
     o.todo,
     o.codeMode,
     o.declaredTools || o.agentReachable !== undefined
@@ -576,6 +576,115 @@ describe('Core System Prompt (prompts.ts)', () => {
   });
 
   describe('QWEN_SYSTEM_MD environment variable', () => {
+    it.each([
+      { todo: false, codeMode: false },
+      { todo: true, codeMode: false },
+      { todo: false, codeMode: true },
+      { todo: true, codeMode: true },
+    ])(
+      'forwards search config and cached source without shifting Todo=$todo or CodeMode=$codeMode',
+      ({ todo, codeMode }) => {
+        vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', '/identity.md');
+        vi.stubEnv('QWEN_WRITE_SYSTEM_MD', '/dump.md');
+        mockAnyFile('Pinned search identity');
+        const source = loadCoreSystemPromptSource();
+        const config = {
+          ...makeConfig({
+            interactive: true,
+            acp: false,
+            codeModeOnly: codeMode,
+          }),
+          isTodoWriteEnabled: () => todo,
+        };
+        vi.mocked(isBashSearchAvailable).mockImplementation(
+          (candidate) => candidate === config,
+        );
+        vi.mocked(fs.readFileSync).mockClear();
+        vi.mocked(fs.writeFileSync).mockClear();
+
+        const fromClient = getMainSessionBaseSystemPrompt(
+          config,
+          'test-model',
+          source,
+        );
+        const direct = getCoreSystemPrompt(
+          undefined,
+          'test-model',
+          undefined,
+          'interactive',
+          undefined,
+          todo,
+          codeMode,
+          { source, searchConfig: config },
+        );
+
+        expect(fromClient).toBe(direct);
+        expect(fromClient).toContain('Pinned search identity');
+        expect(fromClient.includes('# Task Management')).toBe(todo);
+        expect(
+          fromClient.includes("Ordinary tools exist only inside 'exec'"),
+        ).toBe(codeMode);
+        if (!codeMode) {
+          expect(fromClient).toContain("use 'run_shell_command' with `rg`");
+        }
+        expect(isBashSearchAvailable).toHaveBeenNthCalledWith(1, config);
+        expect(isBashSearchAvailable).toHaveBeenNthCalledWith(2, config);
+        expect(fs.readFileSync).not.toHaveBeenCalled();
+        expect(fs.writeFileSync).not.toHaveBeenCalled();
+      },
+    );
+
+    it('reuses loaded source text without per-request file reads or dumps', () => {
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', '/identity.md');
+      vi.stubEnv('QWEN_WRITE_SYSTEM_MD', '/dump.md');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('Pinned identity');
+      const source = loadCoreSystemPromptSource();
+      vi.mocked(fs.readFileSync).mockClear();
+      vi.mocked(fs.writeFileSync).mockClear();
+      const render = (model: string) =>
+        getCoreSystemPrompt(
+          undefined,
+          model,
+          undefined,
+          'interactive',
+          undefined,
+          false,
+          false,
+          { source },
+        );
+      const coder = render('qwen3-coder');
+      const vl = render('qwen3-vl');
+      expect(coder).toContain('Pinned identity');
+      expect(vl).toContain('Pinned identity');
+      expect(coder).not.toBe(vl);
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('keeps a loaded full override literal for every request model', () => {
+      vi.stubEnv('QWEN_SYSTEM_MD', '/system.md');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('Literal system body');
+      const source = loadCoreSystemPromptSource();
+      vi.mocked(fs.readFileSync).mockClear();
+      for (const model of ['qwen3-coder', 'qwen3-vl']) {
+        expect(
+          getCoreSystemPrompt(
+            undefined,
+            model,
+            undefined,
+            'interactive',
+            undefined,
+            false,
+            false,
+            { source },
+          ),
+        ).toBe('Literal system body');
+      }
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+    });
+
     it.each([
       ['should use default prompt when QWEN_SYSTEM_MD is "false"', 'false'],
       ['should use default prompt when QWEN_SYSTEM_MD is "0"', '0'],

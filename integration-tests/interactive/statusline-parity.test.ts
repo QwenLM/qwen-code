@@ -24,6 +24,7 @@ import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { InteractiveSession } from './interactive-session.js';
+import { createUntil } from './wait.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const runtime = resolveE2eCliCommand(pickE2eRenderer());
@@ -50,13 +51,7 @@ function artifactFiles(
     });
 }
 
-async function until(check: () => boolean | Promise<boolean>, message: string) {
-  const deadline = Date.now() + 20_000;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(message);
-    await sleep(50);
-  }
-}
+const until = createUntil(20_000);
 
 interface CommandRecord {
   pid: number;

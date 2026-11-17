@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 // FG10 (issue #14165): multi-process fault gates for the child_run
@@ -106,9 +107,9 @@ class HostedWorkflowFaultGatesIT {
         // so the relay-created child Session's store traffic crosses it)
         // and the packaged Harness (harness.base-url). All three ports are
         // pinned before Spring boots.
-        int port = freePort();
-        int storeProxyPort = freePort();
-        int harnessPort = freePort();
+        int port = reservePort();
+        int storeProxyPort = reservePort();
+        int harnessPort = reservePort();
 
         var arguments = new ArrayList<>(List.of("--server.address=127.0.0.1",
                 "--server.port=" + port,
@@ -370,13 +371,6 @@ class HostedWorkflowFaultGatesIT {
         assertThat(cli).as("Build and bundle the packaged CLI first")
                 .isRegularFile();
         return cli;
-    }
-
-    private static int freePort() throws java.io.IOException {
-        try (java.net.ServerSocket socket = new java.net.ServerSocket(0, 0,
-                java.net.InetAddress.getLoopbackAddress())) {
-            return socket.getLocalPort();
-        }
     }
 
     private static Path repoRoot() {

@@ -58,13 +58,16 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.pull_request.base.sha || github.sha }}'
-          # Cone mode takes directories: this entry brings both entry scripts,
-          # and cone mode adds the files directly under .github/, which holds
-          # issue-owners.json. Don't list the files themselves — on a reused
-          # ECS workspace cone mode rejects them ("is not a directory"), and
-          # non-cone mode leaves core.sparseCheckout set so the runner's next
-          # full checkout comes out sparse.
-          sparse-checkout: '.github/scripts'
+          # Check out all of .github/, not just .github/scripts: cone mode
+          # would add the files directly under .github/ (issue-owners.json),
+          # but `git sparse-checkout set` reuses the mode already stored in a
+          # workspace, and a reused ECS workspace can be left in non-cone mode
+          # by another job (e.g. qwen-triage). In non-cone mode the narrower
+          # pattern drops issue-owners.json and the script fails with ENOENT.
+          # `.github` covers the scripts and the owner map under either mode.
+          # Don't list individual files — cone mode rejects them ("is not a
+          # directory") on a reused ECS workspace.
+          sparse-checkout: '.github'
           persist-credentials: false
 
       - name: 'Assign area owner'

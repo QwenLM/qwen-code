@@ -5,6 +5,10 @@
  */
 
 import { Turn, LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  runModelRound,
+  type ModelRoundSource,
+} from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';
 import { getErrorStatus } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
@@ -17,9 +21,12 @@ import type { HostedModelRequest } from './hosted-model-recovery.js';
 import type { HostedModelSelection } from './hosted-model-selection.js';
 import type { PublicChildModelRoute } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import { HOSTED_MODEL_REQUEST_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/hosted-recovery-records.js';
+import { captureManagedContext } from '@qwen-code/qwen-code-core/managed-runtime/managed-context-snapshot.js';
 
 import type { Content, Part } from '@google/genai';
 import { classifyAction } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import type { ClassifierResult } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import type { HostedLoopClassifier } from './hosted-loop-session.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   runWithRuntimeContentGenerator,
@@ -33,10 +40,16 @@ import type {
   ChatRecord,
   ChatCompressionRecordPayload,
 } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
-import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import {
+  filterHostedTurnHistory,
+  normalizeHostedTurnRecords,
+} from './hosted-turn-history.js';
 import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
+import type { HostedMemorySession } from './hosted-memory-session.js';
+import type { HostedModelConfigReader } from './hosted-model-config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 import {
@@ -250,12 +263,136 @@ export function hostedToolOutputBudget(cwd: string): number {
   );
 }
 
+/**
+ * A fire-time classifier for loop sentinel re-review (decision 5). The
+ * arm-time classifier reviewed the sentinel constant, not the resolved file
+ * text, so a full (first/changed) fire is re-reviewed before it runs. Unlike
+ * the arm-time review there is no active turn at delivery time, so this
+ * builds a short-lived Hosted config (the same trust-pinned construction the
+ * model turn uses) per fire, classifies the resolved content as a
+ * `loop_wakeup` continuation, and shuts the config down. Loop fires are
+ * clamped to >= 60 s, so the per-fire config cost is bounded. Fail closed: an
+ * unavailable classifier reports `unavailable`, and the fire delivers a no-op
+ * re-arm tick (withholding the unreviewed guidance) rather than running it;
+ * only an explicit denial settles the loop dead.
+ */
+export function createHostedLoopFireClassifier(deps: {
+  cwd: string;
+  sessionId: string;
+  modelConfig?: HostedModelConfigReader;
+  /** The Session's definition model pin, used when there is no
+   * modelConfigDigest — the same fallback the model turn resolves (R9-1). */
+  model?: HostedAgentDefinition['model'];
+}): HostedLoopClassifier {
+  return async ({ delaySeconds, prompt, reason }) => {
+    let config: Awaited<ReturnType<typeof loadCliConfig>> | undefined;
+    try {
+      // Wire the Session's own model, exactly as the model turn does, so the
+      // re-review classifies with the model the Session actually runs rather
+      // than an ambient default that may have no credentials.
+      const sessionModelConfig = await deps.modelConfig?.();
+      const settings = loadSettings(deps.cwd, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: true,
+        workspaceTrusted: false,
+      });
+      const argv = {
+        acp: true,
+        safeMode: true,
+        chatRecording: false,
+        sessionId: deps.sessionId,
+        sessionIdGenerated: true,
+      } as CliArgs;
+      config = await loadCliConfig(
+        settings.merged,
+        argv,
+        deps.cwd,
+        undefined,
+        getSeparatedHookSettings(settings),
+        undefined,
+        undefined,
+        undefined,
+        true,
+        {
+          toolInvocationGuard: () => ({ allowed: false }),
+          lspDisabled: true,
+          ...(sessionModelConfig
+            ? { modelConfiguration: sessionModelConfig }
+            : {}),
+        },
+      );
+      // With no digest the turn falls back to the definition model pin; the
+      // fire must pin the same model, not leave the ambient default (R9-1).
+      if (!sessionModelConfig) await applyHostedModelPin(config, deps.model);
+      // loadCliConfig only constructs the Config; the classifier's side query
+      // reads config.getBaseLlmClient(), whose content generator is created
+      // only by initialize()+refreshAuth() (D1). Without them every fire
+      // reported unavailable and the loop never delivered guidance. Mirror the
+      // model turn's trust-pinned sequence so the re-review actually runs.
+      const fireAbort = new AbortController();
+      await config.initialize({
+        signal: fireAbort.signal,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+        lenientToolWarmup: true,
+      });
+      const authType = config.getModelsConfig().getCurrentAuthType();
+      if (!authType) {
+        throw new Error(
+          'Loop fire-time classifier authentication is unavailable.',
+        );
+      }
+      await config.refreshAuth(authType, true);
+      const result = await classifyAction({
+        toolName: 'loop_wakeup',
+        toolParams: { delaySeconds, prompt, reason },
+        messages: [{ role: 'user', parts: [{ text: prompt }] }],
+        config,
+        signal: fireAbort.signal,
+      });
+      return {
+        allowed: !result.shouldBlock && !result.unavailable,
+        reason: result.reason || null,
+        // A transient outage is not a denial: the fire delivers a no-op re-arm
+        // tick and the loop survives to retry, instead of settling dead.
+        unavailable: result.unavailable,
+      };
+    } catch (cause) {
+      // Fail closed without throwing into the pump's pick, but treat a
+      // classifier that cannot be built as a transient outage (no-op re-arm),
+      // not a permanent denial that would end the loop. Surface the cause so a
+      // persistent config/auth failure is diagnosable instead of silently
+      // looping on no-op ticks (N-3).
+      writeStderrLineSafe(
+        'qwen serve: Loop fire-time classifier unavailable for Session ' +
+          deps.sessionId +
+          ': ' +
+          String(cause),
+      );
+      return {
+        allowed: false,
+        unavailable: true,
+        reason: 'Loop fire-time classifier unavailable.',
+      };
+    } finally {
+      await config
+        ?.shutdown({ shutdownTelemetry: false })
+        .catch(() => undefined);
+    }
+  };
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;
   history: readonly ChatRecord[];
   excludedPromptIds?: ReadonlySet<string>;
   classifierUserText?: () => Promise<ReadonlyMap<string, string>>;
+  /** Publishes this turn's permission classifier, adapted for loop arming,
+   * to the Session; cleared when the turn ends. */
+  setLoopClassifier?: (classify: HostedLoopClassifier | undefined) => void;
   commitCompression?: (payload: ChatCompressionRecordPayload) => Promise<void>;
   prompt: string;
   attachmentParts?: readonly Part[];
@@ -306,11 +443,15 @@ export async function runHostedHarnessTextTurn(input: {
         | 'setChildModelResolver'
         | 'planModeInstructions'
         | 'todoInstructions'
+        | 'diagnosticMcpToolNames'
       >
     >;
   workspaceContext?: { read(): string | undefined };
   agentDefinition?: HostedAgentDefinition;
   modelSelection?: HostedModelSelection;
+  modelConfig?: HostedModelConfigReader;
+  memory?: Pick<HostedMemorySession, 'recall'>;
+  recallUserInput?: boolean;
   publicChildModelRoute?: PublicChildModelRoute;
   agentInstructions?: string;
   extensionInstructions?: string;
@@ -323,6 +464,14 @@ export async function runHostedHarnessTextTurn(input: {
     model: string,
   ) => Promise<void>;
 }): Promise<HostedHarnessModelResult> {
+  const sessionModelConfig = await input.modelConfig?.();
+  if (
+    sessionModelConfig &&
+    input.modelSelection &&
+    sessionModelConfig.model !== input.modelSelection.modelId
+  ) {
+    throw new HostedModelUnavailableError();
+  }
   const settings = loadSettings(input.cwd, {
     skipLoadEnvironment: true,
     skipWorkspaceSettings: true,
@@ -341,19 +490,25 @@ export async function runHostedHarnessTextTurn(input: {
     argv,
     input.cwd,
     undefined,
-    undefined,
+    getSeparatedHookSettings(settings),
     undefined,
     undefined,
     undefined,
     true,
-    { toolInvocationGuard: () => ({ allowed: false }) },
+    {
+      toolInvocationGuard: () => ({ allowed: false }),
+      lspDisabled: true,
+      ...(sessionModelConfig ? { modelConfiguration: sessionModelConfig } : {}),
+    },
   );
   const outputBudget = config.getToolOutputBatchBudget?.();
   if (outputBudget !== undefined)
     input.toolTurn?.setToolOutputBudget?.(outputBudget);
-  const model = input.modelSelection
-    ? { id: input.modelSelection.modelId }
-    : input.agentDefinition?.model;
+  const model = sessionModelConfig
+    ? { id: sessionModelConfig.model }
+    : input.modelSelection
+      ? { id: input.modelSelection.modelId }
+      : input.agentDefinition?.model;
   if (input.publicChildModelRoute)
     await applyHostedPublicChildModelPin(
       config,
@@ -362,7 +517,7 @@ export async function runHostedHarnessTextTurn(input: {
         : model,
       input.publicChildModelRoute.origin ?? input.publicChildModelRoute,
     );
-  else await applyHostedModelPin(config, model);
+  else if (!sessionModelConfig) await applyHostedModelPin(config, model);
   if (input.publicChildModelRoute?.origin) {
     // Config falls back to its own generator until authentication fills this frame.
     const view = {} as RuntimeContentGeneratorView;
@@ -379,6 +534,10 @@ async function runPreparedHostedHarnessTextTurn(
   model: HostedAgentDefinition['model'] | undefined,
   runtimeView?: RuntimeContentGeneratorView,
 ): Promise<HostedHarnessModelResult> {
+  const modelRecords = normalizeHostedTurnRecords(
+    input.history,
+    input.excludedPromptIds,
+  );
   let todoContext = await input.toolTurn?.todoInstructions?.();
   const contextWithInstructions = (context: string | undefined) =>
     [
@@ -400,14 +559,10 @@ async function runPreparedHostedHarnessTextTurn(
     input.resumeFromToolResults !== undefined ||
     (input.resumeModel?.pendingToolResults ?? false);
   const excludeUnanswered = (history: Content[]) =>
-    history.filter(
-      (entry) =>
-        entry.role !== 'user' ||
-        !input.excludedPromptIds?.has(getApiHistoryPromptId(entry) ?? ''),
-    );
+    filterHostedTurnHistory(history, input.excludedPromptIds);
   const initialMessages: Content[] = excludeUnanswered(
     buildSessionHistoryFromConversation({
-      messages: input.history,
+      messages: modelRecords,
     }).apiHistory,
   );
   if (!input.resumeFromToolResults && !input.resumeModel)
@@ -476,7 +631,7 @@ async function runPreparedHostedHarnessTextTurn(
             resumedAfter:
               event !== HookEventName.InstructionsLoaded &&
               input.resumeFromToolResults
-                ? input.history.at(-1)?.uuid
+                ? modelRecords.at(-1)?.uuid
                 : null,
           }),
         )
@@ -648,14 +803,19 @@ async function runPreparedHostedHarnessTextTurn(
               .update(selected.baseUrl ?? '')
               .digest('hex'),
             providerPin: llmPreparedProviderPin(selected),
-            origin: {
-              modelId: config.getModel(),
-              authType: active.authType!,
-              endpointDigest: createHash('sha256')
-                .update(active.baseUrl ?? '')
-                .digest('hex'),
-              providerPin: llmPreparedProviderPin(active),
-            },
+            ...(!input.modelConfig ||
+            llmPreparedProviderPin(selected) !== llmPreparedProviderPin(active)
+              ? {
+                  origin: {
+                    modelId: config.getModel(),
+                    authType: active.authType!,
+                    endpointDigest: createHash('sha256')
+                      .update(active.baseUrl ?? '')
+                      .digest('hex'),
+                    providerPin: llmPreparedProviderPin(active),
+                  },
+                }
+              : {}),
           },
         };
       });
@@ -721,6 +881,19 @@ async function runPreparedHostedHarnessTextTurn(
           queued.signal,
         );
     }
+    if (
+      input.memory &&
+      input.recallUserInput &&
+      !input.resumeFromToolResults &&
+      !input.resumeModel
+    ) {
+      const memoryContext = await input.memory.recall(
+        input.promptId,
+        input.prompt,
+        input.signal,
+      );
+      if (memoryContext) effectivePrompt += `\n${memoryContext}`;
+    }
     const textDeltas = input.hooks
       ?.getCatalog()
       ?.hooks.some(
@@ -741,7 +914,10 @@ async function runPreparedHostedHarnessTextTurn(
     }
     let originalUserText: Promise<ReadonlyMap<string, string>> | undefined;
     const classifierActions: Content[] = [];
-    input.toolTurn?.setPermissionClassifier?.(async (call, signal) => {
+    const permissionClassifier = async (
+      call: ToolCallRequestInfo,
+      signal: AbortSignal,
+    ): Promise<ClassifierResult> => {
       originalUserText ??=
         input.classifierUserText?.() ??
         Promise.resolve(new Map([[input.promptId, input.prompt]]));
@@ -768,7 +944,7 @@ async function runPreparedHostedHarnessTextTurn(
           stage: 'fast',
           durationMs: 0,
         };
-      const messages: Content[] = input.history.flatMap((record) => {
+      const messages: Content[] = modelRecords.flatMap((record) => {
         if (record.type !== 'user' && record.type !== 'assistant') return [];
         if (input.excludedPromptIds?.has(record.daemonPromptId ?? ''))
           return [];
@@ -806,13 +982,33 @@ async function runPreparedHostedHarnessTextTurn(
         ],
       });
       return result;
+    };
+    input.toolTurn?.setPermissionClassifier?.(permissionClassifier);
+    // Loop arming rides the same classifier: a wakeup is future model input,
+    // so it is vetted like the turn's other side-effectful tools. Fail closed
+    // when the classifier blocks or is unavailable.
+    input.setLoopClassifier?.(async ({ delaySeconds, prompt, reason }) => {
+      const result = await permissionClassifier(
+        {
+          callId: randomUUID(),
+          name: 'loop_wakeup',
+          args: { delaySeconds, prompt, reason },
+          isClientInitiated: false,
+          prompt_id: input.promptId,
+        },
+        input.signal,
+      );
+      return {
+        allowed: !result.shouldBlock && !result.unavailable,
+        reason: result.reason || null,
+      };
     });
     // Safe mode stays on; the Session's Workspace instructions arrive through
     // the context slot instead of the Harness host's filesystem. The loop below
     // injects them before the first request too.
     let injectedContext: string | undefined;
     let injectedTools: ReadonlySet<string> | undefined;
-    const lastAssistant = input.history.findLastIndex(
+    const lastAssistant = modelRecords.findLastIndex(
       (record) => record.type === 'assistant',
     );
     const resumedIds = new Set(
@@ -821,7 +1017,7 @@ async function runPreparedHostedHarnessTextTurn(
       ),
     );
     const historyRecords = input.resumeFromToolResults
-      ? input.history.flatMap((record, index) => {
+      ? modelRecords.flatMap((record, index) => {
           if (index <= lastAssistant) return [record];
           if (record.type !== 'system' || record.subtype !== 'chat_compression')
             return [];
@@ -837,7 +1033,7 @@ async function runPreparedHostedHarnessTextTurn(
             typeof prefix !== 'number' ||
             !Number.isSafeInteger(prefix) ||
             prefix < 0 ||
-            payload.compressedHistory.length !== prefix + 1 ||
+            payload.compressedHistory.length < prefix + 1 ||
             pending?.role !== 'user' ||
             !responses?.length ||
             responses.some((response) => !resumedIds.has(response.id ?? ''))
@@ -848,15 +1044,15 @@ async function runPreparedHostedHarnessTextTurn(
               ...record,
               systemPayload: {
                 ...payload,
-                compressedHistory: payload.compressedHistory.slice(0, prefix),
+                compressedHistory: payload.compressedHistory.slice(0, -1),
                 ...(payload.promptIds
-                  ? { promptIds: payload.promptIds.slice(0, prefix) }
+                  ? { promptIds: payload.promptIds.slice(0, -1) }
                   : {}),
               },
             },
           ];
         })
-      : input.history;
+      : modelRecords;
     const restored = buildSessionHistoryFromConversation({
       messages: historyRecords,
     });
@@ -865,9 +1061,9 @@ async function runPreparedHostedHarnessTextTurn(
       client.setCompressionObserver(input.commitCompression, {
         restoreRecentFiles: false,
       });
-    // Failed and cancelled turns have no assistant record, and curated
-    // history drops an empty assistant record while keeping its prompt. Omit
-    // both kinds of unanswered prompt even when later completed turns follow.
+    // Text-only turns need a visible answer; curated history can drop an
+    // empty assistant record while keeping its prompt. Tool-profile turns
+    // can carry calls without text and use journal-based group exclusion.
     const answered = (entry: Content | undefined): boolean =>
       entry?.role === 'model' &&
       !!entry.parts?.some((part) => !part.thought && !!part.text);
@@ -951,7 +1147,14 @@ async function runPreparedHostedHarnessTextTurn(
         if (submit?.shouldStopExecution() || submit?.isBlockingDecision())
           throw new Error('Hook blocked queued user input.');
         const updated = submit?.hookSpecificOutput?.['updatedPrompt'];
-        const context = submit?.getAdditionalContext();
+        const memoryContext = await input.memory?.recall(
+          message.id,
+          message.text,
+          input.signal,
+        );
+        const context = [submit?.getAdditionalContext(), memoryContext]
+          .filter(Boolean)
+          .join('\n');
         if (typeof updated === 'string' || context) {
           parts = [
             {
@@ -1035,9 +1238,10 @@ async function runPreparedHostedHarnessTextTurn(
       let modelFailure = true;
       let completeAttempt:
         | Awaited<ReturnType<ManagedHookModelScope['beginMainAttempt']>>
-        | undefined = input.prepareModel
-        ? undefined
-        : await input.modelScope?.beginMainAttempt(config.getModel());
+        | undefined =
+        input.prepareModel || input.modelScope?.diagnosticsEnabled
+          ? undefined
+          : await input.modelScope?.beginMainAttempt(config.getModel());
       let modelOccurrence =
         completeAttempt?.attemptId ?? `${input.promptId}:${round}`;
       let contextWindowSize =
@@ -1046,12 +1250,61 @@ async function runPreparedHostedHarnessTextTurn(
         prepared,
         captureUnsupported,
       ) => {
-        await captureChildRoute(prepared);
         const activeConfig = config.getContentGeneratorConfig();
         contextWindowSize =
           prepared.providerPin === llmPreparedProviderPin(activeConfig)
             ? activeConfig?.contextWindowSize
             : undefined;
+        const contextSnapshot = input.modelScope?.diagnosticsEnabled
+          ? captureManagedContext({
+              prepared,
+              turnId: input.promptId,
+              contextWindowSize,
+              autoCompactThreshold: config.getAutoCompactThreshold(),
+              mcpToolNames:
+                input.toolTurn?.diagnosticMcpToolNames?.() ?? new Set(),
+              origins: [
+                {
+                  category: 'instructionFiles',
+                  name: 'Agent instructions',
+                  text: input.agentInstructions
+                    ? `# Agent instructions\n\n${input.agentInstructions}`
+                    : undefined,
+                },
+                {
+                  category: 'instructionFiles',
+                  name: 'Extension instructions',
+                  text: input.extensionInstructions,
+                },
+                {
+                  category: 'instructionFiles',
+                  name: 'Workspace instructions',
+                  text: input.workspaceContext?.read(),
+                },
+                {
+                  category: 'skills',
+                  name: 'Skill catalog',
+                  text: input.skills?.instructions(),
+                },
+                {
+                  category: 'startupContext',
+                  name: 'Plan instructions',
+                  text: input.toolTurn?.planModeInstructions?.(),
+                },
+                {
+                  category: 'startupContext',
+                  name: 'Todo context',
+                  text: todoContext,
+                },
+                {
+                  category: 'memoryFiles',
+                  name: 'Auto memory',
+                  text: config.getAutoMemoryPrompt(),
+                },
+              ],
+            })
+          : undefined;
+        await captureChildRoute(prepared);
         if (completeAttempt) {
           const previous = completeAttempt;
           completeAttempt = undefined;
@@ -1067,122 +1320,251 @@ async function runPreparedHostedHarnessTextTurn(
         completeAttempt = await input.modelScope?.beginMainAttempt(
           prepared.request.model,
           recoveryRef,
+          ...(contextSnapshot ? ([contextSnapshot] as const) : []),
         );
         modelOccurrence = completeAttempt?.attemptId ?? modelOccurrence;
         finished = false;
         usage.length = 0;
       };
-      prepare.maxSnapshotBytes = HOSTED_MODEL_REQUEST_BYTES;
+      prepare.maxSnapshotBytes =
+        input.prepareModel ||
+        input.publicChildModelRoute ||
+        input.toolTurn?.capturesChildModelRoute?.()
+          ? HOSTED_MODEL_REQUEST_BYTES
+          : 0;
       const usage: unknown[] = [];
       let finalOutputHandled = false;
       try {
-        const stream = preparedRecovery
-          ? new Turn(
-              client.getChat(),
-              input.promptId,
-              undefined,
-              undefined,
-              true,
-              prepare,
-            ).run(
-              preparedRecovery.request.model,
-              [],
-              input.signal,
-              preparedRecovery,
-            )
-          : client.sendMessageStream(request, input.signal, input.promptId, {
-              type:
-                guidanceRequest || (round === 0 && !pendingToolResults)
-                  ? SendMessageType.UserQuery
-                  : SendMessageType.ToolResult,
-              // Published deltas cannot be un-glued after the fact: a cut that
-              // already delivered content replays the request, and the RETRY
-              // handling below retracts the orphaned prefix (#13319).
-              retractDeliveredOutputOnRetry: true,
-              ...(input.prepareModel ||
-              input.publicChildModelRoute ||
-              input.toolTurn?.capturesChildModelRoute?.()
-                ? { onPreparedRequest: prepare }
-                : {}),
-            });
-        preparedRecovery = undefined;
-        guidanceRequest = false;
-        for await (const event of stream) {
-          if (event.type === LlmEventType.Content) {
-            text += event.value;
-            await textDeltas?.delta(event.value);
-          } else if (event.type === LlmEventType.Finished) {
-            finished = true;
-            const reported = event.value?.usageMetadata;
-            if (reported) {
-              const snapshot: Record<string, unknown> = { ...reported };
-              delete snapshot['contextWindowSize'];
-              if (
-                typeof contextWindowSize === 'number' &&
-                Number.isSafeInteger(contextWindowSize) &&
-                contextWindowSize > 0
+        const sendOptions = {
+          type:
+            guidanceRequest || (round === 0 && !pendingToolResults)
+              ? SendMessageType.UserQuery
+              : SendMessageType.ToolResult,
+          // Published deltas cannot be un-glued after the fact: a cut that
+          // already delivered content replays the request, and the RETRY
+          // handling below retracts the orphaned prefix (#13319).
+          retractDeliveredOutputOnRetry: true,
+          ...(input.prepareModel ||
+          input.modelScope?.diagnosticsEnabled ||
+          input.publicChildModelRoute ||
+          input.toolTurn?.capturesChildModelRoute?.()
+            ? { onPreparedRequest: prepare }
+            : {}),
+        };
+        if (config.isUnifiedAgentLoopEnabled('hosted')) {
+          // Model-round-only migration (#17248): the shared round forwards the
+          // events and collects the calls; the Hosted-specific side effects
+          // (durable-feed retraction, usage, model-scope attempts) stay here in
+          // onModelEvent. The outer loop keeps its cap, hooks and tool turn.
+          const recovery = preparedRecovery;
+          const source: ModelRoundSource | typeof client = recovery
+            ? {
+                sendRound: (_round, signal) => {
+                  const turn = new Turn(
+                    client.getChat(),
+                    input.promptId,
+                    undefined,
+                    undefined,
+                    true,
+                    prepare,
+                  );
+                  return (async function* () {
+                    yield* turn.run(
+                      recovery.request.model,
+                      [],
+                      signal,
+                      recovery,
+                    );
+                    return turn;
+                  })();
+                },
+              }
+            : client;
+          const result = await runModelRound(
+            source,
+            { parts: request, promptId: input.promptId, options: sendOptions },
+            input.signal,
+            {
+              onModelEvent: async (event) => {
+                if (event.type === LlmEventType.Content) {
+                  text += event.value;
+                  await textDeltas?.delta(event.value);
+                } else if (event.type === LlmEventType.Finished) {
+                  finished = true;
+                  const reported = event.value?.usageMetadata;
+                  if (reported) {
+                    const snapshot: Record<string, unknown> = { ...reported };
+                    delete snapshot['contextWindowSize'];
+                    if (
+                      typeof contextWindowSize === 'number' &&
+                      Number.isSafeInteger(contextWindowSize) &&
+                      contextWindowSize > 0
+                    )
+                      snapshot['contextWindowSize'] = contextWindowSize;
+                    usage.push(snapshot);
+                  } else usage.push(null);
+                } else if (event.type === LlmEventType.Retry) {
+                  if (!event.isContinuation) {
+                    await textDeltas?.retract();
+                    text = '';
+                  }
+                } else if (event.type === LlmEventType.ModelFallback) {
+                  contextWindowSize = undefined;
+                  if (!input.prepareModel && input.modelScope) {
+                    const previous = completeAttempt;
+                    completeAttempt = undefined;
+                    await previous?.(false, usage);
+                    finished = false;
+                    usage.length = 0;
+                    completeAttempt = await input.modelScope.beginMainAttempt(
+                      event.toModel,
+                    );
+                    modelOccurrence =
+                      completeAttempt.attemptId ?? modelOccurrence;
+                  }
+                  await textDeltas?.retract();
+                  text = '';
+                } else if (event.type === LlmEventType.ToolCallRequest) {
+                  if (!input.toolTurn) {
+                    modelFailure = false;
+                    throw new Error(
+                      'Hosted Harness no-tool turn refused a tool call.',
+                    );
+                  }
+                } else if (
+                  event.type === LlmEventType.ToolCallConfirmation ||
+                  event.type === LlmEventType.ToolCallResponse
+                ) {
+                  modelFailure = false;
+                  throw new Error(
+                    'Hosted Harness no-tool turn refused a tool call.',
+                  );
+                } else if (event.type === LlmEventType.Error) {
+                  throw new HostedModelApiError(event.value.error);
+                } else if (event.type === LlmEventType.UserCancelled) {
+                  modelFailure = false;
+                  throw new Error('Hosted Harness turn was cancelled.');
+                } else if (event.type === LlmEventType.MaxSessionTurns) {
+                  modelFailure = false;
+                  throw new HostedModelRoundLimitError();
+                } else if (
+                  event.type !== LlmEventType.ChatCompressed &&
+                  event.type !== LlmEventType.Thought &&
+                  event.type !== LlmEventType.Citation
+                ) {
+                  modelFailure = false;
+                  throw new Error(
+                    'Hosted Harness model returned an unsupported continuation.',
+                  );
+                }
+              },
+            },
+          );
+          calls = result.calls;
+          preparedRecovery = undefined;
+          guidanceRequest = false;
+        } else {
+          const stream = preparedRecovery
+            ? new Turn(
+                client.getChat(),
+                input.promptId,
+                undefined,
+                undefined,
+                true,
+                prepare,
+              ).run(
+                preparedRecovery.request.model,
+                [],
+                input.signal,
+                preparedRecovery,
               )
-                snapshot['contextWindowSize'] = contextWindowSize;
-              usage.push(snapshot);
-            } else usage.push(null);
-          } else if (event.type === LlmEventType.Retry) {
-            calls = [];
-            if (!event.isContinuation) {
-              // A restarted attempt replaces what the failed one published:
-              // retract the orphaned prefix from the durable feed before the
-              // replay's own deltas arrive (#13319).
-              await textDeltas?.retract();
-              text = '';
-            }
-          } else if (event.type === LlmEventType.ModelFallback) {
-            contextWindowSize = undefined;
-            if (!input.prepareModel && input.modelScope) {
-              const previous = completeAttempt;
-              completeAttempt = undefined;
-              await previous?.(false, usage);
-              finished = false;
-              usage.length = 0;
-              completeAttempt = await input.modelScope.beginMainAttempt(
-                event.toModel,
+            : client.sendMessageStream(
+                request,
+                input.signal,
+                input.promptId,
+                sendOptions,
               );
-              modelOccurrence = completeAttempt.attemptId ?? modelOccurrence;
+          preparedRecovery = undefined;
+          guidanceRequest = false;
+          for await (const event of stream) {
+            if (event.type === LlmEventType.Content) {
+              text += event.value;
+              await textDeltas?.delta(event.value);
+            } else if (event.type === LlmEventType.Finished) {
+              finished = true;
+              const reported = event.value?.usageMetadata;
+              if (reported) {
+                const snapshot: Record<string, unknown> = { ...reported };
+                delete snapshot['contextWindowSize'];
+                if (
+                  typeof contextWindowSize === 'number' &&
+                  Number.isSafeInteger(contextWindowSize) &&
+                  contextWindowSize > 0
+                )
+                  snapshot['contextWindowSize'] = contextWindowSize;
+                usage.push(snapshot);
+              } else usage.push(null);
+            } else if (event.type === LlmEventType.Retry) {
+              calls = [];
+              if (!event.isContinuation) {
+                // A restarted attempt replaces what the failed one published:
+                // retract the orphaned prefix from the durable feed before the
+                // replay's own deltas arrive (#13319).
+                await textDeltas?.retract();
+                text = '';
+              }
+            } else if (event.type === LlmEventType.ModelFallback) {
+              contextWindowSize = undefined;
+              if (!input.prepareModel && input.modelScope) {
+                const previous = completeAttempt;
+                completeAttempt = undefined;
+                await previous?.(false, usage);
+                finished = false;
+                usage.length = 0;
+                completeAttempt = await input.modelScope.beginMainAttempt(
+                  event.toModel,
+                );
+                modelOccurrence = completeAttempt.attemptId ?? modelOccurrence;
+              }
+              await textDeltas?.retract();
+              calls = [];
+              text = '';
+            } else if (
+              event.type === LlmEventType.ToolCallRequest &&
+              input.toolTurn
+            ) {
+              calls.push(event.value);
+            } else if (
+              event.type === LlmEventType.ToolCallRequest ||
+              event.type === LlmEventType.ToolCallConfirmation ||
+              event.type === LlmEventType.ToolCallResponse
+            ) {
+              modelFailure = false;
+              throw new Error(
+                'Hosted Harness no-tool turn refused a tool call.',
+              );
+            } else if (event.type === LlmEventType.Error) {
+              // Format rather than flatten: the formatter keeps a resolved provider
+              // request id on the message, so the daemon stderr line and the
+              // StopFailure hook's error_details keep an id the operator can
+              // quote to their provider.
+              throw new HostedModelApiError(event.value.error);
+            } else if (event.type === LlmEventType.UserCancelled) {
+              modelFailure = false;
+              throw new Error('Hosted Harness turn was cancelled.');
+            } else if (event.type === LlmEventType.MaxSessionTurns) {
+              modelFailure = false;
+              throw new HostedModelRoundLimitError();
+            } else if (
+              event.type !== LlmEventType.ChatCompressed &&
+              event.type !== LlmEventType.Thought &&
+              event.type !== LlmEventType.Citation
+            ) {
+              modelFailure = false;
+              throw new Error(
+                'Hosted Harness model returned an unsupported continuation.',
+              );
             }
-            await textDeltas?.retract();
-            calls = [];
-            text = '';
-          } else if (
-            event.type === LlmEventType.ToolCallRequest &&
-            input.toolTurn
-          ) {
-            calls.push(event.value);
-          } else if (
-            event.type === LlmEventType.ToolCallRequest ||
-            event.type === LlmEventType.ToolCallConfirmation ||
-            event.type === LlmEventType.ToolCallResponse
-          ) {
-            modelFailure = false;
-            throw new Error('Hosted Harness no-tool turn refused a tool call.');
-          } else if (event.type === LlmEventType.Error) {
-            // Format rather than flatten: the formatter keeps a resolved provider
-            // request id on the message, so the daemon stderr line and the
-            // StopFailure hook's error_details keep an id the operator can
-            // quote to their provider.
-            throw new HostedModelApiError(event.value.error);
-          } else if (event.type === LlmEventType.UserCancelled) {
-            modelFailure = false;
-            throw new Error('Hosted Harness turn was cancelled.');
-          } else if (event.type === LlmEventType.MaxSessionTurns) {
-            modelFailure = false;
-            throw new HostedModelRoundLimitError();
-          } else if (
-            event.type !== LlmEventType.ChatCompressed &&
-            event.type !== LlmEventType.Thought &&
-            event.type !== LlmEventType.Citation
-          ) {
-            modelFailure = false;
-            throw new Error(
-              'Hosted Harness model returned an unsupported continuation.',
-            );
           }
         }
         if (!finished)
@@ -1327,6 +1709,10 @@ async function runPreparedHostedHarnessTextTurn(
     throw cause;
   } finally {
     input.hooks?.setMessagesProvider(undefined);
+    // The loop classifier is only valid for this turn; clear it so a later
+    // turn cannot arm against a finished turn's closure (and the funnel's
+    // "no active classifier" refusal stays reachable).
+    input.setLoopClassifier?.(undefined);
     try {
       await config.shutdown({
         shutdownTelemetry: false,

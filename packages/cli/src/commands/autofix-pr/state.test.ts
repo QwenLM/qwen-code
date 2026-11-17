@@ -39,6 +39,11 @@ import {
   withWatchLock,
   type AutofixPrState,
 } from './state.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 describe('vouchedScanRoots', () => {
   const git = (cwd: string, ...args: string[]) =>
@@ -309,7 +314,7 @@ describe('withWatchLock', () => {
   it('runs one helper at a time and removes only its own lock', () => {
     const inner = withWatchLock(paths, 7, () => {
       expect(() => withWatchLock(paths, 7, () => 'second')).toThrow(
-        /another autofix-pr helper is working on PR #7/,
+        refused('busy', /another autofix-pr helper is working on PR #7/),
       );
       return 'first';
     });

@@ -8,9 +8,9 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceExce
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
@@ -45,6 +45,69 @@ class SessionWorktreeGitTest {
     Path root;
     private Path repository;
     private SessionWorktreeGit git;
+
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.MAC)
+    @Test
+    void explicitOfflineUpgradeKeepsAllLegacyAnchorsAndDirtyWork() throws Exception {
+        Plan initial = plan("project", null);
+        String stable = git.prepare(initial);
+        var mapper = new ObjectMapper();
+        Path checkout = target(initial);
+        Path gitdir = Path.of(mapper.readTree(stable).path("gitdir").asText());
+        var legacyPlan = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.valueToTree(initial);
+        legacyPlan.put("rootIdentity", legacyIdentity(root)).put("commonIdentity", legacyIdentity(Path.of(initial.commonDirectory())));
+        Plan saved = mapper.treeToValue(legacyPlan, Plan.class);
+        var identity = mapper.createObjectNode().put("target", legacyIdentity(checkout))
+                .put("gitfile", legacyIdentity(checkout.resolve(".git"))).put("gitdir", gitdir.toString())
+                .put("gitdirIdentity", legacyIdentity(gitdir));
+        Path container = root.resolve(SessionWorktreeGit.CONTAINER);
+        Files.writeString(container.resolve(saved.worktreeId() + ".json"), mapper.writeValueAsString(saved));
+        Files.writeString(container.resolve(saved.worktreeId() + ".ready"), identity.toString());
+        assertThat(mapper.readTree(SessionWorktreeGit.verify(saved, null))).isEqualTo(identity);
+        Files.writeString(checkout.resolve("file.txt"), "valuable after reboot\n");
+        String volume = com.alibaba.qwen.code.runtimebroker.host.MacOsHostIdentity.volumeUuid(root);
+        assertThatThrownBy(() -> SessionWorktreeGit.reattest(saved, identity.toString(), "a".repeat(32)))
+                .isInstanceOf(ManagedAgentException.class);
+        var upgraded = SessionWorktreeGit.reattest(saved, identity.toString(), volume);
+        Plan next = mapper.readValue(upgraded.get("plan"), Plan.class);
+        assertThat(next.storageIdentity()).isEqualTo(saved.storageIdentity());
+        assertThat(next.rootIdentity()).startsWith("macos-volume/1:" + volume);
+        Files.writeString(container.resolve(saved.worktreeId() + ".json"), upgraded.get("plan"));
+        Files.writeString(container.resolve(saved.worktreeId() + ".ready"), upgraded.get("identity"));
+        assertThat(mapper.readTree(SessionWorktreeGit.verify(next, upgraded.get("identity"))))
+                .isEqualTo(mapper.readTree(upgraded.get("identity")));
+        assertThat(Files.readString(checkout.resolve("file.txt"))).isEqualTo("valuable after reboot\n");
+        assertThat(git.cleanupBlocker(next, upgraded.get("identity"))).isEqualTo("worktree_dirty");
+    }
+
+    @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.MAC)
+    @Test
+    void reattestUpgradesALegacyPlanOverAnAlreadyStableCompletion() throws Exception {
+        Plan initial = plan("project", null);
+        String stable = git.prepare(initial);
+        String volume = com.alibaba.qwen.code.runtimebroker.host.MacOsHostIdentity.volumeUuid(root);
+        var mapper = new ObjectMapper();
+        var legacyPlan = (com.fasterxml.jackson.databind.node.ObjectNode) mapper.valueToTree(initial);
+        legacyPlan.put("rootIdentity", legacyIdentity(root)).put("commonIdentity", legacyIdentity(Path.of(initial.commonDirectory())));
+        Plan mixed = mapper.treeToValue(legacyPlan, Plan.class);
+        Path container = root.resolve(SessionWorktreeGit.CONTAINER);
+        Files.writeString(container.resolve(mixed.worktreeId() + ".json"), mapper.writeValueAsString(mixed));
+        assertThatThrownBy(() -> SessionWorktreeGit.reattest(mixed, stable, "a".repeat(32)))
+                .isInstanceOf(ManagedAgentException.class);
+        var upgraded = SessionWorktreeGit.reattest(mixed, stable, volume);
+        assertThat(upgraded.get("identity")).isEqualTo(stable);
+        Plan next = mapper.readValue(upgraded.get("plan"), Plan.class);
+        assertThat(next.rootIdentity()).startsWith("macos-volume/1:" + volume);
+        assertThat(next.commonIdentity()).startsWith("macos-volume/1:" + volume);
+        assertThat(next.storageIdentity()).isEqualTo(mixed.storageIdentity());
+        Files.writeString(container.resolve(mixed.worktreeId() + ".json"), upgraded.get("plan"));
+        assertThat(SessionWorktreeGit.verify(next, upgraded.get("identity"))).isEqualTo(stable);
+    }
+
+    private static String legacyIdentity(Path path) throws Exception {
+        var attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes.class);
+        return attributes.fileKey() + ":" + attributes.creationTime();
+    }
 
     @BeforeEach
     void setup() throws Exception {
@@ -114,10 +177,10 @@ class SessionWorktreeGitTest {
         run(repository, "branch", "topic");
         run(repository, "tag", "start");
         String commit = run(repository, "rev-parse", "HEAD").strip();
-        var store = mock(SessionWorktreeStore.class);
+        var store = mock(JdbcSessionWorktreeStore.class);
         var selection = new WorkspaceSelection("workspace", "project");
         var binding = new ContextBinding("tenant", "workspace", 1, "storage", "project", "config", 1);
-        when(store.source("tenant", "actor", selection)).thenReturn(new SessionWorktreeStore.SourceLocation(
+        when(store.source("tenant", "actor", selection)).thenReturn(new JdbcSessionWorktreeStore.SourceLocation(
                 new ResolvedBinding(binding, "config", "policy"), root, null));
         var properties = new ManagedAgentProperties();
         var broker = properties.getRuntimeBroker();
@@ -126,7 +189,7 @@ class SessionWorktreeGitTest {
         broker.setDurableLocalProcess(true);
         broker.setProvisioner("local-process");
         broker.setBoundSessionIsolationClass("session");
-        var service = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new SessionWorktreeService(store, mock(WorkspaceExecutionStore.class), properties,
+        var service = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new SessionWorktreeService(store, mock(JdbcWorkspaceExecutionStore.class), properties,
                 mock(ManagedAgentStore.class), mock(HarnessCoordinator.class)));
         try {
             for (String ref : List.of("topic", "start", commit, "missing", "../invalid")) {
@@ -169,10 +232,10 @@ class SessionWorktreeGitTest {
         Plan plan = plan("project", null);
         String identity = git.prepare(plan);
         Files.writeString(target(plan).resolve("file.txt"), "preserved after interruption\n");
-        var store = mock(SessionWorktreeStore.class);
-        var execution = mock(WorkspaceExecutionStore.class);
+        var store = mock(JdbcSessionWorktreeStore.class);
+        var execution = mock(JdbcWorkspaceExecutionStore.class);
         var coordinator = mock(HarnessCoordinator.class);
-        var row = new SessionWorktreeStore.Row("tenant", "session", "workspace",
+        var row = new JdbcSessionWorktreeStore.Row("tenant", "session", "workspace",
                 plan.worktreeId(), "PREPARING", plan, null, "operation", null, 1, null, "PREPARING", 0, 1, null, "actor");
         when(store.claim(eq(row), anyString(),
                 anyLong())).thenReturn(row);
@@ -230,8 +293,11 @@ class SessionWorktreeGitTest {
         Plan plan = plan("project", null);
         Path container = Files.createDirectory(root.resolve(SessionWorktreeGit.CONTAINER));
         Files.write(container.resolve(plan.worktreeId() + ".json"), new ObjectMapper().writeValueAsBytes(plan));
-        Process checkout = new ProcessBuilder("git", "-c", "core.hooksPath=/dev/null", "-C", repository.toString(),
-                "worktree", "add", "-b", plan.branch(), "--", target(plan).toString(), plan.baseCommit())
+        // Own the checkout directly: a failed worktree add removes its partial files.
+        run(repository, "worktree", "add", "--no-checkout", "-b", plan.branch(),
+                "--", target(plan).toString(), plan.baseCommit());
+        Process checkout = new ProcessBuilder("git", "-c", "core.hooksPath=/dev/null", "-C", target(plan).toString(),
+                "reset", "--hard", plan.baseCommit())
                 .redirectErrorStream(true).redirectOutput(root.resolve("checkout.log").toFile()).start();
         List<ProcessHandle> descendants = List.of();
         try {
@@ -242,12 +308,15 @@ class SessionWorktreeGitTest {
             }
             descendants = checkout.descendants().toList();
         } finally {
-            checkout.destroyForcibly();
-            descendants.forEach(ProcessHandle::destroyForcibly);
-            assertThat(checkout.waitFor(5, TimeUnit.SECONDS)).isTrue();
-            for (ProcessHandle child : descendants) {
-                child.onExit().get(5, TimeUnit.SECONDS);
+            try {
+                descendants.forEach(ProcessHandle::destroyForcibly);
+                for (ProcessHandle child : descendants) {
+                    child.onExit().get(5, TimeUnit.SECONDS);
+                }
+            } finally {
+                checkout.destroyForcibly();
             }
+            assertThat(checkout.waitFor(5, TimeUnit.SECONDS)).isTrue();
         }
         long checkedOut;
         try (var files = Files.list(target(plan).resolve("bulk"))) {

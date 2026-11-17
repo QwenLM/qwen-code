@@ -18,7 +18,8 @@ import java.util.concurrent.TimeUnit;
  * worker (issue #13183 saw hundreds of status calls per execution).
  *
  * <p>Extracted from {@link RuntimeBrokerService} as the first P1 internal
- * seam. The service owns the scheduler this class schedules eviction on,
+ * seam, now owned by RuntimeExecutionReconciler. The service owns the
+ * scheduler this class schedules eviction on,
  * so the cooldown has no lifecycle of its own.
  */
 final class ExecutionObservationCooldown {

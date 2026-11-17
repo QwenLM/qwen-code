@@ -29,6 +29,87 @@ describe('AuthMessageHandler', () => {
     vi.resetAllMocks();
   });
 
+  it.each(['logout', 'upgrade'] as const)(
+    'routes %s directly to the native subscription action',
+    async (action) => {
+      const handler = new AuthMessageHandler(
+        {} as never,
+        {} as never,
+        null,
+        vi.fn(),
+      );
+      const subscription = vi.fn(async () => undefined);
+      handler.setSubscriptionAuthHandler(subscription);
+      expect(handler.canHandle(action)).toBe(true);
+      await handler.handle({ type: action });
+      expect(subscription).toHaveBeenCalledWith(action);
+      expect(mockShowQuickPick).not.toHaveBeenCalled();
+    },
+  );
+
+  it('lists Qwen Account with Subscription first in the native provider picker', async () => {
+    mockShowQuickPick.mockResolvedValue(undefined);
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+    await handler.handle({ type: 'auth', data: { subscriptionEnabled: true } });
+    const items = mockShowQuickPick.mock.calls[0]![0];
+    expect(items[0]).toMatchObject({
+      label: 'Qwen Account with Subscription',
+      detail: 'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+    });
+  });
+
+  it('keeps subscription OAuth native after the first-row selection', async () => {
+    mockShowQuickPick.mockImplementationOnce(async (items) =>
+      items.find(
+        (item: { label: string }) =>
+          item.label === 'Qwen Account with Subscription',
+      ),
+    );
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    const authInteractiveHandler = vi.fn();
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+    const subscriptionAuthHandler = vi.fn(async () => undefined);
+    handler.setSubscriptionAuthHandler(subscriptionAuthHandler);
+    await handler.handle({ type: 'auth', data: { subscriptionEnabled: true } });
+    expect(mockShowQuickPick).toHaveBeenCalledTimes(1);
+    expect(mockShowInputBox).not.toHaveBeenCalled();
+    expect(authInteractiveHandler).not.toHaveBeenCalled();
+    expect(subscriptionAuthHandler).toHaveBeenCalledOnce();
+    expect(sendToWebView).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'qwenSubscriptionAuth' }),
+    );
+  });
+
+  it('keeps the subscription entry absent when capability is disabled', async () => {
+    mockShowQuickPick.mockResolvedValue(undefined);
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+    await handler.handle({
+      type: 'auth',
+      data: { subscriptionEnabled: false },
+    });
+    expect(mockShowQuickPick.mock.calls[0]![0]).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'Qwen Account with Subscription' }),
+      ]),
+    );
+  });
+
   it('sends authCancelled when the provider picker is dismissed', async () => {
     mockShowQuickPick.mockResolvedValue(undefined);
     const sendToWebView = vi.fn();

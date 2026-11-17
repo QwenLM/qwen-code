@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 
 import java.util.List;
 import java.util.Map;
@@ -20,12 +21,12 @@ public interface SessionQueryStore {
         return findSessionById(sessionId).filter(session -> tenantId.equals(session.tenantId()));
     }
 
-    public default com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor findSessionWorktree(
+    public default SessionWorktreeStore.Descriptor findSessionWorktree(
             String tenantId, String sessionId) {
         return null;
     }
 
-    public default Map<String, com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor> findSessionWorktrees(
+    public default Map<String, SessionWorktreeStore.Descriptor> findSessionWorktrees(
             String tenantId, List<String> sessionIds) {
         return Map.of();
     }

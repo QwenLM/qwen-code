@@ -6,6 +6,8 @@
 
 import {
   isUserPromptSubmitContextPartText as isUserPromptSubmitContextPartTextInternal,
+  USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
+  USER_PROMPT_SUBMIT_CONTEXT_OPEN,
   wrapUserPromptSubmitContext,
 } from '../utils/transcript-records.js';
 
@@ -35,13 +37,30 @@ type UserPromptSubmitContextPart = { text: string } & Record<symbol, unknown>;
  */
 const userPromptSubmitContextReceipt = Symbol('userPromptSubmitContextReceipt');
 
-/** Builds the tagged part the injector appends, stamped with its receipt. */
+/**
+ * The separate contexts a block joins, when it joins more than one: the
+ * Mods' contexts and UserPromptSubmit's. Like the receipt, only the live part
+ * carries it; a resumed block counts as one context.
+ */
+const userPromptSubmitContextSegments = Symbol(
+  'userPromptSubmitContextSegments',
+);
+
+/**
+ * Builds the tagged part the injector appends, stamped with its receipt.
+ * `segments` names the contexts `context` joins, so each one is found
+ * delivered on its own later.
+ */
 export function createUserPromptSubmitContextPart(
   context: string,
+  segments?: readonly string[],
 ): UserPromptSubmitContextPart {
   return {
     text: wrapUserPromptSubmitContext(context),
     [userPromptSubmitContextReceipt]: true,
+    ...(segments && segments.length > 1
+      ? { [userPromptSubmitContextSegments]: [...segments] }
+      : {}),
   };
 }
 
@@ -125,4 +144,34 @@ export function hasUserPromptSubmitContext(
       part?.text === wrapped &&
       part[userPromptSubmitContextReceipt] === true,
   );
+}
+
+/**
+ * The contexts the injector-owned blocks of `entry` delivered, by the same
+ * evidence as `hasUserPromptSubmitContext`: each block's joined contexts one
+ * by one when it was stamped with them, otherwise its whole context.
+ */
+export function deliveredUserPromptSubmitContexts(entry: unknown): string[] {
+  const candidate = entry as { role?: unknown; parts?: unknown } | null;
+  if (candidate?.role !== 'user' || !Array.isArray(candidate.parts)) {
+    return [];
+  }
+  const parts = candidate.parts as Array<UserPromptSubmitContextPart | null>;
+  const prefix = `${USER_PROMPT_SUBMIT_CONTEXT_OPEN}\n`;
+  const suffix = `\n${USER_PROMPT_SUBMIT_CONTEXT_CLOSE}`;
+  return parts.flatMap((part, index) => {
+    if (
+      !(index > 0 || parts.length === 1) ||
+      part?.[userPromptSubmitContextReceipt] !== true ||
+      typeof part.text !== 'string' ||
+      !part.text.startsWith(prefix) ||
+      !part.text.endsWith(suffix)
+    ) {
+      return [];
+    }
+    const segments = part[userPromptSubmitContextSegments];
+    return Array.isArray(segments)
+      ? (segments as string[])
+      : [part.text.slice(prefix.length, -suffix.length)];
+  });
 }

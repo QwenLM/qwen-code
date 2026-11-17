@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import { parseJoinLink } from '../serve/agent-host-join.js';
+import { listExplicitCandidates } from '../serve/local-control/lan-interfaces.js';
 import type { Argv, CommandModule } from 'yargs';
 import type { ServeChannelSelection } from '../serve/types.js';
 import type { RunHandle } from '../serve/run-qwen-serve.js';
@@ -15,7 +17,11 @@ import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
+import {
+  DEFAULT_RING_SIZE,
+  DEFAULT_RING_MAX_BYTES,
+  normalizeMaxRingBytes,
+} from '@qwen-code/acp-bridge/eventBus';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
@@ -121,16 +127,44 @@ async function startLocalControl(
   }
   let status;
   try {
-    status = await service.enable(address ? { address } : {});
+    status = await service.enable(
+      // The flag is the operator's explicit opt-in: record the named address
+      // as the daemon's standing grant so the HTTP enable route (and the Web
+      // Shell card) can re-enable it, while ungranted non-candidate POSTs
+      // keep failing with unknown_lan_interface.
+      address ? { address, allowExplicitAddress: true } : {},
+    );
   } catch (err) {
     // The service reports ambiguity to its caller rather than picking for
     // them; in a terminal the way to answer is a flag, which only this caller
-    // knows about.
+    // knows about. The same holds for the no-candidate and unknown-address
+    // failures: their messages are rendered verbatim to browser clients, so
+    // the CLI-only remedy hints belong here, not in the shared errors.
     if (
       err instanceof Error &&
       (err as { code?: string }).code === 'ambiguous_lan_interface'
     ) {
       throw new Error(`${err.message}. Pass --local-control-address <ip>.`);
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'no_lan_interface'
+    ) {
+      throw new Error(
+        `${err.message} If this host's usable address is outside private/link-local space, or sits on a VPN/tunnel interface, name it: --local-control-address <ip>.`,
+      );
+    }
+    if (
+      err instanceof Error &&
+      (err as { code?: string }).code === 'unknown_lan_interface'
+    ) {
+      // Enumerate the acceptance space, not the automatic-candidate list:
+      // the operator reaches this failure precisely on hosts whose usable
+      // address is one listLanCandidates would never offer (#14136).
+      const candidates = listExplicitCandidates();
+      throw new Error(
+        `${err.message}${candidates.length ? ` This host currently has: ${candidates.map((c) => `${c.interfaceName} (${c.address})`).join(', ')}.` : ''}`,
+      );
     }
     throw err;
   }
@@ -250,10 +284,12 @@ interface ServeArgs {
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
+  'event-ring-max-bytes': number;
   'compacted-replay-max-bytes': number;
   'max-journal-events'?: number;
   'max-journal-bytes'?: number;
   workspace?: string | string[];
+  'conversations-dir'?: string;
   'memory-project-scope'?: MemoryProjectScope;
   'require-auth': boolean;
   'enable-session-shell': boolean;
@@ -318,9 +354,7 @@ function primaryWorkspaceArg(
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
-  command: 'serve',
-  describe:
-    'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
+  ...commandMetadata.serve,
   builder: (yargs: Argv) =>
     yargs
       .option('port', {
@@ -362,7 +396,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         requiresArg: true,
         description:
-          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires an independent browser token of at least 32 bytes via QWEN_SERVER_TOKEN or --token.',
+          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires a non-empty independent browser token via QWEN_SERVER_TOKEN or --token.',
       })
       .option('token', {
         type: 'string',
@@ -399,6 +433,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
           'Repeat to register isolated workspace runtimes; the first is primary.',
+      })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        description:
+          'Absolute working-directory root shared by standalone and Live Conversations. Overrides QWEN_CONVERSATIONS_DIR; defaults to ~/Documents/Qwen Code/Conversations.',
       })
       .option('memory-project-scope', {
         type: 'string',
@@ -499,7 +539,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('local-control-address', {
         type: 'string',
         description:
-          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice.',
+          'Which local IPv4 address to share when the host is on more than one network. Only needed if --local-control reports an ambiguous choice. Naming an address outside RFC 1918/3927 space, or one on a VPN/tunnel interface (e.g. phone and laptop on the same corporate VPN), is accepted as an explicit opt-in; out-of-private-space picks are logged with a warning.',
       })
       .option('join', {
         type: 'string',
@@ -527,6 +567,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Allow unencrypted Agent Host HTTP connections outside loopback (trusted demo networks only).',
       })
       .check((argv) => {
+        if (Array.isArray(argv['conversations-dir'])) {
+          throw new Error('pass --conversations-dir once.');
+        }
+        normalizeMaxRingBytes(
+          argv['event-ring-max-bytes'] as number | undefined,
+        );
         if (argv['local-control'] === true && argv['web'] === false) {
           throw new Error('Local Control requires the Web Shell.');
         }
@@ -583,6 +629,13 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'that send a `Last-Event-ID: N` header. Larger = more reconnect ' +
           'headroom at the cost of a few hundred KB extra RAM per session. ' +
           'Must be a positive finite integer.',
+      })
+      .option('event-ring-max-bytes', {
+        type: 'number',
+        nargs: 1,
+        default: DEFAULT_RING_MAX_BYTES,
+        description:
+          'Per-session retained SSE replay ring byte cap, including the latest full commands snapshot. Must be a positive safe integer up to 256 MiB; no unlimited sentinel.',
       })
       .option('compacted-replay-max-bytes', {
         type: 'number',
@@ -881,7 +934,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           argv.managed ||
           argv.profile !== 'default' ||
           !argv.web ||
-          argv.workspace !== undefined
+          argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined
         ) {
           throw new Error(
             '--managed-web-config cannot be combined with daemon execution or Managed local mode.',
@@ -916,6 +970,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           argv.profile !== 'default' ||
           !argv.web ||
           argv.workspace !== undefined ||
+          argv['conversations-dir'] !== undefined ||
           argv.token !== undefined ||
           argv['tls-cert'] ||
           argv['tls-key'] ||
@@ -1175,6 +1230,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
+        eventRingMaxBytes: argv['event-ring-max-bytes'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
         ...(argv['max-journal-events'] !== undefined
           ? { maxJournalEvents: argv['max-journal-events'] }
@@ -1183,6 +1239,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           ? { maxJournalBytes: argv['max-journal-bytes'] }
           : {}),
         workspace: argv.workspace,
+        ...(argv['conversations-dir'] !== undefined
+          ? { conversationsDir: argv['conversations-dir'] }
+          : {}),
         ...(argv['memory-project-scope'] !== undefined
           ? { memoryProjectScope: argv['memory-project-scope'] }
           : {}),

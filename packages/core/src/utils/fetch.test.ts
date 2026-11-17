@@ -466,6 +466,48 @@ describe('fetchWithPolicy', () => {
     expect(cancelled).toBe(true);
   });
 
+  it.each([403, 429])(
+    'preserves API %s business bodies and Retry-After without replaying the request',
+    async (status) => {
+      const body = JSON.stringify({
+        error: 'access_denied',
+        error_description: 'Backend message',
+      });
+      stubFetch(
+        () => new Response(body, { status, headers: { 'Retry-After': '30' } }),
+      );
+      const result = await fetchResponse('https://example.com/models', {
+        ...opts,
+        retryTransient: false,
+        readErrorBody: true,
+      });
+      expect(result).toMatchObject({ status, retryAfter: '30' });
+      expect(result.body.toString()).toBe(body);
+      expect(fetch).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([true, false])(
+    'retains API permission status when an error body exceeds its limit (declared=%s)',
+    async (declared) => {
+      stubFetch(
+        () =>
+          new Response('x'.repeat(5000), {
+            status: 403,
+            ...(declared ? { headers: { 'Content-Length': '5000' } } : {}),
+          }),
+      );
+      const result = await fetchResponse('https://example.com/models', {
+        ...opts,
+        retryTransient: false,
+        readErrorBody: true,
+      });
+      expect(result.status).toBe(403);
+      expect(result.body.length).toBe(0);
+      expect(fetch).toHaveBeenCalledOnce();
+    },
+  );
+
   it('reports the status of an oversized error page, not a size error', async () => {
     // A 404 whose body exceeds maxBytes must surface as 404, not EMSGSIZE:
     // the status is what the caller acts on, and the body is discarded.

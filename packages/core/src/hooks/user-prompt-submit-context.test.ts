@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   createUserPromptSubmitContextPart,
+  deliveredUserPromptSubmitContexts,
   hasUserPromptSubmitContext,
   isUserPromptSubmitContextPartText,
   restoreUserPromptSubmitContextReceipt,
@@ -266,5 +267,45 @@ describe('isUserPromptSubmitContextPartText', () => {
 
   it('rejects empty text', () => {
     expect(isUserPromptSubmitContextPartText('')).toBe(false);
+  });
+});
+
+describe('deliveredUserPromptSubmitContexts', () => {
+  it('lists a joined block context by context, and an unstamped one whole', () => {
+    expect(
+      deliveredUserPromptSubmitContexts({
+        role: 'user',
+        parts: [
+          { text: 'prompt' },
+          createUserPromptSubmitContextPart('a\n\nb', ['a', 'b']),
+          createUserPromptSubmitContextPart('c\n\nd'),
+        ],
+      }),
+    ).toEqual(['a', 'b', 'c\n\nd']);
+  });
+
+  it('ignores blocks without the receipt, a leading block and model entries', () => {
+    const block = createUserPromptSubmitContextPart('a');
+    expect(
+      deliveredUserPromptSubmitContexts({
+        role: 'user',
+        parts: [{ text: 'prompt' }, { text: wrapUserPromptSubmitContext('a') }],
+      }),
+    ).toEqual([]);
+    expect(
+      deliveredUserPromptSubmitContexts({
+        role: 'user',
+        parts: [block, { text: 'prompt' }],
+      }),
+    ).toEqual([]);
+    expect(
+      deliveredUserPromptSubmitContexts({
+        role: 'model',
+        parts: [{ text: 'x' }, block],
+      }),
+    ).toEqual([]);
+    expect(
+      deliveredUserPromptSubmitContexts({ role: 'user', parts: [block] }),
+    ).toEqual(['a']);
   });
 });

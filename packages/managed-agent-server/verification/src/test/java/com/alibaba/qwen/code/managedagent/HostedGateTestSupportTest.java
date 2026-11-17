@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -14,18 +15,33 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.UncheckedIOException;
 import java.net.BindException;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.PORT_CEILING;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.PORT_FLOOR;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmentsOf;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.bootWithFreshPorts;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.connectorOwning;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.ephemeralFloor;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.followingPort;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.kernelPort;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.windowBelow;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
@@ -279,6 +295,106 @@ class HostedGateTestSupportTest {
                 .isSameAs(failure);
         assertThat(probes).hasValue(1);
         assertThat(boots).hasValue(0);
+    }
+
+    // Every Hosted IT reserves its advertised ports here. The window has to
+    // stay below the ephemeral ranges, where the kernel never picks a port on
+    // its own, and the counter must not hand a number out twice.
+    @Test
+    void reservePortHandsOutDistinctPortsBelowTheEphemeralRanges() {
+        AtomicInteger next = new AtomicInteger(randomStart());
+        List<Integer> ports = new ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            ports.add(reservePort(next));
+        }
+
+        assertThat(ports).doesNotHaveDuplicates().allSatisfy(port -> assertThat(port)
+                .isGreaterThanOrEqualTo(PORT_FLOOR).isLessThan(PORT_CEILING));
+        assertThat(PORT_FLOOR).isGreaterThanOrEqualTo(1024);
+        assertThat(PORT_CEILING).isLessThanOrEqualTo(32_768);
+    }
+
+    // The fork-wide entry point draws from the window only where the window
+    // lies below this host's ephemeral range, and never repeats a number
+    // back to back either way.
+    @Test
+    void reservePortUsesTheWindowOnlyBelowThisHostsEphemeralRange() throws Exception {
+        Path proc = Path.of("/proc/sys/net/ipv4/ip_local_port_range");
+        int floor = ephemeralFloor(proc);
+        if (Files.isReadable(proc)) {
+            // procfs files report size 0; the floor must come from the whole line.
+            assertThat(floor).isEqualTo(Integer.parseInt(
+                    Files.readAllLines(proc).get(0).trim().split("\\s+")[0]));
+        }
+        int first = reservePort();
+        int second = reservePort();
+
+        assertThat(second).isNotEqualTo(first);
+        if (floor >= PORT_CEILING) {
+            assertThat(List.of(first, second)).allSatisfy(port -> assertThat(port)
+                    .isGreaterThanOrEqualTo(PORT_FLOOR).isLessThan(PORT_CEILING));
+        } else {
+            assertThat(List.of(first, second)).allSatisfy(port -> assertThat(port)
+                    .isGreaterThanOrEqualTo(floor));
+        }
+    }
+
+    @Test
+    void reservePortSkipsANumberSomeoneElseListensOn() throws Exception {
+        AtomicInteger next = new AtomicInteger(reservePort(new AtomicInteger(randomStart())));
+        int held = next.get();
+
+        try (ServerSocket listener = new ServerSocket(held, 0, InetAddress.getByName("127.0.0.1"))) {
+            int port = reservePort(next);
+
+            assertThat(port).isNotEqualTo(held);
+            assertThat(next).hasValue(followingPort(port));
+        }
+    }
+
+    // The fallback asks the kernel, which can repeat a number once its probe
+    // has closed.
+    @Test
+    void kernelPortSkipsANumberAlreadyHandedOut() {
+        Set<Integer> handedOut = new HashSet<>(Set.of(40_001));
+        Iterator<Integer> kernel = List.of(40_001, 40_003, 40_003, 40_005).iterator();
+
+        assertThat(kernelPort(handedOut, kernel::next)).isEqualTo(40_003);
+        assertThat(kernelPort(handedOut, kernel::next)).isEqualTo(40_005);
+        assertThat(handedOut).containsExactlyInAnyOrder(40_001, 40_003, 40_005);
+    }
+
+    @Test
+    void ephemeralFloorReadsTheLowBoundAndDefaultsToNone(@TempDir Path directory) throws Exception {
+        Path range = directory.resolve("ip_local_port_range");
+
+        Files.writeString(range, "32768\t60999\n");
+        assertThat(ephemeralFloor(range)).isEqualTo(32_768);
+        Files.writeString(range, "1024 65535\n");
+        assertThat(ephemeralFloor(range)).isEqualTo(1024);
+        Files.writeString(range, "unreadable\n");
+        assertThat(ephemeralFloor(range)).isEqualTo(Integer.MAX_VALUE);
+        assertThat(ephemeralFloor(directory.resolve("absent"))).isEqualTo(Integer.MAX_VALUE);
+    }
+
+    @Test
+    void theWindowIsUsedOnlyWhenTheEphemeralRangeStartsAtOrAboveItsCeiling() {
+        assertThat(windowBelow(32_768)).isTrue();
+        assertThat(windowBelow(PORT_CEILING)).isTrue();
+        assertThat(windowBelow(PORT_CEILING - 1)).isFalse();
+        assertThat(windowBelow(1024)).isFalse();
+        assertThat(windowBelow(Integer.MAX_VALUE)).isTrue();
+    }
+
+    @Test
+    void followingPortWrapsFromTheCeilingBackToTheFloor() {
+        assertThat(followingPort(PORT_FLOOR)).isEqualTo(PORT_FLOOR + 1);
+        assertThat(followingPort(PORT_CEILING - 2)).isEqualTo(PORT_CEILING - 1);
+        assertThat(followingPort(PORT_CEILING - 1)).isEqualTo(PORT_FLOOR);
+    }
+
+    private static int randomStart() {
+        return PORT_FLOOR + ThreadLocalRandom.current().nextInt(PORT_CEILING - PORT_FLOOR);
     }
 
     private static RuntimeException bindConflict() {
