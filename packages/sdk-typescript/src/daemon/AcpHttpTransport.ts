@@ -167,6 +167,7 @@ export class AcpHttpTransport implements DaemonTransport {
   private _disposed = false;
   private _initialized = false;
   private initPromise: Promise<void> | undefined = undefined;
+  private readonly initializationAbort = new AbortController();
   private nextId = 1;
   private initResult: unknown = undefined;
   /** Connection id returned by the ACP initialize handshake. */
@@ -184,6 +185,7 @@ export class AcpHttpTransport implements DaemonTransport {
    * second `GET /acp` would detach the consumer's).
    */
   private readonly activeSessionSubscriptions = new Map<string, number>();
+  private readonly activeSseRequests = new Set<AbortController>();
   /**
    * Background reply pumps started by `sendRequest` for a session-scoped
    * request when no consumer subscription is active, keyed by sessionId and
@@ -330,9 +332,16 @@ export class AcpHttpTransport implements DaemonTransport {
       existingPump.abort.abort();
       this.sessionReplyPumps.delete(sessionId);
     }
+    const requestCtrl = new AbortController();
+    this.activeSseRequests.add(requestCtrl);
     let subscriptionError: Error | undefined;
     try {
-      yield* this.subscribeEventsInner(sessionId, opts);
+      yield* this.subscribeEventsInner(sessionId, {
+        ...opts,
+        signal: opts.signal
+          ? composeAbortSignals([opts.signal, requestCtrl.signal])
+          : requestCtrl.signal,
+      });
     } catch (err) {
       // Capture WHY the subscription ended so the sweep below can reject with
       // the real cause. On the fast-fail path (401 / wrong content-type thrown
@@ -341,6 +350,8 @@ export class AcpHttpTransport implements DaemonTransport {
       subscriptionError = err instanceof Error ? err : new Error(String(err));
       throw err;
     } finally {
+      requestCtrl.abort();
+      this.activeSseRequests.delete(requestCtrl);
       const n = (this.activeSessionSubscriptions.get(sessionId) ?? 1) - 1;
       if (n <= 0) this.activeSessionSubscriptions.delete(sessionId);
       else this.activeSessionSubscriptions.set(sessionId, n);
@@ -371,6 +382,7 @@ export class AcpHttpTransport implements DaemonTransport {
     opts: DaemonTransportSubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     await this.ensureInitialized();
+    if (this._disposed) throw new DaemonTransportClosedError();
 
     // Open the SESSION-scoped `/acp` stream (GET /acp + Acp-Session-Id), NOT
     // REST `/session/:id/events`. This is the resumable §1.8 stream and — the
@@ -532,6 +544,7 @@ export class AcpHttpTransport implements DaemonTransport {
           reader.read(),
           abortPromise,
         ]);
+        if (signal?.aborted) return;
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         if (buf.length > MAX_SSE_BUF_CHARS) {
@@ -546,6 +559,7 @@ export class AcpHttpTransport implements DaemonTransport {
         const { frames, tail } = consumeFrames(buf);
         buf = tail;
         for (const rawFrame of frames) {
+          if (signal?.aborted) return;
           let busId: number | undefined;
           const dataParts: string[] = [];
           for (const rawLine of rawFrame.split('\n')) {
@@ -665,6 +679,12 @@ export class AcpHttpTransport implements DaemonTransport {
     if (this._disposed) return;
     this._disposed = true;
     this._initialized = false;
+    this.initializationAbort.abort();
+
+    for (const request of this.activeSseRequests) {
+      request.abort();
+    }
+    this.activeSseRequests.clear();
 
     // Tear down the connection-scoped SSE stream.
     this.connStreamAbort?.abort();
@@ -721,6 +741,7 @@ export class AcpHttpTransport implements DaemonTransport {
       method: 'POST',
       headers,
       body: JSON.stringify(initReq),
+      signal: this.initializationAbort.signal,
     });
 
     if (!res.ok) {
@@ -760,6 +781,7 @@ export class AcpHttpTransport implements DaemonTransport {
       }
       const capRes = await this._fetch(`${this.baseUrl}/capabilities`, {
         headers: capHeaders,
+        signal: this.initializationAbort.signal,
       });
       if (capRes.ok) {
         this.initResult = await capRes.json();
