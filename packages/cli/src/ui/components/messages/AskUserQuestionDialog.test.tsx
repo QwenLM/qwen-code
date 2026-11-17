@@ -645,6 +645,38 @@ describe('<AskUserQuestionDialog />', () => {
       );
       unmount();
     }, 10000);
+
+    it('confirms a single question once when Enter is pressed twice', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails();
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          availableWidth={80}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      stdin.write('4');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ 4.');
+      });
+      await wait();
+      await writeText(stdin, 'Teal');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('Teal');
+      });
+
+      stdin.write('\r');
+      await wait(20);
+      stdin.write('\r');
+      await wait();
+
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+      unmount();
+    }, 10000);
   });
 
   describe('multi-select interaction', () => {
@@ -727,6 +759,7 @@ describe('<AskUserQuestionDialog />', () => {
       stdin.write('\r');
       await wait();
 
+      expect(onConfirm).toHaveBeenCalledTimes(1);
       expect(onConfirm).toHaveBeenCalledWith(
         ToolConfirmationOutcome.ProceedOnce,
         { answers: { 0: 'My custom answer' } },
@@ -802,6 +835,7 @@ describe('<AskUserQuestionDialog />', () => {
       stdin.write('\r');
       await wait();
 
+      expect(onConfirm).toHaveBeenCalledTimes(1);
       expect(onConfirm).toHaveBeenCalledWith(
         ToolConfirmationOutcome.ProceedOnce,
         { answers: { 0: expect.stringContaining('Red') } },
@@ -889,6 +923,129 @@ describe('<AskUserQuestionDialog />', () => {
       expect(clean(lastFrame())).toContain('Second question?');
       expect(clean(lastFrame())).not.toContain('Third question?');
       expect(onConfirm).not.toHaveBeenCalled();
+      unmount();
+    }, 10000);
+
+    it('advances one question when a multi-select free-text answer is submitted with Enter', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [
+          createSingleQuestion({
+            header: 'Q1',
+            question: 'First question?',
+            multiSelect: true,
+          }),
+          createSingleQuestion({
+            header: 'Q2',
+            question: 'Second question?',
+            multiSelect: true,
+          }),
+          createSingleQuestion({
+            header: 'Q3',
+            question: 'Third question?',
+            multiSelect: true,
+          }),
+        ],
+      });
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          availableWidth={80}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      stdin.write('4');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ [ ] 4.');
+      });
+      await wait();
+      await writeText(stdin, 'Teal');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('Teal');
+      });
+
+      stdin.write('\r');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('Second question?');
+      });
+      await wait(400);
+
+      expect(clean(lastFrame())).toContain('Second question?');
+      expect(clean(lastFrame())).not.toContain('Third question?');
+      expect(onConfirm).not.toHaveBeenCalled();
+      unmount();
+    }, 10000);
+
+    it('does not skip a question when Enter is pressed again inside the advance pause', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [
+          createSingleQuestion({ header: 'Q1', question: 'First question?' }),
+          createSingleQuestion({ header: 'Q2', question: 'Second question?' }),
+          createSingleQuestion({ header: 'Q3', question: 'Third question?' }),
+        ],
+      });
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          availableWidth={80}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      stdin.write('4');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('❯ 4.');
+      });
+      await wait();
+      await writeText(stdin, 'Teal');
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('Teal');
+      });
+
+      // The second Enter lands inside the 150 ms pause before the tab swap.
+      stdin.write('\r');
+      await wait(20);
+      stdin.write('\r');
+      await wait(400);
+
+      expect(clean(lastFrame())).toContain('Second question?');
+      expect(clean(lastFrame())).not.toContain('Third question?');
+      unmount();
+    }, 10000);
+
+    it('a manual tab move inside the advance pause cancels the pending advance', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [
+          createSingleQuestion({ header: 'Q1', question: 'First question?' }),
+          createSingleQuestion({ header: 'Q2', question: 'Second question?' }),
+          createSingleQuestion({ header: 'Q3', question: 'Third question?' }),
+        ],
+      });
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          availableWidth={80}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      // Answer Q1 with its first option, then move right before the swap.
+      stdin.write('\r');
+      await wait(20);
+      stdin.write('\u001B[C'); // Right
+      await wait(400);
+
+      expect(clean(lastFrame())).toContain('Second question?');
+      expect(clean(lastFrame())).not.toContain('Third question?');
       unmount();
     }, 10000);
 
