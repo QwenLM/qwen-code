@@ -15,4 +15,12 @@ public interface RuntimePublicationVerifier {
     public default Map<String, Object> receipt(ToolExecutionRecord execution) {
         return null;
     }
+
+    /**
+     * The external foreground-Shell capture lane, if this Runtime family has
+     * one. Null keeps every other placement on its installed-grant path.
+     */
+    public default com.alibaba.qwen.code.runtimebroker.spi.ExternalShellPublication externalShell() {
+        return null;
+    }
 }

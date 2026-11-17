@@ -395,8 +395,11 @@ import {
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import {
   hostedShellLaneAttachesChildAgents,
-  hasHostedExternalFilesExcludedOptions,
+  hasHostedExternalExcludedOptions,
   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
+  isHostedWorkspaceExternalProfile,
+  isHostedWorkspaceExternalShellProfile,
   isHostedWorkspaceReadProfile,
   isHostedWorkspacePublicShellProfile,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
@@ -954,6 +957,7 @@ async function hostedApprovalForTurn(
       'hosted-workspace-shell/4',
       'hosted-workspace-files/3',
       HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
       'hosted-workspace-files/4',
     ].includes(session.toolProfile ?? '');
   const admission = await readHostedTurnApprovalSelection(
@@ -5011,7 +5015,14 @@ export function registerHostedHarnessSessionRoutes(
       requestedProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
       (!contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE) ||
         contract.lifecycleProtocolVersion !== 1 ||
-        hasHostedExternalFilesExcludedOptions(body))
+        hasHostedExternalExcludedOptions(body, requestedProfile))
+    )
+      return error(res, 400, 'hosted_tool_profile_unavailable');
+    if (
+      isHostedWorkspaceExternalShellProfile(requestedProfile) &&
+      (!contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE) ||
+        contract.lifecycleProtocolVersion !== 1 ||
+        hasHostedExternalExcludedOptions(body, requestedProfile))
     )
       return error(res, 400, 'hosted_tool_profile_unavailable');
     let cleanupPromptId = body?.['recoveryCleanupPromptId'];
@@ -5140,6 +5151,7 @@ export function registerHostedHarnessSessionRoutes(
       ((toolProfile !== undefined &&
         toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
         toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+        !isHostedWorkspaceExternalShellProfile(toolProfile) &&
         toolProfile !== 'hosted-workspace-shell/1') ||
         (create && toolProfile === undefined) ||
         body?.['mcpServers'] !== undefined ||
@@ -5290,9 +5302,9 @@ export function registerHostedHarnessSessionRoutes(
       (lifecycleProtocolVersion === 1
         ? toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
           !(
-            toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+            isHostedWorkspaceExternalProfile(toolProfile) &&
             contract.lifecycleProtocolVersion === 1 &&
-            contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE)
+            contract.features?.includes(toolProfile as string)
           )
         : typeof toolProfile !== 'string' ||
           !contract.lifecycleV2Profiles?.includes(toolProfile))
@@ -5324,6 +5336,7 @@ export function registerHostedHarnessSessionRoutes(
         (toolProfile !== undefined &&
           toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
           toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+          !isHostedWorkspaceExternalShellProfile(toolProfile) &&
           toolProfile !== 'hosted-workspace-shell/1'))
     ) {
       error(res, 409, 'hosted_tool_profile_conflict');
@@ -6265,7 +6278,8 @@ export function registerHostedHarnessSessionRoutes(
                   ...(foregroundOnly ? { foregroundOnly: true } : {}),
                   ...(mcpServers ? { mcpServers } : {}),
                   ...(hookCatalog ? { hookCatalog } : {}),
-                  ...(isHostedWorkspaceShellProfile(toolProfile)
+                  ...(isHostedWorkspaceShellProfile(toolProfile) ||
+                  isHostedWorkspaceExternalShellProfile(toolProfile)
                     ? { captureBytes }
                     : {}),
                   ...(approval
@@ -6275,6 +6289,9 @@ export function registerHostedHarnessSessionRoutes(
                           (toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
                             toolProfile ===
                               HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+                            isHostedWorkspaceExternalShellProfile(
+                              toolProfile,
+                            ) ||
                             toolProfile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
                             isHostedWorkspaceShellProfile(toolProfile)),
                       )
@@ -6340,14 +6357,18 @@ export function registerHostedHarnessSessionRoutes(
       );
       const externalFiles =
         definition?.['toolProfile'] === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE;
+      const externalShell = isHostedWorkspaceExternalShellProfile(
+        definition?.['toolProfile'],
+      );
       if (
-        externalFiles &&
-        (!contract.features?.includes(
-          HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
-        ) ||
+        (externalFiles || externalShell) &&
+        (!contract.features?.includes(definition?.['toolProfile'] as string) ||
           contract.lifecycleProtocolVersion !== 1 ||
-          hasHostedExternalFilesExcludedOptions(body) ||
-          hasHostedExternalFilesExcludedOptions(definition) ||
+          hasHostedExternalExcludedOptions(body, definition?.['toolProfile']) ||
+          hasHostedExternalExcludedOptions(
+            definition,
+            definition?.['toolProfile'],
+          ) ||
           managed.authority
             .eventsInSequenceRange(1, managed.authority.committedSequence)
             .some(
@@ -6486,7 +6507,8 @@ export function registerHostedHarnessSessionRoutes(
       }
       if (
         !create &&
-        isHostedWorkspaceShellProfile(toolProfile) &&
+        (isHostedWorkspaceShellProfile(toolProfile) ||
+          isHostedWorkspaceExternalShellProfile(toolProfile)) &&
         captureBytes === undefined
       )
         captureBytes = definition?.['captureBytes'];
@@ -6495,6 +6517,7 @@ export function registerHostedHarnessSessionRoutes(
         (foregroundOnly &&
           ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
             toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+            !isHostedWorkspaceExternalShellProfile(toolProfile) &&
             toolProfile !== 'hosted-workspace-shell/1') ||
             mcpServers !== undefined ||
             hookCatalog !== undefined ||
@@ -6584,14 +6607,18 @@ export function registerHostedHarnessSessionRoutes(
         ...(childSnapshots ? { childSnapshots: true } : {}),
         ...(toolProfile ? { toolProfile } : {}),
         ...(foregroundOnly ? { foregroundOnly: true } : {}),
-        ...(isHostedWorkspaceShellProfile(toolProfile) &&
+        ...((isHostedWorkspaceShellProfile(toolProfile) ||
+          isHostedWorkspaceExternalShellProfile(toolProfile)) &&
         captureBytes !== undefined
           ? {
               publication: {
                 owner: stores.publication,
                 captureBytes: captureBytes as number,
               },
-              ...(!foregroundOnly
+              // The external placement is foreground-only by contract: it has
+              // no background ledger, so it never opens that lane.
+              ...(!foregroundOnly &&
+              !isHostedWorkspaceExternalShellProfile(toolProfile)
                 ? {
                     backgroundLane: {
                       resources: stores.toolResultResources,
@@ -6631,6 +6658,8 @@ export function registerHostedHarnessSessionRoutes(
         !isDeepStrictEqual(definition?.['hookCatalog'], hookCatalog) ||
         (isHostedWorkspaceShellProfile(toolProfile) &&
           definition?.['captureBytes'] !== captureBytes) ||
+        (isHostedWorkspaceExternalShellProfile(toolProfile) &&
+          definition?.['captureBytes'] !== captureBytes) ||
         (toolProfile && !pinned)
       ) {
         await managed.close();
@@ -6648,9 +6677,22 @@ export function registerHostedHarnessSessionRoutes(
             ).toString('utf8'),
           ),
         );
-      if (externalFiles && hasExtensionConfiguration) {
+      if ((externalFiles || externalShell) && hasExtensionConfiguration) {
         await managed.close();
         return error(res, 409, 'hosted_tool_profile_conflict');
+      }
+      // The external drain proves the captured bytes arrived, so their
+      // capacity must be reserved before the placement admits any Shell.
+      if (
+        externalShell &&
+        (captureBytes === undefined ||
+          !Number.isSafeInteger(captureBytes) ||
+          (captureBytes as number) < 1 ||
+          (captureBytes as number) > 2 ** 41)
+      ) {
+        await managed.close();
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
       }
       const mcpSettings = hasExtensionConfiguration
         ? []
@@ -6831,6 +6873,7 @@ export function registerHostedHarnessSessionRoutes(
       if (extensionManagement?.pending) session.blocked = true;
       if (
         !externalFiles &&
+        !externalShell &&
         !foregroundOnly &&
         session.toolProfile &&
         brokerOptions
@@ -6955,7 +6998,7 @@ export function registerHostedHarnessSessionRoutes(
         });
       // H6b: every hosted Session owns its automation funnel — a run's
       // input needs no Runtime, and its settle reads the turn alone.
-      if (!externalFiles) {
+      if (!externalFiles && !externalShell) {
         session.automations = new HostedAutomationSession(
           {
             authority: managed.authority,
@@ -7030,7 +7073,7 @@ export function registerHostedHarnessSessionRoutes(
         : undefined;
       // H5b: every hosted Session owns its channel funnel — a channel input
       // needs no Runtime, and its reply plans from the settled turn alone.
-      if (!externalFiles) {
+      if (!externalFiles && !externalShell) {
         session.channels = new HostedChannelSession(
           {
             authority: managed.authority,
@@ -7548,7 +7591,7 @@ export function registerHostedHarnessSessionRoutes(
       // drives a Runtime by accident.
       const unsettled = unsettledPromptId(session);
       if (
-        externalFiles &&
+        (externalFiles || externalShell) &&
         unsettled &&
         (await readHostedTurnApprovalSelection(managed, unsettled))?.planMode
       ) {
@@ -8722,9 +8765,9 @@ export function registerHostedHarnessSessionRoutes(
       (protocolVersion === 1 &&
         session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
         !(
-          session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+          isHostedWorkspaceExternalProfile(session.toolProfile) &&
           contract.lifecycleProtocolVersion === 1 &&
-          contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE)
+          contract.features?.includes(session.toolProfile as string)
         ))
     )
       return error(res, 400, 'invalid_hosted_lifecycle_request');
@@ -9029,6 +9072,7 @@ export function registerHostedHarnessSessionRoutes(
                   'hosted-workspace-files/2',
                   'hosted-workspace-files/3',
                   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+                  HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
                   'hosted-workspace-files/4',
                 ]
           ).includes(session.toolProfile ?? '') ||
@@ -13631,7 +13675,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       !session.toolProfile ||
       session.toolProfile === HOSTED_MCP_PROFILE ||
-      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+      isHostedWorkspaceExternalProfile(session.toolProfile) ||
       !brokerOptions
     )
       return error(res, 409, 'hosted_file_history_unavailable');
