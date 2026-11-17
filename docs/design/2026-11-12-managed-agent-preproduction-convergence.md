@@ -83,8 +83,10 @@ cold-archived the Kubernetes / resident CSI backend).
 - **preflight.** 4,393 production lines across 5 files plus 5,513 test lines
   across 6 files (~9,900 total) serve `--check`: `ServerEnvironment` (1,095,
   `StackWalker` format sniffing at :229), `ManagedAgentPreflight` (2,486,
-  `YamlWalk` comment AST at :794), `HarnessBrokerUrl` (410, WHATWG subset shared
-  with `packages/cli/src/serve/managed-runtime-broker-url.fixtures.json`),
+  `YamlWalk` comment AST at :794), `HarnessBrokerUrl` (410 at this pre-change
+  baseline, a WHATWG subset shared with
+  `packages/cli/src/serve/managed-runtime-broker-url.fixtures.json`; ~215 after
+  the Slice 6 canonical gate, #17510),
   `ServiceAccount` (194, user-space `namei`).
 - **Packaging.** A single `exec` repackage remains (#17064 removed the six
   classifier fat-JAR executions; the operator tools survive as admin
@@ -310,10 +312,16 @@ still wanted, it needs its own design effort; otherwise the dual server stands.
 
 ### Slice 6 — preflight simplification
 
-- Require canonical `http(s)://host:port` at the config entry; delete the
-  WHATWG subset and the shared URL fixtures (or move validation to the Node
-  side). Replace `StackWalker` format sniffing with Spring's ConfigData API;
-  keep value-based secret detection (URL user-information passwords and
+- **Done — canonical Broker URL entry.** `HarnessBrokerUrl` drops the
+  hand-written WHATWG IPv4/IPv6 subset (410 → ~210 lines; IPv6 canonicalized
+  via `InetAddress`). It and the Node resolver
+  (`packages/cli/src/serve/managed-runtime-broker-url.ts`) now refuse
+  non-canonical spellings at the entry — `inet_aton` shorthand/octal/hex IPv4,
+  missing or extra scheme slashes, dot-segment paths, empty or out-of-range
+  ports — against one shared, updated fixture set. The remaining sub-items
+  below are security-semantics redesigns, tracked separately.
+- Replace `StackWalker` format sniffing with Spring's ConfigData API; keep
+  value-based secret detection (URL user-information passwords and
   `?password=`/`?token=` parameters under any key) while removing only the
   YAML/comment AST and path machinery — a key-name-only scan would miss a
   credential in e.g. `spring.datasource.url` and lose the `chmod 600` warning;

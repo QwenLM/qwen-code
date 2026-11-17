@@ -27,6 +27,7 @@ import {
   checkArtifacts,
   checkBoundary,
   checkMutationCoverage,
+  containerNonceErrors,
   isFilesystemRoot,
 } from '../../scripts/verify-pr-check.mjs';
 
@@ -35,6 +36,11 @@ const SCRIPT = fileURLToPath(
 );
 const HEAD = 'b'.repeat(40);
 
+// The container-local nonce plaintext and its hash. The gate record carries
+// only the hash (R16-1); a round log must echo a container-nonce line whose
+// value hashes to it for the checker to accept mode:"container".
+const NONCE = '0123456789abcdef0123456789abcdef';
+const NONCE_SHA256 = createHash('sha256').update(NONCE).digest('hex');
 const GATE_RECORD = JSON.stringify({
   gate: 'require-isolation',
   passed: true,
@@ -42,6 +48,7 @@ const GATE_RECORD = JSON.stringify({
   signals: ['container=qwen-verify', '/.dockerenv'],
   observed: ['/.dockerenv'],
   credentialFree: true,
+  nonceSha256: NONCE_SHA256,
 });
 const APPROVAL =
   'https://github.com/QwenLM/qwen-code/pull/17185#issuecomment-1234567890';
@@ -84,6 +91,8 @@ function makeArtifactDir(files, evidence = []) {
   }
   if (files.boundaryGate !== undefined) {
     writeFileSync(join(dir, 'boundary-gate.json'), files.boundaryGate);
+    // The battery echoes the container-local nonce into its logs (R16-1).
+    writeFileSync(join(dir, 'harness.log'), `container-nonce: ${NONCE}\n`);
   }
   if (evidence.length > 0) {
     mkdirSync(join(dir, 'evidence'));
@@ -1250,6 +1259,10 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       JSON.stringify({ mode: 'container', detail: 'test boundary' }),
     );
     writeFileSync(join(artifacts, 'boundary-gate.json'), GATE_RECORD);
+    writeFileSync(
+      join(artifacts, 'harness.log'),
+      `container-nonce: ${NONCE}\n`,
+    );
     writeFileSync(
       join(artifacts, 'report.md'),
       `merge-ready · 1 passed · 0 failed · 1 total · ${base}\n`,
@@ -2489,6 +2502,330 @@ describe('round-15 witnesses', () => {
   });
 });
 
+describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
+  const boundary = JSON.stringify({
+    mode: 'container',
+    detail: 'node:22-bookworm, --network none',
+  });
+  const gateWith = (extra = {}) =>
+    JSON.stringify({
+      gate: 'require-isolation',
+      passed: true,
+      observed: ['/.dockerenv'],
+      signals: ['/.dockerenv'],
+      credentialFree: true,
+      nonceSha256: NONCE_SHA256,
+      ...extra,
+    });
+  const dirWithLog = (line) => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-pr-nonce-'));
+    tmpDirs.push(dir);
+    if (line !== null) writeFileSync(join(dir, 'harness.log'), line);
+    return dir;
+  };
+
+  it('accepts a container claim whose log line hashes to the record', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('finds the nonce line in a nested log directory', () => {
+    const dir = dirWithLog(null);
+    mkdirSync(join(dir, 'logs'));
+    writeFileSync(join(dir, 'logs', 'run.log'), `container-nonce: ${NONCE}\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R1-2/R2-5: the checker is the single authoritative matcher and reads each
+  // file whole (aggregate-bounded), so a 17 MiB log with the nonce on line 1
+  // is accepted, and so is a marker sitting BEHIND >1 MiB of earlier output
+  // (a consolidated harness.log) — a per-file prefix cap would falsely refuse
+  // both. The aggregate budget, not a per-file cap, bounds the work.
+  it('accepts a nonce line at the start of a 17 MiB log', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'big.log'),
+      `container-nonce: ${NONCE}\n` + 'x'.repeat(17 * 1024 * 1024),
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('accepts a marker behind more than 1 MiB of earlier output', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      'x'.repeat(2 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R2-6: pin the checker's own line semantics (the shell no longer mirrors
+  // them). The marker may sit anywhere on the line (not anchored), and the
+  // WHOLE first whitespace-delimited token is hashed (a suffix changes it).
+  it('matches a marker preceded by other text on the line', () => {
+    const dir = dirWithLog(`[12:04] container-nonce: ${NONCE}\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('hashes the whole first token, so a suffix breaks the match', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}XYZ\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /no container-nonce line whose sha256 matches/,
+    );
+  });
+
+  it('matches a marker line split across read chunks', () => {
+    const dir = dirWithLog(null);
+    // Pad to just under a chunk so the marker line straddles the 1 MiB boundary.
+    const pad = 'x'.repeat(1024 * 1024 - 10);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      `${pad}\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-1: the byte budget must not be charged against the binary evidence/
+  // subtree, or a compliant round with large evidence is refused even though
+  // harness.log carries the marker.
+  it('accepts a marker when evidence alone exceeds the byte budget', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
+    mkdirSync(join(dir, 'evidence'));
+    writeFileSync(
+      join(dir, 'evidence', 'big.png'),
+      'x'.repeat(65 * 1024 * 1024),
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-3: a marker line with no trailing newline is still matched (final carry),
+  // including at the end of a multi-MiB no-newline file (capped carry, bounded).
+  it('matches a marker line with no trailing newline', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('matches a marker at the end of a no-newline multi-MiB file', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      'x'.repeat(2 * 1024 * 1024) + `container-nonce: ${NONCE}`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-2: the matcher's own CRLF / NUL witnesses (the shell no longer mirrors it).
+  it('accepts a CRLF-terminated marker line', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\r\n`);
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('accepts a marker in a log that also contains a NUL byte', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      `PASS\x00cell\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R3-3: a compliant marker line straddling a chunk boundary with >256 B of
+  // itself before the boundary must still be found. A complete line precedes it
+  // so the chunk has a newline (lastNl >= 0): the marker sits in the partial
+  // line after that newline, which must be SCANNED before the carry is capped,
+  // or the marker at its head is dropped and the round falsely refused.
+  it('accepts a marker line straddling a chunk boundary with >256 B before it', () => {
+    const dir = dirWithLog(null);
+    const lineA = 'x'.repeat(1024 * 1024 - 500 - 1) + '\n';
+    const lineB = `container-nonce: ${NONCE} ` + 'y'.repeat(599);
+    writeFileSync(join(dir, 'harness.log'), lineA + lineB + '\n');
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  // R4-1: exhausting the byte budget before reaching the marker gives a
+  // bound-specific refusal, not the false "no matching line" diagnosis.
+  it('gives a bound-specific refusal when the marker is beyond the byte budget', () => {
+    const dir = dirWithLog(null);
+    writeFileSync(
+      join(dir, 'harness.log'),
+      'x'.repeat(65 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // R4-4: directories count against the entry cap, so a planted forest of empty
+  // dirs trips the bound (bounded message) rather than walking unbounded.
+  it('counts directories against the entry cap', () => {
+    const dir = dirWithLog(null);
+    for (let i = 0; i < 20001; i++) mkdirSync(join(dir, `d${i}`));
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // R5-3: regular files count against the entry cap too — the byte budget
+  // cannot bound zero-byte logs, so the file branch's visited++ is the only
+  // bound left. Deleting it must red this: the walk would otherwise traverse
+  // an unbounded number of empty files before answering (a hang, not a refusal).
+  it('counts files against the entry cap', () => {
+    const dir = dirWithLog(null);
+    for (let i = 0; i < 20001; i++) writeFileSync(join(dir, `f${i}`), '');
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /hit its resource bound/,
+    );
+  });
+
+  // R4-5: only the TOP-LEVEL evidence/ subtree is exempt; a nested dir named
+  // evidence (under logs/) is still scanned, so a marker there is found.
+  it('scans a nested evidence dir that is not the top-level subtree', () => {
+    const dir = dirWithLog(null);
+    mkdirSync(join(dir, 'logs', 'evidence'), { recursive: true });
+    writeFileSync(
+      join(dir, 'logs', 'evidence', 'run.log'),
+      `container-nonce: ${NONCE}\n`,
+    );
+    expect(containerNonceErrors(boundary, gateWith(), dir)).toEqual([]);
+  });
+
+  it('refuses a plaintext-only legacy record with no nonceSha256', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
+    const legacy = JSON.stringify({
+      gate: 'require-isolation',
+      passed: true,
+      observed: ['/.dockerenv'],
+      signals: ['/.dockerenv'],
+      credentialFree: true,
+      nonce: NONCE,
+    });
+    expect(containerNonceErrors(boundary, legacy, dir).join('\n')).toMatch(
+      /records no nonceSha256/,
+    );
+  });
+
+  it('refuses a non-hex nonceSha256', () => {
+    const dir = dirWithLog(`container-nonce: ${NONCE}\n`);
+    expect(
+      containerNonceErrors(
+        boundary,
+        gateWith({ nonceSha256: 'xyz' }),
+        dir,
+      ).join('\n'),
+    ).toMatch(/records no nonceSha256/);
+  });
+
+  it('refuses when a log line hashes differently from the record', () => {
+    const dir = dirWithLog('container-nonce: deadbeef\n');
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /no container-nonce line whose sha256 matches/,
+    );
+  });
+
+  it('refuses when the round dir carries no nonce line at all', () => {
+    const dir = dirWithLog(null);
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /no container-nonce line whose sha256 matches/,
+    );
+  });
+
+  it('does not follow a symlinked log outside the round dir', () => {
+    const dir = dirWithLog(null);
+    const outside = mkdtempSync(join(tmpdir(), 'verify-pr-nonce-src-'));
+    tmpDirs.push(outside);
+    writeFileSync(join(outside, 'src.log'), `container-nonce: ${NONCE}\n`);
+    symlinkSync(join(outside, 'src.log'), join(dir, 'link.log'));
+    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
+      /no container-nonce line whose sha256 matches/,
+    );
+  });
+
+  it('names maintainer approval for a waiver, not a free bypass (D17-2)', () => {
+    const dir = dirWithLog(null);
+    const message = containerNonceErrors(boundary, gateWith(), dir).join('\n');
+    expect(message).toMatch(/maintainer's approval/);
+    expect(message).toMatch(/not a free bypass/);
+  });
+
+  it('exempts the ci-lane record and non-container modes', () => {
+    const dir = dirWithLog(null);
+    expect(
+      containerNonceErrors(
+        boundary,
+        JSON.stringify({ gate: 'ci-lane', passed: true }),
+        dir,
+      ),
+    ).toEqual([]);
+    expect(
+      containerNonceErrors(JSON.stringify({ mode: 'waived' }), gateWith(), dir),
+    ).toEqual([]);
+    expect(
+      containerNonceErrors(JSON.stringify({ mode: 'vm' }), gateWith(), dir),
+    ).toEqual([]);
+  });
+
+  it('leaves a missing or invalid gate to gateRecordErrors', () => {
+    const dir = dirWithLog(null);
+    expect(containerNonceErrors(boundary, null, dir)).toEqual([]);
+    expect(containerNonceErrors(boundary, '{bad', dir)).toEqual([]);
+    expect(
+      containerNonceErrors(boundary, gateWith({ passed: false }), dir),
+    ).toEqual([]);
+  });
+
+  it('the CLI refuses a container round whose logs lack the nonce line', () => {
+    const dir = makeArtifactDir(validFiles({}));
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/no container-nonce line whose sha256 matches/);
+  });
+
+  // R1-7: the exemption is the record, not the flag. A local run that passes
+  // --publish-lane with a require-isolation record and no nonce line is still
+  // refused; the ci-lane record the publish job writes stays exempt.
+  it('refuses a no-nonce require-isolation round even under --publish-lane', () => {
+    const dir = makeArtifactDir(validFiles({}));
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, '--publish-lane', dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/no container-nonce line whose sha256 matches/);
+  });
+
+  it('exempts the ci-lane record under --publish-lane without a nonce line', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        boundaryGate: JSON.stringify({ gate: 'ci-lane', passed: true }),
+      }),
+    );
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, '--publish-lane', dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(0);
+  });
+
+  // R2-7: $QWEN_VERIFY_CONTEXT non-empty must not switch the binding off for a
+  // require-isolation container claim — the exemption is the record, not a flag.
+  it('refuses a no-nonce require-isolation round even with QWEN_VERIFY_CONTEXT set', () => {
+    const dir = makeArtifactDir(validFiles({}));
+    rmSync(join(dir, 'harness.log'));
+    const res = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '1' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/no container-nonce line whose sha256 matches/);
+  });
+});
+
 describe('R17-1 / R2-1 trust-boundary witnesses', () => {
   // The trust refusal must fail closed on the layouts the path-string test
   // missed, and a hard link must not let a PR-writable snapshot judge its own
@@ -2505,6 +2842,7 @@ describe('R17-1 / R2-1 trust-boundary witnesses', () => {
     writeFileSync(join(dir, 'assertions.json'), files.assertions);
     writeFileSync(join(dir, 'boundary.json'), files.boundary);
     writeFileSync(join(dir, 'boundary-gate.json'), files.boundaryGate);
+    writeFileSync(join(dir, 'harness.log'), `container-nonce: ${NONCE}\n`);
     writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
   };
   const snapshot = JSON.stringify({
