@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import os from 'node:os';
 import {
   extractShellOperations,
   extractShellOperationsAcrossCommand,
@@ -182,6 +183,91 @@ describe('extractShellOperations', () => {
       'redirect >>: write_file',
       'date >> /var/log/app.log',
       [write('/var/log/app.log')],
+    ],
+    // `>|` is the clobber override: the same write as `>`, spelled to defeat
+    // `noclobber`. Not reading it loses a write to a protected path.
+    [
+      'redirect >|: write_file',
+      'echo hello >| /tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect >| without space: write_file',
+      'echo hello >|/tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect 1>|: write_file',
+      'echo hello 1>| /tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect 1>| without space: write_file',
+      'echo hello 1>|/tmp/out.txt',
+      [write('/tmp/out.txt')],
+    ],
+    [
+      'redirect 2>|: write_file',
+      'echo hi 2>| /tmp/err.txt',
+      [write('/tmp/err.txt')],
+    ],
+    [
+      'redirect 2>| without space: write_file',
+      'echo hi 2>|/tmp/err.txt',
+      [write('/tmp/err.txt')],
+    ],
+    [
+      'redirect >|: quoted target',
+      "echo hello >| '/tmp/my file.txt'",
+      [write('/tmp/my file.txt')],
+    ],
+    [
+      'redirect >|: network pseudo-device opens no file',
+      'echo hello >| /dev/tcp/example.com/80',
+      [],
+    ],
+    [
+      'redirect >|: a quoted operator stays a literal argument',
+      'echo "hi >| nope.txt"',
+      [],
+    ],
+    // A `|` inside the operator is a literal filename character, not a shell
+    // pipe: `>"|"file` writes a file called `|file`, and `>"|" out.txt` writes a
+    // file called `|`. Masking `|` along with `<>&` keeps the quoted forms on
+    // the plain `>` branch (base parity) instead of reading them as `>|` and
+    // dropping the leading `|` from the reported target.
+    [
+      'redirect: a quoted pipe in the target is part of the filename',
+      'echo \'{}\' >"|"file',
+      [write(`${CWD}/|file`)],
+    ],
+    [
+      'redirect: a quoted pipe standing alone names the file',
+      'echo hi >"|" out.txt',
+      [write(`${CWD}/|`)],
+    ],
+    [
+      'redirect: an escaped pipe in the target is part of the filename',
+      'echo hi >\\|file',
+      [write(`${CWD}/|file`)],
+    ],
+    [
+      'redirect: a quoted pipe plus .. cannot climb out of a denied path',
+      'echo \'{}\' >"|/../".qwen/settings.json',
+      [write(SETTINGS)],
+    ],
+    // The other spellings: a single-quoted `|` keeps `|x/` in the resolved
+    // path, and a quoted word ending in `>` must not turn the plain redirect
+    // that follows it into a clobber.
+    [
+      'redirect: a single-quoted pipe is part of the filename',
+      "echo '{}' >'|x/'.qwen/settings.json",
+      [write(`${CWD}/|x/.qwen/settings.json`)],
+    ],
+    [
+      'redirect: a quoted word before the redirect does not invent a clobber',
+      'echo hi \'>\'>"|/../".qwen/settings.json',
+      [write(SETTINGS)],
     ],
     [
       'curl: extracts domain',
@@ -585,10 +671,44 @@ describe('extractShellOperations', () => {
   });
 
   // A quoted `>` is not a redirect, so `2">"&1` is not fd duplication; bash
-  // reads the unquoted `&` as "run in background", and the check keeps the
-  // literal write.
+  // reads the unquoted `&` as "run in background" and then runs `1`, so no
+  // file is written.
   it('2">"&1 is not fd duplication', () => {
-    expect(ops('printf X 2">"&1')).toContainEqual(write(`${CWD}/&1`));
+    expect(ops('printf X 2">"&1')).toEqual([]);
+  });
+
+  // A quoted or escaped `>` ends the word; an adjacent unquoted `>` is still
+  // a redirect: `echo x '>'>file` passes `>` to echo and writes `file`.
+  it.each<[command: string, file: string]>([
+    ["echo x '>'>.qwen/settings.json", '.qwen/settings.json'],
+    ['echo x \\>>out2.txt', 'out2.txt'],
+    ['echo x ">">out3.txt', 'out3.txt'],
+    ["echo x $'\\x3e'>out4.txt", 'out4.txt'],
+    ["echo x '&'>out5.txt", 'out5.txt'],
+    ['echo x "&">>out6.txt', 'out6.txt'],
+    ['echo x \\&>out7.txt', 'out7.txt'],
+    ["echo x $'\\x26'>out8.txt", 'out8.txt'],
+    ["echo x '>'&>out9.txt", 'out9.txt'],
+    ['echo x "&"&>out10.txt', 'out10.txt'],
+    // `|` belongs to the same set: a quoted or escaped pipe ends the word and
+    // the adjacent unquoted `>` is still a redirect. Without it bash wrote the
+    // file while the analysis reported nothing at all.
+    ['echo x "|">out11.txt', 'out11.txt'],
+    ["echo x '|'>out12.txt", 'out12.txt'],
+    ['echo x \\|>out13.txt', 'out13.txt'],
+    ['echo \'{}\' "|">.qwen/settings.json', '.qwen/settings.json'],
+  ])(
+    'a quoted operator before a real redirect keeps the write: %s',
+    (command, file) => {
+      expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
+    },
+  );
+
+  // A quoted word before a descriptor operation keeps its fd semantics.
+  it('keeps fd redirects after a quoted word', () => {
+    expect(ops("echo hi '>'>&1")).toEqual([]);
+    expect(ops("echo hi '>'>&-")).toEqual([]);
+    expect(ops("echo hi '>'>&out2.txt")).toEqual([write(`${CWD}/out2.txt`)]);
   });
 
   // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.
@@ -774,6 +894,57 @@ describe('extractShellOperationsAcrossCommand', () => {
       'cd .qwen && cd ..',
       [],
     ],
+    // bash runs `echo … >| file` as ONE command. Splitting at the `|` of the
+    // clobber override handed the permission path two segments and neither
+    // carried the write, so a protected-path write went unseen.
+    [
+      'reports the clobber redirect as a write to a protected path',
+      "echo '{}' >| .qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'reports the clobber redirect without a space before the target',
+      "echo '{}' >|.qwen/settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    [
+      'tracks literal `cd` before a clobber redirect',
+      "cd .qwen && echo '{}' >| settings.json",
+      [write(REPO_SETTINGS)],
+    ],
+    // A lone CR right after the clobber operator is the whole redirect target:
+    // bash writes a file named `\r`, so it must not be trimmed as a line
+    // ending. `1>|` and `2>|` name it exactly as `>|` does.
+    [
+      'reports the CR target behind `>|` as a write',
+      'cat >|\r\necho hi',
+      [write('/repo/\r')],
+    ],
+    [
+      'reports the CR target behind `1>|` as a write',
+      'cat 1>|\r\necho hi',
+      [write('/repo/\r')],
+    ],
+    [
+      'reports the CR target behind `2>|` as a write',
+      'cat 2>|\r\necho hi',
+      [write('/repo/\r')],
+    ],
+    [
+      'still splits the real pipe that follows a clobber redirect',
+      'echo hi >| out.txt | cat',
+      [write('/repo/out.txt')],
+    ],
+    [
+      'still splits the pipe after an escaped `>` (a literal argument)',
+      'echo hi \\>| cat',
+      [],
+    ],
+    [
+      'still splits the pipe after a quoted clobber operator',
+      "echo 'hi >| x' | cat",
+      [],
+    ],
   ])('%s', (_title, command, expected) => {
     expect(across(command)).toEqual(expected);
   });
@@ -804,6 +975,13 @@ describe('extractShellOperationsAcrossCommand', () => {
       'cd "$QWEN_HOME" && echo hi 1>/tmp/out.txt',
       'cd "$QWEN_HOME" && echo hi >&/tmp/out.txt',
       'cd "$QWEN_HOME" && echo hi 1>&/tmp/out.txt',
+      // `>|` is the same write as `>`, so it must reach the same verdict: the
+      // bare `>` alternative matched first here and left `|/tmp/out.txt`
+      // behind, which is not shell-absolute, so this form alone came out
+      // `pathMayDependOnCwd: true`.
+      'cd "$QWEN_HOME" && echo hi >|/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi 1>|/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi 2>|/tmp/out.txt',
     ]) {
       expect(across(command)).toEqual([uncertainWrite('/tmp/out.txt', false)]);
     }
@@ -827,5 +1005,179 @@ describe('extractShellOperationsAcrossCommand', () => {
     // matter, only that the call returns without throwing or hanging.
     const deep = 'bash -lc "bash -lc \\"bash -lc \'bash -lc echo > x.txt\'\\""';
     expect(() => across(deep)).not.toThrow();
+  });
+});
+
+describe('line continuations before a `$` construct', () => {
+  it('reads the ANSI-C word the continuation interrupts', () => {
+    // The shell removes `\`+newline before it lexes, so the ANSI-C opener it
+    // interrupts is the word bash runs; `$` + continuation + `'` is not a
+    // dangling `$` followed by an unrelated quoted word.
+    const literal = ops("mv /tmp/a $'/tmp/protected/x'");
+    expect(literal).not.toEqual([]);
+    expect(ops("mv /tmp/a $\\\n'/tmp/protected/x'")).toEqual(literal);
+  });
+});
+
+describe('ANSI-C words ending in a literal trailing \\c', () => {
+  it('keeps the redirect visible after the word', () => {
+    expect(
+      extractShellOperationsAcrossCommand("echo $'a\\c' > /etc/motd", '/repo'),
+    ).toEqual([write('/etc/motd')]);
+  });
+
+  it('keeps later operands visible after the word', () => {
+    const ops = extractShellOperationsAcrossCommand(
+      "cat $'x\\c' /etc/passwd",
+      '/tmp',
+    );
+    expect(ops.map((op) => op.filePath)).toContain('/etc/passwd');
+  });
+});
+
+// A multi-unit ANSI-C escape appends one `bare` entry per UTF-16 unit of its
+// decoded text, so positional syntax trimming stays aligned and the unquoted
+// `)` after an astral filename is dropped, not kept in the path.
+describe('ANSI-C astral escape keeps bare aligned with current', () => {
+  it('trims the closing paren after a multi-unit escape', () => {
+    expect(
+      extractShellOperationsAcrossCommand("(cat > $'\\U0001F600')", '/repo'),
+    ).toEqual([write('/repo/😀')]);
+  });
+
+  it('still trims after a single-unit escape', () => {
+    expect(
+      extractShellOperationsAcrossCommand("(cat > $'\\x41')", '/repo'),
+    ).toEqual([write('/repo/A')]);
+  });
+});
+
+// Invalid UTF-8 keeps one lone surrogate per byte: two different byte paths
+// must never collapse into the same string.
+describe('ANSI-C bytes that are not valid UTF-8', () => {
+  it.each<[command: string, path: string]>([
+    [String.raw`cat $'\xff'`, '/repo/\udcff'],
+    [String.raw`cat $'\xc3'`, '/repo/\udcc3'],
+    [String.raw`cat $'\uD800'`, '/repo/\udced\udca0\udc80'],
+    [String.raw`cat $'\U00110000'`, '/repo/\udcf4\udc90\udc80\udc80'],
+  ])('keeps one character per byte: %s', (command, path) => {
+    expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+      read(path),
+    ]);
+  });
+});
+
+describe('ANSI-C wrapper payloads', () => {
+  it.each([
+    [String.raw`cat $'\xc3\xa9'`, [read('/repo/é')]],
+    [String.raw`cat $'\xc3'$'\xa9'`, [read('/repo/é')]],
+    [String.raw`cat $'a\c\\tb'`, [read('/repo/a\x1ctb')]],
+    [String.raw`cat $'\c?'`, [read('/repo/\x7f')]],
+    [String.raw`cat $'\x3e'/etc/passwd`, [read('/repo/>/etc/passwd')]],
+    ['echo hi ">"/tmp/x', []],
+    ["echo hi >'>'x/../settings.json", [write('/repo/settings.json')]],
+  ] as const)(
+    'keeps decoded bytes and operators distinct: %s',
+    (command, expected) => {
+      expect(across(command)).toEqual(expected);
+    },
+  );
+
+  it.each(["cd $''", "cd ''"])(
+    'keeps an empty cd argument uncertain: %s',
+    (command) => {
+      expect(across(`${command}; cat > settings.json`)).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+    },
+  );
+  it('keeps a redirect after a continuation-split PID visible', () => {
+    expect(across("cat $\\\n$'a\\' > /etc/motd")).toContainEqual(
+      write('/etc/motd'),
+    );
+  });
+
+  // The script word is the word the shell resolves: an ANSI-C, locale or
+  // continuation-split payload carries the operations that run, so the write
+  // inside it must reach the permission scan.
+  it.each([
+    ['an ANSI-C payload', "bash -c $'cat > /etc/motd'"],
+    ['a locale payload', 'sh -c $"cat > /etc/motd"'],
+    [
+      'a continuation-split payload',
+      String.raw`sh -c $\
+'cat > /etc/motd'`,
+    ],
+    [
+      'a terminator after a continuation',
+      String.raw`sh -c $\
+'--' 'cat > /etc/motd'`,
+    ],
+    ['a brace-expanded terminator', "sh -c {--,'cat > /etc/motd'}"],
+  ])('extracts the write inside %s', (_what, command) => {
+    expect(across(command)).toEqual([write('/etc/motd')]);
+  });
+
+  it('treats a decoded operator as data, not a redirect', () => {
+    // `$'\x3e'` decodes to `>` and is a `>` argument to `cat`: the read of
+    // the file named `>` plus the real write, not a phantom write to `>`.
+    expect(sorted(across(String.raw`cat $'\x3e' > /tmp/t`))).toEqual([
+      read('/repo/>'),
+      write('/tmp/t'),
+    ]);
+  });
+});
+
+describe('quoted and decoded tilde targets', () => {
+  // bash expands `~` only when it was typed unquoted. `cat > "~/x"` and
+  // `cat > $'\x7e/x'` both decode to `~/x` and write under a literal directory
+  // named `~`, so expanding them invented a path under $HOME that no rule can
+  // match (#16075 review, R2-8).
+  it.each([
+    ['a quoted tilde', 'cat > "~/x"'],
+    ['an empty quote before the tilde', 'cat > ""~/x'],
+    ['an empty quote in the tilde prefix', 'cat > ~""/x'],
+    ['a single-quoted tilde', "cat > '~/x'"],
+    ['a backslash-escaped tilde', String.raw`cat > \~/x`],
+  ])('does not expand %s in a redirect target', (_what, command) => {
+    expect(across(command)).toEqual([write('/repo/~/x')]);
+  });
+
+  it('does not expand a decoded tilde', () => {
+    expect(across(String.raw`cat > $'\x7e/x'`)).toEqual([write('/repo/~/x')]);
+  });
+
+  it('still expands an unquoted tilde', () => {
+    const home = os.homedir().replace(/\\/g, '/');
+    expect(across('cat > ~/x')).toEqual([write(`${home}/x`)]);
+  });
+
+  it('keeps a decoded cd target uncertain', () => {
+    // `cd $'\x7e'` is the literal `~` directory and may not exist at all, so
+    // the rest of the segment runs in a cwd the analysis cannot know.
+    expect(across(String.raw`cd $'\x7e' ; cat > settings.json`)).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+  });
+
+  it.each([String.raw`$'\x7e'/x`, '"~"/x', String.raw`\~/x`])(
+    'keeps a literal tilde prefix uncertain: %s',
+    (target) => {
+      expect(across(`cd ${target}; cat > settings.json`)).toEqual([
+        uncertainWrite('/repo/~/x/settings.json'),
+      ]);
+    },
+  );
+
+  it('keeps an empty quote in a cd tilde prefix uncertain', () => {
+    expect(across("cd ~''; cat > settings.json")).toEqual([
+      uncertainWrite('/repo/~/settings.json'),
+    ]);
+  });
+
+  it('keeps a quoted cd target uncertain', () => {
+    expect(across('cd "~/x" ; cat > y')).toEqual([
+      uncertainWrite('/repo/~/x/y'),
+    ]);
   });
 });

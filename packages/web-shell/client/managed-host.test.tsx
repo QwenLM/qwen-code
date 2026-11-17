@@ -62,3 +62,51 @@ it('keeps shadow-root styles until the last host root unmounts', async () => {
     host.remove();
   }
 });
+
+it('shares one adopted sheet across host roots and survives a repeated disposal', async () => {
+  vi.stubGlobal(
+    'CSSStyleSheet',
+    class {
+      replaceSync(_css: string) {}
+    },
+  );
+  const packageStyle = document.createElement('style');
+  packageStyle.dataset.qwenWebShell = 'component';
+  packageStyle.textContent = '[data-web-shell-root] { color: red; }';
+  document.head.appendChild(packageStyle);
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  const shadow = host.attachShadow({ mode: 'open' });
+  let sheets: CSSStyleSheet[] = [];
+  Object.defineProperty(shadow, 'adoptedStyleSheets', {
+    get: () => sheets,
+    set: (next: CSSStyleSheet[]) => {
+      sheets = next;
+    },
+  });
+  const first = document.createElement('div');
+  const second = document.createElement('div');
+  shadow.append(first, second);
+  let left!: ReturnType<typeof renderManagedAgentWebShell>;
+  let right!: ReturnType<typeof renderManagedAgentWebShell>;
+  try {
+    await act(async () => {
+      left = renderManagedAgentWebShell(first, { sessionId: 'first' });
+      right = renderManagedAgentWebShell(second, { sessionId: 'second' });
+    });
+    expect(sheets).toHaveLength(1);
+    await act(async () => left.unmount());
+    expect(sheets).toHaveLength(1);
+    // React treats a second root.unmount() as a no-op, so a host that disposes
+    // twice must not spend the sibling's reference.
+    await act(async () => left.unmount());
+    expect(sheets).toHaveLength(1);
+    expect(second.textContent).toBe('second');
+    await act(async () => right.unmount());
+    expect(sheets).toHaveLength(0);
+  } finally {
+    packageStyle.remove();
+    host.remove();
+    vi.unstubAllGlobals();
+  }
+});

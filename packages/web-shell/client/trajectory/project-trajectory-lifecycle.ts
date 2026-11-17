@@ -76,7 +76,7 @@ export function projectTrajectoryLifecycle(
   history: ReturnType<typeof projectHistoricalLifecycle>,
   trajectory: Trajectory | undefined,
   identity: { sessionId: string; scope?: string } | undefined,
-  live: TrajectoryLiveSnapshot,
+  live: Omit<TrajectoryLiveSnapshot, 'hooks' | 'hookPromptIds'>,
 ): TrajectoryLifecycleProjection {
   const { requests, tools } = history;
   const matches =

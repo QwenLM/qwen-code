@@ -36,6 +36,7 @@ class ManagedSchemaTimeContractTest {
             "ma_resource_ref=gmt_create",
             "ma_output_capture=expires_at,collected_at,gmt_create,gmt_modified",
             "ma_request_receipt=gmt_create,gmt_modified",
+            "ma_side_query=read_deadline_at,deadline_at,gmt_create,gmt_modified",
             "ma_operation=claim_until,available_at,deadline,recovery_deadline,"
                     + "verification_next_at,gmt_create,gmt_modified,completed_at",
             "ma_operation_work=gmt_create,gmt_modified",
@@ -48,8 +49,11 @@ class ManagedSchemaTimeContractTest {
             "ma_channel_instance=gmt_create,gmt_modified",
             "ma_channel_binding=gmt_create",
             "ma_delivery=claimed_at,claim_until,available_at,gmt_create,gmt_modified",
+            "ma_channel_segment=gmt_create,gmt_modified",
             "ma_schedule=armed_at,watermark_slot,lease_until,gate_last_at,gmt_create,gmt_modified",
-            "ma_schedule_occurrence=slot,next_retry_at,gmt_create,gmt_modified");
+            "ma_schedule_occurrence=slot,next_retry_at,gmt_create,gmt_modified",
+            "ma_client_files_binding=expires_at,gmt_create,gmt_modified",
+            "ma_client_files_request=expires_at,gmt_create,gmt_modified");
 
     @Test
     void canonicalSchemaUsesCreationAndModificationNamesWithoutLegacyAliases() {
@@ -58,7 +62,7 @@ class ManagedSchemaTimeContractTest {
     }
 
     @Test
-    void all75PersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
+    void allPersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
         Map<String, String> declarations = declarations();
         List<Executable> checks = new ArrayList<>();
         int count = 0;
@@ -75,7 +79,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(75, count);
+        assertEquals(87, count);
         assertAll(checks);
     }
 

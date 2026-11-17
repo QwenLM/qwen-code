@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { executeSshBootstrap } from './managed-runtime-bootstrap.js';
+import { pinHostMachineId } from './managed-runtime-bootstrap.test-helper.js';
 import {
   MAX_WORKSPACE_UPLOAD_BYTES,
   type SessionWorkspaceFileScope,
@@ -27,6 +28,7 @@ describe('Managed Workspace upload receipts and filesystem', () => {
   let identity: { device: string; inode: string };
 
   beforeEach(async () => {
+    pinHostMachineId();
     temporary = await fs.realpath(
       await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-upload-test-')),
     );

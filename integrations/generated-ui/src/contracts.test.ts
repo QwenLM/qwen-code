@@ -260,6 +260,17 @@ describe('immutable generated view contract', () => {
     );
   });
 
+  it('keeps field bounds in validation messages', () => {
+    const messageFor = (title: unknown) => {
+      const result = showInputSchema.safeParse({ ...input, title });
+      if (result.success) throw new Error('Expected validation to fail.');
+      return result.error.issues[0].message;
+    };
+    expect(messageFor(42)).toBe('Expected text.');
+    expect(messageFor('')).toContain('>=1');
+    expect(messageFor('x'.repeat(121))).toContain('<=120');
+  });
+
   it('accepts the exact serialized ASCII budget and rejects one more byte', () => {
     const candidate = {
       ...input,

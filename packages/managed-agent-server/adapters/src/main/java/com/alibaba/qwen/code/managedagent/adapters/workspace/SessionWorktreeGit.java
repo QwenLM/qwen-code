@@ -4,7 +4,9 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceExce
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SessionWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
+import com.alibaba.qwen.code.runtimebroker.host.MacOsHostIdentity;
 import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
@@ -197,6 +199,22 @@ public final class SessionWorktreeGit implements SessionWorktreeOperations {
     private static String captureIdentity(Plan plan, String savedIdentity) {
         requireRoot(plan);
         requireMarker(plan);
+        try {
+            JsonNode expected = savedIdentity == null
+                    ? Files.exists(completion(plan), LinkOption.NOFOLLOW_LINKS)
+                            ? JSON.readTree(regularText(completion(plan))) : null
+                    : JSON.readTree(savedIdentity);
+            String actual = captureGitIdentity(plan, expected);
+            if (savedIdentity != null && !JSON.readTree(actual).equals(expected)) {
+                throw new IOException("Worktree identity changed");
+            }
+            return actual;
+        } catch (IOException exception) {
+            throw error("worktree_identity_conflict", "The original worktree identity is unavailable.");
+        }
+    }
+
+    private static String captureGitIdentity(Plan plan, JsonNode expected) {
         Path root = Path.of(plan.root());
         Path target = root.resolve(plan.worktreeRoot());
         try {
@@ -212,20 +230,17 @@ public final class SessionWorktreeGit implements SessionWorktreeOperations {
                     || !gitdir.resolve(regularText(gitdir.resolve("gitdir")).strip()).normalize().toRealPath().equals(gitfile.toRealPath())) {
                 throw new IOException("Git registration changed");
             }
-            String actual = JSON.writeValueAsString(Map.of("target", identity(target), "gitfile", identity(gitfile),
-                    "gitdir", gitdir.toString(), "gitdirIdentity", identity(gitdir)));
-            if (savedIdentity != null && !JSON.readTree(actual).equals(JSON.readTree(savedIdentity))) {
-                throw new IOException("Worktree identity changed");
-            }
-            return actual;
+            return JSON.writeValueAsString(Map.of("target", identity(target, expected, "target"),
+                    "gitfile", identity(gitfile, expected, "gitfile"), "gitdir", gitdir.toString(),
+                    "gitdirIdentity", identity(gitdir, expected, "gitdirIdentity")));
         } catch (IOException exception) {
             throw error("worktree_identity_conflict", "The original worktree is missing or its Git identity changed.");
         }
     }
 
     public static void requireRoot(Plan plan) {
-        if (!identity(Path.of(plan.root())).equals(plan.rootIdentity())
-                || !identity(Path.of(plan.commonDirectory())).equals(plan.commonIdentity())) {
+        if (!identity(Path.of(plan.root()), plan.rootIdentity()).equals(plan.rootIdentity())
+                || !identity(Path.of(plan.commonDirectory()), plan.commonIdentity()).equals(plan.commonIdentity())) {
             throw error("worktree_identity_conflict", "The original storage or Git directory changed.");
         }
     }
@@ -240,14 +255,83 @@ public final class SessionWorktreeGit implements SessionWorktreeOperations {
     }
 
     public static String identity(Path path) {
+        return identity(path, (String) null);
+    }
+
+    private static String identity(Path path, JsonNode expected, String field) {
+        return identity(path, expected == null ? null : expected.path(field).asText());
+    }
+
+    private static String identity(Path path, String expected) {
         try {
             BasicFileAttributes stat = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
             if (stat.isSymbolicLink() || !path.toRealPath().equals(path) || stat.fileKey() == null) {
                 throw new IOException("Unverified path");
             }
-            return stat.fileKey() + ":" + stat.creationTime();
+            return "Mac OS X".equals(System.getProperty("os.name"))
+                    && (expected == null || !expected.startsWith("(dev="))
+                            ? MacOsHostIdentity.fileIdentity(path) : stat.fileKey() + ":" + stat.creationTime();
         } catch (IOException exception) {
             throw error("worktree_identity_conflict", "The original filesystem identity is unavailable.");
+        }
+    }
+
+    public static Map<String, String> reattest(Plan plan, String savedIdentity, String volumeUuid) {
+        if (!"Mac OS X".equals(System.getProperty("os.name")) || !volumeUuid.matches("[0-9a-f]{32}")) {
+            throw error("worktree_identity_conflict", "Offline re-attestation requires a verified macOS volume.");
+        }
+        requireMarker(plan);
+        requireLegacyAnchor(Path.of(plan.root()), plan.rootIdentity(), volumeUuid);
+        requireLegacyAnchor(Path.of(plan.commonDirectory()), plan.commonIdentity(), volumeUuid);
+        try {
+            JsonNode saved = JSON.readTree(savedIdentity);
+            if (!saved.equals(JSON.readTree(regularText(completion(plan))))) {
+                throw new IOException("Original checkout completion changed");
+            }
+            var fields = new java.util.TreeMap<String, String>();
+            JSON.readTree(captureGitIdentity(plan, null)).properties().forEach(entry -> fields.put(entry.getKey(), entry.getValue().asText()));
+            String actual = JSON.writeValueAsString(fields);
+            JsonNode current = JSON.readTree(actual);
+            if (!saved.path("gitdir").equals(current.path("gitdir"))) {
+                throw new IOException("Original Git registration changed");
+            }
+            Path target = Path.of(plan.root()).resolve(plan.worktreeRoot());
+            // A PREPARING checkout interrupted across the upgrade keeps its legacy
+            // plan but already captured a stable completion; verify those anchors
+            // in place instead of requiring the legacy shape.
+            requireAttestedAnchor(target, saved.path("target").asText(), volumeUuid);
+            requireAttestedAnchor(target.resolve(".git"), saved.path("gitfile").asText(), volumeUuid);
+            requireAttestedAnchor(Path.of(saved.path("gitdir").asText()), saved.path("gitdirIdentity").asText(), volumeUuid);
+            var upgraded = JSON.valueToTree(plan);
+            ((com.fasterxml.jackson.databind.node.ObjectNode) upgraded)
+                    .put("rootIdentity", identity(Path.of(plan.root())))
+                    .put("commonIdentity", identity(Path.of(plan.commonDirectory())));
+            boolean stableCompletion = saved.path("target").asText().startsWith("macos-volume/1:")
+                    && saved.path("gitfile").asText().startsWith("macos-volume/1:")
+                    && saved.path("gitdirIdentity").asText().startsWith("macos-volume/1:");
+            return Map.of("plan", JSON.writeValueAsString(upgraded), "identity", stableCompletion ? savedIdentity : actual);
+        } catch (IOException exception) {
+            throw error("worktree_identity_conflict", "The original worktree cannot be re-attested.");
+        }
+    }
+
+    private static void requireAttestedAnchor(Path path, String saved, String volumeUuid) {
+        if (saved.startsWith("macos-volume/1:")) {
+            if (!saved.startsWith("macos-volume/1:" + volumeUuid + ":") || !saved.equals(identity(path))) {
+                throw error("worktree_identity_conflict", "An original inode, creation time or attested volume changed.");
+            }
+            return;
+        }
+        requireLegacyAnchor(path, saved, volumeUuid);
+    }
+
+    private static void requireLegacyAnchor(Path path, String saved, String volumeUuid) {
+        String legacy = identity(path, "(dev=");
+        if (!saved.matches("\\(dev=[0-9a-f]+,ino=[0-9]+\\):.+")
+                || !saved.replaceFirst("^\\(dev=[0-9a-f]+,", "(dev=,")
+                        .equals(legacy.replaceFirst("^\\(dev=[0-9a-f]+,", "(dev=,"))
+                || !identity(path).startsWith("macos-volume/1:" + volumeUuid + ":")) {
+            throw error("worktree_identity_conflict", "An original inode, creation time or attested volume changed.");
         }
     }
 

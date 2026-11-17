@@ -75,21 +75,8 @@ public final class ApiModels {
             JsonNode workspace,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
             @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree,
-            @JsonProperty("model_config") JsonNode modelConfig) {
-        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
-                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
-                List<Pin> extensionPins, JsonNode worktree) {
-            this(agentId, agentRevision, input, metadata, stream, workspace, skills, extensionPins, worktree, null);
-        }
-        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
-                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills,
-                List<Pin> extensionPins) {
-            this(agentId, agentRevision, input, metadata, stream, workspace, skills, extensionPins, null);
-        }
-        public CreateSessionRequest(String agentId, String agentRevision, List<InputBlock> input,
-                Map<String, Object> metadata, Boolean stream, JsonNode workspace, List<Map<String, Object>> skills) {
-            this(agentId, agentRevision, input, metadata, stream, workspace, skills, null);
-        }
+            @JsonProperty("model_config") JsonNode modelConfig,
+            @JsonProperty("memory_store_id") @Size(min = 1, max = 128) String memoryStoreId) {
     }
 
     public record SessionEventRequest(@NotBlank String type,
@@ -164,21 +151,8 @@ public final class ApiModels {
             @JsonProperty("session_delete") boolean sessionDelete,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
             @JsonProperty("context_compression") boolean contextCompression,
-            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents) {
-        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
-                boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
-                boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
-                Boolean foregroundShell, boolean contextCompression) {
-            this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
-                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, contextCompression, null);
-        }
-        public SessionCapabilities(boolean items, boolean snapshots, boolean artifacts, boolean resync,
-                boolean sessionLifecycle, boolean tasks, boolean actions, boolean sessionClose,
-                boolean sessionArchive, boolean sessionUnarchive, boolean sessionDelete,
-                Boolean foregroundShell) {
-            this(items, snapshots, artifacts, resync, sessionLifecycle, tasks, actions, sessionClose,
-                    sessionArchive, sessionUnarchive, sessionDelete, foregroundShell, false);
-        }
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents,
+            boolean btw, boolean recap) {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
@@ -189,24 +163,12 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents) {
-        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
-                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
-                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
-                Boolean modelChange, Boolean approvalModeChange,
-                Boolean inputAttachments, Boolean rename, boolean contextCompression) {
-            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
-                    sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
-                    inputAttachments, rename, contextCompression, null);
-        }
-        public WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
-                boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
-                boolean sessionUnarchive, boolean sessionDelete, boolean cwdChange, Boolean foregroundShell,
-                Boolean modelChange, Boolean approvalModeChange,
-                Boolean inputAttachments, Boolean rename) {
-            this(tasks, artifacts, actions, workspaceTurns, sessionClose, sessionArchive, sessionUnarchive,
-                    sessionDelete, cwdChange, foregroundShell, modelChange, approvalModeChange,
-                    inputAttachments, rename, false);
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean terminal,
+            boolean clientFiles) {
+        @JsonProperty("diagnostics")
+        public boolean diagnostics() {
+            return tasks;
         }
     }
 
@@ -229,48 +191,15 @@ public final class ApiModels {
             @JsonProperty("compaction_revision") Long compactionRevision,
             @JsonProperty("context_compression_operation_id") String contextCompressionOperationId,
             SessionRecovery recovery,
-            PublicSessionWorktree worktree) {
-        public PublicSession(String id, String object, String agentId, String agentRevision,
-                String agentDefinitionDigest, String status, long createdAt, long updatedAt,
-                Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
-                long replayFloorSequence, long snapshotThroughSequence, SessionCapabilities capabilities,
-                PublicWorkspace workspace, Long compactionRevision, String contextCompressionOperationId,
-                SessionRecovery recovery) {
-            this(id, object, agentId, agentRevision, agentDefinitionDigest, status, createdAt, updatedAt,
-                    metadata, activeTurn, lastEventId, replayFloorSequence, snapshotThroughSequence,
-                    capabilities, workspace, compactionRevision, contextCompressionOperationId, recovery, null);
-        }
-        public PublicSession(String id, String object, String agentId, String agentRevision,
-                String agentDefinitionDigest, String status, long createdAt, long updatedAt,
-                Map<String, Object> metadata, PublicTurn activeTurn, long lastEventId,
-                long replayFloorSequence, long snapshotThroughSequence, SessionCapabilities capabilities,
-                PublicWorkspace workspace) {
-            this(id, object, agentId, agentRevision, agentDefinitionDigest, status, createdAt, updatedAt,
-                    metadata, activeTurn, lastEventId, replayFloorSequence, snapshotThroughSequence,
-                    capabilities, workspace, 0L, null, null);
-        }
-
-        public PublicSession(String id, String object, String agentId,
-                String agentRevision, String agentDefinitionDigest,
-                String status, long createdAt, long updatedAt,
-                Map<String, Object> metadata, PublicTurn activeTurn,
-                long lastEventId, long replayFloorSequence,
-                long snapshotThroughSequence, SessionCapabilities capabilities,
-                PublicWorkspace workspace, Long compactionRevision,
-                String contextCompressionOperationId) {
-            this(id, object, agentId, agentRevision, agentDefinitionDigest,
-                    status, createdAt, updatedAt, metadata, activeTurn,
-                    lastEventId, replayFloorSequence, snapshotThroughSequence,
-                    capabilities, workspace, compactionRevision,
-                    contextCompressionOperationId, null);
-        }
-
+            PublicSessionWorktree worktree,
+            @JsonProperty("memory_store_id") String memoryStoreId,
+            @JsonProperty("owner_only") Boolean ownerOnly) {
         public PublicSession withRecovery(SessionRecovery value) {
             return new PublicSession(id, object, agentId, agentRevision,
                     agentDefinitionDigest, status, createdAt, updatedAt,
                     metadata, activeTurn, lastEventId, replayFloorSequence,
                     snapshotThroughSequence, capabilities, workspace,
-                    compactionRevision, contextCompressionOperationId, value, worktree);
+                    compactionRevision, contextCompressionOperationId, value, worktree, memoryStoreId, ownerOnly);
         }
 
         public PublicSession withWorktree(SessionWorktreeStore.Descriptor value) {
@@ -281,7 +210,7 @@ public final class ApiModels {
                     compactionRevision, contextCompressionOperationId, recovery,
                     value == null ? null : new PublicSessionWorktree(value.id(), value.sessionId(), value.workspaceId(),
                             value.state(), value.branch(), value.baseCommit(), value.cwdRelative(), value.operationId(),
-                            value.revision(), value.errorCode()));
+                            value.revision(), value.errorCode()), memoryStoreId, ownerOnly);
         }
     }
 
@@ -323,28 +252,6 @@ public final class ApiModels {
                 JsonNode actionResolution, String failureCode) {
             this(id, sessionId, type, status, admissionStage, deliveryState,
                     receiptId, replayed, actionResolution, failureCode, null);
-        }
-
-        public PublicCommandOperation(
-                String id,
-                String sessionId,
-                String type,
-                String status,
-                String admissionStage,
-                String deliveryState,
-                String receiptId,
-                boolean replayed) {
-            this(
-                    id,
-                    sessionId,
-                    type,
-                    status,
-                    admissionStage,
-                    deliveryState,
-                    receiptId,
-                    replayed,
-                    null,
-                    null);
         }
     }
 
@@ -412,6 +319,17 @@ public final class ApiModels {
     public record WebShellSessionRequest(@NotBlank String sessionId) {
     }
 
+    public record WebShellTerminalTicketRequest(
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._-]{1,256}") String sessionId,
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._-]{1,256}") String terminalId) {
+    }
+
+    public record WebShellTerminalTicket(String ticket, long expiresInSeconds) {
+    }
+
+    public record WebShellActivityQueryRequest(@NotBlank String sessionId, @NotBlank String kind,
+            String cursor, Integer limit) { }
+
     public record ManagedMcpServerPin(@NotBlank @Pattern(regexp = "[A-Za-z0-9._:-]{1,128}") String serverId,
             @Min(1) @Max(9_007_199_254_740_991L) long serverRevision,
             @NotBlank @Pattern(regexp = "[a-f0-9]{64}") String definitionDigest) { }
@@ -461,7 +379,15 @@ public final class ApiModels {
             Map<String, Object> metadata,
             JsonNode workspace, String approvalMode, Boolean planMode, String modelId,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
-            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree, JsonNode modelConfig) {
+            @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree, JsonNode modelConfig,
+            @Size(min = 1, max = 128) String memoryStoreId) {
+        public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
+                List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
+                Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins,
+                JsonNode worktree, JsonNode modelConfig) {
+            this(requestId, idempotencyKey, agentId, title, input, metadata, workspace, approvalMode,
+                    planMode, modelId, skills, extensionPins, worktree, modelConfig, null);
+        }
         public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
                 List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
                 Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins, JsonNode worktree) {
@@ -850,8 +776,17 @@ public final class ApiModels {
             @JsonProperty("segment_id") String segmentId,
             int ordinal, String state,
             @JsonProperty("provider_receipt") String providerReceipt,
+            List<PublicChannelDeliverySegment> segments,
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("updated_at") long updatedAt) {
+    }
+
+    /** H5: one segment of a channel delivery with its write-once receipt. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicChannelDeliverySegment(
+            @JsonProperty("segment_id") String segmentId,
+            int ordinal,
+            @JsonProperty("provider_receipt") String providerReceipt) {
     }
 
     /** H6b: one occurrence decision of an automation, with its run's state. */
@@ -1064,6 +999,14 @@ public final class ApiModels {
 
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {
+    }
+
+    public record WebShellDiagnosticTraceRequest(@NotBlank String sessionId,
+            @Size(max = 256) String cursor, @Min(1) @Max(100) Integer limit) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown diagnostic trace request field: " + name);
+        }
     }
 
     public record WebShellTaskGetRequest(@NotBlank String sessionId,

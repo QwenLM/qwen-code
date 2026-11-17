@@ -5,6 +5,7 @@
  */
 
 import type { Content, GenerateContentConfig } from '@google/genai';
+import { isDeepStrictEqual } from 'node:util';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { GenerateTextResult } from '../core/baseLlmClient.js';
@@ -23,11 +24,15 @@ import { movePromptContextAheadOfUserText } from '../core/prompt-context-order.j
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
 import { logChatCompression } from '../telemetry/loggers.js';
+import { withModelObservationSource } from '../telemetry/model-observation.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  estimateContentChars,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
+} from '../utils/api-history-metadata.js';
+import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -45,6 +50,12 @@ import {
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
+
+import {
+  markCompressedHistory,
+  RETAINED_COMPACTION_TAIL_REMINDER,
+} from '../core/environmentContext.js';
+import { findRetainedCompactionTail } from './retained-compaction-tail.js';
 
 const debugLogger = createDebugLogger('COMPRESSION');
 
@@ -338,6 +349,8 @@ export interface CompressOptions {
    * the service does not read or write any global telemetry.
    */
   originalTokenCount: number;
+  /** Latest model output omitted by a provider prompt-only anchor. */
+  unaccountedOutputTokens?: number;
   /**
    * Hook trigger to report for this compression. `force=true` bypasses the
    * threshold gate but does not always mean the user manually requested
@@ -508,6 +521,15 @@ export class ChatCompressionService {
     chat: LlmChat,
     opts: CompressOptions,
   ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
+    return withModelObservationSource('compression', () =>
+      this.compressOwned(chat, opts),
+    );
+  }
+
+  private async compressOwned(
+    chat: LlmChat,
+    opts: CompressOptions,
+  ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
     const {
       promptId,
       force,
@@ -630,12 +652,6 @@ export class ChatCompressionService {
       };
     }
 
-    // CLAUDE-CODE-STYLE FULL-HISTORY COMPRESSION: the entire curated
-    // history is sent to the summary side-query (no split, no tail
-    // preservation), and the post-compact history is assembled by
-    // composePostCompactHistory below (summary + model ack + recent
-    // file restores + recent image restore).
-
     // Guard: need at least a user+model pair for a meaningful summary.
     // This runs BEFORE the PreCompact hook fires — a hook with side effects
     // (transcript dump, external notification) shouldn't be triggered for
@@ -711,7 +727,64 @@ export class ChatCompressionService {
     const visiblePendingHistory = config.getAutoMemoryContext?.()
       ? pendingHistory
       : withoutAutoMemorySnapshots(pendingHistory);
-    const sideQueryHistory = [...sideQueryBase, ...visiblePendingHistory];
+    const candidateTailStart =
+      opts.requestPayloadTooLarge || triggerReason === 'image_overflow'
+        ? undefined
+        : findRetainedCompactionTail(curatedHistory, visiblePendingHistory[0]);
+    const candidateTail =
+      candidateTailStart === undefined
+        ? []
+        : curatedHistory.slice(candidateTailStart);
+    const history = candidateTail.length > 0 ? chat.getHistoryShallow() : [];
+    const responseIndex = history.findLastIndex(
+      (entry) => entry.role === 'model',
+    );
+    // Coalesced user entries can lose a following prompt's identity.
+    const tailMatches =
+      responseIndex >= 0 &&
+      isDeepStrictEqual(history.slice(responseIndex), candidateTail);
+    let retainedPromptId = candidateTail[0]
+      ? getApiHistoryPromptId(candidateTail[0])
+      : undefined;
+    if (candidateTail.length > 0 && !retainedPromptId) {
+      // Curation coalesces adjacent user entries and can lose the newer
+      // prompt identity. Resolve ownership from the raw history instead.
+      const responseMatches =
+        tailMatches && history[responseIndex - 1]?.role !== 'model';
+      for (
+        let index = responseMatches ? responseIndex - 1 : -1;
+        index >= 0;
+        index--
+      ) {
+        const entry = history[index];
+        retainedPromptId = getApiHistoryPromptId(entry);
+        if (
+          retainedPromptId ||
+          (entry.role === 'user' &&
+            !entry.parts?.some((part) => part.functionResponse))
+        ) {
+          break;
+        }
+      }
+    }
+    // Bound the *whole* operation, including results not yet committed to
+    // history. Never slice a tool call away from its result to fit a budget.
+    const preserveTail =
+      candidateTail.length > 0 &&
+      tailMatches &&
+      retainedPromptId !== undefined &&
+      estimateContentTokens(
+        [...candidateTail, ...visiblePendingHistory],
+        slimmingConfig.imageTokenEstimate,
+      ) <= Math.min(COMPACT_MAX_OUTPUT_TOKENS, contextLimit / 5);
+    const retainedTail = preserveTail ? candidateTail : [];
+    if (preserveTail) markApiHistoryPrompt(retainedTail[0], retainedPromptId);
+    const originalHistoryTokenCount =
+      originalTokenCount +
+      (preserveTail ? (opts.unaccountedOutputTokens ?? 0) : 0);
+    const sideQueryHistory = preserveTail
+      ? curatedHistory.slice(0, candidateTailStart)
+      : [...sideQueryBase, ...visiblePendingHistory];
     const pendingToolResultTokenCount = estimateContentTokens(
       visiblePendingHistory,
       slimmingConfig.imageTokenEstimate,
@@ -762,10 +835,31 @@ export class ChatCompressionService {
     // side-query (issue #7960). Left unset when the side-query runs on the
     // main model, whose window `budgetWindow` then comes from below.
     let compactionModelWindow: number | undefined;
-    // Only check the window when the effective model differs from the main
-    // model — warning about the main model being "too small" is confusing
-    // when no compaction model was explicitly configured.
-    if (effectiveCompactionModel !== config.getModel()) {
+    // Which route a selector is actually sent on: `runSideQuery` forwards it
+    // to the send layer, where `resolveForModel` hands back the main content
+    // generator on exactly these terms (baseLlmClient.ts:861-871) — the
+    // resolved model is the main one, a spelled authType is the main one, and
+    // the `\0` endpoint pin matches the main base URL. That normalization is
+    // the only thing that makes `openai:test-model` and `test-model` one
+    // route; comparing route keys never would, because
+    // `resolvedModelIdentity` passes the model half through verbatim.
+    const onMainRoute = (selector: string) => {
+      const [model, pin] = selector.split('\0');
+      const resolved = resolveModelId(model, buildModelIdContext(config));
+      return (
+        (resolved?.modelId ?? model) === config.getModel() &&
+        (!resolved?.authType ||
+          resolved.authType === contentGeneratorConfig.authType) &&
+        (pin === undefined || pin === contentGeneratorConfig.baseUrl)
+      );
+    };
+    // Only check the window when the side-query is not on the main route —
+    // warning about the main model being "too small" is confusing when no
+    // compaction model was explicitly configured, and an equivalent
+    // picker-saved selector (provider-qualified or endpoint-pinned) IS the
+    // main route: the shared path posts the history unslimmed, so the guard
+    // must not pay for the slimming estimate either.
+    if (!onMainRoute(effectiveCompactionModel)) {
       // getCompactionModel() may carry the picker's endpoint pin as
       // `authType:id\0<declaredBaseUrl>` (#12760); measure the window of the
       // entry the request is actually routed to, not the first same-id row.
@@ -804,27 +898,9 @@ export class ChatCompressionService {
       }
     }
 
-    // Which route the side-query is actually sent on: `runSideQuery` forwards
-    // `effectiveCompactionModel` to the send layer, where `resolveForModel`
-    // hands back the main content generator on exactly these terms
-    // (baseLlmClient.ts:861-871) — the resolved model is the main one, a
-    // spelled authType is the main one, and the `\0` endpoint pin matches the
-    // main base URL. That normalization is the only thing that makes
-    // `openai:test-model` and `test-model` one route; comparing route keys
-    // never would, because `resolvedModelIdentity` passes the model half
-    // through verbatim.
-    const [sideQuerySelector, sideQueryPin] =
-      effectiveCompactionModel.split('\0');
-    const sideQueryResolved = resolveModelId(
-      sideQuerySelector,
-      buildModelIdContext(config),
-    );
-    const sideQueryOnMainRoute =
-      (sideQueryResolved?.modelId ?? sideQuerySelector) === config.getModel() &&
-      (!sideQueryResolved?.authType ||
-        sideQueryResolved.authType === contentGeneratorConfig.authType) &&
-      (sideQueryPin === undefined ||
-        sideQueryPin === contentGeneratorConfig.baseUrl);
+    // Re-read after the guard so a window-forced downgrade to the main model
+    // counts as the main route.
+    const sideQueryOnMainRoute = onMainRoute(effectiveCompactionModel);
     // The server-reported ceiling is scoped to the route that reported it
     // (#13876): it is evidence about the endpoint and model the rejected
     // request targeted, and nothing more. A per-turn model override, or a
@@ -956,7 +1032,6 @@ export class ChatCompressionService {
     const sharedDirectiveTokenCount = Math.ceil(
       sharedRequestText.length / CHARS_PER_TOKEN,
     );
-    const usesMainModel = effectiveCompactionModel === config.getModel();
     const providerSupportsCacheSharing =
       supportsCompressionCacheSharing(config);
     // The anchor must be provider-reported, not merely non-zero: an
@@ -977,7 +1052,7 @@ export class ChatCompressionService {
         COMPACT_MAX_OUTPUT_TOKENS <=
       reactiveContextCeiling;
     const canShareCache =
-      usesMainModel &&
+      sideQueryOnMainRoute &&
       providerSupportsCacheSharing &&
       hasProviderTokenCount &&
       sharedRequestFits &&
@@ -989,7 +1064,7 @@ export class ChatCompressionService {
       // slimmed cold path exclusively (#10380).
       !opts.requestPayloadTooLarge;
     if (!canShareCache) {
-      const reason = !usesMainModel
+      const reason = !sideQueryOnMainRoute
         ? 'distinct compaction model'
         : !providerSupportsCacheSharing
           ? 'provider does not support cache sharing'
@@ -1105,8 +1180,8 @@ export class ChatCompressionService {
         return {
           newHistory: null,
           info: {
-            originalTokenCount,
-            newTokenCount: originalTokenCount,
+            originalTokenCount: originalHistoryTokenCount,
+            newTokenCount: originalHistoryTokenCount,
             compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
           },
         };
@@ -1210,8 +1285,8 @@ export class ChatCompressionService {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
+          newTokenCount: originalHistoryTokenCount,
           // Distinct from EMPTY_SUMMARY so telemetry / logs can tell a
           // prompt-quality failure (empty summary → tune prompt / splitter)
           // apart from a capacity failure (output cap hit → raise cap or
@@ -1249,17 +1324,18 @@ export class ChatCompressionService {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
+          newTokenCount: originalHistoryTokenCount,
           compressionStatus:
             CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
         },
       };
     }
 
-    let newTokenCount = originalTokenCount;
+    let newTokenCount = originalHistoryTokenCount;
     let extraHistory: Content[] = [];
     let canCalculateNewTokenCount = false;
+    let restorationTokenCount = 0;
 
     if (!isSummaryEmpty) {
       // Manual /compress has no pending functionResponse, so a trailing
@@ -1271,14 +1347,15 @@ export class ChatCompressionService {
       // with it (trailingFunctionCallContent).
       const lastCurated = curatedHistory[curatedHistory.length - 1];
       const historyForCompose =
-        compactTrigger === 'manual' &&
-        lastCurated?.role === 'model' &&
-        lastCurated.parts?.some((p) => !!p.functionCall)
-          ? curatedHistory.slice(0, -1)
-          : curatedHistory;
+        retainedTail.length > 0
+          ? sideQueryHistory
+          : compactTrigger === 'manual' &&
+              lastCurated?.role === 'model' &&
+              lastCurated.parts?.some((p) => !!p.functionCall)
+            ? curatedHistory.slice(0, -1)
+            : curatedHistory;
 
-      // Use the new composer — assembles summary + ack + file restores +
-      // image restore. No tail preservation, no continuation bridge.
+      // Restore older context; the retained operation is appended below.
       try {
         extraHistory = await composePostCompactHistory(
           historyForCompose,
@@ -1298,7 +1375,13 @@ export class ChatCompressionService {
               opts.requestPayloadTooLarge || opts.restoreRecentFiles === false
                 ? 0
                 : tuning.maxRecentFiles,
-            maxImages: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentImages,
+            maxImages: opts.requestPayloadTooLarge
+              ? 0
+              : Math.max(
+                  0,
+                  tuning.maxRecentImages -
+                    countToolResponseImages(retainedTail),
+                ),
             // Restore plan-mode reminder + running-subagent snapshot so the
             // post-compact agent does not lose either piece of mid-session
             // state. Both reduce to no-ops when the corresponding source is
@@ -1352,6 +1435,36 @@ export class ChatCompressionService {
         ];
       }
 
+      restorationTokenCount = estimateContentTokens(
+        extraHistory.slice(2),
+        slimmingConfig.imageTokenEstimate,
+      );
+      if (retainedTail.length > 0) {
+        const temporalReminder = RETAINED_COMPACTION_TAIL_REMINDER;
+        restorationTokenCount += Math.ceil(
+          temporalReminder.length / CHARS_PER_TOKEN,
+        );
+        // Keep the canonical summary/ack prefix for rewind and restoration.
+        // A user bridge separates the ack from the original model response.
+        extraHistory = [
+          extraHistory[0],
+          extraHistory[1],
+          {
+            role: 'user',
+            parts: [
+              ...extraHistory
+                .slice(2)
+                .flatMap((entry) =>
+                  entry.role === 'user' ? (entry.parts ?? []) : [],
+                ),
+              { text: temporalReminder },
+            ],
+          },
+          ...retainedTail,
+        ];
+        markCompressedHistory(extraHistory, 3);
+      }
+
       // Best-effort token math using model-reported token counts when
       // available. Some OpenAI-compatible providers omit usage for the
       // compression side-query; in that case, fall back to the same local
@@ -1385,11 +1498,13 @@ export class ChatCompressionService {
         canCalculateNewTokenCount = true;
         const compressedHistoryTokenCount = Math.max(
           0,
-          compressionInputTokenCount - 1000 - pendingToolResultTokenCount,
+          compressionInputTokenCount -
+            1000 -
+            (retainedTail.length > 0 ? 0 : pendingToolResultTokenCount),
         );
         newTokenCount = Math.max(
           0,
-          originalTokenCount -
+          originalHistoryTokenCount -
             compressedHistoryTokenCount +
             compressionOutputTokenCount,
         );
@@ -1399,14 +1514,10 @@ export class ChatCompressionService {
         // compressionOutputTokenCount. Estimate their cost locally so the
         // inflation guard below fires when attachments dominate the
         // post-compact size.
-        const restorationChars = extraHistory
-          .slice(2) // skip [summary, model ack]
-          .reduce(
-            (acc, c) =>
-              acc + estimateContentChars(c, slimmingConfig.imageTokenEstimate),
-            0,
-          );
-        newTokenCount += Math.ceil(restorationChars / CHARS_PER_TOKEN);
+        // Only the summarized prefix was subtracted above. A prompt-only
+        // anchor needs its latest model output added explicitly. Count new
+        // restoration/temporal context, not the retained tail, a second time.
+        newTokenCount += restorationTokenCount;
       } else {
         const estimatedOriginalVisibleTokenCount = estimateContentTokens(
           curatedHistory,
@@ -1422,7 +1533,7 @@ export class ChatCompressionService {
         ) {
           const estimatedNonVisibleTokenCount = Math.max(
             0,
-            originalTokenCount - estimatedOriginalVisibleTokenCount,
+            originalHistoryTokenCount - estimatedOriginalVisibleTokenCount,
           );
           // Keep the API-reported system/tool/prompt remainder intact. The
           // local estimator is only used for the visible conversation delta, so
@@ -1452,7 +1563,7 @@ export class ChatCompressionService {
     logChatCompression(
       config,
       makeChatCompressionEvent({
-        tokens_before: originalTokenCount,
+        tokens_before: originalHistoryTokenCount,
         tokens_after: newTokenCount,
         compression_input_token_count: compressionInputTokenCount,
         compression_output_token_count: compressionOutputTokenCount,
@@ -1465,8 +1576,8 @@ export class ChatCompressionService {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
+          newTokenCount: originalHistoryTokenCount,
           compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
         },
       };
@@ -1474,17 +1585,17 @@ export class ChatCompressionService {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
-          newTokenCount: originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
+          newTokenCount: originalHistoryTokenCount,
           compressionStatus:
             CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
         },
       };
-    } else if (newTokenCount > originalTokenCount) {
+    } else if (newTokenCount > originalHistoryTokenCount) {
       return {
         newHistory: null,
         info: {
-          originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
           newTokenCount,
           compressionStatus:
             CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
@@ -1497,10 +1608,12 @@ export class ChatCompressionService {
         // the side-query's analysis scratchpad or the resume trailer.
         summary: stripAnalysisBlock(summary),
         info: {
-          originalTokenCount,
+          originalTokenCount: originalHistoryTokenCount,
           newTokenCount,
           newTokenCountIsEstimated: true,
           compressionStatus: CompressionStatus.COMPRESSED,
+          summaryPrefixLength:
+            retainedTail.length > 0 ? 3 : extraHistory.length,
           triggerReason,
           ...(compactionWarning && { warning: compactionWarning }),
         },

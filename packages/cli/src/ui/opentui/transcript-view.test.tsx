@@ -93,6 +93,7 @@ const mocks = vi.hoisted(() => {
     return {
       on: (event: string, fn: () => void) => void listeners(event).add(fn),
       off: (event: string, fn: () => void) => void listeners(event).delete(fn),
+      requestRender: vi.fn(),
       emit: (event: string) => {
         for (const fn of [...listeners(event)]) fn();
       },
@@ -117,7 +118,15 @@ vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 // `OpenTuiTranscriptView scroll host` below installs one.
 vi.mock('@opentui/react', () => ({ useRenderer: () => mocks.renderer }));
 
-import { OpenTuiTranscriptView } from './transcript-view.js';
+import {
+  OpenTuiTranscriptView,
+  type TranscriptViewProps,
+} from './transcript-view.js';
+import * as modRowHooks from '../hooks/use-mod-row.js';
+import * as interactiveModSession from '../../services/interactive-mod-session.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { ModAssistantMessageProps } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { C } from './theme.js';
 import {
   foldLiveEvent,
@@ -954,6 +963,228 @@ describe('OpenTuiTranscriptView', () => {
     expect(plain.container.textContent).not.toMatch(/\[\d{2}:\d{2}:\d{2}\]/);
   });
 
+  it('draws the text the Mods rewrote for a complete reply block in the main transcript', () => {
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockImplementation((_config, _sessionId, input) =>
+        input
+          ? {
+              ...(input.props as ModAssistantMessageProps),
+              text: 'REWRITTEN_BODY',
+            }
+          : undefined,
+      );
+    try {
+      const config = {} as Config;
+      const item = (streaming: boolean): LiveAssistantItem => ({
+        kind: 'assistant',
+        id: 'a1',
+        text: 'ANSWER_BODY',
+        streaming,
+      });
+      const content = (container: HTMLElement) =>
+        container.querySelector('markdown')?.getAttribute('content');
+
+      const done = render(
+        <OpenTuiTranscriptView
+          items={[item(false)]}
+          modRows={{ config, sessionId: 'session-1' }}
+        />,
+      );
+      expect(content(done.container)).toContain('REWRITTEN_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(config, 'session-1', {
+        surface: 'terminal',
+        component: 'AssistantMessage',
+        requestId: 'a1',
+        props: { text: 'ANSWER_BODY', isFirstOfReply: true },
+      });
+      done.unmount();
+
+      // A streaming block and a view without Mod rows are not offered.
+      const live = render(
+        <OpenTuiTranscriptView
+          items={[item(true)]}
+          modRows={{ config, sessionId: 'session-1' }}
+        />,
+      );
+      expect(content(live.container)).toContain('ANSWER_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(config, 'session-1', undefined);
+      live.unmount();
+      const preview = render(<OpenTuiTranscriptView items={[item(false)]} />);
+      expect(content(preview.container)).toContain('ANSWER_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(undefined, undefined, undefined);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
+  it('draws the text the Mods rewrote for a complete thought once it is expanded', () => {
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockImplementation((_config, _sessionId, input) =>
+        input ? { text: 'REWRITTEN_THOUGHT' } : undefined,
+      );
+    try {
+      const config = {} as Config;
+      const modRows = { config, sessionId: 'session-1' };
+      const item = (done: boolean): LiveThinkingItem => ({
+        kind: 'thinking',
+        id: 'th1',
+        text: 'THOUGHT_BODY\n',
+        done,
+        durationMs: 12_000,
+      });
+      const content = (container: HTMLElement) =>
+        container.querySelector('markdown')?.getAttribute('content');
+
+      const expanded = render(
+        <OpenTuiTranscriptView
+          items={[item(true)]}
+          modRows={modRows}
+          thoughtsExpanded
+        />,
+      );
+      expect(content(expanded.container)).toContain('REWRITTEN_THOUGHT');
+      expect(modRow).toHaveBeenLastCalledWith(
+        config,
+        'session-1',
+        {
+          surface: 'terminal',
+          component: 'Thinking',
+          requestId: 'th1',
+          props: { text: 'THOUGHT_BODY' },
+        },
+        false,
+      );
+      expanded.unmount();
+
+      // A collapsed or streaming thought is not offered.
+      const collapsed = render(
+        <OpenTuiTranscriptView items={[item(true)]} modRows={modRows} />,
+      );
+      expect(collapsed.container.textContent).toContain('Thought for 12s');
+      expect(modRow).toHaveBeenLastCalledWith(
+        config,
+        'session-1',
+        undefined,
+        false,
+      );
+      collapsed.unmount();
+      const live = render(
+        <OpenTuiTranscriptView
+          items={[item(false)]}
+          modRows={modRows}
+          thoughtsExpanded
+        />,
+      );
+      expect(content(live.container)).toContain('THOUGHT_BODY');
+      expect(modRow).toHaveBeenLastCalledWith(
+        config,
+        'session-1',
+        undefined,
+        false,
+      );
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
+  it.each<[string, OpenTuiStreamEvent[]]>([
+    [
+      'live',
+      [
+        { type: 'user', text: 'Prompt' },
+        { type: 'text', delta: 'Opening block' },
+        { type: 'thinking', delta: 'Thought' },
+        { type: 'thinking-end' },
+        { type: 'text', delta: 'Continuation block' },
+        { type: 'done' },
+      ],
+    ],
+    [
+      'replayed',
+      projectHistoryToStreamEvents(
+        [
+          { id: 1, type: 'gemini', text: 'Opening block' },
+          { id: 2, type: 'gemini_content', text: 'Continuation block' },
+        ],
+        {},
+      ),
+    ],
+  ])('marks only the first block of a %s reply', (_mode, events) => {
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockReturnValue(undefined);
+    try {
+      render(
+        <OpenTuiTranscriptView
+          items={items}
+          modRows={{ config: {} as Config, sessionId: 'session-1' }}
+        />,
+      );
+      // The collapsed thought between the blocks is not offered.
+      const replyRows = modRow.mock.calls.filter(
+        ([, , input]) => input !== undefined,
+      );
+      expect(replyRows.map(([, , input]) => input?.props)).toEqual([
+        { text: 'Opening block', isFirstOfReply: true },
+        { text: 'Continuation block', isFirstOfReply: false },
+      ]);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
+  const inlineImage = { mimeType: 'image/png', data: 'aGVsbG8=' };
+  const caption = '  Image caption\n';
+
+  it.each<[string, OpenTuiStreamEvent[]]>([
+    [
+      'live',
+      [
+        { type: 'image', ...inlineImage },
+        { type: 'text', delta: '\n' },
+        { type: 'image', ...inlineImage },
+        { type: 'text', delta: caption },
+        { type: 'done' },
+      ],
+    ],
+    [
+      'replayed',
+      projectHistoryToStreamEvents(
+        [
+          { id: 1, type: 'gemini', text: '', images: [inlineImage] },
+          { id: 2, type: 'gemini_content', text: '\n' },
+          { id: 3, type: 'gemini_content', text: '', images: [inlineImage] },
+          { id: 4, type: 'gemini_content', text: caption },
+        ],
+        {},
+      ),
+    ],
+  ])('skips blank image separators in %s replies', (_mode, events) => {
+    const items = events.reduce<readonly LiveHistoryItem[]>(foldLiveEvent, []);
+    const modRow = vi
+      .spyOn(modRowHooks, 'useModRow')
+      .mockReturnValue(undefined);
+    try {
+      render(
+        <OpenTuiTranscriptView
+          items={items}
+          modRows={{ config: {} as Config, sessionId: 'session-1' }}
+        />,
+      );
+      const inputs = modRow.mock.calls
+        .map(([, , input]) => input)
+        .filter((input) => input !== undefined);
+      expect(inputs.map((input) => input.props)).toEqual([
+        { text: caption, isFirstOfReply: false },
+      ]);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
+
   it('remounts the assistant row when the stamp setting flips (#170)', () => {
     // `output.showTimestamps` is dialog-settable and needs no restart, so an
     // already-mounted row switches shape mid-session. The two shapes differ,
@@ -1222,13 +1453,14 @@ describe('OpenTuiTranscriptView scroll host', () => {
     propRows?: number;
     width?: number;
     thoughtsExpanded?: boolean;
+    modRows?: TranscriptViewProps['modRows'];
     itemRows?: (text: string) => number | undefined;
   }) {
     let width = opts.width ?? 100;
     let thoughtsExpanded = opts.thoughtsExpanded ?? false;
     const rows = opts.rows;
     let items = opts.items ?? session;
-    const viewportRows = opts.viewportRows ?? 24;
+    let viewportRows = opts.viewportRows ?? 24;
     const propRows = opts.propRows ?? viewportRows;
     const view = render(
       <OpenTuiTranscriptView
@@ -1236,6 +1468,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
         availableWidth={width}
         availableTerminalHeight={propRows}
         thoughtsExpanded={thoughtsExpanded}
+        modRows={opts.modRows}
       />,
     );
 
@@ -1271,7 +1504,13 @@ describe('OpenTuiTranscriptView scroll host', () => {
         for (const el of root.children) total += paintedRows(el);
         return total;
       },
-      viewport: { height: viewportRows },
+      viewport: {
+        y: CONTENT_BASE,
+        get height() {
+          return Math.max(1, viewportRows);
+        },
+        yogaNode: { getComputedHeight: () => viewportRows },
+      },
       verticalScrollBar: {
         on: (_event: string, fn: () => void) => void changed.add(fn),
         off: (_event: string, fn: () => void) => void changed.delete(fn),
@@ -1287,14 +1526,13 @@ describe('OpenTuiTranscriptView scroll host', () => {
         const turn = /TURN_(\d+)/.exec(el.textContent ?? '');
         return turn ? Number(turn[1]) : -1;
       };
-      const walk = (el: Element, parent: unknown) => {
+      const walk = (el: Element, parent: unknown, offset = 0) => {
         Object.defineProperty(el, 'parent', {
           value: parent,
           configurable: true,
         });
         Object.defineProperty(el, 'y', {
-          get: () =>
-            el === root ? CONTENT_BASE - host.scrollTop + TRANSCRIPT_OFFSET : 0,
+          get: () => CONTENT_BASE - host.scrollTop + TRANSCRIPT_OFFSET + offset,
           configurable: true,
         });
         const turn = turnOf(el);
@@ -1314,7 +1552,11 @@ describe('OpenTuiTranscriptView scroll host', () => {
           value: { getComputedHeight: () => laidOut },
           configurable: true,
         });
-        for (const child of el.children) walk(child, el);
+        let row = offset;
+        for (const child of el.children) {
+          walk(child, el, row + (child.hasAttribute('data-height') ? 0 : 1));
+          if (el === root) row += paintedRows(child);
+        }
       };
       walk(root, host);
     };
@@ -1328,6 +1570,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
             availableWidth={width}
             availableTerminalHeight={propRows}
             thoughtsExpanded={thoughtsExpanded}
+            modRows={opts.modRows}
           />,
         );
         install();
@@ -1361,6 +1604,9 @@ describe('OpenTuiTranscriptView scroll host', () => {
       setWidth: (next: number) => {
         width = next;
         paint();
+      },
+      setViewportRows: (next: number) => {
+        viewportRows = next;
       },
       setThoughtsExpanded: (next: boolean) => {
         thoughtsExpanded = next;
@@ -1401,6 +1647,99 @@ describe('OpenTuiTranscriptView scroll host', () => {
       unmount: () => act(() => view.unmount()),
     };
   }
+
+  it('watches an expanded thought only after layout puts it in the viewport', async () => {
+    const rewrite = { text: 'REWRITTEN_THOUGHT' };
+    let answered = false;
+    const release = vi.fn();
+    const watchRow = vi.fn(() => {
+      answered = true;
+      return release;
+    });
+    const sessionMock = vi
+      .spyOn(interactiveModSession, 'getInteractiveModSession')
+      .mockReturnValue({
+        starting: false,
+        ready: Promise.resolve(),
+        rowSession: 'session-1',
+        subscribeSession: () => () => {},
+        watchRow,
+        rowProps: () => (answered ? rewrite : undefined),
+      } as unknown as interactiveModSession.InteractiveModSession);
+    const thought: LiveThinkingItem = {
+      kind: 'thinking',
+      id: 'th1',
+      text: 'THOUGHT_BODY',
+      done: true,
+      durationMs: 12_000,
+    };
+    const items = [session[0], session[1], thought, session[3]];
+    const rows = [3, 3, 3, 3];
+    const view = mountHosted({
+      items,
+      rows,
+      viewportRows: 5,
+      modRows: { config: {} as Config, sessionId: 'session-1' },
+      itemRows: (text) => (text.includes('Thought for 12s') ? 3 : undefined),
+    });
+    const markdown = () => view.container.querySelector('markdown');
+
+    try {
+      view.frame();
+      view.jump(9);
+      view.frame();
+      expect(view.visibleLines().join('\n')).toContain('Thought for 12s');
+      await act(async () => view.setThoughtsExpanded(true));
+      expect(watchRow).not.toHaveBeenCalled();
+
+      // A scroll event can arrive while Yoga still has the collapsed layout.
+      view.jump(10);
+      expect(watchRow).not.toHaveBeenCalled();
+
+      // The same expansion grows a preceding row and pushes the thought out.
+      rows[0] += 10;
+      view.frame();
+      const mounted = markdown();
+      expect(mounted?.getAttribute('content')).toBe('THOUGHT_BODY');
+      expect(view.visibleLines().join('\n')).not.toContain('Thought for 12s');
+      expect(watchRow).not.toHaveBeenCalled();
+
+      // The composer can leave Yoga with no transcript rows even when the
+      // renderable reports a one-row viewport over the thought.
+      view.setViewportRows(0);
+      view.jump(21);
+      view.frame();
+      expect(markdown()).toBe(mounted);
+      expect(watchRow).not.toHaveBeenCalled();
+
+      view.jump(0);
+      view.setViewportRows(5);
+      view.frame();
+      view.jump(19);
+      expect(watchRow).not.toHaveBeenCalled();
+      view.frame();
+      expect(markdown()).toBe(mounted);
+      expect(view.visibleLines().join('\n')).toContain('Thought for 12s');
+      expect(watchRow).toHaveBeenCalledExactlyOnceWith(
+        'session-1',
+        {
+          surface: 'terminal',
+          component: 'Thinking',
+          requestId: 'th1',
+          props: { text: 'THOUGHT_BODY' },
+        },
+        expect.any(Function),
+      );
+      expect(markdown()?.getAttribute('content')).toBe(rewrite.text);
+
+      view.jump(0);
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(markdown()?.getAttribute('content')).toBe(rewrite.text);
+    } finally {
+      view.unmount();
+      sessionMock.mockRestore();
+    }
+  });
 
   it('preserves expanded height ownership across compact frames above the reader', () => {
     const history: HistoryItem[] = Array.from({ length: 200 }, (_, index) => ({

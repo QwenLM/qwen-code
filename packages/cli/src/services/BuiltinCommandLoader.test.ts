@@ -169,6 +169,17 @@ describe('BuiltinCommandLoader', () => {
     },
   );
 
+  it('registers /pr for interactive, headless and ACP sessions', async () => {
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+    const pr = commands.find((command) => command.name === 'pr');
+    expect(pr).toBeDefined();
+    expect(pr?.supportedModes).toEqual(
+      expect.arrayContaining(['interactive', 'non_interactive', 'acp']),
+    );
+  });
+
   it('skips automatic IDE process detection in tool sandbox', async () => {
     const { ideCommand } = await import('../ui/commands/ideCommand.js');
     mockConfig.getShellExecutionSandbox = vi

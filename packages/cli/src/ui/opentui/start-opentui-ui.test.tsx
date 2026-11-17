@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile, execFileSync } from 'child_process';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import type { InputPromptProps } from './input-prompt.js';
+import type { OpenTuiSlashGateway } from './slash-gateway.js';
 import type { HistoryItem } from '../types.js';
 import { useTextBuffer } from '../components/shared/text-buffer.js';
 import type { LiveHistoryItem } from './live-session-model.js';
@@ -84,6 +85,7 @@ const mocks = vi.hoisted(() => {
       isCurrentHistory?: (snapshot: readonly LiveHistoryItem[]) => boolean;
       renderMain?: () => unknown;
       onQuit?: (messages: readonly HistoryItem[]) => void;
+      slashGateway?: OpenTuiSlashGateway;
       onToggleVim?: () => Promise<boolean>;
       vimMode?: string;
       vim?: InputPromptProps['vim'];
@@ -856,6 +858,36 @@ describe('startOpenTuiUI fallback contract', () => {
       expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
     }, config);
   });
+
+  it.each(['c', 'd'])(
+    'does not arm or exit on Ctrl+%s during a slash command commit',
+    async (name) => {
+      const config = buildConfig();
+      await withEntryApp(() => {
+        const gateway = mocks.state.appProps!.slashGateway!;
+        const commit = vi
+          .spyOn(gateway, 'isCommitInProgress')
+          .mockReturnValue(true);
+        vi.spyOn(gateway, 'isBusy').mockReturnValue(true);
+        const cancel = vi.spyOn(gateway, 'cancel');
+        const press = () =>
+          act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+
+        press();
+        press();
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(cancel).not.toHaveBeenCalled();
+
+        commit.mockReturnValue(false);
+        press();
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(cancel).not.toHaveBeenCalled();
+        press();
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+      }, config);
+    },
+  );
 
   it.each([false, true])(
     'does not arm exit or cancel a parked call on Shift+Ctrl+C (parked=%s)',

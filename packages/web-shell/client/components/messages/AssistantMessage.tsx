@@ -52,8 +52,11 @@ import {
 } from '../ui/tooltip';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './AssistantMessage.module.css';
+import { HookStatistics } from './HookStatistics';
+import type { HookStatisticsTurn } from './hook-statistics-context';
 
 interface AssistantMessageProps {
+  hookTurn?: HookStatisticsTurn;
   content: string;
   author?: DaemonMessageAuthor;
   /** A workspace agent's reply: its run status, error, steps and tokens. */
@@ -77,6 +80,7 @@ interface AssistantMessageProps {
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
+  hookTurn,
   content,
   author,
   agentMessage,
@@ -112,8 +116,10 @@ export const AssistantMessage = memo(function AssistantMessage({
   const showFooter =
     !!content &&
     !blankAgentReply &&
-    !isStreaming &&
-    (showFooterActions || (turnSources?.length ?? 0) > 0) &&
+    (!isStreaming || hookTurn !== undefined) &&
+    (showFooterActions ||
+      hookTurn !== undefined ||
+      (turnSources?.length ?? 0) > 0) &&
     !documentMode;
   const customFooter = useMemo(
     () =>
@@ -347,6 +353,7 @@ export const AssistantMessage = memo(function AssistantMessage({
                 </TooltipContent>
               </Tooltip>
             )}
+            {hookTurn && <HookStatistics turn={hookTurn} />}
             {turnSources?.length ? (
               <TurnSources sources={turnSources} onOpen={onSourceOpen} />
             ) : null}
@@ -803,7 +810,9 @@ export function ThinkingTranslateButton({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className={styles.translationPopover}
+        // A width utility lets tailwind-merge drop PopoverContent's default w-72;
+        // a CSS-module width ties on specificity and loses when utilities load later.
+        className={`${styles.translationPopover} w-[min(480px,calc(100vw-32px))]`}
         data-approval-shortcuts-ignore={
           mode === 'explain-shell' ? '' : undefined
         }

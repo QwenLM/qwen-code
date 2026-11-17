@@ -303,14 +303,16 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
 
     private Map<String, Object> awaitStartup(SshRuntimeNode node, RuntimeResourceHandle handle, Map<String, Object> result) {
         long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        long pause = 200;
         verifyResource(result, handle);
         while ("STARTING".equals(result.get("state")) && System.nanoTime() < deadline) {
             try {
-                Thread.sleep(100);
+                Thread.sleep(pause);
             } catch (InterruptedException failure) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeBrokerException(503, "ssh_runtime_start_pending", "Original SSH worker startup was interrupted.", true, failure);
             }
+            pause = Math.min(pause * 2, 2_000);
             result = connections.bootstrap(node, operation(node, handle, "observe"));
             verifyResource(result, handle);
         }

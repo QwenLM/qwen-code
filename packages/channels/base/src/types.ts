@@ -118,6 +118,25 @@ export interface Envelope {
   channelName: string;
   senderId: string;
   senderName: string;
+  /**
+   * Adapter-supplied marker identifying an automated sender (e.g. a peer bot
+   * in a bot-to-bot conversation), rendered as `[tag] ` in front of the
+   * sender attribution.
+   *
+   * Carried on the envelope instead of inside `text` because ChannelBase owns
+   * the sender prefix only after message routing and prompt sanitization run:
+   * a leading `[tag]` in `text` would either stop `matchMessageRoute` from
+   * matching (the route prefix must lead the text) or lose its brackets to
+   * `unwrapStartOfLineTags`. ChannelBase renders it only where it composes
+   * that prefix; self-prefixing adapters (`alreadyPrefixed`) render it
+   * themselves.
+   *
+   * A tagged envelope's text is prose, never a command: slash-command
+   * dispatch, `!` shell execution and channel-memory intents are skipped for
+   * it, because an automated peer is not an operator and its command-shaped
+   * text is model input.
+   */
+  senderTag?: string;
   chatId: string;
   chatName?: string;
   text: string;
@@ -208,6 +227,14 @@ export interface PrBindingEntry {
    * Absent means untyped; the adapter groups untyped followers separately.
    */
   role?: PrBindingRole;
+  /**
+   * Whether the session holds an active watch on THIS PR (an `/autofix-pr`
+   * watch or a `/verify-pr --watch` standing trigger), derived by the daemon
+   * at scan time. Absent means unknown — watch detection failed or the
+   * daemon predates the field — and consumers must treat unknown as
+   * eligible: the watch gate is a noise filter, not a security boundary.
+   */
+  watching?: boolean;
 }
 
 /**
@@ -272,6 +299,17 @@ export interface ChannelBoundSessions {
     prompt: string,
     idempotencyKey?: string,
   ): Promise<void>;
+  /**
+   * The set of GitHub comment identifiers the session has itself posted,
+   * canonical as `ic:<id>` (conversation comment) or `rc:<id>` (inline review
+   * comment). The bound PR comment watch uses it to withhold a comment from
+   * the session that wrote it while delivering every other author's comment,
+   * including the same GitHub account used by a different session/agent.
+   * Fail-open: an unavailable lookup resolves to an empty set so delivery is
+   * never suppressed on missing evidence. Optional: absent in standalone
+   * mode, where no suppression is applied.
+   */
+  postedCommentIds?(sessionId: string): Promise<ReadonlySet<string>>;
 }
 
 export interface ObservedChannelIdentity {
@@ -595,7 +633,15 @@ export interface ChannelConfigNumberFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
+  /** Exclusive lower bound: the value must be strictly greater than this. */
   exclusiveMinimum?: number;
+  /**
+   * Inclusive lower bound: the value may equal this. Needed because a field
+   * whose real floor is 0 cannot express it with `exclusiveMinimum` — writing
+   * -1 to admit 0 also admits (-1, 0), which the editor then accepts and the
+   * adapter rejects at save. When both are declared the stricter one wins.
+   */
+  minimum?: number;
   /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
    * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
   maximum?: number;
@@ -640,8 +686,40 @@ export type ChannelConfigFieldDescriptor =
   | ChannelConfigNumberFieldDescriptor
   | ChannelConfigObjectFieldDescriptor;
 
+/**
+ * Handlers an adapter drives during an interactive QR login. The daemon owns
+ * the session lifecycle and the transport; the adapter owns the protocol.
+ */
+export interface ChannelQrLoginHandlers {
+  /** A fresh QR payload URL is ready to render. Never carries a secret. */
+  onQrCode(url: string): void;
+  /** The current QR expired; a replacement is being requested. */
+  onExpired(): void;
+  /**
+   * Login succeeded. Values are keyed by management field key so the daemon can
+   * persist them through the shared config/secret path without knowing which
+   * platform produced them.
+   */
+  onSuccess(values: Readonly<Record<string, string>>): void;
+  onFailure(error: Error): void;
+}
+
+export interface ChannelQrLoginDescriptor {
+  /**
+   * Begin the login handshake. Returns a dispose function that must stop all
+   * upstream polling. Aborting `signal` has the same effect.
+   */
+  start(handlers: ChannelQrLoginHandlers, signal: AbortSignal): () => void;
+}
+
 export interface ChannelManagementDescriptor {
   fields: readonly ChannelConfigFieldDescriptor[];
+
+  /**
+   * Opt in to browser-rendered QR login. Adapters without it can only be
+   * configured by supplying credentials directly.
+   */
+  qrLogin?: ChannelQrLoginDescriptor;
 
   /**
    * Cross-field validation applied to the resolved config during managed
@@ -676,6 +754,16 @@ export interface ChannelPlugin {
 
   /** Opt in to shared task, response, and turn output grouping. */
   supportsOutputMode?: boolean;
+
+  /** Sends notifications without receiving messages or creating conversations. */
+  outboundOnly?: boolean;
+
+  /** Adapter-owned logical destination; endpoint credentials stay in config. */
+  defaultDeliveryTarget?: {
+    type: 'user' | 'chat';
+    id: string;
+    label?: string;
+  };
 
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;
