@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
@@ -149,6 +150,10 @@ export async function deleteSessionGoalSidecar(
   filePath: string,
 ): Promise<void> {
   await enqueueGoalMutation(filePath, async () => {
+    // Short-circuit when there is nothing to unlink: a goal-less restore
+    // backfill must not issue a redundant unlink, which would both waste a
+    // syscall and pollute shared fs spies used by unrelated suites.
+    if (!existsSync(filePath)) return;
     try {
       await fs.unlink(filePath);
     } catch (error) {

@@ -15,6 +15,12 @@ const writeControl = vi.hoisted(() => ({
   delays: [] as number[],
   failFirst: false,
 }));
+// ESM namespace exports are not spy-able, so mock node:fs/promises with a
+// passthrough unlink spy; every other fs method stays real (temp dirs, io).
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, unlink: vi.fn(actual.unlink) };
+});
 vi.mock('../utils/atomicFileWrite.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/atomicFileWrite.js')>();
@@ -160,6 +166,15 @@ describe('session-goal-sidecar', () => {
     await deleteSessionGoalSidecar(file);
     expect(await readSessionGoalSidecar(file)).toBeNull();
     await expect(deleteSessionGoalSidecar(file)).resolves.toBeUndefined();
+  });
+
+  it('does not issue an unlink when the sidecar is absent', async () => {
+    // A goal-less restore backfill must not spend a redundant unlink (and
+    // must not pollute the shared fs spy that unrelated suites assert on).
+    const unlink = vi.mocked(fs.unlink);
+    unlink.mockClear();
+    await deleteSessionGoalSidecar(path.join(dir, 'missing.goal.json'));
+    expect(unlink).not.toHaveBeenCalled();
   });
 
   it('move carries the projection and tolerates an absent source', async () => {
