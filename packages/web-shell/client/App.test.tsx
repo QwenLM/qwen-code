@@ -19895,6 +19895,184 @@ describe('App session callbacks', () => {
     await flush();
   });
 
+  it.each(['Enter', ' '])(
+    'keeps a settled explanation when %s is consumed by a keyboard scope',
+    async (key) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      // A keyboard-scoped status card consumes Enter/Space itself (open/close
+      // detail, server actions); the explanation must yield, not dismiss.
+      const scope = document.createElement('div');
+      scope.setAttribute('data-keyboard-scope', '');
+      container.append(scope);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        scope.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    },
+  );
+
+  it.each([
+    ['textarea', 'textarea'],
+    ['CodeMirror editor', 'cm-editor'],
+    ['select', 'select'],
+    ['contenteditable empty', 'contenteditable-empty'],
+    ['contenteditable plaintext-only', 'contenteditable-plaintext'],
+  ])('preserves Ctrl+C copy on a %s under a drawer', async (_label, kind) => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const drawer = document.createElement('div');
+    drawer.setAttribute('data-slot', 'drawer-content');
+    drawer.setAttribute('data-state', 'open');
+    let surface: HTMLElement;
+    if (kind === 'cm-editor') {
+      surface = document.createElement('div');
+      surface.className = 'cm-editor';
+    } else if (kind === 'contenteditable-empty') {
+      surface = document.createElement('div');
+      surface.setAttribute('contenteditable', '');
+    } else if (kind === 'contenteditable-plaintext') {
+      surface = document.createElement('div');
+      surface.setAttribute('contenteditable', 'plaintext-only');
+    } else {
+      surface = document.createElement(kind);
+    }
+    drawer.append(surface);
+    container.append(drawer);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      surface.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(false);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+  });
+
+  it('cancels a pending explanation with Ctrl+C on a text surface without a guard', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const input = document.createElement('input');
+    container.append(input);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    // With no guard present the copy carve-out does not apply; Ctrl+C cancels.
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      input.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
   it.each(['switch', 'tab', 'option', 'checkbox', 'radio'])(
     'keeps a settled explanation when Enter activates a %s',
     async (role) => {

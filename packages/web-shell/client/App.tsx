@@ -14619,29 +14619,41 @@ export function App({
         !e.shiftKey &&
         (key === 'c' || key === 'd');
 
-      // Surfaces that own the keyboard — an open modal (dialog/alertdialog/
-      // drawer, including component-local confirms portaled into the shell
-      // root), the waiting minigame, and keyboard-scoped subtrees — own
-      // Escape only. None of them owns Enter/Space (activation or settled
-      // dismissal) or the cancel chords, so yield Escape to them and let
-      // every other key reach the activation/dismiss/cancel paths below.
-      // The sole exception is Ctrl+C's copy role on a real text surface under
-      // a guard: Ctrl+D never copies, and a keyboard scope is not itself a
-      // text surface (a button inside a status card still cancels).
+      // Surfaces that own the keyboard yield the keys they actually consume.
+      // Dialogs/drawers (including component-local confirms portaled into the
+      // shell root) own Escape only — Enter/Space on their body still dismiss
+      // a settled explanation, and on a control still activate it. The waiting
+      // minigame (Space pauses, Enter restarts) and keyboard-scoped status
+      // cards (Enter/Space open/close detail and server actions) consume
+      // Enter/Space as well as Escape, so yield those keys to them too. The
+      // cancel chords are never owned by these surfaces, except Ctrl+C's copy
+      // role on a real text surface under a guard: Ctrl+D never copies, and a
+      // keyboard scope is not itself a text surface (a button inside a status
+      // card still cancels).
+      const inKeyboardScope =
+        target instanceof Element &&
+        target.closest('[data-keyboard-scope]') !== null;
       const guardApplies =
         hasOpenModalSurface(portalRoot) ||
         waitingMinigameOpen ||
-        (target instanceof Element &&
-          target.closest('[data-keyboard-scope]') !== null);
+        inKeyboardScope;
+      const guardOwnsActivation =
+        (waitingMinigameOpen || inKeyboardScope) &&
+        (e.key === 'Enter' || e.key === ' ');
       const textCopy =
         guardApplies &&
         isCtrlCancel &&
         key === 'c' &&
         target instanceof Element &&
         target.closest(
-          'input, textarea, select, [contenteditable="true"], .cm-editor',
+          'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .cm-editor',
         ) !== null;
-      if (textCopy || (guardApplies && e.key === 'Escape')) return;
+      if (
+        textCopy ||
+        (guardApplies && e.key === 'Escape') ||
+        guardOwnsActivation
+      )
+        return;
 
       // Enter/Space activate a control — button, link, field, menu item,
       // tab, grid/tree row, and the like — and Escape inside the chip row or
