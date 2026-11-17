@@ -27,14 +27,14 @@
 
 ## 涉及文件
 
-| 文件                                                                                            | 变更                                                                          |
-| ----------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `packages/core/src/skills/bundled/loop/managed-loop-skill.ts`                                   | MANAGED_LOOP_PROFILES + 派生类型；Nd 替换；assertSentinelsExpanded allow-list |
-| `packages/core/src/skills/bundled/loop/managed-loop-skill.test.ts`                              | profile 单一来源；Parsing 库存钉；哨兵 allow-list 可执行测试                  |
-| `packages/core/src/skills/bundled/loop/SKILL.md`                                                | Nd 表行 + 月界 caveat                                                         |
-| `packages/core/src/managed-runtime/contracts/managed-loop-skill-{cron,union,bundled-body}.json` | 重生                                                                          |
-| `scripts/run-managed-agent-server-e2e.ts`                                                       | classifierBlockAnswer + mintedScheduleId helper；两个 fake 都用它们           |
-| `scripts/tests/managed-agent-server-e2e.test.js`                                                | fake createdId 钉；分类器 + minted-id 可执行测试；answer/标识符库存钉         |
+| 文件                                                                                            | 变更                                                                                       |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `packages/core/src/skills/bundled/loop/managed-loop-skill.ts`                                   | MANAGED_LOOP_PROFILES + 派生类型；Nd 替换；assertSentinelsExpanded allow-list              |
+| `packages/core/src/skills/bundled/loop/managed-loop-skill.test.ts`                              | profile 单一来源；Parsing 库存；allow-list 测试；parser 派生 Nd caveat；Java 提供+路由集合 |
+| `packages/core/src/skills/bundled/loop/SKILL.md`                                                | Nd 表行 + 月界 caveat                                                                      |
+| `packages/core/src/managed-runtime/contracts/managed-loop-skill-{cron,union,bundled-body}.json` | 重生                                                                                       |
+| `scripts/run-managed-agent-server-e2e.ts`                                                       | classifierBlockAnswer + mintedScheduleId helper；两个 fake 都用它们                        |
+| `scripts/tests/managed-agent-server-e2e.test.js`                                                | fake createdId 钉；分类器 + minted-id 可执行测试；AST 分类器接线钉                         |
 
 ## 范围边界
 
@@ -43,8 +43,8 @@
 ## 验收标准
 
 - core parity 套件绿（32 测试），含库存、allow-list、调用点、sidecar 集合、Java 服务集合与 caveat 钉及重生 sidecar 逐字节 parity。
-- scripts 元套件绿（182 测试），含 fake createdId 钉、可执行分类器收窄与可执行 minted-id 提取。
-- 变异见证：additive-fallback 分类器变异使非 block 方向红；deny-list 哨兵回退使新哨兵方向红；伪造 fake createdId 使其钉红；删除 Parsing 规则使库存钉红；调用点之后的 sibling fallback 使 answer 字面量库存钉红。各字节级还原复绿。
+- scripts 元套件绿（183 测试），含 fake createdId 钉、可执行分类器收窄、可执行 minted-id 提取与被执行的分类器接线扫描器。
+- 变异见证：additive-fallback 分类器变异使非 block 方向红；deny-list 哨兵回退使新哨兵方向红；伪造 fake createdId 使其钉红；删除 Parsing 规则使库存钉红；调用点之后的 sibling fallback 使分类器接线钉红；caveat 上界改 N ≤ 45 使 parser 派生断言红；删 Java `SHELL_V3` 路由分支使路由目标集合红。各字节级还原复绿。
 - 真实打包栈 `--loop-skill` 与 `--loop-fire` 臂以重生 sidecar 绿（jar 重建）。
 
 ## Round-1 评审精化
@@ -62,7 +62,7 @@
 第二轮抓到一个修复引入的 critical 与四个二阶缺口（各见证）：
 
 - **N ≤ 30 而非 N ≤ 31（round-2 critical）。** `0 0 */31 * *` 本就只匹配 day 1（步长从 day 1 起，1+31 超字段最大值），故 N = 31 正是退化本身而非最后安全值；仍匹配多天的最后一步是 `*/30`（`{1,31}`）。caveat、parity 钉与两版设计文档均改 N ≤ 30；改回 N ≤ 31 使钉红。
-- **Java 服务集合钉（R2-1）。** profile 单一来源跨过 TypeScript 边界：parity 断言读 `ManagedLoopSkill.java` 的 `sidecars()` 键，要求（去掉仅来源比对的 `bundled` 键）等于 `MANAGED_LOOP_PROFILES`，使「加进 tuple 但 Java map 缺失」（会静默不提供 /loop skill）红。
+- **Java 服务集合钉（R2-1）。** profile 单一来源跨过 TypeScript 边界：parity 断言读 `ManagedLoopSkill.java` 的 `sidecars()` 键，要求（去掉仅来源比对的 `bundled` 键）等于 `MANAGED_LOOP_PROFILES`。该 map 只*提供* body；某 workspace profile 能否到达由 `forProfile()` 手工路由链决定，round 3 一并钉住——原理由指错了机制（见 Round-3）。
 - **可执行 minted-id helper（R2-2）。** fake 侧提取合并为顶层纯函数 `mintedScheduleId(messages, createCallId)`（返回 `undefined`，绝不编造 id），两臂共用并在元测试对敌意历史执行；仅源码拼写计数会漏掉伪造 `?? 'asch_' + '0'.repeat(32)` fallback 且挡住合并。调用点与显式失败 `?? 'missing-schedule-id'` fallback 上钉。
 - **classifier 门钉（R2-3）。** 对 `if (blockAnswer !== undefined) {`（两臂）计数钉，堵住「门改宽」（`if (blockProperties !== undefined)` + `blockAnswer ?? {…}`）——该拼写在赋值计数仍为 2 时复活误答。
 - **替换单元钉（R2-4）。** managed Nd 修复的 `sub()` 替换串上钉（`midnight UTC on days 1, 1+N, … of each month`、`not.toContain('every N days')`）加示例间隔，使回退替换串并重生不能在全绿下重新教「every N days」。
@@ -72,8 +72,16 @@
 独立 `/verify-pr` 轮在首个精化 head 上报了两条发现与一条 nit，三者均在此关闭：
 
 - **N ≤ 31 多算一档（low）。** 与第二轮评审抓到的 critical 同一缺陷；由上文 N ≤ 30 修正关闭。
-- **调用点之后的 sibling fallback（覆盖缺口）。** 语句锚定计数钉看不到写在门*之后*的 fallback（`if (blockAnswer === undefined) return …allow…`）：两个计数仍为 2，而 fire fake 重新误答侧查询，只在打包臂可见。改用两条「数成分而非数语句」的库存钉关闭——block allow 字面量 `shouldBlock: false` 只在 `classifierBlockAnswer` 内构造（计数 1），每臂恰好引用 `blockAnswer` 三次：声明 / 门 / answer（计数 6）。三路见证：报告点名的门后 sibling 与 usage 行 `?? { shouldBlock: false }` fallback 各使字面量库存红；经 helper 重新推导 allow（不新增字面量）的 sibling 只使标识符库存红，故两条钉都不空转。helper 前置注释不再拼写该字面量，使库存计数无歧义。
-- **parity 计数陈旧（nit）。** PR 正文与上文验收标准改为当前套件规模（core 32、scripts 元 182）与最新真实栈 occurrence key。
+- **调用点之后的 sibling fallback（覆盖缺口）。** 语句锚定计数钉看不到写在门*之后*的 fallback（`if (blockAnswer === undefined) return …allow…`）：两个计数仍为 2，而 fire fake 重新误答侧查询，只在打包臂可见。首次响应改为「数成分」——block allow 字面量与决策变量引用计数。round 3 随后证明：经 helper 在*第二个绑定*下重新推导 allow 的 sibling 两个成分都不新增，故那两条计数同样盲；且对原始源码文本计数会因注释仅提到绑定而以难定位的计数不匹配变红。两者均被 AST 接线钉取代（见 Round-3）；成分计数已移除，结构化钉不再需要为计数无歧义而改写注释。
+- **parity 计数陈旧（nit）。** PR 正文与上文验收标准改为当前套件规模（core 32、scripts 元 183）与最新真实栈 occurrence key。
+
+## Round-3 评审精化
+
+第三轮发了三条建议，都是同一根因的实例：钉子断言的是拼写，而非它声称守护的机制。三条均改为结构化断言并见证。
+
+- **分类器接线钉结构而非 token（R2-3，修复引入）。** 成分计数看不到「经 `classifierBlockAnswer` 在第二个绑定下重推 allow」的门后 sibling（字面量计数与 `blockAnswer` 引用计数都不动），且计数跑在原始源码文本上，注释仅提到绑定就会以难定位的计数不匹配变红。改用 `loopClassifierWiring`——对两个 loop fake 的 AST 库存：由 helper 以 schema 自身 properties 初始化的 `blockAnswer` 绑定、`!== undefined` 门、每个 `respond_in_schema` `fakeToolCall` 的 answer 表达式（不论 call id 一律收集，使 sibling 无法藏在新 call id 后；每个 loop classifier call id 恰一个，且必须是该被门控的绑定本身），以及 `respond_in_schema` 字符串字面量计数（使绕过 `fakeToolCall` 手搭的 tool call 也可见）。扫描器对敌意 fake 执行，故不会空转：第二绑定的 sibling 被检出，散文提到绑定与工具名不改任何计数。见证：报告点名的 sibling 使 answer 站点集合红，而旧计数仍为 1 与 6；换 call id 的 sibling 使同一集合红；手搭 tool call 使字面量库存红；含 `blockAnswer`、`shouldBlock: false` 与 `respond_in_schema` 的注释保持绿；此前已覆盖的 usage 行 `?? { shouldBlock: false }` fallback 仍红，且报错直接点名该表达式而非计数。
+- **caveat 算术由 shipped parser 派生（R3-1）。** 上界与示例原是手写散文钉——这正是 `Keep N ≤ 31` 穿过两轮的原因。测试改为派生「`parseCron('0 0 */N * *').dayOfMonth` 仍收集多于一天的最大步长」（30），并由 `*/2` 日集合派生两个月界间隔（30 天月→2、31 天月→1），要求 cron 与 union body 含这些派生值。见证：caveat 改 `Keep N ≤ 45` 并重生 sidecar 使派生断言红。
+- **Java 钉覆盖路由而非仅提供（R3-2）。** `sidecars()` 只提供 body；`forProfile()` 手工链决定哪个 workspace profile 能到达，故往 tuple 追加 profile 时本 PR 新增的每道门都绿，却没有任何 profile 路由到其 body。parity 测试现同时要求 `key = "…";` 路由目标集合等于 `MANAGED_LOOP_PROFILES`。无 creator 的 profile 路由到 null 且不赋 key，故 `ManagedLoopSkillTest` 的 null 期望不受影响。见证：删 `SHELL_V3` → `wakeup` 分支使路由集合红，而 sidecar 键断言仍通过。
 
 ## 开放问题
 

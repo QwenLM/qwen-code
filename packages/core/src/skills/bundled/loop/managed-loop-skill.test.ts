@@ -15,6 +15,7 @@ import {
   type ManagedLoopProfile,
 } from './managed-loop-skill.js';
 import { parseSkillContent } from '../../skill-load.js';
+import { parseCron } from '../../../utils/cronParser.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const contractsDir = join(here, '../../../managed-runtime/contracts');
@@ -355,13 +356,17 @@ describe('managed loop skill parity', () => {
     expect(committed).toEqual(declared);
   });
 
-  it('the Java sidecar map serves exactly the declared profile set', () => {
-    // The set actually served is the hand-kept sidecars() map in
-    // ManagedLoopSkill.java, not the TypeScript tuple. A profile added to
-    // MANAGED_LOOP_PROFILES (and generated) but missing from the Java map
-    // would silently serve no /loop skill on that profile. Pin the Java key
-    // set to the declared profiles; the provenance-only "bundled" key is
-    // allowed (it backs the bundled-import comparison, not a tool profile).
+  it('the Java sidecar map and routing serve exactly the declared profile set', () => {
+    // Two hand-kept Java sites decide whether a profile gets a /loop skill,
+    // and neither is bound to the TypeScript tuple: sidecars() only SUPPLIES
+    // bodies, while forProfile()'s routing chain decides which workspace
+    // profile reaches one. A profile added to MANAGED_LOOP_PROFILES (and
+    // generated) but missing from either site would silently serve no /loop
+    // skill, so pin both key sets to the declared profiles. The
+    // provenance-only "bundled" key is allowed in sidecars() (it backs the
+    // bundled-import comparison, not a tool profile); the routing targets are
+    // exactly the declared profiles, since a creator-less profile routes to
+    // null and never assigns a key.
     const javaSource = readFileSync(
       join(
         here,
@@ -374,23 +379,45 @@ describe('managed loop skill parity', () => {
       .filter((key) => key !== 'bundled')
       .sort();
     expect(javaKeys).toEqual([...MANAGED_LOOP_PROFILES].sort());
+    const javaTargets = [...javaSource.matchAll(/key = "(\w+)";/g)]
+      .map((match) => match[1])
+      .sort();
+    expect(javaTargets).toEqual([...MANAGED_LOOP_PROFILES].sort());
   });
 
-  it('the Nd month-boundary caveat survives into the cron and union bodies', () => {
+  it('the Nd month-boundary caveat matches the shipped cron parser', () => {
     // The caveat flows verbatim from SKILL.md (no substitution), so deleting
-    // or rewording it would otherwise regenerate green. Pin the corrected
-    // semantics: a day-of-month step, at most N days across the boundary, and
-    // the N ≤ 30 bound (a step of 31 already collects only day 1, since 1+31
-    // is past the day-of-field maximum).
+    // or rewording it would otherwise regenerate green. Its arithmetic is
+    // DERIVED from parseCron — the parser the scheduler fires by — instead of
+    // restated as prose, so a wrong bound or a wrong example gap reddens even
+    // when the pin text is updated to match it. The N ≤ 31 off-by-one survived
+    // two review rounds precisely because nothing computed the bound.
+    const daySet = (step: number): Set<number> =>
+      parseCron(`0 0 */${step} * *`).dayOfMonth;
+    // The day-of-month field is [1, 31] and a step past 31 collects day 1
+    // alone, so scanning 1..31 covers every distinct day set.
+    let maxStep = 1;
+    for (let step = 1; step <= 31; step += 1) {
+      if (daySet(step).size > 1) maxStep = step;
+    }
+    const exampleDays = [...daySet(2)];
+    const lastFire = (monthLength: number): number =>
+      Math.max(...exampleDays.filter((day) => day <= monthLength));
+    // The boundary gap runs from the month's last fire to the next month's
+    // day 1, which the step always collects.
+    const boundaryGap = (monthLength: number): number =>
+      monthLength - lastFire(monthLength) + 1;
     for (const profile of ['cron', 'union'] as const) {
       const text = asset(profile).body;
       expect(text).toContain('day-of-month step, not a rolling N-day cadence');
       expect(text).toContain('at most N days');
-      expect(text).toContain('Keep N ≤ 30');
-      // The worked examples pin the boundary arithmetic so a wrong gap
-      // number cannot ship green.
-      expect(text).toContain('a 2-day gap');
-      expect(text).toContain('a 1-day gap');
+      expect(text).toContain(`Keep N ≤ ${maxStep}`);
+      expect(text).toContain(
+        `in a 30-day month \`*/2\` fires on the ${lastFire(30)}`,
+      );
+      expect(text).toContain(`in a 31-day month on the ${lastFire(31)}`);
+      expect(text).toContain(`a ${boundaryGap(30)}-day gap`);
+      expect(text).toContain(`a ${boundaryGap(31)}-day gap`);
     }
   });
 
