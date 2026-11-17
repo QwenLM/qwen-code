@@ -16,6 +16,7 @@ import generatedUiConfig from '../../integrations/generated-ui/vitest.config.js'
 import acpBridgeConfig from '../../packages/acp-bridge/vitest.config.js';
 import audioCaptureConfig from '../../packages/audio-capture/vitest.config.js';
 import browserUseConfig from '../../packages/browser-use/vitest.config.js';
+import aoneConfig from '../../packages/channels/aone/vitest.config.js';
 import channelsBaseConfig from '../../packages/channels/base/vitest.config.js';
 import dingtalkConfig from '../../packages/channels/dingtalk/vitest.config.js';
 import dwsConfig from '../../packages/channels/dws/vitest.config.js';
@@ -104,6 +105,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/acp-bridge': acpBridgeConfig,
   'packages/audio-capture': audioCaptureConfig,
   'packages/browser-use': browserUseConfig,
+  'packages/channels/aone': aoneConfig,
   'packages/channels/base': channelsBaseConfig,
   'packages/channels/dingtalk': dingtalkConfig,
   'packages/channels/dws': dwsConfig,
@@ -296,6 +298,8 @@ const configModules: Record<
     import('../../packages/audio-capture/vitest.config.js'),
   'packages/browser-use': () =>
     import('../../packages/browser-use/vitest.config.js'),
+  'packages/channels/aone': () =>
+    import('../../packages/channels/aone/vitest.config.js'),
   'packages/channels/base': () =>
     import('../../packages/channels/base/vitest.config.js'),
   'packages/channels/dingtalk': () =>
@@ -388,6 +392,7 @@ describe('shared-pool test timeout', () => {
     'packages/acp-bridge',
     'packages/audio-capture',
     'packages/browser-use',
+    'packages/channels/aone',
     'packages/channels/base',
     'packages/channels/dingtalk',
     'packages/channels/dws',
@@ -776,6 +781,7 @@ describe('autofix-gate per-file ceiling floor', () => {
   const guarded = [
     'packages/cli/src/ui/auth/SubscriptionDialog.test.tsx',
     'packages/cli/src/serve/server/session-pr-refresh.test.ts',
+    'packages/cli/src/serve/managed-runtime-terminal.test.ts',
     'packages/core/src/hooks/file-changed-watcher.test.ts',
   ];
   it('keeps the tuned suites from overriding the granted testTimeout', () => {
@@ -790,11 +796,20 @@ describe('autofix-gate per-file ceiling floor', () => {
       // so the floor must cover that spelling too (R5-1). Check every ceiling
       // constant's FAST arm — the one in force inside the gate, where env -i
       // drops RUNNER_NAME/RUNNER_OS and the worker clamp keeps loadavg under
-      // the slow-host threshold: it must inherit (undefined) or sit at/above
-      // the 60000 the gate grants, never below it.
-      for (const [, name, expr] of src.matchAll(
-        /const\s+(\w*CEILING\w*)\s*=\s*([^;]+);/g,
-      )) {
+      // the slow-host threshold: it must inherit (undefined) or equal the
+      // 60000 the gate grants. Below it the suite is cut before the gate's own
+      // budget (R4-1); above it the file outranks the grant and a hang runs to
+      // the file's figure instead of the lane's (R10-1).
+      const ceilings = [
+        ...src.matchAll(/const\s+(\w*CEILING\w*)\s*=\s*([^;]+);/g),
+      ];
+      // Without this the entry is decorative: a file that renames its ceiling
+      // constant matches nothing, and the loop below asserts nothing at all.
+      expect(
+        ceilings.length,
+        `${file} declares no *CEILING* constant for this guard to read`,
+      ).toBeGreaterThan(0);
+      for (const [, name, expr] of ceilings) {
         let fast = expr.trim();
         const q = fast.indexOf('?');
         if (q >= 0) fast = fast.slice(fast.indexOf(':', q) + 1).trim();
@@ -806,8 +821,8 @@ describe('autofix-gate per-file ceiling floor', () => {
         ).toBe(true);
         expect(
           n,
-          `${file}: ${name} fast arm ${n} sits below the gate's 60000 grant`,
-        ).toBeGreaterThanOrEqual(60_000);
+          `${file}: ${name} fast arm ${n} must equal the gate's 60000 grant, or inherit it (undefined)`,
+        ).toBe(60_000);
       }
     }
   });
