@@ -61,13 +61,14 @@ const WAIT_LOCAL_MS = 30_000;
 const until = createUntil(WAIT_LOCAL_MS);
 
 // The /permissions cases pin their own ceiling to fail fast on a wedged
-// dialog. It must outrank the boot window plus one stalled wait, or vitest's
-// bare "Test timed out" pre-empts the wait's own label (#17544). retry: 0
-// because a wedged dialog repeats in a fresh worker, so the suite's two
-// retries would only triple the cost.
+// dialog. It must outrank the boot window plus a few repaints that each burn
+// a full wait budget and still pass — these cases poll a dozen times — or
+// vitest's bare "Test timed out" pre-empts the wait's own label (#17544).
+// retry: 0 because a wedged dialog repeats in a fresh worker, so the suite's
+// two retries would only triple the cost.
 const PERMISSIONS_CASE_OPTIONS = {
   timeout:
-    readyPromptBudgetMs(process.env) + scaledWait(WAIT_LOCAL_MS) + 60_000,
+    readyPromptBudgetMs(process.env) + 3 * scaledWait(WAIT_LOCAL_MS) + 60_000,
   retry: 0,
 };
 
