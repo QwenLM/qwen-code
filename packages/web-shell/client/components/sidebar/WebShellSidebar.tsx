@@ -1,9 +1,12 @@
 import {
   SessionSortMenu,
+  readSessionGroupBy,
   readSessionSort,
   readWorkspaceFilter,
+  writeSessionGroupBy,
   writeSessionSort,
   writeWorkspaceFilter,
+  type SessionGroupBy,
   type SessionSort,
   type WorkspaceFilter,
 } from './SessionSortMenu';
@@ -198,6 +201,7 @@ import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
 import { RecentSessions } from './RecentSessions';
+import { ActivityDateSessions } from './ActivityDateSessions';
 import { LocalFilesControl } from '../LocalFilesControl';
 import { DesktopRelayControl } from '../DesktopRelayControl';
 import { workspaceLabelForCwd } from '../../utils/workspace';
@@ -1414,6 +1418,14 @@ export function WebShellSidebar({
     writeSessionSort(sortHost, value);
     setSortPreference({ host: sortHost, value });
   };
+  const [groupByPreference, setGroupByPreference] = useState(() => ({
+    host: sortHost,
+    value: readSessionGroupBy(sortHost),
+  }));
+  const changeSessionGroupBy = (value: SessionGroupBy) => {
+    writeSessionGroupBy(sortHost, value);
+    setGroupByPreference({ host: sortHost, value });
+  };
   const sourceMetadataEnabled = Boolean(
     connection.capabilities?.features?.includes('session_source_metadata'),
   );
@@ -2210,6 +2222,27 @@ export function WebShellSidebar({
       ? JSON.stringify(['standalone', currentSessionId])
       : currentSessionIdentity;
   const activityEnabled = organizationEnabled && !sectionView;
+  const activityDateProjectWorkspaces = displayedWorkspaces.filter(
+    (entry) => entry.kind !== 'live',
+  );
+  const activityDateGroupingSupported =
+    activityEnabled &&
+    workspaceQualifiedRestCoreEnabled &&
+    selectedSessionSource !== 'channel' &&
+    managedWorkspaces === undefined &&
+    activityDateProjectWorkspaces.length > 0 &&
+    activityDateProjectWorkspaces.every(
+      (entry) =>
+        entry.trusted &&
+        isAbsolutePath(entry.cwd) &&
+        liveStateWorkspaceCwdSet.has(entry.cwd),
+    );
+  const sessionGroupBy = activityDateGroupingSupported
+    ? groupByPreference.host === sortHost
+      ? groupByPreference.value
+      : readSessionGroupBy(sortHost)
+    : 'workspace';
+  const activityDateMode = sessionGroupBy === 'activityDate';
   const [activityOpen, setActivityOpen] = useState(false);
   const activityOperationScope = `${focusedHostOrigin}:${JSON.stringify(liveStateWorkspaceCwds)}`;
   const activityOperations = useActivityOperations(activityOperationScope);
@@ -2236,7 +2269,7 @@ export function WebShellSidebar({
     client: workspace.client,
     workspaceCwds: liveStateWorkspaceCwds,
     enabled: activityEnabled,
-    open: activityOpen,
+    open: activityOpen || activityDateMode,
     liveStateEnabled: workspaceSessionLiveStateEnabled,
     currentKey: activityCurrentKey,
     onArchivedCurrent: (entry) =>
@@ -2526,6 +2559,9 @@ export function WebShellSidebar({
     () => orderWorkspaces(projectWorkspaces, workspaceOrder),
     [projectWorkspaces, workspaceOrder],
   );
+  const renderedProjectWorkspaces = activityDateMode
+    ? []
+    : orderedProjectWorkspaces;
   useEffect(() => {
     const sourceCwd = workspaceDrag?.cwd ?? workspaceDragStartRef.current?.cwd;
     if (
@@ -2790,14 +2826,33 @@ export function WebShellSidebar({
       isCurrentSession,
     ],
   );
+  const activityDateEntries = useMemo(
+    () =>
+      activityEntries.filter(
+        (entry) =>
+          isActivityEligible(entry, activityPreferences, true) &&
+          !entry.session.isPinned &&
+          matchesSessionSource(entry.session, selectedSessionSource),
+      ),
+    [activityEntries, activityPreferences, selectedSessionSource],
+  );
+  const activityTrackingEntries = useMemo(
+    () =>
+      activityOpen
+        ? activityEntries
+        : activityDateMode
+          ? activityDateEntries
+          : [],
+    [activityDateEntries, activityDateMode, activityEntries, activityOpen],
+  );
   const activityIdentities = useMemo(
     () =>
       new Set(
-        (activityOpen ? activity.entries : []).map(({ session }) =>
+        activityTrackingEntries.map(({ session }) =>
           getIdentityForSession(session),
         ),
       ),
-    [activity.entries, activityOpen, getIdentityForSession],
+    [activityTrackingEntries, getIdentityForSession],
   );
   const markActivityRead = useCallback(
     async (entries: ActivityEntry[]) => {
@@ -2820,12 +2875,12 @@ export function WebShellSidebar({
   >(undefined);
   const activityScope = JSON.stringify(liveStateWorkspaceCwds);
   useEffect(() => {
-    if (!activityEnabled || !activityOpen) {
+    if (!activityEnabled || !(activityOpen || activityDateMode)) {
       previousActivityRunning.current = undefined;
       return;
     }
     const running = new Map(
-      activity.entries.map(({ session }) => [
+      activityTrackingEntries.map(({ session }) => [
         getIdentityForSession(session),
         Boolean(session.hasActivePrompt),
       ]),
@@ -2854,10 +2909,11 @@ export function WebShellSidebar({
         : next;
     });
   }, [
-    activity.entries,
     activityEnabled,
+    activityDateMode,
     activityOpen,
     activityScope,
+    activityTrackingEntries,
     currentSessionIdentity,
     getIdentityForSession,
     workspace.client,
@@ -3319,8 +3375,8 @@ export function WebShellSidebar({
     for (const session of [...sessions, ...eligibleSecondarySessions]) {
       byIdentity.set(getIdentityForSession(session), session);
     }
-    if (activityEnabled && activityOpen) {
-      for (const entry of activity.entries) {
+    if (activityEnabled && (activityOpen || activityDateMode)) {
+      for (const entry of activityTrackingEntries) {
         byIdentity.set(getIdentityForSession(entry.session), entry.session);
       }
     }
@@ -3331,8 +3387,9 @@ export function WebShellSidebar({
     secondaryStatusQueriesActive,
     sessions,
     activityEnabled,
+    activityDateMode,
     activityOpen,
-    activity.entries,
+    activityTrackingEntries,
   ]);
   const collapsedSessionStatus = useMemo(() => {
     if (statusSessions.some((session) => session.isWaitingForPermission)) {
@@ -6822,6 +6879,7 @@ export function WebShellSidebar({
     t,
   ]);
   const displayMenuEnabled =
+    activityDateGroupingSupported ||
     questionSortSupported ||
     standaloneSessionsVisible ||
     sidebarWorkspaces.length > 1 ||
@@ -8040,6 +8098,9 @@ export function WebShellSidebar({
                         onChange={changeSessionSort}
                         workspaceValue={workspaceFilter}
                         onWorkspaceChange={changeWorkspaceFilter}
+                        groupValue={sessionGroupBy}
+                        onGroupChange={changeSessionGroupBy}
+                        groupEnabled={activityDateGroupingSupported}
                         workspaces={sidebarWorkspaces}
                         sortEnabled={questionSortSupported}
                         triggerClassName={sessionActionButtonClassName}
@@ -8298,34 +8359,43 @@ export function WebShellSidebar({
               )}
               {!liveView && !hideProjectHeader && (
                 <div className={styles.projectsHeader}>
-                  <button
-                    className={styles.projectsHeaderToggle}
-                    type="button"
-                    aria-expanded={projectsExpanded}
-                    onClick={() => {
-                      const nextExpanded = !projectsExpanded;
-                      writeWorkspaceExpanded('projects', nextExpanded);
-                      setProjectsExpanded(nextExpanded);
-                    }}
-                  >
-                    <span>{t('sidebar.project')}</span>
-                    {workspaceOverviewEnabled &&
-                      managedWorkspaces === undefined &&
-                      projectWorkspaces.length > 1 && (
-                        <span
-                          className={styles.projectsHeaderCount}
-                          aria-label={t('sidebar.workspaceCount', {
-                            count: projectWorkspaces.length,
-                          })}
-                          title={t('sidebar.workspaceCount', {
-                            count: projectWorkspaces.length,
-                          })}
-                        >
-                          {projectWorkspaces.length}
-                        </span>
-                      )}
-                    <IconChevron expanded={projectsExpanded} />
-                  </button>
+                  {activityDateMode ? (
+                    <span
+                      className={styles.projectsHeaderToggle}
+                      style={{ cursor: 'default' }}
+                    >
+                      {t('sidebar.recentConversations')}
+                    </span>
+                  ) : (
+                    <button
+                      className={styles.projectsHeaderToggle}
+                      type="button"
+                      aria-expanded={projectsExpanded}
+                      onClick={() => {
+                        const nextExpanded = !projectsExpanded;
+                        writeWorkspaceExpanded('projects', nextExpanded);
+                        setProjectsExpanded(nextExpanded);
+                      }}
+                    >
+                      <span>{t('sidebar.project')}</span>
+                      {workspaceOverviewEnabled &&
+                        managedWorkspaces === undefined &&
+                        projectWorkspaces.length > 1 && (
+                          <span
+                            className={styles.projectsHeaderCount}
+                            aria-label={t('sidebar.workspaceCount', {
+                              count: projectWorkspaces.length,
+                            })}
+                            title={t('sidebar.workspaceCount', {
+                              count: projectWorkspaces.length,
+                            })}
+                          >
+                            {projectWorkspaces.length}
+                          </span>
+                        )}
+                      <IconChevron expanded={projectsExpanded} />
+                    </button>
+                  )}
                   <div className={styles.projectsHeaderActions}>
                     {!sectionView &&
                       displayMenuEnabled &&
@@ -8335,12 +8405,16 @@ export function WebShellSidebar({
                           onChange={changeSessionSort}
                           workspaceValue={workspaceFilter}
                           onWorkspaceChange={changeWorkspaceFilter}
+                          groupValue={sessionGroupBy}
+                          onGroupChange={changeSessionGroupBy}
+                          groupEnabled={activityDateGroupingSupported}
                           workspaces={sidebarWorkspaces}
                           sortEnabled={questionSortSupported}
                           triggerClassName={styles.projectsHeaderAction}
                         />
                       )}
-                    {managedWorkspaces === undefined &&
+                    {!activityDateMode &&
+                      managedWorkspaces === undefined &&
                       projectWorkspaces.length > 0 && (
                         <button
                           className={styles.projectsHeaderAction}
@@ -8406,7 +8480,7 @@ export function WebShellSidebar({
               )}
               <div
                 className="flex flex-col"
-                hidden={liveView || !projectsExpanded}
+                hidden={liveView || (!projectsExpanded && !activityDateMode)}
               >
                 {/* Multi-daemon (#13727): the connected host occupies its
                     fixed origin rank instead of floating to the top, so a
@@ -8425,7 +8499,23 @@ export function WebShellSidebar({
                   {!hideProjectHeader && <WorkspaceHostHeading />}
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
-                      {orderedProjectWorkspaces.map((ws) => (
+                      {activityDateMode && (
+                        <ActivityDateSessions
+                          key={activityOperationScope}
+                          entries={activityDateEntries}
+                          sortBy={sessionSort}
+                          loading={activity.loading}
+                          unavailable={activity.unavailable || !daemonAvailable}
+                          hasMore={activity.hasMore}
+                          onRetry={activity.retry}
+                          editingSessionIdentity={editingSessionIdentity}
+                          sessionIdentity={getIdentityForSession}
+                          renderSession={(entry) =>
+                            renderSessionRow(entry.session)
+                          }
+                        />
+                      )}
+                      {renderedProjectWorkspaces.map((ws) => (
                         <div
                           key={ws.id}
                           data-sidebar-workspace={ws.cwd}

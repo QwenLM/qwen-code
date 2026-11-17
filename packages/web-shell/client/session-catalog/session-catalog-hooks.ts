@@ -39,6 +39,10 @@ interface SessionCatalogHookOptions {
   pollIntervalMs?: number;
 }
 
+interface SessionCatalogQueriesOptions extends SessionCatalogHookOptions {
+  pollQueries?: (query: SessionCatalogQuery, index: number) => boolean;
+}
+
 export interface WebShellSessionsOptions extends SessionCatalogHookOptions {
   sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
@@ -122,13 +126,14 @@ export function useSessionCatalogQuery(
 export function useSessionCatalogQueries(
   client: DaemonClient,
   queries: readonly SessionCatalogQuery[],
-  options: SessionCatalogHookOptions = {},
+  options: SessionCatalogQueriesOptions = {},
 ): readonly SessionCatalogSnapshot[] {
   const {
     autoLoad = false,
     enabled = true,
     maxAgeMs,
     pollIntervalMs,
+    pollQueries,
   } = options;
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const queriesKey = queries.map(getSessionCatalogQueryKey).join('\n');
@@ -140,16 +145,21 @@ export function useSessionCatalogQueries(
     stableQueriesRef.current = { key: queriesKey, queries: [...queries] };
   }
   const stableQueries = stableQueriesRef.current.queries;
+  const pollQueriesRef = useRef(pollQueries);
+  pollQueriesRef.current = pollQueries;
   const cachedSnapshots = useRef<readonly SessionCatalogSnapshot[]>([]);
 
   const subscribe = useCallback(
     (listener: () => void) => {
       if (!enabled) return () => undefined;
-      const unsubscribes = stableQueries.map((query) =>
+      const unsubscribes = stableQueries.map((query, index) =>
         store.subscribe(query, listener, {
           autoLoad,
           ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
-          ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
+          ...(pollIntervalMs !== undefined &&
+          (pollQueriesRef.current?.(query, index) ?? true)
+            ? { pollIntervalMs }
+            : {}),
         }),
       );
       return () => {
