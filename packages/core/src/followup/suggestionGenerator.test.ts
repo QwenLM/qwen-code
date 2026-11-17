@@ -44,6 +44,7 @@ import {
   generatePromptSuggestion,
   getFilterReason,
   shouldFilterSuggestion,
+  SUGGESTION_PROMPT,
 } from './suggestionGenerator.js';
 
 const conversationHistory: Content[] = [
@@ -93,19 +94,24 @@ describe('generatePromptSuggestion', () => {
     sessionId = 'test-session',
     enableCacheSharing = true,
     signal = new AbortController().signal,
+    model,
+    history = conversationHistory,
   }: {
     fastModel?: string;
     sessionId?: string;
     enableCacheSharing?: boolean;
     signal?: AbortSignal;
+    model?: string;
+    history?: Content[];
   } = {}) {
     const config = {
       getFastModel: vi.fn(() => fastModel),
       getModel: vi.fn(() => 'main-model'),
       getSessionId: vi.fn(() => sessionId),
     } as unknown as Config;
-    return generatePromptSuggestion(config, conversationHistory, signal, {
+    return generatePromptSuggestion(config, history, signal, {
       enableCacheSharing,
+      model,
     });
   }
 
@@ -120,11 +126,14 @@ describe('generatePromptSuggestion', () => {
     );
   });
 
-  it('passes the fast model in cache mode when one is configured', async () => {
+  it('uses a compact side query when the fast model differs from the cached model', async () => {
     mockCacheFork();
+    mockBaseLlm();
     await suggest({ fastModel: 'openai:fast-model' });
 
-    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    expect(mockRunSideQuery).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ model: 'openai:fast-model' }),
     );
   });
@@ -170,13 +179,308 @@ describe('generatePromptSuggestion', () => {
     expect(result.suggestion).toBe('from base llm');
   });
 
-  it('passes preserveTools: false when fast model differs from cache-safe model', async () => {
+  it('keeps the cached fork when the fast model matches the cached model', async () => {
     mockCacheFork();
-    await suggest({ fastModel: 'different-fast-model' });
+    await suggest({ fastModel: 'main-model' });
 
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ preserveTools: false }),
+      expect.objectContaining({ preserveTools: true, model: 'main-model' }),
     );
+    expect(mockRunSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('lets an explicit model override the fast model and use the same-model fork', async () => {
+    mockCacheFork();
+    await suggest({ fastModel: 'fast-model', model: 'main-model' });
+
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'main-model', preserveTools: true }),
+    );
+    expect(mockRunSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('uses the explicit different model without inheriting parent context', async () => {
+    const snapshot = {
+      ...cacheSafeParams(),
+      history: [{ role: 'user', parts: [{ text: 'parent-only history' }] }],
+      generationConfig: {
+        systemInstruction: 'parent-only system prompt',
+        tools: [{ functionDeclarations: [{ name: 'parent_tool' }] }],
+      },
+    };
+    mockGetCacheSafeParams.mockReturnValue(snapshot);
+    mockBaseLlm();
+    await suggest({ fastModel: 'fast-model', model: 'explicit-model' });
+
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    const request = mockRunSideQuery.mock.calls[0][1];
+    expect(request.model).toBe('explicit-model');
+    expect(request.maxAttempts).toBe(1);
+    expect(JSON.stringify(request)).not.toContain('parent-only');
+    expect(JSON.stringify(request)).not.toContain('parent_tool');
+    expect(snapshot.history[0].parts[0].text).toBe('parent-only history');
+  });
+
+  it('uses the current main model when a snapshot belongs to a previous model', async () => {
+    mockGetCacheSafeParams.mockReturnValue({
+      ...cacheSafeParams(),
+      model: 'previous-main-model',
+    });
+    mockBaseLlm();
+    await suggest();
+
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    expect(mockRunSideQuery.mock.calls[0][1].model).toBe('main-model');
+  });
+
+  it('uses a compact side query when no cache snapshot exists', async () => {
+    mockGetCacheSafeParamsSessionId.mockReturnValue(undefined);
+    mockBaseLlm();
+    await suggest();
+
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    expect(mockRunSideQuery.mock.calls[0][1].contents).toEqual([
+      {
+        role: 'user',
+        parts: [
+          {
+            text: 'User: fix this\n\nUser: anything else?\n\nAssistant: You could run tests.',
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
+    ]);
+  });
+
+  it.each(['English context ', '中文上下文'])(
+    'bounds long %s while retaining the latest request and answer ends',
+    async (padding) => {
+      mockBaseLlm();
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'Original: analyze only, do not edit.' }],
+        },
+        { role: 'model', parts: [{ text: 'Earlier answer.' }] },
+        ...Array.from(
+          { length: 10 },
+          (_, index): Content => ({
+            role: 'user',
+            parts: [
+              { text: `Earlier user ${index}: ${padding.repeat(1_000)}` },
+            ],
+          }),
+        ),
+        {
+          role: 'user',
+          parts: [
+            { text: `Latest request: ${padding.repeat(1_000)}No deployment.` },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              text: `Answer beginning: ${padding.repeat(2_000)}Final next step: inspect the report.`,
+            },
+          ],
+        },
+      ];
+      const before = structuredClone(history);
+      await suggest({ history, enableCacheSharing: false });
+
+      const request = mockRunSideQuery.mock.calls[0][1];
+      const context = request.contents[0].parts[0].text as string;
+      expect(context.length).toBeLessThanOrEqual(4_000);
+      expect(context).toContain('Latest request:');
+      expect(context).toContain('No deployment.');
+      expect(context).toContain('Answer beginning:');
+      expect(context).toContain('Final next step: inspect the report.');
+      expect(context).toContain('Earlier user 9:');
+      expect(context).not.toContain('Earlier answer.');
+      expect(context.indexOf('Earlier user 9:')).toBeLessThan(
+        context.indexOf('Latest request:'),
+      );
+      expect(context.indexOf('Latest request:')).toBeLessThan(
+        context.indexOf('Answer beginning:'),
+      );
+      expect(request.contents[1].parts[0].text).toBe(SUGGESTION_PROMPT);
+      expect(history).toEqual(before);
+    },
+  );
+
+  it('keeps a recent earlier user constraint when space is available', async () => {
+    mockBaseLlm();
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'Only analyze the failure. Do not edit or deploy.' }],
+      },
+      { role: 'model', parts: [{ text: 'I will inspect the data.' }] },
+      { role: 'user', parts: [{ text: 'Focus on the slow query.' }] },
+      {
+        role: 'model',
+        parts: [{ text: 'The query plan identifies the issue.' }],
+      },
+    ];
+    await suggest({ history, enableCacheSharing: false });
+
+    expect(
+      mockRunSideQuery.mock.calls[0][1].contents[0].parts[0].text,
+    ).toContain('Do not edit or deploy.');
+  });
+
+  it('summarizes only current-turn tool results without forwarding protocol blocks or large payloads', async () => {
+    mockBaseLlm();
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Old request' }] },
+      { role: 'model', parts: [{ text: 'Old answer' }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'old_tool',
+              response: { error: 'stale error' },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'Diagnose without editing.' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'run_shell_command',
+              args: { command: 'private command arguments' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: {
+                output: `raw body ${'x'.repeat(50_000)}important output tail`,
+              },
+            },
+          },
+          {
+            functionResponse: {
+              name: 'run_shell_command',
+              response: {
+                error: `details ${'y'.repeat(50_000)}permission denied`,
+              },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'The command failed; assess the permission.' }],
+      },
+    ];
+    await suggest({ history, enableCacheSharing: false });
+
+    const request = mockRunSideQuery.mock.calls[0][1];
+    const context = request.contents[0].parts[0].text as string;
+    expect(context).toContain('Diagnose without editing.');
+    expect(context).toContain('Tool read_file: completed');
+    expect(context).toContain('important output tail');
+    expect(context).toContain('Tool run_shell_command: error');
+    expect(context).toContain('permission denied');
+    expect(context).not.toContain('old_tool');
+    expect(context).not.toContain('private command arguments');
+    expect(context).not.toContain('x'.repeat(500));
+    expect(context.indexOf('Tool read_file:')).toBeLessThan(
+      context.indexOf('Tool run_shell_command:'),
+    );
+    expect(
+      request.contents.every((entry: Content) =>
+        entry.parts?.every((part) => typeof part.text === 'string'),
+      ),
+    ).toBe(true);
+  });
+
+  it('excludes thinking, reminders, memory metadata and image payloads', async () => {
+    mockBaseLlm();
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Original request' }] },
+      { role: 'model', parts: [{ text: 'Hidden thinking', thought: true }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>Internal memory</system-reminder>Latest real request',
+          },
+          {
+            inlineData: { mimeType: 'image/png', data: 'private image bytes' },
+          },
+          { fileData: { mimeType: 'text/plain', fileUri: 'private file URI' } },
+          {
+            text: 'Internal memory catalog',
+            partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          { text: 'Secret reasoning', thought: true },
+          { text: 'Visible final answer' },
+        ],
+      },
+    ];
+    await suggest({ history, enableCacheSharing: false });
+
+    const context = mockRunSideQuery.mock.calls[0][1].contents[0].parts[0]
+      .text as string;
+    expect(context).toContain('Original request');
+    expect(context).toContain('Latest real request');
+    expect(context).toContain('Visible final answer');
+    expect(context).not.toMatch(
+      /Hidden thinking|Secret reasoning|Internal memory|private|system-reminder/,
+    );
+  });
+
+  it('skips an empty visible context without making a model request', async () => {
+    await suggest({
+      enableCacheSharing: false,
+      history: [
+        { role: 'model', parts: [{ text: 'thinking 1', thought: true }] },
+        { role: 'model', parts: [{ text: 'thinking 2', thought: true }] },
+      ],
+    });
+    expect(mockRunSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('skips an already cancelled request', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await suggest({ signal: controller.signal });
+
+    expect(result).toEqual({ suggestion: null });
+    expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
+    expect(mockRunSideQuery).not.toHaveBeenCalled();
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+  });
+
+  it('discards a late suggestion after cancellation', async () => {
+    const controller = new AbortController();
+    mockRunSideQuery.mockImplementation(async () => {
+      controller.abort();
+      return { text: 'run tests' };
+    });
+    const result = await suggest({
+      signal: controller.signal,
+      enableCacheSharing: false,
+    });
+
+    expect(result).toEqual({ suggestion: null });
   });
 });
 
