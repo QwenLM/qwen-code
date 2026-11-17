@@ -1,5 +1,6 @@
 import type {
   DaemonEvent,
+  DaemonSessionShellTaskStatus,
   DaemonSessionWorkflowTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import { test, expect, type Page, type TestInfo } from '@playwright/test';
@@ -200,10 +201,216 @@ test('a chip for several runs lists them to pick from', async ({
   });
 
   // A run with no row in this transcript opens in the tasks dialog.
-  await list.getByRole('button', { name: /Update the docs/ }).click();
+  await list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Update the docs' })
+    .click();
   await expect(
     page.getByRole('dialog', { name: 'Background tasks' }),
   ).toBeVisible();
+});
+
+test('a "?" on a task choice asks a side question for an explanation', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+
+  await page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' })
+    .click();
+  const list = page.getByTestId('composer-task-list');
+  await list.getByTestId('composer-task-explain').first().click();
+
+  // The mock daemon's stock side answer streams into the btw panel; the
+  // list stays open so another task can be asked about next. The panel
+  // echoes a short display line, not the composed fact dump.
+  const panel = page.locator('[class*="btwPanel"]');
+  await expect(panel).toContainText('A side answer.');
+  await expect(panel).toContainText(
+    'Explain what this task is doing: Review and fix',
+  );
+  await expect(panel).not.toContainText('Task facts:');
+  await expect(list).toBeVisible();
+});
+
+test('Escape on a "?" closes the list without dismissing the explanation', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+
+  await page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' })
+    .click();
+  const list = page.getByTestId('composer-task-list');
+  await list.getByTestId('composer-task-explain').first().click();
+  const panel = page.locator('[class*="btwPanel"]');
+  await expect(panel).toContainText('A side answer.');
+
+  // App's window-capture btw shortcut must leave Escape inside the chips
+  // to the chips: the list closes, the panel survives.
+  await list.getByTestId('composer-task-explain').last().focus();
+  await page.keyboard.press('Escape');
+  await expect(list).toHaveCount(0);
+  await expect(panel).toContainText('A side answer.');
+});
+
+test('the row highlight is the open click target and the "?" keeps the chip focus ring', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  await chip.click();
+  const list = page.getByTestId('composer-task-list');
+  const row = list.locator('[data-testid="composer-task-row"]').first();
+  await expect(row).toBeVisible();
+
+  // Every painted point of the row must belong to one of its two buttons:
+  // the left gutter and the column left of the "?" to the open button, the
+  // strips above/below the "?" to the "?" itself. A null hit (point outside
+  // the viewport, unpainted row) is a failure, not a pass.
+  const owners = await row.evaluate((el) => {
+    const rect = el.getBoundingClientRect();
+    const explainEl = el.querySelector(
+      '[data-testid="composer-task-explain"]',
+    ) as HTMLElement;
+    const er = explainEl.getBoundingClientRect();
+    const sample = (x: number, y: number) => {
+      const hit = document.elementFromPoint(x, y);
+      if (!(hit instanceof Element)) return 'none';
+      if (hit.closest('[data-testid="composer-task-open"]')) return 'open';
+      if (hit.closest('[data-testid="composer-task-explain"]'))
+        return 'explain';
+      return 'row';
+    };
+    return {
+      gutter: sample(rect.left + 4, rect.top + rect.height / 2),
+      gapColumn: sample(er.left - 2, rect.top + rect.height / 2),
+      aboveExplain: sample(er.left + er.width / 2, rect.top + 1),
+      belowExplain: sample(er.left + er.width / 2, rect.bottom - 1),
+    };
+  });
+  expect(owners).toEqual({
+    gutter: 'open',
+    gapColumn: 'open',
+    aboveExplain: 'explain',
+    belowExplain: 'explain',
+  });
+
+  // Keyboard focus on the row "?" draws the same ring as the chip itself.
+  // Reopen via keyboard so every focus step below has keyboard origin.
+  await page.keyboard.press('Escape');
+  await expect(chip).toBeFocused();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Tab');
+  const explain = list.getByTestId('composer-task-explain').first();
+  await expect(explain).toBeFocused();
+  const explainRing = await page.evaluate(
+    () => getComputedStyle(document.activeElement as HTMLElement).boxShadow,
+  );
+  expect(explainRing).not.toBe('none');
+  // Escape returns focus to the chip (keyboard origin): its ring is the control.
+  await page.keyboard.press('Escape');
+  await expect(chip).toBeFocused();
+  const chipRing = await page.evaluate(() => {
+    const el = document.querySelector('[data-kind="workflow"]') as HTMLElement;
+    return getComputedStyle(el).boxShadow;
+  });
+  expect(explainRing).toBe(chipRing);
+});
+
+test('the shell detail panel offers "?" and mirrors the explanation in place', async ({
+  page,
+}, testInfo) => {
+  const shellTask: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-panel',
+    label: 'npm run dev',
+    description: 'npm run dev',
+    status: 'running',
+    startTime: Date.now() - 20_000,
+    runtimeMs: 20_000,
+    command: 'npm run dev',
+    cwd: '/workspace',
+  };
+  const events: DaemonEvent[] = [
+    userTextEvent('Run the dev server in the background.', { id: 1 }),
+    toolCallEvent(
+      'shell-call',
+      'run_shell_command',
+      { command: 'npm run dev', is_background: true },
+      { id: 2 },
+    ),
+    turnCompleteEvent('shell-panel', { id: 3 }),
+  ];
+  const scenario = createWebShellDaemonScenario({
+    workflowTasks: [shellTask],
+    events,
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.goto(`/session/${scenario.sessionId}?theme=dark`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({
+      sessionId: scenario.sessionId,
+      replayedCount: events.length,
+    }),
+  );
+
+  // The single-task shell chip opens its detail panel.
+  await page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '1 shell' })
+    .click();
+  const panelExplain = page.getByTestId('artifact-panel-explain');
+  await expect(panelExplain).toBeVisible();
+  await panelExplain.click();
+
+  // The answer mirrors in place inside the panel, with the display line
+  // rather than the fact dump; the btw panel above the composer has it too.
+  // A button-triggered explanation is not a typed /btw command: neither
+  // copy may carry the slash-command prefix.
+  const block = page.getByTestId('artifact-panel-explanation');
+  await expect(block).toContainText('A side answer.');
+  await expect(block).not.toContainText('Task facts:');
+  await expect(block.locator('[class*="question"]')).toHaveText(
+    /^Explain what this task is doing: npm run dev/,
+  );
+  const composerPanel = page.locator('[class*="btwPanel"]');
+  await expect(composerPanel).toContainText('A side answer.');
+  await expect(composerPanel.locator('[class*="question"]')).toHaveText(
+    /^Explain what this task is doing: npm run dev/,
+  );
 });
 
 test('an expired reveal does not reopen a collapsed workflow on sibling approval', async ({
@@ -266,15 +473,23 @@ test('keyboard focus leaving task choices closes the list', async ({
     .getByTestId('composer-task-chips')
     .getByRole('button', { name: '2 workflows' });
   const list = page.getByTestId('composer-task-list');
+  const firstOpen = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Review and fix' });
+  const secondOpen = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Update the docs' });
+  const explains = list.getByTestId('composer-task-explain');
   await chip.focus();
   await page.keyboard.press('Enter');
-  await expect(
-    list.getByRole('button', { name: /Review and fix/ }),
-  ).toBeFocused();
+  await expect(firstOpen).toBeFocused();
+  // Each row offers two actions: open the task, then ask "?" about it.
   await page.keyboard.press('Tab');
-  await expect(
-    list.getByRole('button', { name: /Update the docs/ }),
-  ).toBeFocused();
+  await expect(explains.first()).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(secondOpen).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(explains.last()).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(chip).toBeFocused();
   await expect(list).toBeVisible();
@@ -300,11 +515,12 @@ test('selection and task completion keep focus near the composer', async ({
     .getByTestId('composer-task-chips')
     .locator('[data-kind="workflow"]');
   const list = page.getByTestId('composer-task-list');
+  const firstOpen = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Review and fix' });
   await chip.focus();
   await page.keyboard.press('Enter');
-  await expect(
-    list.getByRole('button', { name: /Review and fix/ }),
-  ).toBeFocused();
+  await expect(firstOpen).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(list).toHaveCount(0);
   await expect(
@@ -313,9 +529,7 @@ test('selection and task completion keep focus near the composer', async ({
   await expect(chip).toBeFocused();
 
   await page.keyboard.press('Enter');
-  await expect(
-    list.getByRole('button', { name: /Review and fix/ }),
-  ).toBeFocused();
+  await expect(firstOpen).toBeFocused();
   scenario.workflowTasks = [first, { ...second, status: 'completed' }];
   await expect(chip).toHaveText('1 workflow');
   await expect(list).toHaveCount(0);
@@ -349,8 +563,12 @@ test('a multi-task chip opens keyboard choices and returns focus on Escape @smok
     .getByTestId('composer-task-chips')
     .getByRole('button', { name: '2 workflows' });
   const list = page.getByTestId('composer-task-list');
-  const first = list.getByRole('button', { name: /Review and fix/ });
-  const second = list.getByRole('button', { name: /Update the docs/ });
+  const first = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Review and fix' });
+  const second = list
+    .getByTestId('composer-task-open')
+    .filter({ hasText: 'Update the docs' });
   await chip.focus();
   await page.keyboard.press('Enter');
   await expect(first).toBeFocused();
@@ -360,6 +578,8 @@ test('a multi-task chip opens keyboard choices and returns focus on Escape @smok
 
   await page.keyboard.press('Space');
   await expect(first).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(list.getByTestId('composer-task-explain').first()).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(second).toBeFocused();
   await page.keyboard.press('Enter');

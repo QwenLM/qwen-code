@@ -62,6 +62,11 @@ export const ADMIN_COMMANDS = Object.freeze([
     'Retire, prepare, promote, abort or inspect a Workspace migration.',
   ],
   [
+    'workspace-identity-reattest',
+    `${PERSISTENCE}.WorkspaceIdentityReattestationMain`,
+    'Plan, fence, retire or complete an offline macOS storage identity upgrade.',
+  ],
+  [
     'maintenance-recovery',
     `${PERSISTENCE}.WorkspaceMaintenanceRecoveryMain`,
     'Inspect or reconcile a Workspace held by maintenance.',
@@ -409,7 +414,7 @@ export async function createReferenceDistribution({
     throw new Error(`${CONTRACT_DOCUMENT} ${publicApi.error}.`);
   }
   const capabilities = await readFile(
-    path.join(root, 'packages/cli/src/serve/capabilities.ts'),
+    path.join(root, 'packages/sdk-typescript/src/daemon/capabilities.ts'),
     'utf8',
   );
   const brokerClient = await readFile(
