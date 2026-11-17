@@ -1026,38 +1026,6 @@ export class AcpHttpTransport implements DaemonTransport {
     // Merge caller headers with transport headers.
     const headers = mergeHeaders(transportHeaders, callerHeaders);
 
-    const res = await this._fetch(`${this.baseUrl}/acp`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(req),
-      signal,
-    });
-
-    if (!res.ok) {
-      // POST itself failed — return a synthetic error response.
-      const text = await res.text().catch(() => '');
-      return {
-        jsonrpc: '2.0',
-        id: req.id,
-        error: {
-          code: -res.status,
-          message: `HTTP ${res.status}: ${text}`,
-          data: { httpStatus: res.status },
-        },
-      };
-    }
-
-    // If the server returned 200 with a JSON body (e.g. a server
-    // that doesn't use 202+SSE), consume it directly.
-    const ct = res.headers.get('content-type') ?? '';
-    if (res.status === 200 && ct.includes('application/json')) {
-      return (await res.json()) as JsonRpcResponse;
-    }
-
-    // 202 (ack) — the real response rides an SSE stream. Ensure the
-    // connection-scoped stream is open and register the pending request.
-    this.ensureConnStream();
-
     // The daemon routes a handful of session methods' replies onto the SESSION
     // stream, not the connection stream. If this is one of them and the caller
     // isn't already iterating `subscribeEvents` for that session (which would
@@ -1075,11 +1043,6 @@ export class AcpHttpTransport implements DaemonTransport {
       sessionId && SESSION_STREAM_REPLY_METHODS.has(method)
         ? sessionId
         : undefined;
-    const releaseSessionPump =
-      replyScopeSessionId &&
-      !this.activeSessionSubscriptions.has(replyScopeSessionId)
-        ? this.ensureSessionReplyPump(replyScopeSessionId)
-        : undefined;
 
     const responsePromise = new Promise<JsonRpcResponse>((resolve, reject) => {
       this.pending.set(req.id, {
@@ -1088,6 +1051,9 @@ export class AcpHttpTransport implements DaemonTransport {
         sessionId: replyScopeSessionId,
       });
     });
+
+    // The SSE stream can reject this request while its POST is still pending.
+    void responsePromise.catch(() => {});
 
     // Handle abort signal: if the caller aborts, reject the pending
     // request and clean up.
@@ -1111,16 +1077,61 @@ export class AcpHttpTransport implements DaemonTransport {
         signal.removeEventListener('abort', abortHandler);
     }
 
-    // Release the background reply pump AND drop the abort listener once the
-    // request settles (resolved by the pump, rejected by abort/stream-close) —
-    // the pump closes when its last in-flight request drains.
-    const cleanup = () => {
+    let releaseSessionPump: (() => void) | undefined;
+    try {
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+      }
+      const res = await this._fetch(`${this.baseUrl}/acp`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(req),
+        signal,
+      });
+
+      if (this._disposed) throw new DaemonTransportClosedError();
+      if (signal?.aborted) {
+        throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+      }
+
+      if (!res.ok) {
+        // POST itself failed — return a synthetic error response.
+        const text = await res.text().catch(() => '');
+        return {
+          jsonrpc: '2.0',
+          id: req.id,
+          error: {
+            code: -res.status,
+            message: `HTTP ${res.status}: ${text}`,
+            data: { httpStatus: res.status },
+          },
+        };
+      }
+
+      // If the server returned 200 with a JSON body (e.g. a server
+      // that doesn't use 202+SSE), consume it directly.
+      const ct = res.headers.get('content-type') ?? '';
+      if (res.status === 200 && ct.includes('application/json')) {
+        return (await res.json()) as JsonRpcResponse;
+      }
+
+      // 202 (ack) — the real response rides an SSE stream. Ensure the
+      // connection-scoped stream is open to deliver the registered response.
+      this.ensureConnStream();
+
+      if (
+        replyScopeSessionId &&
+        this.pending.has(req.id) &&
+        !this.activeSessionSubscriptions.has(replyScopeSessionId)
+      ) {
+        releaseSessionPump = this.ensureSessionReplyPump(replyScopeSessionId);
+      }
+      return await responsePromise;
+    } finally {
+      this.pending.delete(req.id);
       removeAbortHandler?.();
       releaseSessionPump?.();
-    };
-    return removeAbortHandler || releaseSessionPump
-      ? responsePromise.finally(cleanup)
-      : responsePromise;
+    }
   }
 
   /**
