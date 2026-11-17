@@ -69,7 +69,7 @@ async function dragBoldSubstring(
   await page.mouse.up();
 }
 
-test('@smoke partial mouse selection offers plain text and Markdown copying without changing whole-reply copy', async ({
+test('@smoke partial mouse selection offers plain text and Markdown copying and whole-reply content copying', async ({
   page,
   context,
 }, testInfo) => {
@@ -115,10 +115,12 @@ test('@smoke partial mouse selection offers plain text and Markdown copying with
     name: 'Copy plain text',
     exact: true,
   });
-  const markdown = page.getByRole('button', {
-    name: 'Copy Markdown',
-    exact: true,
-  });
+  const markdown = page
+    .locator('[data-slot="popover-content"]')
+    .getByRole('button', {
+      name: 'Copy Markdown',
+      exact: true,
+    });
 
   for (const [button, expected] of [
     [plain, 'bold'],
@@ -250,8 +252,10 @@ test('@smoke partial mouse selection offers plain text and Markdown copying with
   );
 
   await row.hover();
-  await row.getByRole('button', { name: 'Copy', exact: true }).click();
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(reply);
+  await row.getByRole('button', { name: 'Copy content', exact: true }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+    'Selection copying\nSelect bold words in this reply.\nThe result is x^2 + 1 units.\nBefore diagram after.',
+  );
 });
 
 test('@smoke copies through the real clipboard fallback from a ShadowRoot menu', async ({
@@ -286,10 +290,12 @@ test('@smoke copies through the real clipboard fallback from a ShadowRoot menu',
   });
   await expect(row).toBeVisible();
   await dragBoldSubstring(page, row.locator('p'));
-  const button = page.getByRole('button', {
-    name: 'Copy Markdown',
-    exact: true,
-  });
+  const button = page
+    .locator('[data-slot="popover-content"]')
+    .getByRole('button', {
+      name: 'Copy Markdown',
+      exact: true,
+    });
   await expect(button).toBeVisible();
   const clipboard = await page.evaluateHandle(() => navigator.clipboard);
   try {

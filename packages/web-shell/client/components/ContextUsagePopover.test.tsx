@@ -4,7 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
-import type { ContextUsageControls } from '../hooks/useContextUsageControls';
+import type { ContextCompressionControls } from '../hooks/useContextUsageControls';
 import { ContextUsagePopover } from './ContextUsagePopover';
 import { Button } from './ui/button';
 
@@ -50,10 +50,7 @@ async function mount({
   const details = vi.fn();
   const compress = vi.fn().mockResolvedValue(undefined);
   const ancestorClick = vi.fn();
-  let controls: Pick<
-    ContextUsageControls,
-    'canCompress' | 'compressing' | 'result' | 'compress'
-  > = {
+  let controls: ContextCompressionControls = {
     canCompress: true,
     compressing: false,
     compress,
@@ -640,7 +637,7 @@ describe('ContextUsagePopover', () => {
     await h.update({ compressing: false, result: { kind: 'interrupted' } });
     expect(compress.disabled).toBe(true);
     expect(compress.parentElement?.title).toBe(
-      'Requires an idle, connected, writable session with the built-in compression command and no active goal.',
+      'Requires an idle, connected session with permission to compress context.',
     );
     expect(h.card!.querySelector('[role="status"]')?.textContent).toBe(
       'Connection changed during compression. Refresh to check current usage.',
@@ -649,6 +646,22 @@ describe('ContextUsagePopover', () => {
     expect(compress.disabled).toBe(false);
     expect(h.card!.querySelector('[role="alert"]')?.textContent).toBe(
       'Compression failed. You can try again.',
+    );
+  });
+
+  it('reports Managed completion with unknown usage and a noop without daemon readings', async () => {
+    const h = await mount({ known: false, withDetails: false });
+    await act(async () => h.trigger.focus());
+    await h.update({ result: { kind: 'compressed' } });
+    expect(h.card!.querySelector('[role="status"]')?.textContent).toBe(
+      'Compression completed. Context usage will be observed on the next turn.',
+    );
+    expect(h.card!.textContent).toContain(
+      'Context usage has not been observed',
+    );
+    await h.update({ result: { kind: 'noop' } });
+    expect(h.card!.querySelector('[role="status"]')?.textContent).toBe(
+      'No compression needed.',
     );
   });
 

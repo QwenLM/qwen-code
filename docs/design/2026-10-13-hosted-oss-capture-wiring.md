@@ -14,7 +14,7 @@ Real-bucket acceptance reproduced the gap: the Shell execution and cancellation 
 
 Add an optional `captureBytes(long)` builder field to Java SDK `CreateHarnessSession`. Serialize it only when supplied and reject values outside the Harness contract's inclusive range 1 to `2^41`. Existing SDK requests retain their current shape.
 
-For resolved `hosted-workspace-shell/1`, `/2` and the existing internal `hosted-workspace-team-lead/1` Shell-family Sessions, the Java connector supplies `qwen.managed-agent.tool-publication.execution-bytes` when tool-publication is enabled. This is the existing raw capture ceiling; no new configuration key or default is introduced. Files, MCP and no-tool profiles omit the field. AgentDefinitions retain their resolved profile and approval mode. Public Shell child-agent suppression remains a separate condition; the internal team-lead profile keeps its existing tools and admission rules.
+For resolved `hosted-workspace-shell/1` and the existing internal `hosted-workspace-team-lead/1` Shell-family Sessions, the Java connector supplies `qwen.managed-agent.tool-publication.execution-bytes` when tool-publication is enabled. This is the existing raw capture ceiling; no new configuration key or default is introduced. Files, MCP and no-tool profiles omit the field. AgentDefinitions retain their resolved profile and approval mode. Public Shell child-agent suppression remains a separate condition; the internal team-lead profile keeps its existing tools and admission rules.
 
 `execution-bytes` covers raw capture only. Publication reserves producer and admission overhead separately against the existing Session and tenant capacities. Operators must leave room for that overhead and retained publications in the aggregate capacities. This change does not clamp budgets or bypass quota refusal.
 
@@ -31,7 +31,7 @@ The four process-recovery cuts also use the remote producer, with a 1 MiB raw bu
 ## Validation and acceptance
 
 - SDK HTTP tests cover omission, minimum/maximum values, an ordinary 1 MiB budget, and invalid bounds.
-- Connector tests cover Shell `/1` and `/2` with publication enabled/disabled, non-Shell profiles, create-conflict-to-load, configuration drift, and recovery loads that omit the current budget.
+- Connector tests cover the unified Shell `/1` with publication enabled/disabled, non-Shell profiles, create-conflict-to-load, configuration drift, and recovery loads that omit the current budget.
 - Existing Harness contract tests verify persisted budget restoration and conflicting explicit loads. Relevant SDK/server tests, full repository build/typecheck/bundle, and static checks must pass.
 - Linux acceptance uses the requested `oauth-data-govermence` profile and private, unversioned `qwencode-test` bucket in `cn-beijing`, an isolated MySQL schema and the production Java create path without an admission relay. Configure `execution-bytes=1048576` and aggregate capacities with room for overhead.
 - Require real OSS output rows, public REST/WebShell metadata and full/range byte parity, cancellation, a same-Session next Shell/Read Turn, physical worker close, post-close downloads and production collection of only the owned objects. Read back that the owned prefix is empty and restore the test environment.

@@ -113,7 +113,7 @@ it('keeps the rescan copy when an empty submit is rejected after a failed pairin
   expect(fetch).toHaveBeenCalledTimes(1);
   expect(container.textContent).toContain('Scan a fresh QR code');
   expect(container.textContent).not.toContain(
-    'Enter the bearer token from the daemon terminal.',
+    'Enter the bearer token from the server’s remote connection settings or startup output.',
   );
 });
 
@@ -246,9 +246,11 @@ it('retries with the typed token, stores it per tab, and creates no connection',
     'good',
   );
   expect(localStorage.getItem('qwen-remote-connections')).toBeNull();
-  expect(fetch.mock.calls[1][1].headers).toEqual({
-    Authorization: 'Bearer good',
-  });
+  expect(new Headers(fetch.mock.calls[1][1].headers)).toEqual(
+    new Headers({
+      Authorization: 'Bearer good',
+    }),
+  );
 });
 it('clears a rejected stored token after tokenless access succeeds', async () => {
   persistDaemonToken('wrong', 'http://daemon.test');
@@ -485,7 +487,8 @@ it('distinguishes policy rejection from authentication failure', async () => {
     vi.fn().mockResolvedValue(stubResponse({ status: 403 })),
   );
   await mount();
-  expect(container.textContent).toContain('Origin or Host policy');
+  expect(container.textContent).toContain('HTTP 403');
+  expect(container.textContent).toContain('Host policy');
   expect(addressInput().value).toBe('http://daemon.test');
 });
 it('keeps tokenless loopback access working', async () => {
@@ -866,9 +869,11 @@ it('keeps a token typed during an automatic retry when that retry is rejected', 
   // The retry re-probes the credential the gate started with, so the 401 is a
   // verdict about that one — never about the value just typed.
   for (const call of fetch.mock.calls) {
-    expect((call[1] as RequestInit).headers).toEqual({
-      Authorization: 'Bearer stale-token',
-    });
+    expect(new Headers((call[1] as RequestInit).headers)).toEqual(
+      new Headers({
+        Authorization: 'Bearer stale-token',
+      }),
+    );
   }
   expect(tokenInput().value).toBe('fresh-token');
 });
@@ -976,7 +981,7 @@ it('asks a first-visit operator to enter the token, not correct an invalid one',
   );
   await mount();
   expect(container.textContent).toContain(
-    'Enter the bearer token from the daemon terminal.',
+    'Enter the bearer token from the server’s remote connection settings or startup output.',
   );
   expect(container.textContent).not.toContain('Invalid or expired');
   expect(container.textContent).not.toContain('Connected ');
@@ -1016,9 +1021,11 @@ it('trims a whitespace-padded typed token before probing and persisting', async 
   expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
     'padded-token',
   );
-  expect(fetch.mock.calls[1][1].headers).toEqual({
-    Authorization: 'Bearer padded-token',
-  });
+  expect(new Headers(fetch.mock.calls[1][1].headers)).toEqual(
+    new Headers({
+      Authorization: 'Bearer padded-token',
+    }),
+  );
 });
 
 it('lets a manual retry supersede an armed auto-retry', async () => {
@@ -1082,10 +1089,48 @@ it('offers cross-origin diagnostics without treating network failures as permane
   const fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
   vi.stubGlobal('fetch', fetch);
   await mount();
-  expect(container.textContent).toContain('--allow-origin');
+  expect(container.textContent).toContain(
+    'advanced remote connection settings',
+  );
   expect(container.textContent).toContain('network');
+  expect(container.querySelector('details')?.open).toBe(true);
+  expect(container.textContent).toContain(window.location.origin);
+  expect(container.textContent).toContain('Allow remote connections');
+  expect(container.textContent).toContain('cannot distinguish');
   await act(async () => vi.advanceTimersByTimeAsync(2_000));
   expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  ['http://remote.example:4170', false],
+  ['http://127.0.0.1:4170', true],
+])('checks mixed content before probing %s', async (baseUrl, allowed) => {
+  const originalLocation = Object.getOwnPropertyDescriptor(window, 'location')!;
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: new URL('https://shell.example/'),
+  });
+  const fetchMock = vi.fn().mockResolvedValue(stubResponse({ status: 401 }));
+  vi.stubGlobal('fetch', fetchMock);
+  try {
+    await act(async () =>
+      root.render(
+        <StandaloneAuth baseUrl={baseUrl} initialToken="secret">
+          {() => <p>Connected</p>}
+        </StandaloneAuth>,
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    if (!allowed) {
+      expect(container.textContent).toContain('HTTPS page cannot connect');
+      expect(container.textContent).not.toContain('Connected');
+      expect(getDaemonToken(baseUrl)).not.toBe('secret');
+      await act(submitForm);
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+  } finally {
+    Object.defineProperty(window, 'location', originalLocation);
+  }
 });
 
 it('remembers only the selected daemon in the current tab across reload checks', async () => {

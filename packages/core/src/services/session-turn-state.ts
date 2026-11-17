@@ -4,12 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseHookLifecycle } from '../telemetry/hook-lifecycle-contract.js';
 import type { ChatRecord } from './chatRecordingService.js';
+import { getRecordRewindId } from './session-api-history.js';
 import { readFileHistorySnapshotPayload } from './session-file-history-state.js';
 
 export interface SessionTurnState {
   initialTurn: number;
   turnParentUuids: Array<string | null>;
+  turnPromptIds: Array<string | undefined>;
+  turnDaemonPromptIds: Array<string | undefined>;
   backgroundNotificationTaskIds: string[];
 }
 
@@ -17,14 +21,21 @@ export interface SessionTurnRecordHint {
   promptTurn?: number;
   countsAsUserPrompt: boolean;
   turnParentUuid?: string | null;
+  turnPromptId?: string;
+  turnDaemonPromptId?: string;
   backgroundNotificationTaskId?: string;
+  hookTurn?: { promptId: string; parentUuid: string | null };
 }
 
 export class SessionTurnStateAccumulator {
   private maxPromptTurn = 0;
   private userMessageCount = 0;
   private readonly turnParentUuids: Array<string | null> = [];
+  private readonly turnPromptIds: Array<string | undefined> = [];
+  private readonly turnDaemonPromptIds: Array<string | undefined> = [];
   private readonly backgroundNotificationTaskIds = new Set<string>();
+  private readonly hookTurnParents = new Map<string, string | null>();
+  private readonly recordedPromptIds = new Set<string>();
 
   constructor(private readonly sessionId: string) {}
 
@@ -33,6 +44,16 @@ export class SessionTurnStateAccumulator {
   }
 
   addHint(hint: SessionTurnRecordHint): void {
+    if (
+      hint.hookTurn &&
+      !this.recordedPromptIds.has(hint.hookTurn.promptId) &&
+      !this.hookTurnParents.has(hint.hookTurn.promptId)
+    ) {
+      this.hookTurnParents.set(
+        hint.hookTurn.promptId,
+        hint.hookTurn.parentUuid,
+      );
+    }
     if (hint.countsAsUserPrompt) {
       this.userMessageCount += 1;
     }
@@ -40,7 +61,18 @@ export class SessionTurnStateAccumulator {
       this.maxPromptTurn = Math.max(this.maxPromptTurn, hint.promptTurn);
     }
     if (hint.turnParentUuid !== undefined) {
-      this.turnParentUuids.push(hint.turnParentUuid);
+      const promptId = hint.turnPromptId;
+      this.turnParentUuids.push(
+        promptId && this.hookTurnParents.has(promptId)
+          ? this.hookTurnParents.get(promptId)!
+          : hint.turnParentUuid,
+      );
+      if (promptId) {
+        this.recordedPromptIds.add(promptId);
+        this.hookTurnParents.delete(promptId);
+      }
+      this.turnPromptIds.push(hint.turnPromptId);
+      this.turnDaemonPromptIds.push(hint.turnDaemonPromptId);
     }
     if (hint.backgroundNotificationTaskId !== undefined) {
       this.backgroundNotificationTaskIds.add(hint.backgroundNotificationTaskId);
@@ -52,6 +84,8 @@ export class SessionTurnStateAccumulator {
       initialTurn:
         this.maxPromptTurn > 0 ? this.maxPromptTurn : this.userMessageCount,
       turnParentUuids: [...this.turnParentUuids],
+      turnPromptIds: [...this.turnPromptIds],
+      turnDaemonPromptIds: [...this.turnDaemonPromptIds],
       backgroundNotificationTaskIds: [...this.backgroundNotificationTaskIds],
     };
   }
@@ -87,11 +121,31 @@ export function getSessionTurnRecordHint(
             | undefined
         )?.backgroundTask
       : undefined;
+  const hook =
+    record.type === 'system' && record.subtype === 'ui_telemetry'
+      ? parseHookLifecycle(
+          (record.systemPayload as { uiEvent?: unknown } | undefined)?.uiEvent,
+        )
+      : undefined;
   return {
+    ...(hook && hook.sessionId === sessionId
+      ? {
+          hookTurn: {
+            promptId: hook.promptId,
+            parentUuid: record.parentUuid ?? null,
+          },
+        }
+      : {}),
     ...(promptTurn !== undefined ? { promptTurn } : {}),
     countsAsUserPrompt:
       record.sessionId === sessionId && isUserPromptRecord(record),
-    ...(turnParentUuid !== undefined ? { turnParentUuid } : {}),
+    ...(turnParentUuid !== undefined
+      ? {
+          turnParentUuid,
+          turnPromptId: getRecordRewindId(record),
+          turnDaemonPromptId: record.daemonPromptId,
+        }
+      : {}),
     ...(typeof backgroundTask?.taskId === 'string'
       ? { backgroundNotificationTaskId: backgroundTask.taskId }
       : {}),
@@ -136,6 +190,8 @@ function readTelemetryPromptId(payload: unknown): string | undefined {
     return undefined;
   }
   const uiEvent = (payload as { uiEvent?: unknown }).uiEvent;
+  const hook = parseHookLifecycle(uiEvent);
+  if (hook) return hook.promptId;
   if (!uiEvent || typeof uiEvent !== 'object' || !('prompt_id' in uiEvent)) {
     return undefined;
   }

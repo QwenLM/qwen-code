@@ -6,7 +6,6 @@
 
 import { createHash } from 'node:crypto';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
-import { parseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import type { ManagedSession } from './managed-session-assembly.js';
 import type { ManagedSessionResourceStore } from './managed-session-storage.js';
 import type {
@@ -146,10 +145,10 @@ export class ManagedShellResultSession {
     ) {
       throw new Error('Tool result belongs to another Session or binding.');
     }
-    const checkpointBytes = await this.session.authority.readCheckpointState();
-    if (!checkpointBytes)
-      throw new Error('Runtime dispatch has no checkpoint.');
-    const checkpoint = parseHarnessCheckpointV1(checkpointBytes);
+    const parsed = await this.session.authority.readParsedCheckpointState();
+    if (!parsed?.ok)
+      throw new Error('Runtime dispatch has no readable checkpoint.');
+    const checkpoint = parsed.checkpoint;
     const item = checkpoint.tools?.items.find(
       (each) => each.executionCallId === capture.executionCallId,
     );

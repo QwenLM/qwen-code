@@ -230,9 +230,9 @@ function inputValue(input: HTMLInputElement, value: string): void {
 }
 
 function selectValue(trigger: HTMLElement, value: string): void {
-  click(trigger);
+  pointerClick(trigger);
   const option = document.querySelector<HTMLElement>(
-    `[role="option"][data-value="${value}"]`,
+    `[role="menuitemradio"][data-value="${value}"]`,
   );
   expect(option).not.toBeNull();
   click(option!);
@@ -791,20 +791,42 @@ describe('EnhancedMarkdownTable', () => {
     expect(appRoot?.contains(popover)).toBe(false);
     expect(document.body.style.pointerEvents).not.toBe('none');
 
-    click(
+    pointerClick(
       container.querySelector<HTMLElement>(
         '[data-name="markdown-table-text-operator-0"]',
       )!,
     );
-    const select = portalRoot?.querySelector<HTMLElement>(
-      '[data-slot="select-content"]',
+    const operatorMenu = portalRoot?.querySelector<HTMLElement>(
+      '[data-slot="dropdown-menu-content"]',
     );
-    expect(select).not.toBeNull();
-    expect(select?.className).toContain('web-shell-popover-z-index');
-    expect(select?.dataset.markdownTableFilterOwner).toBe(
+    expect(operatorMenu).not.toBeNull();
+    expect(operatorMenu?.className).toContain('web-shell-popover-z-index');
+    expect(operatorMenu?.dataset.markdownTableFilterOwner).toBe(
       popover?.dataset.markdownTableFilterOwner,
     );
   });
+
+  it.each([
+    ['Team', 'text', '0'],
+    ['Score', 'number', '1'],
+  ])(
+    'opens the %s filter operators without locking the page',
+    (column, kind, index) => {
+      const container = renderTable();
+      click(button(container, `Filter ${column}`));
+
+      pointerClick(
+        container.querySelector<HTMLElement>(
+          `[data-name="markdown-table-${kind}-operator-${index}"]`,
+        )!,
+      );
+
+      expect(document.querySelector('[role="menuitemradio"]')).not.toBeNull();
+      expect(document.body.style.pointerEvents).not.toBe('none');
+      expect(document.body.hasAttribute('data-scroll-locked')).toBe(false);
+      expect(container.textContent).toContain('Custom filter');
+    },
+  );
 
   it('applies a custom number filter', () => {
     const container = renderTable();
@@ -2865,6 +2887,24 @@ describe('EnhancedMarkdownTable', () => {
     expect(container.textContent).not.toContain('Expand text');
   });
 
+  it.each(['Copy', 'Table density'])(
+    'opens %s without locking the page or hiding the table',
+    (label) => {
+      const container = renderTable();
+
+      pointerClick(button(container, label));
+
+      expect(document.querySelector('[role="menu"]')).not.toBeNull();
+      expect(document.body.style.pointerEvents).not.toBe('none');
+      expect(document.body.hasAttribute('data-scroll-locked')).toBe(false);
+      expect(
+        container
+          .querySelector('[data-web-shell-app-root]')
+          ?.closest('[aria-hidden="true"]'),
+      ).toBeNull();
+    },
+  );
+
   it('selects display density from the toolbar', () => {
     const container = renderTable();
     const shell = container.querySelector<HTMLElement>('[class*="tableShell"]');
@@ -3236,6 +3276,9 @@ describe('EnhancedMarkdownTable', () => {
 
     dragCells(dataCell(container, 0, 1), dataCell(container, 2, 1));
 
+    const statistics = container.querySelector<HTMLElement>('[role="group"]');
+    expect(statistics?.getAttribute('aria-label')).toBe('数值选区统计');
+    expect(statistics?.tabIndex).toBe(0);
     expect(container.textContent).toContain('已选 3');
     expect(container.textContent).toContain('非空 3');
     expect(container.textContent).toContain('数值 3');
@@ -3262,8 +3305,8 @@ describe('EnhancedMarkdownTable', () => {
 
     dragColumn(container, 'Move Score', 'Move Team');
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
-    const scroller = container.querySelector<HTMLElement>('div[tabindex="0"]');
-    expect(scroller).not.toBeNull();
+    const scroller = container.querySelector('table')?.parentElement;
+    expect(scroller).toBeDefined();
     const { event, setData } = dispatchCopy(scroller!);
 
     expect(event.defaultPrevented).toBe(true);
@@ -3616,8 +3659,8 @@ describe('EnhancedMarkdownTable', () => {
     outsideButton.focus();
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
-    const scroller = container.querySelector<HTMLElement>('div[tabindex="0"]');
-    expect(scroller).not.toBeNull();
+    const scroller = container.querySelector('table')?.parentElement;
+    expect(scroller).toBeDefined();
     expect(document.activeElement).toBe(scroller);
     const { event, setData } = dispatchCopy(document.activeElement!);
 

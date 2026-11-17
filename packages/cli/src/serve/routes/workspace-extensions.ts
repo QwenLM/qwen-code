@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { registerManagedPackagePreparation } from './managed-package-preparation.js';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -26,6 +27,7 @@ import {
   qualifySkillName,
   validateSkillName,
 } from '@qwen-code/qwen-code-core';
+import { isNpmPackage } from '@qwen-code/qwen-code-core/extension/npm.js';
 import express, {
   type Application,
   type Request,
@@ -861,6 +863,7 @@ export function registerWorkspaceExtensionRoutes(
   }
 
   const registerFor = (base: string, resolve: ResolveController): void => {
+    registerManagedPackagePreparation(app, base, resolve, mutate);
     // GET {base} — read-only installed extension status.
     app.get(base, async (req, res) => {
       const assertGenerationOpen = deps.captureGenerationAssertion?.();
@@ -1310,7 +1313,8 @@ export function registerWorkspaceExtensionRoutes(
             return;
           }
         }
-        const npmSource = sourceValue.startsWith('@');
+        const npmSource =
+          sourceValue.startsWith('@') || isNpmPackage(sourceValue);
         const remoteSource =
           npmSource ||
           sourceValue.startsWith('https://') ||

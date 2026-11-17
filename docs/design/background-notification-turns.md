@@ -8,7 +8,7 @@ Background results enter a Session queue, but their automatic execution never en
 
 ## Behavior
 
-A background subagent retains its originating execution ID and tool call ID. Its result for the currently executing turn is consumed at a safe model boundary from the same notification queue; it cannot subsequently launch a duplicate automatic turn. Results from earlier turns wait while another execution is active. Completion is visible independently from result consumption. When idle, each result starts a separate automatic execution using the shared session history.
+A background task retains the identifiers needed to attribute its result. Any result whose origin turn equals the currently executing turn is consumed at a safe model boundary from the same notification queue; it cannot subsequently launch a duplicate automatic turn. Results from earlier turns wait while another execution is active. Completion is visible independently from result consumption. When idle, each result starts a separate automatic execution using the shared session history.
 
 Sending user input during an automatic execution uses the existing mid-turn queue. Input arriving at completion is consumed before the final boundary or promoted through the existing user-prompt path. Explicit stop cancels the current execution and suspends notification draining until a new user prompt; it retains pending results.
 
@@ -34,7 +34,7 @@ Focused tests cover start/terminal ordering, stale end events, same-turn result 
 
 ## Decisions
 
-User messages and model execution IDs are distinct: mid-turn guidance is a real user message in the current execution. Background task activity is distinct from parent model execution; queued or still-running tasks do not alone set hasActivePrompt. Shell, monitor, and workflow notifications share the automatic lifecycle; same-execution injection is limited to subagents with origin metadata. Missing legacy origin metadata falls back to queued automatic delivery, not guessed same-turn injection. Reliable bridge restart recovery of a surviving child must use the existing load/runtime snapshot path; never infer running state solely from historical start rows.
+User messages and model execution IDs are distinct: mid-turn guidance is a real user message in the current execution. Background task activity is distinct from parent model execution; queued or still-running tasks do not alone set hasActivePrompt. Shell, monitor, and workflow notifications share the automatic lifecycle; same-execution injection applies to any notification whose origin turn equals the live turn (agent, shell, monitor and workflow alike), and a result without that origin metadata still falls back to queued automatic delivery, not guessed same-turn injection. Reliable bridge restart recovery of a surviving child must use the existing load/runtime snapshot path; never infer running state solely from historical start rows.
 
 ## Conversation presentation
 

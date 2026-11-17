@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
+
 export interface LanCandidate {
   interfaceName: string;
   address: string;
@@ -25,11 +28,20 @@ export interface LocalControlStatus {
   sleepInhibited?: boolean;
   encrypted?: boolean;
   interfaces?: LanCandidate[];
-}
-
-function resolveLocalControlUrl(baseUrl: string, path: string): URL {
-  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
-  return new URL(path.replace(/^\/+/, ''), base);
+  /**
+   * The address the operator granted with `--local-control-address` when it
+   * lies outside the automatic candidate list, present only while the host
+   * still holds it. Never folded into `interfaces`: that list is the
+   * automatic-candidate set other clients resolve against.
+   */
+  explicitCandidate?: LanCandidate;
+  /**
+   * The address the operator granted with `--local-control-address`, reported
+   * from the daemon's recorded grant rather than from live interface state.
+   * Unlike `explicitCandidate` it survives the host temporarily losing the
+   * address (VPN down, DHCP move) while the listener stays bound to it.
+   */
+  grantedAddress?: string;
 }
 
 export class LocalControlRequestError extends Error {
@@ -49,12 +61,17 @@ export async function requestLocalControl(
   method: 'GET' | 'POST',
   path: string,
   body?: object,
+  client?: DaemonClient,
 ): Promise<LocalControlStatus> {
   const headers = new Headers(
     token ? { Authorization: `Bearer ${token}` } : undefined,
   );
   if (body) headers.set('Content-Type', 'application/json');
-  const response = await fetch(resolveLocalControlUrl(baseUrl, path), {
+  const response = await createDaemonRestRequest(
+    baseUrl,
+    token,
+    client,
+  )(path, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,

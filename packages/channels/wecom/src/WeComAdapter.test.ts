@@ -400,6 +400,8 @@ describe('WeComChannel', () => {
     vi.stubEnv('TMPDIR', suiteTmpDir);
     vi.stubEnv('TMP', suiteTmpDir);
     vi.stubEnv('TEMP', suiteTmpDir);
+    // Channel event journals must not land in the developer's real ~/.qwen.
+    vi.stubEnv('QWEN_HOME', join(suiteTmpDir, 'qwen-home'));
   });
 
   afterAll(() => {

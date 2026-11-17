@@ -99,13 +99,16 @@ it('accepts only bounded Skill resource references on create', () => {
     byteLength: 100,
     digest: 'c'.repeat(64),
   };
-  expect(
-    parseHostedAgentDefinition({ ...identity, skillsRef })?.skillsRef,
-  ).toEqual(skillsRef);
+  for (const byteLength of [100, 48 * 1024 + 1, 2 * 1024 * 1024]) {
+    const ref = { ...skillsRef, byteLength };
+    expect(
+      parseHostedAgentDefinition({ ...identity, skillsRef: ref })?.skillsRef,
+    ).toEqual(ref);
+  }
   for (const change of [
     { kind: 'managed-agent-instructions' },
     { schemaVersion: 2 },
-    { byteLength: 48 * 1024 + 1 },
+    { byteLength: 2 * 1024 * 1024 + 1 },
   ])
     expect(() =>
       parseHostedAgentDefinition({

@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import type { ManagedCreationSkillsSource } from './managed-creation-skills';
 import type {
   ManagedAgentProvider,
   ManagedSessionSkills,
@@ -8,44 +9,69 @@ export function useManagedSkills(
   provider: ManagedAgentProvider,
   clientId: string,
   sessionId: string | undefined,
+  creationSkills?: ManagedCreationSkillsSource,
 ) {
+  const source = sessionId ? undefined : creationSkills;
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<{
     provider: ManagedAgentProvider;
-    sessionId: string;
+    clientId: string;
+    sessionId?: string;
+    source?: ManagedCreationSkillsSource;
     skills?: ManagedSessionSkills['skills'];
     error: boolean;
   }>();
   const current =
-    state?.provider === provider && state.sessionId === sessionId
+    state?.provider === provider &&
+    state.clientId === clientId &&
+    state.sessionId === sessionId &&
+    state.source === source
       ? state
       : undefined;
   const loaded = current?.skills !== undefined;
-  const supported = Boolean(provider.skills && sessionId);
+  const supported = sessionId ? Boolean(provider.skills) : Boolean(source);
+  const needsLoad = !sessionId || !loaded;
+  const onOpenChange = useCallback(
+    (next: boolean) => {
+      if (!next && !sessionId) setState(undefined);
+      setOpen(next);
+    },
+    [sessionId],
+  );
 
   useEffect(() => {
-    if (!open || loaded || !sessionId || !provider.skills) return;
+    if (!open || !supported || !needsLoad) return;
     const abort = new AbortController();
-    setState({ provider, sessionId, error: false });
-    void provider.skills
-      .list(sessionId, { clientId, signal: abort.signal })
-      .then(({ skills }) => {
-        if (!abort.signal.aborted)
-          setState({ provider, sessionId, skills, error: false });
+    const owner = { provider, clientId, sessionId, source };
+    setState({ ...owner, error: false });
+    const request = sessionId
+      ? provider
+          .skills!.list(sessionId, { clientId, signal: abort.signal })
+          .then(({ skills }) => skills)
+      : source!.list(abort.signal);
+    void request
+      .then((skills) => {
+        if (!abort.signal.aborted) setState({ ...owner, skills, error: false });
       })
       .catch(() => {
-        if (!abort.signal.aborted)
-          setState({ provider, sessionId, error: true });
+        if (!abort.signal.aborted) setState({ ...owner, error: true });
       });
     return () => abort.abort();
-  }, [provider, clientId, sessionId, open, loaded]);
+  }, [provider, clientId, sessionId, source, open, supported, needsLoad]);
 
+  const skills = current?.skills ?? [];
   return {
     supported,
-    skills: current?.skills ?? [],
+    skills,
+    commands: skills.map(({ name, description }) => ({
+      name,
+      description,
+      source: 'skill',
+      displayCategory: 'skill' as const,
+    })),
     loading: supported && open && !loaded && !current?.error,
     loaded,
     error: current?.error === true,
-    onOpenChange: setOpen,
+    onOpenChange,
   };
 }

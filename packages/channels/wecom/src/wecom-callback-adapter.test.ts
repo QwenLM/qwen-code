@@ -1,7 +1,19 @@
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import type { Server } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
@@ -85,6 +97,16 @@ describe('WeCom Callback adapter', () => {
   let config: ChannelConfig & Record<string, unknown>;
   let bridge: ChannelAgentBridge;
   const api = vi.fn<typeof fetch>();
+  const qwenHome = mkdtempSync(join(tmpdir(), 'wecom-callback-home-'));
+
+  beforeAll(() => {
+    vi.stubEnv('QWEN_HOME', qwenHome);
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+    rmSync(qwenHome, { recursive: true, force: true });
+  });
 
   beforeEach(async () => {
     const reservation = createServer();

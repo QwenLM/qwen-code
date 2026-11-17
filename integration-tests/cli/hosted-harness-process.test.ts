@@ -8,9 +8,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { createServer as createHttpServer } from 'node:http';
 import path from 'node:path';
 import WebSocket from 'ws';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { parseManagedExecutionEvidence } from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   fakeToolCall,
@@ -43,6 +45,7 @@ interface Receipt {
 }
 let cli: HostedHarnessProcess;
 let model: FakeOpenAIServer | undefined;
+let broker: ReturnType<typeof createHttpServer> | undefined;
 let store: Awaited<ReturnType<typeof startHostedSessionStore>> | undefined;
 let sessionId: string;
 let clientId: string;
@@ -74,6 +77,13 @@ afterEach(async ({ task }) => {
       await store?.close();
     } finally {
       await model?.close();
+      if (broker) {
+        broker.closeAllConnections();
+        await new Promise<void>((resolve, reject) =>
+          broker!.close((error) => (error ? reject(error) : resolve())),
+        );
+        broker = undefined;
+      }
       store = undefined;
       model = undefined;
     }
@@ -88,13 +98,15 @@ afterEach(async ({ task }) => {
 
 async function start(
   handler: FakeOpenAIHandler = () => ({ content: 'HOSTED_REPLY' }),
+  options: Parameters<HostedHarnessProcess['start']>[1] = {},
+  supportedStorageVersion: 2 | 4 = 2,
 ) {
   cli = new HostedHarnessProcess();
   clientId = '';
   model = await startFakeOpenAIServer(handler);
-  await cli.start(model.baseUrl);
+  await cli.start(model.baseUrl, options);
   sessionId = randomUUID();
-  store = await startHostedSessionStore(sessionId);
+  store = await startHostedSessionStore(sessionId, { supportedStorageVersion });
 }
 
 function connection() {
@@ -248,6 +260,184 @@ describe(
   'Hosted packaged no-tool process',
   { timeout: 90_000, retry: 0 },
   () => {
+    it('keeps basic tools and Shell todos across a packaged session reload', async () => {
+      const brokerRequests: string[] = [];
+      broker = createHttpServer((req, res) => {
+        brokerRequests.push(req.url ?? '');
+        req.resume();
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url?.endsWith('/runtimes:warm')) res.end('{}');
+        else if (req.url?.endsWith('/tool-sessions:active-holds'))
+          res.end(JSON.stringify({ heldRuntimeSessionIds: [] }));
+        else
+          res
+            .writeHead(404)
+            .end(JSON.stringify({ code: 'unexpected_runtime_work' }));
+      });
+      broker.listen(0, '127.0.0.1');
+      await once(broker, 'listening');
+      const address = broker.address();
+      if (!address || typeof address === 'string')
+        throw new Error('Missing broker port');
+      const todos = [
+        { id: 'basic', content: 'Persist a Shell todo', status: 'pending' },
+      ];
+      await start(
+        ({ requestIndex }) =>
+          requestIndex === 0
+            ? {
+                toolCalls: [
+                  fakeToolCall('todo_write', { todos }, 'basic-todo'),
+                ],
+              }
+            : { content: 'BASIC_TOOLS_OK' },
+        {
+          extraArgs: [
+            '--managed-runtime-broker-url',
+            `http://127.0.0.1:${address.port}`,
+            '--managed-runtime-broker-token',
+            'basic-tools-fixture',
+          ],
+        },
+      );
+      const created = await json<{ clientId: string }>('/session', {
+        sessionId,
+        sessionScope: 'thread',
+        managedSessionStore: connection(),
+        toolProfile: 'hosted-workspace-shell/1',
+        approvalMode: 'default',
+      });
+      clientId = created.clientId;
+      const first = payload('Write the supplied todo.');
+      await submit(first);
+      const events = await settled();
+      expect(
+        events.find(
+          (event) =>
+            event.promptId === first.promptId && event.type === 'turn_complete',
+        )?.data.stopReason,
+      ).toBe('end_turn');
+      expect(model!.requests).toHaveLength(2);
+      const tools = model!.requests[0].body.tools as Array<{
+        function: {
+          name: string;
+          parameters: { properties: Record<string, unknown> };
+        };
+      }>;
+      expect(tools.map((tool) => tool.function.name)).toEqual(
+        expect.arrayContaining(['glob', 'todo_write', 'run_shell_command']),
+      );
+      expect(
+        tools.find((tool) => tool.function.name === 'read_file')?.function
+          .parameters.properties,
+      ).toHaveProperty('pages');
+      expect(JSON.stringify(model!.requests[1].body.messages)).toContain(
+        'Persist a Shell todo',
+      );
+      const committed = await store!.scan();
+      expect(
+        committed.events.some(
+          (event) =>
+            event.kind === 'domain.committed' &&
+            event.payload['domain'] === 'todo_state',
+        ),
+      ).toBe(true);
+      await json(`/session/${sessionId}/detach`, {}, 204);
+      await open(true);
+      const reloaded = payload('Report the saved todo.');
+      await submit(reloaded);
+      const resumed = await settled();
+      expect(
+        resumed.find(
+          (event) =>
+            event.promptId === reloaded.promptId &&
+            event.type === 'turn_complete',
+        )?.data.stopReason,
+      ).toBe('end_turn');
+      expect(model!.requests).toHaveLength(3);
+      expect(JSON.stringify(model!.requests[2].body.messages)).toContain(
+        'Persist a Shell todo',
+      );
+      expect(JSON.stringify(model!.requests[2].body.messages)).toContain(
+        '# Current Session todo list',
+      );
+      expect(brokerRequests).toEqual(
+        expect.arrayContaining([expect.stringMatching(/\/runtimes:warm$/)]),
+      );
+      expect(
+        brokerRequests.every(
+          (route) =>
+            route.endsWith('/runtimes:warm') ||
+            route.endsWith('/tool-sessions:active-holds'),
+        ),
+      ).toBe(true);
+      await json(`/session/${sessionId}`, undefined, 204, 'DELETE');
+      expect(store!.failures).toEqual([]);
+    });
+
+    it('persists an execution diagnostic epoch through packaged text output, replay and reload', async () => {
+      await start(undefined, {}, 4);
+      await open();
+      const body = payload('COLLECT_DIAGNOSTIC_EPOCH');
+      const receipt = await submit(body);
+      assertCompleted(await settled(), body.promptId, 'HOSTED_REPLY');
+      const evidence = async () => {
+        const messages = (await store!.scan()).events.filter(
+          (event) =>
+            event.kind === 'message.committed' &&
+            event.payload['role'] === 'assistant',
+        );
+        return Promise.all(
+          messages.map(async (event) => {
+            const ref = event.payload[
+              'diagnosticsRef'
+            ] as unknown as ManagedSessionDurableRef;
+            expect(ref).toMatchObject({
+              kind: 'managed-execution-diagnostics',
+              schemaVersion: 1,
+            });
+            return {
+              eventId: event.eventId,
+              facts: parseManagedExecutionEvidence(
+                await store!.readResource(ref),
+              ),
+            };
+          }),
+        );
+      };
+      const first = await evidence();
+      expect(first).toHaveLength(1);
+      expect(first[0].facts).toMatchObject({
+        schemaVersion: 1,
+        reducerVersion: 1,
+        startEventId: first[0].eventId,
+        sourceEventId: first[0].eventId,
+        observations: [],
+        omittedObservationCount: 0,
+      });
+      const committed = (await store!.scan()).committed;
+      expect(await submit(body)).toEqual(receipt);
+      expect((await store!.scan()).committed).toBe(committed);
+      expect(await evidence()).toEqual(first);
+      expect(model!.requests).toHaveLength(1);
+      await json(`/session/${sessionId}/detach`, {}, 204);
+      await open(true);
+      const next = payload('AFTER_DIAGNOSTIC_RELOAD');
+      await submit(next);
+      assertCompleted(await settled(), next.promptId, 'HOSTED_REPLY');
+      const restored = await evidence();
+      expect(restored).toHaveLength(2);
+      expect(restored[0]).toEqual(first[0]);
+      expect(restored[1].facts).toMatchObject({
+        epochId: first[0].facts.epochId,
+        startEventId: first[0].eventId,
+        sourceEventId: restored[1].eventId,
+        observations: [],
+      });
+      expect(restored[1].eventId).not.toBe(first[0].eventId);
+      expect(model!.requests).toHaveLength(2);
+    });
+
     it('initializes a fresh canonical Session and replays committed text without duplicate inference', async () => {
       await start();
       await open();
@@ -379,7 +569,7 @@ describe(
           {
             failed: {
               type: 'turn_error',
-              data: { code: 'hosted_turn_failed' },
+              data: { code: 'model_request_failed' },
             },
             cancelled: {
               type: 'turn_complete',

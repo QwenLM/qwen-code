@@ -2074,6 +2074,40 @@ describe('<ToolMessage /> localized badge', () => {
     await setLanguageAsync('en');
   });
 
+  it.each([
+    ['Shell', 'zh'],
+    ['ReadFile', 'zh'],
+    ['Shell', 'zh-TW'],
+    ['ReadFile', 'zh-TW'],
+  ])(
+    'preserves literal successful %s output under %s',
+    async (name, language) => {
+      const { setLanguageAsync } = await import('../../../i18n/index.js');
+      await setLanguageAsync(language);
+      const literal =
+        "You've used up your weekly credits. Please try again after the reset.";
+      const { lastFrame, unmount } = renderWithContext(
+        <ToolMessage
+          {...localizedProps}
+          name={name}
+          resultDisplay={literal}
+          forceShowResult
+          renderOutputAsMarkdown={false}
+          config={{ getShouldUseNodePtyShell: () => false } as Config}
+        />,
+        StreamingState.Idle,
+      );
+      try {
+        const output = (lastFrame() ?? '').replace(/\s+/g, ' ');
+        expect(output).toContain(literal);
+        expect(output).not.toContain('周额度已用完');
+        expect(output).not.toContain('週額度已用完');
+      } finally {
+        unmount();
+      }
+    },
+  );
+
   it('shows the localized display name under the zh locale', async () => {
     const { setLanguageAsync } = await import('../../../i18n/index.js');
     await setLanguageAsync('zh');

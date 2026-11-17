@@ -1204,24 +1204,11 @@ export class HookRunner {
         }
       };
 
-      // Use hook-specific shell configuration if specified
-      const shellConfig = this.getShellConfigForHook(hookConfig);
-      const command = this.expandCommand(
-        hookConfig.command,
+      const { shellConfig, command, env } = this.commandInvocation(
+        hookConfig,
         input,
-        shellConfig.shell,
+        options?.environment,
       );
-
-      const env: NodeJS.ProcessEnv = {
-        // Hook commands are child processes launched on the agent's behalf,
-        // so they must not inherit Qwen-internal daemon secrets.
-        ...sanitizeChildEnv(options?.environment ?? process.env),
-        GEMINI_PROJECT_DIR: input.cwd,
-        CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
-        QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
-        ...getShellContextEnvVars(),
-        ...hookConfig.env,
-      };
 
       let processUnit: HookCommandCgroup | undefined;
       if (options?.waitForProcessTree) {
@@ -1591,101 +1578,16 @@ export class HookRunner {
           return;
         }
 
-        // Parse output
-        // Exit code 2 is a blocking error - ignore stdout, use stderr only
-        let output: HookOutput | undefined;
-        const isBlockingError = exitCode === 2;
-
-        // For exit code 2, only use stderr (ignore stdout)
-        const stdoutText = stdout.trim();
-        const textToParse = isBlockingError
-          ? stderr.trim()
-          : stdoutText || stderr.trim();
-        // Only stdout is promoted as plain-text context; the stderr fallback
-        // stays a system message. JSON on stderr is still parsed as structured
-        // output when stdout is empty, as it was before.
-        const parsedFromStdout = !isBlockingError && stdoutText !== '';
-
-        if (textToParse) {
-          // Structured output is a JSON object, possibly double-encoded as a
-          // JSON string (applies to both exit 0 and exit 2). Anything else,
-          // including bare JSON values such as `42` or `[1, 2]`, is plain text.
-          let parsed: unknown;
-          let parseFailed = false;
-          try {
-            parsed = JSON.parse(textToParse);
-            if (typeof parsed === 'string') {
-              parsed = JSON.parse(parsed);
-            }
-          } catch {
-            parseFailed = true;
-          }
-          if (
-            !parseFailed &&
-            parsed !== null &&
-            typeof parsed === 'object' &&
-            !Array.isArray(parsed)
-          ) {
-            output = parsed as HookOutput;
-          } else if (
-            parseFailed &&
-            !isBlockingError &&
-            textToParse.startsWith('{')
-          ) {
-            // Output that starts like a JSON object but does not parse is a
-            // broken structured payload, not context or a message: as in
-            // Claude Code, it is a non-blocking error and nothing of it reaches
-            // the model. Exit code 2 still blocks on its stderr text below.
-            debugLogger.warn(
-              `Hook "${hookConfig.name || hookConfig.command}" printed output that starts like a JSON object but is not valid JSON; it is ignored`,
-            );
-            finish({
-              hookConfig,
-              eventName,
-              success: false,
-              outcome: 'non_blocking_error',
-              error: new Error('Hook output is not valid JSON'),
-              stdout,
-              stderr,
-              exitCode: exitCode ?? -1,
-              duration,
-            });
-            return;
-          } else {
-            output = this.convertPlainTextToHookOutput(
-              textToParse,
-              isBlockingError
-                ? exitCode
-                : exitCode === EXIT_CODE_SUCCESS
-                  ? EXIT_CODE_SUCCESS
-                  : EXIT_CODE_NON_BLOCKING_ERROR,
-              parsedFromStdout ? eventName : undefined,
-            );
-          }
-        }
-
-        const killedBySignal = exitCode === null;
-        finish({
-          hookConfig,
-          eventName,
-          success: exitCode === EXIT_CODE_SUCCESS,
-          // A signal this runner did not send (it returned above for its own
-          // abort and timeout) leaves exitCode null: a failure, not a cancel.
-          outcome:
-            exitCode === EXIT_CODE_SUCCESS
-              ? 'success'
-              : exitCode === 2
-                ? 'blocking'
-                : 'non_blocking_error',
-          output,
-          stdout,
-          stderr,
-          exitCode: exitCode ?? -1,
-          duration,
-          ...(killedBySignal && {
-            error: new Error('Hook killed by signal'),
-          }),
-        });
+        finish(
+          this.commandResult(
+            hookConfig,
+            eventName,
+            stdout,
+            stderr,
+            exitCode,
+            duration,
+          ),
+        );
       });
 
       // Handle process errors
@@ -1709,6 +1611,132 @@ export class HookRunner {
         });
       });
     });
+  }
+
+  commandInvocation(
+    hookConfig: CommandHookConfig,
+    input: HookInput,
+    environment?: NodeJS.ProcessEnv,
+  ) {
+    const shellConfig = this.getShellConfigForHook(hookConfig);
+    return {
+      shellConfig,
+      command: this.expandCommand(hookConfig.command, input, shellConfig.shell),
+      env: {
+        // Hook commands are child processes launched on the agent's behalf,
+        // so they must not inherit Qwen-internal daemon secrets.
+        ...sanitizeChildEnv(environment ?? process.env),
+        GEMINI_PROJECT_DIR: input.cwd,
+        CLAUDE_PROJECT_DIR: input.cwd,
+        QWEN_PROJECT_DIR: input.cwd,
+        ...getShellContextEnvVars(),
+        ...hookConfig.env,
+      } as NodeJS.ProcessEnv,
+    };
+  }
+
+  commandResult(
+    hookConfig: CommandHookConfig,
+    eventName: HookEventName,
+    stdout: string,
+    stderr: string,
+    exitCode: number | null,
+    duration: number,
+  ): HookExecutionResult {
+    // Parse output
+    // Exit code 2 is a blocking error - ignore stdout, use stderr only
+    let output: HookOutput | undefined;
+    const isBlockingError = exitCode === 2;
+
+    // For exit code 2, only use stderr (ignore stdout)
+    const stdoutText = stdout.trim();
+    const textToParse = isBlockingError
+      ? stderr.trim()
+      : stdoutText || stderr.trim();
+    // Only stdout is promoted as plain-text context; the stderr fallback
+    // stays a system message. JSON on stderr is still parsed as structured
+    // output when stdout is empty, as it was before.
+    const parsedFromStdout = !isBlockingError && stdoutText !== '';
+
+    if (textToParse) {
+      // Structured output is a JSON object, possibly double-encoded as a
+      // JSON string (applies to both exit 0 and exit 2). Anything else,
+      // including bare JSON values such as `42` or `[1, 2]`, is plain text.
+      let parsed: unknown;
+      let parseFailed = false;
+      try {
+        parsed = JSON.parse(textToParse);
+        if (typeof parsed === 'string') {
+          parsed = JSON.parse(parsed);
+        }
+      } catch {
+        parseFailed = true;
+      }
+      if (
+        !parseFailed &&
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        !Array.isArray(parsed)
+      ) {
+        output = parsed as HookOutput;
+      } else if (
+        parseFailed &&
+        !isBlockingError &&
+        textToParse.startsWith('{')
+      ) {
+        // Output that starts like a JSON object but does not parse is a
+        // broken structured payload, not context or a message: as in
+        // Claude Code, it is a non-blocking error and nothing of it reaches
+        // the model. Exit code 2 still blocks on its stderr text below.
+        debugLogger.warn(
+          `Hook "${hookConfig.name || hookConfig.command}" printed output that starts like a JSON object but is not valid JSON; it is ignored`,
+        );
+        return {
+          hookConfig,
+          eventName,
+          success: false,
+          outcome: 'non_blocking_error',
+          error: new Error('Hook output is not valid JSON'),
+          stdout,
+          stderr,
+          exitCode: exitCode ?? -1,
+          duration,
+        };
+      } else {
+        output = this.convertPlainTextToHookOutput(
+          textToParse,
+          isBlockingError
+            ? exitCode
+            : exitCode === EXIT_CODE_SUCCESS
+              ? EXIT_CODE_SUCCESS
+              : EXIT_CODE_NON_BLOCKING_ERROR,
+          parsedFromStdout ? eventName : undefined,
+        );
+      }
+    }
+
+    const killedBySignal = exitCode === null;
+    return {
+      hookConfig,
+      eventName,
+      success: exitCode === EXIT_CODE_SUCCESS,
+      // A signal this runner did not send (it returned above for its own
+      // abort and timeout) leaves exitCode null: a failure, not a cancel.
+      outcome:
+        exitCode === EXIT_CODE_SUCCESS
+          ? 'success'
+          : exitCode === 2
+            ? 'blocking'
+            : 'non_blocking_error',
+      output,
+      stdout,
+      stderr,
+      exitCode: exitCode ?? -1,
+      duration,
+      ...(killedBySignal && {
+        error: new Error('Hook killed by signal'),
+      }),
+    };
   }
 
   /**

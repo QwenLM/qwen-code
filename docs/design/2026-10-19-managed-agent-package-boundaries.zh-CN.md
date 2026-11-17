@@ -2,6 +2,8 @@
 
 [English](2026-10-19-managed-agent-package-boundaries.md) | [简体中文](2026-10-19-managed-agent-package-boundaries.zh-CN.md)
 
+后继设计：[Maven 多模块边界](2026-10-29-managed-agent-maven-modules.zh-CN.md)。本文保留当时的决策与验证记录；当前构建结构以多模块设计为准。
+
 状态：已在主干基点 `f37e003d9450` 上实现并完成本地验证。远端 CI 与正式评审状态见 [PR #14710](https://github.com/QwenLM/qwen-code/pull/14710)。本次包调整未在本地运行可选的 MySQL、Hosted 和 Linux 故障专项 profile。
 
 ## 问题与现状

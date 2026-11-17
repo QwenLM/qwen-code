@@ -13,6 +13,9 @@
 // 2026-10-09, and the stall had already reached main once (#13163).
 
 export const CONTRACT_DOCUMENT =
+  'packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json';
+
+export const CONTRACT_DOCUMENT_MONOLITH =
   'packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json';
 
 // Open PRs based before the application move still expose the contract here.

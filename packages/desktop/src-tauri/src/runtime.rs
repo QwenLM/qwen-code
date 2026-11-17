@@ -61,6 +61,10 @@ impl DesktopRuntime {
             .stderr(Stdio::piped())
             .env("QWEN_CODE_DESKTOP", "1")
             .env("QWEN_SERVER_TOKEN", &token);
+        // macOS GUI apps inherit launchd's minimal PATH, which hides user
+        // tooling (gh, docker, Homebrew, CLIs in ~/.local/bin) from the
+        // daemon's shell subprocesses; prepend the standard locations.
+        apply_daemon_path_env(&mut command);
 
         let mut child = spawn_runtime_group(&mut command)
             .map_err(|error| format!("Failed to start bundled Qwen Code runtime: {error}"))?;
@@ -546,10 +550,65 @@ fn runtime_arguments(workspace: &Path) -> Vec<OsString> {
     .collect()
 }
 
+// macOS apps launched from Finder or Dock run in launchd's GUI domain and
+// inherit its minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin), so the daemon's
+// shell subprocesses cannot find user tooling such as gh, docker, Homebrew
+// installs, or CLIs under ~/.local/bin (#12690). The standard user locations
+// are prepended and the inherited PATH is kept after them. Other platforms
+// inherit a full session PATH and are left untouched.
+#[cfg(target_os = "macos")]
+fn daemon_path_prepend_entries() -> Vec<String> {
+    let mut entries = vec![
+        "/opt/homebrew/bin".to_string(),
+        "/opt/homebrew/sbin".to_string(),
+        "/usr/local/bin".to_string(),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        entries.push(format!("{}/.local/bin", home.to_string_lossy()));
+    }
+    entries
+}
+
+#[cfg(not(target_os = "macos"))]
+fn daemon_path_prepend_entries() -> Vec<String> {
+    Vec::new()
+}
+
+// Prepend entries that are not already present in `inherited`. Entries that
+// are present keep their original position; the inherited value is preserved
+// verbatim as the tail (no empty entry when `inherited` is empty).
+fn merged_daemon_path(inherited: &str, prepend: &[String]) -> String {
+    let mut merged: Vec<String> = Vec::new();
+    for entry in prepend {
+        if !inherited
+            .split(':')
+            .any(|existing| existing == entry.as_str())
+        {
+            merged.push(entry.clone());
+        }
+    }
+    if !inherited.is_empty() {
+        merged.extend(inherited.split(':').map(str::to_owned));
+    }
+    merged.join(":")
+}
+
+fn apply_daemon_path_env(command: &mut Command) {
+    let prepend = daemon_path_prepend_entries();
+    if prepend.is_empty() {
+        return;
+    }
+    let inherited = std::env::var_os("PATH")
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    command.env("PATH", merged_daemon_path(&inherited, &prepend));
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        append_failure_output, parse_listening_url, resolve_workspace, runtime_arguments,
+        append_failure_output, apply_daemon_path_env, daemon_path_prepend_entries,
+        merged_daemon_path, parse_listening_url, resolve_workspace, runtime_arguments,
         DesktopRuntime, RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
     #[cfg(unix)]
@@ -714,6 +773,125 @@ mod tests {
                 "--no-open",
             ]
         );
+    }
+
+    #[test]
+    fn merged_daemon_path_prepends_missing_entries() {
+        let merged = merged_daemon_path(
+            "/usr/bin:/bin:/usr/sbin:/sbin",
+            &[
+                "/opt/homebrew/bin".to_string(),
+                "/opt/homebrew/sbin".to_string(),
+                "/usr/local/bin".to_string(),
+                "/Users/dev/.local/bin".to_string(),
+            ],
+        );
+        assert_eq!(
+            merged,
+            "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Users/dev/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        );
+    }
+
+    #[test]
+    fn merged_daemon_path_keeps_inherited_entries_in_place() {
+        let merged = merged_daemon_path(
+            "/opt/homebrew/bin:/usr/bin",
+            &[
+                "/opt/homebrew/bin".to_string(),
+                "/opt/homebrew/sbin".to_string(),
+                "/usr/local/bin".to_string(),
+            ],
+        );
+        assert_eq!(
+            merged,
+            "/opt/homebrew/sbin:/usr/local/bin:/opt/homebrew/bin:/usr/bin",
+        );
+    }
+
+    #[test]
+    fn merged_daemon_path_without_inherited_has_no_empty_entry() {
+        assert_eq!(
+            merged_daemon_path("", &["/opt/homebrew/bin".to_string()]),
+            "/opt/homebrew/bin"
+        );
+    }
+
+    #[test]
+    fn daemon_path_prepend_entries_match_the_platform() {
+        let entries = daemon_path_prepend_entries();
+        #[cfg(target_os = "macos")]
+        {
+            let home = std::env::var("HOME").expect("HOME is set on macOS");
+            assert_eq!(
+                entries,
+                [
+                    "/opt/homebrew/bin".to_string(),
+                    "/opt/homebrew/sbin".to_string(),
+                    "/usr/local/bin".to_string(),
+                    format!("{home}/.local/bin"),
+                ]
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert!(entries.is_empty());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apply_daemon_path_env_prepends_macos_locations() {
+        // The inherited PATH is whatever this process has, so recompute the
+        // expected value from the same inputs instead of asserting a fixed
+        // prefix: missing entries are prepended (in order) and the inherited
+        // value is kept verbatim as the tail.
+        let inherited = std::env::var_os("PATH")
+            .expect("inherited PATH")
+            .to_string_lossy()
+            .into_owned();
+        let home = std::env::var("HOME").expect("HOME is set on macOS");
+        let expected_dirs = [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            &format!("{home}/.local/bin"),
+        ];
+        let mut command = std::process::Command::new("echo");
+        apply_daemon_path_env(&mut command);
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .expect("PATH is set")
+            .1
+            .expect("PATH has a value")
+            .to_string_lossy()
+            .into_owned();
+        let inherited_entries: Vec<&str> = inherited.split(':').collect();
+        let expected: Vec<&str> = expected_dirs
+            .iter()
+            .copied()
+            .filter(|dir| !inherited_entries.contains(dir))
+            .chain(inherited_entries.iter().copied())
+            .collect();
+        assert_eq!(
+            path,
+            expected.join(":"),
+            "daemon PATH does not follow the prepend contract"
+        );
+        for dir in &expected_dirs {
+            assert!(
+                path.split(':').any(|entry| entry == *dir),
+                "missing {dir} in daemon PATH: {path}"
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn apply_daemon_path_env_is_inert_off_macos() {
+        let mut command = std::process::Command::new("echo");
+        apply_daemon_path_env(&mut command);
+        assert_eq!(command.get_envs().count(), 0);
     }
 
     #[test]

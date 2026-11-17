@@ -195,6 +195,30 @@ async function activeRowOf(page: Page, grid: Locator): Promise<Locator> {
   return page.locator(`[id="${active}"]`);
 }
 
+/** The right panel's edge; the details split has a handle of its own. */
+const RIGHT_PANEL_HANDLE =
+  '[role="separator"][aria-orientation="vertical"]:not([aria-label="Resize details"])';
+
+async function resizePanel(page: Page, width: number) {
+  const panel = page.getByTestId('trajectory-panel');
+  const current = (await panel.boundingBox())!.width;
+  const handle = (await page.locator(RIGHT_PANEL_HANDLE).last().boundingBox())!;
+  await page.mouse.move(
+    handle.x + handle.width / 2,
+    handle.y + handle.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    handle.x + handle.width / 2 + current - width,
+    handle.y + handle.height / 2,
+    { steps: 5 },
+  );
+  await page.mouse.up();
+  await expect
+    .poll(async () => Math.round((await panel.boundingBox())!.width))
+    .toBe(width);
+}
+
 /** Rows the virtualizer has mounted, which is never the whole page. */
 function mountedRows(page: Page): Locator {
   return page.locator('[data-testid="trajectory-rows"] [role="row"]');
@@ -344,13 +368,11 @@ test.describe('trajectory panel', () => {
     await openTrajectory(page, String(testInfo.project.use.baseURL));
     const panel = page.getByTestId('trajectory-panel');
     await panel.getByTestId('trajectory-row-tool').last().click();
-    await panel.getByRole('button', { name: 'View details' }).click();
-    const inspector = panel.getByTestId('trajectory-inspector');
-    await inspector.getByRole('button', { name: 'Input' }).click();
-    const content = inspector.locator('pre');
-    const copy = inspector.getByRole('button', {
-      name: 'Copy displayed content',
-    });
+    const detail = panel.getByTestId('trajectory-detail');
+    await expect(detail).toHaveAttribute('data-presentation', 'drill-in');
+    const input = detail.locator('[data-section="input"]');
+    const content = input.locator('pre');
+    const copy = input.getByRole('button', { name: 'Copy Input' });
     const box = (await panel.boundingBox())!;
     await page.mouse.move(box.x + 20, box.y + 20);
     await page.mouse.wheel(0, 600);
@@ -359,9 +381,7 @@ test.describe('trajectory panel', () => {
     await expect(content).toContainText('/workspace/demo/note-40.txt');
     await copy.click();
     await expect(copy).toBeFocused();
-    await expect(inspector.getByRole('status')).toHaveText(
-      'Copied displayed content',
-    );
+    await expect(detail.getByRole('status')).toHaveText('Copied');
     const copied = await page.evaluate(() => navigator.clipboard.readText());
     expect(copied).toBe(await content.textContent());
     expect(JSON.parse(copied)).toEqual({
@@ -393,23 +413,22 @@ test.describe('trajectory panel', () => {
     });
     const tool = page.getByTestId('trajectory-row-tool').last();
     await tool.click();
-    await page.getByRole('button', { name: 'View details' }).click();
-    const inspector = page.getByTestId('trajectory-inspector');
+    const inspector = page.getByTestId('trajectory-detail');
     await expect(inspector).toBeVisible();
     await expect(tool).toBeInViewport();
-    await inspector.getByRole('button', { name: 'Input' }).click();
-    await expect(inspector).toContainText(`/workspace/demo/note-${TURNS}.txt`);
-    await inspector.getByRole('button', { name: 'Output' }).click();
-    await expect(inspector).toContainText('unrecorded');
+    await expect(inspector.locator('[data-section="input"]')).toContainText(
+      `/workspace/demo/note-${TURNS}.txt`,
+    );
+    await expect(inspector.locator('[data-section="output"]')).toContainText(
+      'Not recorded',
+    );
     const evidenceDir = resolve(
       process.cwd(),
       '../../.qwen/e2e-tests/trajectory-pr2',
     );
     mkdirSync(evidenceDir, { recursive: true });
     const panel = page.getByTestId('trajectory-panel');
-    const resizeHandle = page
-      .locator('[role="separator"][aria-orientation="vertical"]')
-      .last();
+    const resizeHandle = page.locator(RIGHT_PANEL_HANDLE).last();
     for (const width of [320, 960]) {
       const current = (await panel.boundingBox())!.width;
       const handle = (await resizeHandle.boundingBox())!;
@@ -447,16 +466,107 @@ test.describe('trajectory panel', () => {
       await panel.screenshot({
         path: resolve(evidenceDir, `inspector-${width}.png`),
       });
-      await inspector.getByRole('button', { name: 'Summary' }).click();
-      await expect(inspector).toContainText('call_0040');
+      const ids = inspector.locator('[data-section="ids"]');
+      if (!(await ids.evaluate((node) => (node as HTMLDetailsElement).open)))
+        await ids.locator('summary').click();
+      await expect(ids.getByText('call_0040')).toBeVisible();
       await panel.screenshot({
         path: resolve(evidenceDir, `inspector-summary-${width}.png`),
       });
     }
+    // 960 px is wide enough for details to sit beside the list.
+    await expect(inspector).toHaveAttribute('data-presentation', 'side');
     await inspector.getByRole('button', { name: 'Close details' }).click();
     await expect(inspector).toHaveCount(0);
     await expect(grid).toBeFocused();
     expect(detailRequests).toBe(0);
+  });
+
+  test('drills into details when docked and returns to the same place @smoke', async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    const grid = await openTrajectory(
+      page,
+      String(testInfo.project.use.baseURL),
+    );
+    const panel = page.getByTestId('trajectory-panel');
+    await grid.evaluate((element) => {
+      element.scrollTop = element.scrollHeight / 2;
+    });
+    const target = page
+      .getByTestId('trajectory-row-tool')
+      .filter({ hasText: 'note-20.txt' });
+    await target.click();
+    await expect(target).toHaveAttribute('data-selected', 'true');
+    const selectedId = await target.evaluate(
+      (element) => element.closest('[role="row"]')!.id,
+    );
+    const offset = await grid.evaluate((element) => element.scrollTop);
+
+    const detail = panel.getByTestId('trajectory-detail');
+    await expect(detail).toHaveAttribute('data-presentation', 'drill-in');
+    await expect(detail.locator('h3')).toBeFocused();
+    // The summary bar and the strip stay; the toolbar and list are covered.
+    await expect(panel.getByTestId('trajectory-metrics')).toBeInViewport();
+    await expect(panel.getByTestId('trajectory-overview')).toBeInViewport();
+    const covered = (await detail.boundingBox())!;
+    expect(covered.y).toBeLessThanOrEqual(
+      (await panel
+        .getByRole('searchbox', { name: 'Search loaded records' })
+        .boundingBox())!.y,
+    );
+    // Room for at least 20 lines of 17 px content.
+    expect(covered.height - 40).toBeGreaterThanOrEqual(20 * 17);
+
+    await page.keyboard.press('Escape');
+    await expect(detail).toHaveCount(0);
+    await expect(grid).toBeFocused();
+    expect(
+      Math.abs((await grid.evaluate((element) => element.scrollTop)) - offset),
+    ).toBeLessThanOrEqual(34);
+    await expect(grid).toHaveAttribute('aria-activedescendant', selectedId);
+  });
+
+  test('resizes side details with the pointer and the keyboard @smoke', async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 2400, height: 900 });
+    await openTrajectory(page, String(testInfo.project.use.baseURL));
+    await resizePanel(page, 1200);
+    await page.getByTestId('trajectory-row-tool').last().click();
+    const detail = page.getByTestId('trajectory-detail');
+    await expect(detail).toHaveAttribute('data-presentation', 'side');
+    const width = async () => Math.round((await detail.boundingBox())!.width);
+    // Starts at 40% of the panel.
+    expect(Math.abs((await width()) - 480)).toBeLessThanOrEqual(8);
+
+    const handle = page.getByRole('separator', { name: 'Resize details' });
+    const drag = async (dx: number) => {
+      const grip = (await handle.boundingBox())!;
+      const y = grip.y + grip.height / 2;
+      await page.mouse.move(grip.x + grip.width / 2, y);
+      await page.mouse.down();
+      await page.mouse.move(grip.x + grip.width / 2 + dx, y, { steps: 5 });
+      await page.mouse.up();
+    };
+    await drag(-100);
+    await expect.poll(width).toBeGreaterThan(560);
+
+    const dragged = await width();
+    await handle.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect.poll(width).toBeLessThan(dragged);
+
+    // Never narrower than 320 px, never wider than 60% of the panel.
+    await drag(600);
+    await expect.poll(width).toBeLessThanOrEqual(330);
+    expect(await width()).toBeGreaterThanOrEqual(319);
+    // In two steps, so the pointer stays inside the trajectory panel.
+    await drag(-250);
+    await drag(-250);
+    await expect.poll(width).toBeLessThanOrEqual(721);
+    expect(await width()).toBeGreaterThanOrEqual(700);
   });
 
   for (const { language, theme } of [
@@ -537,8 +647,7 @@ test.describe('trajectory panel', () => {
       }
       if (language === 'zh-CN') {
         await panel.getByTestId('trajectory-row-tool').last().click();
-        await panel.getByRole('button', { name: '查看详情' }).click();
-        const inspector = panel.getByTestId('trajectory-inspector');
+        const inspector = panel.getByTestId('trajectory-detail');
         await expect(inspector).toBeVisible();
         const evidenceDir = resolve(
           process.cwd(),
@@ -548,7 +657,9 @@ test.describe('trajectory panel', () => {
         await panel.screenshot({
           path: resolve(evidenceDir, 'inspector-zh-light-960.png'),
         });
-        await inspector.getByRole('button', { name: '关闭详情' }).click();
+        await inspector
+          .getByRole('button', { name: /^(关闭详情|返回记录列表)$/ })
+          .click();
       }
       const metricsBefore = await panel
         .getByTestId('trajectory-metrics')
@@ -825,7 +936,8 @@ test.describe('trajectory panel', () => {
       page,
       String(testInfo.project.use.baseURL),
     );
-    await grid.click();
+    // A click on a row would open its details; only focus is wanted here.
+    await grid.focus();
 
     // The last row is the last turn's tool call, which is the last span.
     await page.keyboard.press('End');
@@ -1448,12 +1560,12 @@ test.describe('trajectory panel', () => {
         path: resolve(evidence, 'latest-fixture-en.png'),
       });
       await panel.getByTestId('trajectory-row-tool').last().click();
-      await panel.getByRole('button', { name: 'View details' }).click();
-      const inspector = panel.getByTestId('trajectory-inspector');
-      await inspector
-        .getByRole('button', { name: 'Input', exact: true })
-        .click();
-      await expect(inspector.locator('pre')).toContainText('note-180.txt');
+      const inspector = panel.getByTestId('trajectory-detail');
+      await expect(
+        inspector.locator('[data-section="input"] pre'),
+      ).toContainText('note-180.txt');
+      // Docked, details cover the toolbar; Back returns to it.
+      await inspector.getByRole('button', { name: 'Back to records' }).click();
       const search = page.getByRole('searchbox', {
         name: 'Search loaded records',
       });
@@ -1511,9 +1623,10 @@ test.describe('trajectory panel', () => {
         .toBe(true);
     });
 
-    test('retains the old inspector on navigation failure and retries only its failed page @smoke', async ({
+    test('retains the old details on navigation failure and retries only its failed page @smoke', async ({
       page,
     }, testInfo) => {
+      await page.setViewportSize({ width: 2400, height: 900 });
       await page
         .context()
         .grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -1526,13 +1639,12 @@ test.describe('trajectory panel', () => {
         },
       );
       const panel = page.getByTestId('trajectory-panel');
+      await resizePanel(page, 1000);
       await panel.getByTestId('trajectory-row-tool').last().click();
-      await panel.getByRole('button', { name: 'View details' }).click();
-      const inspector = panel.getByTestId('trajectory-inspector');
-      await inspector
-        .getByRole('button', { name: 'Input', exact: true })
-        .click();
-      const before = await inspector.locator('pre').textContent();
+      const inspector = panel.getByTestId('trajectory-detail');
+      await expect(inspector).toHaveAttribute('data-presentation', 'side');
+      const input = inspector.locator('[data-section="input"]');
+      const before = await input.locator('pre').textContent();
       await panel.getByTestId('trajectory-window-older').click();
       const warnings = panel.getByTestId('trajectory-warnings');
       await warnings.click();
@@ -1540,10 +1652,8 @@ test.describe('trajectory panel', () => {
       await expect(error).toContainText('Transcript page is unavailable');
       await page.keyboard.press('Escape');
       await expect(grid).toHaveAttribute('aria-rowcount', '400');
-      await expect(inspector.locator('pre')).toHaveText(before!);
-      await inspector
-        .getByRole('button', { name: 'Copy displayed content' })
-        .click();
+      await expect(input.locator('pre')).toHaveText(before!);
+      await input.getByRole('button', { name: 'Copy Input' }).click();
       await expect
         .poll(() => page.evaluate(() => navigator.clipboard.readText()))
         .toBe(before);
@@ -1750,7 +1860,7 @@ test.describe('trajectory panel', () => {
       await page.keyboard.press('Escape');
       await expect(page.getByTestId('trajectory-truncated')).toHaveCount(0);
       // The oldest page's first turn is in the table, not only the newest's.
-      await grid.click();
+      await grid.focus();
       await page.keyboard.press('Home');
       await page.keyboard.press('ArrowDown');
       await expect(await activeRowOf(page, grid)).toContainText(
@@ -1884,29 +1994,6 @@ test.describe('trajectory panel', () => {
 });
 
 test.describe('collapsible waterfall', () => {
-  async function resizePanel(page: Page, width: number) {
-    const panel = page.getByTestId('trajectory-panel');
-    const current = (await panel.boundingBox())!.width;
-    const handle = (await page
-      .locator('[role="separator"][aria-orientation="vertical"]')
-      .last()
-      .boundingBox())!;
-    await page.mouse.move(
-      handle.x + handle.width / 2,
-      handle.y + handle.height / 2,
-    );
-    await page.mouse.down();
-    await page.mouse.move(
-      handle.x + handle.width / 2 + current - width,
-      handle.y + handle.height / 2,
-      { steps: 5 },
-    );
-    await page.mouse.up();
-    await expect
-      .poll(async () => Math.round((await panel.boundingBox())!.width))
-      .toBe(width);
-  }
-
   test('preserves inspector and clipboard while folding and reveals the original record @smoke', async ({
     page,
   }, testInfo) => {
@@ -1924,10 +2011,10 @@ test.describe('collapsible waterfall', () => {
     const tool = page.getByTestId('trajectory-row-tool').last();
     const key = await tool.getAttribute('data-row-key');
     await tool.click();
-    await page.getByRole('button', { name: 'View details' }).click();
-    const inspector = page.getByTestId('trajectory-inspector');
-    await inspector.getByRole('button', { name: 'Input', exact: true }).click();
-    const content = await inspector.locator('pre').textContent();
+    const inspector = page.getByTestId('trajectory-detail');
+    await expect(inspector).toHaveAttribute('data-presentation', 'side');
+    const input = inspector.locator('[data-section="input"]');
+    const content = await input.locator('pre').textContent();
     await page
       .getByTestId('trajectory-row-request')
       .last()
@@ -1940,10 +2027,8 @@ test.describe('collapsible waterfall', () => {
     await expect(inspector).toContainText(
       'The group containing this record is collapsed.',
     );
-    await expect(inspector.locator('pre')).toHaveText(content!);
-    await inspector
-      .getByRole('button', { name: 'Copy displayed content' })
-      .click();
+    await expect(input.locator('pre')).toHaveText(content!);
+    await input.getByRole('button', { name: 'Copy Input' }).click();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
       content,
     );
@@ -2098,7 +2183,7 @@ test.describe('trajectory search and filters', () => {
     await expect(
       page.locator('[data-testid="trajectory-row-tool"][data-selected="true"]'),
     ).toBeInViewport();
-    await expect(page.getByTestId('trajectory-inspector')).toHaveCount(0);
+    await expect(page.getByTestId('trajectory-detail')).toHaveCount(0);
     await page
       .getByRole('button', { name: 'Clear search', exact: true })
       .click();
@@ -2121,16 +2206,18 @@ test.describe('trajectory search and filters', () => {
     await page
       .context()
       .grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.setViewportSize({ width: 2400, height: 900 });
     await openTrajectory(page, String(testInfo.project.use.baseURL), {
       transcriptPage: { events: transcriptEvents(2) },
     });
+    await resizePanel(page, 1000);
     const tool = page.getByTestId('trajectory-row-tool').last();
     const key = await tool.getAttribute('data-row-key');
     await tool.click();
-    await page.getByRole('button', { name: 'View details' }).click();
-    const inspector = page.getByTestId('trajectory-inspector');
-    await inspector.getByRole('button', { name: 'Input', exact: true }).click();
-    const content = await inspector.locator('pre').textContent();
+    const inspector = page.getByTestId('trajectory-detail');
+    await expect(inspector).toHaveAttribute('data-presentation', 'side');
+    const input = inspector.locator('[data-section="input"]');
+    const content = await input.locator('pre').textContent();
     const search = page.getByRole('searchbox', {
       name: 'Search loaded records',
     });
@@ -2140,10 +2227,8 @@ test.describe('trajectory search and filters', () => {
     await expect(inspector).toContainText(
       'This record does not match the current filters.',
     );
-    await expect(inspector.locator('pre')).toHaveText(content!);
-    await inspector
-      .getByRole('button', { name: 'Copy displayed content' })
-      .click();
+    await expect(input.locator('pre')).toHaveText(content!);
+    await input.getByRole('button', { name: 'Copy Input' }).click();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
       content,
     );

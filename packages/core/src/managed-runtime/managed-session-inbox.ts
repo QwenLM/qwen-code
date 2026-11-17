@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, mkdir, readFile, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { FileManagedTerminalIdentityStore } from './managed-terminal-identity-store.js';
 import type {
   ManagedActivationFence,
   ManagedActivationOutcome,
@@ -406,12 +407,15 @@ export class FileManagedSessionInbox {
   private fatalError: Error | undefined;
   private syncedBytes = 0;
   private snapshotBytes = 0;
+  private readonly terminals: FileManagedTerminalIdentityStore<ManagedSessionMessageSnapshot>;
 
   private constructor(
     readonly filePath: string,
     private readonly clock: () => number,
     private readonly maxPayloadBytes: number,
-  ) {}
+  ) {
+    this.terminals = new FileManagedTerminalIdentityStore(filePath, 'inbox');
+  }
 
   static async open(
     filePath: string,
@@ -499,7 +503,13 @@ export class FileManagedSessionInbox {
             `Managed Session message ${JSON.stringify(admittedMessage.messageId)} was reused with different data.`,
           );
         }
-        return { created: false, message: snapshot(existing) };
+        return {
+          created: false,
+          message:
+            existing.state === 'finished'
+              ? await this.readTerminalState(existing)
+              : snapshot(existing),
+        };
       }
 
       const pending = [...this.messages.values()].filter(
@@ -679,6 +689,28 @@ export class FileManagedSessionInbox {
       });
       return snapshot(this.required(messageIdentity));
     });
+  }
+
+  readTerminal(
+    input: ManagedSessionMessageIdentity,
+  ): Promise<ManagedSessionMessageSnapshot | undefined> {
+    const captured = structuredClone(input);
+    return this.serial(async () => {
+      const state = this.messages.get(messageKey(identity(captured)));
+      return state?.state === 'finished'
+        ? this.readTerminalState(state)
+        : undefined;
+    });
+  }
+
+  private readTerminalState(
+    state: MessageState,
+  ): Promise<ManagedSessionMessageSnapshot> {
+    const { tenantId, sessionId, messageId } = state.message;
+    return this.terminals.read(
+      [tenantId, sessionId, messageId],
+      snapshot(state),
+    );
   }
 
   get(

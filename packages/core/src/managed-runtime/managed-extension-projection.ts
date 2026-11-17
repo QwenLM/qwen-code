@@ -86,6 +86,16 @@ import {
   parseTeamState,
   parseTeamTask,
 } from './managed-team-record.js';
+import {
+  parseHistoryMaintenance,
+  isHistoryMaintenanceStart,
+  isHistoryMaintenanceSuccessor,
+} from './managed-history-maintenance-record.js';
+import {
+  parseManagedToolStage,
+  isManagedToolStageStart,
+  isManagedToolStageSuccessor,
+} from './managed-tool-stage-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -173,6 +183,24 @@ function childRunTaskKind(record: AnyChildRun): ManagedTaskKind {
 export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
   Partial<Record<ManagedSessionDomain, ManagedExtensionRecordBody>>
 > = Object.freeze({
+  tool_stage: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseManagedToolStage(value);
+      return { record, recordId: record.toolStageId, run: record.run };
+    },
+    isStart: isManagedToolStageStart,
+    isSuccessor: isManagedToolStageSuccessor,
+  }),
+  history_maintenance: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseHistoryMaintenance(value);
+      return { record, recordId: record.operationId, run: record.run };
+    },
+    isStart: isHistoryMaintenanceStart,
+    isSuccessor: isHistoryMaintenanceSuccessor,
+  }),
   mcp_configuration: Object.freeze({
     taskKindOf: () => null,
     parse: (value: unknown) => {

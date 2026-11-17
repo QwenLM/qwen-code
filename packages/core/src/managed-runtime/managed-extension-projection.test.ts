@@ -107,6 +107,18 @@ const fixtures = JSON.parse(
 ) as FixtureSuite;
 
 describe('managed-extension-projection/1 fixtures', () => {
+  it('keeps Store-owned Harness release receipts unavailable to callers', () => {
+    expect(MANAGED_EXTENSION_RECORD_BODIES).not.toHaveProperty(
+      'hosted_harness_release',
+    );
+    expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain(
+      'hosted_harness_release',
+    );
+    expect(MANAGED_SESSION_ENVELOPE_DOMAINS).not.toContain(
+      'hosted_harness_release',
+    );
+  });
+
   it('pins the record bodies, task states and outbox states', () => {
     expect(fixtures.contractVersion).toBe(1);
     expect(

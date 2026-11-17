@@ -1,5 +1,6 @@
 import {
   ModelRefreshControl,
+  ModelRefreshError,
   type ModelRefreshState,
 } from '../ModelRefreshControl';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -270,7 +271,12 @@ export function ModelDialog({
           </div>
         </>
       ) : null}
-      <ModelRefreshControl state={modelRefresh} />
+      {modelRefresh?.refresh ? (
+        <div className={styles.toolbar}>
+          <ModelRefreshControl state={modelRefresh} />
+          <ModelRefreshError state={modelRefresh} />
+        </div>
+      ) : null}
     </div>
   );
 }

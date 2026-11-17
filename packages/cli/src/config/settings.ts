@@ -25,6 +25,7 @@ import {
   parseExecutionSandboxSettings,
   readBareModeOperatorSettings,
   readOperatorSandboxSettings,
+  selectOperatorCatalogRefresh,
   selectOperatorExecutionSandbox,
   stripUtf8Bom,
 } from './execution-sandbox-settings.js';
@@ -37,6 +38,7 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
+import { applyVerifyPrCoordinateEnv } from './verify-pr-coordinates.js';
 import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   setNestedPropertySafe,
@@ -751,6 +753,22 @@ function mergeSettings(
   } else if (merged.tools && typeof merged.tools === 'object') {
     delete merged.tools.executionSandbox;
   }
+  const operatorCatalogRefresh = selectOperatorCatalogRefresh(
+    systemDefaults,
+    user,
+    system,
+  );
+  // Same shape as the executionSandbox restore: a project that replaces the
+  // whole `model` section cannot reset the operator's refresh opt-out.
+  if (operatorCatalogRefresh !== undefined) {
+    const model = merged.model;
+    merged.model = {
+      ...(model && typeof model === 'object' && !Array.isArray(model)
+        ? model
+        : {}),
+      catalogRefresh: operatorCatalogRefresh,
+    } as Settings['model'];
+  }
   return merged;
 }
 
@@ -1027,6 +1045,7 @@ export function createMinimalSettings(): LoadedSettings {
         }
       : {}),
     ...(operator.privacy ? { privacy: operator.privacy } : {}),
+    ...(operator.model ? { model: operator.model } : {}),
   };
   const emptySettingsFile: SettingsFile = {
     path: '',
@@ -1213,8 +1232,15 @@ function readSettingsLayers(
     // This is okay. The path might not exist yet, and that's a valid state.
   }
 
-  // We expect homedir to always exist and be resolvable.
-  const realHomeDir = resolveHomeDirectory();
+  // The home directory may not exist (e.g. a container user created without
+  // `-m`); like the workspace path above, that's a valid state. Fall back to
+  // the unresolved path so the home-vs-workspace comparison still works.
+  let realHomeDir = path.resolve(homedir());
+  try {
+    realHomeDir = resolveHomeDirectory();
+  } catch (_e) {
+    // This is okay. The path might not exist yet, and that's a valid state.
+  }
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
@@ -1605,6 +1631,9 @@ function readSettingsLayers(
   // the settings to avoid a cycle
   if (!opts.skipLoadEnvironment) {
     loadEnvironment(tempMergedSettings, workspaceDir);
+    // `verifyPr` is a workspace-restricted root, so the merged value already
+    // excludes a cloned repository's choice of publishing target.
+    applyVerifyPrCoordinateEnv(tempMergedSettings.verifyPr);
   }
 
   // Create LoadedSettings first

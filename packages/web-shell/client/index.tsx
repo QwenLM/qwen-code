@@ -23,6 +23,7 @@ export {
   JavaManagedAgentClient,
   JavaManagedAgentHttpError,
   type JavaAgentCommandAdmission,
+  type JavaAgentTurnAdmission,
   type JavaAgentEnvironment,
   type JavaAgentEvent,
   type JavaAgentSession,
@@ -34,6 +35,14 @@ export {
   createJavaManagedAgentProvider,
   type JavaManagedAgentProviderOptions,
 } from './components/managed/java-managed-agent-provider';
+export type {
+  ManagedSideQuery,
+  ManagedSideQueryKind,
+  ManagedSideQueryCreate,
+  ManagedSideQueryContext,
+  ManagedSideQueryPage,
+  ManagedSideQueriesProvider,
+} from './components/managed/managed-side-query-types';
 export {
   ManagedAgentWebShell,
   type ManagedAgentWebShellProps,
@@ -50,6 +59,11 @@ export type {
 export {
   type ManagedAgentCommandOptions,
   type ManagedAgentPendingAction,
+  type ManagedAgentPendingPermissionAction,
+  type ManagedAgentPendingQuestionAction,
+  type ManagedAgentQuestionAnswer,
+  type ManagedAgentQuestionResponse,
+  type ManagedAgentActionResponse,
   type ManagedAgentProvider,
   type ManagedAgentRequestOptions,
   type ManagedAgentRuntimeState,
@@ -66,6 +80,8 @@ export {
 } from './components/managed/managed-agent-provider';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
+  /** Unmount the chat view and its portals while keeping the daemon session attached. */
+  viewHidden?: boolean;
   /**
    * Opt in to URL routing. Explicit initial session target props override the
    * URL; later target prop changes replace it. Stop host history writes when
@@ -169,6 +185,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     clientId,
     restartSseOnPrompt,
     historyPageSize,
+    viewHidden,
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
@@ -184,6 +201,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
         clientId={clientId}
         restartSseOnPrompt={restartSseOnPrompt}
         historyPageSize={historyPageSize}
+        viewHidden={viewHidden}
         webShellProps={webShellProps}
       />
     </DaemonWorkspaceProvider>
@@ -296,6 +314,7 @@ export type {
   WebShellAtProviderTab,
   WebShellAtItem,
   WebShellAtProvider,
+  WebShellWorkspaceDirectoryPicker,
   WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownChartCustomization,
@@ -370,8 +389,25 @@ export type {
 
 export type { WebShellModelManagementOptions } from './modelManagement';
 export type {
+  WebShellModelPickerContext,
+  WebShellModelPickerItemContext,
+  WebShellModelPickerMount,
+  WebShellModelPickerOptions,
+} from './model-picker';
+export type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipHandle,
+  WebShellUnavailableModelTooltipInfo,
+  WebShellUnavailableModelTooltipMount,
+} from './unavailableModels';
+export type {
   WebShellMessageNavigationRequest,
   WebShellMessageNavigationResult,
 } from './hooks/useMessageNavigation';
 export { highlightCode } from './components/messages/codeHighlighter';
 export type { CodeHighlightRequest } from './components/messages/codeHighlighter';
+
+export {
+  QwenSubscriptionPanel,
+  QwenSubscriptionFlow,
+} from './components/messages/QwenSubscriptionPanel';

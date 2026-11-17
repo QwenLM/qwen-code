@@ -39,13 +39,10 @@ impl Tool for GetCursorPositionTool {
             return result;
         }
         // Create a null event and query its location to get cursor position.
-        use core_graphics::{
-            event::CGEvent,
-            event_source::{CGEventSource, CGEventSourceStateID},
-        };
+        use core_graphics::event::CGEvent;
 
         let result = tokio::task::spawn_blocking(|| {
-            let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            let source = crate::input::new_event_source()
                 .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
             let event = CGEvent::new(source).map_err(|_| anyhow::anyhow!("CGEvent::new failed"))?;
             let loc = event.location();

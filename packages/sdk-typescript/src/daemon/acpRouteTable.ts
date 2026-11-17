@@ -239,6 +239,17 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       }),
     },
   },
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/config-option$/,
+    mapping: {
+      method: 'session/set_config_option',
+      extractParams: (segs, body) => ({
+        ...bodyRecord(body),
+        sessionId: segs[0],
+      }),
+    },
+  },
   // GET /capabilities → use initialize result (handled specially)
   {
     httpMethod: 'GET',

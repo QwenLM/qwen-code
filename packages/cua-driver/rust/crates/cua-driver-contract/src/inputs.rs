@@ -6,7 +6,7 @@
 //! These types are transport-free. The contract generator derives JSON Schema
 //! from them, and live Rust handlers deserialize the same types before acting.
 
-use crate::CursorThemeSelection;
+use crate::{schema_settings, CursorThemeSelection};
 use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -15,42 +15,89 @@ pub trait ToolInput: Serialize + DeserializeOwned + JsonSchema {
     const TOOL_NAME: &'static str;
 
     fn input_schema() -> Value {
-        let settings = schemars::generate::SchemaSettings::draft2020_12().with(|settings| {
-            settings.meta_schema = None;
-            settings.inline_subschemas = true;
-        });
-        let schema = settings.into_generator().into_root_schema_for::<Self>();
+        let schema = schema_settings()
+            .into_generator()
+            .into_root_schema_for::<Self>();
         let mut value = serde_json::to_value(schema).expect("tool input schema serializes");
-        normalize_schema(&mut value);
+        normalize_input_schema(&mut value);
         value
     }
 }
 
-fn normalize_schema(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            object.remove("title");
-            if object.get("type").and_then(Value::as_str) == Some("object") {
-                object
-                    .entry("properties")
-                    .or_insert_with(|| Value::Object(serde_json::Map::new()));
-                object
-                    .entry("required")
-                    .or_insert_with(|| Value::Array(Vec::new()));
-                object
-                    .entry("additionalProperties")
-                    .or_insert(Value::Bool(true));
+pub fn normalize_input_schema(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    object.remove("title");
+    if object.get("default").is_some_and(Value::is_null) {
+        object.remove("default");
+    }
+    if let Some(types) = object.get("type").and_then(Value::as_array) {
+        let kept: Vec<_> = types
+            .iter()
+            .filter(|kind| kind.as_str() != Some("null"))
+            .cloned()
+            .collect();
+        if let [kind] = kept.as_slice() {
+            object.insert("type".into(), kind.clone());
+        }
+    }
+    if let Some(variants) = object.get("anyOf").and_then(Value::as_array) {
+        let kept: Vec<_> = variants
+            .iter()
+            .filter(|schema| schema["type"] != "null")
+            .cloned()
+            .collect();
+        if let [Value::Object(schema)] = kept.as_slice() {
+            let schema = schema.clone();
+            object.remove("anyOf");
+            object.extend(schema);
+        }
+    }
+    if let Some(constant) = object.remove("const") {
+        match constant {
+            Value::String(text) => {
+                object.insert("type".into(), serde_json::json!("string"));
+                object.insert("enum".into(), serde_json::json!([text]));
             }
-            for child in object.values_mut() {
-                normalize_schema(child);
+            Value::Number(number) => {
+                object.insert("minimum".into(), serde_json::json!(number));
+                object.insert("maximum".into(), serde_json::json!(number));
+            }
+            other => {
+                object.insert("const".into(), other);
             }
         }
-        Value::Array(values) => {
-            for child in values {
-                normalize_schema(child);
+    }
+    if object.get("type").and_then(Value::as_str) == Some("object") {
+        object
+            .entry("properties")
+            .or_insert_with(|| serde_json::json!({}));
+        object
+            .entry("required")
+            .or_insert_with(|| serde_json::json!([]));
+        object
+            .entry("additionalProperties")
+            .or_insert(Value::Bool(true));
+    }
+    for key in ["properties", "$defs"] {
+        if let Some(children) = object.get_mut(key).and_then(Value::as_object_mut) {
+            for child in children.values_mut() {
+                normalize_input_schema(child);
             }
         }
-        _ => {}
+    }
+    for key in ["items", "additionalProperties"] {
+        if let Some(child) = object.get_mut(key).filter(|child| child.is_object()) {
+            normalize_input_schema(child);
+        }
+    }
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(children) = object.get_mut(key).and_then(Value::as_array_mut) {
+            for child in children {
+                normalize_input_schema(child);
+            }
+        }
     }
 }
 
@@ -246,23 +293,38 @@ fn desktop_scope_schema(generator: &mut SchemaGenerator) -> Schema {
 /// `display_id="primary"` is the portable desktop target in this release.
 /// Platforms that cannot address another display reject it explicitly rather
 /// than silently changing coordinate spaces.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, uniffi::Enum)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ActionTarget {
     Window { pid: u32, window_id: u64 },
     Desktop { display_id: String },
 }
 
+impl JsonSchema for ActionTarget {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ActionTarget".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "description": "Exact window or desktop target. Window requires pid and window_id; desktop requires display_id.",
+            "required": ["kind"],
+            "properties": {
+                "kind": {"type":"string","enum":["window","desktop"]},
+                "pid": {"type":"integer","minimum":0},
+                "window_id": {"type":"integer","minimum":0},
+                "display_id": {"type":"string","description":"Use primary for the primary display."}
+            }
+        })
+    }
+}
+
 pub fn action_target_schema() -> Value {
-    let settings = schemars::generate::SchemaSettings::draft2020_12().with(|settings| {
-        settings.meta_schema = None;
-        settings.inline_subschemas = true;
-    });
-    let schema = settings
+    let schema = schema_settings()
         .into_generator()
         .into_root_schema_for::<ActionTarget>();
     let mut value = serde_json::to_value(schema).expect("action target schema serializes");
-    normalize_schema(&mut value);
+    normalize_input_schema(&mut value);
     value
 }
 
@@ -1276,13 +1338,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn input_schema_normalization_keeps_property_names_and_literal_values() {
+        let mut schema = json!({
+            "type":"object", "title":"Drop annotation", "properties": {
+                "title": {"type":["string","null"], "default":null},
+                "const": {"type":"object", "default":{"title":"literal","const":1}},
+                "version": {"type":"integer","const":1}
+            }
+        });
+        normalize_input_schema(&mut schema);
+        assert_eq!(schema["properties"]["title"], json!({"type":"string"}));
+        assert_eq!(
+            schema["properties"]["const"]["default"],
+            json!({"title":"literal","const":1})
+        );
+        assert_eq!(
+            schema["properties"]["version"],
+            json!({"type":"integer","minimum":1,"maximum":1})
+        );
+        assert!(schema.get("title").is_none());
+        assert!(serde_json::from_value::<ActionTarget>(json!({"kind":"window","pid":1})).is_err());
+        assert!(serde_json::from_value::<ActionTarget>(json!({"kind":"desktop"})).is_err());
+    }
+
+    #[test]
     fn generated_click_schema_matches_driver_dialect() {
         let schema = ClickInput::input_schema();
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["required"], json!(["x", "y"]));
-        assert_eq!(schema["properties"]["scope"]["const"], "desktop");
-        assert!(schema["properties"]["target"]["anyOf"].is_array());
+        assert_eq!(schema["properties"]["scope"]["enum"], json!(["desktop"]));
+        assert_eq!(schema["properties"]["target"]["type"], "object");
+        assert!(schema["properties"]["target"].get("anyOf").is_none());
         assert_eq!(
             schema["properties"]["button"],
             json!({ "type": "string", "enum": ["left", "right", "middle"] })

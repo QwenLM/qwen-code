@@ -111,6 +111,7 @@ import type {
   FlashFallbackEvent,
   NextSpeakerCheckEvent,
   LoopDetectedEvent,
+  LoopProtectionEvent,
   RepeatedToolFailureGuardEvent,
   LoopDetectionDisabledEvent,
   SlashCommandEvent,
@@ -761,6 +762,20 @@ export function logLoopDetected(
     attributes,
   };
   logger.emit(logRecord);
+}
+
+export function logLoopProtection(
+  config: Config,
+  event: LoopProtectionEvent,
+): void {
+  QwenLogger.getInstance(config)?.logLoopProtectionEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Loop protection ${event.decision}. Type: ${event.loop_type}.`,
+    attributes: { ...getCommonAttributes(config), ...event },
+  });
 }
 
 export function logRepeatedToolFailureGuard(

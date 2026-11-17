@@ -82,7 +82,7 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   page,
   baseURL,
 }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1600, height: 900 });
   const live = Array.from({ length: TURNS * 2 }, (_, index) =>
     recordEvent(
       index,
@@ -147,9 +147,8 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
 
   // The rail highlights the reading position without any click, sitting at
   // its own bottom edge while the transcript is at the live tail.
-  await expect.poll(() => ariaOrdinal(page)).not.toBeNull();
+  await expect.poll(() => ariaOrdinal(page)).toBeGreaterThanOrEqual(TURNS - 6);
   const atBottom = (await ariaOrdinal(page))!;
-  expect(atBottom).toBeGreaterThanOrEqual(TURNS - 6);
   await expect.poll(() => inRangeCount(page)).toBeGreaterThan(0);
   await expect.poll(() => markerOffsetRatio(page)).toBeGreaterThan(0.85);
   await expect.poll(() => railScrollTop(page)).toBeGreaterThan(0);
@@ -172,18 +171,56 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   await expect.poll(() => ariaOrdinal(page)).toBeGreaterThan(inMiddle + 3);
   await expect.poll(() => railScrollTop(page)).toBeGreaterThan(0);
 
-  // Narrowing below the rail threshold hides the rail; scrolling there must
-  // not corrupt its window — widening brings the marker back inside the band.
-  await page.setViewportSize({ width: 1100, height: 900 });
+  // The rail needs 56 px gutters beside a row of at least 440 px; at 860 px
+  // the responsive row sits on its 440 px floor with 32 px gutters. Scrolling
+  // there must not corrupt its window — widening brings the marker back.
+  await page.setViewportSize({ width: 860, height: 900 });
+  // The row width transitions over 320 ms; waiting for the 440 px floor keeps
+  // the gutter check on the settled layout rather than a mid-transition frame.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const railElement = document.querySelector(
+            '[data-global-turn-navigation]',
+          );
+          const viewport = railElement?.closest('[data-history-viewport]');
+          const row = viewport?.querySelector('[data-web-shell-message-row]');
+          if (!viewport || !row) return false;
+          const viewportRect = viewport.getBoundingClientRect();
+          const rowRect = row.getBoundingClientRect();
+          return (
+            Math.abs(rowRect.width - 440) < 0.5 &&
+            rowRect.left - viewportRect.left < 56 &&
+            viewportRect.right - rowRect.right < 56
+          );
+        }),
+      {
+        message:
+          'expected 860 px to keep the row on its 440 px floor with gutters under the 56 px rail threshold',
+      },
+    )
+    .toBe(true);
   await expect(rail).toBeHidden();
   await scrollTranscriptTo(page, 0.5);
   await expect.poll(() => ariaOrdinal(page)).toBeNull();
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.setViewportSize({ width: 1600, height: 900 });
   await expect(rail).toBeVisible();
   await expect.poll(() => ariaOrdinal(page)).not.toBeNull();
   const ratio = await markerOffsetRatio(page);
   expect(ratio).toBeGreaterThanOrEqual(0);
   expect(ratio).toBeLessThanOrEqual(1);
+
+  // A width change relayouts the virtualized transcript and re-follows the
+  // tail, so keep asking for the upper reading position until the rail
+  // reflects it. At the tail the rail would re-window away from tick 0
+  // before the click lands.
+  await expect
+    .poll(async () => {
+      await scrollTranscriptTo(page, 0.2);
+      return ariaOrdinal(page);
+    })
+    .toBeLessThan(TURNS / 2);
 
   // Clicking a tick still jumps, and the highlight lands on the jumped turn.
   await rail

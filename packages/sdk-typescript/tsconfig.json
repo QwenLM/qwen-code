@@ -11,6 +11,10 @@
     "declarationMap": true,
     "sourceMap": true,
     "outDir": "./dist",
+    // The core sources mapped in `paths` below sit outside this package, so the
+    // project root is the packages directory. TypeScript 5 infers that; newer
+    // compilers default rootDir to this directory and reject those files.
+    "rootDir": "..",
     "removeComments": true,
     "importHelpers": false,
 
@@ -35,7 +39,6 @@
     /* Module Resolution */
     "resolveJsonModule": true,
     "types": ["node"],
-    "baseUrl": ".",
     // The cli bundle pulls these sources in through the cli tsconfig
     // `@qwen-code/sdk/*` mapping, and mainBuild discovers this file per
     // importing file (it passes no `tsconfig` option). Without a named entry

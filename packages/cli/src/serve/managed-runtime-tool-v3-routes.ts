@@ -67,6 +67,12 @@ function reference(value: unknown): ManagedToolReference | null {
   return body as unknown as ManagedToolReference;
 }
 
+export {
+  reference as parseManagedToolReference,
+  capture as parseManagedShellCapture,
+  receipt as parseManagedToolReceipt,
+};
+
 function body(
   value: unknown,
   keys: readonly string[],

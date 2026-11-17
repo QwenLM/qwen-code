@@ -27,6 +27,7 @@ import type {
 } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings } from '../config/settings.js';
+import { filterModelEntriesForDisplay } from '../utils/model-display-order.js';
 import type { Settings } from '../config/settings.js';
 import {
   getAuthTypeFromEnv,
@@ -111,22 +112,33 @@ function buildWorkspaceProvidersStatus(
       generationConfigSources: resolvedCliConfig.sources,
     });
     const currentAuth = resolvedCliConfig.authType;
-    const currentModelId = (
+    let currentModelId = (
       resolvedCliConfig.model ||
       modelsConfig.getModel() ||
       ''
     ).trim();
+    const requestedModelId = currentModelId;
+    if (
+      currentAuth &&
+      !modelsConfig.getResolvedModel(currentAuth, currentModelId)
+    ) {
+      modelsConfig.syncAfterAuthRefresh(currentAuth, currentModelId);
+      currentModelId = (modelsConfig.getModel() || '').trim();
+    }
+    const usedFallback = currentModelId !== requestedModelId;
     const hasCurrentModel = currentModelId.length > 0;
     const modelCameFromSettings =
       !argv.model && settings.model?.name?.trim() === currentModelId;
-    const currentBaseUrl =
-      modelCameFromSettings && settings.model?.baseUrl !== undefined
+    const currentBaseUrl = usedFallback
+      ? modelsConfig.getGenerationConfig().baseUrl
+      : modelCameFromSettings && settings.model?.baseUrl !== undefined
         ? settings.model.baseUrl || undefined
         : resolvedCliConfig.sources['baseUrl']
           ? resolvedCliConfig.baseUrl || undefined
           : undefined;
-    const currentRegistryBaseUrl =
-      modelCameFromSettings && currentAuth
+    const currentRegistryBaseUrl = usedFallback
+      ? modelsConfig.getCurrentRegistryBaseUrl()
+      : modelCameFromSettings && currentAuth
         ? settings.model?.baseUrl !== undefined
           ? settings.model.baseUrl || null
           : (modelsConfig.getResolvedModel(currentAuth, currentModelId)
@@ -154,7 +166,7 @@ function buildWorkspaceProvidersStatus(
         : undefined;
     const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
-    for (const option of modelOptions) {
+    for (const option of filterModelEntriesForDisplay(modelOptions)) {
       const { model, effectiveModelId, modelId } = option;
       if (model.isRuntimeModel) continue;
       const authType = String(model.authType);

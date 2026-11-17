@@ -1,0 +1,177 @@
+package com.alibaba.qwen.code.managedagent;
+
+import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
+import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+
+public final class HostedProcessCrashFixtureMain {
+    private HostedProcessCrashFixtureMain() {
+    }
+
+    public static void main(String[] args) throws Exception {
+        Path root = Path.of(args[0]);
+        String node = args[1];
+        String cli = args[2];
+        String tenant = args[3];
+        String fault = args[4];
+        boolean coordinatorRestart = "coordinator-only".equals(fault);
+        boolean settlement = "recovery-settlement".equals(fault);
+        boolean brokerOnly = "recovery-broker".equals(fault);
+        boolean workspaceRecovery = settlement || brokerOnly;
+        Path workspace = root.resolve("workspace");
+        ObjectMapper mapper = new ObjectMapper();
+        List<String> arguments = new ArrayList<>(List.of(
+                "--server.address=127.0.0.1",
+                "--spring.datasource.url=" + System.getenv("FG6C_MYSQL_URL"),
+                "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
+                "--spring.datasource.username=" + System.getenv("FG6C_MYSQL_USER"),
+                "--spring.datasource.password=" + System.getenv().getOrDefault("FG6C_MYSQL_PASSWORD", ""),
+                "--qwen.managed-agent.session-store.enabled=true"));
+        if (coordinatorRestart) {
+            String port = args[5];
+            arguments.addAll(List.of(
+                    "--server.port=" + port,
+                    "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + port,
+                    "--qwen.managed-agent.session-store.workspace-id=coordinator-restart",
+                    "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
+                    "--qwen.managed-agent.harness.enabled=true",
+                    "--qwen.managed-agent.harness.base-url=" + args[6],
+                    "--qwen.managed-agent.harness.token=hosted-process-fixture-token",
+                    "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
+                    "--qwen.managed-agent.runtime-broker.enabled=false",
+                    "--qwen.managed-agent.dispatch.scan-delay=100ms",
+                    "--qwen.managed-agent.dispatch.lease-duration=3s",
+                    "--qwen.managed-agent.dispatch.lease-renew-interval=1s"));
+        } else {
+            Path worker = root.resolve("fixture-worker.mjs");
+            Path cliPath = Path.of(cli).toAbsolutePath().normalize();
+            Files.writeString(worker, "await import("
+                    + mapper.writeValueAsString(cliPath.getParent().getParent()
+                            .resolve("integration-tests/helpers/hosted-file-read-gate.mjs").toUri().toString())
+                    + ");\nprocess.argv[1] = " + mapper.writeValueAsString(cliPath.toString())
+                    + ";\nawait import(" + mapper.writeValueAsString(cliPath.toUri().toString()) + ");\n");
+            arguments.addAll(List.of(
+                    "--server.port=" + (settlement ? args[5] : "0"),
+                    "--qwen.managed-agent.harness.enabled=" + settlement,
+                    "--qwen.managed-agent.harness.capability-digest=sha256:" + "a".repeat(64),
+                    "--qwen.managed-agent.runtime-broker.enabled=true",
+                    "--qwen.managed-agent.runtime-broker.port=" + (brokerOnly ? args[7] : "0"),
+                    "--qwen.managed-agent.runtime-broker.token=hosted-tools-broker-token",
+                    "--qwen.managed-agent.runtime-broker.durable-local-process=" + workspaceRecovery,
+                    "--qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery=false",
+                    "--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
+                        + List.of("Linux", "Mac OS X").contains(System.getProperty("os.name")),
+                    "--qwen.managed-agent.runtime-broker.workspace-cwd=" + (workspaceRecovery ? workspace : root),
+                    "--qwen.managed-agent.runtime-broker.state-directory="
+                        + root.resolve(settlement ? "coordinator-runtime" : "runtime"),
+                    "--qwen.managed-agent.runtime-broker.credential-key-id=test",
+                    "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                    "--qwen.managed-agent.runtime-broker.node-executable=" + node,
+                    "--qwen.managed-agent.runtime-broker.worker-entry=" + worker,
+                    "--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=" + tenant,
+                    "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
+                    "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root=" + workspace));
+            if (settlement) {
+                arguments.addAll(List.of(
+                        "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:" + args[5],
+                        "--qwen.managed-agent.session-store.workspace-id=unused-global-workspace",
+                        "--qwen.managed-agent.session-store.writer-lease-duration=30s",
+                        "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
+                        "--qwen.managed-agent.harness.base-url=http://127.0.0.1:" + args[6],
+                        "--qwen.managed-agent.harness.token=hosted-process-fixture-token",
+                        "--qwen.managed-agent.harness.workspace-files-enabled=true",
+                        "--qwen.managed-agent.harness.approval-mode=yolo",
+                        "--qwen.managed-agent.runtime-broker.session-create-warm=false",
+                        "--qwen.managed-agent.dispatch.scan-delay=100ms",
+                        "--qwen.managed-agent.dispatch.lease-duration=3s",
+                        "--qwen.managed-agent.dispatch.lease-renew-interval=1s"));
+            }
+        }
+        var application = new SpringApplicationBuilder(ManagedAgentServerApplication.class);
+        if (settlement) {
+            // The resident sidecar owns execution; suppress only the optional local prewarm.
+            application.initializers(context -> ((GenericApplicationContext) context).registerBean(
+                    "fixtureNoPrewarm", RuntimeWarmer.class, () -> new RuntimeWarmer() {
+                        @Override
+                        public boolean isEnabled() {
+                            return false;
+                        }
+
+                        @Override
+                        public CompletableFuture<Void> warm(String sessionId) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+
+                        @Override
+                        public CompletableFuture<Void> drain(String sessionId) {
+                            return CompletableFuture.completedFuture(null);
+                        }
+                    }, definition -> definition.setPrimary(true)));
+        }
+        var spring = (ServletWebServerApplicationContext) application.run(arguments.toArray(String[]::new));
+        if (brokerOnly) {
+            Path ready = root.resolve("broker-ready.tmp");
+            mapper.writeValue(ready.toFile(), Map.of(
+                    "brokerUrl", spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri().toString()));
+            Files.move(ready, root.resolve("broker-ready.json"), StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+            return;
+        }
+        if (coordinatorRestart) {
+            Path ready = root.resolve("ready.tmp");
+            mapper.writeValue(ready.toFile(), Map.of(
+                    "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort()));
+            Files.move(ready, root.resolve("ready.json"), StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+            return;
+        }
+        Path saved = root.resolve("session-id");
+        String sessionId;
+        if (Files.exists(saved)) {
+            sessionId = Files.readString(saved);
+        } else {
+            JdbcTemplate jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
+            jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
+                    + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage',"
+                    + " 'Workspace', ?, ?, 'ACTIVE')", tenant,
+                    WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+            sessionId = spring.getBean(ManagedAgentStore.class).insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("create")
+                    .requestDigest("sha256:" + "a".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "child"))
+                    .build()).sessionId();
+            Files.writeString(saved, sessionId);
+        }
+        Path ready = root.resolve("ready.tmp");
+        new ObjectMapper().writeValue(ready.toFile(), Map.of(
+                "tenantId", tenant, "sessionId", sessionId, "workspaceId", "workspace",
+                "directory", workspace.resolve("child").toString(), "fault", fault,
+                "storeUrl", "http://127.0.0.1:" + spring.getWebServer().getPort(),
+                "brokerUrl", settlement ? "http://127.0.0.1:" + args[7]
+                        : spring.getBean(EmbeddedRuntimeBroker.class).getBaseUri().toString()));
+        Files.move(ready, root.resolve("ready.json"), StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING);
+    }
+}

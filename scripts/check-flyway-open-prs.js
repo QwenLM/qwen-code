@@ -183,10 +183,15 @@ function evaluate(modules, mainFiles, prs) {
       .map((file) => ({
         ...file,
         path: relocated
-          ? file.path.replace(
-              /^packages\/sdk-java\/(?:managed-agent-server|runtime-broker)\/src\//,
-              `${currentModule}/src/`,
-            )
+          ? file.path
+              .replace(
+                /^packages\/sdk-java\/(?:managed-agent-server|runtime-broker)\/src\//,
+                `${currentModule}/src/`,
+              )
+              .replace(
+                /^packages\/managed-agent-server\/src\/main\/resources\/db\/managed-schema\//,
+                `${currentModule}/persistence/src/main/resources/db/managed-schema/`,
+              )
           : file.path,
       }))
       .filter((file) => isTracked(modules, file.path));

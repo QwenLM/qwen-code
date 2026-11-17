@@ -44,6 +44,17 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it('keeps Generated UI retention out of the read-only transcript runtime', () => {
+    const withoutCss = (javascript: string) =>
+      javascript.replace(/^const __qwenWebShellCss=.*\n/gm, '');
+    expect(withoutCss(readTranscriptBundle())).not.toContain(
+      'data-generated-ui-slot',
+    );
+    expect(withoutCss(readPackageJavascript())).toContain(
+      'data-generated-ui-slot',
+    );
+  });
+
   it('keeps deletion-only copy out of the read-only transcript', () => {
     for (const copy of [
       'Delete permanently',
@@ -143,6 +154,10 @@ describe('build artifact — package boundary', () => {
     expect(bundle).not.toContain('react/jsx-dev-runtime');
     expect(bundle).not.toContain('jsxDEV');
     expect(bundle).not.toContain('fileName:');
+  });
+
+  it('uses the host React DOM server renderer for conversation exports', () => {
+    expect(readPackageJavascript()).toContain('from "react-dom/server"');
   });
 
   it('externalizes @qwen-code/sdk subpaths', () => {
@@ -336,6 +351,15 @@ describe('build artifact — package boundary', () => {
     });
 
     expect(fullscreenRule).toBeDefined();
+    expect(fullscreenRule?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'decl',
+          prop: '--chat-responsive-content-width',
+          value: '100%',
+        }),
+      ]),
+    );
     expect(fullscreenRule?.selector).toMatch(
       /\._panelFullscreen_[A-Za-z0-9_]+$/,
     );
@@ -500,6 +524,19 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(readTranscriptBundle()).not.toContain('/tool-details/get');
   });
 
+  it('keeps Managed MCP management transport and copy out of the transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const content of [
+      '/session-mcp/management/submit',
+      'Choose an exact definition published for this Runtime and Workspace.',
+      '原命令仍需确认，请先查询该命令，再开始其他修改。',
+    ]) {
+      expect(packaged).toContain(content);
+      expect(transcript).not.toContain(content);
+    }
+  });
+
   it('keeps workspace mutations out of the read-only transcript entry', () => {
     const transcript = readTranscriptBundle();
     const packaged = readPackageJavascript();
@@ -602,6 +639,19 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js.includes('managed.tasks.')).toBe(false);
   });
 
+  it('keeps browser notification strings and lookups in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('browserNotifications.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('browserNotifications.helpMac');
+    expect(interactive).toContain('browserNotifications.approval');
+    expect(interactive).toContain('Open System Settings → Notifications.');
+    expect(interactive).toContain('浏览器（Chrome');
+  });
+
   it('keeps remote Workspace registration copy in the interactive entry', () => {
     expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
     expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');
@@ -643,6 +693,20 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(readPackageJavascript()).toContain('trajectory.pill.live');
     expect(readPackageJavascript()).toContain('trajectory.filter.search');
     expect(readPackageJavascript()).toContain('Search loaded records');
+  });
+
+  it('keeps the Russian Web Shell catalog in the interactive entry only', () => {
+    const transcript = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('Что вы хотите сделать?');
+    expect(interactive).toContain('Недельный лимит кредитов исчерпан');
+    expect(interactive).toContain('Вас @упомянули в комментарии');
+    expect(transcript).not.toContain('Что вы хотите сделать?');
+    expect(transcript).not.toContain('Недельный лимит кредитов исчерпан');
+    expect(transcript).not.toContain('Вас @упомянули в комментарии');
   });
 
   it('still carries what a transcript actually renders', () => {

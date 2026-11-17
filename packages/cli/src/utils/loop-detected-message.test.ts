@@ -17,13 +17,13 @@ import {
 } from './loop-detected-message.js';
 
 describe('formatLoopDetectedMessage', () => {
-  it('keeps the existing text for a loop type without a reason', () => {
+  it('names the governing setting for a loop type without a reason', () => {
     expect(
       formatLoopDetectedMessage({
         loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
       }),
     ).toBe(
-      'Loop detection halted the run (consecutive_identical_tool_calls: the model repeated the same tool call with identical arguments). This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.',
+      'Loop detection halted the run (consecutive_identical_tool_calls: the model repeated the same tool call with identical arguments). Set `model.loopProtection` to "warn" to remind the model instead of stopping, or to "off" to disable this guard.',
     );
     expect(formatLoopDetectedMessage(undefined)).toBe(
       'Loop detection halted the run. Set the `model.skipLoopDetection` setting to true to disable.',
@@ -73,7 +73,7 @@ describe('formatLoopDetectedMessage', () => {
         toolCallLimit: 100,
       }),
     ).toBe(
-      'Loop detection halted the run (turn_tool_call_cap: past 100 tool calls the model kept repeating the same tool call). Give the model a more specific instruction. An explicit `model.maxToolCallsPerTurn` replaces this repetition check with a fixed cap (0 disables it).',
+      'Loop detection halted the run (turn_tool_call_cap: past 100 tool calls the model kept repeating the same tool call). Give the model a more specific instruction, or set `model.loopProtection` to "warn" to remind it instead of stopping. An explicit `model.maxToolCallsPerTurn` replaces this repetition check with a fixed cap (0 disables it).',
     );
   });
 
@@ -84,7 +84,7 @@ describe('formatLoopDetectedMessage', () => {
         loopReason: LoopReason.REPEATED_CALL,
       }),
     ).toBe(
-      'Loop detection halted the run (global_tool_call_duplicate: the model repeated the same tool call across the turn, even when not back-to-back). Set the `model.skipLoopDetection` setting to true to disable.',
+      'Loop detection halted the run (global_tool_call_duplicate: the model repeated the same tool call across the turn, even when not back-to-back). Set `model.loopProtection` to "warn" to remind the model instead of stopping, or `model.skipLoopDetection` to true to disable this check.',
     );
     expect(
       formatLoopDetectedMessage({

@@ -1,31 +1,7 @@
 //! Shared delivery-mode logic for cua-driver Linux input tools.
 //!
-//! Mirrors macOS `tools::DeliveryMode` and Windows `input::delivery`: each
-//! input tool accepts an optional `delivery_mode` field with exactly two modes
-//! — the agent-selected rung of the best-effort-background ladder, passed per
-//! call (never a stored setting):
-//!
-//! - `background` (DEFAULT) — inject without activating/raising the target.
-//!   - **X11**: XTEST / XSendEvent / XInput2 MPX master-pointer no-focus-steal
-//!     path (see `input::mod`). Lands on a backgrounded window without stealing
-//!     focus — the direct analogue of macOS CGEvent / Windows PostMessage.
-//!   - **Wayland**: libei via xdg-desktop-portal (`wayland::libei`). Wayland's
-//!     security model has NO arbitrary per-window background targeting — libei
-//!     injects to the compositor's input focus, so "background" cannot aim at a
-//!     specific non-focused window the way X11/macOS/Windows can (this is a
-//!     platform constraint, reported honestly, like macOS pixel input being
-//!     driver-unverifiable). When no libei backend is available
-//!     (`PORTAL_INPUT_ENABLED == false`) the tool returns a structured
-//!     `background_unavailable` error so the caller can escalate to foreground.
-//!
-//! - `foreground` — activate the target first, inject, then restore the prior
-//!   active window.
-//!   - **X11**: EWMH `_NET_ACTIVE_WINDOW` client message (the `wmctrl -a`
-//!     equivalent) raise + activate.
-//!   - **Wayland**: compositor-specific activate where supported; else the
-//!     libei-to-focus path with an honest note.
-//!   The agent's explicit last resort; a brief focus swap unless the target was
-//!   already active. Matches the macOS / Windows `foreground` rung.
+//! X11 background delivery uses semantic actions, XSendEvent or MPX. Foreground
+//! delivery activates the target and restores the prior active window.
 
 use serde_json::Value;
 
@@ -34,7 +10,7 @@ use serde_json::Value;
 /// macOS `tools::DeliveryMode` and Windows `input::delivery::DeliveryMode`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum DeliveryMode {
-    /// Inject without activating the target (X11 XTEST/MPX; Wayland libei-to-focus).
+    /// Inject without activating the target (X11 XTEST/MPX).
     #[default]
     Background,
     /// Activate the target, inject, restore prior active window.
@@ -55,11 +31,7 @@ impl DeliveryMode {
 
     /// Parse from a tool's JSON args, reading the `delivery_mode` field.
     pub fn from_args(args: &Value) -> Self {
-        if args.get("app_context").and_then(Value::as_bool) == Some(true) {
-            Self::Foreground
-        } else {
-            Self::parse(args.get("delivery_mode").and_then(|v| v.as_str()))
-        }
+        Self::parse(args.get("delivery_mode").and_then(|v| v.as_str()))
     }
 
     pub fn is_foreground(self) -> bool {
@@ -71,34 +43,16 @@ impl DeliveryMode {
 /// input tool's `input_schema.properties.delivery_mode`. Two modes, matching
 /// the macOS / Windows surface.
 pub fn delivery_mode_schema() -> Value {
-    // Source the SHAPE (`type` + `enum`) from the shared canon so it can't drift
-    // from macOS / Windows, while keeping the Linux-specific Wayland/X11 prose
-    // (the gate compares shape only — descriptions may vary per platform). The
-    // `default` advertisement is additive on top of the canon shape.
     let mut v = cua_driver_core::tool_schema::delivery_mode_schema_with(
-        "Input delivery mode. 'background' (default) never activates or raises \
-         the target window. On X11 it injects via XTEST / the XInput2 master \
-         pointer (no focus steal). On Wayland it goes through libei + \
-         xdg-desktop-portal, which injects to the compositor's input focus — \
-         Wayland's security model has no per-window background targeting, so a \
-         specific non-focused window cannot be aimed at; when no libei backend \
-         is available the tool returns a structured background_unavailable \
-         error. 'foreground' is the explicit escalation: activate the target \
-         (X11 _NET_ACTIVE_WINDOW; Wayland compositor activate), inject, then \
-         restore the prior active window — a brief focus swap unless the \
-         target was already active. Matches the macOS / Windows delivery_mode \
-         surface.",
+        "Input delivery mode. 'background' (default) does not activate the target. 'foreground' activates the exact X11 window for input and then restores the previous foreground.",
     );
     v["default"] = serde_json::json!("background");
     v
 }
 
-/// Reason a `background` delivery cannot be performed on Wayland.
+/// Reason background input is unavailable on the exact X11 target.
 #[derive(Copy, Clone, Debug)]
 pub enum BackgroundUnavailable {
-    /// No libei backend (built without `portal-input`, or the portal session
-    /// was denied / unavailable). Input has no actuator at all.
-    NoLibeiBackend,
     /// X11/Chromium does not accept synthetic pointer or keyboard input
     /// addressed to an occluded, unfocused renderer without briefly moving
     /// focus, which background delivery forbids.
@@ -108,24 +62,21 @@ pub enum BackgroundUnavailable {
     /// WebKitGTK rejects synthetic XSendEvent input and no real target-addressed
     /// pointer backend is available in this session.
     WebKitSyntheticInput,
+    /// Openbox promotes an MPX master's core FocusIn to global activation.
+    WindowManagerFocus,
 }
 
 impl BackgroundUnavailable {
     fn code(self) -> &'static str {
         match self {
-            Self::NoLibeiBackend => "background_unavailable",
             Self::ChromiumInput => "background_unavailable",
             Self::FocusedInputOnly => "background_unavailable",
             Self::WebKitSyntheticInput => "background_unavailable",
+            Self::WindowManagerFocus => "background_unavailable",
         }
     }
     fn detail(self) -> &'static str {
         match self {
-            Self::NoLibeiBackend => {
-                "no libei input backend on this Wayland compositor (built without \
-                 portal-input, or the xdg-desktop-portal RemoteDesktop session was \
-                 unavailable/denied): synthetic input has no actuator"
-            }
             Self::ChromiumInput => {
                 "Chromium/Electron does not accept pointer or keyboard input \
                  addressed to an occluded, unfocused renderer through X11 \
@@ -137,12 +88,23 @@ impl BackgroundUnavailable {
             Self::WebKitSyntheticInput => {
                 "WebKitGTK rejects synthetic XSendEvent input and this session has no real target-addressed pointer backend"
             }
+            Self::WindowManagerFocus => {
+                "Openbox treats virtual keyboard focus as global window activation"
+            }
         }
     }
 }
 
+impl std::fmt::Display for BackgroundUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.detail())
+    }
+}
+
+impl std::error::Error for BackgroundUnavailable {}
+
 /// Build the structured `background_unavailable` error returned when a
-/// `delivery_mode:"background"` injection has no Wayland backend. Mirrors the
+/// background injection has no usable backend. Mirrors the
 /// Windows silent-drop error so callers branch on `code` identically.
 pub fn background_unavailable_error(
     reason: BackgroundUnavailable,
@@ -155,6 +117,7 @@ pub fn background_unavailable_error(
     ))
     .with_structured(serde_json::json!({
         "code": reason.code(),
+        "sent": false,
         "detail": detail,
         "suggestion": "Retry this action with delivery_mode:\"foreground\".",
         "escalation": {
@@ -228,7 +191,7 @@ mod tests {
 
     #[test]
     fn background_unavailable_error_carries_code() {
-        let r = background_unavailable_error(BackgroundUnavailable::NoLibeiBackend);
+        let r = background_unavailable_error(BackgroundUnavailable::FocusedInputOnly);
         assert_eq!(r.is_error, Some(true));
         assert_eq!(
             r.structured_content.as_ref().unwrap()["code"],

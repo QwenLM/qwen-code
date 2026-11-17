@@ -2,6 +2,8 @@
 
 [English](2026-10-19-managed-agent-package-boundaries.md) | [简体中文](2026-10-19-managed-agent-package-boundaries.zh-CN.md)
 
+Successor: [Maven module boundaries](2026-10-29-managed-agent-maven-modules.md). This document retains its historical decisions and validation record; the successor defines the current build layout.
+
 Status: implemented and verified locally on main base `f37e003d9450`. Remote CI and formal review are tracked on [PR #14710](https://github.com/QwenLM/qwen-code/pull/14710). The optional MySQL, Hosted and Linux fault profiles were not run locally for this package reorganization.
 
 ## Problem and current state

@@ -26,6 +26,7 @@ import type { ChannelFactory } from './channel.js';
 import { markChannelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import { redactLogCredentials } from './logRedaction.js';
 import {
+  DAEMON_ACP_NDJSON_LIMITS,
   NdJsonQueueLimitError,
   ndJsonStream,
   type NdJsonMessageObservation,
@@ -43,12 +44,7 @@ import { estimateJsonStringBytes } from './json-string-bytes.js';
 import { detectAvailableMemoryMb } from './daemon-memory-budget.js';
 
 let cachedMemoryArgs: string[] | undefined;
-export const DAEMON_ACP_NDJSON_LIMITS: Readonly<NdJsonStreamLimits> =
-  Object.freeze({
-    maxFrameBytes: 64 * 1024 * 1024,
-    maxQueuedMessages: 256,
-    maxQueuedBytes: 64 * 1024 * 1024,
-  });
+export { DAEMON_ACP_NDJSON_LIMITS };
 
 const daemonClientParamValidators = new Map<
   string,
@@ -743,6 +739,10 @@ export const defaultSpawnChannelFactory: ChannelFactory =
  * loopback Guard provider. The ACP child reaches the daemon over its private
  * channel and never needs this token.
  *
+ * `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`: the Hosted Harness's Runtime Broker
+ * credential. Only the daemon calls the Broker; a prompt-injected agent
+ * holding it could drive Runtime executions directly.
+ *
  * **WARNING**: this denylist is correct *only because the agent
  * already has unrestricted shell-tool access* — anything in the env
  * is reachable via `~/.bashrc`/`~/.aws/credentials`/etc. anyway.
@@ -759,6 +759,7 @@ const SCRUBBED_CHILD_ENV_KEYS: ReadonlySet<string> = new Set([
   'QWEN_SERVER_TOKEN',
   'QWEN_CODE_SIMPLE',
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
+  'QWEN_MANAGED_RUNTIME_BROKER_TOKEN',
 ]);
 
 /**

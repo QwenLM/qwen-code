@@ -5,14 +5,14 @@
  */
 
 import { readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { SessionWriterLease } from '../services/session-writer-lease.js';
+import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import {
-  ManagedSessionRecordError,
-  MANAGED_SESSION_FORMAT_VERSION,
-} from './managed-session-records.js';
+  acquireLocalManagedSessionWriter,
+  prepareLocalManagedSessionWriter,
+} from './local-managed-session-writer.js';
+import { readLocalManagedJournal } from './local-managed-journal-snapshot.js';
+import { ManagedSessionRecordError } from './managed-session-records.js';
 import {
-  emptyManagedSessionJournalScan,
-  scanManagedSessionJournal,
   type ManagedSessionCommitProof,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
@@ -25,6 +25,7 @@ interface LocalJsonlManagedSessionJournalStoreOptions {
   readonly sessionId: string;
   readonly transcriptPath: string;
   readonly lease?: SessionWriterLease;
+  readonly requireNew?: boolean;
 }
 
 /** Local-file implementation retained for standalone CLI and development. */
@@ -41,23 +42,16 @@ export class LocalJsonlManagedSessionJournalStore
     const adopted = this.options.lease !== undefined;
     const lease =
       this.options.lease ??
-      (await SessionWriterLease.acquire({
+      (await acquireLocalManagedSessionWriter({
         runtimeBaseDir: this.options.runtimeBaseDir,
         sessionId: this.options.sessionId,
         transcriptPath: this.options.transcriptPath,
-        takeoverPolicy: 'certified',
-        // A Managed writer pins its log format into the lock: baseline
-        // binaries refuse the unknown schema, which is the write barrier
-        // that keeps this log off legacy writers.
-        lockSchema: {
-          schemaVersion: 3,
-          formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-        },
       }));
     return new LocalJsonlManagedSessionJournalHandle(
       lease,
       request.sessionKey,
       !adopted,
+      this.options.requireNew !== true,
     );
   }
 
@@ -68,20 +62,13 @@ export class LocalJsonlManagedSessionJournalStore
     return new LocalJsonlManagedSessionJournalHandle(lease, sessionKey, false);
   }
 
-  static async read(
-    transcriptPath: string,
-    sessionKey: ManagedSessionKey,
-    maxBytes?: number,
-  ): Promise<ManagedSessionJournalScan> {
-    try {
-      const bytes = await readFile(transcriptPath);
-      return scanManagedSessionJournal(bytes, sessionKey, maxBytes);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return emptyManagedSessionJournalScan();
-      }
-      throw error;
-    }
+  static async read(options: {
+    readonly transcriptPath: string;
+    readonly runtimeBaseDir: string;
+    readonly sessionKey: ManagedSessionKey;
+    readonly maxBytes?: number;
+  }): Promise<ManagedSessionJournalScan> {
+    return readLocalManagedJournal(options);
   }
 }
 
@@ -92,18 +79,30 @@ export class LocalJsonlManagedSessionJournalHandle
     private readonly lease: SessionWriterLease,
     readonly sessionKey: ManagedSessionKey,
     private readonly ownsLease: boolean,
+    private readonly prepareOnRead = true,
   ) {}
 
-  read(
+  private preparation: Promise<boolean> | undefined;
+
+  async read(
     options: {
       readonly maxBytes?: number;
     } = {},
   ): Promise<ManagedSessionJournalScan> {
-    return LocalJsonlManagedSessionJournalStore.read(
-      this.lease.transcriptPath,
-      this.sessionKey,
-      options.maxBytes,
-    );
+    if (this.prepareOnRead) {
+      // This handle already owns the writer; static inspection never prepares.
+      this.preparation ??= prepareLocalManagedSessionWriter(
+        this.lease,
+        this.sessionKey,
+      );
+      await this.preparation;
+    }
+    return LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: this.lease.transcriptPath,
+      runtimeBaseDir: this.lease.runtimeBaseDir,
+      sessionKey: this.sessionKey,
+      ...options,
+    });
   }
 
   async appendTransaction(records: readonly unknown[]): Promise<void> {
@@ -133,9 +132,14 @@ export class LocalJsonlManagedSessionJournalHandle
   }
 
   async abort(): Promise<void> {
-    if (this.ownsLease) {
-      await this.lease.release();
+    if (!this.ownsLease) return;
+    if ((this.lease.managedJournalFormatVersion ?? 0) >= 2) {
+      // Retain the format barrier so an older writer cannot acquire the Session.
+      const proof = this.lease.takeoverCommitProof;
+      if (proof) await this.lease.sealForHandoff(proof);
+      return;
     }
+    await this.lease.release();
   }
 
   async recoverUncommittedTail(): Promise<{

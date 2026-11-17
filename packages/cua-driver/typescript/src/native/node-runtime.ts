@@ -36,13 +36,43 @@ const { UniffiNativeModule, pumpMainRunLoop } = require(runtimePath) as {
   pumpMainRunLoop: () => void
 }
 
-export async function withMainRunLoop<T>(operation: () => Promise<T>): Promise<T> {
+let users = 0
+let timer: ReturnType<typeof setInterval> | undefined
+let nativeIsLive: (() => boolean) | undefined
+
+function stopWhenIdle() {
+  if (users === 0 && !nativeIsLive?.() && timer) {
+    clearInterval(timer)
+    timer = undefined
+  }
+}
+
+export function retainMainRunLoop(liveness?: () => boolean): () => void {
   pumpMainRunLoop()
-  const timer = setInterval(pumpMainRunLoop, 10)
+  if (liveness) nativeIsLive = liveness
+  users++
+  if (!timer) {
+    timer = setInterval(() => {
+      pumpMainRunLoop()
+      stopWhenIdle()
+    }, 10)
+    timer.unref()
+  }
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    users--
+    stopWhenIdle()
+  }
+}
+
+export async function withMainRunLoop<T>(operation: () => Promise<T>): Promise<T> {
+  const release = retainMainRunLoop()
   try {
     return await operation()
   } finally {
-    clearInterval(timer)
+    release()
   }
 }
 

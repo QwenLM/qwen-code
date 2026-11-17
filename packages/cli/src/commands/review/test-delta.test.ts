@@ -129,6 +129,53 @@ describe('runTestDelta', () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
+  it('reruns a related run on base as written, like a whole suite', () => {
+    const related =
+      'npm exec --workspace="packages/core" --yes=false -- vitest related --run "src/a.ts"';
+    const ran: string[] = [];
+    const r = runWith(
+      [
+        cmd({
+          command: related,
+          output: ' FAIL  src/a.test.ts > case\n FAIL  src/b.test.ts > case',
+        }),
+      ],
+      (command) => {
+        ran.push(command);
+        return cmd({ command, output: ' FAIL  src/b.test.ts > case' });
+      },
+    );
+    expect(ran).toEqual([related]);
+    expect(r.netNew).toEqual(['src/a.test.ts']);
+    expect(r.shared).toEqual(['src/b.test.ts']);
+  });
+
+  it('attributes nothing when the related run on base found no test to run', () => {
+    // vitest exits 0 with "No test files found" when nothing the paths name
+    // is in the base graph: a base that ran nothing, not a green one.
+    const related =
+      'npm exec --workspace="packages/core" --yes=false -- vitest related --run "src/new.ts"';
+    const r = runWith(
+      [cmd({ command: related, output: ' FAIL  src/a.test.ts > case' })],
+      (command) =>
+        cmd({
+          command,
+          exitCode: 0,
+          output: 'No test files found, exiting with code 0',
+        }),
+    );
+    expect(r.netNew).toEqual([]);
+    expect(r.shared).toEqual([]);
+    expect(r.note).toContain('found no test to run on base');
+    // A green base that ran tests still measures: the failure is the PR's.
+    const green = runWith(
+      [cmd({ command: related, output: ' FAIL  src/a.test.ts > case' })],
+      (command) =>
+        cmd({ command, exitCode: 0, output: ' Test Files  1 passed (1)' }),
+    );
+    expect(green.netNew).toEqual(['src/a.test.ts']);
+  });
+
   it('refuses the base-side rerun under `required` instead of running it on the host', () => {
     // The PR side now runs in a container with an env allowlist and no
     // network. Running the base side on the host anyway does not just break

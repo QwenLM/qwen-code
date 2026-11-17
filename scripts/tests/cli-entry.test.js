@@ -539,6 +539,7 @@ describe('scripts/cli-entry.js production entry', () => {
 
     it.each([
       ['managed-runtime-bootstrap'],
+      ['managed-runtime-bootstrap', '--workspace-file-upload'],
       ['managed-runtime-bootstrap-worker', '/private/runtime/resource'],
     ])(
       'keeps pinned %s commands in this process and skips active updates',

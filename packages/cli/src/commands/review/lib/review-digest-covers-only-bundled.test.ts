@@ -44,6 +44,7 @@ import {
   NOT_BUNDLED_FILE,
   NOT_BUNDLED_RE,
 } from './stale-bundle.js';
+import { stripComments } from './js-source.js';
 
 const repoRoot = resolve(
   import.meta.dirname,
@@ -88,23 +89,6 @@ function isTypeOnlyClause(clause: string): boolean {
   return /^\s*type\s+(?:[{*]|[A-Za-z_$][\w$]*\s*$)/.test(clause);
 }
 
-/**
- * The source with comments dropped, which is what the scans below must read:
- * esbuild's lexer ignores comments, so a comment inside a multi-line import
- * clause must neither hide the edge (a comment carrying `;` or `'` defeats
- * the clause capture for the whole statement) nor fake one (a comment-
- * decorated `import type …` would escape `isTypeOnlyClause` and count a
- * clause esbuild erases). String and template literals match first and are
- * returned verbatim, so a `/*` or a `// …` line inside a literal — the
- * agent prompts embed both — never triggers the comment arms.
- */
-function stripComments(src: string): string {
-  return src.replace(
-    /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|\/\*[\s\S]*?\*\/|\/\/[^\n]*/g,
-    (m) => (m.startsWith('/') ? ' ' : m),
-  );
-}
-
 const isTest = (f: string) => NOT_BUNDLED_RE.test(basename(f));
 const isFixture = (f: string) =>
   relative(reviewDir, f)
@@ -113,6 +97,13 @@ const isFixture = (f: string) =>
 
 /** The modules `f` imports from within this repo, resolved to real paths. */
 function localImports(f: string): string[] {
+  // Comments dropped, which is what the scans below must read: esbuild's
+  // lexer ignores comments, so a comment inside a multi-line import clause
+  // must neither hide the edge (a comment carrying `;` or `'` defeats the
+  // clause capture for the whole statement) nor fake one (a comment-
+  // decorated `import type …` would escape `isTypeOnlyClause` and count a
+  // clause esbuild erases). Literals survive — the agent prompts embed both
+  // comment markers.
   const src = stripComments(readFileSync(f, 'utf8'));
   const specs: string[] = [];
   // `from '…'` / `export … from '…'`, `await import('…')` — the directory

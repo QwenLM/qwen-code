@@ -2,6 +2,8 @@
 
 [English](2026-10-15-managed-agent-server-layout.md) | [简体中文](2026-10-15-managed-agent-server-layout.zh-CN.md)
 
+后继设计：[Maven 多模块边界](2026-10-29-managed-agent-maven-modules.zh-CN.md)。本文保留当时的决策与验证记录；当前构建结构以多模块设计为准。
+
 状态：已实现并完成本地验证。本次尚未运行远端 CI 或真实 MySQL/Linux 部署验收。
 
 ## 问题与现状

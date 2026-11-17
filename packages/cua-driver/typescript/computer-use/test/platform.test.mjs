@@ -5,7 +5,7 @@ import { ComputerUse, ComputerUseError } from "../index.js";
 function fixture(listToolsJson) {
   const owner = { listToolsJson };
   const session = {
-    getWindowState() { throw new Error("platform lookup must not observe the desktop"); },
+    callTool() { throw new Error("platform lookup must not observe the desktop"); },
     listToolsJson() { throw new Error("platform lookup must use the owner"); },
   };
   return { computer: new ComputerUse(session, { owner }), owner };

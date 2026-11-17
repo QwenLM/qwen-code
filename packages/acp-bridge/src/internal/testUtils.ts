@@ -36,6 +36,8 @@
  */
 
 import * as path from 'node:path';
+import v8 from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import {
   AgentSideConnection,
   PROTOCOL_VERSION,
@@ -369,4 +371,43 @@ export function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
     },
   };
   return handle;
+}
+
+/**
+ * Forces full collections until `ref` is cleared or the attempts run out.
+ * deref() keeps its target alive until the current job ends, so each
+ * collection runs in a job that has not dereferenced it.
+ */
+export async function collectedAfterGc(ref: WeakRef<object>): Promise<boolean> {
+  v8.setFlagsFromString('--expose_gc');
+  const gc = runInNewContext('gc') as () => void;
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await tick();
+    gc();
+    await tick();
+    if (ref.deref() === undefined) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether this runtime's native `Promise.race` keeps a finished race's value
+ * reachable from a competitor that is still pending. Node 22 and 24 and the
+ * Electron runtime the VS Code companion uses do; Node 26 does not, so
+ * retention tests have nothing to prove there.
+ */
+export async function nativeRaceRetainsValues(): Promise<boolean> {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const finished = await (async () => {
+    const value = {};
+    await Promise.race([Promise.resolve(value), pending]);
+    return new WeakRef(value);
+  })();
+  const retained = !(await collectedAfterGc(finished));
+  release();
+  return retained;
 }

@@ -1,10 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ManagedAgentPendingAction,
+  ManagedAgentActionResponse,
   ManagedAgentProvider,
   ManagedAgentSessionEvent,
 } from './managed-agent-provider';
 import { isNonRetryableClientError } from './managed-request-error';
+import type { ManagedQuestionDraft } from './ManagedQuestionForm';
+import {
+  canonicalQuestionAnswers,
+  questionResponseKey,
+} from './managed-question-response';
 
 // Re-reads shortly after the earliest expiry so an unanswered approval leaves
 // the page once the Harness has ended it.
@@ -29,6 +35,21 @@ const ENDED_ACTION_CODES: ReadonlySet<string> = new Set([
   'action_already_resolved',
 ]);
 
+export function managedActionKey(action: ManagedAgentPendingAction): string {
+  return JSON.stringify([
+    action.sessionId,
+    action.actionId,
+    action.inputRevision,
+    action.policyRevision,
+  ]);
+}
+
+function actionSelectionKey(action: ManagedAgentPendingAction): string {
+  return JSON.stringify([action.sessionId, action.actionId]);
+}
+
+const EMPTY_QUESTION_DRAFT: ManagedQuestionDraft = {};
+
 function endedAction(failure: unknown): boolean {
   const code =
     typeof failure === 'object' && failure !== null && 'code' in failure
@@ -38,8 +59,16 @@ function endedAction(failure: unknown): boolean {
 }
 
 export interface ManagedActionsState {
-  /** The approval to show; answered ones stay hidden while they settle. */
+  actions: readonly ManagedAgentPendingAction[];
+  /** The selected pending request; answered ones stay hidden while they settle. */
   action?: ManagedAgentPendingAction;
+  select(action: ManagedAgentPendingAction): void;
+  questionDraft: ManagedQuestionDraft;
+  setQuestionDraft(
+    action: ManagedAgentPendingAction,
+    draft: ManagedQuestionDraft,
+  ): void;
+  submitting: boolean;
   /** Reading the pending approvals failed; retries run in the background. */
   loadError?: unknown;
   /**
@@ -58,7 +87,10 @@ export interface ManagedActionsState {
    * re-probes instead of treating one 403 as permanent for the mount.
    */
   respondForbidden: boolean;
-  respond(actionId: string, optionId: string): Promise<void>;
+  respond(
+    action: ManagedAgentPendingAction,
+    response: ManagedAgentActionResponse,
+  ): Promise<void>;
   /** Reads the pending approvals again now. */
   retry(): void;
 }
@@ -76,15 +108,42 @@ export function useManagedActions(
   clientId: string,
   enabled: boolean | undefined,
   events: readonly ManagedAgentSessionEvent[],
+  includeChildren = false,
 ): ManagedActionsState {
   const reader = enabled === false ? undefined : provider.actions;
+  const credentials = useMemo(
+    () => ({ provider, clientId }),
+    [provider, clientId],
+  );
+  const owner = useMemo(
+    () => ({ credentials, sessionId }),
+    [credentials, sessionId],
+  );
+  const ownerRef = useRef(owner);
+  ownerRef.current = owner;
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const changed = () => setVisible(!document.hidden);
+    document.addEventListener('visibilitychange', changed);
+    return () => document.removeEventListener('visibilitychange', changed);
+  }, []);
   const [pending, setPending] = useState<{
-    sessionId?: string;
+    owner?: typeof owner;
     actions: ManagedAgentPendingAction[];
   }>({ actions: [] });
   const [answered, setAnswered] = useState<ReadonlySet<string>>(new Set());
   const [loadError, setLoadError] = useState<unknown>();
-  const [answerError, setAnswerError] = useState<unknown>();
+  const [answerErrors, setAnswerErrors] = useState<
+    ReadonlyMap<string, unknown>
+  >(new Map());
+  const [drafts, setDrafts] = useState<
+    ReadonlyMap<string, ManagedQuestionDraft>
+  >(new Map());
+  const [selection, setSelection] = useState<{
+    owner: typeof owner;
+    key: string;
+  }>();
+  const [submitting, setSubmitting] = useState<ReadonlySet<string>>(new Set());
   // The Sessions that refused this viewer under the owner-or-operator
   // rule, keyed by Session so that leaving a refused one and coming back
   // does not re-admit the 403 without an explicit retry.
@@ -93,13 +152,11 @@ export function useManagedActions(
   >(new Set());
   const [revision, setRevision] = useState(0);
   const loadFailures = useRef(0);
-  // The Action whose answer last failed, so the warning can be dropped once
-  // that Action is no longer pending instead of labelling the next one.
-  const answerFailure = useRef<string | undefined>(undefined);
   // Actions hidden because the service reported them ended when answered. A
   // read that still lists one shows it again, so a wrong report cannot hide
   // an approvable Action.
   const endedAnswers = useRef(new Set<string>());
+  const inFlight = useRef(new Map<string, typeof owner>());
   const trigger = useMemo(() => {
     let last = 0;
     for (const event of events) {
@@ -113,11 +170,17 @@ export function useManagedActions(
   useEffect(() => {
     setAnswered(new Set());
     setLoadError(undefined);
-    setAnswerError(undefined);
+    setAnswerErrors(new Map());
+    setDrafts(new Map());
+    setSelection(undefined);
+    setSubmitting(new Set());
     loadFailures.current = 0;
-    answerFailure.current = undefined;
     endedAnswers.current.clear();
-  }, [sessionId]);
+  }, [owner]);
+
+  useEffect(() => {
+    setForbiddenSessions(new Set());
+  }, [credentials]);
 
   useEffect(() => {
     if (!reader || !sessionId) {
@@ -127,6 +190,7 @@ export function useManagedActions(
       loadFailures.current = 0;
       return undefined;
     }
+    if (includeChildren && !visible) return undefined;
     if (enabled === undefined) {
       // So is a reload, which is how a user retries from the page: the
       // reader comes back with the same Session and a fresh retry budget.
@@ -136,14 +200,18 @@ export function useManagedActions(
     const abort = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     reader
-      .listPending(sessionId, { clientId, signal: abort.signal })
+      .listPending(sessionId, {
+        clientId,
+        signal: abort.signal,
+        ...(includeChildren ? { includeChildren: true } : {}),
+      })
       .then((actions) => {
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted || ownerRef.current !== owner) return;
         loadFailures.current = 0;
-        setPending({ sessionId, actions });
+        setPending({ owner, actions });
         setLoadError(undefined);
         const stillListed = actions
-          .map((entry) => entry.actionId)
+          .map(managedActionKey)
           .filter((id) => endedAnswers.current.has(id));
         endedAnswers.current.clear();
         if (stillListed.length > 0) {
@@ -153,26 +221,31 @@ export function useManagedActions(
             return next;
           });
         }
-        // The Action whose answer failed is no longer pending, so the
-        // unconfirmed-answer warning has nothing left to describe; keeping it
-        // would announce a stale failure beside an unrelated card.
-        if (
-          answerFailure.current !== undefined &&
-          !actions.some((entry) => entry.actionId === answerFailure.current)
-        ) {
-          answerFailure.current = undefined;
-          setAnswerError(undefined);
+        const listed = new Set(actions.map(managedActionKey));
+        setAnswerErrors(
+          (current) => new Map([...current].filter(([key]) => listed.has(key))),
+        );
+        setDrafts(
+          (current) => new Map([...current].filter(([key]) => listed.has(key))),
+        );
+        if (includeChildren) {
+          retryTimer = setTimeout(
+            () => setRevision((value) => value + 1),
+            3_000,
+          );
         }
       })
       .catch((failure: unknown) => {
-        if (abort.signal.aborted) return;
+        if (abort.signal.aborted || ownerRef.current !== owner) return;
         setLoadError(failure);
         // A 4xx the service will answer the same way every time is not a
         // hiccup: retrying it only burns requests, and the Retry button would
         // keep offering an attempt that cannot succeed. Timeouts and rate
         // limits still back off as before.
         if (isNonRetryableClientError(failure)) return;
-        const delay = LOAD_RETRY_DELAYS_MS[loadFailures.current];
+        const delay =
+          LOAD_RETRY_DELAYS_MS[loadFailures.current] ??
+          (includeChildren ? 10_000 : undefined);
         loadFailures.current += 1;
         if (delay !== undefined) {
           retryTimer = setTimeout(
@@ -185,7 +258,17 @@ export function useManagedActions(
       abort.abort();
       clearTimeout(retryTimer);
     };
-  }, [reader, enabled, sessionId, clientId, trigger, revision]);
+  }, [
+    reader,
+    enabled,
+    sessionId,
+    clientId,
+    trigger,
+    revision,
+    owner,
+    includeChildren,
+    visible,
+  ]);
 
   const earliestExpiry = pending.actions.length
     ? Math.min(...pending.actions.map((action) => action.expiresAt))
@@ -200,42 +283,134 @@ export function useManagedActions(
   }, [earliestExpiry]);
 
   const actions = useMemo(
-    () => (pending.sessionId === sessionId ? pending.actions : []),
-    [pending.sessionId, pending.actions, sessionId],
+    () => (pending.owner === owner ? pending.actions : []),
+    [pending.owner, pending.actions, owner],
   );
-  // `pending.sessionId` is set by the success branch of a read only.
-  const loaded = pending.sessionId === sessionId;
-  const action = actions.find((entry) => !answered.has(entry.actionId));
-  const current = useRef({ sessionId, actions });
-  current.current = { sessionId, actions };
+  // `pending.owner` is set by the success branch of a read only.
+  const loaded = pending.owner === owner;
+  const available = useMemo(
+    () =>
+      actions
+        .filter((entry) => !answered.has(managedActionKey(entry)))
+        .sort(
+          (left, right) =>
+            (left.createdAt ?? Number.MAX_SAFE_INTEGER) -
+              (right.createdAt ?? Number.MAX_SAFE_INTEGER) ||
+            left.sessionId.localeCompare(right.sessionId) ||
+            left.actionId.localeCompare(right.actionId),
+        ),
+    [actions, answered],
+  );
+  const action =
+    available.find(
+      (entry) =>
+        selection?.owner === owner &&
+        actionSelectionKey(entry) === selection.key,
+    ) ?? available[0];
+  const selectedKey = action && managedActionKey(action);
+  const selectedIdentity = action && actionSelectionKey(action);
+  useEffect(() => {
+    if (
+      selectedIdentity &&
+      (selection?.owner !== owner || selection.key !== selectedIdentity)
+    )
+      setSelection({ owner, key: selectedIdentity });
+  }, [owner, selectedIdentity, selection]);
+  const current = useRef({ owner, actions, answered, reader });
+  current.current = { owner, actions, answered, reader };
+
+  const select = useCallback(
+    (target: ManagedAgentPendingAction) => {
+      const key = managedActionKey(target);
+      if (
+        current.current.owner === owner &&
+        !current.current.answered.has(key) &&
+        current.current.actions.some((entry) => managedActionKey(entry) === key)
+      )
+        setSelection({ owner, key: actionSelectionKey(target) });
+    },
+    [owner],
+  );
+
+  const setQuestionDraft = useCallback(
+    (target: ManagedAgentPendingAction, draft: ManagedQuestionDraft) => {
+      const key = managedActionKey(target);
+      if (
+        current.current.owner === owner &&
+        !current.current.answered.has(key) &&
+        current.current.actions.some(
+          (entry) =>
+            entry.kind === 'question' && managedActionKey(entry) === key,
+        )
+      )
+        setDrafts((current) => new Map(current).set(key, draft));
+    },
+    [owner],
+  );
 
   const respond = useCallback(
-    async (actionId: string, optionId: string) => {
-      const target = actions.find((entry) => entry.actionId === actionId);
-      if (!target || !reader) return;
+    async (
+      requested: ManagedAgentPendingAction,
+      response: ManagedAgentActionResponse,
+    ) => {
+      if (current.current.owner !== owner) return;
+      const key = managedActionKey(requested);
+      const target = current.current.actions.find(
+        (entry) =>
+          managedActionKey(entry) === key && !current.current.answered.has(key),
+      );
+      const actionReader = current.current.reader;
+      if (!target || !actionReader) return;
+      if (inFlight.current.get(key) === owner) return;
+      inFlight.current.set(key, owner);
+      setSubmitting((current) => new Set(current).add(key));
       const isPending = () =>
-        current.current.sessionId === target.sessionId &&
-        current.current.actions.some((entry) => entry.actionId === actionId);
-      setAnswered((current) => new Set(current).add(actionId));
+        current.current.owner === owner &&
+        current.current.actions.some(
+          (entry) => managedActionKey(entry) === key,
+        );
+      if (target.kind !== 'question')
+        setAnswered((current) => new Set(current).add(key));
       try {
-        // One key per Action and option: a retried click replays the same
-        // durable operation instead of answering twice.
-        await reader.respond(target, optionId, {
+        if ((target.kind === 'question') !== (typeof response !== 'string')) {
+          throw new Error('Action response kind does not match the request');
+        }
+        const submitted =
+          target.kind === 'question' && typeof response !== 'string'
+            ? {
+                kind: 'question' as const,
+                answers: canonicalQuestionAnswers(target, response.answers),
+              }
+            : response;
+        const idempotencyKey =
+          target.kind === 'question' && typeof submitted !== 'string'
+            ? await questionResponseKey(target, submitted.answers)
+            : `${target.actionId}:${submitted}`;
+        if (!isPending()) return;
+        await actionReader.respond(target, submitted, {
           clientId,
-          idempotencyKey: `${target.actionId}:${optionId}`,
+          idempotencyKey,
         });
         if (!isPending()) return;
-        if (answerFailure.current === actionId) {
-          setAnswerError(undefined);
-          answerFailure.current = undefined;
-        }
+        setAnswered((current) => new Set(current).add(key));
+        setAnswerErrors((current) => {
+          const next = new Map(current);
+          next.delete(key);
+          return next;
+        });
+        setDrafts((current) => {
+          const next = new Map(current);
+          next.delete(key);
+          return next;
+        });
         setRevision((value) => value + 1);
       } catch (failure) {
         if (
           typeof failure === 'object' &&
           failure !== null &&
           'code' in failure &&
-          (failure as { code?: unknown }).code === 'action_forbidden'
+          (failure as { code?: unknown }).code === 'action_forbidden' &&
+          ownerRef.current.credentials === credentials
         ) {
           // Responding requires the Session's owner or a Workspace operator,
           // which the service decides from the viewer's Workspace role row
@@ -252,25 +427,39 @@ export function useManagedActions(
         if (endedAction(failure)) {
           // No retry can succeed, so keep the card hidden and read the list
           // again instead of offering an answer the service will refuse.
-          endedAnswers.current.add(actionId);
-          if (answerFailure.current === actionId) {
-            answerFailure.current = undefined;
-            setAnswerError(undefined);
-          }
+          endedAnswers.current.add(key);
+          setAnswered((current) => new Set(current).add(key));
+          setAnswerErrors((current) => {
+            const next = new Map(current);
+            next.delete(key);
+            return next;
+          });
+          setDrafts((current) => {
+            const next = new Map(current);
+            next.delete(key);
+            return next;
+          });
           setRevision((value) => value + 1);
           return;
         }
         setAnswered((current) => {
           const next = new Set(current);
-          next.delete(actionId);
+          next.delete(key);
           return next;
         });
-        setAnswerError(failure);
-        answerFailure.current = actionId;
+        setAnswerErrors((current) => new Map(current).set(key, failure));
         throw failure;
+      } finally {
+        if (inFlight.current.get(key) === owner) inFlight.current.delete(key);
+        if (ownerRef.current === owner)
+          setSubmitting((current) => {
+            const next = new Set(current);
+            next.delete(key);
+            return next;
+          });
       }
     },
-    [actions, reader, clientId],
+    [clientId, owner, credentials],
   );
 
   const retry = useCallback(() => {
@@ -286,13 +475,20 @@ export function useManagedActions(
   }, []);
 
   return {
+    actions: available,
     action,
+    select,
+    questionDraft: selectedKey
+      ? (drafts.get(selectedKey) ?? EMPTY_QUESTION_DRAFT)
+      : EMPTY_QUESTION_DRAFT,
+    setQuestionDraft,
+    submitting: selectedKey !== undefined && submitting.has(selectedKey),
     loadError,
     loaded,
-    answerError:
-      answerFailure.current === action?.actionId ? answerError : undefined,
-    respondForbidden:
-      sessionId !== undefined && forbiddenSessions.has(sessionId),
+    answerError: selectedKey ? answerErrors.get(selectedKey) : undefined,
+    respondForbidden: includeChildren
+      ? action !== undefined && forbiddenSessions.has(action.sessionId)
+      : sessionId !== undefined && forbiddenSessions.has(sessionId),
     respond,
     retry,
   };

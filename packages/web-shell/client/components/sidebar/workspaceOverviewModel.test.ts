@@ -100,7 +100,27 @@ describe('summarizeHooks', () => {
         hooks: [{ name: 'a' }, { name: 'b' }] as never,
         events: { BeforeTool: {} } as never,
       }),
-    ).toEqual({ initialized: true, count: 2, disabled: true });
+    ).toEqual({ initialized: true, count: 2, disabled: true, untrusted: 0 });
+  });
+
+  it('counts trust-withheld hooks and flags the facet', () => {
+    const hooks = summarizeHooks({
+      v: 1,
+      workspaceCwd: '/w',
+      initialized: true,
+      disabled: false,
+      hooks: [
+        { enabled: true },
+        { enabled: false, disabledReason: 'untrusted' },
+        { enabled: false, disabledReason: 'registryDisabled' },
+        { enabled: false },
+      ] as never,
+      events: {} as never,
+    });
+    expect(hooks.untrusted).toBe(1);
+    const snapshot: WorkspaceOverviewSnapshot = { hooks, fetchedAt: 0 };
+    expect(formatOverviewValue(snapshot, 'hooks')).toBe('4');
+    expect(overviewFacetHasIssue(snapshot, 'hooks')).toBe(true);
   });
 
   it('keeps an uninitialized runtime unknown', () => {

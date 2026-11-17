@@ -2,16 +2,35 @@
  * cron_create tool — creates a new cron job (in-session or durable).
  */
 
-import type { ToolInvocation, ToolResult } from './tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolConfirmationOutcome,
+  ToolConfirmationPayload,
+  ToolExecuteConfirmationDetails,
+  ToolInvocation,
+  ToolResult,
+} from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { buildPermissionCheckContext } from '../core/permission-helpers.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { parseCron, nextFireTime } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { CRON_TASKS_DISPLAY_PATH } from '../services/cronTasksFile.js';
+import {
+  CRON_GATE_TIMEOUT_MS,
+  gateCommandError,
+} from '../services/cron-gate.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { getErrorMessage } from '../utils/errors.js';
+import {
+  buildShellExecWarnings,
+  getCommandRoot,
+  normalizeMonitorCommand,
+} from '../utils/shell-utils.js';
+import { extractCommandRules } from '../utils/shellAstParser.js';
 
 /** "1 day" / "7 days" / "0.5 days". Callers handle the Infinity case. */
 function formatDays(days: number): string {
@@ -47,12 +66,17 @@ export interface CronCreateParams {
   recurring?: boolean;
   durable?: boolean;
   sessionMode?: 'unbound' | 'current';
+  /** Shell command run at each fire, outside the model; see cron-gate.ts. */
+  gate?: string;
 }
 
 class CronCreateInvocation extends BaseToolInvocation<
   CronCreateParams,
   ToolResult
 > {
+  /** The exec dialog for the gate was answered with a proceed outcome. */
+  private gateConfirmed = false;
+
   constructor(
     private config: Config,
     params: CronCreateParams,
@@ -61,7 +85,106 @@ class CronCreateInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return `${this.params.cron}: ${this.params.prompt}`;
+    const gate = this.params.gate ? ` [gate: ${this.params.gate}]` : '';
+    return `${this.params.cron}: ${this.params.prompt}${gate}`;
+  }
+
+  /**
+   * A gate is a shell command that will run unattended, so its dialog is
+   * the exec dialog `Monitor` shows for the same command — the command, its
+   * root and `Monitor(...)` rules — so that "always allow" saves a rule that
+   * also lets the scheduler run it after a restart. The command shown is the
+   * string the scheduler persists and runs, not Monitor's re-spelled spawn
+   * command. Without a gate the generic info dialog stands.
+   */
+  override async getConfirmationDetails(
+    abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    const gate = this.params.gate?.trim();
+    if (!gate) return super.getConfirmationDetails(abortSignal);
+    const normalized = normalizeMonitorCommand(gate);
+    let permissionRules: string[] = [];
+    try {
+      permissionRules = [
+        ...new Set(await extractCommandRules(normalized.safetyCommand)),
+      ].map((rule) => `Monitor(${rule})`);
+    } catch {
+      // Conservative fallback below: a rule for the whole command.
+    }
+    if (permissionRules.length === 0) {
+      permissionRules = [`Monitor(${normalized.safetyCommand})`];
+    }
+    const details: ToolExecuteConfirmationDetails = {
+      type: 'exec',
+      title: 'Schedule a gated task',
+      command: gate,
+      rootCommand: getCommandRoot(normalized.safetyCommand) ?? gate,
+      permissionRules,
+      warnings: [
+        `Runs unattended on this schedule (${humanReadableCron(this.params.cron)}) without further approval; the task prompt runs only when the command prints output.`,
+        ...(buildShellExecWarnings(normalized.safetyCommand, gate) ?? []),
+      ],
+      onConfirm: async (
+        outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
+        // Every approving outcome is a `proceed_*` value; cancel is not.
+        if (String(outcome).startsWith('proceed_')) this.gateConfirmed = true;
+      },
+    };
+    return details;
+  }
+
+  /**
+   * An explicit deny of the gate as a `monitor` command refuses the task in
+   * every mode and over the dialog: the runner checks deny before anything
+   * else at each fire, so such a task could only ever be blocked.
+   *
+   * Otherwise a bare `cron_create` allow rule, saved when this tool could
+   * not run shell commands, must not approve a gate on its own. When no
+   * dialog ran and the mode would have asked, the gate has to pass as a
+   * `monitor` command: a saved `Monitor(...)`/`Bash(...)` rule or the
+   * read-only check.
+   *
+   * Yolo mode confirms nothing, and the gate runs unattended in yolo mode
+   * anyway. Auto mode's safety net is the classifier, which sees the gate in
+   * its input — unless that bare allow rule took the allow fast path around
+   * it, in which case nobody has looked at the command and it is held to the
+   * default-mode check.
+   */
+  private async assertGateApproved(gate: string): Promise<void> {
+    const pm = this.config.getPermissionManager?.();
+    const cwd = this.config.getTargetDir();
+    const decision = await pm?.evaluate({
+      toolName: ToolNames.MONITOR,
+      command: gate,
+      cwd,
+    });
+    if (decision === 'deny') {
+      throw new Error(
+        'The gate command is denied by a permission rule, so the task would be blocked at every fire. Remove that deny rule or choose another command.',
+      );
+    }
+    if (this.gateConfirmed) return;
+    const mode = this.config.getApprovalMode();
+    if (mode === ApprovalMode.YOLO) return;
+    if (mode === ApprovalMode.AUTO) {
+      // The same context the permission flow evaluated for this call, so a
+      // rule that took the allow fast path there — bare, or scoped to these
+      // parameters (`cron_create(prompt:…)`) — is seen here too.
+      const toolDecision = await pm?.evaluate(
+        buildPermissionCheckContext(
+          ToolNames.CRON_CREATE,
+          this.params as unknown as Record<string, unknown>,
+          cwd,
+        ),
+      );
+      if (toolDecision !== 'allow') return;
+    }
+    if (decision === 'allow') return;
+    throw new Error(
+      `The gate command was not confirmed: a saved ${ToolNames.CRON_CREATE} rule does not cover a shell command that runs unattended. Add a Monitor(...) rule for it, or remove that rule so the command can be confirmed.`,
+    );
   }
 
   /**
@@ -81,6 +204,7 @@ class CronCreateInvocation extends BaseToolInvocation<
     const durable = this.params.durable === true;
     const useCurrentSession = this.params.sessionMode === 'current';
     const prompt = this.params.prompt.trim();
+    const gate = this.params.gate?.trim() || undefined;
 
     if (durable && this.config.getSessionSourceType?.() === 'standalone') {
       const message =
@@ -107,6 +231,14 @@ class CronCreateInvocation extends BaseToolInvocation<
           'Current-session scheduling requires durable: true because session-only jobs cannot survive a daemon session switch.',
         );
       }
+      // A one-shot has no next slot: a quiet gate would consume it with
+      // nothing delivered and no trace.
+      if (gate && !recurring) {
+        throw new Error(
+          'A gate needs a recurring task: a one-shot whose gate prints nothing would be consumed with nothing delivered. Schedule it recurring (it still auto-expires) and delete it when done.',
+        );
+      }
+      if (gate) await this.assertGateApproved(gate);
 
       let job: { id: string; cronExpr: string };
       if (useCurrentSession) {
@@ -122,16 +254,44 @@ class CronCreateInvocation extends BaseToolInvocation<
           prompt,
           recurring,
           promptId,
+          ...(gate ? { gate } : {}),
         });
+        // A daemon that predates gated tasks stored the task without its
+        // gate: left alone it would run the prompt at every slot.
+        if (gate && created.gate !== gate) {
+          try {
+            await scheduler.removeDurable(created.id);
+          } catch (error) {
+            throw new Error(
+              `current_session_gate_unsupported: The daemon stored task ${created.id} without its gate, and removing it failed (${getErrorMessage(error)}): it runs the prompt at every slot until deleted with cron_delete.`,
+            );
+          }
+          throw new Error(
+            'current_session_gate_unsupported: The daemon stored the task without its gate, so it was removed. Restart `qwen serve` on the current version, or schedule the gated task without sessionMode "current".',
+          );
+        }
+        // The daemon writes the task and this session's scheduler installs
+        // it on its next reload; carry the confirmation over to that job.
+        if (gate) scheduler.approveGate(created.id, gate);
         job = { id: created.id, cronExpr: created.cron };
       } else {
-        job = durable
-          ? await scheduler.createDurable(this.params.cron, prompt, recurring)
-          : scheduler.create(this.params.cron, prompt, recurring);
+        const created = durable
+          ? await scheduler.createDurable(
+              this.params.cron,
+              prompt,
+              recurring,
+              gate,
+            )
+          : scheduler.create(this.params.cron, prompt, recurring, gate);
+        // The command was confirmed just now (dialog, classifier or a
+        // permissive mode); the runner trusts that until a restart, where a
+        // saved rule or the approval mode decides instead.
+        if (gate) created.gateApproved = true;
+        job = created;
       }
 
       const display = humanReadableCron(job.cronExpr);
-      const returnDisplay = `Scheduled ${job.id} (${display})${durable ? ' [durable]' : ''}${useCurrentSession ? ' [current conversation]' : ''}`;
+      const returnDisplay = `Scheduled ${job.id} (${display})${durable ? ' [durable]' : ''}${useCurrentSession ? ' [current conversation]' : ''}${gate ? ' [gated]' : ''}`;
 
       const where = durable
         ? `Persisted to ${CRON_TASKS_DISPLAY_PATH}${useCurrentSession ? ' and bound to the current conversation' : ''}`
@@ -140,11 +300,15 @@ class CronCreateInvocation extends BaseToolInvocation<
       const expiry = Number.isFinite(maxAgeDays)
         ? `Auto-expires after ${formatDays(maxAgeDays)}. Use CronDelete to cancel sooner.`
         : 'Never auto-expires. Use CronDelete to cancel.';
-      const llmContent = recurring
-        ? `Scheduled recurring job ${job.id} (${job.cronExpr}). ${where}. ` +
-          expiry
-        : `Scheduled one-shot task ${job.id} (${job.cronExpr}). ${where}. ` +
-          'It will fire once then auto-delete.';
+      const gateNote = gate
+        ? ` Gate: \`${gate}\` runs at each fire; the prompt is delivered only when it prints output, a silent run costs no turn, and a failing run is reported once, not at every fire.`
+        : '';
+      const llmContent =
+        (recurring
+          ? `Scheduled recurring job ${job.id} (${job.cronExpr}). ${where}. ` +
+            expiry
+          : `Scheduled one-shot task ${job.id} (${job.cronExpr}). ${where}. ` +
+            'It will fire once then auto-delete.') + gateNote;
 
       return { llmContent, returnDisplay };
     } catch (error) {
@@ -196,6 +360,9 @@ export class CronCreateTool extends BaseDeclarativeTool<
         'By default (sessionMode: "unbound") a durable task stays unbound and uses the existing per-project scheduler owner; it does not reuse this conversation. ' +
         'Use sessionMode: "current" only when the user explicitly wants future runs to continue in this conversation. ' +
         'Current-session mode requires durable: true and an active daemon-backed prompt.\n\n' +
+        '## Gate (optional)\n\n' +
+        'Pass gate: a shell command run at each fire, outside the model, from the project directory. It decides whether the fire reaches you: nothing on stdout and exit 0 = the fire is skipped (no turn, nothing recorded); output = the fire is delivered with the output appended after the prompt, marked as data; a non-zero exit or a timeout = reported once, then counted until the command succeeds again or is blocked. ' +
+        'Use it for watches that are usually quiet ("every 2 minutes, check this PR"): the command keeps its own cursor and prints only what changed, and the prompt says what to do with the output. The command is confirmed like a Monitor command when the task is created and then runs unattended. Write the prompt as instructions, not as a slash command. A gate needs a recurring task (a one-shot whose gate is quiet would be consumed with nothing delivered).\n\n' +
         '## Runtime behavior\n\n' +
         'Jobs only fire while the REPL is idle (not mid-query). The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n' +
         `${recurringExpiryBlurb(maxAgeDays)}\n\n` +
@@ -233,6 +400,10 @@ export class CronCreateTool extends BaseDeclarativeTool<
             description:
               'unbound (default) = preserve the existing unbound durable scheduler behavior. current = bind a durable task to this daemon conversation; requires durable: true.',
           },
+          gate: {
+            type: 'string',
+            description: `Shell command run at each fire, outside the model. Prints nothing and exits 0 = the fire is skipped and no turn runs. Prints output = the fire is delivered with the output. Exits non-zero or runs longer than ${CRON_GATE_TIMEOUT_MS / 1000} s = reported once, not at every fire.`,
+          },
         },
         required: ['cron', 'prompt'],
         additionalProperties: false,
@@ -257,6 +428,10 @@ export class CronCreateTool extends BaseDeclarativeTool<
     if (!params.prompt || params.prompt.trim() === '') {
       return 'Parameter "prompt" must be a non-empty string.';
     }
+    if (params.gate !== undefined) {
+      const gateError = gateCommandError(params.gate);
+      if (gateError) return `Parameter "gate" ${gateError}.`;
+    }
     return null;
   }
 
@@ -277,6 +452,8 @@ export class CronCreateTool extends BaseDeclarativeTool<
       recurring: params.recurring ?? true,
       durable: params.durable ?? false,
       sessionMode: params.sessionMode ?? 'unbound',
+      // The gate is a shell command that will run unattended on the schedule.
+      ...(params.gate ? { gate: params.gate } : {}),
     };
   }
 }

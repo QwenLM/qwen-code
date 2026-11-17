@@ -3,6 +3,7 @@ import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   installMockDaemon,
+  permissionRequestEvent,
   replayCompleteEvent,
   turnCompleteEvent,
   userTextEvent,
@@ -24,17 +25,44 @@ async function expectSameEdges(message: Locator, composer: Locator) {
     .toBeLessThanOrEqual(1);
 }
 
+async function expectTimelineVerticallyCentered(
+  rail: Locator,
+  viewport: Locator,
+) {
+  const railViewport = rail.locator(':scope > div').first();
+  const action = rail.locator(':scope > button[title]');
+  await expect(action).toBeVisible();
+  await expect
+    .poll(async () => {
+      const [viewportBox, railViewportBox, actionBox] = await Promise.all([
+        viewport.boundingBox(),
+        railViewport.boundingBox(),
+        action.boundingBox(),
+      ]);
+      if (!viewportBox || !railViewportBox || !actionBox) return Infinity;
+      const contentCenter =
+        (Math.min(railViewportBox.y, actionBox.y) +
+          Math.max(
+            railViewportBox.y + railViewportBox.height,
+            actionBox.y + actionBox.height,
+          )) /
+        2;
+      return Math.abs(contentCenter - viewportBox.y - viewportBox.height / 2);
+    })
+    .toBeLessThanOrEqual(1);
+}
+
 for (const navigation of [true, false]) {
   test(`transcript matches composer edges with turn navigation ${navigation ? 'enabled' : 'unsupported'} @smoke`, async ({
     page,
     baseURL,
   }, testInfo) => {
-    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.setViewportSize({ width: 1600, height: 900 });
     const scenario = createWebShellDaemonScenario({
-      events: Array.from({ length: 4 }, (_, index) => [
+      events: Array.from({ length: 6 }, (_, index) => [
         userTextEvent('What is the weather?', { id: index * 3 + 1 }),
         assistantTextEvent(
-          index < 3
+          index < 5
             ? 'Earlier forecast.'
             : `the weather report is ready\n\n${Array.from(
                 { length: 80 },
@@ -58,9 +86,9 @@ for (const navigation of [true, false]) {
           v: 1,
           sessionId: scenario.sessionId,
           snapshot: 'mock-snapshot',
-          totalTurns: 4,
+          totalTurns: 6,
           start: 0,
-          turns: Array.from({ length: 4 }, (_, ordinal) => ({
+          turns: Array.from({ length: 6 }, (_, ordinal) => ({
             ordinal,
             turnId: `record-${ordinal}`,
             kind: 'prompt',
@@ -88,12 +116,16 @@ for (const navigation of [true, false]) {
       : page.getByTestId('session-timeline');
     await expect(rail).toBeVisible();
 
+    const viewport = page.locator('[data-history-viewport]');
     const messageList = page.locator('[data-web-shell-message-list]');
     const message = messageList
       .locator('[data-web-shell-message-row]')
       .filter({ hasText: 'the weather report is ready' });
     await expect(message).toBeVisible();
     const composer = page.locator('[data-web-shell-composer]');
+    const sidebar = page.getByRole('complementary', {
+      name: 'Workspace sidebar',
+    });
     await expect(composer).toBeVisible();
     await expect
       .poll(() =>
@@ -107,6 +139,7 @@ for (const navigation of [true, false]) {
       .toHaveCSS('border-bottom-width', '1px');
     await messageList.hover();
     await page.mouse.wheel(0, -400);
+    await expectTimelineVerticallyCentered(rail, viewport);
     const scrollToBottom = page.getByRole('button', {
       name: /Scroll to bottom|回到底部/,
     });
@@ -117,10 +150,12 @@ for (const navigation of [true, false]) {
       'color(srgb 1 1 1 / 0.96)',
     );
     await scrollToBottom.click();
-    for (const width of [1440, 1300, 1261, 1260, 1259, 1000, 802, 700, 599]) {
+    for (const width of [
+      1600, 1500, 1444, 1400, 1300, 1116, 1000, 802, 700, 609, 607, 599, 575,
+      390,
+    ]) {
       await page.setViewportSize({ width, height: 900 });
       await expectSameEdges(message, composer);
-      const viewport = page.locator('[data-history-viewport]');
       await expect
         .poll(async () => {
           const scrollBox = await messageList.boundingBox();
@@ -131,22 +166,123 @@ for (const navigation of [true, false]) {
           );
         })
         .toBeLessThanOrEqual(1);
+      await expect
+        .poll(async () => {
+          const viewportBox = await viewport.boundingBox();
+          const messageBox = await message.boundingBox();
+          const availableWidth = await messageList.evaluate((element) => {
+            const style = getComputedStyle(element);
+            return (
+              element.clientWidth -
+              parseFloat(style.paddingLeft) -
+              parseFloat(style.paddingRight)
+            );
+          });
+          if (!viewportBox || !messageBox) return Infinity;
+          return Math.abs(
+            messageBox.width -
+              Math.min(
+                availableWidth,
+                1000,
+                Math.max(
+                  440,
+                  Math.min(viewportBox.width * 0.85, viewportBox.width - 128),
+                ),
+              ),
+          );
+        })
+        .toBeLessThanOrEqual(1);
       const viewportBox = await viewport.boundingBox();
-      if (viewportBox && viewportBox.width >= 1000) {
-        await expect(rail).toBeVisible();
+      const messageBox = await message.boundingBox();
+      const gutter = Math.min(
+        messageBox!.x - viewportBox!.x,
+        viewportBox!.x + viewportBox!.width - messageBox!.x - messageBox!.width,
+      );
+      if (gutter >= 56 && messageBox!.width >= 440) {
+        await expect(
+          rail,
+          `rail at ${width}px with ${gutter}px gutters and ${messageBox!.width}px content`,
+        ).toBeVisible();
+        await expectTimelineVerticallyCentered(rail, viewport);
         const railBox = await rail.boundingBox();
-        const messageBox = await message.boundingBox();
-        expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(messageBox!.x);
+        expect(railBox!.x + railBox!.width).toBeLessThanOrEqual(
+          messageBox!.x + 1,
+        );
       } else {
-        await expect(rail).toBeHidden();
+        await expect(
+          rail,
+          `rail at ${width}px with ${gutter}px gutters`,
+        ).toBeHidden();
       }
     }
+    for (const height of [900, 640, 480]) {
+      await page.setViewportSize({ width: 1600, height });
+      await expectTimelineVerticallyCentered(rail, viewport);
+    }
     {
-      await page.setViewportSize({ width: 1440, height: 900 });
-      const shell = page.locator('[data-web-shell-root]');
-      const sidebar = page.getByRole('complementary', {
-        name: 'Workspace sidebar',
+      await page.setViewportSize({ width: 1116, height: 743 });
+      await sidebar.evaluate((element) => {
+        element.style.setProperty('--web-shell-sidebar-width', '276px');
       });
+      const viewport = page.locator('[data-history-viewport]');
+      await expect
+        .poll(async () => (await viewport.boundingBox())?.width ?? 0)
+        .toBe(840);
+      await expect(rail).toBeVisible();
+      await expectSameEdges(message, composer);
+      await expect
+        .poll(async () => (await message.boundingBox())?.width ?? 0)
+        .toBeCloseTo(712, 0);
+      const button = rail.locator('button').first();
+      const tick = button.locator(':scope > span').first();
+      await button.hover();
+      await expect
+        .poll(async () => {
+          const tickBox = await tick.boundingBox();
+          const messageBox = await message.boundingBox();
+          return tickBox && messageBox
+            ? messageBox.x - tickBox.x - tickBox.width
+            : -Infinity;
+        })
+        .toBeGreaterThanOrEqual(16);
+      const preview = page.locator(
+        navigation
+          ? '[data-slot="tooltip-content"]'
+          : '#session-timeline-detail-tooltip',
+      );
+      await expect(preview).toBeVisible();
+      await expect
+        .poll(async () => {
+          const previewBox = await preview.boundingBox();
+          const tickBox = await tick.boundingBox();
+          return previewBox && tickBox
+            ? Math.abs(previewBox.x - tickBox.x - tickBox.width - 8)
+            : -Infinity;
+        })
+        .toBeLessThanOrEqual(1);
+      await page.mouse.move(500, 10);
+      await page.setViewportSize({ width: 984, height: 743 });
+      await expect
+        .poll(async () => (await viewport.boundingBox())?.width ?? 0)
+        .toBe(708);
+      await expect(rail).toBeVisible();
+      await expectSameEdges(message, composer);
+      await expect
+        .poll(async () => (await message.boundingBox())?.width ?? 0)
+        .toBeCloseTo(580, 0);
+      await page.setViewportSize({ width: 865, height: 743 });
+      await expect
+        .poll(async () => (await viewport.boundingBox())?.width ?? 0)
+        .toBe(589);
+      await expect(rail).toBeVisible();
+      await expectSameEdges(message, composer);
+      await expect
+        .poll(async () => (await message.boundingBox())?.width ?? 0)
+        .toBeCloseTo(461, 0);
+    }
+    {
+      await page.setViewportSize({ width: 1600, height: 900 });
+      const shell = page.locator('[data-web-shell-root]');
       await expect(sidebar).toBeVisible();
       const sidebarWidth = (await sidebar.boundingBox())!.width;
       for (const minWidth of [800, 1200, 1000]) {
@@ -155,27 +291,52 @@ for (const navigation of [true, false]) {
             '--chat-regular-content-width',
             `${width}px`,
           );
+          element.style.setProperty('--chat-content-width', `${width}px`);
+          element.style.setProperty(
+            '--chat-responsive-content-width',
+            `${width}px`,
+          );
+          element.style.setProperty('--chat-shell-width', `${width + 40}px`);
         }, minWidth);
         for (const offset of [-1, 0, 1]) {
           await page.setViewportSize({
-            width: minWidth + sidebarWidth + offset,
+            width: minWidth + 112 + sidebarWidth + offset,
             height: 900,
           });
           if (offset < 0) await expect(rail).toBeHidden();
-          else await expect(rail).toBeVisible();
+          else {
+            await expect(rail).toBeVisible();
+            const button = rail.locator('button').first();
+            const tick = button.locator(':scope > span').first();
+            await button.hover();
+            await expect
+              .poll(async () => (await tick.boundingBox())?.width ?? 0)
+              .toBeGreaterThan(27);
+            await expect
+              .poll(async () => {
+                const tickBox = await tick.boundingBox();
+                const messageBox = await message.boundingBox();
+                return tickBox && messageBox
+                  ? messageBox.x - tickBox.x - tickBox.width
+                  : -Infinity;
+              })
+              .toBeGreaterThanOrEqual(16);
+            await page.mouse.move(500, 10);
+          }
         }
       }
-      await page.setViewportSize({ width: 1000 + sidebarWidth, height: 900 });
+      await page.setViewportSize({ width: 1112 + sidebarWidth, height: 900 });
       await shell.evaluate((element) => {
-        element.style.setProperty('--chat-regular-content-width', '1200px');
+        element.style.setProperty('--chat-content-width', '100%');
       });
       await expect(rail).toBeHidden();
       await shell.evaluate((element) => {
-        element.style.setProperty('--chat-regular-content-width', '1000px');
+        element.style.setProperty('--chat-content-width', '1000px');
+        element.style.setProperty('--chat-shell-width', '1040px');
       });
       await expect(rail).toBeVisible();
     }
-    for (const width of [1440, 1360]) {
+    for (const width of [1600, 1500]) {
       await page.setViewportSize({ width, height: 900 });
       const button = rail.locator('button').first();
       const tick = button.locator(':scope > span').first();
@@ -194,6 +355,14 @@ for (const navigation of [true, false]) {
           : '#session-timeline-detail-tooltip',
       );
       await expect(preview).toBeVisible();
+      await expect
+        .poll(async () => {
+          const previewBox = await preview.boundingBox();
+          return previewBox
+            ? Math.abs(previewBox.x - tickBox!.x - tickBox!.width - 8)
+            : -Infinity;
+        })
+        .toBeLessThanOrEqual(1);
       await expect(preview).toContainText('What is the weather?');
       if (navigation)
         await expect(preview).toContainText(
@@ -236,5 +405,114 @@ for (const navigation of [true, false]) {
       await expect(panel).toBeHidden();
       await expectSameEdges(message, composer);
     });
+  });
+}
+
+for (const approvalKind of ['tool', 'ask-user', 'hooks']) {
+  test(`global timeline stays centered with a ${approvalKind} request @smoke`, async ({
+    page,
+    baseURL,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 1600, height: 900 });
+    const turnCount = 6;
+    const scenario = createWebShellDaemonScenario({
+      events: [
+        ...Array.from({ length: turnCount }, (_, index) => [
+          userTextEvent('What is the weather?', { id: index * 3 + 1 }),
+          assistantTextEvent(
+            index < turnCount - 1 ? 'Earlier forecast.' : 'Final forecast.',
+            { id: index * 3 + 2 },
+          ),
+          turnCompleteEvent(`prompt-alignment-${index}`, { id: index * 3 + 3 }),
+        ]).flat(),
+        ...(approvalKind === 'hooks'
+          ? []
+          : [
+              permissionRequestEvent('timeline-permission', {
+                id: turnCount * 3 + 1,
+                toolCall:
+                  approvalKind === 'ask-user'
+                    ? {
+                        toolCallId: 'timeline-permission',
+                        title: 'Ask user 1 question',
+                        kind: 'think',
+                        _meta: { toolName: 'ask_user_question' },
+                        rawInput: {
+                          questions: [
+                            {
+                              header: 'Continue',
+                              question: 'Should I continue?',
+                              options: [{ label: 'Yes' }, { label: 'No' }],
+                            },
+                          ],
+                        },
+                      }
+                    : undefined,
+              }),
+            ]),
+      ],
+    });
+    scenario.capabilities.features.push('session_turn_navigation');
+    const daemon = await installMockDaemon(page, scenario, {
+      baseURL: String(testInfo.project.use.baseURL),
+    });
+    if (approvalKind === 'hooks') {
+      await page.route('**/hooks', async (route) => {
+        await route.fulfill({
+          json: {
+            v: 1,
+            workspaceCwd: scenario.workspaceCwd,
+            initialized: true,
+            pendingApproval: true,
+            pendingApprovalHash: 'timeline-hooks',
+            pendingApprovalHooks: ['SessionStart node marker.mjs'],
+            hooks: [],
+          },
+        });
+      });
+    }
+    await page.route(`${baseURL}/**`, async (route) => {
+      const url = new URL(route.request().url());
+      if (!url.pathname.endsWith('/turn-index')) return route.fallback();
+      await route.fulfill({
+        json: {
+          v: 1,
+          sessionId: scenario.sessionId,
+          snapshot: 'mock-snapshot',
+          totalTurns: turnCount,
+          start: 0,
+          turns: Array.from({ length: turnCount }, (_, ordinal) => ({
+            ordinal,
+            turnId: `record-${ordinal}`,
+            kind: 'prompt',
+            label: 'What is the weather?',
+            detail: 'The weather report includes the weekly forecast.',
+          })),
+        },
+      });
+    });
+    await page.goto(
+      `/session/${encodeURIComponent(scenario.sessionId)}?theme=light`,
+    );
+    await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+    const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+    await daemon.sendEvent(
+      replayCompleteEvent({
+        sessionId: connection.sessionId,
+        replayedCount: scenario.events.length,
+      }),
+    );
+    await expect(page.getByText('Loading...')).toHaveCount(0);
+
+    const rail = page.locator('[data-global-turn-navigation]');
+    const approval = page.locator(
+      approvalKind === 'ask-user'
+        ? '[data-web-shell-ask-panel]'
+        : '[data-web-shell-permission-panel]',
+    );
+    const chatLayout = page.locator('[class*="chatViewWrap"]');
+    await expect(rail).toBeVisible();
+    await expect(approval).toBeVisible();
+    await expectTimelineVerticallyCentered(rail, chatLayout);
   });
 }

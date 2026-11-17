@@ -1630,6 +1630,8 @@ function mergeToolCall(
   target.status = source.status ?? target.status;
   target.title = source.title ?? target.title;
   target.toolName = source.toolName ?? target.toolName;
+  target.generatedUiToolCallId =
+    source.generatedUiToolCallId ?? target.generatedUiToolCallId;
   target.kind = source.kind ?? target.kind;
   target.sourceBlockIds = unionMessageIds(
     target.sourceBlockIds,
@@ -1730,6 +1732,7 @@ export function daemonToolBlockToToolCall(
 
   return {
     callId: block.toolCallId,
+    generatedUiToolCallId: block.toolCallId,
     toolName,
     title: block.title === block.toolName ? toolName : block.title,
     status:
@@ -1744,6 +1747,10 @@ export function daemonToolBlockToToolCall(
       : undefined,
     subagentSessionReady: block.subagentSessionReady,
     parentToolCallId: block.parentToolCallId,
+    // Replay rebuilds the AgentTool block's identity from its persisted
+    // `task_execution` display; a live sub-content frame that already adopted
+    // a path via `appendSubContent` keeps first-wins there.
+    ...(block.agent ? { agentPath: block.agent.agentName } : {}),
     startTime: block.createdAt,
     endTime:
       isComplete && !forceBackgroundPending ? block.updatedAt : undefined,

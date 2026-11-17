@@ -12,6 +12,8 @@
 其 node-source coordinator、inventory 扩展和配套迁移已撤出。#14761 已关闭，
 不是依赖。既有私有 Session 退役和恢复保留原语义。
 
+[2026-10-24 范围决定](2026-10-23-csi-evidence-source.zh-CN.md)将完整 CSI 审计移出首版前置条件。本维护契约仍为保留归属的有界 DELETE 尝试；平台托管回收与跨 Workspace 复用另行设计。
+
 ## 问题与可信边界
 
 正常 Session 关闭结算工作、撤销逻辑上下文并释放其 Runtime Session。binding
@@ -37,7 +39,7 @@ unpublish 或卷可安全复用。
 Workspace、预期 generation、actor 和 retirement ID。actor 是管理员声明的审计
 身份，不是认证机制。命令还要求其当前 Workspace `OWNER` grant。不增加 HTTP
 API、签名密钥或权限框架。调用者不能选择替代 Pod 或 endpoint。Kubernetes
-API/token/CA 设置留在部署配置中，计划不保存凭据。参见[部署指南](../../deploy/k2-resident/README.zh-CN.md)。
+API/token/CA 设置留在部署配置中，计划不保存凭据。参见[部署指南](../../packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident/README.zh-CN.md)。
 
 ## 空闲准入与持久封锁
 

@@ -925,6 +925,9 @@ describe('Tool Control Parameters (E2E)', () => {
         const canUseToolCalls: string[] = [];
 
         const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          // The read comes back before the write: a write that needs
+          // approval checks the read when approval is asked for, and the
+          // shared loop asks for a batch's approvals before any call runs.
           if (requestIndex === 0) {
             return {
               toolCalls: [
@@ -933,6 +936,12 @@ describe('Tool Control Parameters (E2E)', () => {
                   { file_path: helper.getPath('test.txt') },
                   'read-test',
                 ),
+              ],
+            };
+          }
+          if (requestIndex === 1) {
+            return {
+              toolCalls: [
                 fakeToolCall(
                   'write_file',
                   {
@@ -1400,6 +1409,9 @@ describe('Tool Control Parameters (E2E)', () => {
         const canUseToolCalls: string[] = [];
 
         const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          // The read comes back before the write: a write that needs
+          // approval checks the read when approval is asked for, and the
+          // shared loop asks for a batch's approvals before any call runs.
           if (requestIndex === 0) {
             return {
               toolCalls: [
@@ -1408,6 +1420,12 @@ describe('Tool Control Parameters (E2E)', () => {
                   { file_path: helper.getPath('test.txt') },
                   'read-test',
                 ),
+              ],
+            };
+          }
+          if (requestIndex === 1) {
+            return {
+              toolCalls: [
                 fakeToolCall(
                   'write_file',
                   {

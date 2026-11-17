@@ -1,35 +1,15 @@
-//! Per-(pid, window_id) element cache.
-//!
-//! After `get_window_state`, each actionable element's AXUIElementRef pointer
-//! is cached by element_index. Subsequent `click`, `type_text`, etc. look up
-//! the element_index to get the raw pointer and perform AX actions on it.
-//!
-//! Cache is scoped per (pid, window_id) — a new `get_window_state` call
-//! for the same (pid, window_id) replaces the entire entry.
-//!
-//! Memory contract:
-//!   tree::walk_element retains each actionable element before storing its ptr.
-//!   CachedSnapshot::drop releases those retains so we have no AX leaks.
-//!
-//! The locked-HashMap plumbing lives in `cua_driver_core::element_cache` — see
-//! `docs/dedup-audit.md` item #3. This module owns the macOS-specific
-//! `CacheKey`, `CachedSnapshot`, and the `Drop` impl that fires `CFRelease`
-//! when an entry is replaced or removed.
+//! Native AX snapshots owned by element-token bindings. The per-target directory
+//! holds weak references; only current tokens and resolved actions keep payloads
+//! alive. Walked pointers transfer their extra CFRetain into CachedSnapshot.
 
 use super::bindings::AXUIElementRef;
 use super::tree::AXNode;
 use core_foundation::base::{CFRelease, CFRetain, CFTypeRef};
 use cua_driver_core::element_cache::ElementCacheCore;
+use cua_driver_core::element_token::{ResolvedElement, SnapshotBinding};
+use std::sync::{Arc, Weak};
 
-/// An AXUIElementRef borrowed out of the cache with an extra `CFRetain`, so it
-/// stays alive for the duration of an AX action even if a concurrent
-/// `get_window_state` (→ [`ElementCache::update`]) replaces and drops the
-/// snapshot it came from. Without this, the snapshot's `Drop` could `CFRelease`
-/// the element to zero while an in-flight click was still dereferencing the raw
-/// pointer — a use-after-free that trips `AXUIElementCopyActionNames` →
-/// `CFGetTypeID` (`EXC_BREAKPOINT`) and crashes the daemon. The retain is taken
-/// under the cache lock (see [`ElementCache::get_element_retained`]); the
-/// matching `CFRelease` fires on drop.
+/// An extra retain for an action that can outlive its resolved snapshot view.
 pub struct RetainedElement(usize);
 
 impl RetainedElement {
@@ -78,7 +58,7 @@ impl Drop for CachedSnapshot {
 
 /// Global element cache.
 pub struct ElementCache {
-    core: ElementCacheCore<CacheKey, CachedSnapshot>,
+    core: ElementCacheCore<CacheKey, Weak<CachedSnapshot>>,
 }
 
 impl ElementCache {
@@ -89,51 +69,101 @@ impl ElementCache {
     }
 
     /// Replace the snapshot for (pid, window_id) with the nodes from a fresh walk.
-    pub fn update(&self, pid: i32, window_id: u32, nodes: &[AXNode]) {
+    pub fn update(&self, pid: i32, window_id: u32, nodes: &[AXNode]) -> u32 {
+        self.publish(pid, window_id, Self::prepare(nodes))
+    }
+
+    pub fn prepare(nodes: &[AXNode]) -> Arc<CachedSnapshot> {
         let elements: Vec<usize> = nodes
             .iter()
             .filter(|n| n.element_index.is_some())
             .map(|n| n.element_ptr)
             .collect();
-        self.core
-            .insert(CacheKey { pid, window_id }, CachedSnapshot { elements });
+        Arc::new(CachedSnapshot { elements })
     }
 
-    /// Look up + `CFRetain` the element for `element_index` in (pid, window_id),
-    /// returning a guard that releases on drop. The retain happens **under the
-    /// cache lock**, so a concurrent [`update`](Self::update) (which replaces
-    /// the snapshot and drops its retains) cannot free the element between the
-    /// lookup and the retain. Hold the returned guard for the entire AX action —
-    /// this is what makes element actions safe when two sessions drive the same
-    /// `(pid, window_id)`. Returns `None` if the index isn't cached.
+    pub fn publish(&self, pid: i32, window_id: u32, snapshot: Arc<CachedSnapshot>) -> u32 {
+        self.publish_for_session(pid, window_id, snapshot, None)
+    }
+
+    pub fn publish_for_session(
+        &self,
+        pid: i32,
+        window_id: u32,
+        snapshot: Arc<CachedSnapshot>,
+        session: Option<&str>,
+    ) -> u32 {
+        let id = cua_driver_core::element_token::global().register_snapshot_payload_for_session(
+            pid,
+            window_id,
+            0..snapshot.elements.len(),
+            snapshot.clone(),
+            session,
+        );
+        self.core
+            .insert(CacheKey { pid, window_id }, Arc::downgrade(&snapshot));
+        id
+    }
+
+    /// Number of indexed elements for (pid, window_id), or 0 if not cached.
+    pub fn element_count(&self, pid: i32, window_id: u32) -> usize {
+        self.core
+            .with_snapshot(&CacheKey { pid, window_id }, |s| {
+                s.upgrade().map_or(0, |s| s.elements.len())
+            })
+            .unwrap_or(0)
+    }
+
+    pub fn clear_target(&self, pid: i32, window_id: u32) {
+        cua_driver_core::element_token::global().clear_current_target(pid, window_id);
+        self.core.remove(&CacheKey { pid, window_id });
+    }
+}
+
+#[derive(Clone)]
+pub struct BoundElementCache {
+    binding: Option<SnapshotBinding>,
+}
+
+impl BoundElementCache {
+    pub fn from_resolved(resolved: &ResolvedElement) -> Self {
+        Self {
+            binding: resolved.binding(),
+        }
+    }
+
+    pub fn from_binding(binding: SnapshotBinding) -> Self {
+        Self {
+            binding: Some(binding),
+        }
+    }
+
+    fn with_snapshot<R>(
+        &self,
+        key: &CacheKey,
+        read: impl FnOnce(&CachedSnapshot) -> R,
+    ) -> Option<R> {
+        self.binding
+            .as_ref()?
+            .with_payload(key.pid as i32, key.window_id as u32, read)
+    }
+
+    /// Retain from this immutable snapshot, never from a newer window snapshot.
     pub fn get_element_retained(
         &self,
         pid: i32,
         window_id: u32,
         element_index: usize,
     ) -> Option<RetainedElement> {
-        self.core
-            .with_snapshot(&CacheKey { pid, window_id }, |s| {
-                let ptr = s.elements.get(element_index).copied()?;
-                if ptr != 0 {
-                    // Safety: still inside `with_snapshot`'s lock, so the
-                    // snapshot (and thus this CFTypeRef) is alive right now.
-                    unsafe { CFRetain(ptr as AXUIElementRef as CFTypeRef) };
-                }
-                Some(RetainedElement(ptr))
-            })
-            .flatten()
-    }
-
-    /// Number of indexed elements for (pid, window_id), or 0 if not cached.
-    pub fn element_count(&self, pid: i32, window_id: u32) -> usize {
-        self.core
-            .with_snapshot(&CacheKey { pid, window_id }, |s| s.elements.len())
-            .unwrap_or(0)
-    }
-
-    pub fn clear_target(&self, pid: i32, window_id: u32) {
-        self.core.remove(&CacheKey { pid, window_id });
+        self.with_snapshot(&CacheKey { pid, window_id }, |s| {
+            let ptr = s.elements.get(element_index).copied()?;
+            if ptr != 0 {
+                // The binding owns the snapshot throughout this retain.
+                unsafe { CFRetain(ptr as AXUIElementRef as CFTypeRef) };
+            }
+            Some(RetainedElement(ptr))
+        })
+        .flatten()
     }
 }
 
@@ -188,8 +218,8 @@ mod tests {
     /// a concurrent `get_window_state` replaces the snapshot and its `Drop`
     /// `CFRelease`s the element to zero — freeing it under the in-flight click
     /// (use-after-free → `EXC_BREAKPOINT` in `AXUIElementCopyActionNames`).
-    /// `get_element_retained` takes an extra retain under the lock so the
-    /// element stays alive across the replace. This asserts that accounting.
+    /// `get_element_retained` takes an extra retain from the bound snapshot so
+    /// the element outlives both snapshot replacement and the binding itself.
     #[test]
     fn retained_element_survives_concurrent_snapshot_replace() {
         let s = CFString::new("cua-driver-uaf-test-element-placeholder");
@@ -200,7 +230,7 @@ mod tests {
         // to the cache, and CachedSnapshot::drop releases that retain.
         unsafe { CFRetain(ptr as CFTypeRef) };
         let cache = ElementCache::new();
-        cache.update(1, 2, &[node_with_ptr(ptr)]);
+        let sid = cache.update(721_500, 2, &[node_with_ptr(ptr)]);
         assert_eq!(
             unsafe { CFGetRetainCount(ptr as CFTypeRef) },
             base + 1,
@@ -208,8 +238,12 @@ mod tests {
         );
 
         // Borrow the element out for an action.
-        let guard = cache
-            .get_element_retained(1, 2, 0)
+        let (_, _, binding) = cua_driver_core::element_token::global()
+            .resolve_bound(721_500, &cua_driver_core::element_token::token_for(sid, 0))
+            .unwrap();
+        let bound = BoundElementCache::from_binding(binding.unwrap());
+        let guard = bound
+            .get_element_retained(721_500, 2, 0)
             .expect("element is cached");
         assert_eq!(
             unsafe { CFGetRetainCount(ptr as CFTypeRef) },
@@ -219,7 +253,8 @@ mod tests {
 
         // Concurrent get_window_state replaces the snapshot → old one dropped →
         // CFRelease of the cache's retain. The guard's retain must remain.
-        cache.update(1, 2, &[]);
+        drop(bound);
+        cache.update(721_500, 2, &[]);
         assert_eq!(
             unsafe { CFGetRetainCount(ptr as CFTypeRef) },
             base + 1,
@@ -235,12 +270,73 @@ mod tests {
         );
     }
 
-    /// A missing index returns None without retaining anything.
+    #[test]
+    fn prepared_and_resolved_snapshots_keep_their_native_identity() {
+        let first = CFString::new("first-native-snapshot-object-with-a-heap-allocation");
+        let second = CFString::new("second-native-snapshot-object-with-a-heap-allocation");
+        let a = first.as_concrete_TypeRef() as usize;
+        let b = second.as_concrete_TypeRef() as usize;
+        let baseline = unsafe { CFGetRetainCount(a as CFTypeRef) };
+        let pid = 721_501;
+        let window = 721_502;
+        unsafe {
+            CFRetain(a as CFTypeRef);
+            CFRetain(b as CFTypeRef);
+        }
+        let pending = ElementCache::prepare(&[node_with_ptr(a)]);
+        let cache = ElementCache::new();
+        let sid_b = cache.update(pid, window, &[node_with_ptr(b)]);
+        let sid_a = cache.publish(pid, window, pending);
+        let registry = cua_driver_core::element_token::global();
+        assert!(registry
+            .resolve(pid, &cua_driver_core::element_token::token_for(sid_b, 0))
+            .is_err());
+        let (_, _, binding) = registry
+            .resolve_bound(pid, &cua_driver_core::element_token::token_for(sid_a, 0))
+            .unwrap();
+        let bound = BoundElementCache::from_binding(binding.unwrap());
+        cache.update(pid, window, &[]);
+        let element = bound.get_element_retained(pid, window, 0).unwrap();
+        assert_eq!(element.as_ptr(), a);
+        assert!(bound.get_element_retained(pid, window + 1, 0).is_none());
+        registry.clear_target(pid, window);
+        drop(element);
+        assert_eq!(unsafe { CFGetRetainCount(a as CFTypeRef) }, baseline + 1);
+        drop(bound);
+        assert_eq!(unsafe { CFGetRetainCount(a as CFTypeRef) }, baseline);
+
+        unsafe {
+            CFRetain(a as CFTypeRef);
+        }
+        let cancelled = ElementCache::prepare(&[node_with_ptr(a)]);
+        drop(cancelled);
+        assert_eq!(unsafe { CFGetRetainCount(a as CFTypeRef) }, baseline);
+    }
+
+    #[test]
+    fn clearing_unresolved_target_revokes_token_and_releases_native_payload() {
+        let value = CFString::new("unresolved-window-owned-native-object-heap-allocation");
+        let ptr = value.as_concrete_TypeRef() as usize;
+        let baseline = unsafe { CFGetRetainCount(ptr as CFTypeRef) };
+        let pid = 721_504;
+        let cache = ElementCache::new();
+        unsafe { CFRetain(ptr as CFTypeRef) };
+        let sid = cache.update(pid, 7, &[node_with_ptr(ptr)]);
+        let registry = cua_driver_core::element_token::global();
+        let token = cua_driver_core::element_token::token_for(sid, 0);
+        assert!(registry.resolve(pid, &token).is_ok());
+        cache.clear_target(pid, 7);
+        assert!(registry.resolve(pid, &token).is_err());
+        assert_eq!(cache.element_count(pid, 7), 0);
+        assert_eq!(unsafe { CFGetRetainCount(ptr as CFTypeRef) }, baseline);
+    }
+
     #[test]
     fn missing_index_returns_none() {
         let cache = ElementCache::new();
-        assert!(cache.get_element_retained(1, 2, 0).is_none());
-        cache.update(1, 2, &[]);
-        assert!(cache.get_element_retained(1, 2, 5).is_none());
+        let bound = BoundElementCache::from_resolved(&ResolvedElement::None);
+        assert!(bound.get_element_retained(721_503, 2, 0).is_none());
+        cache.update(721_503, 2, &[]);
+        assert!(bound.get_element_retained(721_503, 2, 5).is_none());
     }
 }

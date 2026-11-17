@@ -27,7 +27,7 @@ PR #14319 将已发布的静态 Skill、MCP server pin 和独立 Hook catalog pi
 
 联合使用 SQL 记录、模型消息、进程追加证据以及操作系统进程/cgroup 观测。公开状态本身不能证明物理清理。测试最终清理与产品 close 断言分开，避免强制收尾掩盖产品生命周期失败。
 
-中断中的 MCP 故障分组省略可选 Hook catalog，以验证普通工具 takeover；当前在途 Hook Session 会拒绝 takeover。正常冷加载分组保留全部三种扩展。动态 MCP 工具调用使用普通 `ma_tool_execution` 账本，而不是独立的 MCP 控制操作 domain。将其 Harness prompt 身份连接到公开 Turn，要求替换前后仍为同一 `UNKNOWN` execution，没有已结算结果或第二次执行。必须观察替代 Harness 实际 load 被拒绝，并出现 `hosted_turn_recovery_required` 与 `runtime_broker_execution_unknown`；公开 Turn 保持 `RUNNING`，新输入和关闭均返回 `409 turn_active`。不能假定无法结算的已准入 Turn 会变成 `FAILED`。
+中断中的 MCP 故障分组省略可选 Hook catalog，以验证普通工具 takeover；当前在途 Hook Session 会拒绝 takeover。正常冷加载分组保留全部三种扩展。动态 MCP 工具调用使用普通 `ma_tool_execution` 账本，而不是独立的 MCP 控制操作 domain。将其 Harness prompt 身份连接到公开 Turn，要求替换前后仍为同一 `UNKNOWN` execution，没有已结算结果或第二次执行。必须在持久化的 Turn 投影中看到 `ma_turn.error_code = hosted_runtime_recovery_blocked`；公开 Turn 保持 `RUNNING`，新输入和关闭均返回 `409 turn_active`。不能假定无法结算的已准入 Turn 会变成 `FAILED`，也不能只用瞬时拒绝码代替持久状态。
 
 ## 范围与实现
 

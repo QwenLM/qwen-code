@@ -114,6 +114,16 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     );
   });
 
+  it('holds the overlay width at rest on rows that show a PR badge', () => {
+    // The badge sits right before the slot; growing the slot on hover slid it
+    // left and put Pin under the pointer. Touch keeps the buttons in the
+    // flow, so the reservation is hover-only.
+    expect(hoverMedia).toMatch(
+      /\.sessionMetaSlotReserved\s*\{[^}]*min-width:\s*var\(--session-actions-width/,
+    );
+    expect(nonHoverCss).not.toMatch(/\.sessionMetaSlotReserved/);
+  });
+
   it('hides the trailing markers whenever the overlay is revealed', () => {
     for (const marker of [
       'sessionGitIcon',

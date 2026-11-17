@@ -11,10 +11,15 @@ import type {
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
+  applyConfigOptions,
+  applySessionConfigContext,
+  getConfigOptionsUpdate,
+  mapWorkflowMode,
   getPlanExecutionMode,
   getReplayTokenCount,
   getReplayTokenUsage,
   mapProviderStatus,
+  mapSessionContextModels,
   mapReasoningControls,
   mapWorkspaceSkills,
   selectGoalState,
@@ -22,6 +27,97 @@ import {
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import type { DaemonConnectionState } from './types.js';
+
+it('preserves resolved model details from the session catalog', () => {
+  const details = {
+    authType: 'openai',
+    baseModelId: 'qwen3.7-max',
+    contextLimit: 1_000_000,
+    modalities: { image: true, video: true, audio: false, pdf: false },
+    baseUrl: 'https://models.example/v1',
+    envKey: 'MODEL_API_KEY',
+    isRuntime: true,
+  };
+  const result = mapSessionContextModels({
+    v: 1,
+    sessionId: 'session-models',
+    workspaceCwd: '/workspace',
+    state: {
+      models: {
+        currentModelId: 'qwen-route:v1:one',
+        availableModels: [
+          { modelId: 'qwen-route:v1:one', name: 'First route', _meta: details },
+          {
+            modelId: 'qwen-route:v1:two',
+            name: 'Text route',
+            _meta: { ...details, modalities: {}, isRuntime: false },
+          },
+        ],
+      },
+    },
+  });
+  const { contextLimit, ...expectedDetails } = details;
+  expect(result?.models).toEqual([
+    {
+      id: 'qwen-route:v1:one',
+      label: 'First route',
+      ...expectedDetails,
+      contextWindow: contextLimit,
+    },
+    {
+      id: 'qwen-route:v1:two',
+      label: 'Text route',
+      ...expectedDetails,
+      contextWindow: contextLimit,
+      modalities: {},
+      isRuntime: false,
+    },
+  ]);
+});
+
+it.each([false, true])(
+  'respects an explicit empty catalog while retaining a partial snapshot (catalog: %s)',
+  (hasCatalog) => {
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      currentModel: 'qwen3.8-max',
+      contextWindow: 1234,
+      models: [{ id: 'qwen3.8-max' }],
+    };
+    const after = applySessionConfigContext(current, {
+      v: 1,
+      sessionId: 'observer',
+      workspaceCwd: '/workspace',
+      state: {
+        models: {
+          currentModelId: 'qwen3.8-max',
+          ...(hasCatalog ? { availableModels: [] } : {}),
+        },
+      },
+    });
+    expect(after.models).toEqual(hasCatalog ? [] : current.models);
+    expect(after.currentModel).toBe(current.currentModel);
+    expect(after.contextWindow).toBe(current.contextWindow);
+  },
+);
+
+it('clears an observer selection on an empty model switch after logout', () => {
+  const after = applyEvent(
+    {
+      status: 'connected',
+      currentModel: 'qwen3.8-max',
+      contextWindow: 1234,
+    },
+    {
+      v: 1,
+      id: 1,
+      type: 'model_switched',
+      data: { sessionId: 'observer', modelId: '', subscriptionSignedOut: true },
+    } as DaemonEvent,
+  );
+  expect(after.currentModel).toBeUndefined();
+  expect(after.contextWindow).toBeUndefined();
+});
 
 function availableCommandsEvent(
   availableCommands: Array<Record<string, unknown>>,
@@ -1658,4 +1754,122 @@ it('does not revive a completed background turn from its repeated start', () => 
     },
   });
   expect(replayed.backgroundTurn).toBeUndefined();
+});
+
+describe('Workflow mode configuration', () => {
+  const option = (requested: boolean, available = true) => ({
+    id: 'workflow_mode',
+    type: 'select',
+    currentValue: requested ? 'on' : 'off',
+    options: [{ value: 'off' }, { value: 'on' }],
+    _meta: {
+      'qwen.workflowMode': { available, effective: requested && available },
+    },
+  });
+
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'maps requested=%s independently of available=%s',
+    (requested, available) => {
+      expect(mapWorkflowMode([option(requested, available)])).toEqual({
+        workflowModeStatus: 'ready',
+        workflowMode: {
+          requested,
+          available,
+          effective: requested && available,
+        },
+      });
+    },
+  );
+
+  it.each([
+    ['missing metadata', { ...option(true), _meta: undefined }],
+    [
+      'nonboolean availability',
+      {
+        ...option(true),
+        _meta: { 'qwen.workflowMode': { available: 'true', effective: true } },
+      },
+    ],
+    [
+      'contradictory effectiveness',
+      {
+        ...option(true),
+        _meta: { 'qwen.workflowMode': { available: false, effective: true } },
+      },
+    ],
+    ['invalid requested value', { ...option(true), currentValue: true }],
+    ['missing off choice', { ...option(true), options: [{ value: 'on' }] }],
+    [
+      'invalid reason',
+      {
+        ...option(true),
+        _meta: {
+          'qwen.workflowMode': { available: true, effective: true, reason: 7 },
+        },
+      },
+    ],
+  ])('does not advertise malformed %s as off', (_name, invalid) => {
+    expect(mapWorkflowMode([invalid])).toEqual({
+      workflowModeStatus: 'unknown',
+      workflowMode: undefined,
+    });
+  });
+
+  it('distinguishes duplicate/unknown data from authoritative omission', () => {
+    expect(
+      mapWorkflowMode([option(true), option(false)]).workflowModeStatus,
+    ).toBe('unknown');
+    expect(mapWorkflowMode(undefined).workflowModeStatus).toBe('unknown');
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workflowMode: { requested: true, available: true, effective: true },
+      workflowModeStatus: 'ready',
+      context: {
+        v: 1,
+        sessionId: 's',
+        workspaceCwd: '/workspace',
+        state: { configOptions: [option(true)] },
+      },
+    };
+    expect(applyConfigOptions(current, undefined)).toMatchObject({
+      workflowMode: current.workflowMode,
+      workflowModeStatus: 'unknown',
+      context: current.context,
+    });
+    expect(applyConfigOptions(current, [])).toMatchObject({
+      workflowMode: undefined,
+      workflowModeStatus: 'unsupported',
+      context: { state: { configOptions: [] } },
+    });
+  });
+
+  it.each([false, true])(
+    'reads wrapped=%s config notifications without treating a synthetic snapshot as omission',
+    (wrapped) => {
+      const update = {
+        sessionUpdate: 'config_option_update',
+        configOptions: [option(true)],
+      };
+      const event = {
+        v: 1,
+        type: 'session_update',
+        data: wrapped ? { update } : update,
+      } as DaemonEvent;
+      expect(getConfigOptionsUpdate(event)).toEqual({
+        configOptions: update.configOptions,
+      });
+      expect(
+        getConfigOptionsUpdate({
+          v: 1,
+          type: 'session_snapshot',
+          data: { sessionId: 's' },
+        } as DaemonEvent),
+      ).toBeUndefined();
+    },
+  );
 });

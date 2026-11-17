@@ -2,9 +2,12 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import TurndownService from 'turndown';
 import { WebShellCustomizationProvider } from '../../customization';
-import { I18nProvider } from '../../i18n';
+import { getTranslator, I18nProvider } from '../../i18n';
 import { getSelectedReplyContent } from '../../utils/selectionClipboard';
+import { WebShellPortalRootContext } from '../../portalRoot';
+import styles from './AssistantMessage.module.css';
 import {
   TranscriptDocumentExpandedProvider,
   TranscriptRenderModeProvider,
@@ -515,6 +518,61 @@ describe('AssistantMessage streaming markdown', () => {
   });
 });
 
+describe('AssistantMessage footer tooltips', () => {
+  it.each([
+    [
+      'en',
+      [
+        'Copy content',
+        'Copy Markdown source',
+        'Satisfied',
+        'Not satisfied',
+        'New chat from here',
+      ],
+    ],
+    [
+      'zh-CN',
+      ['复制内容', '复制 Markdown 源文', '满意', '不满意', '从此处新建对话'],
+    ],
+  ] as const)(
+    'shows localized tooltips in the Web Shell portal on keyboard focus in %s',
+    async (language, labels) => {
+      const portal = document.createElement('div');
+      document.body.appendChild(portal);
+      try {
+        const container = render(
+          <WebShellPortalRootContext.Provider value={portal}>
+            <AssistantMessage
+              content="answer"
+              showFooterActions
+              showAssistantFeedback
+              showBranchAction
+              onBranchSession={vi.fn()}
+            />
+          </WebShellPortalRootContext.Provider>,
+          language,
+        );
+        expect(container.querySelector('.lucide-split')).not.toBeNull();
+        for (const label of labels) {
+          const button = container.querySelector<HTMLButtonElement>(
+            `button[aria-label="${label}"]`,
+          )!;
+          expect(button).not.toBeNull();
+          expect(button.hasAttribute('title')).toBe(false);
+          await act(async () => button.focus());
+          const tooltip = portal.querySelector('[role="tooltip"]')!;
+          expect(tooltip?.textContent).toBe(label);
+          expect(button.getAttribute('aria-describedby')).toBe(tooltip.id);
+          expect(container.querySelector('[role="tooltip"]')).toBeNull();
+          await act(async () => button.blur());
+        }
+      } finally {
+        portal.remove();
+      }
+    },
+  );
+});
+
 describe('AssistantMessage branch action', () => {
   it('disables the selected action while the branch request is pending', async () => {
     let resolveBranch!: () => void;
@@ -533,7 +591,7 @@ describe('AssistantMessage branch action', () => {
       />,
     );
     const button = container.querySelector<HTMLButtonElement>(
-      'button[title="Branch"]',
+      'button[aria-label="New chat from here"]',
     );
 
     act(() => button?.click());
@@ -560,7 +618,7 @@ describe('AssistantMessage branch action', () => {
         />,
       );
       const button = container.querySelector<HTMLButtonElement>(
-        'button[title="Branch"]',
+        'button[aria-label="New chat from here"]',
       );
 
       await act(async () => {
@@ -616,89 +674,284 @@ describe('AssistantMessage markdown tables', () => {
   });
 });
 
-describe('AssistantMessage copy reset timer', () => {
-  it('leaves no pending reset timer behind on unmount', async () => {
-    vi.useFakeTimers();
-    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: vi.fn().mockResolvedValue(undefined) },
-    });
+describe('AssistantMessage Markdown copy', () => {
+  it.each([
+    ['en', 'Copy content', 'Copy Markdown source'],
+    ['zh-CN', '复制内容', '复制 Markdown 源文'],
+  ] as const)(
+    'copies rendered content and source Markdown with independent feedback in %s',
+    async (language, copyLabel, markdownLabel) => {
+      vi.useFakeTimers();
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      vi.stubGlobal('navigator', { clipboard: { writeText } });
+      try {
+        const content =
+          '## Heading\n\n**Bold** [link](https://example.com)\n\n- Item\n\n```ts\nconst x = 1;\n```';
+        const container = render(
+          <AssistantMessage content={content} showFooterActions />,
+          language,
+        );
+        const copy = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${copyLabel}"]`,
+        )!;
+        const markdown = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${markdownLabel}"]`,
+        )!;
+        expect(copy.nextElementSibling).toBe(markdown);
+        expect(markdown.hasAttribute('title')).toBe(false);
+        expect(markdown.getAttribute('aria-label')).not.toBe(
+          getTranslator(language)('assistant.copyMarkdown'),
+        );
+        await act(async () => markdown.click());
+        expect(writeText).toHaveBeenCalledWith(content);
+        expect(markdown.querySelector('rect')).toBeNull();
+        expect(copy.querySelector('rect')).not.toBeNull();
+        act(() => vi.advanceTimersByTime(2000));
+        expect(markdown.querySelector('rect')).not.toBeNull();
+        await act(async () => copy.click());
+        expect(writeText).toHaveBeenLastCalledWith(
+          'Heading\nBold link\nItem\nconst x = 1;',
+        );
+        expect(markdown.querySelector('rect')).not.toBeNull();
+        expect(copy.querySelector('rect')).toBeNull();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it('copies the whole rendered reply without replacing a partial selection', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const selection = window.getSelection()!;
     try {
       const container = render(
-        <AssistantMessage content="copy me" showFooterActions />,
+        <AssistantMessage content="Before **bold** after." showFooterActions />,
+      );
+      const range = document.createRange();
+      range.selectNodeContents(container.querySelector('strong')!);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(writeText).toHaveBeenCalledWith('Before bold after.');
+      expect(selection.toString()).toBe('bold');
+      expect(selection.getRangeAt(0)).toBe(range);
+    } finally {
+      selection.removeAllRanges();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    { content: '', showFooterActions: true },
+    { content: 'answer', showFooterActions: false },
+    { content: 'answer', showFooterActions: true, isStreaming: true },
+  ])('honors footer visibility: %j', (props) => {
+    const container = render(<AssistantMessage {...props} />);
+    expect(
+      container.querySelector('button[aria-label="Copy Markdown source"]'),
+    ).toBeNull();
+  });
+
+  it('omits the Markdown control from exported documents', () => {
+    const container = render(
+      <AssistantMessage content="answer" showFooterActions />,
+      'en',
+      'document',
+    );
+    expect(
+      container.querySelector('button[aria-label="Copy Markdown source"]'),
+    ).toBeNull();
+  });
+
+  it('falls back to the raw source when the reply renders no plain text', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    try {
+      const content = '![](https://example.com/a.png)';
+      const container = render(
+        <AssistantMessage content={content} showFooterActions />,
       );
       const button = container.querySelector<HTMLButtonElement>(
-        'button[title="Copy"]',
-      );
-      await act(async () => {
-        button?.click();
-        await Promise.resolve();
-      });
-      // The 2s reset is pending; unmounting must clear it, or it fires
-      // after the file's environment is torn down and the unit suites'
-      // unhandled-error gate turns an all-green run red.
-      expect(vi.getTimerCount()).toBeGreaterThan(0);
-      const { root, container: mountedContainer } = mounted.pop()!;
-      act(() => root.unmount());
-      mountedContainer.remove();
-      expect(vi.getTimerCount()).toBe(0);
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(writeText).toHaveBeenCalledWith(content);
+      expect(writeText).not.toHaveBeenCalledWith('');
     } finally {
-      if (descriptor) {
-        Object.defineProperty(navigator, 'clipboard', descriptor);
-      }
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('copies rendered text without running the Markdown converter', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    const turndown = vi.spyOn(TurndownService.prototype, 'turndown');
+    try {
+      const container = render(
+        <AssistantMessage content="Before **bold** after." showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(turndown).not.toHaveBeenCalled();
+      expect(writeText).toHaveBeenCalledWith('Before bold after.');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('marks the footer persistently visible only when asked', () => {
+    const shown = render(
+      <AssistantMessage
+        content="answer"
+        showFooterActions
+        footerAlwaysVisible
+      />,
+    );
+    expect(
+      shown
+        .querySelector(`.${styles.messageFooter}`)
+        ?.classList.contains(styles.messageFooterVisible),
+    ).toBe(true);
+    const resting = render(
+      <AssistantMessage content="answer" showFooterActions />,
+    );
+    expect(
+      resting
+        .querySelector(`.${styles.messageFooter}`)
+        ?.classList.contains(styles.messageFooterVisible),
+    ).toBe(false);
+  });
+
+  it('reports clipboard failure without a success flash', async () => {
+    vi.stubGlobal('navigator', {
+      clipboard: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+    });
+    const originalExecCommand = document.execCommand;
+    document.execCommand = vi.fn().mockReturnValue(false);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const container = render(
+        <AssistantMessage content="answer" showFooterActions />,
+      );
+      const markdown = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy Markdown source"]',
+      )!;
+      await act(async () => markdown.click());
+      expect(warn).toHaveBeenCalledWith(
+        '[web-shell] clipboard write failed:',
+        expect.any(Error),
+      );
+      expect(markdown.querySelector('rect')).not.toBeNull();
+    } finally {
+      document.execCommand = originalExecCommand;
+      vi.unstubAllGlobals();
     }
   });
 });
 
-describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
-  it('falls back to execCommand and still shows the copied state', async () => {
-    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: undefined,
-    });
-    let copiedViaFallback: string | null = null;
-    const originalExecCommand = document.execCommand;
-    const execCommandMock = vi.fn().mockImplementation((command: string) => {
-      if (command === 'copy') {
-        copiedViaFallback = document.querySelector('textarea')?.value ?? null;
-      }
-      return true;
-    });
-    document.execCommand = execCommandMock;
-
-    try {
-      const container = render(
-        <AssistantMessage content="copy me" showFooterActions />,
+describe('AssistantMessage copy reset timer', () => {
+  it.each(['Copy content', 'Copy Markdown source'])(
+    'cleans up the %s timer on unmount',
+    async (label) => {
+      vi.useFakeTimers();
+      const descriptor = Object.getOwnPropertyDescriptor(
+        navigator,
+        'clipboard',
       );
-      const button = container.querySelector<HTMLButtonElement>(
-        'button[title="Copy"]',
-      );
-      expect(button).not.toBeNull();
-
-      await act(async () => {
-        button?.click();
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn().mockResolvedValue(undefined) },
       });
-
-      expect(execCommandMock).toHaveBeenCalledWith('copy');
-      expect(copiedViaFallback).toBe('copy me');
-      // The button should flip to the check icon even without the async API.
-      expect(
-        button?.querySelector('path[d="m3.5 8.3 3 3L12.8 5"]'),
-      ).not.toBeNull();
-    } finally {
-      document.execCommand = originalExecCommand;
-      if (descriptor) {
-        Object.defineProperty(navigator, 'clipboard', descriptor);
+      try {
+        const container = render(
+          <AssistantMessage content="copy me" showFooterActions />,
+        );
+        const button = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${label}"]`,
+        );
+        await act(async () => {
+          button?.click();
+          await Promise.resolve();
+        });
+        // The 2s reset is pending; unmounting must clear it, or it fires
+        // after the file's environment is torn down and the unit suites'
+        // unhandled-error gate turns an all-green run red.
+        expect(vi.getTimerCount()).toBeGreaterThan(0);
+        const { root, container: mountedContainer } = mounted.pop()!;
+        act(() => root.unmount());
+        mountedContainer.remove();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(navigator, 'clipboard', descriptor);
+        }
       }
-    }
-  });
+    },
+  );
+});
+
+describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
+  it.each(['Copy content', 'Copy Markdown source'])(
+    'falls back to execCommand for %s',
+    async (label) => {
+      const descriptor = Object.getOwnPropertyDescriptor(
+        navigator,
+        'clipboard',
+      );
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: undefined,
+      });
+      let copiedViaFallback: string | null = null;
+      const originalExecCommand = document.execCommand;
+      const execCommandMock = vi.fn().mockImplementation((command: string) => {
+        if (command === 'copy') {
+          copiedViaFallback = document.querySelector('textarea')?.value ?? null;
+        }
+        return true;
+      });
+      document.execCommand = execCommandMock;
+
+      try {
+        const container = render(
+          <AssistantMessage content="**copy me**" showFooterActions />,
+        );
+        const button = container.querySelector<HTMLButtonElement>(
+          `button[aria-label="${label}"]`,
+        );
+        expect(button).not.toBeNull();
+
+        await act(async () => {
+          button?.click();
+        });
+
+        expect(execCommandMock).toHaveBeenCalledWith('copy');
+        expect(copiedViaFallback).toBe(
+          label === 'Copy content' ? 'copy me' : '**copy me**',
+        );
+        // The button should flip to the check icon even without the async API.
+        expect(
+          button?.querySelector('path[d="m3.5 8.3 3 3L12.8 5"]'),
+        ).not.toBeNull();
+      } finally {
+        document.execCommand = originalExecCommand;
+        if (descriptor) {
+          Object.defineProperty(navigator, 'clipboard', descriptor);
+        }
+      }
+    },
+  );
 });
 
 describe('AssistantMessage satisfied / not-satisfied marks', () => {
   const find = (container: HTMLElement, title: string) =>
-    container.querySelector<HTMLButtonElement>(`button[title="${title}"]`);
+    container.querySelector<HTMLButtonElement>(`button[aria-label="${title}"]`);
 
   it('offers no marks unless the host opts in', () => {
     const container = render(
@@ -890,8 +1143,12 @@ describe('AssistantMessage agent replies', () => {
       />,
     );
 
-    expect(container.querySelector('button[aria-label="Copy"]')).not.toBeNull();
-    expect(container.querySelector('button[aria-label="Branch"]')).toBeNull();
+    expect(
+      container.querySelector('button[aria-label="Copy content"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="New chat from here"]'),
+    ).toBeNull();
     expect(container.querySelector('button[aria-pressed]')).toBeNull();
     expect(container.textContent).toContain('Failed');
   });

@@ -7,24 +7,24 @@
  */
 
 /**
- * Release gate for the vendored ripgrep's exec bits in the published CLI
- * tarball (#12668).
+ * Release gate for the exec bits of spawned vendored binaries in the
+ * published CLI tarball (#12668).
  *
  * From 0.24.4 on the release published the generated CLI with `pnpm publish`,
  * whose packer writes 0755 for the entries named in the manifest's `bin` map
- * and 0644 for every other entry — so `vendor/ripgrep/<platform>/rg` shipped
- * without an exec bit and a fresh install could not spawn the bundled ripgrep.
- * `npm pack` keeps the working-tree mode. This gate packs the prepared CLI
- * with the same packer the publish step uses and reads the modes recorded in
- * the archive (no extraction, so the umask cannot mask them), failing when any
- * unix vendored ripgrep lacks all three exec bits: a root-owned
+ * and 0644 for every other entry — so every vendored binary shipped without
+ * an exec bit and a fresh install could not spawn it. `npm pack` keeps the
+ * working-tree mode. This gate packs the prepared CLI with the same packer
+ * the publish step uses and reads the modes recorded in the archive (no
+ * extraction, so the umask cannot mask them), failing when any spawned
+ * vendored binary lacks all three exec bits: a root-owned
  * `sudo npm install -g` is only executable by others with 0111 set, and the
- * runtime heal cannot chmod such an install.
+ * runtime heals cannot chmod such an install.
  *
  * Usage: node scripts/check-release-tarball-exec-bits.mjs [package-dir]
- * Exit 0 = every unix vendored ripgrep keeps 0111; exit 1 = one does not, or
- * the gate could not measure (a Windows host, an unreadable directory, no
- * tarball, or a missing `vendor/ripgrep`). It never passes vacuously.
+ * Exit 0 = every spawned vendored binary keeps 0111; exit 1 = one does not,
+ * or the gate could not measure (a Windows host, an unreadable directory, no
+ * tarball, or no spawned vendored binaries). It never passes vacuously.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -33,9 +33,27 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// `rg.exe` is a 0644 Windows binary by design, so only a bare unix `rg` name
-// matches; `-win32` directories carry nothing else this gate must inspect.
-const UNIX_RIPGREP_ENTRY = /^package\/vendor\/ripgrep\/[^/]+\/rg$/;
+// Vendored binaries the CLI spawns directly, one expected entry per platform
+// directory. Platform membership comes from the directory name alone: a
+// platform directory whose binary is missing is itself a broken package and
+// must fail the gate, never shrink the expected set. `rg.exe` is a 0644
+// Windows binary by design, so `-win32` platforms are excluded;
+// `landlock-run/src` is a source directory, not a platform, and is excluded
+// by name. Any future vendored binary spawned the same way belongs here —
+// its runtime heal shares the ripgrep heal's limit of being unable to chmod
+// a root-owned or read-only install (#12668).
+const SPAWNED_VENDORED_BINARIES = [
+  {
+    root: ['vendor', 'ripgrep'],
+    leaf: 'rg',
+    skip: (platform) => platform.endsWith('-win32'),
+  },
+  {
+    root: ['vendor', 'landlock-run'],
+    leaf: 'qwen-landlock-run',
+    skip: (platform) => platform === 'src',
+  },
+];
 
 // read/write/exec bit values for owner, group and other, in tar order.
 const MODE_CLASSES = [
@@ -65,8 +83,8 @@ function symbolicModeToOctal(mode) {
   return bits;
 }
 
-/** Maps every unix `vendor/ripgrep/<platform>/rg` entry to its archive mode. */
-function listRipgrepEntries(tarball) {
+/** Maps every regular-file entry in the archive to its recorded mode. */
+function listTarEntryModes(tarball) {
   const listing = spawnSync('tar', ['-tvzf', tarball], { encoding: 'utf8' });
   if (listing.status !== 0) {
     throw new Error(
@@ -75,16 +93,19 @@ function listRipgrepEntries(tarball) {
   }
   const entries = new Map();
   for (const line of listing.stdout.split('\n')) {
+    if (line[0] !== '-') continue;
     const name = line.trim().split(/\s+/).pop();
-    if (name === undefined || !UNIX_RIPGREP_ENTRY.test(name)) continue;
-    entries.set(name, symbolicModeToOctal(line.slice(0, 10)));
+    if (name !== undefined) {
+      entries.set(name, symbolicModeToOctal(line.slice(0, 10)));
+    }
   }
   return entries;
 }
 
 /**
- * Packs `packageDir` the way the release publishes it and asserts every unix
- * vendored ripgrep entry keeps 0111. Throws with a per-entry report otherwise.
+ * Packs `packageDir` the way the release publishes it and asserts every
+ * spawned vendored binary entry keeps 0111. Throws with a per-entry report
+ * otherwise.
  */
 export function checkReleaseTarballExecBits(packageDir = 'dist') {
   if (process.platform === 'win32') {
@@ -92,11 +113,11 @@ export function checkReleaseTarballExecBits(packageDir = 'dist') {
       'the release tarball exec-bit gate cannot read POSIX tar entry modes on Windows',
     );
   }
-  const expected = expectedRipgrepEntries(packageDir);
+  const expected = expectedSpawnedEntries(packageDir);
   const destination = mkdtempSync(join(tmpdir(), 'release-tarball-exec-bits-'));
   try {
     const tarball = pack(packageDir, destination);
-    const actual = listRipgrepEntries(tarball);
+    const actual = listTarEntryModes(tarball);
     const problems = [];
     for (const name of expected) {
       const mode = actual.get(name);
@@ -109,7 +130,7 @@ export function checkReleaseTarballExecBits(packageDir = 'dist') {
     if (problems.length > 0) {
       throw new Error(
         [
-          `the CLI tarball ships a vendored ripgrep without all exec bits (${packageDir})`,
+          `the CLI tarball ships a spawned vendored binary without all exec bits (${packageDir})`,
           ...problems.map((problem) => `  ${problem}`),
         ].join('\n'),
       );
@@ -123,25 +144,32 @@ export function checkReleaseTarballExecBits(packageDir = 'dist') {
   }
 }
 
-function expectedRipgrepEntries(packageDir) {
-  const vendored = join(packageDir, 'vendor', 'ripgrep');
-  let platforms;
-  try {
-    platforms = readdirSync(vendored, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !entry.name.endsWith('-win32'))
-      .map((entry) => entry.name)
-      .sort();
-  } catch (error) {
+function expectedSpawnedEntries(packageDir) {
+  const expected = [];
+  for (const spec of SPAWNED_VENDORED_BINARIES) {
+    const root = join(packageDir, ...spec.root);
+    let platforms;
+    try {
+      platforms = readdirSync(root, { withFileTypes: true });
+    } catch (error) {
+      throw new Error(
+        `cannot read ${root}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    for (const platform of platforms) {
+      if (!platform.isDirectory() || spec.skip(platform.name)) continue;
+      expected.push(
+        `package/${spec.root.join('/')}/${platform.name}/${spec.leaf}`,
+      );
+    }
+  }
+  if (expected.length === 0) {
     throw new Error(
-      `cannot read ${vendored}: ${error instanceof Error ? error.message : String(error)}`,
+      `no spawned vendored executables under ${join(packageDir, 'vendor')}; the gate refuses to pass vacuously`,
     );
   }
-  if (platforms.length === 0) {
-    throw new Error(
-      `no unix vendored ripgrep under ${vendored}; the gate refuses to pass vacuously`,
-    );
-  }
-  return platforms.map((platform) => `package/vendor/ripgrep/${platform}/rg`);
+  expected.sort();
+  return expected;
 }
 
 function pack(packageDir, destination) {
@@ -174,7 +202,7 @@ function main(argv) {
   try {
     const { tarball, entries } = checkReleaseTarballExecBits(packageDir);
     process.stdout.write(
-      `ok: ${entries.length} vendored ripgrep entries keep 0111 in ${tarball} (${packageDir})\n`,
+      `ok: ${entries.length} spawned vendored binaries keep 0111 in ${tarball} (${packageDir})\n`,
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

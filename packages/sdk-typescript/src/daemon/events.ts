@@ -270,6 +270,7 @@ export interface DaemonPermissionForbiddenData {
 export interface DaemonModelSwitchedData {
   sessionId: string;
   modelId: string;
+  subscriptionSignedOut?: boolean;
   [key: string]: unknown;
 }
 
@@ -883,7 +884,10 @@ export interface DaemonSessionMessagesDeletedData {
 export interface DaemonSessionRewoundData {
   sessionId: string;
   promptId: string;
+  daemonPromptId?: string;
   targetTurnIndex: number;
+  /** Authoritative surviving UI prefix, with newly seeded daemon event IDs. */
+  replay?: DaemonEvent[];
   filesChanged: string[];
   filesFailed: string[];
   originatorClientId?: string;
@@ -1912,6 +1916,21 @@ function isSessionRewoundData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['promptId']) &&
     isFiniteNumber(value['targetTurnIndex']) &&
+    (value['replay'] === undefined ||
+      (Array.isArray(value['replay']) &&
+        value['replay'].every(
+          (event) =>
+            isRecord(event) &&
+            event['v'] === 1 &&
+            isNonEmptyString(event['type']) &&
+            event['type'] !== 'session_rewound' &&
+            'data' in event &&
+            (!isRecord(event['data']) ||
+              event['data']['sessionId'] === undefined ||
+              event['data']['sessionId'] === value['sessionId'] ||
+              (event['type'] === 'approval_mode_changed' &&
+                event['data']['persisted'] === true)),
+        ))) &&
     Array.isArray(value['filesChanged']) &&
     Array.isArray(value['filesFailed'])
   );
@@ -2061,7 +2080,7 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         sessionId: event.data.sessionId,
-        currentModelId: event.data.modelId,
+        currentModelId: event.data.modelId || undefined,
         lastModelSwitchFailure: undefined,
       };
     case 'model_switch_failed':
@@ -2694,7 +2713,8 @@ function isModelSwitchedData(value: unknown): value is DaemonModelSwitchedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
-    isNonEmptyString(value['modelId'])
+    (isNonEmptyString(value['modelId']) ||
+      (value['modelId'] === '' && value['subscriptionSignedOut'] === true))
   );
 }
 

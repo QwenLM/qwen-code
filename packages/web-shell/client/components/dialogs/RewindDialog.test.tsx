@@ -16,19 +16,33 @@ if (!Element.prototype.scrollIntoView) {
 }
 
 const blocks = [
-  { kind: 'user', text: 'first turn' },
-  { kind: 'user', text: 'second turn' },
+  { id: 'user-A', kind: 'user', text: 'first turn', promptId: 'daemon-A' },
+  { id: 'user-B', kind: 'user', text: 'second turn', promptId: 'daemon-B' },
 ] as unknown as DaemonTranscriptBlock[];
 
 const snapshots: DaemonRewindSnapshotInfo[] = [
-  { promptId: 'p0', turnIndex: 0, timestamp: '2026-01-01T00:00:00.000Z' },
-  { promptId: 'p1', turnIndex: 1, timestamp: '2026-01-01T00:01:00.000Z' },
+  {
+    promptId: 'p0',
+    daemonPromptId: 'daemon-A',
+    turnIndex: 0,
+    timestamp: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    promptId: 'p1',
+    daemonPromptId: 'daemon-B',
+    turnIndex: 1,
+    timestamp: '2026-01-01T00:01:00.000Z',
+  },
 ] as unknown as DaemonRewindSnapshotInfo[];
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-async function mount(rewind: (id: string) => Promise<void>) {
+async function mount(
+  rewind: (id: string) => Promise<void>,
+  entries = snapshots,
+  transcriptBlocks = blocks,
+) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -36,8 +50,8 @@ async function mount(rewind: (id: string) => Promise<void>) {
     root!.render(
       <I18nProvider language="en">
         <RewindDialog
-          blocks={blocks}
-          loadSnapshots={() => Promise.resolve({ snapshots })}
+          blocks={transcriptBlocks}
+          loadSnapshots={() => Promise.resolve({ snapshots: entries })}
           rewind={rewind}
           onError={vi.fn()}
           onClose={vi.fn()}
@@ -90,6 +104,7 @@ describe('RewindDialog keyboard', () => {
   it('the button rewinds the snapshot confirmed via keyboard', async () => {
     const rewind = vi.fn().mockResolvedValue(undefined);
     await mount(rewind);
+    expect(container!.textContent).toContain('#2 second turn');
 
     // Move cursor to the 2nd snapshot and confirm it with Enter.
     press('ArrowDown');
@@ -98,6 +113,94 @@ describe('RewindDialog keyboard', () => {
       rewindButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(rewind).toHaveBeenCalledWith('p1');
+  });
+
+  it('does not relabel a retained checkpoint as an earlier visible turn', async () => {
+    const rewind = vi.fn().mockResolvedValue(undefined);
+    await mount(rewind, [snapshots[1]!]);
+    expect(container!.textContent).toContain('#2 second turn');
+    expect(container!.textContent).not.toContain('first turn');
+    press('Enter');
+    await act(async () => {
+      rewindButton().click();
+    });
+    expect(rewind).toHaveBeenCalledWith('p1');
+  });
+
+  it('keeps session turn numbers after earlier transcript blocks are evicted', async () => {
+    const rewind = vi.fn().mockResolvedValue(undefined);
+    await mount(rewind, [{ ...snapshots[1]!, turnIndex: 40 }], [blocks[1]!]);
+    expect(container!.querySelector('[role="option"]')?.textContent).toContain(
+      '#41 second turn',
+    );
+    press('Enter');
+    await act(async () => {
+      rewindButton().click();
+    });
+    expect(rewind).toHaveBeenCalledWith('p1');
+  });
+
+  it('numbers the checkpoint the way the chat numbers it past an injected row', async () => {
+    // The injected row shares the daemon prompt identity; the preview must
+    // still come from the ordinary user block.
+    const withInjected = [
+      blocks[0]!,
+      {
+        id: 'injected',
+        kind: 'user',
+        text: 'injected mid turn',
+        promptId: 'daemon-B',
+        meta: { source: 'mid_turn_message_injected' },
+      },
+      blocks[1]!,
+    ] as unknown as DaemonTranscriptBlock[];
+    const rewind = vi.fn().mockResolvedValue(undefined);
+    await mount(rewind, [snapshots[1]!], withInjected);
+    expect(container!.textContent).toContain('#2 second turn');
+    expect(container!.textContent).not.toContain('#3');
+  });
+
+  it.each(['missing', 'duplicate'])(
+    'refuses a %s association instead of guessing an ordinal',
+    async (kind) => {
+      const entry = {
+        ...snapshots[0]!,
+        daemonPromptId: kind === 'missing' ? undefined : 'daemon-A',
+      };
+      const rewind = vi.fn().mockResolvedValue(undefined);
+      await mount(
+        rewind,
+        kind === 'duplicate'
+          ? [entry, { ...entry, promptId: 'duplicate' }]
+          : [entry],
+      );
+      press('Enter');
+      expect(rewindButton().disabled).toBe(true);
+      expect(rewind).not.toHaveBeenCalled();
+      if (kind === 'missing') {
+        expect(container!.textContent).toContain('no prompt identity');
+      }
+    },
+  );
+
+  it('keeps a turn outside the loaded window rewindable by its identity', async () => {
+    // The loaded transcript is a window, not the session: a truncated replay
+    // leaves snapshots whose blocks were never paged in. The rewind itself
+    // carries only the prompt identity, so those rows stay targetable and keep
+    // their snapshot number even without preview text.
+    const entry = { ...snapshots[0]!, daemonPromptId: 'not-paged-in' };
+    const rewind = vi.fn().mockResolvedValue(undefined);
+    await mount(rewind, [entry]);
+    // The snapshot still supplies its number; only the preview falls back to
+    // the identity-derived label.
+    expect(container!.textContent).toContain('Prompt');
+    expect(container!.textContent).toContain('#1');
+    press('Enter');
+    expect(rewindButton().disabled).toBe(false);
+    await act(async () => {
+      rewindButton().click();
+    });
+    expect(rewind).toHaveBeenCalledWith(entry.promptId);
   });
 
   it('disables keyboard navigation while a rewind is in flight', async () => {

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as runtimeInfo from '../utils/runtime-info.js';
 import { spawn, spawnSync } from 'node:child_process';
 import {
   mkdir,
@@ -176,6 +177,26 @@ describe('unit creation and attachment', () => {
 });
 
 describe('managed command launcher environment', () => {
+  it('launches through the private interpreter while preserving the payload executable', () => {
+    const interpreter = join(directory, 'bun', 'bin', 'bun');
+    vi.spyOn(runtimeInfo, 'getJsInterpreterCommand').mockReturnValue({
+      command: interpreter,
+      runtime: 'bun',
+    });
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch('/payload/bin/tool', ['literal argument'], {
+      PATH: '/payload/bin',
+    });
+    expect(launch.executable).toBe(interpreter);
+    expect(launch.args.slice(-3)).toEqual([
+      directory,
+      '/payload/bin/tool',
+      '["literal argument"]',
+    ]);
+  });
+
   it('keeps environment values out of argv and applies them only after membership', async () => {
     const preload = join(directory, 'preload.cjs');
     const marker = join(directory, 'preloaded');

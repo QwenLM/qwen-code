@@ -1,0 +1,40 @@
+package com.alibaba.qwen.code.managedagent.contracts.artifact;
+
+import java.io.InputStream;
+
+/**
+ * Private, immutable object storage for one publication service.
+ * Implementations report backend failures through {@link ToolPublicationStorageException}.
+ */
+public interface ToolPublicationObjectStore {
+    /**
+     * One physical create, with no automatic retries, for a key exclusively owned by its durable
+     * PUT attempt. An existing key must never be overwritten. Once the complete object is readable,
+     * this invocation must not create it again, including after a later deletion.
+     */
+    public void putIfAbsent(String key, byte[] bytes);
+
+    /** The caller closes the stream after verifying its complete contents. */
+    public InputStream open(String key);
+
+    /** Check authorization before each new storage request, including implementation retries. */
+    public default InputStream open(String key, Runnable guard) {
+        guard.run();
+        return open(key);
+    }
+
+    /**
+     * Range read with the same guard-before-each-request contract as {@link #open(String, Runnable)}.
+     * The caller closes the stream after verifying its complete contents. Implementations must not
+     * retry without re-running the guard.
+     */
+    public InputStream openRange(String key, long offset, long length, Runnable guard);
+
+    /** Physically delete the exact owned key; an absent object is already deleted. */
+    public default void deleteIfPresent(String key) {
+        throw new UnsupportedOperationException("Output deletion is not supported by this adapter");
+    }
+
+    /** Validate private, durable, immutable storage and exact-key deletion guarantees. */
+    public void validateConfiguration();
+}

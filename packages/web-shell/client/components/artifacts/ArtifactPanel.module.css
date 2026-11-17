@@ -18,6 +18,7 @@
 
 .panelFullscreen {
   --chat-content-width: 100%;
+  --chat-responsive-content-width: 100%;
 }
 
 .header {

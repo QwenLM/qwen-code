@@ -36,8 +36,6 @@ export async function writeSandboxFile(
   const handle = await executeSandbox(
     policy,
     {
-      // S3 handoff: bwrap/landlock still stage process.execPath, not this
-      // resolver. Allowlist migration is pending; see bun-runtime-boundary.md.
       executable: getJsInterpreterCommand(import.meta.url).command,
       args: [sandboxAsset('file-worker')],
       cwd: policy.workspace,

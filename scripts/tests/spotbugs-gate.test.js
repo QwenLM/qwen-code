@@ -46,7 +46,7 @@ describe('SpotBugs gate witness', () => {
     );
     const byName = (name) => steps.filter((step) => step.name === name);
 
-    // Hosted MySQL, the MariaDB job's combined install-and-verify step and
+    // Hosted MySQL, the MySQL job's combined install-and-verify step and
     // both EventTransport gate jobs each stage the sibling modules before
     // their own verify; the Hosted failover job stages them before packaging
     // the jar its arms run.

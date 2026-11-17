@@ -237,12 +237,63 @@ describe('sedEditParser', () => {
     expect(
       parseSedEditCommand("sed -i 's/[[:digit:]]/X/g' file.txt"),
     ).toBeNull();
+    // Negated, mixed and equivalence-class forms do not contain the
+    // self-contained `[[:alpha:]]` shape the old guard matched.
+    expect(
+      parseSedEditCommand("sed -i 's/[^[:space:]]/X/g' file.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/[[:alpha:]abc]/X/g' file.txt"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/[[=a=]]/X/g' file.txt")).toBeNull();
+  });
+
+  it('rejects an escaped `[` followed by a POSIX-looking opener', () => {
+    // `\[[:alpha:]]` is a literal `[` and an ordinary class to BSD sed, but
+    // GNU sed rejects it as a malformed bracket expression. A simulation has
+    // to match both, so it declines and lets whichever sed is installed decide.
+    expect(
+      parseSedEditCommand(String.raw`sed -i 's/\[[:alpha:]]/X/g' f.txt`),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand(String.raw`sed -i 's/\[[.a.]]/X/g' f.txt`),
+    ).toBeNull();
+    // A doubled backslash leaves a real `[[:alpha:]]` bracket expression,
+    // which the existing POSIX guard rejects on its own.
+    expect(
+      parseSedEditCommand("sed -i 's/\\[[:alpha:]]/X/g' f.txt"),
+    ).toBeNull();
+  });
+
+  it('keeps plain bracket classes whose first member is `:`, `.` or `=`', () => {
+    // Not POSIX constructs: the `:`/`.`/`=` is a literal class member, and the
+    // translator handles them exactly like sed.
+    expect(parseSedEditCommand("sed -i 's/[.]/X/g' f.txt")).not.toBeNull();
+    expect(parseSedEditCommand("sed -i 's/[=]/X/g' f.txt")).not.toBeNull();
+    expect(parseSedEditCommand("sed -i 's/[:]/X/g' f.txt")).not.toBeNull();
+    expect(applySed("sed -i 's/[.]$//' f.txt", 'ab.\n')).toBe('ab\n');
   });
 
   it('rejects sed escapes that diverge in JavaScript regexes', () => {
     expect(parseSedEditCommand("sed -i 's/\\d/X/g' file.txt")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/\\</X/g' file.txt")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/\\>/X/g' file.txt")).toBeNull();
+    // Under the `u` flag these are JavaScript Unicode property / code-point
+    // escapes, so the simulation used to rewrite files that real sed rejects
+    // (`\p{L}`) or leaves unchanged (`\u{41}`).
+    expect(parseSedEditCommand("sed -E -i 's/\\p{L}/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/\\P{L}/X/g' file.txt")).toBeNull();
+    expect(
+      parseSedEditCommand("sed -E -i 's/\\u{41}/X/g' file.txt"),
+    ).toBeNull();
+    // `\0` is a NUL to an ES regex with the `u` flag, but a literal `0` to sed.
+    expect(parseSedEditCommand("sed -i 's/\\0/X/g' file.txt")).toBeNull();
+  });
+
+  it('declines u-only invalid escapes so the real sed runs', () => {
+    expect(parseSedEditCommand("sed -i 's/a\\-b/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/a\\ b/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/a{/X/g' file.txt")).toBeNull();
   });
 
   it('preserves carriage returns in sed pattern space', () => {
@@ -250,6 +301,25 @@ describe('sedEditParser', () => {
       'foo\r\n',
     );
     expect(applySed("sed -i 's/\\r$//g' file.txt", 'foo\r\n')).toBe('foo\n');
+  });
+
+  it('matches one character for . and bracket expressions', () => {
+    // sed matches `\r` with `.`, and treats an astral character as one
+    // character rather than two UTF-16 code units.
+    expect(applySed("sed -i 's/^.//' f.txt", '😀 Title\n')).toBe(' Title\n');
+    expect(applySed("sed -E -i 's/^.//' f.txt", '😀 Title\n')).toBe(' Title\n');
+    expect(applySed("sed -i 's/.$//' f.txt", 'abc😀\n')).toBe('abc\n');
+    expect(applySed("sed -i 's/[^a-z]/_/g' f.txt", 'a😀b\n')).toBe('a_b\n');
+    // BSD sed advances over characters for zero-width global matches; GNU sed
+    // advances over bytes for this pattern.
+    expect(applySed("sed -i 's/x*/-/g' f.txt", '😀\n')).toBe('-😀-\n');
+    // The same split covers backreferences: with `u`, `\(.\)\1` matches one
+    // astral character repeated, as GNU sed does in a UTF-8 locale; BSD sed
+    // compares bytes and leaves this file alone.
+    expect(applySed("sed -i 's/\\(.\\)\\1/X/g' f.txt", '😀😀x\n')).toBe('Xx\n');
+    expect(applySed("sed -i 's/=.*$/=new/' f.txt", 'key=old\r\nk2=v\r\n')).toBe(
+      'key=new\nk2=new\n',
+    );
   });
 
   it('applies substitutions to empty lines', () => {
@@ -321,8 +391,8 @@ describe('sedEditParser', () => {
   });
 
   it('declines the same bracket expressions under -E', () => {
-    // The -E path hands the pattern to RegExp untouched, so it diverges the
-    // same way and has to be declined separately.
+    // -E goes through the same bracket translation, so the same check
+    // declines these.
     expect(parseSedEditCommand("sed -E -i 's/[]a]/X/g' f.txt")).toBeNull();
     expect(parseSedEditCommand("sed -E -i 's/[^]]/X/g' f.txt")).toBeNull();
   });
@@ -334,5 +404,59 @@ describe('sedEditParser', () => {
     expect(applySed("sed -i 's/[abc]/X/g' f.txt", 'a]b')).toBe('X]X');
     expect(applySed("sed -i 's/[^abc]/X/g' f.txt", 'a]b')).toBe('aXb');
     expect(applySed("sed -i 's/a\\[b/X/g' f.txt", 'a[b]c')).toBe('X]c');
+  });
+
+  // A backslash inside a bracket expression is a literal member under -E
+  // too; JS read it as an escape. Expected values measured with GNU sed 4.9.
+  it('keeps backslashes literal inside bracket expressions under -E', () => {
+    // [\[\]] is the class {\, [} followed by a literal ]; sed leaves this
+    // input alone, the simulation deleted both brackets.
+    expect(applySed("sed -E -i 's/[\\[\\]]//g' f.txt", 'a[b]c')).toBe('a[b]c');
+    expect(applySed("sed -E -i 's/[\\+]/X/g' f.txt", 'a + \\ b')).toBe(
+      'a X X b',
+    );
+    expect(applySed("sed -E -i 's/[\\.]/X/g' f.txt", 'a.b\\c')).toBe('aXbXc');
+    expect(applySed("sed -E -i 's/[\\]]/X/g' f.txt", 'a\\]b]')).toBe('aXb]');
+    // \-c is a range from backslash to c, so it covers b as well.
+    expect(applySed("sed -E -i 's/[a\\-c]/X/g' f.txt", 'a-b\\c')).toBe('X-XXX');
+  });
+
+  // GNU sed expands \t, \n and friends inside a bracket expression, so
+  // [ \t] is a space or a TAB there; the BRE translation read it as a space,
+  // backslash or t. Other seds disagree with GNU, so these go to real sed.
+  it('declines character escapes inside bracket expressions', () => {
+    // On 'bat', sed writes 'bat'; the simulation wrote 'ba'.
+    expect(parseSedEditCommand("sed -i 's/[ \\t]*$//' f.txt")).toBeNull();
+  });
+
+  it.each(['n', 't', 'r', 'f', 'v', 'a', 'd065', 'o101', 'x41', 'cA'])(
+    'declines [\\%s] under BRE and -E',
+    (escape) => {
+      expect(
+        parseSedEditCommand(`sed -i 's/[\\${escape}]/X/g' f.txt`),
+      ).toBeNull();
+      expect(
+        parseSedEditCommand(`sed -E -i 's/[\\${escape}]/X/g' f.txt`),
+      ).toBeNull();
+    },
+  );
+
+  it('still simulates escapes outside brackets and escaped backslashes', () => {
+    // Guards over-correcting. GNU sed reads \t outside a bracket as a TAB,
+    // as the simulation does; the ] in [a]\t closes the bracket, so that \t
+    // is simulated (GNU sed 4.9 writes 'at Xb'); a \\ inside a bracket
+    // leaves the t after it literal; and under -E an escaped [ does not
+    // open a bracket expression.
+    expect(applySed("sed -i 's/a\\tb/X/g' f.txt", 'a\tb')).toBe('X');
+    expect(applySed("sed -i 's/[a]\\t/X/' f.txt", 'at a\tb')).toBe('at Xb');
+    expect(applySed("sed -E -i 's/[a]\\t/X/' f.txt", 'at a\tb')).toBe('at Xb');
+    expect(applySed("sed -i 's/[\\\\t]/X/g' f.txt", 'a\tb\\t')).toBe('a\tbXX');
+    expect(applySed("sed -E -i 's/[\\\\t]/X/g' f.txt", 'a\tb\\t')).toBe(
+      'a\tbXX',
+    );
+    expect(applySed("sed -E -i 's/a\\.b/X/g' f.txt", 'a.b axb')).toBe('X axb');
+    expect(applySed("sed -E -i 's/\\[a\\]/X/g' f.txt", '[a] a\\]')).toBe(
+      'X a\\]',
+    );
   });
 });

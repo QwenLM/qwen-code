@@ -6,7 +6,7 @@ import {
   type ComponentRef,
   type ReactElement,
 } from 'react';
-import type { ContextUsageControls } from '../hooks/useContextUsageControls';
+import type { ContextCompressionControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
 import { getContextUsageLevel } from '../utils/contextUsage';
 import { ContextCompressionFeedback } from './ContextCompressionFeedback';
@@ -26,10 +26,7 @@ export function ContextUsagePopover({
   tokenCount: number;
   contextWindow: number;
   known?: boolean;
-  controls?: Pick<
-    ContextUsageControls,
-    'canCompress' | 'compressing' | 'result' | 'compress'
-  >;
+  controls?: ContextCompressionControls;
   onOpenDetails?: () => void;
   showSnapshotHint: boolean;
   children: ReactElement;

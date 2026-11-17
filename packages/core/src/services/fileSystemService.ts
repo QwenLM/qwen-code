@@ -250,7 +250,7 @@ export function resetUtf8BomCache(): void {
  * Returns true if the file at the given path requires CRLF line endings.
  * Only applies on Windows where cmd.exe actually parses these files.
  */
-function needsCrlfLineEndings(filePath: string): boolean {
+export function needsCrlfLineEndings(filePath: string): boolean {
   if (os.platform() !== 'win32') {
     return false;
   }

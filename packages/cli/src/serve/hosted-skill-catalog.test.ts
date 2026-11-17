@@ -66,7 +66,7 @@ it.each([
   { ...skill, name: '<injected>' },
   { ...skill, name: 'a'.repeat(129) },
   { ...skill, description: '界'.repeat(1366) },
-  { ...skill, body: '界'.repeat(10923) },
+  { ...skill, body: '界'.repeat(174763) },
   { ...skill, body: '' },
   { ...skill, body: '\ud800' },
   { ...skill, description: '\udfff' },
@@ -89,13 +89,16 @@ it('refuses duplicate names, item and total byte limits, and unsupported invocat
   expect(() => parseHostedSkills([skill, skill])).toThrow();
   expect(() =>
     parseHostedSkills(
-      Array.from({ length: 17 }, (_, i) => ({ ...skill, name: `s${i}` })),
+      Array.from({ length: 257 }, (_, i) => ({ ...skill, name: `s${i}` })),
     ),
   ).toThrow();
   expect(() =>
     parseHostedSkills([
-      { ...skill, name: 'a', body: 'x'.repeat(32768) },
-      { ...skill, name: 'b', body: 'x'.repeat(32768) },
+      ...Array.from({ length: 5 }, (_, i) => ({
+        ...skill,
+        name: `large-${i}`,
+        body: 'x'.repeat(512 * 1024),
+      })),
     ]),
   ).toThrow();
   const catalog = new HostedSkillCatalog([skill]);
@@ -148,4 +151,40 @@ it('verifies the original durable bytes, kind, digest and UTF-8 before loading',
     ),
   ).rejects.toThrow();
   expect(await readHostedSkills(undefined, { read })).toEqual([]);
+});
+
+it('keeps manual-only Skills user-invocable and user-hidden Skills model-invocable', () => {
+  const catalog = new HostedSkillCatalog([
+    { ...skill, name: 'manual', model_invocable: false },
+    { ...skill, name: 'model-only', user_invocable: false },
+  ]);
+  expect(catalog.instructions()).not.toContain('<name>\nmanual\n</name>');
+  expect(catalog.declaration()?.parametersJsonSchema).toMatchObject({
+    properties: { skill: { enum: ['model-only'] } },
+  });
+  expect(catalog.invocations('/manual inspect')).toEqual(['manual']);
+  expect(catalog.invocations('/model-only inspect')).toEqual([]);
+  expect(catalog.validationError({ skill: 'manual' }, 'model')).toContain(
+    'only',
+  );
+  expect(catalog.validationError({ skill: 'manual' }, 'user')).toBeUndefined();
+  expect(catalog.validationError({ skill: 'model-only' }, 'user')).toContain(
+    'not user-invocable',
+  );
+  expect(
+    catalog.validationError({ skill: 'model-only' }, 'model'),
+  ).toBeUndefined();
+  expect(catalog.response({ skill: 'manual' })).toContain(skill.body);
+});
+
+it('accepts the complete 42-Skill catalog with a bounded large body', () => {
+  const skills = Array.from({ length: 42 }, (_, i) => ({
+    ...skill,
+    name: `s${i}`,
+    body: i === 0 ? 'x'.repeat(404465) : 'instruction',
+  }));
+  expect(parseHostedSkills(skills)).toHaveLength(42);
+  expect(new HostedSkillCatalog(skills).response({ skill: 's0' })).toContain(
+    skills[0]!.body,
+  );
 });

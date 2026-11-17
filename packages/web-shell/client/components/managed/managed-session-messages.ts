@@ -1,3 +1,4 @@
+import { isTodoWriteToolName } from '../../utils/todos';
 import type { ACPToolCall, Message } from '../../adapters/types';
 import type { ManagedAgentSessionEvent } from './managed-agent-provider';
 import type { ManagedToolResult } from './managed-tool-result-types';
@@ -32,6 +33,7 @@ function carryManagedEventEpoch(
 export function mergeManagedEvents(
   current: readonly ManagedAgentSessionEvent[],
   incoming: readonly ManagedAgentSessionEvent[],
+  itemPages = false,
 ): ManagedAgentSessionEvent[] {
   // An empty input cannot ride the ascending check: strictlyAscendingIds
   // loops from index 1, and the fast path dereferences incoming[0].
@@ -48,11 +50,28 @@ export function mergeManagedEvents(
     managedEventEpochs.set(merged, carryManagedEventEpoch(current));
     return merged;
   }
+  const encoder = itemPages ? new TextEncoder() : undefined;
   const merged = [
     ...new Map(
-      [...current, ...incoming].map((event) => [event.id, event]),
+      [...current, ...incoming].map((event) => [
+        itemPages
+          ? `${event.id}:${String(record(event.data)['itemId'] ?? '')}`
+          : event.id,
+        event,
+      ]),
     ).values(),
-  ].sort((a, b) => a.id - b.id);
+  ].sort((a, b) => {
+    const sequence = a.id - b.id;
+    if (sequence || !encoder) return sequence;
+    // SQL orders opaque identities by UTF-8 bytes, rather than locale.
+    const left = encoder.encode(String(record(a.data)['itemId'] ?? ''));
+    const right = encoder.encode(String(record(b.data)['itemId'] ?? ''));
+    for (let index = 0; index < Math.min(left.length, right.length); index++) {
+      const difference = left[index]! - right[index]!;
+      if (difference) return difference;
+    }
+    return left.length - right.length;
+  });
   managedEventEpochs.set(merged, newManagedEventEpoch());
   return merged;
 }
@@ -69,6 +88,23 @@ function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function structuredToolOutput(
+  data: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const snapshot = data['todoSnapshot'];
+  if (typeof snapshot !== 'string') return undefined;
+  try {
+    const todos: unknown = JSON.parse(snapshot);
+    return Array.isArray(todos) ? { todos } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasTodoSnapshot(value: unknown): boolean {
+  return Array.isArray(record(value)['todos']);
 }
 
 // Only these Turn-bearing types may settle a Turn boundary. Control-plane
@@ -226,13 +262,9 @@ function appendManagedEvents(
       if (event.type !== 'tool_result_updated') settle();
       const callId = data['toolCallId'];
       const itemId = data['itemId'];
-      const identity = typeof itemId === 'string' ? itemId : callId;
-      if (typeof identity !== 'string') continue;
-      const key = `${event.turnId}:${identity}`;
-      const legacyKey =
-        typeof callId === 'string' ? `${event.turnId}:${callId}` : undefined;
-      let tool =
-        tools.get(key) ?? (legacyKey ? tools.get(legacyKey) : undefined);
+      if (typeof itemId !== 'string' || !itemId) continue;
+      const key = `${event.turnId}:${itemId}`;
+      let tool = tools.get(key);
       const result = readResult(data['result'], event);
       if (!tool) {
         if (event.turnId === currentTurnId) settle();
@@ -243,7 +275,7 @@ function appendManagedEvents(
               ? data['toolName']
               : result
                 ? 'run_shell_command'
-                : identity,
+                : itemId,
           status: 'pending',
         };
         const message: Message = {
@@ -269,11 +301,16 @@ function appendManagedEvents(
         else messages.push(message);
       }
       tools.set(key, tool);
-      if (legacyKey) tools.set(legacyKey, tool);
-      if (typeof itemId === 'string') tool.callId = key;
       if (typeof callId === 'string') tool.toolCallId = callId;
       if (Number.isSafeInteger(data['sourceSequence'])) {
-        tool.toolDetailsRevision = Number(data['sourceSequence']);
+        const revision = Number(data['sourceSequence']);
+        if (
+          isTodoWriteToolName(tool.toolName) &&
+          tool.toolDetailsRevision !== undefined &&
+          revision <= tool.toolDetailsRevision
+        )
+          continue;
+        tool.toolDetailsRevision = revision;
       }
       if (typeof data['toolName'] === 'string')
         tool.toolName = data['toolName'];
@@ -288,6 +325,9 @@ function appendManagedEvents(
         tool.args = record(input);
         if (Object.keys(tool.args).length === 0) tool.args = { input };
       }
+      const structuredOutput = isTodoWriteToolName(tool.toolName)
+        ? structuredToolOutput(data)
+        : undefined;
       if (result) {
         if (
           tool.toolResult &&
@@ -322,13 +362,15 @@ function appendManagedEvents(
             data['output'] +
             (data['truncated'] === true ? `\n${truncatedLabel}` : '');
           if (
-            data['truncated'] !== true ||
-            typeof tool.rawOutput !== 'string' ||
-            output.length > tool.rawOutput.length
+            !hasTodoSnapshot(tool.rawOutput) &&
+            (data['truncated'] !== true ||
+              typeof tool.rawOutput !== 'string' ||
+              output.length > tool.rawOutput.length)
           ) {
             tool.rawOutput = output;
           }
         }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
         continue;
       }
       if (event.type === 'tool_started') {
@@ -344,11 +386,15 @@ function appendManagedEvents(
         tool.wasCancelled = data['cancelled'] === true;
         tool.endTime = event.at;
         runtimeFailed.delete(tool);
-        if (typeof data['output'] === 'string') {
+        if (
+          typeof data['output'] === 'string' &&
+          !hasTodoSnapshot(tool.rawOutput)
+        ) {
           tool.rawOutput =
             data['output'] +
             (data['truncated'] === true ? `\n${truncatedLabel}` : '');
         }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
       }
     } else if (
       event.type === 'completed' ||

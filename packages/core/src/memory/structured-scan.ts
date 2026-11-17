@@ -449,6 +449,17 @@ async function listMarkdownFiles(
   );
 }
 
+/**
+ * Imported memory is published under `imported/` and is demoted behind native
+ * memory at both the scan cap and the index budget, so a large import cannot
+ * evict documents the user wrote.
+ */
+export function isImportedMemoryDocument(
+  doc: Pick<ScannedAutoMemoryDocument, 'relativePath'>,
+): boolean {
+  return doc.relativePath.startsWith('imported/');
+}
+
 function sortScannedDocuments(
   docs: ScannedAutoMemoryDocument[],
   deterministic?: boolean,
@@ -463,6 +474,8 @@ function sortScannedDocuments(
       )
     : docs.sort(
         (a, b) =>
+          Number(isImportedMemoryDocument(a)) -
+            Number(isImportedMemoryDocument(b)) ||
           b.mtimeMs - a.mtimeMs ||
           a.filename.localeCompare(b.filename) ||
           a.relativePath.localeCompare(b.relativePath),
@@ -615,6 +628,25 @@ export async function scanAllAutoMemoryTopicDocumentsFromRoot(
   scope: AutoMemoryScope,
 ): Promise<ScannedAutoMemoryDocument[]> {
   return scanAutoMemoryDocumentsFromRoot(root, { scope, uncapped: true });
+}
+
+export async function scanAutoMemoryIndexDocumentsFromRoot(
+  root: string,
+  scope: AutoMemoryScope,
+  deterministic = scope === 'team',
+): Promise<{
+  docs: ScannedAutoMemoryDocument[];
+  omitted: ScannedAutoMemoryDocument[];
+}> {
+  const docs = await scanAutoMemoryDocumentsFromRoot(root, {
+    scope,
+    deterministic,
+    uncapped: true,
+  });
+  return {
+    docs: docs.slice(0, MAX_SCANNED_MEMORY_FILES),
+    omitted: docs.slice(MAX_SCANNED_MEMORY_FILES),
+  };
 }
 
 function dedupeScannedDocuments(

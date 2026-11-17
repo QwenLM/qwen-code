@@ -6,21 +6,18 @@ Status: implemented. Resolves #13030.
 
 ## Problem and scope
 
-A Hosted Session sees only the tools its pinned profile declares:
-`hosted-workspace-files/1` offers Read/Write/Edit and `hosted-workspace-shell/1`
-adds foreground Shell. Neither offers a way to find a file the model was not
-told about: the file profile has no search at all, and the Shell profile can
-only fall back to `rg`/`find` inside a command, each with a full durable
-dispatch.
+A Hosted Session sees only the tools its pinned profile declares.
+`hosted-workspace-files/1` offers Read/Write/Edit; files `/2` adds read-only
+`glob`. The unified `hosted-workspace-shell/1` includes those file tools,
+Shell, Monitor and `glob`. The unshipped Shell versions were consolidated;
+there is no accepted Shell `/2` identifier. See the
+[consolidation design](2026-10-23-managed-shell-profile.md).
 
-This slice adds the read-only `glob` tool behind new profile versions,
-`hosted-workspace-files/2` and `hosted-workspace-shell/2`. The model-facing
-profile decides what is offered, while worker admission widens under the
-existing `managed-runtime-tools/1` identity. Unlike H1, glob advertisement is
-static, not derived from worker discovery; the unchanged digest cannot prove
-glob support. Java and Broker remain unchanged, and public profile selection
-stays on `/1`. The coordinated rollout requirement below applies even to
-private `/2` Sessions.
+The model-facing profile decides what is offered, while worker admission uses
+the existing `managed-runtime-tools/1` identity. Unlike H1, glob advertisement
+is static, not derived from worker discovery; the unchanged digest cannot
+prove glob support. Matching Harness and Runtime artifacts must therefore be
+deployed together, including for private Sessions.
 
 `grep_search` is excluded: the hosted-runtime boundary document excludes both
 Grep implementations until physical process ownership and cancellation
@@ -29,13 +26,12 @@ product and `glob` covers the need.
 
 ## Harness
 
-The Hosted Harness accepts the two new profile strings at Session create and
-load, persisted in the Session definition exactly like `/1`; a load with a
-different profile is still a `409 hosted_tool_profile_conflict`, and existing
-Sessions keep their pinned `/1` snapshot. Both the initial turn and
-continuation construct their tool turn with that saved profile. Shell `/2`
-inherits the Shell wiring (capture capacity, publisher or deferred-capture
-options) unchanged.
+The Hosted Harness accepts the file-search and unified Shell profiles at
+Session create and load and persists them in the Session definition. A load
+with a different profile is still a `409 hosted_tool_profile_conflict`. Both
+the initial turn and continuation construct their tool turn with that saved
+profile. Adding glob to the unified Shell profile preserves capture capacity,
+publisher and deferred-capture wiring. Files `/1` retains its original tools.
 
 The `glob` declaration takes a required `pattern` and an optional `path`
 relative to the saved Session working directory. The Harness validates `path`
@@ -133,11 +129,10 @@ existing omitted path still applies.
 - CLI worker: admission, containment, Workspace-relative output.
 - Core: `GlobTool` gains opt-in `containmentRoot` and `executionTimeoutMs` constructor options; the
   ordinary CLI does not set it and keeps external globs behind permission.
-- Workspace recovery: W1 recovery accepts the `/2` profiles through the same
+- Workspace recovery: W1 recovery accepts the search profiles through the same
   shared profile predicates as creation and load.
-- Java: unchanged. The production connector still pins
-  `hosted-workspace-files/1`; enabling `/2` for public Sessions is a separate
-  deployment decision.
+- Java: ordinary Shell uses the unified `/1` profile and its existing
+  lifecycle v2 admission. Files `/2` admission remains a deployment decision.
 
 ## Validation and acceptance
 
@@ -148,7 +143,7 @@ Focused CLI suites are `hosted-glob-pattern`, `hosted-workspace-tool-turn`,
 create/load/continuation, free correctable refusals and normalized dispatch,
 expansion budgets, live/recovered prefix truncation at both durable ceilings,
 relative output and error handling, worker-local file containment, linked
-reads, creation through symlinks, and W1 `/2` recovery. Relativizer units pin
+reads, creation through symlinks, and W1 search-profile recovery. Relativizer units pin
 path-token anchoring and the filesystem-root case. Core's `glob` suite covers
 contained traversal and unchanged ordinary CLI behavior. Executed platform
 and test totals belong in the PR verification report rather than this
@@ -161,11 +156,11 @@ identity does not distinguish old workers from workers with glob support.
 A new Harness dispatching glob to an old worker can leave the execution
 unknown and retain the Workspace lease, blocking other Sessions.
 
-**Rollout requirement:** before creating any `/2` Session, stop admission,
+**Rollout requirement:** before enabling native glob, stop admission,
 drain existing Runtime workers, deploy this worker build to every provisioner,
 and verify that no old worker can be reused or newly provisioned. Only then
-upgrade/enable the Harness `/2` path. Keep `/2` disabled if that cannot be
-proven. Rollback likewise requires draining `/2` Sessions before restoring
+upgrade/enable the matching Harness. Keep glob profiles disabled if that cannot be
+proven. Rollback likewise requires draining glob-capable Sessions before restoring
 old workers. This is an operator-enforced requirement, not a negotiated
 capability or an automatic safety check. Public connector enablement remains
 separate. Mixed-version operation needs a versioned worker identity or

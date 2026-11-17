@@ -15,6 +15,7 @@ import { promisify } from 'node:util';
 import lockfile from 'proper-lockfile';
 import semver from 'semver';
 import { getNpmCliPath } from './installationInfo.js';
+import { getNpmNodePath } from './npm-runtime.js';
 
 const PACKAGE_NAME = '@qwen-code/qwen-code';
 const debugLogger = createDebugLogger('MANAGED_NPM_UPDATE');
@@ -115,9 +116,10 @@ function cleanupOrphanedManagedNpmUpdateArtifacts(
 function resolveNpmGlobalConfigPath(): string {
   const configured = process.env['NPM_CONFIG_GLOBALCONFIG'];
   if (configured) return path.resolve(configured);
-  const npmCliPath = getNpmCliPath(process.execPath, process.platform);
+  const nodePath = getNpmNodePath();
+  const npmCliPath = getNpmCliPath(nodePath, process.platform);
   const runNpm = (args: string[]) =>
-    execFileSync(process.execPath, [npmCliPath, ...args], {
+    execFileSync(nodePath, [npmCliPath, ...args], {
       encoding: 'utf8',
       timeout: 10_000,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -134,7 +136,7 @@ function resolveNpmGlobalConfigPath(): string {
         'exec',
         '--offline',
         '-c',
-        `"${process.execPath}" -p "process.env.npm_config_globalconfig || require('path').resolve(process.env.npm_config_global_prefix, 'etc', 'npmrc')"`,
+        `"${nodePath}" -p "process.env.npm_config_globalconfig || require('path').resolve(process.env.npm_config_global_prefix, 'etc', 'npmrc')"`,
       ])
         .split(/\r?\n/)
         .at(-1) ?? '';
@@ -185,7 +187,7 @@ async function smokeTest(prefix: string): Promise<void> {
   delete env['CLI_VERSION'];
   delete env['QWEN_CODE_RELAUNCH_ARGS'];
   await execFileAsync(
-    process.execPath,
+    getNpmNodePath(),
     [path.join(packageDir(prefix), 'cli-entry.js'), '--help'],
     { encoding: 'utf8', env, timeout: 10_000 },
   );
@@ -326,9 +328,9 @@ export async function stageManagedNpmUpdate(
   try {
     await new Promise<void>((resolve, reject) => {
       const child = spawnFn(
-        process.execPath,
+        getNpmNodePath(),
         [
-          getNpmCliPath(process.execPath, process.platform),
+          getNpmCliPath(getNpmNodePath(), process.platform),
           ...update.installArgs,
         ],
         {

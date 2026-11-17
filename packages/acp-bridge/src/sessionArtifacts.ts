@@ -320,6 +320,16 @@ export class SessionArtifactStore {
     this.realWorkspaceCwdPromise = undefined;
   }
 
+  // Synchronous public projection shared by list() and listRestored(). It must
+  // stay plain (no enqueue): listRestored() calls it from inside its own
+  // enqueue, and a nested enqueue would queue behind the outer one and never
+  // resolve.
+  private snapshotPublicArtifacts(): DaemonSessionArtifact[] {
+    return Array.from(this.artifacts.values())
+      .sort((a, b) => a.insertSeq - b.insertSeq)
+      .map(toPublicArtifact);
+  }
+
   async list(): Promise<SessionArtifactsEnvelope> {
     return this.enqueue(async () => {
       await this.refreshWorkspaceStatuses();
@@ -327,9 +337,7 @@ export class SessionArtifactStore {
       return {
         v: 1,
         sessionId: this.sessionId,
-        artifacts: Array.from(this.artifacts.values())
-          .sort((a, b) => a.insertSeq - b.insertSeq)
-          .map(toPublicArtifact),
+        artifacts: this.snapshotPublicArtifacts(),
         generatedAt: new Date().toISOString(),
         limits: { maxArtifacts: this.maxArtifacts },
         ...(this.lastRestoreWarnings.length > 0
@@ -340,6 +348,13 @@ export class SessionArtifactStore {
           : {}),
       };
     });
+  }
+
+  // Restored-snapshot read for the load/resume response. Skips the workspace
+  // status refresh so it adds no stat/hash latency to session restore; the
+  // client's normal gated list() refreshes status shortly after.
+  async listRestored(): Promise<DaemonSessionArtifact[]> {
+    return this.enqueue(async () => this.snapshotPublicArtifacts());
   }
 
   async get(artifactId: string): Promise<DaemonSessionArtifact | undefined> {
@@ -741,9 +756,69 @@ export class SessionArtifactStore {
     return undefined;
   }
 
+  async readPersistedLibrary(
+    snapshot: RebuiltSessionArtifactSnapshot,
+  ): Promise<SessionArtifactsEnvelope> {
+    const artifacts: DaemonSessionArtifact[] = [];
+    const warnings = [...snapshot.warnings];
+    for (const artifact of snapshot.artifacts) {
+      if (this.dropLegacyLocalPublished(artifact)) continue;
+      if (artifact.retention === 'pinned') {
+        warnings.push(
+          `pinned artifact ${artifact.id} downgraded to restorable; runtime does not support pinned retention`,
+        );
+      }
+      try {
+        const normalized = await this.normalizeInput(
+          {
+            ...persistedArtifactToInput(artifact),
+            retention:
+              artifact.retention === 'pinned'
+                ? 'restorable'
+                : artifact.retention,
+          },
+          0,
+          artifact.storage === 'published' &&
+            !isNonSnapshotFileLocator(artifact),
+          {
+            metadataBudget: 'persisted',
+            workspaceAccess: 'metadata-only',
+            workspaceStatus: artifact.status,
+            hashWorkspaceContent: false,
+          },
+        );
+        if (normalized.id !== artifact.id)
+          throw new Error('Artifact identity mismatch');
+        artifacts.push(
+          toPublicArtifact({
+            ...normalized,
+            createdAt: artifact.createdAt,
+            updatedAt: artifact.updatedAt,
+            persistedAt: artifact.persistedAt,
+            restoreState: 'restored',
+            persistenceWarning:
+              normalized.status !== 'available'
+                ? 'metadata_only_restore'
+                : undefined,
+          }),
+        );
+      } catch {
+        warnings.push(`artifact ${artifact.id} is unavailable`);
+      }
+    }
+    return {
+      v: 1,
+      sessionId: this.sessionId,
+      artifacts,
+      generatedAt: new Date().toISOString(),
+      limits: { maxArtifacts: this.maxArtifacts },
+      ...(warnings.length ? { warnings } : {}),
+    };
+  }
+
   async remove(
     artifactId: string,
-    options?: { clientId?: string },
+    options?: { clientId?: string; workspaceOwner?: boolean },
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
       const existing = this.artifacts.get(artifactId);
@@ -753,7 +828,10 @@ export class SessionArtifactStore {
       // Client-created artifacts with an owner require the same client id.
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
-      this.denyCrossClientMutation('remove', artifactId, existing, options);
+      // Management routes act for the authenticated workspace owner; legacy
+      // client routes cannot grant this authority.
+      if (!options?.workspaceOwner)
+        this.denyCrossClientMutation('remove', artifactId, existing, options);
       const removedAt = new Date().toISOString();
       const removedArtifact = isNonSnapshotPublishedFileUrl(existing)
         ? undefined

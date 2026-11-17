@@ -18,6 +18,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Session } from './Session.js';
+import type { Part } from '@google/genai';
+import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { Config, LlmChat } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -99,6 +101,7 @@ describe('Session.pendingWorktreeNotice', () => {
     const mockLlmClient = {
       isInitialized: vi.fn().mockReturnValue(true),
       getChat: vi.fn().mockReturnValue(mockChat),
+      stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -436,6 +439,46 @@ describe('Session.pendingWorktreeNotice', () => {
     // Message was still sent to the model.
     expect(capturedMessages.length).toBeGreaterThanOrEqual(1);
   });
+
+  it.each([false, true])(
+    'preserves plan reminders on catalog-bearing continuation, existing reminder=%s',
+    async (withReminder) => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      const parts: Part[] = [
+        { text: 'do the thing' },
+        getAutoMemorySnapshot(
+          [],
+          '<system-reminder>CATALOG</system-reminder>',
+        )!,
+      ];
+      if (withReminder) {
+        parts.unshift({
+          text: '<system-reminder>Existing plan reminder</system-reminder>',
+        });
+      }
+      vi.mocked(mockChat.getHistory).mockReturnValue([{ role: 'user', parts }]);
+      const session = new Session(
+        SESSION_ID,
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      await session.prompt({
+        sessionId: SESSION_ID,
+        prompt: [],
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as PromptRequest);
+      expect(capturedMessages).toHaveLength(1);
+      expect(capturedMessages[0]).toEqual(
+        withReminder
+          ? parts
+          : [
+              { text: expect.stringContaining('Plan mode is active.') },
+              ...parts,
+            ],
+      );
+    },
+  );
 
   // VP5: ordering contract when the worktree notice, system reminders, and a
   // continuation that leads with functionResponse parts all combine. Locks the

@@ -193,8 +193,8 @@ export class EmbeddedHarnessScheduler {
       if (this.store.haltedError) this.halt(this.store.haltedError);
       throw error;
     }
-    // A duplicate enqueue performs no store I/O, so it must not reset the
-    // consecutive transient-failure streak.
+    // Only a new journal write resets its transient-failure streak; a
+    // terminal duplicate can succeed through the separate derived index.
     if (result.created) this.noteStoreOutcome();
     if (this.started) {
       // A genuinely new queued activation restarts the blocked poll cadence;

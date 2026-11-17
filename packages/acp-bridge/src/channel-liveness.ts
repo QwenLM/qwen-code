@@ -6,6 +6,7 @@
 
 import { performance } from 'node:perf_hooks';
 import { CHANNEL_LIVENESS_VERSION } from './bridgeTypes.js';
+import { raceLongLived } from './race-long-lived.js';
 
 export const CHANNEL_LIVENESS_INTERVAL_MS = 15_000;
 export const CHANNEL_LIVENESS_PROBE_TIMEOUT_MS = 10_000;
@@ -114,7 +115,7 @@ export function startChannelLivenessMonitor(
         }, CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
         timer.unref();
       });
-      outcome = await Promise.race([response, timeout, stoppedOutcome]);
+      outcome = await raceLongLived([response, timeout], stoppedOutcome);
       if (timer !== undefined) {
         clearTimeout(timer);
         timer = undefined;

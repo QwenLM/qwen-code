@@ -8,122 +8,47 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type Root } from 'react';
 import { createRoot } from 'react-dom/client';
+import {
+  DAEMON_APPROVAL_MODES,
+  createSidebarMocks,
+  installSidebarDomShims,
+  sidebarSessionPage,
+  staticSidebarSessionCatalogQuery,
+} from '../../test/sidebarHarness';
 
-const { connection, workspace, workspaceActions, active, pinned, archived } =
-  vi.hoisted(() => {
-    const makeSessions = () => {
-      const state = {
-        sessions: [] as never[],
-        loading: false,
-        error: null as Error | null,
-        data: [] as never[] | undefined,
-        reload: vi.fn().mockResolvedValue(undefined),
-        deleteSession: vi.fn().mockResolvedValue(true),
-        archiveSession: vi.fn().mockResolvedValue(true),
-        unarchiveSession: vi.fn().mockResolvedValue(true),
-        exportSession: vi.fn(),
-      };
-      state.data = state.sessions;
-      return state;
-    };
-    return {
-      connection: {
-        status: 'connected',
-        sessionId: null as string | null,
-        workspaceCwd: '/tmp/project',
-        capabilities: { qwenCodeVersion: '1.2.3', features: [] } as
-          | { qwenCodeVersion: string; features: string[] }
-          | undefined,
-      },
-      workspace: {
-        capabilities: undefined,
-        client: {
-          workspaceByCwd: vi.fn(() => ({
-            listWorkspaceSessions: vi.fn().mockResolvedValue([]),
-            listSessionGroups: vi.fn().mockResolvedValue({
-              groups: [],
-              colorOptions: [],
-            }),
-          })),
-        },
-        refreshCapabilities: vi.fn(),
-      },
-      workspaceActions: {
-        addWorkspace: vi.fn(),
-        removeWorkspace: vi.fn(),
-        listSessionGroups: vi.fn().mockResolvedValue({
-          groups: [],
-          colorOptions: [],
-        }),
-        createSessionGroup: vi.fn(),
-        updateSessionGroup: vi.fn(),
-        deleteSessionGroup: vi.fn(),
-        updateSessionOrganization: vi.fn(),
-      },
-      active: makeSessions(),
-      pinned: makeSessions(),
-      archived: makeSessions(),
-    };
-  });
+const mocks = createSidebarMocks({
+  connectionCapabilities: { qwenCodeVersion: '1.2.3', features: [] },
+});
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  useConnection: () => connection,
-  useActions: () => ({ renameSession: vi.fn() }),
-  useWorkspace: () => workspace,
-  useWorkspaceActions: () => workspaceActions,
-  useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
-  useSessions: (options?: { archiveState?: string; group?: string }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
+  DAEMON_APPROVAL_MODES,
+  useConnection: () => mocks.connection,
+  useActions: () => mocks.actions,
+  useWorkspace: () => mocks.workspace,
+  useWorkspaceActions: () => mocks.workspaceActions,
+  useChannels: () => mocks.channels,
+  useSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
 }));
 
 vi.mock('../../session-catalog/session-catalog-hooks', () => ({
-  useWebShellSessions: (options?: {
-    archiveState?: string;
-    group?: string;
-  }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
+  useWebShellSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
   useSessionCatalogController: () => ({
-    refreshQueries: vi.fn(),
+    refreshQueries: mocks.refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),
     refreshWorkspace: vi.fn(),
     renamed: vi.fn(),
   }),
   useSessionCatalogPolling: () => undefined,
-  useSessionCatalogQuery: () => ({
-    sessions: [],
-    loading: false,
-    error: undefined,
-    reload: vi.fn(),
-  }),
-  useSessionCatalogQueries: vi.fn(() => []),
+  useSessionCatalogQuery: () => staticSidebarSessionCatalogQuery(),
+  useSessionCatalogQueries: mocks.useSessionCatalogQueries,
 }));
 
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
+installSidebarDomShims();
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const VERSION_BADGE_TITLE = 'Qwen Code v1.2.3';

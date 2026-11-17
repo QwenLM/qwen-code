@@ -4,6 +4,111 @@ import {
   installMockDaemon,
   replayCompleteEvent,
 } from './utils/mockDaemon';
+import { submitLocalCommand } from './visuals/harness';
+
+test('shows Qwen models after authentication in an existing conversation @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const tokenPlanModel = {
+    modelId: scenario.currentModel,
+    name: '[ModelStudio Token Plan] qwen3.8-max',
+  };
+  const subscriptionModelId = 'qwen3.8-max(qwen-subscription)';
+  scenario.state.models = {
+    currentModelId: scenario.currentModel,
+    availableModels: [tokenPlanModel],
+  };
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.route('**/workspace/models', (route) =>
+    route.fulfill({ json: { models: [] } }),
+  );
+  await page.route('**/workspace/auth/providers', (route) =>
+    route.fulfill({
+      json: {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        providers: [],
+        groups: [],
+      },
+    }),
+  );
+  await page.route('**/auth/subscription', (route) =>
+    route.fulfill({
+      json: { enabled: true, plansUrl: 'https://plans.example' },
+    }),
+  );
+  await page.route('**/auth/subscription/flows', (route) =>
+    route.fulfill({
+      json: {
+        id: 'signed-in',
+        status: 'ready',
+        userInfo: {
+          sub: 'test-user',
+          email: 'user@example.test',
+          member_type: 'pro',
+        },
+      },
+    }),
+  );
+  await page.route('**/workspaces/*/auth/subscription', async (route) => {
+    scenario.state.models = {
+      currentModelId: scenario.currentModel,
+      availableModels: [
+        tokenPlanModel,
+        { modelId: subscriptionModelId, name: 'Qwen Max' },
+        { modelId: 'qwen3.8-flash(qwen-subscription)', name: 'Qwen Flash' },
+      ],
+    };
+    await route.fulfill({
+      json: {
+        authType: 'qwen-subscription',
+        modelId: 'qwen3.8-max',
+        runtimeSync: { status: 'applied' },
+      },
+    });
+  });
+  await page.goto(`/e2e/settings-harness.html?sessionId=${scenario.sessionId}`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: scenario.sessionId }),
+  );
+  await page.locator('[data-web-shell-model-button]').click();
+  await expect(
+    page.getByRole('button', { name: tokenPlanModel.name, exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+  await submitLocalCommand(page, '/auth');
+  await page
+    .getByRole('button', {
+      name: 'Qwen Account with Subscription',
+      exact: true,
+    })
+    .click();
+  await expect(
+    page.getByText('Current plan: Qwen Pro. Qwen Code is ready.', {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.locator('[data-web-shell-model-button]').click();
+  await expect(
+    page.getByRole('button', { name: 'Qwen Max', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Qwen Flash', exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: tokenPlanModel.name, exact: true }),
+  ).toBeVisible();
+  await expect(page.locator('[data-web-shell-model-button]')).toContainText(
+    'Qwen Max',
+  );
+  expect(scenario.currentModel).toBe(subscriptionModelId);
+  await page.screenshot({ path: testInfo.outputPath('qwen-auth-models.png') });
+});
 
 test('refreshes the model picker without selecting or replaying a session @smoke', async ({
   page,

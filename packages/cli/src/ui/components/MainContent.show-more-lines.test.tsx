@@ -132,6 +132,7 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     auth: {
       authError: null,
       isAuthDialogOpen: false,
+      isAuthDialogDismissible: false,
       isAuthenticating: false,
       pendingAuthType: undefined,
       externalAuthState: null,
@@ -187,6 +188,8 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     currentMcpApproval: undefined,
     pendingMcpApprovals: [],
     mcpApprovalRemaining: 0,
+    isProjectHooksApprovalDialogOpen: false,
+    pendingProjectHooks: undefined,
     isTrustedFolder: true,
     constrainHeight: true,
     ideContextState: undefined,

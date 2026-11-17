@@ -7,7 +7,10 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { readWorkspaceFiles } from './managed-workspace-files.js';
+import {
+  readWorkspaceFiles,
+  type SessionWorkspaceFileScope,
+} from './managed-workspace-files.js';
 
 describe('Managed Workspace file snapshots', () => {
   let root: string;
@@ -76,6 +79,51 @@ describe('Managed Workspace file snapshots', () => {
     '\u0000',
   ])('refuses %s', async (relative) => {
     await expect(request('read', { path: relative })).rejects.toThrow();
+  });
+
+  it('permits only the internally resolved Session base and still blocks private relative paths', async () => {
+    const cwd = '.qwen-managed-worktrees/owned/src';
+    const target = path.join(root, '.qwen-managed-worktrees/owned');
+    await fs.mkdir(path.join(root, cwd), { recursive: true });
+    await fs.writeFile(path.join(root, cwd, 'a.txt'), 'owned');
+    const stat = await fs.stat(target, { bigint: true });
+    const scope: SessionWorkspaceFileScope = {
+      sessionId: 'session-a',
+      contextDigest: `sha256:${'a'.repeat(64)}`,
+      worktreeId: 'owned',
+      worktreeRevision: 2,
+      cwdRelative: cwd,
+      worktreeRootIdentity: {
+        device: String(stat.dev),
+        inode: String(stat.ino),
+      },
+    };
+    const read = (relative: string, proof = scope) =>
+      readWorkspaceFiles(
+        root,
+        cwd,
+        { protocolVersion: 1, operation: 'read', path: relative },
+        identity,
+        proof,
+      );
+    await expect(request('read', { path: 'a.txt' }, cwd)).rejects.toThrow();
+    expect((await read('a.txt'))['text']).toBe('owned');
+    for (const relative of [
+      '../a.txt',
+      '.git/config',
+      '.qwen-managed-worktrees/other/a.txt',
+    ]) {
+      await expect(read(relative)).rejects.toThrow();
+    }
+    await expect(
+      read('a.txt', { ...scope, worktreeId: 'other' }),
+    ).rejects.toThrow();
+    await fs.rename(target, `${target}-moved`);
+    await fs.mkdir(path.join(root, cwd), { recursive: true });
+    await fs.writeFile(path.join(root, cwd, 'a.txt'), 'replacement');
+    await expect(read('a.txt')).rejects.toMatchObject({
+      code: 'ssh_runtime_file_changed',
+    });
   });
 
   it('refuses symlink files, symlink ancestors, wrong root identity and special files', async () => {

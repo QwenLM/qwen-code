@@ -11,10 +11,55 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'yaml';
+
+// macOS ships rm at /bin/rm, so a hardcoded /usr/bin/rm exits 127 on the macOS
+// scripts lane (which collects these files — the vitest exclude is win32-only).
+// Resolve external tools the way the workflows themselves do.
+const resolvedBin = (name) =>
+  execFileSync('bash', ['-c', `command -v ${name}`], {
+    encoding: 'utf8',
+  }).trim();
 import { expect, it } from 'vitest';
 
+// The qwen-triage entries are DERIVED, not hand-typed: every pool-routed job
+// that checks out must reset the workspace git metadata first. A hand-typed
+// list missed publish-triage once (the write-PAT job ran on the pool with
+// agent-planted hooks executable while this suite stayed green); deriving
+// the set means the next pool-routed checkout job reddens here with no edit
+// to this file. The checkout intersection is load-bearing: authorize and
+// publish-tmux are pool-routed but never check out, so they have no reset
+// step to pin. Same derivation shape as e2e-workflow.test.js's pool gate.
+const triagePoolCheckoutJobs = Object.entries(
+  parse(readFileSync('.github/workflows/qwen-triage.yml', 'utf8')).jobs,
+)
+  .filter(([, job]) => String(job['runs-on'] ?? '').includes('ecs-qwen'))
+  .filter(([, job]) =>
+    (job.steps ?? []).some((step) =>
+      /^actions\/checkout@/.test(String(step.uses ?? '')),
+    ),
+  )
+  .map(([name]) => ['qwen-triage', name]);
+
+// A floor, not an exact list: the derivation reads the UN-EVALUATED runs-on
+// expression, so rewriting one job's routing into a `vars.` lookup (or moving
+// its checkout behind a composite action) silently drops that row and the
+// guard stops covering it. Assert the jobs known to be pool-routed with a
+// checkout are present, so a filter that stops matching names the job it
+// lost; a NEW pool job still joins the matrix with no edit here.
+it('derives every known pool-routed checkout job in qwen-triage', () => {
+  expect(triagePoolCheckoutJobs.map(([, name]) => name)).toEqual(
+    expect.arrayContaining([
+      'triage',
+      'publish-triage',
+      'tmux-testing',
+      'verify',
+    ]),
+  );
+});
+
 const jobs = [
-  ...['triage', 'tmux-testing', 'verify'].map((name) => ['qwen-triage', name]),
+  ['desktop-release', 'prepare'],
+  ...triagePoolCheckoutJobs,
   ...[
     'test',
     'lint_and_static',
@@ -22,6 +67,13 @@ const jobs = [
     'integration_cli',
     'web_shell_e2e_smoke',
   ].map((name) => ['ci', name]),
+  // The E2E pool legs check out on the same shared workspace, and a leftover
+  // sparse index from another lane breaks them the same way: checkout's
+  // clean/reset skip the sparse-excluded paths, then `sparse-checkout disable`
+  // aborts with "not uptodate; will not remove from working tree" and leaves
+  // no .github/ behind. Run 43010833061 lost the sandbox:docker leg at the very
+  // next step, which could not resolve .github/actions/self-hosted-node.
+  ...['build', 'e2e-test-linux'].map((name) => ['e2e', name]),
   ...['test', 'flyway-migrations', 'mysql-integration', 'daemon-e2e'].map(
     (name) => ['sdk-java', name],
   ),
@@ -29,11 +81,24 @@ const jobs = [
     'qwen-autofix',
     name,
   ]),
+  ...['classify', 'act'].map((name) => ['qwen-ci-flaky-rerun', name]),
+  // The managed lanes joined the persistent fleet with the trusted-PR
+  // routing split (#17279). The fleet reuses workspaces between jobs, so
+  // they inherit the same leftovers as the lanes above: the kernel leg's
+  // first fleet run (43621213542) died in checkout's recreate path on
+  // root-owned files.
+  ['managed-agent-loop', 'managed-loop', true],
+  ['web-shell-managed-host', 'build', true],
+  // tui-parity was already fleet-routed but only healed ownership: a
+  // leftover sparse index from qwen-triage's non-cone publisher checkout
+  // still broke its checkout (runs 43621213523 and 43621721648 lost the
+  // parity job with no .github/actions/self-hosted-node on disk).
+  ...['parity', 'noflicker'].map((name) => ['tui-parity', name, true]),
 ];
 
 it.each(jobs)(
   '%s / %s replaces runner Git metadata before checkout without following links',
-  (workflow, name) => {
+  (workflow, name, healAbove) => {
     const { steps } = parse(
       readFileSync(`.github/workflows/${workflow}.yml`, 'utf8'),
     ).jobs[name];
@@ -43,6 +108,19 @@ it.each(jobs)(
     expect(index).toBeGreaterThanOrEqual(0);
     expect(steps[index].if).toBe("${{ runner.environment == 'self-hosted' }}");
     expect(steps[index + 1].uses).toMatch(/^actions\/checkout@/);
+    // The reset covers index state; the heal covers permissions, and only the
+    // pair clears both leftovers. The managed rows therefore ask for the heal
+    // directly above the reset as well — deleting it keeps the reset green and
+    // lets run 43621213542's failure return, because root-owned files fail
+    // `git clean` before the reset can help. Opt-in per row: qwen-triage heals
+    // after its reset, and desktop-release and the flaky-rerun rows carry no
+    // heal step at all, so a global assertion would red them.
+    if (healAbove) {
+      expect(
+        steps[index - 1].name,
+        `${workflow} / ${name} must heal ownership directly above the metadata reset`,
+      ).toBe('Restore workspace ownership');
+    }
 
     const root = mkdtempSync(join(tmpdir(), 'qwen-checkout-'));
     try {
@@ -54,12 +132,34 @@ it.each(jobs)(
       const preserved = join(external, 'keep');
       mkdirSync(cached);
       writeFileSync(preserved, 'keep external repository');
+      // A real runner always provides these. Steps that neutralise the global
+      // and system Git config write an empty file under RUNNER_TEMP and export
+      // the scopes through GITHUB_ENV, so the fixture has to offer both or it
+      // would exercise those steps against paths that do not exist.
+      const runnerTemp = join(root, 'runner-temp');
+      mkdirSync(runnerTemp);
+      const githubEnv = join(root, 'gh-env');
+      writeFileSync(githubEnv, '');
       const git = (...args) =>
         execFileSync('git', args, { cwd: workspace, stdio: 'pipe' });
       const recover = () =>
         execFileSync('bash', ['-e', '-c', steps[index].run], {
           cwd: workspace,
-          env: { ...process.env, GITHUB_WORKSPACE: workspace },
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: workspace,
+            RUNNER_TEMP: runnerTemp,
+            GITHUB_ENV: githubEnv,
+            // Steps that use the guard's verified base need those binaries and
+            // an output file; a real runner always supplies GITHUB_OUTPUT.
+            GITHUB_OUTPUT: join(root, 'gh-output'),
+            RM_BIN: resolvedBin('rm'),
+            // The patrol's rebuild also validates every component of the
+            // system_path it hands checkout. Derive it from the same binary so
+            // the two checks stand or fall together on any host.
+            SYSTEM_PATH: resolvedBin('rm').replace(/\/[^/]+$/, ''),
+            MKTEMP_BIN: resolvedBin('mktemp'),
+          },
         });
 
       git('init', '--quiet');

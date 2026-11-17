@@ -173,8 +173,12 @@ never hold the live-session scheduler.
    recovery or migration operation pinned the Session). Each failure
    reschedules with the
    same backoff taxonomy as the publication collector: `recovery_protected`
-   waits 24 hours, `grace_period` waits until `retired_at + grace`, and every
-   other blocker waits 60 seconds.
+   waits 24 hours, `grace_period` waits until `retired_at + grace`,
+   `reader_active` waits until the last read lease expires, capped at one claim
+   interval, and every
+   other blocker waits 60 seconds. While the Session ledger has not settled,
+   the publication collector rechecks `resource_referenced` every 5 seconds
+   instead of a full minute, because the Session collector owns that handoff.
 3. A confirmed claim holds the ledger for 60 seconds. Each page runs in its
    own new transaction: claim's locks and blocker evaluation committed with
    claim's transaction, so the page first re-takes the tenant and Session
