@@ -45,6 +45,7 @@ function createStreamClient(
     debug: boolean;
     onDownStream: (data: unknown) => void;
     connect: () => Promise<void>;
+    heartbeatIntervallId?: ReturnType<typeof setInterval>;
     socket?: {
       readyState: number;
       on: (event: string, cb: (...args: unknown[]) => void) => void;
@@ -52,6 +53,16 @@ function createStreamClient(
     };
   };
   internals.debug = false;
+  // The SDK creates a heartbeat interval on every socket open but never
+  // clears it on close, and the next open overwrites the only stored handle —
+  // the old interval keeps pinging the replacement socket. Retire it on close,
+  // before the SDK's autoReconnect opens the next one (#17173 R5).
+  const retireHeartbeat = () => {
+    if (internals.heartbeatIntervallId !== undefined) {
+      clearInterval(internals.heartbeatIntervallId);
+      internals.heartbeatIntervallId = undefined;
+    }
+  };
   client.registerCallbackListener(TOPIC_ROBOT, (msg: DWClientDownStream) => {
     // A frame without a routing messageId cannot be acked or admitted; drop it
     // instead of letting client.send throw through the socket handler.
@@ -136,7 +147,12 @@ function createStreamClient(
         reject(new Error('DingTalk stream connect timed out.'));
       }, CONNECT_TIMEOUT_MS);
       withConnectLoggingSuppressed(sdkConnect)
-        .then(() => waitForSocketOpen())
+        .then(() => {
+          // Each attempt constructs a fresh socket; arm the heartbeat retire
+          // on its close so a reconnect never inherits the old interval.
+          internals.socket?.on('close', retireHeartbeat);
+          return waitForSocketOpen();
+        })
         .then(
           () => {
             clearTimeout(timer);

@@ -41,6 +41,12 @@ const definitions = [
       '^(export )?(const|let|var) MAX_SUB_SESSION_PROMPT_CHARS[[:space:]]*[:=]',
     owner: 'packages/core/src/tools/sub-session-constants.ts',
   },
+  {
+    symbol: 'MAX_SUB_SESSION_WORKSPACE_CHARS',
+    pattern:
+      '^(export )?(const|let|var) MAX_SUB_SESSION_WORKSPACE_CHARS[[:space:]]*[:=]',
+    owner: 'packages/core/src/tools/sub-session-constants.ts',
+  },
 ];
 
 it.each(definitions)('$symbol has one owner', ({ pattern, owner }) => {
@@ -85,6 +91,21 @@ const imports = [
   ],
   [
     'MAX_SUB_SESSION_PROMPT_CHARS',
+    'packages/acp-bridge/src/bridgeClient.ts',
+    './bridgeOptions.js',
+  ],
+  [
+    'MAX_SUB_SESSION_WORKSPACE_CHARS',
+    'packages/core/src/tools/create-sub-session.ts',
+    './sub-session-constants.js',
+  ],
+  [
+    'MAX_SUB_SESSION_WORKSPACE_CHARS',
+    'packages/acp-bridge/src/bridgeOptions.ts',
+    '@qwen-code/qwen-code-core/subSessionConstants',
+  ],
+  [
+    'MAX_SUB_SESSION_WORKSPACE_CHARS',
     'packages/acp-bridge/src/bridgeClient.ts',
     './bridgeOptions.js',
   ],
