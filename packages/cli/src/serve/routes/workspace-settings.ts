@@ -101,6 +101,7 @@ const WEB_SHELL_SETTINGS = new Set([
   'imageModel',
   'advisorModel',
   'mcpServers',
+  'worktree.defaultForNewSessions',
 ]);
 
 const LIVE_WEB_SHELL_SETTINGS = [

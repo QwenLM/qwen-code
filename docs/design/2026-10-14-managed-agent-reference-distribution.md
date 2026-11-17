@@ -29,7 +29,6 @@ The release asset is `qwen-managed-agent-reference-<version>.tar.gz`. It contain
 
 ```text
 bin/qwen-managed-agent-server
-bin/qwen-managed-agent-operator-recovery
 bin/qwen-managed-agent-admin
 bin/qwen-managed-agent-bootstrap
 bin/qwen-managed-agent-bootstrap.mjs
@@ -43,7 +42,6 @@ systemd/server.env.example
 systemd/README.md
 systemd/README.zh-CN.md
 lib/qwen-managed-agent-server-<component-version>.jar
-lib/qwen-managed-agent-server-<component-version>-operator-recovery.jar
 docs/deployment.md
 docs/deployment.zh-CN.md
 docs/server-reference.md

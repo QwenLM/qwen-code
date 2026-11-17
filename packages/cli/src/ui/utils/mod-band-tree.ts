@@ -8,7 +8,7 @@
 // input, and the parts of a tree that read the same in Ink and OpenTUI.
 
 import type {
-  ModRenderInput,
+  ModBandInput,
   ModRenderNode,
   ModRenderProps,
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
@@ -33,7 +33,7 @@ export function modBandInput(terminal: {
   isFullscreen: boolean;
   hasSurvey: boolean;
   isWorking: boolean;
-}): ModRenderInput {
+}): ModBandInput {
   const maxRows = modBandMaxRows(terminal.rows);
   return {
     surface: 'terminal',

@@ -11,6 +11,15 @@ import java.util.List;
 import java.util.Map;
 
 public interface ManagedWorkspaceRegistry {
+    public static void requireSessionVisibility(
+            com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord session,
+            String actorId, ManagedWorkspaceRegistry workspaces) {
+        if (session.ownerOnly() && !workspaces.isSessionOwner(session.tenantId(), actorId, session.sessionId())) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(
+                    404, "session_not_found", "The Session was not found.");
+        }
+    }
+
     public boolean createdSession(String tenantId, String actorId, String sessionId);
 
     public boolean isSessionOwner(String tenantId, String actorId, String sessionId);
@@ -36,6 +45,11 @@ public interface ManagedWorkspaceRegistry {
 
     public boolean bindingCurrent(String tenantId, String workspaceId,
             long generation, String storageId);
+
+    /** Whether any registered EXTERNAL storage can host an external Workspace. */
+    public boolean externalFilesAvailable();
+
+    public boolean externalFilesAllowed(ContextBinding binding);
 
     public record WorkspaceSummary(String workspaceId, String displayName,
             String state, boolean canCreateSession, String defaultCwdRelative, boolean canSelectDirectory) {

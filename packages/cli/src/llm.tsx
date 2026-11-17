@@ -756,14 +756,17 @@ export async function main() {
         undefined,
         undefined,
         undefined,
-        privateAcpParentCapability === undefined
-          ? {
-              workflowAncestorTrustProvider:
-                createLocalWorkflowAncestorTrustProvider(
-                  getOperatorTrustSettings(settings),
-                ),
-            }
-          : undefined,
+        {
+          lspDisabled: true,
+          ...(privateAcpParentCapability === undefined
+            ? {
+                workflowAncestorTrustProvider:
+                  createLocalWorkflowAncestorTrustProvider(
+                    getOperatorTrustSettings(settings),
+                  ),
+              }
+            : {}),
+        },
         buildEnabledSkillNamesProvider(settings),
         undefined,
         isAllowedBaseUrlsWorkspaceOnly(settings),
@@ -1184,6 +1187,7 @@ export async function main() {
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
+      isAcpMode ||
       isBareMode(argv.bare) ||
       config.isSafeMode() ||
       config.getShellExecutionSandbox?.()
@@ -1359,9 +1363,16 @@ export async function main() {
       !config.getExperimentalZedIntegration() &&
       !input &&
       !hasRemoteInput;
+    const allowSubscriptionStartupFallback =
+      !config.getExperimentalZedIntegration() &&
+      argv.model === undefined &&
+      argv.authType === undefined;
     markAcpStartup('appInitializationStart');
     const initializationResult = await initializeApp(config, settings, {
       deferIdeConnection,
+      allowSubscriptionStartupFallback,
+      allowUnlistedSubscriptionModel:
+        deferIdeConnection && allowSubscriptionStartupFallback,
     });
     markAcpStartup('appInitializationEnd');
     profileCheckpoint('after_initialize_app');
@@ -1503,6 +1514,9 @@ export async function main() {
         process.env,
         config.getScreenReader(),
       );
+      const { setTuiRendererOfRecord } = await import(
+        './ui/tui-renderer-of-record.js'
+      );
       if (selection.renderer === 'opentui') {
         try {
           const { startOpenTuiUI } = await import(
@@ -1520,6 +1534,7 @@ export async function main() {
             },
           );
           if (started) {
+            setTuiRendererOfRecord('opentui');
             clearCorruptionEnvVars();
             return;
           }
@@ -1543,6 +1558,9 @@ export async function main() {
       } else {
         debugLogger.debug(`TUI renderer: ${selection.reason}`);
       }
+      // Reached for the default ink renderer and for every non-strict OpenTUI
+      // boot fallback, so the diagnostic records the renderer actually serving.
+      setTuiRendererOfRecord('ink');
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,

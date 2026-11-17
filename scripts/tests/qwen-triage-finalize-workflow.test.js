@@ -5,6 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,11 +29,24 @@ describe('qwen-triage-finalize workflow', () => {
       'Qwen Code CI',
       'Qwen Autofix',
       'Managed Agent gate',
+      'Managed Agent loop verification',
       'SDK Python',
       'Serve A/B',
       'Web-shell Visuals',
     ]);
     expect(workflow.on.workflow_run.workflows).not.toContain('E2E Tests');
+    // Literal against literal above, so tie each name to a `name:` some
+    // workflow really carries: `workflow_run.workflows` matches on that name,
+    // so a typo keeps this suite green while the finalizer never fires.
+    const names = readdirSync('.github/workflows')
+      .filter((f) => f.endsWith('.yml'))
+      .map(
+        (f) => parse(readFileSync(join('.github/workflows', f), 'utf8')).name,
+      );
+    expect(
+      workflow.on.workflow_run.workflows.filter((n) => !names.includes(n)),
+      'names in workflow_run.workflows that no workflow carries:',
+    ).toEqual([]);
     expect(workflow.on.workflow_run.types).toEqual(['completed']);
     expect(workflow.jobs.finalize.if).toContain(
       "github.event.workflow_run.event == 'pull_request'",

@@ -431,6 +431,33 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
+    it('toggles the unset unified agent loop setting on', async () => {
+      vi.mocked(saveModifiedSettings).mockClear();
+      const settings = createMockSettings();
+      const { stdin, unmount, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={() => {}} />
+        </KeypressProvider>,
+      );
+      const targetIndex = getDialogSettingKeys().indexOf(
+        'experimental.unifiedAgentLoop',
+      );
+      expect(targetIndex).toBeGreaterThan(0);
+      for (let i = 0; i < targetIndex; i++) {
+        act(() => stdin.write(TerminalKeys.DOWN_ARROW));
+        await wait();
+      }
+      const activeRow = () =>
+        lastFrame()
+          ?.split('\n')
+          .find((line) => line.includes('●\uFE0E Unified Agent Loop'));
+      await waitFor(() => expect(activeRow()).toContain('(not set)'));
+
+      act(() => stdin.write(TerminalKeys.ENTER));
+      await waitFor(() => expect(activeRow()).toContain('true*'));
+      unmount();
+    });
+
     it('persists resetting an explicit WebSearch setting to auto', async () => {
       vi.mocked(saveModifiedSettings).mockClear();
       const settings = createMockSettings({

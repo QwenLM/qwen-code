@@ -54,7 +54,10 @@ export function questionWaitDefinitionAdmitted(
       'hosted-workspace-files/1',
       'hosted-workspace-files/2',
       'hosted-workspace-files/3',
+      'hosted-workspace-files/4',
       'hosted-workspace-shell/1',
+      'hosted-workspace-shell/3',
+      'hosted-workspace-shell/4',
     ].includes(String(definition['toolProfile'] ?? 'hosted-workspace-files/1'))
   )
     return false;
@@ -67,7 +70,9 @@ export function questionWaitDefinitionAdmitted(
   return (
     definition['publicChildAgentsVersion'] === 1 &&
     (expectedDepth === undefined || expectedDepth === 1) &&
-    definition['toolProfile'] === 'hosted-workspace-shell/1' &&
+    (definition['toolProfile'] === 'hosted-workspace-shell/1' ||
+      definition['toolProfile'] === 'hosted-workspace-shell/3' ||
+      definition['toolProfile'] === 'hosted-workspace-shell/4') &&
     child['depth'] === 1 &&
     typeof child['parentSessionId'] === 'string' &&
     child['parentSessionId'] === child['rootSessionId'] &&
@@ -78,7 +83,7 @@ export function questionWaitDefinitionAdmitted(
 
 export async function acquireHostedQuestionRuntime(
   broker: HostedWorkspaceBroker,
-  original: HostedApprovalContinuation['runtime'],
+  original: NonNullable<HostedApprovalContinuation['runtime']>,
   signal: AbortSignal,
   expiresAt?: number,
 ): Promise<boolean> {

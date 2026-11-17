@@ -295,6 +295,9 @@ describe('SessionStatsContext', () => {
       totalTtftMs: 100,
       totalGenerationDurationMs: 400,
       totalThroughputOutputTokens: 20,
+      totalTimedGenerationDurationMs: 400,
+      totalOutputSpeedTokens: 20,
+      totalOutputSpeedDurationMs: 500,
       last: {
         model: 'qwen3-coder',
         ttftMs: 100,

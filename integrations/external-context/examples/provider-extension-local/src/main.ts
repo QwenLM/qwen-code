@@ -19,10 +19,13 @@ import {
 } from './provider.js';
 import { installEnvironmentProxy } from './proxy.js';
 
-const server = new McpServer({
-  name: 'provider-context-local-example',
-  version: '1.0.0',
-});
+const server = new McpServer(
+  {
+    name: 'provider-context-local-example',
+    version: '1.0.0',
+  },
+  { maxToolInputElements: 100_000 },
+);
 
 server.registerTool(
   'context_search',

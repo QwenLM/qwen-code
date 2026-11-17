@@ -33,8 +33,9 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
     undefined,
     undefined,
     undefined,
-    undefined,
-    undefined,
+    false,
+    // This Config exists for one memory-import run and never uses LSP.
+    { lspDisabled: true },
     undefined,
     undefined,
     // Same managed model policy as the interactive and ACP paths: a
