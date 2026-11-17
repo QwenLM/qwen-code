@@ -3441,17 +3441,20 @@ export class SessionService {
         'The session transcript has an incomplete conversation chain.',
       );
     }
+    const journalWarnings: string[] = [];
     const snapshot = rebuildSessionArtifactSnapshot(
       sideRecordsOnly
         ? records
         : includeActiveSideArtifactRecords(records, messages),
       sessionId,
+      journalWarnings,
     );
     return {
       physical,
       identity,
       records,
       snapshot,
+      journalWarnings,
       // Parenting to side records would hide this removal on conversation replay.
       artifactParentUuid: messages.at(-1)?.uuid ?? null,
     };
@@ -3511,9 +3514,9 @@ export class SessionService {
         'Artifact mutation must use its managed session authority.',
       );
     }
-    if (
-      hasDisqualifyingArtifactJournalWarning(state.snapshot?.warnings ?? [])
-    ) {
+    // Threaded warnings, not the snapshot's: an all-refused journal yields
+    // no snapshot but is damaged, not artifact-free (same gate as the seed).
+    if (hasDisqualifyingArtifactJournalWarning(state.journalWarnings)) {
       throw new SessionArtifactLibraryError(
         sessionId,
         'session_transcript_corrupt',
@@ -3787,9 +3790,15 @@ export class SessionService {
       records,
       messages,
     );
+    // The warnings are threaded out separately: an all-refused journal
+    // yields an undefined snapshot but still carries its damage warnings,
+    // and the seed gate must see them (undefined-with-warnings is damaged,
+    // not artifact-free).
+    const artifactJournalWarnings: string[] = [];
     const artifactSnapshot = rebuildSessionArtifactSnapshot(
       activeBranchRecords,
       firstRecord.sessionId,
+      artifactJournalWarnings,
     );
     // Seed the derived list cache so legacy sessions (journal records
     // predating the sidecar) and forks gain a count on their first open.
@@ -3803,12 +3812,14 @@ export class SessionService {
     // to the restore path. A zero count heals an existing stale sidecar (a
     // failed best-effort zero write must not leave a phantom count forever)
     // but never creates one for an artifact-free session. An undefined
-    // snapshot (no artifact records on the active branch at all) is a zero
-    // count for healing purposes.
+    // snapshot with NO warnings (no artifact records on the active branch
+    // at all) is a zero count for healing purposes; an undefined snapshot
+    // whose records were all refused is damaged, and the gate below
+    // refuses it via the threaded warnings.
     if (
       sourceReadComplete &&
       gaps.length === 0 &&
-      !hasDisqualifyingArtifactJournalWarning(artifactSnapshot?.warnings ?? [])
+      !hasDisqualifyingArtifactJournalWarning(artifactJournalWarnings)
     ) {
       // Count the set a cold open restores, not the raw rebuild: legacy
       // local-published html artifacts are dropped on restore and must

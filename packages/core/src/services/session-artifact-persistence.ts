@@ -345,15 +345,26 @@ export class SessionArtifactSnapshotAccumulator {
       warnings: this.warnings,
     };
   }
+
+  /**
+   * Warnings collected even when no readable record produced a snapshot —
+   * an all-refused journal still carries its damage warnings here.
+   */
+  warningList(): readonly string[] {
+    return this.warnings;
+  }
 }
 
 export function rebuildSessionArtifactSnapshot(
   records: readonly SessionArtifactChatRecordLike[],
   fallbackSessionId?: string,
+  outWarnings?: string[],
 ): RebuiltSessionArtifactSnapshot | undefined {
   const accumulator = new SessionArtifactSnapshotAccumulator(fallbackSessionId);
   for (const record of records) accumulator.add(record);
-  return accumulator.finish();
+  const snapshot = accumulator.finish();
+  if (outWarnings) outWarnings.push(...accumulator.warningList());
+  return snapshot;
 }
 
 /**

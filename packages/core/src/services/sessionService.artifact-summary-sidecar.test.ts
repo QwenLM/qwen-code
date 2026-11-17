@@ -500,6 +500,97 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
+  it('counts restorable survivors, not a decrement by the requested batch', async () => {
+    // A stale id in the removal batch must not shrink the count: the
+    // survivors are recounted, not subtracted by requestedIds.size.
+    const a = persistedArtifact('https://example.com/stale-a');
+    const b = persistedArtifact('https://example.com/stale-b');
+    const c = persistedArtifact('https://example.com/stale-c');
+    writeTranscript([userRecord(), artifactEventRecord([a, b, c])]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 3);
+
+    const removed = await service.removeSessionArtifactsForLibrary(
+      SESSION_ID,
+      [a.id, 'absent-id'],
+      {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      },
+    );
+
+    expect(removed).toEqual([a.id]);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  it('does not zero-heal a correct sidecar from an all-refused journal', async () => {
+    // Every artifact record is refused (forward payload version): the
+    // rebuild yields no snapshot, but the damage warnings must still reach
+    // the seed gate — "no readable records" is not "no records".
+    const a = persistedArtifact('https://example.com/refused-a');
+    const unreadable: ChatRecord = {
+      uuid: 'artifact-event-v3',
+      parentUuid: 'user-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:01.000Z',
+      type: 'system',
+      subtype: 'session_artifact_event',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        v: 3,
+        sessionId: SESSION_ID,
+        sequence: 1,
+        recordedAt: '2026-11-17T00:00:01.000Z',
+        changes: [{ action: 'created', artifactId: a.id, artifact: a }],
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([userRecord(), unreadable]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 5);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      5,
+    );
+  });
+
+  it('refuses a library removal on an all-refused journal', async () => {
+    // Same damaged shape as the seed case: the mutation guard must see the
+    // threaded warnings even though the rebuild yields no snapshot.
+    const a = persistedArtifact('https://example.com/library-refused-a');
+    const unreadable: ChatRecord = {
+      uuid: 'artifact-event-v3-library',
+      parentUuid: 'user-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:01.000Z',
+      type: 'system',
+      subtype: 'session_artifact_event',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        v: 3,
+        sessionId: SESSION_ID,
+        sequence: 1,
+        recordedAt: '2026-11-17T00:00:01.000Z',
+        changes: [{ action: 'created', artifactId: a.id, artifact: a }],
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([userRecord(), unreadable]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 5);
+
+    await expect(
+      service.removeSessionArtifactsForLibrary(SESSION_ID, [a.id], {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      }),
+    ).rejects.toMatchObject({ code: 'session_transcript_corrupt' });
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      5,
+    );
+  });
+
   it('does not seed from a journal with a discarded change entry', async () => {
     // 'skipped malformed artifact change' is change-level damage (the
     // artifact the change would create is missing from the rebuild), not
