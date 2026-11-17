@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  MAIN_SOURCE,
-  type ModelMetrics,
-  type ModelMetricsCore,
-} from '@qwen-code/qwen-code-core';
+import type {
+  ModelMetrics,
+  ModelMetricsCore,
+  SessionMetrics,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import { MAIN_SOURCE } from '@qwen-code/qwen-code-core/utils/subagentNameContext.js';
 
 /**
  * One entry in the flattened view of the `models` metric map. Each entry
@@ -30,6 +31,7 @@ export interface ModelSourceEntry {
   label: string;
   /** Backing metrics — either the model aggregate or one source bucket. */
   metrics: ModelMetricsCore;
+  billableOutputTokens?: number;
 }
 
 /**
@@ -53,6 +55,7 @@ export interface ModelSourceEntry {
  */
 export function flattenModelsBySource(
   models: Record<string, ModelMetrics>,
+  billableOutputTokens?: SessionMetrics['billableOutputTokens'],
 ): ModelSourceEntry[] {
   const sessionHasNonMainSource = Object.values(models).some((modelMetrics) =>
     Object.keys(modelMetrics.bySource).some((source) => source !== MAIN_SOURCE),
@@ -71,6 +74,7 @@ export function flattenModelsBySource(
         key: modelName,
         label: displayName,
         metrics: modelMetrics,
+        billableOutputTokens: billableOutputTokens?.[modelName]?.total,
       });
       continue;
     }
@@ -82,6 +86,7 @@ export function flattenModelsBySource(
         key: modelName,
         label: displayName,
         metrics: modelMetrics.bySource[MAIN_SOURCE] ?? modelMetrics,
+        billableOutputTokens: billableOutputTokens?.[modelName]?.total,
       });
       continue;
     }
@@ -92,6 +97,8 @@ export function flattenModelsBySource(
         key: `${modelName}::${source}`,
         label: `${displayName} (${source})`,
         metrics: modelMetrics.bySource[source],
+        billableOutputTokens:
+          billableOutputTokens?.[modelName]?.bySource[source],
       });
     }
   }

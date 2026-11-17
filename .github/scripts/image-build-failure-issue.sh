@@ -45,10 +45,9 @@ existing="$(
 
 # The machine-owned recurrence block: every recorded failed run is a bullet
 # under this marker, newest first. On recurrence ONLY this block is rebuilt —
-# hand-written annotations anywhere else in the body survive verbatim. This is
-# the same merge contract splitOccurrenceBlock()/renderIssueBody() in
-# .github/scripts/ci/main-failure-signature.mjs implements for
-# main-ci-failure-issue.yml; a fix to one must be applied to the other.
+# hand-written annotations anywhere else in the body survive verbatim. The
+# main-CI helper retains a similar legacy body renderer for revertability, but
+# main-ci-failure-issue.yml now consumes only analyze/comment and appends comments.
 runs_heading='## Failed runs'
 occurrences_marker='<!-- image-build-failure-occurrences -->'
 max_runs=10

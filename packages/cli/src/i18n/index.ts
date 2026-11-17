@@ -223,7 +223,9 @@ function interpolate(
 }
 
 // Language setting helpers
-function resolveLanguage(lang: SupportedLanguage | 'auto'): SupportedLanguage {
+export function resolveLanguage(
+  lang: SupportedLanguage | 'auto',
+): SupportedLanguage {
   if (lang === 'auto') {
     return detectSystemLanguage();
   }
@@ -311,7 +313,7 @@ export async function initializeI18n(
 export function resolveLanguageSetting(
   settingsLanguage?: string,
 ): SupportedLanguage | 'auto' {
-  return (
-    process.env['QWEN_CODE_LANG'] || settingsLanguage || 'auto'
-  ) as SupportedLanguage | 'auto';
+  return (process.env['QWEN_CODE_LANG'] || settingsLanguage || 'auto') as
+    | SupportedLanguage
+    | 'auto';
 }

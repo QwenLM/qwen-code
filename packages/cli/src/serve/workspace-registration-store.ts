@@ -15,11 +15,15 @@ import {
 } from '@qwen-code/qwen-code-core/noFollowOpen';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { getGlobalQwenDirLite } from '../config/storage-paths-lite.js';
-import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
+import {
+  MAX_REGISTERED_WORKSPACES,
+  MAX_CONFIGURED_REGISTERED_WORKSPACES,
+  resolveMaxRegisteredWorkspaces,
+} from './workspace-inputs.js';
 
 const SCHEMA_VERSION = 1;
-const MAX_SECONDARY_WORKSPACES = MAX_REGISTERED_WORKSPACES - 1;
-const MAX_STORE_BYTES = 256 * 1024;
+const MAX_SECONDARY_WORKSPACES = MAX_CONFIGURED_REGISTERED_WORKSPACES - 1;
+const MAX_STORE_BYTES = 8 * 1024 * 1024;
 export const MAX_WORKSPACE_DISPLAY_NAME_LENGTH = 256;
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
@@ -39,6 +43,7 @@ export interface WorkspaceRegistrationSnapshot {
   primaryWorkspace: string;
   workspaces: string[];
   displayNames?: Record<string, string>;
+  workspaceOrder?: string[];
 }
 
 export class WorkspaceDisplayNameValidationError extends Error {
@@ -87,7 +92,39 @@ export class WorkspaceRegistrationStoreError extends Error {
 
 export class WorkspaceRegistrationStoreLimitError extends WorkspaceRegistrationStoreError {}
 
+export class WorkspaceRegistrationStoreTooLargeError extends WorkspaceRegistrationStoreError {}
+
 export class WorkspaceRegistrationStoreCommittedError extends WorkspaceRegistrationStoreError {}
+
+export class WorkspaceOrderValidationError extends WorkspaceRegistrationStoreError {}
+
+export function normalizeWorkspaceOrder(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_CONFIGURED_REGISTERED_WORKSPACES
+  ) {
+    throw new WorkspaceOrderValidationError(
+      'Workspace order must be an array of at most 256 paths',
+    );
+  }
+  const seen = new Set<string>();
+  return Array.from(value, (entry, index) => {
+    let cwd: string;
+    try {
+      cwd = validateWorkspacePath(entry, `workspaceOrder[${index}]`);
+    } catch (err) {
+      throw new WorkspaceOrderValidationError((err as Error).message);
+    }
+    const key = normalizedScopePath(cwd);
+    if (seen.has(key)) {
+      throw new WorkspaceOrderValidationError(
+        'Workspace order contains duplicate paths',
+      );
+    }
+    seen.add(key);
+    return cwd;
+  });
+}
 
 function normalizedScopePath(primaryWorkspace: string): string {
   return os.platform() === 'win32'
@@ -272,6 +309,9 @@ function parseSnapshot(
     primaryWorkspace,
     workspaces,
     ...(displayNames ? { displayNames } : {}),
+    ...(record['workspaceOrder'] !== undefined
+      ? { workspaceOrder: normalizeWorkspaceOrder(record['workspaceOrder']) }
+      : {}),
   };
 }
 
@@ -390,7 +430,7 @@ export class WorkspaceRegistrationStore {
         );
       }
       if (stat.size > MAX_STORE_BYTES) {
-        throw new WorkspaceRegistrationStoreError(
+        throw new WorkspaceRegistrationStoreTooLargeError(
           `Workspace registration store exceeds ${MAX_STORE_BYTES} bytes`,
         );
       }
@@ -420,7 +460,7 @@ export class WorkspaceRegistrationStore {
         totalBytesRead += bytesRead;
       }
       if (totalBytesRead > MAX_STORE_BYTES) {
-        throw new WorkspaceRegistrationStoreError(
+        throw new WorkspaceRegistrationStoreTooLargeError(
           `Workspace registration store exceeds ${MAX_STORE_BYTES} bytes`,
         );
       }
@@ -433,7 +473,13 @@ export class WorkspaceRegistrationStore {
     }
   }
 
-  async add(workspace: string, displayName?: string): Promise<boolean> {
+  async add(
+    workspace: string,
+    displayName?: string,
+    maxRegisteredWorkspaces = MAX_REGISTERED_WORKSPACES,
+  ): Promise<boolean> {
+    const maxSecondaries =
+      resolveMaxRegisteredWorkspaces(maxRegisteredWorkspaces, {}) - 1;
     validateWorkspacePath(workspace, 'workspace');
     const normalizedDisplayName =
       displayName === undefined
@@ -456,9 +502,9 @@ export class WorkspaceRegistrationStore {
       ) {
         return false;
       }
-      if (snapshot.workspaces.length >= MAX_SECONDARY_WORKSPACES) {
+      if (snapshot.workspaces.length >= maxSecondaries) {
         throw new WorkspaceRegistrationStoreLimitError(
-          `Workspace registration store limit of ${MAX_SECONDARY_WORKSPACES} reached`,
+          `Workspace registration store limit of ${maxSecondaries} reached`,
         );
       }
       snapshot.workspaces.push(workspace);
@@ -527,6 +573,16 @@ export class WorkspaceRegistrationStore {
     return removed;
   }
 
+  async setWorkspaceOrder(cwds: readonly string[]): Promise<void> {
+    const order = normalizeWorkspaceOrder(cwds);
+    await this.update((snapshot) => {
+      if (JSON.stringify(snapshot.workspaceOrder) === JSON.stringify(order))
+        return false;
+      snapshot.workspaceOrder = order;
+      return true;
+    });
+  }
+
   private async update(
     mutate: (snapshot: WorkspaceRegistrationSnapshot) => boolean,
   ): Promise<boolean> {
@@ -543,12 +599,18 @@ export class WorkspaceRegistrationStore {
         lock.assertOwned();
         changed = mutate(snapshot);
         if (changed) {
+          const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
+          if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_BYTES) {
+            throw new WorkspaceRegistrationStoreTooLargeError(
+              `Workspace registration store exceeds ${MAX_STORE_BYTES} bytes`,
+            );
+          }
           lock.assertOwned();
-          await atomicWriteFile(
-            this.filePath,
-            `${JSON.stringify(snapshot, null, 2)}\n`,
-            { mode: 0o600, forceMode: true, noFollow: true },
-          );
+          await atomicWriteFile(this.filePath, serialized, {
+            mode: 0o600,
+            forceMode: true,
+            noFollow: true,
+          });
           committed = true;
         }
       } catch (err) {

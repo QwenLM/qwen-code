@@ -1,5 +1,7 @@
 import {
   DAEMON_ERROR_KINDS,
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
   type DaemonErrorKind,
   type DaemonPermissionTranscriptBlock,
   type DaemonShellTranscriptBlock,
@@ -14,6 +16,7 @@ import {
   type DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { SchemaValidator } from '@qwen-code/qwen-code-core';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
 import type { ExportSessionData } from './types.js';
 import exportTranscriptDocumentV1Schema from './export-transcript-document-v1.schema.json' with { type: 'json' };
@@ -125,6 +128,7 @@ type ExportToolPreviewV1 =
   | ToolPreviewPick<'generic', 'summary'>;
 type ExportToolResultPreviewV1 =
   | ExportTodoListPreviewV1
+  | Extract<DaemonToolResultPreview, { kind: 'question_answers' }>
   | { kind: 'text'; text: string }
   | { kind: 'generic'; summary: string };
 
@@ -135,6 +139,13 @@ export type ExportPermissionResolutionV1 =
   | 'expired'
   | 'resolved';
 
+/**
+ * The workspace agent that wrote a user or assistant block: an agent's reply
+ * (`agent_message`) or a message it posted into the session.
+ */
+export interface ExportTranscriptAuthorV1 {
+  name: string;
+}
 type ExportTextTranscriptBlockBaseV1 = Pick<
   DaemonTextTranscriptBlock,
   | Exclude<ExportBlockBaseKeys, 'kind'>
@@ -144,10 +155,15 @@ type ExportTextTranscriptBlockBaseV1 = Pick<
   | 'parentToolCallId'
 > & { streaming?: false };
 type ExportTextTranscriptBlockV1 =
-  | (ExportTextTranscriptBlockBaseV1 & { kind: 'user' | 'thought' })
+  | (ExportTextTranscriptBlockBaseV1 & { kind: 'thought' })
+  | (ExportTextTranscriptBlockBaseV1 & {
+      kind: 'user';
+      author?: ExportTranscriptAuthorV1;
+    })
   | (ExportTextTranscriptBlockBaseV1 & {
       kind: 'assistant';
       usage?: DaemonTextTranscriptBlock['usage'];
+      author?: ExportTranscriptAuthorV1;
     });
 type ExportToolTranscriptBlockV1 = Pick<
   DaemonToolTranscriptBlock,
@@ -388,15 +404,20 @@ function applyRecordExportPolicy(
       type === 'system' &&
       typeof subtype === 'string' &&
       VISIBLE_SYSTEM_RECORD_SUBTYPES.has(subtype);
+    const internalCodeModeToolResult = isInternalCodeModeToolResult(record);
     const visible =
       type === 'user' ||
       type === 'assistant' ||
-      type === 'tool_result' ||
+      (type === 'tool_result' && !internalCodeModeToolResult) ||
       acceptedSystemSubtype;
-    if (visible || type === 'system') {
+    if (visible || type === 'system' || internalCodeModeToolResult) {
       projectionRecords.push(record);
       const uuid = record['uuid'];
-      if (visible && typeof uuid === 'string') visibleRecordIds.add(uuid);
+      // The internal result projects no block of its own, but the replay
+      // machine stamps its uuid on the history-gap notice, which must survive.
+      if ((visible || internalCodeModeToolResult) && typeof uuid === 'string') {
+        visibleRecordIds.add(uuid);
+      }
       if (type === 'system' && !acceptedSystemSubtype) {
         diagnostics.add('record_internal_excluded', 'info');
       }
@@ -416,6 +437,12 @@ const VISIBLE_SYSTEM_RECORD_SUBTYPES = new Set([
   'realtime_message',
   'goal_state',
   'goal_runtime',
+  // Session multi-agent records are `type: 'user'`, so the gate above already
+  // admits them; listed so the set names every visible subtype. Replay
+  // projects their display text (an agent reply as an assistant block), and
+  // the block carries its agent as `author`.
+  'agent_mention',
+  'agent_message',
 ]);
 
 function sanitizeBlock(
@@ -451,11 +478,20 @@ function sanitizeBlock(
         );
         budget.markContentLoss();
       }
+      const authorName =
+        block.kind === 'thought' || block.parentToolCallId
+          ? undefined
+          : parseQwenAgentMessageMeta(
+              block.meta?.[QWEN_AGENT_MESSAGE_META_KEY],
+            )?.author?.name.trim();
       return {
         ...common,
         kind: block.kind,
         text,
         streaming: false,
+        ...(authorName
+          ? { author: { name: budget.label(authorName, 128) } }
+          : {}),
         ...(block.collapsed ? { collapsed: true } : {}),
         ...(block.parentToolCallId
           ? {
@@ -792,8 +828,21 @@ function sanitizeResultPreview(
   if (preview.kind === 'todo_list') {
     return sanitizeTodoPreview(preview, budget, ids);
   }
+  if (preview.kind === 'shell_result') {
+    return { kind: 'text', text: budget.text(preview.result.text) };
+  }
   if (preview.kind === 'text') {
     return { kind: 'text', text: budget.text(preview.text) };
+  }
+  if (preview.kind === 'question_answers') {
+    return {
+      kind: 'question_answers',
+      text: budget.plainText(preview.text),
+      answers: budget.array(preview.answers).map(({ question, answer }) => ({
+        question: budget.plainText(question),
+        answer: budget.plainText(answer),
+      })),
+    };
   }
   if (!preview.summary?.trim()) return undefined;
   const summary = budget.text(preview.summary);
@@ -1389,6 +1438,15 @@ function assertSemanticSafety(value: Record<string, unknown>): void {
     }
     if (!isRecord(entry)) return;
     if (
+      key === 'author' &&
+      !(
+        isSafeLabel(entry['name'], 128) &&
+        isSafePresentationLabel(entry['name'], 128)
+      )
+    ) {
+      throw new ExportTranscriptDocumentError('invalid_block');
+    }
+    if (
       (entry['kind'] === 'status' || entry['kind'] === 'error') &&
       entry['code'] !== undefined &&
       !isSafeLabel(entry['code'], 128)
@@ -1710,7 +1768,10 @@ function isMarkdownExportText(
   path: readonly string[],
 ): boolean {
   if (path.at(-2) === 'resultPreview') {
-    return key === 'text' || key === 'summary';
+    return (
+      parent?.['kind'] !== 'question_answers' &&
+      (key === 'text' || key === 'summary')
+    );
   }
   return (
     key === 'text' &&
@@ -1768,6 +1829,7 @@ const VISIBLE_EXPORT_TEXT_FIELDS = new Set([
   'command',
   'cwd',
   'question',
+  'answer',
   'path',
   'oldText',
   'newText',

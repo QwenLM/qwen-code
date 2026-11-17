@@ -7,6 +7,8 @@
 import { createHash } from 'node:crypto';
 import { isTranscriptArtifactRecord } from '../utils/transcript-records.js';
 
+export { selectActiveSideArtifactRecordUuids } from '../utils/transcript-records.js';
+
 export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 export const WORKSPACE_CONTENT_SHA256_METADATA_KEY = 'qwen.workspace.sha256';
@@ -103,6 +105,44 @@ export interface PersistedSessionArtifact {
   clientId?: string;
 }
 
+export function getWebPreviewSnapshotId(
+  artifact: Partial<PersistedSessionArtifact>,
+): string | undefined {
+  const id =
+    /^preview-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.exec(
+      artifact.managedId ?? '',
+    )?.[1];
+  const sha256 = artifact.metadata?.[PUBLISHED_CONTENT_SHA256_METADATA_KEY];
+  if (
+    !id ||
+    artifact.kind !== 'html' ||
+    artifact.storage !== 'published' ||
+    artifact.metadata?.['artifactType'] !== 'web_preview_snapshot' ||
+    typeof sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(sha256) ||
+    (artifact.source !== undefined &&
+      (artifact.source !== 'tool' ||
+        artifact.toolName?.toLowerCase() !== 'artifact')) ||
+    (artifact.toolName !== undefined &&
+      artifact.toolName.toLowerCase() !== 'artifact')
+  )
+    return undefined;
+  try {
+    const url = new URL(artifact.url ?? '');
+    if (
+      url.protocol === 'file:' &&
+      !url.host &&
+      !url.search &&
+      !url.hash &&
+      url.pathname.endsWith(`/artifacts/snapshots/${id}/index.html`)
+    )
+      return id;
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 export type SessionArtifactPersistedChangeAction =
   | 'created'
   | 'updated'
@@ -161,84 +201,6 @@ export function isSessionArtifactRecord(
   record: SessionArtifactChatRecordLike,
 ): boolean {
   return isTranscriptArtifactRecord(record);
-}
-
-export function selectActiveSideArtifactRecordUuids(
-  records: ReadonlyArray<
-    SessionArtifactChatRecordLike & {
-      uuid: string;
-      parentUuid: string | null;
-    }
-  >,
-  activeRecordUuids: readonly string[],
-): string[] {
-  const activeUuids = new Set(activeRecordUuids);
-  const firstActiveUuid = activeRecordUuids[0];
-  const firstActiveIndex =
-    firstActiveUuid === undefined
-      ? -1
-      : records.findIndex((record) => record.uuid === firstActiveUuid);
-  const nextActiveUuidByIndex = new Map<number, string>();
-  const nextBlockingUuidByIndex = new Map<number, string>();
-  let nextActiveUuid: string | undefined;
-  let nextBlockingUuid: string | undefined;
-  for (let index = records.length - 1; index >= 0; index--) {
-    if (nextActiveUuid !== undefined) {
-      nextActiveUuidByIndex.set(index, nextActiveUuid);
-    }
-    if (nextBlockingUuid !== undefined) {
-      nextBlockingUuidByIndex.set(index, nextBlockingUuid);
-    }
-    const record = records[index]!;
-    if (activeUuids.has(record.uuid)) {
-      nextActiveUuid = record.uuid;
-      nextBlockingUuid = undefined;
-    } else if (
-      !isSessionArtifactRecord(record) &&
-      !(record.type === 'system' && record.subtype === 'custom_title')
-    ) {
-      nextBlockingUuid = record.uuid;
-    }
-  }
-
-  const selected: string[] = [];
-  const includedSideArtifactUuids = new Set<string>();
-  let previousActiveUuid: string | undefined;
-  for (let index = 0; index < records.length; index++) {
-    const record = records[index]!;
-    if (activeUuids.has(record.uuid)) {
-      previousActiveUuid = record.uuid;
-      continue;
-    }
-    if (!isSessionArtifactRecord(record)) continue;
-
-    const nextUuid = nextActiveUuidByIndex.get(index);
-    const isInActiveSegment =
-      !nextBlockingUuidByIndex.has(index) &&
-      (nextUuid !== undefined
-        ? activeUuids.has(nextUuid)
-        : previousActiveUuid !== undefined &&
-          activeUuids.has(previousActiveUuid));
-    if (
-      record.parentUuid !== null &&
-      (activeUuids.has(record.parentUuid) ||
-        includedSideArtifactUuids.has(record.parentUuid)) &&
-      isInActiveSegment &&
-      (record.parentUuid === previousActiveUuid ||
-        includedSideArtifactUuids.has(record.parentUuid))
-    ) {
-      selected.push(record.uuid);
-      includedSideArtifactUuids.add(record.uuid);
-    } else if (
-      record.parentUuid === null &&
-      index < firstActiveIndex &&
-      isInActiveSegment
-    ) {
-      selected.push(record.uuid);
-      includedSideArtifactUuids.add(record.uuid);
-    }
-  }
-  return selected;
 }
 
 export function stableSessionArtifactId(
@@ -602,7 +564,11 @@ function isForkSafeArtifact(artifact: PersistedSessionArtifact): boolean {
   if (artifact.metadata && hasRestoreUnsafeMetadata(artifact.metadata)) {
     return false;
   }
-  if (artifact.url && hasRestoreUnsafeUrl(artifact.url)) {
+  if (
+    artifact.url &&
+    hasRestoreUnsafeUrl(artifact.url) &&
+    !getWebPreviewSnapshotId(artifact)
+  ) {
     return false;
   }
   return true;

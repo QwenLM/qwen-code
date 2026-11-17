@@ -26,7 +26,88 @@ import { AuthMessageHandler } from './AuthMessageHandler.js';
 
 describe('AuthMessageHandler', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
+  });
+
+  it.each(['logout', 'upgrade'] as const)(
+    'routes %s directly to the native subscription action',
+    async (action) => {
+      const handler = new AuthMessageHandler(
+        {} as never,
+        {} as never,
+        null,
+        vi.fn(),
+      );
+      const subscription = vi.fn(async () => undefined);
+      handler.setSubscriptionAuthHandler(subscription);
+      expect(handler.canHandle(action)).toBe(true);
+      await handler.handle({ type: action });
+      expect(subscription).toHaveBeenCalledWith(action);
+      expect(mockShowQuickPick).not.toHaveBeenCalled();
+    },
+  );
+
+  it('lists Qwen Account with Subscription first in the native provider picker', async () => {
+    mockShowQuickPick.mockResolvedValue(undefined);
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+    await handler.handle({ type: 'auth', data: { subscriptionEnabled: true } });
+    const items = mockShowQuickPick.mock.calls[0]![0];
+    expect(items[0]).toMatchObject({
+      label: 'Qwen Account with Subscription',
+      detail: 'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+    });
+  });
+
+  it('keeps subscription OAuth native after the first-row selection', async () => {
+    mockShowQuickPick.mockImplementationOnce(async (items) =>
+      items.find(
+        (item: { label: string }) =>
+          item.label === 'Qwen Account with Subscription',
+      ),
+    );
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    const authInteractiveHandler = vi.fn();
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+    const subscriptionAuthHandler = vi.fn(async () => undefined);
+    handler.setSubscriptionAuthHandler(subscriptionAuthHandler);
+    await handler.handle({ type: 'auth', data: { subscriptionEnabled: true } });
+    expect(mockShowQuickPick).toHaveBeenCalledTimes(1);
+    expect(mockShowInputBox).not.toHaveBeenCalled();
+    expect(authInteractiveHandler).not.toHaveBeenCalled();
+    expect(subscriptionAuthHandler).toHaveBeenCalledOnce();
+    expect(sendToWebView).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'qwenSubscriptionAuth' }),
+    );
+  });
+
+  it('keeps the subscription entry absent when capability is disabled', async () => {
+    mockShowQuickPick.mockResolvedValue(undefined);
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+    await handler.handle({
+      type: 'auth',
+      data: { subscriptionEnabled: false },
+    });
+    expect(mockShowQuickPick.mock.calls[0]![0]).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'Qwen Account with Subscription' }),
+      ]),
+    );
   });
 
   it('sends authCancelled when the provider picker is dismissed', async () => {
@@ -214,10 +295,41 @@ describe('AuthMessageHandler', () => {
     });
   });
 
+  it('labels every custom protocol option with a human-readable name', async () => {
+    // Provider pick → custom; then cancel at the protocol pick so the test
+    // stays focused on the items the picker was handed.
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce(undefined);
+
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({ type: 'auth' });
+
+    const protocolItems = mockShowQuickPick.mock.calls[1]?.[0] as Array<{
+      label: string;
+      value: string;
+    }>;
+    // Raw AuthType strings ('openai-responses') must never reach the UI.
+    expect(protocolItems).toEqual(
+      expect.arrayContaining([
+        { label: 'OpenAI Compatible', value: 'openai' },
+        { label: 'Anthropic', value: 'anthropic' },
+        { label: 'Gemini', value: 'gemini' },
+      ]),
+    );
+  });
+
   it('rejects a non-http(s) custom base URL with authError', async () => {
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
-      .mockResolvedValueOnce({ value: 'openai' });
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'chat-completions' });
     // file:// URL must be rejected before reaching authInteractiveHandler.
     mockShowInputBox.mockResolvedValueOnce('file:///etc/passwd');
 
@@ -238,6 +350,69 @@ describe('AuthMessageHandler', () => {
       data: { message: expect.stringContaining('http') },
     });
     expect(authInteractiveHandler).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the Responses default endpoint when the URL input is blank after picking Responses', async () => {
+    // The API step's pick is part of the effective route: a blank URL after
+    // choosing Responses must fall back to the /v1-less Responses default,
+    // not the Chat Completions /v1 default.
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'responses' })
+      .mockResolvedValueOnce({ value: 'no' });
+    mockShowInputBox
+      .mockResolvedValueOnce('') // blank URL → fallback to the wire's default
+      .mockResolvedValueOnce('sk-test')
+      .mockResolvedValueOnce('model');
+
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+    const submit = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(submit);
+    await handler.handle({ type: 'auth' });
+
+    expect(submit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        protocol: 'openai',
+        wireApi: 'responses',
+        baseUrl: 'https://api.openai.com',
+      }),
+    );
+  });
+
+  it('collects Responses as an API choice within OpenAI setup', async () => {
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'responses' })
+      .mockResolvedValueOnce({ value: 'no' });
+    mockShowInputBox
+      .mockResolvedValueOnce('https://gateway.example/v1')
+      .mockResolvedValueOnce('key')
+      .mockResolvedValueOnce('model');
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+    const submit = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(submit);
+    await handler.handle({ type: 'auth' });
+    expect(submit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        protocol: 'openai',
+        wireApi: 'responses',
+        modelIds: ['model'],
+      }),
+    );
   });
 
   it('falls back to the protocol-specific default when custom URL input is blank', async () => {
@@ -276,7 +451,8 @@ describe('AuthMessageHandler', () => {
   it('rejects whitespace-only model IDs with authError', async () => {
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
-      .mockResolvedValueOnce({ value: 'openai' });
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'chat-completions' });
     mockShowInputBox
       .mockResolvedValueOnce('https://api.example.com/v1')
       .mockResolvedValueOnce('sk-test')
@@ -308,7 +484,8 @@ describe('AuthMessageHandler', () => {
     // failure must send ONLY authError, never a trailing authCancelled.
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
-      .mockResolvedValueOnce({ value: 'openai' });
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'chat-completions' });
     mockShowInputBox.mockResolvedValueOnce('file:///etc/passwd');
 
     const sendToWebView = vi.fn();
@@ -325,5 +502,33 @@ describe('AuthMessageHandler', () => {
     const types = sendToWebView.mock.calls.map((c) => c[0]?.type);
     expect(types).toContain('authError');
     expect(types).not.toContain('authCancelled');
+  });
+
+  it('lists QwenCloud as the first provider group in the picker', async () => {
+    mockShowQuickPick.mockResolvedValue(undefined);
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({ type: 'auth' });
+
+    const items = mockShowQuickPick.mock.calls[0][0] as Array<{
+      label: string;
+      value: string;
+      kind?: number;
+    }>;
+    // First separator should be QwenCloud, matching the daemon catalog order.
+    const separators = items.filter((i) => i.kind === -1);
+    expect(separators[0].label).toBe('QwenCloud');
+    // QwenCloud group should contain both presets.
+    const qwencloudItems = items.filter(
+      (i) =>
+        i.value === 'qwencloud-token-plan' || i.value === 'qwencloud-standard',
+    );
+    expect(qwencloudItems).toHaveLength(2);
   });
 });

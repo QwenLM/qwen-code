@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 
 use crate::ax::bindings::{
     ax_get_window_id, copy_ax_windows, perform_action, set_bool_attr_true,
-    AXUIElementCreateApplication,
+    AXUIElementCreateApplication, AXUIElementSetMessagingTimeout,
 };
 
 pub struct BringToFrontTool;
@@ -161,14 +161,16 @@ fn wait_for_exact_window(pid: i32, window_id: u32) -> ExactWindowObservation {
 
 /// Best-effort completion of the one exact-window request. This addresses only
 /// the requested AX window; it never orders every window owned by the process.
-fn raise_exact_ax_window(pid: i32, window_id: u32) -> bool {
+pub(super) fn raise_exact_ax_window(pid: i32, window_id: u32) -> bool {
     unsafe {
         let app = AXUIElementCreateApplication(pid);
         if app.is_null() {
             return false;
         }
+        let _ = AXUIElementSetMessagingTimeout(app, 0.1);
         let mut target = None;
         for window in copy_ax_windows(app) {
+            let _ = AXUIElementSetMessagingTimeout(window, 0.1);
             if target.is_none() && ax_get_window_id(window) == Some(window_id) {
                 target = Some(window);
             } else {

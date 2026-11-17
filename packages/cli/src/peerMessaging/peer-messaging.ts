@@ -16,6 +16,11 @@
  * exists), so messages accepted before then are buffered rather than
  * dropped: a peer that messaged during startup should not have to guess
  * that it needed to wait.
+ *
+ * Rate limiting lives in the gate, but its two reports are wired here:
+ * the receipts that tell a sender it is being dropped travel over the
+ * same socket this owns, and the notices that tell the user go to the
+ * same listeners the held-message notices do.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -28,17 +33,34 @@ import {
   type ApprovalMode,
   canonicalizeMsgId,
   createDebugLogger,
+  drainSendPacer,
+  type DropNotice,
+  DropNoticeThrottle,
+  DropReceiptCoalescer,
+  forgetSendPacerMessages,
   formatPeerDisplay,
   formatPeerEnvelope,
+  getPeerControllerRegistryPath,
   InboundGate,
+  MAX_CONCURRENT_SENDS,
   MAX_HELD_MESSAGES,
+  PEER_ADMISSION_LIMITS,
   type HeldMessage,
   type InboundPolicy,
+  type PeerAdmission,
   type PolicyScope,
+  type PeerControlFrame,
   type PeerDeliveryStatus,
+  type PeerDropReason,
   type PeerFrame,
   type PeerInbox,
+  type PeerOrigin,
+  peerSenderKey,
   type PeerUserFrame,
+  readPeerControllerRegistrySync,
+  refundSendPacerMessage,
+  refundSendPacerToken,
+  resolveControllerToken,
   sendDeliveryStatus,
   type SettledPeerReceipt,
   settleSentPeerMessage,
@@ -50,6 +72,7 @@ const debugLogger = createDebugLogger('PEER_MESSAGING');
 /** Identity needed to re-check a queued frame's recipient at drain time. */
 export interface PeerQueuedDelivery {
   msgId: string;
+  admissionKey?: string;
   from?: string;
   replyToken?: string;
   toSessionId?: string;
@@ -83,6 +106,35 @@ export type PeerSubmitFn = (
 export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
 
 /**
+ * How long `close()` waits for folded drop receipts to reach their
+ * senders.
+ *
+ * Nothing here can make three rounds of best-effort receipts fit the exit
+ * path's per-entry budget: each individual send may take up to
+ * `SEND_TIMEOUT_MS`, which is already longer than the budget on its own.
+ * What is choosable is the order, and these receipts go last — so this
+ * bound spends only what the corrective ones left, and a slow but living
+ * peer still gets its answer.
+ */
+const CLOSE_DROP_FLUSH_BOUND_MS = 1_000;
+
+/** Drop notices held for a listener that has not subscribed yet. */
+const MAX_UNHEARD_DROP_NOTICES = 20;
+
+/**
+ * How long the wall a `rate-limited` receipt describes can still stand.
+ *
+ * A receiver refuses at an empty bucket and refills it in this long, so
+ * a receipt older than one refill says nothing about the level now.
+ * Derived from the limits rather than written down, so a retune of
+ * either cannot leave this stale.
+ */
+const RECEIVER_REFILL_MS =
+  (PEER_ADMISSION_LIMITS.bucketCapacity /
+    PEER_ADMISSION_LIMITS.refillPerSecond) *
+  1000;
+
+/**
  * A delivery receipt for a message this session sent, as surfaced to
  * the UI: which address it went to and what became of it there.
  */
@@ -92,18 +144,31 @@ export interface PeerReceipt {
   origMsgId: string;
   /** The state the message was in before this receipt. */
   previous: PeerDeliveryStatus | 'pending';
+  /** Which wall a dropped message met. Only set for `status: 'dropped'`. */
+  dropReason?: PeerDropReason;
+  /**
+   * How many of this session's messages this receipt settled, at least
+   * one. A `dropped` receipt stands for a burst, so the transcript says
+   * how many rather than repeating the line — only set for that status.
+   */
+  dropped?: number;
 }
 
 export interface PeerMessagingOptions {
-  getApprovalMode: () => ApprovalMode | null;
-  getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * The four settings readers take the session a message is addressed to
+   * (its `toSessionId`). A process holding one session ignores it; one
+   * hosting several reads the settings of that session. See the gate.
+   */
+  getApprovalMode: (sessionId?: string) => ApprovalMode | null;
+  getPolicySetting: (sessionId?: string) => InboundPolicy | undefined;
   /**
    * How long a held message waits, in milliseconds, or null for "until
    * the session ends". Omitted in tests, which take the default.
    */
-  getHeldExpiryMs?: () => number | null;
+  getHeldExpiryMs?: (sessionId?: string) => number | null;
   /** Which scope set the policy, for wording a hold cause. See the gate. */
-  getPolicyScope?: () => PolicyScope | undefined;
+  getPolicyScope?: (sessionId?: string) => PolicyScope | undefined;
   updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
     ipcToken?: string,
@@ -130,6 +195,24 @@ export interface PeerMessagingOptions {
    * session holds now. Absent means frames are never checked against it.
    */
   getSessionId?: () => string;
+  /**
+   * For a process hosting several sessions: whether `id` is one of them.
+   *
+   * Wired instead of `getSessionId` — the two are mutually exclusive,
+   * because a process either has one session to name or a set to test
+   * against. With this set, a frame naming no session at all is
+   * misaddressed: an unpinned frame could have meant the one session a
+   * single-session process holds, and here it could mean any of several.
+   */
+  ownsSessionId?: (id: string) => boolean;
+  /** See `InboundGateOptions.presentsHolds`. */
+  presentsHolds?: boolean;
+  /**
+   * Where accepted messages go, installed before the socket binds. A host
+   * that knows this up front never buffers: a buffered message whose
+   * session had gone would block every message behind it.
+   */
+  submit?: PeerSubmitFn;
   socketPath?: string;
   /**
    * Overrides the generated inbox token. A test seam like `socketPath`:
@@ -139,12 +222,39 @@ export interface PeerMessagingOptions {
   ipcToken?: string;
   /** Overrides the generated child token. Same seam, same reason. */
   childToken?: string;
+  /**
+   * Read controller grants from here instead of the Qwen home. A test
+   * seam only: production reads the one file per home, which is what
+   * makes a grant apply to whichever sessions the user is running.
+   */
+  controllerRegistryPath?: string;
+  /**
+   * Meter arrivals with this instead of a fresh one. A test seam: the
+   * limits are minutes wide, so a suite that wants to see a drop injects
+   * a clock rather than sending thirty real messages.
+   */
+  admission?: PeerAdmission;
+  /** How long a dropped-receipt batch waits. A test seam; see the gate. */
+  dropReceiptTrailMs?: number;
+  /**
+   * Empty this session's send-side mirror for an address. Defaults to the
+   * real pacer; injectable for the same reason `settleSentMessage` is —
+   * the wiring from a receipt to the drain is a decision this class
+   * makes, and it should be observable without staging a real send.
+   */
+  drainMirror?: (ipcPath: string) => void;
+  /** Remove messages the receiver confirmed never reached its model. */
+  forgetMirror?: (ipcPath: string, messageIds: readonly string[]) => void;
+  /** Refund a message rejected before the receiver's admission meter. */
+  refundMirror?: (ipcPath: string, messageId: string) => void;
+  /** Refund a duplicate's token while retaining its body baseline. */
+  refundMirrorToken?: (ipcPath: string, messageId: string) => void;
 }
 
 /** An accepted message waiting for the TUI's submit function. */
 interface BufferedDelivery {
   frame: PeerUserFrame;
-  selfSent: boolean;
+  origin: PeerOrigin;
 }
 
 export class PeerMessaging {
@@ -155,14 +265,31 @@ export class PeerMessaging {
     ipcToken?: string,
   ) => Promise<void> = async () => {};
   private getSessionId: (() => string) | null = null;
+  private ownsSessionId: ((id: string) => boolean) | null = null;
   private settleSentMessage: (
     msgId: string,
     status: PeerDeliveryStatus,
   ) => SettledPeerReceipt | undefined = settleSentPeerMessage;
   private reassertSessionRecord: (() => Promise<void>) | null = null;
+  private drainMirror: (ipcPath: string) => void = drainSendPacer;
+  private forgetMirror: (
+    ipcPath: string,
+    messageIds: readonly string[],
+  ) => void = forgetSendPacerMessages;
+  private refundMirror: (ipcPath: string, messageId: string) => void =
+    refundSendPacerMessage;
+  private refundMirrorToken: (ipcPath: string, messageId: string) => void =
+    refundSendPacerToken;
   private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
+  private readonly dropListeners = new Set<(notice: DropNotice) => void>();
+  /** Notices raised before anything subscribed; see `onDropped`. */
+  private readonly unheardDrops: DropNotice[] = [];
+  /** Folds dropped receipts so a flood draws few connections, not many. */
+  private dropReceipts: DropReceiptCoalescer | null = null;
   private submitFn: PeerSubmitFn | null = null;
   private readonly buffered: BufferedDelivery[] = [];
+  private controllerRegistryPath: string | null = null;
+  private validControllerIds: ReadonlySet<string> | null = null;
   /**
    * Accepted frames whose 'delivered' receipt has not been earned yet:
    * still buffered here or still queued in the session's input queue.
@@ -190,7 +317,45 @@ export class PeerMessaging {
   static async start(
     options: PeerMessagingOptions,
   ): Promise<PeerMessaging | null> {
+    if (options.getSessionId && options.ownsSessionId) {
+      // A configuration mistake rather than a runtime condition: one asks
+      // which session this process is, the other which sessions it hosts,
+      // and a process that answered both would judge pins against
+      // whichever happened to be checked first.
+      throw new Error(
+        'PeerMessaging: pass getSessionId or ownsSessionId, not both',
+      );
+    }
     const messaging = new PeerMessaging();
+    const controllerRegistryPath =
+      options.controllerRegistryPath ?? getPeerControllerRegistryPath();
+    messaging.controllerRegistryPath = controllerRegistryPath;
+
+    // Reads `messaging.inbox` at send time rather than capturing it: the
+    // socket is bound below, and a drop can happen before it resolves.
+    const dropReceipts = new DropReceiptCoalescer(
+      ({ frame, reason, droppedMsgIds }) => {
+        if (!frame.from) return;
+        return sendDeliveryStatus(
+          frame.from,
+          {
+            status: 'dropped',
+            origMsgId: frame.msgId,
+            from: messaging.inbox?.socketPath,
+            dropReason: reason,
+            droppedMsgIds,
+          },
+          frame.replyToken,
+        );
+      },
+      options.dropReceiptTrailMs !== undefined
+        ? { trailMs: options.dropReceiptTrailMs }
+        : {},
+    );
+    messaging.dropReceipts = dropReceipts;
+    const dropNotices = new DropNoticeThrottle((notice) =>
+      messaging.emitDropped(notice),
+    );
 
     const gate = new InboundGate({
       getApprovalMode: options.getApprovalMode,
@@ -201,8 +366,20 @@ export class PeerMessaging {
       ...(options.getPolicyScope
         ? { getPolicyScope: options.getPolicyScope }
         : {}),
+      isControllerValid: (id) => messaging.validControllerIds?.has(id) ?? true,
+      ...(options.admission ? { admission: options.admission } : {}),
       getSessionId: options.getSessionId,
-      deliver: (frame, origin) => messaging.deliver(frame, origin.selfSent),
+      ...(options.ownsSessionId
+        ? { ownsSessionId: options.ownsSessionId }
+        : {}),
+      ...(options.presentsHolds !== undefined
+        ? { presentsHolds: options.presentsHolds }
+        : {}),
+      deliver: (frame, origin) => messaging.deliver(frame, origin),
+      reportDropped: (frame, reason, origin) =>
+        dropReceipts.note(frame, origin ?? { selfSent: false }, reason),
+      onDropped: (frame, origin, reason) =>
+        dropNotices.note(frame, origin, reason),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
         return sendDeliveryStatus(
@@ -227,9 +404,16 @@ export class PeerMessaging {
     // session id and the send ledger this process holds, not against the
     // nulls a later assignment would leave in place.
     messaging.getSessionId = options.getSessionId ?? null;
+    messaging.ownsSessionId = options.ownsSessionId ?? null;
+    messaging.submitFn = options.submit ?? null;
     messaging.settleSentMessage =
       options.settleSentMessage ?? settleSentPeerMessage;
     messaging.reassertSessionRecord = options.reassertSessionRecord ?? null;
+    messaging.drainMirror = options.drainMirror ?? drainSendPacer;
+    messaging.forgetMirror = options.forgetMirror ?? forgetSendPacerMessages;
+    messaging.refundMirror = options.refundMirror ?? refundSendPacerMessage;
+    messaging.refundMirrorToken =
+      options.refundMirrorToken ?? refundSendPacerToken;
 
     // Any pair still in the environment at this point was inherited from an
     // ancestor session, and every exit below this line other than a bound
@@ -240,17 +424,28 @@ export class PeerMessaging {
     clearInheritedPeerMessagingEnv();
 
     // Two tokens for two audiences. The first is published in the registry
-    // record for peers; the second exists only in this process's
-    // environment, so presenting it proves descent from this session.
+    // record for peers; the second proves descent from a single session.
+    // A shared host cannot prove which session started a child.
     const ipcToken = options.ipcToken ?? randomBytes(32).toString('hex');
-    const childToken = options.childToken ?? randomBytes(32).toString('hex');
+    const childToken = options.ownsSessionId
+      ? undefined
+      : (options.childToken ?? randomBytes(32).toString('hex'));
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
         ? { socketPath: options.socketPath }
         : {}),
       requiredToken: ipcToken,
-      childToken,
-      onFrame: (frame, auth) => messaging.onFrame(frame, auth === 'child'),
+      ...(childToken !== undefined ? { childToken } : {}),
+      // Read from disk per auth line rather than captured here: a grant
+      // the user mints or revokes mid-session must take effect on the
+      // next connection, with nothing to restart.
+      resolveController: (presented) =>
+        resolveControllerToken(presented, controllerRegistryPath),
+      onFrame: (frame, auth, controller) =>
+        messaging.onFrame(frame, {
+          selfSent: auth === 'child',
+          ...(controller ? { controller } : {}),
+        }),
     });
     if (!inbox) return null;
 
@@ -270,8 +465,10 @@ export class PeerMessaging {
     // way. Children get the child token, never the published one: what
     // makes a child's message recognizable as the session's own is that
     // nothing else ever holds this value.
-    process.env[MESSAGING_SOCKET_ENV] = inbox.socketPath;
-    process.env[MESSAGING_TOKEN_ENV] = childToken;
+    if (childToken !== undefined) {
+      process.env[MESSAGING_SOCKET_ENV] = inbox.socketPath;
+      process.env[MESSAGING_TOKEN_ENV] = childToken;
+    }
 
     return messaging;
   }
@@ -286,14 +483,16 @@ export class PeerMessaging {
    */
   setSubmitFn(fn: PeerSubmitFn): void {
     if (this.closed) return;
-    this.submitFn = fn;
-    // A refused frame means the queue is full; leave it and the rest
-    // buffered — `deliver` retries them, in order, on the next arrival.
-    while (this.buffered.length > 0) {
-      const head = this.buffered[0];
-      if (!head || !this.submit(head.frame, head.selfSent)) break;
-      this.buffered.shift();
-    }
+    this.withControllerValidity(() => {
+      this.submitFn = fn;
+      // A refused frame means the queue is full; leave it and the rest
+      // buffered — `deliver` retries them, in order, on the next arrival.
+      while (this.buffered.length > 0) {
+        const head = this.buffered[0];
+        if (!head || !this.submit(head.frame, head.origin)) break;
+        this.buffered.shift();
+      }
+    });
   }
 
   /**
@@ -308,15 +507,17 @@ export class PeerMessaging {
   }
 
   getHeld(): readonly HeldMessage[] {
-    return this.gate?.getHeld() ?? [];
+    return this.withControllerValidity(() => this.gate?.getHeld() ?? []);
   }
 
   /**
-   * How long a held message has to live, in milliseconds, or null when
-   * holds do not expire. Used by `/peers` to show what is left.
+   * How long a held message addressed to `sessionId` has to live, in
+   * milliseconds, or null when holds do not expire for it. Used by
+   * `/peers` to show what is left, and asked per message: a process
+   * holding several sessions gives each its own lifetime.
    */
-  getHeldExpiryMs(): number | null {
-    return this.gate?.getHeldExpiryMs() ?? null;
+  getHeldExpiryMs(sessionId?: string): number | null {
+    return this.gate?.getHeldExpiryMs(sessionId) ?? null;
   }
 
   /**
@@ -394,12 +595,23 @@ export class PeerMessaging {
     msgId: string,
     decision: 'approve' | 'deny',
   ): 'done' | 'failed' | 'gone' {
-    return this.gate?.decide(msgId, decision) ?? 'gone';
+    return this.withControllerValidity(
+      () => this.gate?.decide(msgId, decision) ?? 'gone',
+    );
+  }
+
+  /** Remove a revoked grant's authority from messages already waiting. */
+  forgetController(id: string): number {
+    return this.withControllerValidity(
+      () => this.gate?.forgetController(id) ?? 0,
+    );
   }
 
   /** Release everything the gate now considers acceptable. */
   reevaluate(reason: string): number {
-    return this.gate?.reevaluate(reason) ?? 0;
+    return this.withControllerValidity(
+      () => this.gate?.reevaluate(reason) ?? 0,
+    );
   }
 
   onHeldChange(listener: (held: readonly HeldMessage[]) => void): () => void {
@@ -426,6 +638,60 @@ export class PeerMessaging {
     return () => this.receiptListeners.delete(listener);
   }
 
+  /**
+   * Subscribe to notices about messages this session turned away.
+   *
+   * Already throttled when they get here: one per sender per minute,
+   * carrying the count of what it stands for.
+   */
+  onDropped(listener: (notice: DropNotice) => void): () => void {
+    const first = this.dropListeners.size === 0;
+    this.dropListeners.add(listener);
+    // The socket is accepting before the UI subscribes, and a notice
+    // raised in that window has already spent its sender's once-a-minute
+    // budget — so dropping it would cost the user the line *and* delay
+    // the next one by a full window. Replayed as it was, never re-noted,
+    // so the throttle that produced it stays the only thing rationing
+    // these. The same replay `onHeldChange` does, for the same reason.
+    if (first && this.unheardDrops.length > 0) {
+      const unheard = this.unheardDrops.splice(0, this.unheardDrops.length);
+      for (const notice of unheard) {
+        try {
+          listener(notice);
+        } catch (error) {
+          debugLogger.debug(
+            `drop listener threw on replay: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    }
+    return () => this.dropListeners.delete(listener);
+  }
+
+  private emitDropped(notice: DropNotice): void {
+    if (this.dropListeners.size === 0) {
+      // Bounded: one per sender and reason is all the throttle can raise
+      // in a window anyway, and the startup gap is far shorter than that.
+      if (this.unheardDrops.length < MAX_UNHEARD_DROP_NOTICES) {
+        this.unheardDrops.push(notice);
+      }
+      return;
+    }
+    for (const listener of this.dropListeners) {
+      try {
+        listener(notice);
+      } catch (error) {
+        debugLogger.debug(
+          `drop listener threw: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+
   private emitReceipt(receipt: PeerReceipt): void {
     for (const listener of this.receiptListeners) {
       try {
@@ -440,19 +706,41 @@ export class PeerMessaging {
     }
   }
 
-  async close(): Promise<void> {
+  async close(deliveries: readonly PeerQueuedDelivery[] = []): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    // Settle held messages before the socket goes away: the expiry
-    // receipts have to travel over it, and the process exits once close
-    // resolves — a receipt still in flight then is one the sender never
-    // receives.
-    await this.gate?.shutdown();
-    await this.settleUnconsumed();
+    // The exit path gives this whole method one bounded slot, and three
+    // separate rounds of best-effort receipts want to travel in it, each
+    // send of which may take longer than the slot on its own. So the
+    // order is the decision, and it is made by what a lost receipt costs:
+    //
+    //  - `gate.shutdown()` tells senders their parked messages expired.
+    //    Its bounded burst is awaited before the corrective burst below,
+    //    so both get the whole outbound-send ceiling instead of racing for
+    //    the same slots.
+    //  - the inbox closes next, so no new drop can be noted into a
+    //    coalescer that is about to be flushed.
+    //  - The input queue corrections update receipts this host already sent
+    //    as `delivered` for messages it never read. Those are the only
+    //    ones that are actively *wrong* rather than merely missing, so
+    //    they go before the drop receipts.
+    //  - the registry and environment clears come next; leaving a socket
+    //    path advertised after the socket is gone makes this session look
+    //    reachable to every peer that lists.
+    //  - the folded drop receipts last, under their own bound.
+    //
+    // Outbound receipts do not need the listening socket: each opens its
+    // own connection, and `socketPath` survives `close()`.
+    const shuttingDown = this.gate?.shutdown();
     await this.inbox?.close();
+    await shuttingDown;
+    await this.settleUnconsumed();
+    await this.expireQueued(deliveries);
     // Same pair, same removal as the startup scrub — one writer for it.
     clearInheritedPeerMessagingEnv();
     await this.updateSessionRegistryIpcPath(undefined);
+    await this.dropReceipts?.flush(CLOSE_DROP_FLUSH_BOUND_MS);
+    this.dropReceipts?.dispose();
   }
 
   /**
@@ -484,11 +772,102 @@ export class PeerMessaging {
   }
 
   /**
-   * `selfSent` is the transport's finding that the connection presented
-   * the child token; it is never read off the frame.
+   * Apply a receipt that says a burst of this session's messages was
+   * turned away at the far inbox.
+   *
+   * Every id it names is settled, but only ids this session actually sent
+   * and has not settled already — the same rule every other receipt
+   * follows, applied to a list. A receipt that moves nothing is noise
+   * from a stranger, or a repeat, and says nothing to the user.
+   *
+   * One notice for the whole batch: the point of folding the receipt was
+   * that a flood must not become a flood of lines, and unfolding it here
+   * would undo that.
    */
-  private onFrame(frame: PeerFrame, selfSent: boolean): void {
+  private onDroppedReceipt(frame: PeerControlFrame): void {
+    const ids = [frame.origMsgId, ...(frame.droppedMsgIds ?? [])];
+    let first: SettledPeerReceipt | undefined;
+    let settledCount = 0;
+    const settledByPath = new Map<
+      string,
+      { ids: string[]; freshestAgeMs: number }
+    >();
+    for (const id of ids) {
+      const settled = this.settleSentMessage(id, 'dropped');
+      if (!settled) continue;
+      first ??= settled;
+      settledCount += 1;
+      const entry = settledByPath.get(settled.ipcPath) ?? {
+        ids: [],
+        freshestAgeMs: Number.POSITIVE_INFINITY,
+      };
+      entry.ids.push(id);
+      entry.freshestAgeMs = Math.min(entry.freshestAgeMs, settled.ageMs);
+      settledByPath.set(settled.ipcPath, entry);
+    }
+    if (!first) {
+      debugLogger.debug(
+        `ignoring dropped receipt for ${frame.origMsgId}: unknown message or repeated receipt`,
+      );
+      return;
+    }
+    debugLogger.debug(
+      `dropped receipt from ${first.address} (${frame.dropReason ?? 'unspecified'}) settled ${settledCount} message(s)`,
+    );
+    // A duplicate was rejected before charging the receiver, but it remains
+    // that receiver's latest-body baseline. Other drops do not leave a
+    // baseline, so the mirror forgets those bodies entirely.
+    if (frame.dropReason === 'duplicate') {
+      for (const [ipcPath, entry] of settledByPath) {
+        for (const id of entry.ids) this.refundMirrorToken(ipcPath, id);
+      }
+    } else {
+      for (const [ipcPath, entry] of settledByPath) {
+        this.forgetMirror(ipcPath, entry.ids);
+      }
+    }
+    if (frame.dropReason === 'rate-limited') {
+      for (const [ipcPath, entry] of settledByPath) {
+        // The mirror bucket also said there was room and the receiver
+        // disagreed: empty it so the next send waits for the rate the
+        // receiver actually refills at rather than for the one guessed
+        // here. Keyed by the path the ledger recorded, which is the one
+        // the mirror reserved against.
+        //
+        // Only while the wall it describes can still be standing. A
+        // receipt can wait out a spent receipt budget on the far side,
+        // and one that describes a bucket the receiver has since
+        // refilled would hold this session back from sends that session
+        // would take. The ids are settled either way: a sender told
+        // nothing cannot tell a drop from a delivery.
+        if (entry.freshestAgeMs <= RECEIVER_REFILL_MS)
+          this.drainMirror(ipcPath);
+      }
+    }
+    this.emitReceipt({
+      status: 'dropped',
+      address: first.address,
+      origMsgId: frame.origMsgId,
+      // A drop can only follow `pending`; the ledger enforced that above.
+      previous: 'pending',
+      ...(frame.dropReason ? { dropReason: frame.dropReason } : {}),
+      dropped: settledCount,
+    });
+  }
+
+  /**
+   * `origin` is what the transport established from the connection's auth
+   * line — the child token, or a controller grant the user minted. None
+   * of it is ever read off the frame.
+   */
+  private onFrame(frame: PeerFrame, origin: PeerOrigin): void {
     if (frame.type === 'control') {
+      // One dropped receipt can answer for a burst, so it settles a list
+      // of ids and reports once.
+      if (frame.status === 'dropped') {
+        this.onDroppedReceipt(frame);
+        return;
+      }
       // A receipt for a message this session sent. Any process that can
       // reach the socket can write one for any id, so only ids the
       // send-side ledger knows are surfaced; the rest are logged and
@@ -503,6 +882,13 @@ export class PeerMessaging {
       debugLogger.debug(
         `delivery status from ${settled.address}: ${settled.previous} -> ${frame.status} for ${frame.origMsgId}`,
       );
+      if (frame.status !== 'held' && frame.status !== 'delivered') {
+        if (frame.status === 'misaddressed') {
+          this.refundMirror(settled.ipcPath, frame.origMsgId);
+        } else {
+          this.forgetMirror(settled.ipcPath, [frame.origMsgId]);
+        }
+      }
       this.emitReceipt({
         status: frame.status,
         address: settled.address,
@@ -520,13 +906,19 @@ export class PeerMessaging {
     // may be the stale side (a skipped /clear patch), so it is re-asserted
     // too; otherwise every later send here would be refused the same way.
     const ownSessionId = this.getSessionId?.();
-    if (
-      frame.toSessionId !== undefined &&
-      ownSessionId !== undefined &&
-      frame.toSessionId !== ownSessionId
-    ) {
+    const ownsSessionId = this.ownsSessionId;
+    const misaddressed = ownsSessionId
+      ? // Hosting several sessions: a frame has to say which, and name one
+        // this process still holds.
+        frame.toSessionId === undefined || !ownsSessionId(frame.toSessionId)
+      : frame.toSessionId !== undefined &&
+        ownSessionId !== undefined &&
+        frame.toSessionId !== ownSessionId;
+    if (misaddressed) {
       debugLogger.debug(
-        `refusing peer message ${frame.msgId}: addressed to session ${frame.toSessionId}, this is ${ownSessionId}`,
+        `refusing peer message ${frame.msgId}: addressed to session ${
+          frame.toSessionId ?? '(unspecified)'
+        }, this process does not hold it`,
       );
       if (frame.from) {
         void sendDeliveryStatus(
@@ -548,26 +940,30 @@ export class PeerMessaging {
       });
       return;
     }
-    this.gate?.admit(frame, { selfSent });
+    this.gate?.admit(frame, origin);
   }
 
-  private deliver(frame: PeerUserFrame, selfSent: boolean): void {
+  private deliver(frame: PeerUserFrame, origin: PeerOrigin): void {
     if (!this.submitFn) {
       if (this.buffered.length >= MAX_ACCEPTED_BACKLOG) {
         throw new Error('accepted-message backlog is full');
       }
-      this.buffered.push({ frame, selfSent });
+      this.buffered.push({ frame, origin });
       this.trackOutstanding(frame);
       return;
     }
-    while (this.buffered.length > 0) {
-      const head = this.buffered[0];
-      if (!head || !this.submit(head.frame, head.selfSent)) {
-        throw new Error('accepted-message backlog is full');
-      }
-      this.buffered.shift();
+    if (this.buffered.length > 0) {
+      this.withControllerValidity(() => {
+        while (this.buffered.length > 0) {
+          const head = this.buffered[0];
+          if (!head || !this.submit(head.frame, head.origin)) {
+            throw new Error('accepted-message backlog is full');
+          }
+          this.buffered.shift();
+        }
+      });
     }
-    if (!this.submit(frame, selfSent)) {
+    if (!this.submit(frame, origin)) {
       throw new Error('accepted-message backlog is full');
     }
     this.trackOutstanding(frame);
@@ -584,26 +980,61 @@ export class PeerMessaging {
     }
   }
 
-  private submit(frame: PeerUserFrame, selfSent: boolean): boolean {
+  private withControllerValidity<T>(action: () => T): T {
+    if (this.controllerRegistryPath === null || this.validControllerIds) {
+      return action();
+    }
+    this.validControllerIds = new Set(
+      readPeerControllerRegistrySync(
+        this.controllerRegistryPath,
+      ).controllers.map((controller) => controller.id),
+    );
+    for (const delivery of this.buffered) {
+      const controller = delivery.origin.controller;
+      if (controller && !this.validControllerIds.has(controller.id)) {
+        delete delivery.origin.controller;
+      }
+    }
+    try {
+      return action();
+    } finally {
+      this.validControllerIds = null;
+    }
+  }
+
+  private submit(frame: PeerUserFrame, origin: PeerOrigin): boolean {
     // A script injecting into its own session rarely listens for a reply,
-    // so it usually has no address to give; say what it is instead.
-    const from = frame.from ?? (selfSent ? 'own process' : 'unknown session');
+    // so it usually has no address to give; say what it is instead. A
+    // controller often has none either — it drives the session rather
+    // than conversing with it.
+    const from =
+      frame.from ??
+      (origin.controller
+        ? 'controller'
+        : origin.selfSent
+          ? 'own process'
+          : 'unknown session');
+    const attribution = {
+      selfSent: origin.selfSent,
+      ...(origin.controller ? { controller: origin.controller } : {}),
+    };
     return (
       this.submitFn?.(
         formatPeerEnvelope({
           from,
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
-          selfSent,
+          ...attribution,
         }),
         formatPeerDisplay({
           from,
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
-          selfSent,
+          ...attribution,
         }),
         {
           msgId: frame.msgId,
+          admissionKey: peerSenderKey(frame, origin),
           ...(frame.from !== undefined ? { from: frame.from } : {}),
           ...(frame.replyToken !== undefined
             ? { replyToken: frame.replyToken }
@@ -614,6 +1045,45 @@ export class PeerMessaging {
         },
       ) ?? false
     );
+  }
+
+  /**
+   * Tell the senders of accepted messages that were still queued when
+   * their session went that nobody read them. For a host of several
+   * sessions, which names the messages rather than counting them: its
+   * queues drain independently, so `setQueuedPeerCount` cannot say which
+   * ones are left. Wait for send slots shared with other outbound frames.
+   */
+  async expireQueued(deliveries: readonly PeerQueuedDelivery[]): Promise<void> {
+    for (
+      let start = 0;
+      start < deliveries.length;
+      start += MAX_CONCURRENT_SENDS
+    ) {
+      await Promise.allSettled(
+        deliveries
+          .slice(start, start + MAX_CONCURRENT_SENDS)
+          .map((delivery) => {
+            if (delivery.admissionKey !== undefined) {
+              this.gate?.forgetAdmittedMessage(
+                delivery.admissionKey,
+                delivery.msgId,
+              );
+            }
+            if (!delivery.from) return undefined;
+            return sendDeliveryStatus(
+              delivery.from,
+              {
+                status: 'expired',
+                origMsgId: delivery.msgId,
+                from: this.inbox?.socketPath,
+              },
+              delivery.replyToken,
+              { waitForCapacity: true },
+            );
+          }),
+      );
+    }
   }
 
   /** Drop a queued frame if an in-process session swap invalidated its pin. */
@@ -639,6 +1109,9 @@ export class PeerMessaging {
         },
         delivery.replyToken,
       );
+    }
+    if (delivery.admissionKey !== undefined) {
+      this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
     }
     return false;
   }

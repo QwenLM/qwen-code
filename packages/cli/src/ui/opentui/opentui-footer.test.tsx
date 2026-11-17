@@ -1,0 +1,823 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+// @vitest-environment jsdom
+
+/**
+ * Tests for the restored OpenTUI footer + responding indicator: the status-line
+ * render, the responding spinner that shows only while a turn is in flight, and
+ * the loading phrases resolved through the shared locale-aware cycler.
+ */
+
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { act, render } from '@testing-library/react';
+
+// theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
+// native FFI — unavailable in the test runtime. Stub the graphics surface.
+vi.mock('@opentui/core', () => ({
+  SyntaxStyle: { fromStyles: () => ({}) },
+  MouseButton: { LEFT: 0 },
+}));
+
+const mocks = vi.hoisted(() => {
+  const state = {
+    dimensions: { width: 110, height: 40 },
+    gitBranch: 'main' as string | undefined,
+    promptTokens: 0,
+    /** Stands in for a loaded locale's WITTY_LOADING_PHRASES array. */
+    localePhrases: [] as string[],
+  };
+  async function buildJsxRuntime() {
+    const React = await import('react');
+    const jsx = (
+      type: unknown,
+      props: { children?: unknown; content?: unknown; key?: React.Key } | null,
+      key?: React.Key,
+    ) => {
+      const config = key === undefined ? props : { ...props, key };
+      const children = (config?.content ??
+        config?.children ??
+        null) as React.ReactNode;
+      if (type === 'box' || type === 'text') {
+        // jsdom drops unknown props, so the colour-bearing opentui attributes
+        // are surfaced as data-* for assertions to pin.
+        const dom: Record<string, unknown> = key === undefined ? {} : { key };
+        const source = (config ?? {}) as Record<string, unknown>;
+        for (const name of ['fg', 'bg', 'borderColor', 'attributes']) {
+          if (source[name] !== undefined) dom[`data-${name}`] = source[name];
+        }
+        return React.createElement(
+          type === 'box' ? 'div' : 'span',
+          dom,
+          children,
+        );
+      }
+      return React.createElement(
+        type as React.ElementType,
+        config as Record<string, unknown>,
+        children,
+      );
+    };
+    return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
+  }
+  return {
+    state,
+    buildJsxRuntime,
+    styleText: vi.fn(
+      (value: string, _style: { color?: string; dim: boolean }) => value,
+    ),
+  };
+});
+
+vi.mock('@opentui/react', () => ({
+  useTerminalDimensions: () => mocks.state.dimensions,
+}));
+vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
+vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+
+vi.mock('./status-line-text.js', () => ({
+  statusLineStyledText: mocks.styleText,
+}));
+
+// The phrases come from the active locale through the shared cycler; this lets
+// a test load one without booting the whole i18n layer.
+vi.mock('../../i18n/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../i18n/index.js')>();
+  return {
+    ...actual,
+    ta: (key: string) =>
+      key === 'WITTY_LOADING_PHRASES' && mocks.state.localePhrases.length > 0
+        ? mocks.state.localePhrases
+        : actual.ta(key),
+  };
+});
+
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  SPINNER_FRAMES,
+  SPINNER_INTERVAL_MS,
+  WAITING_SPINNER_FRAME,
+} from '../constants.js';
+import { WITTY_LOADING_PHRASES } from '../hooks/usePhraseCycler.js';
+import {
+  OpenTuiFooter,
+  OpenTuiLoadingIndicator,
+  type OpenTuiFooterProps,
+} from './opentui-footer.js';
+import {
+  buildStatusLinePresetLines,
+  DEFAULT_STATUS_LINE_PRESET_CONFIG,
+} from '../statusLinePresets.js';
+import { getPreviewData } from '../status-line-model.js';
+import { StreamingState } from '../types.js';
+import type { LoadedSettings } from '../../config/settings.js';
+import { C } from './theme.js';
+
+function renderedSpans(container: HTMLElement): HTMLElement[] {
+  return [...container.querySelectorAll('span')];
+}
+
+/** The indicator's first text cell is the spinner's own 2-column box. */
+function spinnerCell(container: HTMLElement): string {
+  return (container.querySelector('span')?.textContent ?? '').trim();
+}
+
+function fakeConfig(overrides: Partial<Config> = {}): Config {
+  return {
+    getTargetDir: () => '/home/user/projects/qwen-code',
+    getCliVersion: () => '1.0.0',
+    getModelDisplayName: () => 'qwen3-coder-plus',
+    getContentGeneratorConfig: () => ({ contextWindowSize: 1_000_000 }),
+    ...overrides,
+  } as unknown as Config;
+}
+
+function Footer(
+  props: Pick<OpenTuiFooterProps, 'config' | 'streaming'> &
+    Partial<OpenTuiFooterProps>,
+) {
+  const sessionStats =
+    props.sessionStats ??
+    ({
+      sessionId: 'session-test',
+      lastPromptTokenCount: mocks.state.promptTokens,
+      metrics: {
+        models: {},
+        tools: { totalCalls: 0 },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      },
+    } as OpenTuiFooterProps['sessionStats']);
+  const statusLine = props.statusLine ?? {
+    lines: buildStatusLinePresetLines(
+      DEFAULT_STATUS_LINE_PRESET_CONFIG,
+      getPreviewData(props.config, {
+        sessionStats,
+        branchName: mocks.state.gitBranch,
+        streamingState: props.streaming
+          ? StreamingState.Responding
+          : StreamingState.Idle,
+      }),
+    ),
+    useThemeColors: true,
+    respectUserColors: false,
+    hideContextIndicator: false,
+  };
+  return (
+    <OpenTuiFooter
+      settings={{ merged: {} } as LoadedSettings}
+      activeWorktree={null}
+      {...props}
+      statusLine={statusLine}
+      sessionStats={sessionStats}
+    />
+  );
+}
+
+describe('OpenTuiLoadingIndicator', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mocks.state.localePhrases = [];
+    mocks.state.dimensions = { width: 110, height: 40 };
+  });
+
+  it('renders nothing when not streaming', () => {
+    const { container } = render(<OpenTuiLoadingIndicator streaming={false} />);
+    expect(container.textContent).toBe('');
+  });
+
+  it('shows the spinner row with an esc-to-cancel hint while streaming', () => {
+    const { container } = render(<OpenTuiLoadingIndicator streaming />);
+    expect(container.textContent).toContain('esc to cancel');
+    expect(container.textContent).toContain('(0s');
+  });
+
+  it('advances the spinner frame while the turn is in flight', () => {
+    const { container } = render(<OpenTuiLoadingIndicator streaming />);
+    expect(spinnerCell(container)).toBe(SPINNER_FRAMES[0]);
+    act(() => {
+      vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 3);
+    });
+    expect(spinnerCell(container)).toBe(SPINNER_FRAMES[3]);
+  });
+
+  it("holds ink's static frame once a call is parked on a confirmation", () => {
+    // Parked, not idle: the shell renders this row with the turn still in
+    // flight, so every tick source has to be off on `waiting` alone.
+    const { container } = render(<OpenTuiLoadingIndicator streaming waiting />);
+    // The frame stays put because no tick exists to move it, not because the
+    // next tick happens to draw the same glyph.
+    expect(vi.getTimerCount()).toBe(0);
+    expect(container.textContent).toContain('Waiting for user confirmation...');
+    // ink drops the cancel suffix here: there is no in-flight request to cancel.
+    expect(container.textContent).not.toContain('esc to cancel');
+    act(() => {
+      vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 20);
+    });
+    expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
+  });
+
+  it('resumes the elapsed counter a parked call paused instead of restarting it', () => {
+    const { container, rerender } = render(
+      <OpenTuiLoadingIndicator streaming />,
+    );
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(container.textContent).toContain('(3s');
+    rerender(<OpenTuiLoadingIndicator streaming waiting />);
+    act(() => {
+      vi.advanceTimersByTime(30_000);
+    });
+    rerender(<OpenTuiLoadingIndicator streaming />);
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    // Four, not one: a pause that read as "inactive" would reset the accumulated
+    // elapsed on the way back, and the row would report a turn that has been
+    // running for half a minute as four seconds old.
+    expect(container.textContent).toContain('(4s');
+  });
+
+  it('keeps the waiting row but loses its phrase when loading phrases are off', () => {
+    // ui.accessibility.enableLoadingPhrases: ink's Composer passes no phrase,
+    // and the row stays so the waiting-row sequence is unchanged.
+    const { container } = render(
+      <OpenTuiLoadingIndicator streaming waiting showPhrase={false} />,
+    );
+    expect(container.textContent).not.toContain(
+      'Waiting for user confirmation',
+    );
+    expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
+  });
+
+  it('ticks the elapsed counter once per second', () => {
+    const { container } = render(<OpenTuiLoadingIndicator streaming />);
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(container.textContent).toContain('(3s');
+  });
+
+  it('takes its phrase from the shared cycler fallback list', () => {
+    const { container } = render(<OpenTuiLoadingIndicator streaming />);
+    expect(container.textContent).toContain(WITTY_LOADING_PHRASES[0]);
+  });
+
+  it('takes its phrase from the active locale when one is loaded', () => {
+    mocks.state.localePhrases = ['正在努力搬砖，请稍候...'];
+    const { container } = render(<OpenTuiLoadingIndicator streaming />);
+    expect(container.textContent).toContain('正在努力搬砖，请稍候...');
+  });
+
+  it('truncates a long phrase on a narrow terminal, keeping the cancel hint', () => {
+    mocks.state.dimensions = { width: 40, height: 40 };
+    mocks.state.localePhrases = ['正在努力搬砖，请稍候，马上就好，别催我'];
+    const { container } = render(<OpenTuiLoadingIndicator streaming />);
+    const text = container.textContent ?? '';
+    expect(text).toContain('esc to cancel');
+    expect(text).toContain('…');
+    expect(text).not.toContain('别催我');
+  });
+
+  it('estimates tokens from the streamed character count', () => {
+    const { container } = render(
+      <OpenTuiLoadingIndicator
+        streaming
+        streamingCharsRef={{ current: 400 }}
+        isReceivingContent
+      />,
+    );
+    expect(container.textContent).toContain('↓ 100 tokens');
+  });
+
+  it('points the arrow up while no content has arrived yet', () => {
+    const { container } = render(
+      <OpenTuiLoadingIndicator
+        streaming
+        streamingCharsRef={{ current: 400 }}
+        isReceivingContent={false}
+      />,
+    );
+    expect(container.textContent).toContain('↑ 100 tokens');
+  });
+
+  it('omits the token segment until characters have streamed', () => {
+    const { container } = render(
+      <OpenTuiLoadingIndicator streaming streamingCharsRef={{ current: 0 }} />,
+    );
+    expect(container.textContent).not.toContain('tokens');
+  });
+
+  it('omits the token segment on a narrow terminal, like ink', () => {
+    mocks.state.dimensions = { width: 40, height: 40 };
+    const { container } = render(
+      <OpenTuiLoadingIndicator
+        streaming
+        streamingCharsRef={{ current: 400 }}
+      />,
+    );
+    expect(container.textContent).not.toContain('tokens');
+  });
+});
+
+describe('OpenTuiFooter', () => {
+  it.each([true, false])(
+    'shows saved mode even when capability is unavailable (%s)',
+    (available) => {
+      const { container } = render(
+        <Footer
+          config={fakeConfig({
+            getWorkflowMode: () => ({
+              requested: true,
+              available,
+              effective: available,
+            }),
+          })}
+          streaming={false}
+        />,
+      );
+      expect(container.textContent).toContain(
+        available ? 'Workflow mode: on' : 'Workflow mode: on (unavailable)',
+      );
+    },
+  );
+  it.each(['NORMAL', 'INSERT'] as const)(
+    'shows %s in the existing hint slot below exit warnings',
+    (vimMode) => {
+      const { container, rerender } = render(
+        <Footer
+          config={fakeConfig()}
+          streaming={true}
+          shellModeActive={true}
+          vimMode={vimMode}
+        />,
+      );
+      expect(container.textContent).toContain(`-- ${vimMode} --`);
+      expect(container.textContent).not.toContain('shell mode enabled');
+      expect(container.textContent).not.toContain('Enter to steer');
+      rerender(
+        <Footer
+          config={fakeConfig()}
+          streaming={true}
+          vimMode={vimMode}
+          exitHint="Press Ctrl+C again to exit."
+        />,
+      );
+      expect(container.textContent).toContain('Press Ctrl+C again to exit.');
+      expect(container.textContent).not.toContain(`-- ${vimMode} --`);
+    },
+  );
+
+  beforeEach(() => {
+    mocks.state.promptTokens = 0;
+    mocks.styleText.mockClear();
+    mocks.state.gitBranch = 'main';
+    mocks.state.dimensions = { width: 110, height: 40 };
+  });
+
+  it('shows the current runtime tool policy without an environment marker', () => {
+    const config = fakeConfig({
+      getShellExecutionSandbox: () =>
+        ({
+          filesystem: 'read-only',
+          network: 'closed',
+          effectiveBackend: 'bwrap',
+          enforcement: 'full',
+        }) as ReturnType<Config['getShellExecutionSandbox']>,
+    });
+    const { container } = render(<Footer config={config} streaming={false} />);
+    expect(container.textContent).toContain(
+      'tools / auto → bwrap (full) / read-only / command network: closed',
+    );
+  });
+
+  it('wraps the status row onto a second line instead of truncating it', () => {
+    mocks.state.dimensions = { width: 50, height: 40 };
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        statusLine={{
+          lines: ['➜ qwen-code · my-session · git:(main) · qwen3-coder-plus'],
+          useThemeColors: true,
+          respectUserColors: false,
+          hideContextIndicator: false,
+        }}
+      />,
+    );
+    const rows = [...container.querySelectorAll('span')].map(
+      (row) => row.textContent ?? '',
+    );
+    expect(rows).toEqual([
+      '➜ qwen-code · my-session · git:(main) · ',
+      'qwen3-coder-plus',
+    ]);
+    expect(container.textContent).not.toContain('…');
+  });
+
+  it('caps the status row at two lines like ink’s overflow-hidden box', () => {
+    mocks.state.dimensions = { width: 40, height: 40 };
+    mocks.state.gitBranch = 'a-very-long-branch-name-that-cannot-fit';
+    const { container } = render(
+      <Footer config={fakeConfig()} streaming={false} />,
+    );
+    const rows = [...container.querySelectorAll('span')].map(
+      (row) => row.textContent ?? '',
+    );
+    // The wrap yields three lines here; ink hides the third rather than letting
+    // the footer grow, so the model segment is genuinely lost at this width.
+    expect(rows).toHaveLength(2);
+    expect(container.textContent).not.toContain('qwen3-coder-plus');
+  });
+
+  it('renders the project name, git branch and model', () => {
+    const { container } = render(
+      <Footer config={fakeConfig()} streaming={false} />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('qwen-code');
+    expect(text).toContain('qwen3-coder-plus');
+    expect(text).toContain('git:(main)');
+  });
+
+  it("carries the reasoning effort on the model segment, as ink's preset does", () => {
+    const withEffort = fakeConfig({
+      getContentGeneratorConfig: () =>
+        ({
+          contextWindowSize: 1_000_000,
+          reasoning: { effort: 'high' },
+        }) as unknown as ReturnType<Config['getContentGeneratorConfig']>,
+    });
+    const { container } = render(
+      <Footer config={withEffort} streaming={false} />,
+    );
+    expect(container.textContent).toContain('qwen3-coder-plus high');
+
+    const thinkingOff = fakeConfig({
+      getContentGeneratorConfig: () =>
+        ({
+          contextWindowSize: 1_000_000,
+          reasoning: false,
+        }) as unknown as ReturnType<Config['getContentGeneratorConfig']>,
+    });
+    const off = render(<Footer config={thinkingOff} streaming={false} />);
+    expect(off.container.textContent).toContain(
+      'qwen3-coder-plus reasoning off',
+    );
+  });
+
+  it('omits the git segment outside a repository', () => {
+    mocks.state.gitBranch = undefined;
+    const { container } = render(
+      <Footer config={fakeConfig()} streaming={false} />,
+    );
+    expect(container.textContent).not.toContain('git:(');
+  });
+
+  it('leaves out the hint row when nothing is live to report', () => {
+    const { container } = render(
+      <Footer config={fakeConfig()} streaming={false} />,
+    );
+    expect(container.textContent).not.toContain('Enter to steer');
+    expect(container.textContent).not.toContain('queued');
+  });
+
+  it('labels the mode from the shared mapping, not a local table', () => {
+    const { container, rerender } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming
+        approvalMode={ApprovalMode.AUTO_EDIT}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('auto-accept edits');
+    expect(text).not.toContain('Auto-edit mode');
+    // ink's AutoAcceptIndicator suffixes the mode with the cycle shortcut, and
+    // the composer now binds it.
+    expect(text).toContain(
+      `auto-accept edits (${process.platform === 'win32' ? 'tab' : 'shift + tab'} to cycle)`,
+    );
+
+    rerender(
+      <Footer
+        config={fakeConfig()}
+        streaming
+        approvalMode={ApprovalMode.YOLO}
+      />,
+    );
+    expect(container.textContent).toContain('YOLO mode');
+  });
+
+  it('paints the status row with the accent colour ink’s Footer uses', () => {
+    const { container } = render(
+      <Footer config={fakeConfig()} streaming={false} />,
+    );
+    expect(container.textContent).toContain('qwen3-coder-plus');
+    expect(mocks.styleText).toHaveBeenCalledWith(
+      expect.stringContaining('qwen3-coder-plus'),
+      { color: C.accent, dim: false },
+    );
+  });
+
+  it.each([
+    [ApprovalMode.PLAN, 'plan mode', C.green],
+    [ApprovalMode.AUTO_EDIT, 'auto-accept edits', C.yellow],
+    [ApprovalMode.AUTO, 'Auto mode', C.purple],
+    [ApprovalMode.YOLO, 'YOLO mode', C.red],
+    [ApprovalMode.DEFAULT, '⏸ Ask permissions', C.dim],
+  ] as const)(
+    'colours the %s label with ink’s indicator colour and keeps the shortcut secondary',
+    (mode, label, color) => {
+      const { container } = render(
+        <Footer config={fakeConfig()} streaming={false} approvalMode={mode} />,
+      );
+      const shortcut = renderedSpans(container).find((row) =>
+        (row.textContent ?? '').includes('to cycle'),
+      );
+      expect(shortcut?.getAttribute('data-fg')).toBe(C.dim);
+      const modeLabel = shortcut?.previousElementSibling as HTMLElement;
+      expect(modeLabel.textContent).toBe(label);
+      expect(modeLabel.getAttribute('data-fg')).toBe(color);
+    },
+  );
+
+  it('prefixes the default mode with ink’s pause glyph', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        approvalMode={ApprovalMode.DEFAULT}
+      />,
+    );
+    expect(container.textContent).toContain('⏸ Ask permissions');
+  });
+
+  it('words the cycle hint for Windows, where Shift+Tab is not distinguishable', () => {
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    try {
+      const { container } = render(
+        <Footer
+          config={fakeConfig()}
+          streaming
+          approvalMode={ApprovalMode.AUTO}
+        />,
+      );
+      expect(container.textContent).toContain('Auto mode (tab to cycle)');
+      expect(container.textContent).not.toContain('shift + tab');
+    } finally {
+      Object.defineProperty(process, 'platform', {
+        value: original,
+        configurable: true,
+      });
+    }
+  });
+
+  it('orders the hint row as steer, mode, queue', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming
+        queueLength={2}
+        approvalMode={ApprovalMode.AUTO}
+      />,
+    );
+    expect(container.textContent).toContain(
+      `Enter to steer · Ctrl+Q to queue · Auto mode (${process.platform === 'win32' ? 'tab' : 'shift + tab'} to cycle) ⏳ 2 queued`,
+    );
+  });
+
+  it('truncates the hint row part by part inside one line', () => {
+    mocks.state.dimensions = { width: 44, height: 40 };
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming
+        queueLength={2}
+        approvalMode={ApprovalMode.AUTO}
+      />,
+    );
+    // The hint row is the nested row box; the status line is a sibling span.
+    const hint =
+      renderedSpans(container).find((row) =>
+        row.textContent?.includes('Enter to steer'),
+      )?.parentElement?.textContent ?? '';
+    expect(hint).toContain('Enter to steer');
+    // The coloured mode label survives narrowing instead of being dropped
+    // whole, but the budget is spent: nothing after it is rendered.
+    expect(hint).toContain('Auto');
+    expect(hint).not.toContain('shift + tab');
+    expect(hint).not.toContain('queued');
+    expect(hint.length).toBeLessThanOrEqual(40);
+  });
+
+  it('gives shell mode the hint slot ink’s ShellModeIndicator holds', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming
+        queueLength={2}
+        approvalMode={ApprovalMode.AUTO_EDIT}
+        shellModeActive
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('shell mode enabled (esc to disable)');
+    expect(text).not.toContain('Enter to steer');
+    expect(text).not.toContain('auto-accept edits');
+    // The queue badge is a separate child of ink's hint row, so it survives
+    // the mode taking the slot ahead of it.
+    expect(text).toContain('⏳ 2 queued');
+  });
+
+  it('gives the armed quit warning the footer, dropping the status row', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        approvalMode={ApprovalMode.YOLO}
+        queueLength={2}
+        exitHint="Press Ctrl+C again to exit."
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('Press Ctrl+C again to exit.');
+    expect(text).not.toContain('qwen3-coder-plus');
+    expect(text).not.toContain('git:(main)');
+    expect(text).not.toContain('YOLO');
+    // The queue badge is a sibling of the hint the warning replaces, not part
+    // of it, so it stays visible while the warning is armed — joined by the
+    // single space its leading literal space produces in ink.
+    expect(text).toContain('Press Ctrl+C again to exit. ⏳ 2 queued');
+  });
+
+  it('shows the context indicator only after tokens are used', () => {
+    const { container, rerender } = render(
+      <Footer config={fakeConfig()} streaming={false} />,
+    );
+    expect(container.textContent).not.toContain('% context used');
+
+    mocks.state.promptTokens = 50_000;
+    rerender(<Footer config={fakeConfig()} streaming={false} />);
+    expect(container.textContent).toContain('5.0% context used');
+  });
+
+  it('reports over-limit usage as >100 like the ink indicator', () => {
+    mocks.state.promptTokens = 1_500_000;
+    const { container } = render(
+      <Footer config={fakeConfig()} streaming={false} />,
+    );
+    expect(container.textContent).toContain('>100% context used');
+    const usage = renderedSpans(container).find((row) =>
+      row.textContent?.includes('>100% context used'),
+    );
+    expect(usage?.getAttribute('data-fg')).toBe(C.red);
+    expect(usage?.textContent).toBe('>100% context used');
+  });
+
+  it('keeps the normal fallback percentage secondary and respects explicit hiding', () => {
+    mocks.state.promptTokens = 50_000;
+    const line = {
+      lines: ['model only'],
+      useThemeColors: false,
+      respectUserColors: false,
+      hideContextIndicator: false,
+    };
+    const { container, rerender } = render(
+      <Footer config={fakeConfig()} streaming={false} statusLine={line} />,
+    );
+    const usage = renderedSpans(container).find((row) =>
+      row.textContent?.includes('5.0% context used'),
+    );
+    expect(usage?.textContent).toBe('5.0% context used');
+    expect(usage?.getAttribute('data-fg')).toBe(C.dim);
+    rerender(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        statusLine={{ ...line, hideContextIndicator: true }}
+      />,
+    );
+    expect(container.textContent).not.toContain('context used');
+  });
+
+  it('places two command lines together and clips a third row', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        statusLine={{
+          lines: ['FIRST', 'SECOND', 'THIRD'],
+          useThemeColors: false,
+          respectUserColors: true,
+          hideContextIndicator: false,
+        }}
+      />,
+    );
+    expect(renderedSpans(container).map((row) => row.textContent)).toEqual([
+      'FIRST',
+      'SECOND',
+    ]);
+  });
+
+  it('renders no status text for an explicitly empty preset', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        statusLine={{
+          lines: [],
+          useThemeColors: false,
+          respectUserColors: false,
+          hideContextIndicator: true,
+        }}
+      />,
+    );
+    expect(container.textContent).toBe('');
+    expect(mocks.styleText).not.toHaveBeenCalled();
+  });
+
+  it('shows the built-in worktree indicator unless the user hides it', () => {
+    const activeWorktree = {
+      slug: 'issue-123',
+      branch: 'fix/input',
+      path: '/worktree',
+      originalCwd: '/repo',
+      originalBranch: 'main',
+      originalHeadCommit: 'abc',
+    };
+    const { container, rerender } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        activeWorktree={activeWorktree}
+      />,
+    );
+    expect(container.textContent).toContain('⎇ fix/input (issue-123)');
+    rerender(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        activeWorktree={activeWorktree}
+        settings={
+          {
+            merged: { ui: { hideBuiltinWorktreeIndicator: true } },
+          } as LoadedSettings
+        }
+      />,
+    );
+    expect(container.textContent).not.toContain('issue-123');
+    expect(container.textContent).toContain('qwen3-coder-plus');
+  });
+
+  it('shortens the usage label below 100 columns', () => {
+    mocks.state.dimensions = { width: 90, height: 40 };
+    mocks.state.promptTokens = 50_000;
+    const { container } = render(
+      <Footer config={fakeConfig()} streaming={false} />,
+    );
+    expect(container.textContent).toContain('5.0% used');
+    expect(container.textContent).not.toContain('% context used');
+  });
+
+  it('adds the steer hint and the queue badge while streaming', () => {
+    const { container } = render(
+      <Footer config={fakeConfig()} streaming queueLength={2} />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('Enter to steer');
+    expect(text).toContain('2 queued');
+  });
+
+  it('shows the queue badge on its own when queued but idle', () => {
+    const { container } = render(
+      <Footer config={fakeConfig()} streaming={false} queueLength={1} />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('1 queued');
+    expect(text).not.toContain('Enter to steer');
+  });
+
+  it('renders the user-selected session-id preset supplied by the shared state', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        statusLine={{
+          lines: ['my-session'],
+          useThemeColors: false,
+          respectUserColors: false,
+          hideContextIndicator: false,
+        }}
+      />,
+    );
+    expect(container.textContent).toContain('my-session');
+  });
+});

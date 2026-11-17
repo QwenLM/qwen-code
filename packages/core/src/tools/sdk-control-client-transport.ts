@@ -17,7 +17,10 @@
  * communicates with SDK MCP servers running in the SDK process.
  */
 
-import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import {
+  isJSONRPCRequest,
+  type JSONRPCMessage,
+} from '@modelcontextprotocol/sdk/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MCP_SDK_TRANSPORT');
@@ -47,6 +50,7 @@ export class SdkControlClientTransport {
   private serverName: string;
   private sendMcpMessage: SendMcpMessageCallback;
   private started = false;
+  private readonly pending = new Map<string | number, { cancelled: boolean }>();
 
   // Transport interface callbacks
   onmessage?: (message: JSONRPCMessage) => void;
@@ -90,6 +94,18 @@ export class SdkControlClientTransport {
       `Sending message to '${this.serverName}': ${JSON.stringify(message)}`,
     );
 
+    const request = isJSONRPCRequest(message)
+      ? { id: message.id, cancelled: false }
+      : undefined;
+    if (request) this.pending.set(request.id, request);
+    if ('method' in message && message.method === 'notifications/cancelled') {
+      const id = message.params?.['requestId'];
+      if (typeof id === 'string' || typeof id === 'number') {
+        const pending = this.pending.get(id);
+        if (pending) pending.cancelled = true;
+      }
+    }
+
     try {
       // Send message to SDK and wait for response
       const response = await this.sendMcpMessage(this.serverName, message);
@@ -98,11 +114,13 @@ export class SdkControlClientTransport {
         `Received response from '${this.serverName}': ${JSON.stringify(response)}`,
       );
 
-      // Deliver response via onmessage callback
-      if (this.onmessage) {
-        this.onmessage(response);
+      // Control-plane notification acks and late cancelled replies are not MCP
+      // responses: the SDK has no response handler for either of them.
+      if (request && !request.cancelled) {
+        this.onmessage?.(response);
       }
     } catch (error) {
+      if (request?.cancelled) return;
       debugLogger.error(`Error sending to '${this.serverName}': ${error}`);
 
       if (this.onerror) {
@@ -110,6 +128,10 @@ export class SdkControlClientTransport {
       }
 
       throw error;
+    } finally {
+      if (request && this.pending.get(request.id) === request) {
+        this.pending.delete(request.id);
+      }
     }
   }
 

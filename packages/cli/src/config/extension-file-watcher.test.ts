@@ -416,7 +416,7 @@ describe('ExtensionFileWatcher', () => {
     expect(refreshState.markExtensionContentChanged).not.toHaveBeenCalled();
   });
 
-  it('auto-refreshes command, skill, and agent content changes', () => {
+  it('auto-refreshes command, skill, agent, and workflow content changes', () => {
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
       configWithExtensions([]),
@@ -428,8 +428,9 @@ describe('ExtensionFileWatcher', () => {
     fireAllEvent(0, 'add', `${extensionsDir}/alpha/commands/run.toml`);
     fireAllEvent(0, 'unlink', `${extensionsDir}/alpha/skills/demo/SKILL.md`);
     fireAllEvent(0, 'change', `${extensionsDir}/alpha/agents/reviewer.md`);
+    fireAllEvent(0, 'add', `${extensionsDir}/alpha/workflows/audit.js`);
 
-    expect(refreshState.markExtensionContentChanged).toHaveBeenCalledTimes(3);
+    expect(refreshState.markExtensionContentChanged).toHaveBeenCalledTimes(4);
     expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
   });
 

@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { parseSessionStartupConfig } from '@qwen-code/acp-bridge/sessionStartupConfig';
 import {
   APPROVAL_MODES,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   type ApprovalMode,
   type SessionArchiveState,
@@ -109,6 +111,7 @@ function parseRestoreOptions(
   const body = requireExactBody(req, res, [
     'historyPageSize',
     'liveReplayMode',
+    'compactedReplayMode',
     'hideInheritedHistory',
     'approvalMode',
   ]);
@@ -137,6 +140,18 @@ function parseRestoreOptions(
     sendInvalidRequest(res, '`liveReplayMode` must be `full` or `summary`.');
     return undefined;
   }
+  const compactedReplayMode = body['compactedReplayMode'];
+  if (
+    compactedReplayMode !== undefined &&
+    compactedReplayMode !== 'full' &&
+    compactedReplayMode !== 'summary'
+  ) {
+    sendInvalidRequest(
+      res,
+      '`compactedReplayMode` must be `full` or `summary`.',
+    );
+    return undefined;
+  }
   const hideInheritedHistory = body['hideInheritedHistory'];
   if (
     hideInheritedHistory !== undefined &&
@@ -156,6 +171,7 @@ function parseRestoreOptions(
       ? { historyPageSize: historyPageSize as number }
       : {}),
     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
+    ...(compactedReplayMode !== undefined ? { compactedReplayMode } : {}),
     ...(hideInheritedHistory !== undefined ? { hideInheritedHistory } : {}),
     ...(approvalMode !== undefined ? { approvalMode } : {}),
   };
@@ -188,6 +204,7 @@ function parseListOptions(
   res: Response,
 ):
   | {
+      sortBy?: 'updatedAt' | 'lastUserPromptAt';
       cursor?: string;
       size?: number;
       archiveState?: SessionArchiveState;
@@ -196,10 +213,22 @@ function parseListOptions(
   | undefined {
   if (
     !Object.keys(req.query).every((key) =>
-      ['cursor', 'size', 'archiveState'].includes(key),
+      ['cursor', 'size', 'archiveState', 'sortBy'].includes(key),
     )
   ) {
     sendInvalidRequest(res, 'The request query contains unknown fields.');
+    return undefined;
+  }
+  const sortBy = req.query['sortBy'];
+  if (
+    sortBy !== undefined &&
+    sortBy !== 'updatedAt' &&
+    sortBy !== 'lastUserPromptAt'
+  ) {
+    sendInvalidRequest(
+      res,
+      '`sortBy` must be `updatedAt` or `lastUserPromptAt`.',
+    );
     return undefined;
   }
   const cursor = req.query['cursor'];
@@ -239,6 +268,7 @@ function parseListOptions(
     if (!res.writableFinished) abort();
   });
   return {
+    ...(sortBy !== undefined ? { sortBy } : {}),
     ...(cursor !== undefined ? { cursor } : {}),
     ...(size !== undefined ? { size } : {}),
     ...(archiveState !== undefined ? { archiveState } : {}),
@@ -281,6 +311,7 @@ export function registerStandaloneSessionRoutes(
       const body = requireExactBody(req, res, [
         'sessionId',
         'modelServiceId',
+        'startupConfig',
         'approvalMode',
       ]);
       if (!body) return;
@@ -292,14 +323,18 @@ export function registerStandaloneSessionRoutes(
         body['modelServiceId'] !== undefined &&
         (typeof body['modelServiceId'] !== 'string' ||
           body['modelServiceId'].length === 0 ||
-          body['modelServiceId'].length > 256)
+          body['modelServiceId'].length > MAX_CRON_TASK_ROUTING_ID_LENGTH)
       ) {
         sendInvalidRequest(
           res,
-          '`modelServiceId` must be a non-empty string of at most 256 characters.',
+          `\`modelServiceId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters.`,
         );
         return;
       }
+      const startupConfig = parseSessionStartupConfig(
+        body['startupConfig'],
+        body,
+      );
       const approvalMode = parseApprovalMode(body['approvalMode']);
       if (approvalMode === null) {
         sendInvalidRequest(
@@ -310,6 +345,7 @@ export function registerStandaloneSessionRoutes(
       }
       const request: CreateStandaloneSessionRequest = {
         sessionId: body['sessionId'],
+        ...(startupConfig ? { startupConfig } : {}),
         ...(body['modelServiceId'] !== undefined
           ? { modelServiceId: body['modelServiceId'] as string }
           : {}),

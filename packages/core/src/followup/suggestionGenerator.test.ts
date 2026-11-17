@@ -40,6 +40,7 @@ vi.mock('../agents/forkedAgent.js', async (importOriginal) => {
 });
 
 import {
+  _setWordSegmenterForTest,
   generatePromptSuggestion,
   getFilterReason,
   shouldFilterSuggestion,
@@ -52,6 +53,14 @@ const conversationHistory: Content[] = [
   { role: 'model', parts: [{ text: 'You could run tests.' }] },
 ];
 
+const cacheSafeParams = () => ({
+  generationConfig: {},
+  history: conversationHistory,
+  model: 'main-model',
+  version: 1,
+  sessionId: 'test-session',
+});
+
 describe('generatePromptSuggestion', () => {
   beforeEach(() => {
     mockGetCacheSafeParams.mockReset();
@@ -61,29 +70,49 @@ describe('generatePromptSuggestion', () => {
     mockRunSideQuery.mockReset();
   });
 
-  it('passes cache-safe model in cache mode when no explicit or fast model exists', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
+  /** Cache-safe params for this session and a fork that suggests "run tests". */
+  function mockCacheFork(): void {
+    mockGetCacheSafeParams.mockReturnValue(cacheSafeParams());
     mockRunForkedAgent.mockResolvedValue({
       text: null,
       jsonResult: { suggestion: 'run tests' },
       usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
     });
-    const config = {
-      getFastModel: vi.fn(() => undefined),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
+  }
 
-    const signal = new AbortController().signal;
-    await generatePromptSuggestion(config, conversationHistory, signal, {
-      enableCacheSharing: true,
+  function mockBaseLlm(): void {
+    mockRunSideQuery.mockResolvedValue({
+      text: '{"suggestion":"from base llm"}',
+      usage: { inputTokens: 1, outputTokens: 1 },
     });
+  }
+
+  /** Runs the generator with a config whose main model is `main-model`. */
+  function suggest({
+    fastModel,
+    sessionId = 'test-session',
+    enableCacheSharing = true,
+    signal = new AbortController().signal,
+  }: {
+    fastModel?: string;
+    sessionId?: string;
+    enableCacheSharing?: boolean;
+    signal?: AbortSignal;
+  } = {}) {
+    const config = {
+      getFastModel: vi.fn(() => fastModel),
+      getModel: vi.fn(() => 'main-model'),
+      getSessionId: vi.fn(() => sessionId),
+    } as unknown as Config;
+    return generatePromptSuggestion(config, conversationHistory, signal, {
+      enableCacheSharing,
+    });
+  }
+
+  it('passes cache-safe model in cache mode when no explicit or fast model exists', async () => {
+    mockCacheFork();
+    const signal = new AbortController().signal;
+    await suggest({ signal });
 
     expect(mockGetCacheSafeParams).toHaveBeenCalledWith('test-session');
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
@@ -92,60 +121,16 @@ describe('generatePromptSuggestion', () => {
   });
 
   it('passes the fast model in cache mode when one is configured', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
-    mockRunForkedAgent.mockResolvedValue({
-      text: null,
-      jsonResult: { suggestion: 'run tests' },
-      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => 'openai:fast-model'),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
-
-    await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: true },
-    );
+    mockCacheFork();
+    await suggest({ fastModel: 'openai:fast-model' });
 
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ model: 'openai:fast-model' }),
     );
   });
   it('passes preserveTools: true for Anthropic prompt-cache sharing', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
-    mockRunForkedAgent.mockResolvedValue({
-      text: null,
-      jsonResult: { suggestion: 'run tests' },
-      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => undefined),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
-
-    await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: true },
-    );
+    mockCacheFork();
+    await suggest();
 
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ preserveTools: true }),
@@ -159,22 +144,9 @@ describe('generatePromptSuggestion', () => {
     // content leak) — it falls back to the session-safe base-LLM path
     // (#9233).
     mockGetCacheSafeParamsSessionId.mockReturnValue('session-B');
-    mockRunSideQuery.mockResolvedValue({
-      text: '{"suggestion":"from base llm"}',
-      usage: { inputTokens: 1, outputTokens: 1 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => undefined),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'session-A'), // this session is different
-    } as unknown as Config;
+    mockBaseLlm();
 
-    const result = await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: true },
-    );
+    const result = await suggest({ sessionId: 'session-A' }); // this session is different
 
     // The cache API rejects the foreign slot before cloning its payload.
     expect(mockGetCacheSafeParams).toHaveBeenCalledWith('session-A');
@@ -186,29 +158,10 @@ describe('generatePromptSuggestion', () => {
   });
 
   it('does not use the cache-safe fork when cache sharing is disabled', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
-    mockRunSideQuery.mockResolvedValue({
-      text: '{"suggestion":"from base llm"}',
-      usage: { inputTokens: 1, outputTokens: 1 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => undefined),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
+    mockGetCacheSafeParams.mockReturnValue(cacheSafeParams());
+    mockBaseLlm();
 
-    const result = await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: false },
-    );
+    const result = await suggest({ enableCacheSharing: false });
 
     expect(mockGetCacheSafeParamsSessionId).not.toHaveBeenCalled();
     expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
@@ -218,30 +171,8 @@ describe('generatePromptSuggestion', () => {
   });
 
   it('passes preserveTools: false when fast model differs from cache-safe model', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
-    mockRunForkedAgent.mockResolvedValue({
-      text: null,
-      jsonResult: { suggestion: 'run tests' },
-      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => 'different-fast-model'),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
-
-    await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: true },
-    );
+    mockCacheFork();
+    await suggest({ fastModel: 'different-fast-model' });
 
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ preserveTools: false }),
@@ -289,6 +220,125 @@ describe('shouldFilterSuggestion', () => {
 
   it('allows slash commands as single word', () => {
     expect(shouldFilterSuggestion('/commit')).toBe(false);
+  });
+
+  it('uses character bounds for CJK suggestions', () => {
+    expect(shouldFilterSuggestion('运行测试')).toBe(false);
+    expect(shouldFilterSuggestion('テストを実行')).toBe(false);
+    expect(shouldFilterSuggestion('테스트실행')).toBe(false);
+    expect(getFilterReason('好')).toBe('too_few_words');
+    expect(getFilterReason('运'.repeat(31))).toBe('too_many_words');
+  });
+
+  it('counts words with a segmenter for Thai, Lao, Khmer and Myanmar suggestions', () => {
+    // These scripts are written without spaces between words, so a whole
+    // suggestion is one whitespace-delimited "word".
+    expect(getFilterReason('รันเทสต์อีกครั้ง')).toBeNull(); // Thai
+    expect(getFilterReason('แก้บั๊กนี้ให้หน่อย')).toBeNull(); // Thai
+    expect(getFilterReason('ແລ່ນການທົດສອບ')).toBeNull(); // Lao
+    expect(getFilterReason('ដំណើរការតេស្ត')).toBeNull(); // Khmer
+    expect(getFilterReason('စမ်းသပ်မှုလုပ်ပါ')).toBeNull(); // Myanmar
+    expect(getFilterReason('ใช่')).toBeNull(); // "yes"
+    // Long but within 12 words: the CJK 30-char cap would reject these.
+    expect(getFilterReason('ช่วยรันเทสต์ทั้งหมดอีกครั้งหนึ่ง')).toBeNull();
+    expect(
+      getFilterReason('ช่วยรันเทสต์ทั้งหมด แล้ว commit ให้หน่อย'),
+    ).toBeNull();
+    expect(getFilterReason('ก')).toBe('too_few_words');
+    expect(
+      getFilterReason(
+        'ช่วยรันเทสต์ทั้งหมดอีกครั้งแล้วแก้บั๊กที่เจอและอธิบายสาเหตุให้ละเอียด',
+      ),
+    ).toBe('too_many_words');
+    // Cases where the word count and the 60-character fallback disagree, so
+    // they fail if the segmenter is silently disabled.
+    // 37 characters, 13 words: over the 12-word window.
+    expect(getFilterReason('กดปุ่มนี้แล้วรอสักครู่นะครับผมจะไปเอง')).toBe(
+      'too_many_words',
+    );
+    // 76 characters, 11 words: over the fallback cap, within the window.
+    expect(
+      getFilterReason(
+        'ปรับปรุงประสิทธิภาพการประมวลผลฐานข้อมูลอิเล็กทรอนิกส์ของมหาวิทยาลัยเทคโนโลยี',
+      ),
+    ).toBeNull();
+  });
+
+  // Thai mixed with paths or commands: few whitespace words, but many
+  // segments and over the 60-character fallback.
+  const MIXED_WITH_SPACES = [
+    'รันเทสต์ใน packages/core/src/followup และ packages/cli/src/ui ให้หน่อย',
+    'รัน npx vitest run src/followupแล้วรายงานผลให้ฟังหน่อยนะครับ',
+  ];
+
+  it('keeps the slash command exemption for these scripts', () => {
+    // 61 characters and 15 segments: over both bounds without the exemption.
+    const slash =
+      '/อธิบายโค้ดส่วนนี้ให้ละเอียดหน่อยนะครับผมอยากเข้าใจมันมากขึ้น';
+    expect(getFilterReason(slash)).toBeNull();
+    _setWordSegmenterForTest(null);
+    try {
+      expect(getFilterReason(slash)).toBeNull();
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
+  it('keeps whitespace bounds for these scripts when the suggestion has spaces', () => {
+    for (const suggestion of MIXED_WITH_SPACES) {
+      expect(getFilterReason(suggestion)).toBeNull();
+    }
+    _setWordSegmenterForTest(null);
+    try {
+      for (const suggestion of MIXED_WITH_SPACES) {
+        expect(getFilterReason(suggestion)).toBeNull();
+      }
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
+  it('falls back to a character bound for these scripts without full ICU', () => {
+    _setWordSegmenterForTest(null);
+    try {
+      expect(getFilterReason('รันเทสต์อีกครั้ง')).toBeNull();
+      expect(getFilterReason('ก')).toBe('too_few_words');
+      expect(getFilterReason('ก'.repeat(61))).toBe('too_many_words');
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
+  it('does not create a segmenter on a small-icu build', () => {
+    // process.config.variables is frozen, but process.config itself is
+    // reconfigurable (see withIcuSmall in packages/cli/src/startup/icu-check.test.ts).
+    const original = Object.getOwnPropertyDescriptor(process, 'config')!;
+    const withIcuSmall = (value: unknown, fn: () => void) => {
+      const variables = {
+        ...(original.value as { variables: Record<string, unknown> }).variables,
+        icu_small: value,
+      };
+      Object.defineProperty(process, 'config', {
+        ...original,
+        value: { ...(original.value as object), variables },
+      });
+      _setWordSegmenterForTest(undefined);
+      try {
+        fn();
+      } finally {
+        Object.defineProperty(process, 'config', original);
+        _setWordSegmenterForTest(undefined);
+      }
+    };
+    // 76 characters, 11 words: only the segmenter lets it through.
+    const long =
+      'ปรับปรุงประสิทธิภาพการประมวลผลฐานข้อมูลอิเล็กทรอนิกส์ของมหาวิทยาลัยเทคโนโลยี';
+    withIcuSmall(true, () => {
+      expect(getFilterReason(long)).toBe('too_many_words');
+    });
+    withIcuSmall(false, () => {
+      expect(getFilterReason(long)).toBeNull();
+    });
   });
 
   it('filters too many words', () => {

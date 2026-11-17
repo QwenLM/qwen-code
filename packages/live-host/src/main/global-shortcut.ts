@@ -1,3 +1,5 @@
+import { liveMessage } from '@qwen-code/qwen-live/i18n';
+
 export type GlobalShortcutBackend = {
   register: (accelerator: string, callback: () => void) => boolean;
   unregister: (accelerator: string) => void;
@@ -41,8 +43,8 @@ export class LiveGlobalShortcut {
         accelerator,
         healthy: false,
         error: invalid
-          ? 'That shortcut is invalid.'
-          : 'That shortcut is already in use.',
+          ? liveMessage('host.error.shortcutInvalid')
+          : liveMessage('host.error.shortcutInUse'),
       };
       if (!previousHealthy) this.publish(state);
       return state;

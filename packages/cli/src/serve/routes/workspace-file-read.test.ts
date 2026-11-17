@@ -8,7 +8,7 @@ import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
   buildRecordArtifactReminder,
@@ -27,6 +27,7 @@ import {
 import type { Request } from 'express';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { ServeOptions } from '../types.js';
+import type { WorkspaceFileSystemFactory } from '../fs/workspace-file-system.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -543,6 +544,33 @@ describe('GET /glob', () => {
     h = await makeHarness();
   });
   afterEach(async () => teardown(h));
+
+  it('reports an incomplete boundary search even below the result cap', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'visible.ts'), '');
+    const factory = h.app.locals['fsFactory'] as WorkspaceFileSystemFactory;
+    const forRequest = factory.forRequest.bind(factory);
+    const visible = await forRequest({ route: 'test' }).resolve(
+      'visible.ts',
+      'glob',
+    );
+    const spy = vi.spyOn(factory, 'forRequest').mockImplementation((ctx) => ({
+      ...forRequest(ctx),
+      glob: async () => Object.assign([visible], { truncated: true }),
+    }));
+    try {
+      const res = await request(h.app)
+        .get('/glob?pattern=*.ts&maxResults=10')
+        .set('Host', loopbackHost());
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        matches: ['visible.ts'],
+        count: 1,
+        truncated: true,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
 
   it('returns workspace-relative match paths', async () => {
     await fsp.writeFile(path.join(h.workspace, 'one.ts'), '');

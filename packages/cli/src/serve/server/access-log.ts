@@ -6,18 +6,58 @@
 
 import { performance } from 'node:perf_hooks';
 import { context, ROOT_CONTEXT } from '@opentelemetry/api';
-import type { Application } from 'express';
+import type { Application, Response } from 'express';
 import type { DaemonLogContext, DaemonLogger } from '../daemon-logger.js';
 import { getDaemonTelemetryInboundTraceId } from './telemetry-context.js';
 
 const SESSION_ID_RE = /\/session\/([^/]+)/;
 const ACCESS_LOG_BURST = 60;
 const ACCESS_LOG_REFILL_PER_SECOND = 2;
+// Gate rejects rejected before authentication (Host allowlist, the CORS
+// wall, the remote same-origin credential check) draw from a separate,
+// smaller budget AND count suppression into a separate accumulator. They
+// share this middleware only because the walls moved above it; without the
+// split a credential-less host sustaining >2 req/s of rejected traffic
+// drains the burst in ~30 s and holds the OPERATOR's own authenticated
+// lines suppressed behind the aggregate warning. bearerAuth's 401s are
+// deliberately NOT marked: they were charged below the access log
+// pre-change too, so a no-Origin flood starves the operator budget exactly
+// as before — the split covers only the reject classes this reorder moved.
+const ACCESS_LOG_REJECT_BURST = 30;
+const ACCESS_LOG_REJECT_REFILL_PER_SECOND = 1;
 const ROUTE_MAX_BYTES = 2 * 1024;
 const SESSION_ID_MAX_BYTES = 256;
 const CLIENT_ID_MAX_BYTES = 256;
 
 export const ACCESS_LOG_CONTROLLER_LOCAL = 'accessLogController';
+
+/** res.locals key the pre-auth gates set on their reject path. */
+export const ACCESS_LOG_REJECT_LOCAL = 'accessLogPreAuthReject';
+
+/**
+ * res.locals keys an entity that rejects a request with an `{error, code}`
+ * body — a route helper's `error()` or app-level middleware such as the
+ * Hosted Harness contract gate: without these the access log records the
+ * status but never the branch that produced it.
+ */
+export const ACCESS_LOG_ERROR_CODE_LOCAL = 'accessLogErrorCode';
+export const ACCESS_LOG_ERROR_REASON_LOCAL = 'accessLogErrorReason';
+
+/**
+ * Records the rejecting branch of an `{error, code}` refusal so the access
+ * log can attribute every status >= 400: every emitter calls this, never
+ * each wires the locals itself.
+ */
+export function markAccessLogError(
+  res: Response,
+  code: string,
+  reason?: string,
+): void {
+  const locals = res.locals as Record<string, unknown> | undefined;
+  if (!locals) return;
+  locals[ACCESS_LOG_ERROR_CODE_LOCAL] = code;
+  if (reason !== undefined) locals[ACCESS_LOG_ERROR_REASON_LOCAL] = reason;
+}
 
 export interface AccessLogController {
   sealAndFlushSuppressed(): void;
@@ -88,7 +128,10 @@ export function installAccessLogMiddleware(
   let sealed = false;
   let tokens = ACCESS_LOG_BURST;
   let refillBaseline = monotonicNow();
-  let suppressed = emptySuppressedCounts();
+  let rejectTokens = ACCESS_LOG_REJECT_BURST;
+  let rejectRefillBaseline = refillBaseline;
+  const suppressed = emptySuppressedCounts();
+  const suppressedRejects = emptySuppressedCounts();
 
   const refill = (): void => {
     const now = Math.max(monotonicNow(), refillBaseline);
@@ -99,12 +142,24 @@ export function installAccessLogMiddleware(
     refillBaseline = now;
   };
 
-  const flushSuppressed = (): boolean => {
-    if (!daemonLog || suppressed.suppressed === 0) return false;
+  const refillReject = (): void => {
+    const now = Math.max(monotonicNow(), rejectRefillBaseline);
+    rejectTokens = Math.min(
+      ACCESS_LOG_REJECT_BURST,
+      rejectTokens +
+        ((now - rejectRefillBaseline) / 1_000) *
+          ACCESS_LOG_REJECT_REFILL_PER_SECOND,
+    );
+    rejectRefillBaseline = now;
+  };
+
+  const flushSuppressed = (counts: SuppressedCounts): boolean => {
+    if (!daemonLog || counts.suppressed === 0) return false;
     context.with(ROOT_CONTEXT, () => {
-      daemonLog.warn('access logs suppressed', suppressed);
+      // Snapshot before reset: the logger may read the bag asynchronously.
+      daemonLog.warn('access logs suppressed', { ...counts });
     });
-    suppressed = emptySuppressedCounts();
+    Object.assign(counts, emptySuppressedCounts());
     return true;
   };
 
@@ -113,7 +168,8 @@ export function installAccessLogMiddleware(
       if (sealed) return;
       sealed = true;
       try {
-        flushSuppressed();
+        flushSuppressed(suppressed);
+        flushSuppressed(suppressedRejects);
       } catch {
         // Diagnostic logging must not prevent daemon shutdown.
       }
@@ -140,15 +196,35 @@ export function installAccessLogMiddleware(
           return;
         }
         refill();
-        if (suppressed.suppressed > 0 && tokens >= 1) {
+        refillReject();
+        const isPreAuthReject = Boolean(
+          (res.locals as Record<string, unknown> | undefined)?.[
+            ACCESS_LOG_REJECT_LOCAL
+          ],
+        );
+        // Select the accumulator and the budget BEFORE flushing: a reject
+        // flood must never spend an operator token, not even on the flush.
+        if (isPreAuthReject) {
+          if (suppressedRejects.suppressed > 0 && rejectTokens >= 1) {
+            rejectTokens -= 1;
+            flushSuppressed(suppressedRejects);
+          }
+          if (rejectTokens < 1) {
+            countSuppressed(suppressedRejects, status);
+            return;
+          }
+          rejectTokens -= 1;
+        } else {
+          if (suppressed.suppressed > 0 && tokens >= 1) {
+            tokens -= 1;
+            flushSuppressed(suppressed);
+          }
+          if (tokens < 1) {
+            countSuppressed(suppressed, status);
+            return;
+          }
           tokens -= 1;
-          flushSuppressed();
         }
-        if (tokens < 1) {
-          countSuppressed(suppressed, status);
-          return;
-        }
-        tokens -= 1;
 
         const route = truncateUtf8(`${method} ${reqPath}`, ROUTE_MAX_BYTES);
         const sessionMatch = reqPath.match(SESSION_ID_RE);
@@ -164,6 +240,17 @@ export function installAccessLogMiddleware(
         // where it is the only traceId link between a daemon log line and the
         // caller that sent the traceparent header.
         const inboundTraceId = getDaemonTelemetryInboundTraceId(res);
+        const locals = res.locals as Record<string, unknown> | undefined;
+        const errorCode =
+          status >= 400 &&
+          typeof locals?.[ACCESS_LOG_ERROR_CODE_LOCAL] === 'string'
+            ? (locals[ACCESS_LOG_ERROR_CODE_LOCAL] as string)
+            : undefined;
+        const errorReason =
+          status >= 400 &&
+          typeof locals?.[ACCESS_LOG_ERROR_REASON_LOCAL] === 'string'
+            ? (locals[ACCESS_LOG_ERROR_REASON_LOCAL] as string)
+            : undefined;
         const ctx = {
           route: route.value,
           ...(route.originalBytes
@@ -186,6 +273,8 @@ export function installAccessLogMiddleware(
               }
             : {}),
           ...(inboundTraceId ? { traceId: inboundTraceId } : {}),
+          ...(errorCode ? { code: errorCode } : {}),
+          ...(errorReason ? { reason: errorReason } : {}),
           status,
           durationMs: Math.max(0, Math.round(monotonicNow() - startMs)),
         };

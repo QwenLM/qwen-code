@@ -6,6 +6,7 @@
 
 import type {
   DaemonCapabilities,
+  DaemonSessionClient,
   DaemonSession,
   DaemonStandaloneSession,
 } from '@qwen-code/sdk/daemon';
@@ -66,17 +67,20 @@ export function resolveActionSessionContext(
   );
 }
 
+/**
+ * The Live workspace is the daemon's own, and it announces it by tagging that
+ * entry `kind: 'live'` — a tag no daemon old enough to lack Live session
+ * routing has ever sent. That tag is therefore the whole precondition.
+ *
+ * It deliberately does not ask for `multi_workspace_sessions`. That feature
+ * counts *user* workspaces (`listEntries()` drops the Live entry as internal),
+ * so a daemon serving a single project withholds it while still advertising
+ * the Live workspace in the very same payload — and a Live session could not
+ * be opened at all. The checks below are what actually keep this safe.
+ */
 export function resolveLiveSessionWorkspaceCwd(
   capabilities: DaemonCapabilities,
 ): string {
-  if (
-    !Array.isArray(capabilities.features) ||
-    !capabilities.features.includes('multi_workspace_sessions')
-  ) {
-    throw new Error(
-      'Daemon does not advertise multi-workspace session routing',
-    );
-  }
   const workspaces = Array.isArray(capabilities.workspaces)
     ? capabilities.workspaces
     : [];
@@ -155,6 +159,15 @@ export function getDaemonErrorCode(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined;
 }
 
+export function isSessionWriterBlockedCode(code: string | undefined): boolean {
+  return (
+    code === 'session_writer_conflict' ||
+    code === 'session_writer_unavailable' ||
+    code === 'session_writer_lost' ||
+    code === 'session_transcript_changed'
+  );
+}
+
 export function isDaemonErrorExplicitlyNonRetryable(error: unknown): boolean {
   return getDaemonErrorBody(error)?.['retryable'] === false;
 }
@@ -162,11 +175,9 @@ export function isDaemonErrorExplicitlyNonRetryable(error: unknown): boolean {
 export function getStandaloneConnectionState(
   session: DaemonSession | undefined,
 ): DaemonStandaloneConnectionState | undefined {
-  if (!session) return undefined;
+  if (!isStandaloneDaemonSession(session)) return undefined;
   const standalone = session as Partial<DaemonStandaloneSession>;
   if (
-    standalone.sourceType !== 'standalone' ||
-    standalone.context?.kind !== 'standalone' ||
     standalone.projectlessOutputDirectory === undefined ||
     standalone.workingDirectory === undefined
   ) {
@@ -176,4 +187,25 @@ export function getStandaloneConnectionState(
     projectlessOutputDirectory: standalone.projectlessOutputDirectory,
     workingDirectory: standalone.workingDirectory,
   };
+}
+
+export function isStandaloneDaemonSession(
+  session: DaemonSession | undefined,
+): boolean {
+  if (!session) return false;
+  const standalone = session as Partial<DaemonStandaloneSession>;
+  return (
+    standalone.sourceType === 'standalone' &&
+    standalone.context?.kind === 'standalone'
+  );
+}
+
+export function daemonClientSessionContext(
+  client: DaemonSessionClient | undefined,
+): DaemonProductSessionContext | undefined {
+  if (!client) return undefined;
+  if (isStandaloneDaemonSession(client.session)) {
+    return { kind: 'standalone' };
+  }
+  return { kind: 'workspace', cwd: client.workspaceCwd };
 }

@@ -12,6 +12,10 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { ComponentProps } from 'react';
+import {
+  ARTIFACT_ICON_URLS,
+  getArtifactIconKind,
+} from './artifacts/ArtifactIcon';
 
 const EXTENSION_ICONS: ReadonlyArray<[ReadonlySet<string>, LucideIcon]> = [
   [new Set(['json', 'jsonl', 'geojson']), BracesIcon],
@@ -79,8 +83,24 @@ function iconForFile(name: string, mimeType?: string): LucideIcon {
 export function FileTypeIcon({
   name,
   mimeType,
+  size = 24,
+  absoluteStrokeWidth,
   ...props
 }: ComponentProps<LucideIcon> & { name: string; mimeType?: string }) {
   const Icon = iconForFile(name, mimeType);
-  return <Icon {...props} />;
+  const kind = getArtifactIconKind({
+    kind: 'file',
+    title: name.replace(/[?#]/g, '_'),
+    mimeType,
+  });
+  if (kind !== 'file' || Icon === FileIcon) {
+    return (
+      <svg width={size} height={size} {...props} data-file-type-icon={kind}>
+        <image href={ARTIFACT_ICON_URLS[kind]} width="100%" height="100%" />
+      </svg>
+    );
+  }
+  return (
+    <Icon size={size} absoluteStrokeWidth={absoluteStrokeWidth} {...props} />
+  );
 }

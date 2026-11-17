@@ -27,8 +27,11 @@
 // check trusts: the prompts this CLI recorded itself building (keyed
 // `reverse-audit--chunk-<n>--round-<k>--<digest>`) and the harness's own
 // transcripts of the agents launched with them. Nothing the orchestrator
-// writes is consulted — a schedule the subject of the checks could edit is a
-// schedule that retires whatever chunk is inconvenient to audit.
+// writes can retire a chunk — a schedule the subject of the checks could edit
+// is a schedule that retires whatever chunk is inconvenient to audit. Past
+// that pairing, a launch is read only for what keeps a chunk under audit
+// (#10136 R25-1): the blocks it names or ran, its session and when it returned,
+// and — for a launch that certifies nothing — the yield it filed.
 //
 // Everything here fails toward auditing, chunk by chunk: no transcripts, no
 // matching transcript, a whiffed receipt, an unclassifiable return — each
@@ -41,7 +44,7 @@
 // output instead of from evidence cleanup was about to destroy.
 
 import { readFileSync, statSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { basename, resolve, sep } from 'node:path';
 import { readRunTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
 import { readFindingsPointer } from './certification.js';
@@ -51,11 +54,13 @@ import {
 } from './audit-layers.js';
 import {
   deliveredVerbatimLines,
+  findingsFilePath,
   findingsPointerOf,
   flattenPrompt,
   promptLines,
   promptRecordDir,
   readRecordedPrompts,
+  recordedPromptPath,
 } from './prompt-record.js';
 import { stripBudgetGapLines, INLINE_BUDGET_GAP_RE } from './budget.js';
 
@@ -85,13 +90,21 @@ export type CertificationFailure =
   | 'receipt clause contradicts the phrase'
   | 'receipt clause names no walk'
   | 'receipt clause too thin'
-  | 'findings list unread';
+  | 'findings list unread'
+  | 'launch not paired with the record of its block'
+  | 'launch named several blocks';
 
 /** One transcript's classified return, with the failed bar when not dry. */
 interface Classification {
   outcome: AuditOutcome;
   /** Defined exactly when `outcome` is `unknown`. */
   failure: CertificationFailure | null;
+  /**
+   * Defined exactly when `outcome` is `yielded`: the first filed finding's
+   * file — the entry a later launch's findings list must carry to prove
+   * the merge between them ran (#10136 R26-1's partial-merge witness).
+   */
+  filedFile?: string;
 }
 
 /** A retired chunk skipped this round, with the receipts that earned it. */
@@ -110,7 +123,39 @@ export interface RoundSchedule {
   coldChecks: number[];
   /** Retired chunks NOT due this round — the retirement note names these. */
   skipped: RetiredChunk[];
-  /** Every chunk is retired and none is due: the audit has converged. */
+  /**
+   * Chunks the fix-audit posture narrowed out of the wave (#10104): not a delta
+   * territory, and the most recent LAUNCH on record is provably dry — every
+   * member of every round in it certified dry. A launch is one round, except
+   * the convergence pair: rounds 1 and 2 are built together against one
+   * findings list, so a dry pair member cannot have seen what its partner filed
+   * (#10136 R17-1, R20-2). Every earlier launch's findings entered the list
+   * before the latest launch was built — the loop merges before every round
+   * build — unless the latest launch ran on the very list bytes of an earlier
+   * round with a member not certified dry, which says the merge never ran, or
+   * unless some return on record that was not dry (a launch that certified
+   * nothing, or left no record, included) does not share one stamped session
+   * with every dry receipt of the latest launch — across a resume only
+   * `recover-findings` could have carried it onto the list — or unless such a
+   * return was written after the latest launch's first record was built, so
+   * that launch's list cannot carry it. A block a launch names but did not pair
+   * with — its record lost, or the delivery altered — still counts in its
+   * round: named through the brief the launch points at or the rest of the
+   * block it delivered, or through the brief its agent opened, which a launch
+   * that paired with some record counts only for a block whose record no launch
+   * paired with, and that launch then certifies nothing (#10136 R25-1). Unlike
+   * a retired chunk, a narrowed one gets no alternating cold check: on a
+   * critical-posture round the wave re-launches the delta territories under the
+   * ordinary retirement rules and every non-delta chunk the previous waves
+   * could not certify dry. The note disclosing the narrowing IS this list.
+   * Empty whenever the caller passed no narrowing context.
+   */
+  narrowed: Array<{ chunkId: number; dryRound: number }>;
+  /**
+   * No chunk is due: retired chunks are between cold checks, posture-narrowed
+   * chunks have left the wave (#10104 — on a fix-audit round a non-delta
+   * chunk converges on its single dry launch), and the audit has converged.
+   */
   converged: boolean;
   /**
    * One line per chunk whose two most recent audits are NEITHER dry enough
@@ -128,14 +173,15 @@ export interface RoundSchedule {
  * loosely on purpose: its width is the digest function's business, and a key
  * this regex misses is merely history this module cannot see — fail-open.
  */
-const RECORD_KEY_RE = /^reverse-audit--chunk-(\d+)--round-(\d+)--[0-9a-f]+$/;
+const RECORD_KEY_RE = /^reverse-audit--chunk-(\d+)--round-(\d+)--([0-9a-f]+)$/;
 
 /**
  * Every launch the builder emits for this loop carries the literal role id —
  * the identity line and the brief path both spell it, whitespace-free, so no
  * re-wrap can hide it — and each record's own lines carry it too, so a
- * transcript that could verbatim-match any record must contain it. That makes
- * it a sound cheap cut over the transcripts before the pairing walk.
+ * transcript that could verbatim-match any record must contain it, and so does
+ * the call that opened a block's brief, whose path spells it. That makes it a
+ * sound cheap cut over the transcripts before the pairing walk.
  */
 const REVERSE_AUDIT_MARKER = 'reverse-audit';
 
@@ -558,7 +604,7 @@ function classifyReturn(
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
       if (findingsList.includes(`**File:** ${file}`)) continue;
-      return { outcome: 'yielded', failure: null };
+      return { outcome: 'yielded', failure: null, filedFile: file };
     }
   }
   // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
@@ -681,8 +727,24 @@ function mergeOutcomes(outcomes: AuditOutcome[]): AuditOutcome {
 }
 
 /**
+ * The launch a reverse-audit round was built in. Rounds 1 and 2 are the
+ * convergence pair — both built, on one findings list and in one workflow,
+ * before either returns (SKILL.md Step 5), whatever order a concurrency
+ * limit then runs them in — so they are ONE launch, the way SKILL.md counts
+ * the pair for convergence. Every later round is its own launch, built after
+ * the merge of everything before it.
+ */
+function launchOf(round: number): number {
+  return Math.max(round, CONVERGENCE_PAIR_LAST_ROUND);
+}
+
+/** The later round of the convergence pair. */
+const CONVERGENCE_PAIR_LAST_ROUND = 2;
+
+/**
  * Which chunks round `round` owes an auditor, from the audit history the
- * harness and the prompt records agree on.
+ * harness and the prompt records agree on — plus every block a launch names
+ * but did not itself pair with, which can only keep a chunk under audit.
  *
  * Retirement: a chunk whose two most recent audits are both `dry` is due
  * only on even rounds — one round skipped, one round cold-checked,
@@ -692,6 +754,19 @@ function mergeOutcomes(outcomes: AuditOutcome[]): AuditOutcome {
  * parity). A retired chunk whose cold check yields simply stops satisfying
  * the two-most-recent-dry rule and is due every round again; no state is
  * kept anywhere, the history IS the state.
+ *
+ * Narrowing (#10104): on a fix-audit round the caller passes the delta
+ * territories, and from round 3 a NON-delta chunk leaves the wave after ONE
+ * substantive dry LAUNCH — every member of it dry — and no alternating cold
+ * check brings it back. That is the posture's deliberate recall trade
+ * ("re-launch only the chunks that produced findings in the previous wave,
+ * plus the delta chunks"), read the way SKILL.md reads "previous": the
+ * convergence pair is one wave. It narrows the wave's WIDTH instead of
+ * lowering the round cap, because the late waves are where measured
+ * fix-induced Criticals kept surfacing. The failure directions are
+ * unchanged: an `unknown` outcome still reads as hot, a yield still
+ * re-launches, and with no narrowing context the schedule is exactly what
+ * it always was.
  *
  * Throws whatever the transcript or record readers throw
  * (`TranscriptsUnavailableError` included): the CALLER owns the fail-open,
@@ -704,6 +779,7 @@ export function scheduleReverseAuditRound(
   round: number,
   env: NodeJS.ProcessEnv = process.env,
   diffPath?: string,
+  narrowing?: { deltaChunkIds: ReadonlySet<number> } | null,
 ): RoundSchedule {
   // Rounds 1 and 2 establish each chunk's record; retirement needs two
   // consecutive dry audits, so nothing can retire before round 3.
@@ -712,6 +788,7 @@ export function scheduleReverseAuditRound(
       due: [...chunkIds],
       coldChecks: [],
       skipped: [],
+      narrowed: [],
       converged: false,
       diagnostics: [],
     };
@@ -750,19 +827,45 @@ export function scheduleReverseAuditRound(
   const records: Array<{
     chunkId: number;
     round: number;
+    digest: string;
     lines: string[];
     territory: Array<[number, number]>;
     findings: string;
     pointer: string | null;
+    key: string;
+    /** When its block was built — birth time, else last write — for the clock. */
+    builtAt: number;
   }> = [];
   for (const [key, prompt] of built) {
     const m = RECORD_KEY_RE.exec(key);
     if (!m) continue;
     const r = Number(m[2]);
     if (r >= round) continue;
+    // The block's first build in this attempt, as far as the record shows.
+    // `recordPrompt` rewrites a record in place, so a reprint under the same
+    // key — Step 5's single-auditor repair — moves its mtime but not its birth
+    // time; the earlier of the two is read, so a birth time later than the
+    // last write (mtime set back) never dates a record past it. A record born
+    // before the plan is a dead attempt's that this attempt wrote again, and a
+    // filesystem that keeps no birth time reports 0: both date from the last
+    // write. A record whose first write was lost is born at the repair that
+    // wrote it. A record whose time cannot be read (a race with a cleanup)
+    // reads as built before every return, so any earlier return that was not
+    // dry holds its launch.
+    let builtAt = -Infinity;
+    try {
+      const st = statSync(recordedPromptPath(planPath, key));
+      builtAt =
+        st.birthtimeMs >= since
+          ? Math.min(st.birthtimeMs, st.mtimeMs)
+          : st.mtimeMs;
+    } catch {
+      // Left at -Infinity.
+    }
     records.push({
       chunkId: Number(m[1]),
       round: r,
+      digest: m[3],
       // Flattened ONCE per record, beside the once-per-transcript flatten
       // below: the pairing walk pays neither half per (record, transcript)
       // pair.
@@ -770,6 +873,8 @@ export function scheduleReverseAuditRound(
       territory: bakedRanges(prompt, diffPath),
       findings: findingsListFor(prompt, recordDir, findingsMemo),
       pointer: findingsPointerOf(prompt),
+      key,
+      builtAt,
     });
   }
 
@@ -793,65 +898,258 @@ export function scheduleReverseAuditRound(
   //
   // The pairing walk is O(records × transcripts) over multi-KB prompts, on
   // the critical path before the round is admitted — so cut the transcript
-  // side down to the launches that carry the role marker first (a launch
-  // that could match any record contains it; see REVERSE_AUDIT_MARKER), and
+  // side down to the launches that carry the role marker first — a launch
+  // that could match any record contains it, and so does a call that opened
+  // a block's brief (see REVERSE_AUDIT_MARKER) — and
   // flatten each survivor ONCE instead of once per pair (the record side is
   // already flattened once per record, above). A transcript the cut drops
-  // fails the way everything here fails: it certifies nothing, and its
-  // chunk stays under audit.
+  // certifies nothing; if its record was lost as well, nothing here names its
+  // block either — a double fault DESIGN.md lists.
   const candidates = transcripts
-    .filter((t) => t.launchPrompt.includes(REVERSE_AUDIT_MARKER))
+    .filter(
+      (t) =>
+        t.launchPrompt.includes(REVERSE_AUDIT_MARKER) ||
+        t.successfulCallArgs.some((a) => a.includes(REVERSE_AUDIT_MARKER)),
+    )
     .map((t) => ({ transcript: t, flat: flattenPrompt(t.launchPrompt) }));
   const matchesByRecord = records.map((rec) =>
     candidates
       .filter((c) => deliveredVerbatimLines(c.flat, rec.lines))
       .map((c) => c.transcript),
   );
-  const recordsPerTranscript = new Map<AgentRecord, number>();
-  for (const matches of matchesByRecord) {
+  // Which record keys each launch paired with, and which keys it names.
+  // Every launch block points its agent at the brief filed under the
+  // record's own key, in this plan's record dir (`writeBrief`), so a
+  // transcript names every key it was launched for whether or not the record
+  // beside the brief survived. The keys are read from the flattened launch,
+  // the text the pairing itself reads: a delivery the delivery check accepts —
+  // a path re-wrapped at one of its spaces — names the same keys. The match
+  // reads only the tail every absolute spelling of this plan's record dir
+  // shares — the dir's own name, then the key, in any letter case — so a plan
+  // spelled through a symlinked directory, a relative path or another case
+  // (the same directory on a case-insensitive filesystem) names the same
+  // keys, and a path that merely ends that way names a key too, which costs
+  // an audit.
+  const paired = new Map<AgentRecord, Set<string>>();
+  matchesByRecord.forEach((matches, i) => {
     for (const t of matches) {
-      recordsPerTranscript.set(t, (recordsPerTranscript.get(t) ?? 0) + 1);
+      const keys = paired.get(t) ?? new Set<string>();
+      keys.add(records[i].key);
+      paired.set(t, keys);
+    }
+  });
+  const recordTail = sep + basename(recordDir) + sep;
+  const briefKeyRe = (lead: string, tail: string, quote: string) =>
+    new RegExp(
+      `${quote}${lead}${tail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}` +
+        `reverse-audit--chunk-(\\d+)--round-(\\d+)--([0-9a-f]+)\\.brief\\.md${quote}`,
+      'gi',
+    );
+  const launchedKey = briefKeyRe('', flattenPrompt(recordTail), '');
+  // Two more ways a launch names a block. Its delivery may carry every line of
+  // the block's record but the brief line, dropped or re-spelled on the way —
+  // read against every record except those of a (chunk, round) the launch
+  // paired with, since a rebuild on an empty list can differ from its
+  // sibling's record in the brief line alone. And a launch that paired with no
+  // record names the brief its agent opened: a call the harness recorded,
+  // read as a whole JSON string value ending in that tail, the evidence
+  // `openedBrief` reads. A paired launch's own record already names its
+  // block, and opening a sibling's brief is not running it: for a paired
+  // launch an opened brief counts only when no launch paired with its block's
+  // record — lost or too partly written to pair, a dead attempt's, or of a
+  // round not yet history — and then it names that block like any other, so
+  // the launch certifies nothing.
+  const openedKey = briefKeyRe(
+    '[^"]*',
+    JSON.stringify(recordTail).slice(1, -1),
+    '"',
+  );
+  const briefless = records.map((rec) => {
+    const brief = flattenPrompt(
+      `${recordTail}${encodeURIComponent(rec.key)}.brief.md`,
+    ).toLowerCase();
+    return rec.lines.filter((l) => !l.toLowerCase().includes(brief));
+  });
+  const keyOf = (m: RegExpMatchArray) => ({
+    chunk: Number(m[1]),
+    round: Number(m[2]),
+    digest: m[3],
+    key: `reverse-audit--chunk-${m[1]}--round-${m[2]}--${m[3]}`,
+  });
+  const pairedKeys = new Set(
+    records
+      .filter((_, i) => matchesByRecord[i].length > 0)
+      .map((rec) => rec.key),
+  );
+  const named = new Map<
+    AgentRecord,
+    Array<{ chunk: number; round: number; digest: string; key: string }>
+  >();
+  for (const { transcript: t, flat } of candidates) {
+    const keys = [...flat.matchAll(launchedKey)].map(keyOf);
+    const own = records.filter((rec) => paired.get(t)?.has(rec.key));
+    records.forEach((rec, i) => {
+      if (own.some((o) => o.chunkId === rec.chunkId && o.round === rec.round)) {
+        return;
+      }
+      if (!deliveredVerbatimLines(flat, briefless[i])) return;
+      const { chunkId: chunk, round: r, digest, key } = rec;
+      keys.push({ chunk, round: r, digest, key });
+    });
+    const opened = t.successfulCallArgs.flatMap((args) =>
+      [...args.matchAll(openedKey)].map(keyOf),
+    );
+    keys.push(
+      ...(paired.has(t)
+        ? opened.filter((n) => !pairedKeys.has(n.key))
+        : opened),
+    );
+    named.set(t, keys);
+  }
+  // A launch certifies a record only when it pairs with that record alone
+  // AND names no key but that record's. Counting paired records alone let a
+  // lost record turn the shortcut this guard exists for — one agent handed
+  // several blocks — back into a certificate for the block whose record
+  // survived (#10136 R25-1). A launch that certifies nothing still proves
+  // heat: the classification walk below counts its yield.
+  const certifiesAlone = (t: AgentRecord): boolean => {
+    const own = paired.get(t);
+    return own?.size === 1 && (named.get(t) ?? []).every((n) => own.has(n.key));
+  };
+  // Launches the pairing walk could not tie to a record (#10136 R25-1). A
+  // record's write and its read are both best-effort (`recordPrompt`,
+  // `readRecordedPrompts`), and a fail-open build prints every chunk whatever
+  // the schedule said, so a round can run — its prompt delivered, its return
+  // filed — and leave no record for this walk to pair; a delivery the
+  // orchestrator altered pairs with nothing either, beside a record that
+  // survived. Read as absent, that launch vanished from the chunk's history:
+  // a stale dry launch before it read as the latest one, and a lost cold
+  // check let a retired chunk skip, and converge, over the yield it filed. So
+  // every key a launch names but did not pair with, for a round before the
+  // one being built, joins that round's history below — as the yield it
+  // filed, or as a member that certified nothing — with its digest, its
+  // session and when it returned.
+  const lostLaunches: Array<{
+    chunk: number;
+    round: number;
+    digest: string;
+    session: string;
+    returnedAt: number;
+    yielded: boolean;
+    /** The finding a yielded lost launch filed — the witness's subject. */
+    filedFile?: string;
+  }> = [];
+  for (const [t, keys] of named) {
+    for (const n of keys) {
+      if (n.round >= round || paired.get(t)?.has(n.key)) continue;
+      // A key whose record is on disk but older than the plan belongs to a
+      // dead attempt at the same plan path, and so does a late transcript
+      // naming it: the record fence reads that record as absent, not lost. A
+      // retry whose rewrite of that record failed hides its own launch here,
+      // which takes the dead attempt and the failed write together.
+      try {
+        if (statSync(recordedPromptPath(planPath, n.key)).mtimeMs < since) {
+          continue;
+        }
+      } catch {
+        // No record on disk: lost, or never written — the case read here.
+      }
+      // What it returned: a yield counts as one and outranks a dry sibling of
+      // its round in the fold, as any yield does. Its quotation guard reads
+      // the list the CLI filed under the key's own round and digest, spelled
+      // as `findingsFileFor` spells it (a drift reads an empty list, which only
+      // costs audits), never a pointer the delivered text could steer; a list
+      // that is not on disk reads as empty, which counts a quotation as a
+      // filing. Nothing it returned can certify dry: it proves no territory.
+      let list = '';
+      try {
+        list = readFileSync(
+          findingsFilePath(
+            planPath,
+            `reverse-audit--round-${n.round}--${n.digest}`,
+          ),
+          'utf8',
+        );
+      } catch {
+        // No list on disk: every file line reads as a filing.
+      }
+      const lostClassification = classifyReturn(t, [], list, true);
+      lostLaunches.push({
+        chunk: n.chunk,
+        round: n.round,
+        digest: n.digest,
+        session: t.recordedSession,
+        returnedAt: t.mtimeMs,
+        yielded: lostClassification.outcome === 'yielded',
+        filedFile: lostClassification.filedFile,
+      });
     }
   }
   // Every record's classifications AND the bar each uncertified one fell
   // at: a record no transcript matches reads `no matching transcript`; one
-  // whose only matches are ambiguous launches (themselves matching several
-  // records) reads `launch matched multiple records`; one a transcript
-  // certifies carries the classifier's own bar. These are what the round's
-  // diagnostic names when a chunk that looked certifiable never retires
-  // (#9206) — the refusal is the same fail-toward-audit refusal it always
-  // was, only no longer silent.
+  // whose only matches cannot certify it alone reads `launch matched multiple
+  // records` or `launch named several blocks`; one a transcript certifies
+  // carries the classifier's own bar. These are what the round's diagnostic
+  // names when a chunk that looked certifiable never retires (#9206) — the
+  // refusal is the same fail-toward-audit refusal it always was, only no
+  // longer silent.
   const classificationsByRecord: Classification[][] = [];
   const failuresByRecord: CertificationFailure[][] = [];
+  /** The transcript of each classification, index for index. */
+  const returnsByRecord: AgentRecord[][] = [];
+  /** The launches that could not certify a record alone. */
+  const ambiguousByRecord: AgentRecord[][] = [];
   matchesByRecord.forEach((matches, i) => {
-    const unique = matches.filter((t) => recordsPerTranscript.get(t) === 1);
-    const classifications = unique.map((t) =>
-      // The findings-read fact rides INTO the classification and gates only
-      // the dry branch there: applied out here as a filter it also
-      // suppressed filed YIELDS, flipping a round to dry and retiring a
-      // chunk that had a live finding. The POINTER was extracted once from
-      // the RAW prompt by the same call `findingsListFor` uses: extracting
-      // again from trim-normalized lines asks the same question under a
-      // different normalization, and trimming defeats the `^…$` anchors
-      // that reject indented quotations.
+    // The findings-read fact rides INTO the classification and gates only
+    // the dry branch there: applied out here as a filter it also
+    // suppressed filed YIELDS, flipping a round to dry and retiring a
+    // chunk that had a live finding. The POINTER was extracted once from
+    // the RAW prompt by the same call `findingsListFor` uses: extracting
+    // again from trim-normalized lines asks the same question under a
+    // different normalization, and trimming defeats the `^…$` anchors
+    // that reject indented quotations.
+    const classify = (t: AgentRecord): Classification =>
       classifyReturn(
         t,
         records[i].territory,
         records[i].findings,
         readFindingsPointer(t, records[i].pointer),
+      );
+    const unique = matches.filter(certifiesAlone);
+    const shared = matches.filter((t) => !certifiesAlone(t));
+    // A launch that certifies nothing still proves heat (#10136 R25-1): a
+    // yield it filed joins this record's fold, so a dry relaunch of the same
+    // record cannot decide the round over it. Anything short of a yield
+    // certifies nothing.
+    const heat = shared.filter((t) => classify(t).outcome === 'yielded');
+    const classifications: Classification[] = [
+      ...unique.map(classify),
+      ...heat.map(
+        (): Classification => ({ outcome: 'yielded', failure: null }),
       ),
-    );
+    ];
     classificationsByRecord.push(classifications);
+    returnsByRecord.push([...unique, ...heat]);
+    // A launch that does not certify its record alone certifies none of the
+    // records it touches. `recover-findings` refuses one that matched several
+    // records the same way, so across a resume whatever it filed may never
+    // reach the list: it rides as a return that was not dry.
+    ambiguousByRecord.push(shared);
     if (classifications.some((c) => c.outcome === 'dry')) {
-      // The round's merge takes this dry; whatever else the record's
-      // launches did cannot hold the chunk back from retirement.
+      // The record certified dry, so its failures have nothing left to
+      // explain; a yield beside the dry outranks it in the fold and explains
+      // its own heat.
       failuresByRecord.push([]);
       return;
     }
     const failures: CertificationFailure[] = [];
     if (matches.length === 0) failures.push('no matching transcript');
-    for (let m = 0; m < matches.length - unique.length; m++) {
-      failures.push('launch matched multiple records');
+    for (const t of shared) {
+      failures.push(
+        (paired.get(t)?.size ?? 0) > 1
+          ? 'launch matched multiple records'
+          : 'launch named several blocks',
+      );
     }
     for (const c of classifications) {
       if (c.failure !== null) failures.push(c.failure);
@@ -860,30 +1158,137 @@ export function scheduleReverseAuditRound(
   });
 
   // chunk id → prior round → every outcome that round's records produced,
-  // plus the certification failures behind its unknowns. A record no
-  // transcript certifies (a blank partial write, an undelivered build, an
-  // ambiguous launch) contributes nothing, and its round classifies
-  // `unknown`: the round was scheduled for this chunk, and nothing proves
-  // it dry.
+  // plus the certification failures behind its unknowns. A record with no
+  // certifying transcript and no yield (a blank partial write, an undelivered
+  // build, a launch that cannot certify it alone and filed nothing)
+  // contributes no outcome to the fold, and a round of only such records
+  // classifies `unknown`: the round was scheduled for this chunk, and nothing
+  // proves it dry. The narrowing still counts such a record as an uncertified
+  // member (`memberOutcomes`, `heldSessions`), and every block a launch names
+  // but did not pair with joins its round too.
   const history = new Map<
     number,
-    Map<number, { outcomes: AuditOutcome[]; failures: CertificationFailure[] }>
+    Map<
+      number,
+      {
+        outcomes: AuditOutcome[];
+        failures: CertificationFailure[];
+        /** The findings-list digests this round's launches were built on. */
+        digests: Set<string>;
+        /**
+         * The sessions of this round's returns that were not dry (a launch
+         * that certified nothing, or left no record, included), and of its
+         * dry receipts — the resume rule in the narrowing branch.
+         */
+        heldSessions: Set<string>;
+        drySessions: Set<string>;
+        /**
+         * When this round's first record was built, and when its latest
+         * return that was not dry was written — the clock in the narrowing
+         * branch.
+         */
+        builtAt: number;
+        heldReturnedAt: number;
+        /**
+         * One outcome per audit MEMBER of the round. The round-level fold
+         * above hides these — `mergeOutcomes` folds `['unknown', 'dry']` to
+         * `'dry'` — and the narrowing branch needs them: a launch holding one
+         * dry receipt beside an uncertified sibling is not a launch that
+         * certified the territory (#10136 R20-2). A record with no
+         * certifying transcript and no yield is a member too — it names no
+         * outcome of its own, and the round was still scheduled for it.
+         */
+        memberOutcomes: AuditOutcome[];
+        /**
+         * The filed files of this round's yielded members — the lines a
+         * later launch's list must carry (#10136 R26-1).
+         */
+        filedFiles: Set<string>;
+      }
+    >
   >();
-  records.forEach((rec, i) => {
-    let byRound = history.get(rec.chunkId);
+  const entryFor = (chunkId: number, r: number) => {
+    let byRound = history.get(chunkId);
     if (!byRound) {
       byRound = new Map();
-      history.set(rec.chunkId, byRound);
+      history.set(chunkId, byRound);
     }
-    const entry = byRound.get(rec.round) ?? { outcomes: [], failures: [] };
+    let entry = byRound.get(r);
+    if (!entry) {
+      entry = {
+        outcomes: [],
+        failures: [],
+        digests: new Set<string>(),
+        heldSessions: new Set<string>(),
+        drySessions: new Set<string>(),
+        builtAt: Infinity,
+        heldReturnedAt: -Infinity,
+        memberOutcomes: [],
+        filedFiles: new Set<string>(),
+      };
+      byRound.set(r, entry);
+    }
+    return entry;
+  };
+  records.forEach((rec, i) => {
+    const entry = entryFor(rec.chunkId, rec.round);
     entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
     entry.failures.push(...failuresByRecord[i]);
-    byRound.set(rec.round, entry);
+    for (const c of classificationsByRecord[i]) {
+      if (c.filedFile !== undefined) entry.filedFiles.add(c.filedFile);
+    }
+    if (classificationsByRecord[i].length === 0) {
+      // A record with no certifying transcript and no yield: nothing proves
+      // it dry, and the round was scheduled for it — an uncertified member,
+      // not an absent one. `outcomes` is left alone, so the round's fold is
+      // unchanged by it; the narrowing reads the member.
+      entry.memberOutcomes.push('unknown');
+    } else {
+      entry.memberOutcomes.push(
+        ...classificationsByRecord[i].map((c) => c.outcome),
+      );
+    }
+    entry.digests.add(rec.digest);
+    entry.builtAt = Math.min(entry.builtAt, rec.builtAt);
+    const hold = (t: AgentRecord) => {
+      entry.heldSessions.add(t.recordedSession);
+      entry.heldReturnedAt = Math.max(entry.heldReturnedAt, t.mtimeMs);
+    };
+    classificationsByRecord[i].forEach((c, j) => {
+      const t = returnsByRecord[i][j];
+      if (c.outcome === 'dry') entry.drySessions.add(t.recordedSession);
+      else hold(t);
+    });
+    ambiguousByRecord[i].forEach(hold);
+    // …and it is a member of the round that certified nothing: beside a dry
+    // relaunch of the same record it may still carry a filing that never
+    // merged, so the launch it belongs to is not dry in every member. (A
+    // record with no classification already counts as one `unknown` above.)
+    if (
+      ambiguousByRecord[i].length > 0 &&
+      classificationsByRecord[i].length > 0
+    ) {
+      entry.memberOutcomes.push('unknown');
+    }
   });
+  // …and every block a launch names but did not pair with, a member of that
+  // block's round (#10136 R25-1): a yield joins the fold as any yield does, and
+  // a launch that filed nothing adds no outcome but names its failure.
+  for (const lost of lostLaunches) {
+    const entry = entryFor(lost.chunk, lost.round);
+    if (lost.yielded) entry.outcomes.push('yielded');
+    else entry.failures.push('launch not paired with the record of its block');
+    entry.memberOutcomes.push(lost.yielded ? 'yielded' : 'unknown');
+    if (lost.filedFile !== undefined) entry.filedFiles.add(lost.filedFile);
+    entry.digests.add(lost.digest);
+    entry.heldSessions.add(lost.session);
+    entry.heldReturnedAt = Math.max(entry.heldReturnedAt, lost.returnedAt);
+  }
 
   const due: number[] = [];
   const coldChecks: number[] = [];
   const skipped: RetiredChunk[] = [];
+  const narrowed: Array<{ chunkId: number; dryRound: number }> = [];
   const diagnostics: string[] = [];
   for (const chunkId of chunkIds) {
     const audits = [...(history.get(chunkId)?.entries() ?? [])]
@@ -891,8 +1296,149 @@ export function scheduleReverseAuditRound(
         round: r,
         outcome: mergeOutcomes(entry.outcomes),
         failures: entry.failures,
+        digests: [...entry.digests],
+        heldSessions: [...entry.heldSessions],
+        drySessions: [...entry.drySessions],
+        builtAt: entry.builtAt,
+        heldReturnedAt: entry.heldReturnedAt,
+        memberOutcomes: entry.memberOutcomes,
+        filedFiles: [...entry.filedFiles],
       }))
       .sort((a, b) => a.round - b.round);
+    // The posture narrowing, ruled before retirement so a non-delta chunk
+    // never earns a cold-check slot the posture does not run.
+    //
+    // The bar is ORDER, never the findings list's rendering (#10136 R20-3).
+    // One dry receipt prices a chunk out only when it cannot have been built
+    // before an earlier yield's or uncertified receipt's findings entered the
+    // cumulative list, and the loop fixes that order itself: findings merge
+    // unconditionally before every round build, and the one exception is the
+    // convergence pair, whose two rounds are built together against one list
+    // (SKILL.md Step 5). So the unit is the LAUNCH. A dry receipt counts only
+    // when every member of its launch is dry — a dry pair member beside a
+    // yielding or uncertified partner, or a dry relaunch beside its round's
+    // uncertified sibling, was built before what they filed (#10136 R17-1,
+    // R20-2) — and every non-dry return of an earlier launch that came back
+    // before the dry launch was built is, by that order, already on the list
+    // it was built against.
+    //
+    // Eight review rounds of reading the list instead — its entry set, the
+    // locations a return filed, the quotation a return made — each found a
+    // rendering (a re-wrapped list, a range, an aggregate, a `./` prefix, a
+    // second finding at one location) where a misreading GRANTED the
+    // narrowing. Order has no rendering. The one list fact kept is exact
+    // bytes: an earlier round with a member not certified dry, whose findings
+    // digest is also one of the dry launch's, says the merge between them
+    // never ran, and it only ever keeps the chunk in the wave. So does the
+    // clock below, for a return that came back after the dry launch was
+    // built.
+    //
+    // The order is the LIVE orchestrator's, though: it merges the returns it
+    // received. A resumed session receives the interrupted attempt's returns
+    // only through `recover-findings`, whose bar (brief opened, findings list
+    // read, diff read) is stricter than this module's scan — so every return
+    // on record that was not dry (a yield, or an `unknown` that may carry a
+    // filing the quotation guard refused) must share ONE stamped session with
+    // every dry receipt of the latest launch, or it holds the narrowing. The
+    // session boundary is exact; a second copy of recovery's bar here would
+    // be one more re-implementation to drift.
+    if (narrowing != null && !narrowing.deltaChunkIds.has(chunkId)) {
+      const latest = audits[audits.length - 1];
+      if (latest !== undefined && latest.outcome === 'dry') {
+        const launch = launchOf(latest.round);
+        const members = audits.filter((a) => launchOf(a.round) === launch);
+        const launchDry = members.every((a) =>
+          a.memberOutcomes.every((o) => o === 'dry'),
+        );
+        const unmerged = audits.some(
+          (a) =>
+            launchOf(a.round) < launch &&
+            // Member-level, like the launch bar: a round folded dry beside an
+            // uncertified member may still hold a filing that never merged.
+            // A round dry in every member changes nothing on the list, so
+            // sharing its bytes is the ordinary case, not a skipped merge.
+            a.memberOutcomes.some((o) => o !== 'dry') &&
+            a.digests.some((d) => members.some((m) => m.digests.includes(d))),
+        );
+        const launchSessions = new Set(members.flatMap((m) => m.drySessions));
+        // When any return on record was not dry, it and every dry receipt of
+        // the latest launch must share ONE stamped session: a launch whose
+        // dry receipts span two sessions, or a return no session stamped,
+        // cannot show that the live merge covered it. An all-dry history
+        // filed nothing and needs no merge.
+        // Every round, not only earlier launches: a return inside the latest
+        // launch that was not dry already fails `launchDry`.
+        const acrossResume = audits.some((a) =>
+          a.heldSessions.some(
+            (s) => s === '' || [...launchSessions].some((d) => d !== s),
+          ),
+        );
+        // The clock tells the same order from the other side: a return that
+        // was not dry, written after the latest launch's first record was
+        // built, cannot be on the list that launch was built against — a
+        // block of an earlier round launched again inside a later wave pairs
+        // with its own old record, on a digest the dry launch does not share.
+        const launchBuiltAt = Math.min(...members.map((m) => m.builtAt));
+        const lateReturn = audits.some(
+          (a) => launchOf(a.round) < launch && a.heldReturnedAt > launchBuiltAt,
+        );
+        // The partial-merge witness (#10136 R26-1) — refusal only, never a
+        // grant. `unmerged`'s byte comparison detects a TOTAL merge skip; a
+        // partial one (the live orchestrator merged some of a round's
+        // returns and dropped one) always changes the bytes, so the
+        // tripwire stays false and the narrowing would be granted over a
+        // finding that never reached any list. The merge is a prose
+        // instruction to the model (SKILL.md Step 5), not a mechanism, so
+        // prove it on the one artifact the merge wrote: the findings file
+        // the dry launch was built from. For each earlier round with a
+        // yielded member, the list a member of this launch was built from
+        // — read from the file the CLI filed under that launch's own round
+        // and digest, the same call the lost-launch path makes, never a
+        // pointer a delivered text could steer — must carry the yield's
+        // filed `**File:**` line (the membership test `classifyReturn`
+        // already applies). A misreading can only refuse, which is the
+        // direction this module states for itself; a file absent from disk
+        // is no evidence either way, so the check skips it and today's
+        // rules stand.
+        const launchLists: string[] = [];
+        for (const m of members) {
+          for (const d of m.digests) {
+            try {
+              launchLists.push(
+                readFileSync(
+                  findingsFilePath(
+                    planPath,
+                    `reverse-audit--round-${m.round}--${d}`,
+                  ),
+                  'utf8',
+                ),
+              );
+            } catch {
+              // Not on disk: no evidence either way.
+            }
+          }
+        }
+        const partialMerge =
+          launchLists.length > 0 &&
+          audits.some(
+            (a) =>
+              launchOf(a.round) < launch &&
+              a.filedFiles.some((f) =>
+                launchLists.some((l) => !l.includes(`**File:** ${f}`)),
+              ),
+          );
+        if (
+          launchDry &&
+          !unmerged &&
+          !acrossResume &&
+          !lateReturn &&
+          !partialMerge
+        ) {
+          narrowed.push({ chunkId, dryRound: latest.round });
+          continue;
+        }
+      }
+    }
     const lastTwo = audits.slice(-2);
     const retired =
       lastTwo.length === 2 && lastTwo.every((a) => a.outcome === 'dry');
@@ -953,11 +1499,14 @@ export function scheduleReverseAuditRound(
     due,
     coldChecks,
     skipped,
+    narrowed,
     // An empty `chunkIds` empties `due` vacuously — nothing was ever under
     // audit, so nothing has proven itself cold. `runAllChunks` refuses a
     // chunkless plan long before scheduling, but this function is exported,
     // and convergence is an exit-5 termination rule: it must not be
-    // reachable from nothing.
+    // reachable from nothing. A narrowed-out chunk does not block
+    // convergence: leaving the wave is what the posture ruled for it, and
+    // the note that discloses the narrowing is the record of the trade.
     converged: chunkIds.length > 0 && due.length === 0,
     diagnostics,
   };

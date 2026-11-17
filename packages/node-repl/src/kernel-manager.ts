@@ -30,7 +30,8 @@ const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System3
 
 const READY_TIMEOUT_MS = 15_000;
 const ADD_ROOT_TIMEOUT_MS = 10_000;
-const TERMINATE_GRACE_MS = 500;
+const CANCEL_GRACE_MS = 5_000;
+const TERMINATE_GRACE_MS = 2500;
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const MAX_RAW_TEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RAW_TEXT_EVENTS = 128 * 1024;
@@ -53,6 +54,7 @@ export interface NodeReplImageEvent {
   type: 'image';
   data: string;
   mimeType: string;
+  metadata?: string;
 }
 
 export type NodeReplOutputEvent = NodeReplTextEvent | NodeReplImageEvent;
@@ -69,7 +71,13 @@ export interface NodeReplExecOutcome {
   events: NodeReplOutputEvent[];
   rawTextTruncated: boolean;
   imagesDropped: number;
-  error?: { name: string; message: string; stack?: string };
+  error?: {
+    name: string;
+    message: string;
+    stack?: string;
+    code?: string;
+    details?: string;
+  };
   stats: {
     durationMs: number;
     generation: number;
@@ -88,6 +96,7 @@ export interface NodeReplExecRequest {
 }
 
 export interface KernelManagerOptions {
+  preloadCua?: boolean;
   cwd: string;
   homeDir: string;
   tmpRootDir: string;
@@ -167,6 +176,7 @@ export class NodeReplKernelManager {
   private inflight: InflightExec | null = null;
   private operationChain: Promise<unknown> = Promise.resolve();
   private disposed = false;
+  private disposal: Promise<void> | undefined;
   private sessionTmpDir: string | null = null;
   private pendingReady: PendingReady | null = null;
   private readonly pendingAddRoot = new Map<
@@ -257,8 +267,8 @@ export class NodeReplKernelManager {
     return run;
   }
 
-  dispose(): void {
-    if (this.disposed) return;
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
     this.disposed = true;
     const inflight = this.inflight;
     if (inflight) {
@@ -272,11 +282,13 @@ export class NodeReplKernelManager {
     this.rejectPending('node_repl task disposed');
     const handle = this.kernel;
     this.kernel = null;
-    if (handle) {
-      this.signalProcessTree(handle, true);
-    }
-    this.cleanupTmpDir();
-    debugLogger.debug('[node-repl] disposed');
+    this.disposal = (
+      handle ? this.terminateHandle(handle) : Promise.resolve()
+    ).finally(() => {
+      this.cleanupTmpDir();
+      debugLogger.debug('[node-repl] disposed');
+    });
+    return this.disposal;
   }
 
   private async execInner(
@@ -391,10 +403,26 @@ export class NodeReplKernelManager {
 
     let stopStarted = false;
     let requestedStopStatus: 'timeout' | 'cancelled' | null = null;
+    let cancelTimeout: NodeJS.Timeout | undefined;
     const stop = (status: 'timeout' | 'cancelled', message: string) => {
       if (stopStarted || inflight.settled) return;
       stopStarted = true;
       requestedStopStatus = status;
+      // Native cancellation barriers and a blocked kernel event loop cannot
+      // enforce their own deadline. Only the host can bound this wait.
+      cancelTimeout = setTimeout(() => {
+        if (inflight.settled || this.kernel !== handle) return;
+        void this.invalidateKernel(status)
+          .catch(() => undefined)
+          .finally(() => {
+            inflight.settle({
+              hostStatus: status,
+              message:
+                `${message} The kernel did not stop within ${CANCEL_GRACE_MS}ms after cancellation and was terminated; all bindings were lost. ` +
+                'External actions may have completed; verify external state before retrying.',
+            });
+          });
+      }, CANCEL_GRACE_MS);
       try {
         handle.toKernel.write(encodeFrame({ type: 'cancel', execId }));
       } catch (error) {
@@ -430,6 +458,7 @@ export class NodeReplKernelManager {
       handle.toKernel.write(execFrame);
     } catch (error) {
       clearTimeout(timeout);
+      clearTimeout(cancelTimeout);
       request.signal?.removeEventListener('abort', onAbort);
       await this.invalidateKernel('crashed');
       if (this.inflight === inflight) this.inflight = null;
@@ -444,6 +473,7 @@ export class NodeReplKernelManager {
 
     const terminal = await settled;
     clearTimeout(timeout);
+    clearTimeout(cancelTimeout);
     request.signal?.removeEventListener('abort', onAbort);
     if (this.inflight === inflight) this.inflight = null;
     // Flush any partial multi-byte sequence still held by the raw stream
@@ -505,6 +535,10 @@ export class NodeReplKernelManager {
                   ? `Execution exceeded the ${effectiveTimeout}ms timeout.`
                   : 'JavaScript execution failed.'),
             ...(terminal.errorStack ? { stack: terminal.errorStack } : {}),
+            ...(terminal.errorCode ? { code: terminal.errorCode } : {}),
+            ...(terminal.errorDetails
+              ? { details: terminal.errorDetails }
+              : {}),
           }
         : undefined;
     return this.outcomeFromInflight(inflight, status, startedAt, error, false);
@@ -540,6 +574,11 @@ export class NodeReplKernelManager {
         '--experimental-vm-modules',
         '--experimental-import-meta-resolve',
         resolveKernelPath(),
+        ...process.argv
+          .slice(2)
+          .filter((argument) =>
+            ['--no-overlay', '--no-pip'].includes(argument),
+          ),
       ],
       {
         cwd: this.options.cwd,
@@ -601,6 +640,7 @@ export class NodeReplKernelManager {
       handle.toKernel.write(
         encodeFrame({
           type: 'init',
+          preloadCua: this.options.preloadCua ?? false,
           generation: handle.generation,
           cwd: this.options.cwd,
           homeDir: this.options.homeDir,
@@ -676,12 +716,21 @@ export class NodeReplKernelManager {
           typeof message.execId !== 'string' ||
           typeof message.data !== 'string' ||
           typeof message.mimeType !== 'string' ||
-          message.mimeType.length > MAX_IMAGE_MIME_CHARS
+          message.mimeType.length > MAX_IMAGE_MIME_CHARS ||
+          !(
+            message.metadata === undefined ||
+            typeof message.metadata === 'string'
+          )
         ) {
           this.handleProtocolError(handle, new Error('invalid image frame'));
           return;
         }
-        this.collectImage(message.execId, message.data, message.mimeType);
+        this.collectImage(
+          message.execId,
+          message.data,
+          message.mimeType,
+          message.metadata,
+        );
         return;
       case 'execResult':
         this.handleExecResult(handle, message as ExecResultMessage);
@@ -759,6 +808,13 @@ export class NodeReplKernelManager {
       !(
         message.errorStack === undefined ||
         typeof message.errorStack === 'string'
+      ) ||
+      !(
+        message.errorCode === undefined || typeof message.errorCode === 'string'
+      ) ||
+      !(
+        message.errorDetails === undefined ||
+        typeof message.errorDetails === 'string'
       )
     ) {
       this.handleProtocolError(handle, new Error('invalid exec result'));
@@ -807,7 +863,12 @@ export class NodeReplKernelManager {
     });
   }
 
-  private collectImage(execId: string, data: string, mimeType: string): void {
+  private collectImage(
+    execId: string,
+    data: string,
+    mimeType: string,
+    metadata?: string,
+  ): void {
     const inflight = this.inflight;
     if (!inflight || inflight.execId !== execId) {
       if (inflight) inflight.droppedStaleFrames++;
@@ -822,7 +883,12 @@ export class NodeReplKernelManager {
     }
     inflight.imageCount++;
     inflight.imageChars += data.length;
-    inflight.events.push({ type: 'image', data, mimeType });
+    inflight.events.push({
+      type: 'image',
+      data,
+      mimeType,
+      ...(metadata === undefined ? {} : { metadata }),
+    });
   }
 
   /**
@@ -934,22 +1000,54 @@ export class NodeReplKernelManager {
   }
 
   private async terminateHandle(handle: KernelHandle): Promise<void> {
+    const running =
+      handle.child.exitCode === null && handle.child.signalCode === null;
     try {
       handle.toKernel.write(encodeFrame({ type: 'shutdown' }));
+      // The kernel's pending read on this pipe keeps its process.exit()
+      // from completing until the pipe reaches EOF; without it every
+      // shutdown waits out the grace period and ends in a signal.
+      handle.toKernel.end();
     } catch {
       // The hard stop below remains authoritative.
     }
-    this.signalProcessTree(handle, false);
     let exited = await this.waitForExit(handle.child, TERMINATE_GRACE_MS);
     let hardKill = false;
+    if (!exited) {
+      this.signalProcessTree(handle, false);
+      exited = await this.waitForExit(handle.child, 500);
+    }
     if (!exited) {
       hardKill = true;
       this.signalProcessTree(handle, true);
       exited = await this.waitForExit(handle.child, TERMINATE_GRACE_MS);
+    } else if (running && !IS_WINDOWS) {
+      // Processes the session started without detaching outlive a kernel
+      // that exits before the hard stop, whether on its own or on SIGTERM
+      // they ignored. They are still in its process group, which keeps its
+      // ID while any of them lives, so stop them as the hard stop would.
+      hardKill = await this.stopLeftoverProcessGroup(handle.pid);
     }
     debugLogger.debug(
       `[node-repl] process tree termination completed (generation=${handle.generation}, pid=${handle.pid}, hardKill=${hardKill}, exited=${exited})`,
     );
+  }
+
+  private async stopLeftoverProcessGroup(pgid: number): Promise<boolean> {
+    const signalGroup = (signal: NodeJS.Signals | 0): boolean => {
+      try {
+        process.kill(-pgid, signal);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (!signalGroup('SIGTERM')) return false;
+    for (let waited = 0; waited < 500; waited += 50) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (!signalGroup(0)) return false;
+    }
+    return signalGroup('SIGKILL');
   }
 
   private signalProcessTree(handle: KernelHandle, hard: boolean): void {
@@ -1068,7 +1166,7 @@ export class NodeReplKernelManager {
     inflight: InflightExec | undefined,
     status: NodeReplExecStatus,
     startedAt: number,
-    error?: { name: string; message: string; stack?: string },
+    error?: NodeReplExecOutcome['error'],
     kernelReplaced = false,
   ): NodeReplExecOutcome {
     const outcome: NodeReplExecOutcome = {

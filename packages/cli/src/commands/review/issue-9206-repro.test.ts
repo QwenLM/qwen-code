@@ -73,7 +73,6 @@ import {
 import {
   DEADLINE_ENV,
   RESERVE_ENV,
-  TOOL_CONCURRENCY_ENV,
   readBudgetStop,
   writeRoundCapStop,
 } from './lib/deadline.js';
@@ -176,7 +175,7 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
       // and fails this suite for reasons that have nothing to do with it.
       DEADLINE_ENV,
       RESERVE_ENV,
-      TOOL_CONCURRENCY_ENV,
+      'QWEN_CODE_MAX_TOOL_CONCURRENCY',
     ]) {
       SAVED[k] = process.env[k];
     }
@@ -184,7 +183,7 @@ describe('issue #9206 — retirement must retire twice-dry chunks, or say why it
     process.env['QWEN_CODE_SESSION_ID'] = 'S1';
     delete process.env[DEADLINE_ENV];
     delete process.env[RESERVE_ENV];
-    delete process.env[TOOL_CONCURRENCY_ENV];
+    delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
   });
 

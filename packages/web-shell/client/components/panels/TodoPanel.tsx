@@ -10,6 +10,7 @@ interface TodoPanelProps {
   todos: TodoItem[];
   title?: string;
   statusItems?: readonly WebShellBottomStatusItem[];
+  hasLiveActivity?: boolean;
   onOpen?: () => void;
 }
 
@@ -28,6 +29,7 @@ export const TodoPanel = memo(function TodoPanel({
   todos,
   title,
   statusItems = [],
+  hasLiveActivity = true,
   onOpen,
 }: TodoPanelProps) {
   const { t } = useI18n();
@@ -138,7 +140,7 @@ export const TodoPanel = memo(function TodoPanel({
               className={`${styles.item} ${getStatusClass(todo.status)}`}
             >
               <span className={styles.icon} aria-hidden="true">
-                {todo.status === 'in_progress' ? (
+                {todo.status === 'in_progress' && hasLiveActivity ? (
                   <span className={styles.loadingIcon} />
                 ) : (
                   getTodoStatusIcon(todo.status)

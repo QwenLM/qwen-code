@@ -8,3 +8,4 @@
 
 # Packaging output of `npm run package`; regenerated, never committed.
 chrome-extension.zip
+chrome-extension-store.zip

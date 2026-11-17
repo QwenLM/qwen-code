@@ -24,7 +24,7 @@ const powershellInstaller = readFileSync(
 describe('CUA SDK release workflow', () => {
   it('fails closed when a driver production dispatch disables notarization', () => {
     expect(workflow).toContain(
-      '"${{ inputs.dry_run }}" != "true" && "${{ inputs.node_repl_only }}" != "true" && "${{ inputs.notarize }}" != "true"',
+      '"${{ inputs.dry_run }}" != "true" && "${{ inputs.notarize }}" != "true"',
     );
   });
 
@@ -41,9 +41,7 @@ describe('CUA SDK release workflow', () => {
 
   it('smokes the high-level ComputerUse runtime from a clean package', () => {
     expect(packageVerifier).toContain('await ComputerUse.create(');
-    expect(packageVerifier).toContain(
-      'await computer.supportsObservationRevision()',
-    );
+    expect(packageVerifier).toContain('await computer.appCall("click"');
     expect(workflow).toContain('await ComputerUse.create(');
     expect(workflow).toContain('await computer.close()');
   });

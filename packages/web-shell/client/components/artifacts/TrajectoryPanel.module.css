@@ -1,0 +1,414 @@
+.panel {
+  --traj-text-secondary: var(--secondary-foreground);
+  container-type: inline-size;
+  container-name: trajectory;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The dark theme resolves the shadcn tokens, where --secondary-foreground is
+   near white; --muted-foreground is the readable secondary ink there. */
+:global(.dark) .panel {
+  --traj-text-secondary: var(--muted-foreground);
+}
+
+.headerButton {
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--traj-text-secondary);
+  font-size: 11px;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.headerButton:hover:not(:disabled),
+.headerButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.headerButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.tableWrap {
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+}
+
+.split {
+  flex: 1 1 0;
+  min-height: 180px;
+}
+
+/* A panel's content must not hold it wider than the split gives it. */
+.split > [data-panel] {
+  min-width: 0;
+}
+
+.recordsPanel {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.records {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.detailPanel {
+  display: flex;
+  min-width: 0;
+}
+
+.splitHandle {
+  cursor: col-resize;
+  touch-action: none;
+}
+
+/* The line stays 1 px; the grab area is wider. */
+.splitHandle::after {
+  content: '';
+  position: absolute;
+  inset: 0 -3px;
+}
+
+.splitHandle:hover,
+.splitHandle[data-separator='active'],
+.splitHandle[data-separator='focus'] {
+  background: var(--ring);
+}
+
+.placeholder {
+  padding: 24px 8px;
+  text-align: center;
+  color: var(--traj-text-secondary);
+  font-size: 12px;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+}
+
+.scroll:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--ring);
+  border-radius: 6px;
+}
+
+.virtualBody {
+  position: relative;
+  width: 100%;
+}
+
+.virtualRow {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  display: flex;
+  align-items: stretch;
+}
+
+.turnHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0 6px;
+  border: none;
+  border-top: 1px solid var(--border);
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  cursor: default;
+}
+
+.turnTitle {
+  flex-shrink: 0;
+}
+
+.turnSummary {
+  margin-left: auto;
+  font-weight: 400;
+  color: var(--traj-text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.record {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 0 6px;
+  font-size: 12px;
+  cursor: default;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.record:hover {
+  background: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+
+.record[data-depth='1'] {
+  padding-left: 18px;
+}
+
+.nestMarker {
+  flex-shrink: 0;
+  color: var(--traj-text-secondary);
+}
+
+.selected {
+  box-shadow: inset 2px 0 0 var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+}
+
+.badge {
+  flex-shrink: 0;
+  min-width: 58px;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--traj-text-secondary);
+  text-transform: none;
+}
+
+.text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+}
+
+.faint {
+  color: var(--traj-text-secondary);
+  font-style: italic;
+}
+
+.rowMetrics {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--traj-text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rowMetrics {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toneError {
+  color: var(--destructive);
+}
+
+.toneMuted {
+  opacity: 0.6;
+}
+
+.foldButton,
+.foldSpacer {
+  width: 18px;
+  flex: 0 0 18px;
+}
+.foldButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--traj-text-secondary);
+  cursor: pointer;
+}
+.foldButton:hover {
+  background: var(--background);
+  color: var(--foreground);
+}
+.turnPrompt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+}
+.foldCount,
+.parentNotice {
+  flex: none;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--traj-text-secondary);
+  font-size: 10px;
+}
+.record[data-grouped='true'] {
+  padding-left: 18px;
+}
+.rowMetrics {
+  max-width: 35%;
+}
+.waterfallSlot {
+  display: none;
+}
+@container trajectory (min-width: 760px) {
+  .waterfallSlot {
+    display: flex;
+    flex: 0 0 36%;
+    height: 34px;
+  }
+  .rowMetrics {
+    flex: 0 0 110px;
+  }
+  .record[data-grouped='true'],
+  .record[data-depth='1'] {
+    padding-left: 6px;
+  }
+  .record[data-grouped='true'] .badge {
+    padding-left: 12px;
+    box-sizing: border-box;
+  }
+  .nestMarker {
+    display: none;
+  }
+}
+@container trajectory (max-width: 479px) {
+  .turnSummary {
+    display: none;
+  }
+  .parentNotice,
+  .foldCount {
+    max-width: 75px;
+  }
+  .record {
+    gap: 4px;
+  }
+  .badge {
+    min-width: 38px;
+    max-width: 65px;
+  }
+}
+
+.tableWrap {
+  position: relative;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.virtualBoundary {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+.boundary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  overflow: hidden;
+  color: var(--traj-text-secondary);
+  font-size: 12px;
+}
+
+.boundaryText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.boundaryButton {
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 3px 6px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.boundaryButton:hover:not([aria-disabled='true']),
+.boundaryButton:focus-visible {
+  background: var(--muted);
+}
+
+.boundaryButton[aria-disabled='true'] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.jumpLatest {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--foreground);
+  color: var(--background);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--foreground) 18%, transparent);
+  cursor: pointer;
+}
+
+.jumpLatest[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.updatedDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-running-fg);
+}

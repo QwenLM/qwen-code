@@ -73,6 +73,8 @@ export interface FakeDashScopeConnection {
    * Returns the response id.
    */
   functionCall(call: FakeDashScopeFunctionCall): string;
+  /** Script the next client response.create; does not simulate user input. */
+  queueFunctionCall(call: FakeDashScopeFunctionCall): void;
   /**
    * Simulate a direct spoken answer: response.created →
    * response.audio.delta (base64) → response.audio.done → response.done.
@@ -101,6 +103,8 @@ export interface FakeDashScopeServer {
   inbox: JsonObject[];
   /** Answer client `response.create` with created+done automatically. */
   autoAckResponses: boolean;
+  /** Response id automatically sent for this exact inbox request. */
+  autoResponseIdFor(request: JsonObject): string | undefined;
   waitForConnection(timeoutMs?: number): Promise<FakeDashScopeConnection>;
   waitForMessage(
     predicate: (message: JsonObject) => boolean,
@@ -156,6 +160,7 @@ export async function startFakeDashScopeServer(): Promise<FakeDashScopeServer> {
 
   const connections: FakeDashScopeConnection[] = [];
   const inbox: JsonObject[] = [];
+  const autoResponseIds = new WeakMap<JsonObject, string>();
   let eventSeq = 0;
   let itemSeq = 0;
   let responseSeq = 0;
@@ -166,6 +171,7 @@ export async function startFakeDashScopeServer(): Promise<FakeDashScopeServer> {
     connections,
     inbox,
     autoAckResponses: true,
+    autoResponseIdFor: (request) => autoResponseIds.get(request),
     waitForConnection: (timeoutMs = 15_000) => {
       if (connections.length > 0) return Promise.resolve(connections[0]);
       return new Promise<FakeDashScopeConnection>((resolve, reject) => {
@@ -261,6 +267,7 @@ export async function startFakeDashScopeServer(): Promise<FakeDashScopeServer> {
         response: { id: responseId, status },
       });
     };
+    let queuedFunctionCall: FakeDashScopeFunctionCall | undefined;
 
     const connection: FakeDashScopeConnection = {
       index: connections.length,
@@ -313,6 +320,11 @@ export async function startFakeDashScopeServer(): Promise<FakeDashScopeServer> {
         finishResponse(responseId);
         return responseId;
       },
+      queueFunctionCall: (call) => {
+        if (queuedFunctionCall)
+          throw new Error('A function call is already queued');
+        queuedFunctionCall = call;
+      },
       respondWithAudio: (pcm16) => {
         if (pcm16.byteLength === 0 || pcm16.byteLength % 2 !== 0) {
           throw new Error('respondWithAudio needs a non-empty PCM16 buffer');
@@ -345,11 +357,16 @@ export async function startFakeDashScopeServer(): Promise<FakeDashScopeServer> {
       inbox.push(parsed);
       if (parsed['type'] === 'session.update') {
         sendJson({ type: 'session.updated', session: { id: 'sess-1' } });
-      } else if (
-        parsed['type'] === 'response.create' &&
-        handle.autoAckResponses
-      ) {
-        finishResponse(beginResponse());
+      } else if (parsed['type'] === 'response.create') {
+        if (queuedFunctionCall) {
+          const call = queuedFunctionCall;
+          queuedFunctionCall = undefined;
+          connection.functionCall(call);
+        } else if (handle.autoAckResponses) {
+          const responseId = beginResponse();
+          autoResponseIds.set(parsed, responseId);
+          finishResponse(responseId);
+        }
       }
       emitter.emit('message', parsed);
     });

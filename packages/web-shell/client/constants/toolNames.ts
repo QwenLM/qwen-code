@@ -11,3 +11,8 @@ export const AGENT_TOOL_NAME = 'agent';
 export function isAgentTool(toolName: string | undefined): boolean {
   return toolName === AGENT_TOOL_NAME;
 }
+
+export function isAskUserQuestionToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+}

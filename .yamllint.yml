@@ -83,6 +83,8 @@ rules:
     check-keys: true
 
 ignore:
+  - 'pnpm-lock.yaml'
+  - 'deploy/kubernetes/chart/templates/'
   - 'thirdparty/'
   - 'third_party/'
   - 'vendor/'

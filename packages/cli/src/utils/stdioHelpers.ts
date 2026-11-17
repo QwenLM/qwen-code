@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
+
 /**
  * Utility functions for writing to stdout/stderr in CLI commands.
  *
@@ -13,6 +15,27 @@
  *
  * For debug/diagnostic logging, use `createDebugLogger()` from @qwen-code/qwen-code-core.
  */
+
+// Control characters are intentionally stripped from daemon log lines.
+/* eslint-disable no-control-regex */
+export const LOG_LINE_UNSAFE_RE =
+  /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/g;
+/* eslint-enable no-control-regex */
+
+/**
+ * Renders Store- or cause-derived free text safe for a single-line daemon
+ * stderr/log sink: terminal escape sequences and C0/C1 controls are removed
+ * first (`stripAnsiAndControl` removes them outright), then the
+ * log-line-unsafe class — `\r`, U+2028/U+2029, bidi overrides and invisible
+ * formatters — becomes a space, capped at 4096. The order is load-bearing:
+ * the second step substitutes a space per character, so an escape sequence
+ * reaching it would leave its `[2J` tail behind.
+ */
+export function sanitizeDaemonLogLine(text: string): string {
+  return stripAnsiAndControl(text)
+    .replace(LOG_LINE_UNSAFE_RE, ' ')
+    .slice(0, 4096);
+}
 
 /**
  * Writes a message to stdout with a trailing newline.

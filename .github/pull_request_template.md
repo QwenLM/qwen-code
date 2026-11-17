@@ -49,6 +49,8 @@ Non–user-visible (refactor, types, docs): commands and output below; write N/A
 - Not validated / out of scope:
 - Breaking changes / migration notes:
 
+<!-- If this PR creates or updates a design document, link both its English (.md) and Chinese (.zh-CN.md) versions. Verify that both are complete and synchronized, including decisions, constraints, acceptance criteria, and follow-up work. See docs/design/README.md. / 新增或修改设计文档时，请附上英文和中文版本链接，并确认设计决策、约束、验收标准及后续工作完整同步。详见 docs/design/README.zh-CN.md。 -->
+
 ## Linked Issues
 
 <!--

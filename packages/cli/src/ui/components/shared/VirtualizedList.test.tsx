@@ -12,7 +12,7 @@ import {
   useState,
 } from 'react';
 import type { RefObject } from 'react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
 import { Box, Text } from 'ink';
@@ -27,6 +27,7 @@ import { SettingsContext } from '../../contexts/SettingsContext.js';
 import { VirtualViewportContext } from '../../contexts/VirtualViewportContext.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { ThoughtExpandedProvider } from '../../contexts/ThoughtExpandedContext.js';
+import * as modRowHooks from '../../hooks/use-mod-row.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 import type { HistoryItem } from '../../types.js';
 
@@ -143,6 +144,31 @@ describe('<VirtualizedList />', () => {
     expect(frame).toContain('item-0');
     expect(frame).toContain('item-19');
     expect(frame.endsWith('item-19')).toBe(true);
+  });
+
+  it('stays anchored to the first row when stickToBottom is false', async () => {
+    const list = (
+      <VirtualizedList<Item>
+        data={makeItems(20)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+        stickToBottom={false}
+      />
+    );
+
+    const { lastFrame, rerender } = render(list);
+    rerender(list);
+    await act(async () => {});
+
+    // The transcript default would follow the tail after measurement; a
+    // top-anchored viewport (the /btw side answer) must not.
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('item-0');
+    expect(frame).not.toContain('item-19');
   });
 
   it('collapses a short bottom-stuck list below the container height', async () => {
@@ -1111,6 +1137,62 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
   );
 
   const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  it('offers an expanded thought to Mods only when it scrolls into view', async () => {
+    const data = thoughtHistory(1, 12, 0).slice(1);
+    const ref: RefObject<VirtualizedListRef<HistoryItem> | null> = {
+      current: null,
+    };
+    const modRow = vi.spyOn(modRowHooks, 'useModRow');
+    const tree = (fullDetail: boolean) => (
+      <SettingsContext.Provider value={settings}>
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <VirtualizedList
+            ref={ref}
+            data={data}
+            renderItem={({ item, isInViewport }) => (
+              <HistoryItemDisplay
+                item={item}
+                terminalWidth={80}
+                isPending={false}
+                fullDetail={fullDetail}
+                modSessionId="session"
+                isInViewport={isInViewport}
+              />
+            )}
+            estimatedItemHeight={(index) => (index === 0 ? 2 : 13)}
+            keyExtractor={(item) => `h-${item.id}`}
+            isStaticItem={() => true}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            containerHeight={10}
+            showScrollbar={false}
+          />
+        </KeypressProvider>
+      </SettingsContext.Provider>
+    );
+    const offeredThought = () =>
+      modRow.mock.calls.some(
+        ([, , input, visible]) => input?.component === 'Thinking' && visible,
+      );
+    try {
+      const harness = render(tree(false));
+      await tick();
+      harness.rerender(tree(true));
+      await tick();
+      await tick();
+      expect(harness.lastFrame()).toContain('answer thought line 11');
+      expect(harness.lastFrame()).not.toContain('head thought line 0');
+      expect(offeredThought()).toBe(false);
+
+      ref.current?.scrollTo(0);
+      await tick();
+      await tick();
+      expect(harness.lastFrame()).toContain('head thought line 0');
+      expect(offeredThought()).toBe(true);
+    } finally {
+      modRow.mockRestore();
+    }
+  });
 
   it('releases reserved height when a thought group collapses', async () => {
     const data = thoughtHistory(12);

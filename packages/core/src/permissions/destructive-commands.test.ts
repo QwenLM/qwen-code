@@ -11,10 +11,29 @@ import {
   extractLastUserPrompt,
   registerSessionCommit,
   clearSessionCommits,
+  amendNeedsApproval,
+  isAmendOfSessionCommit,
+  getSessionCommitGeneration,
 } from './destructive-commands.js';
-import type { Content } from '@google/genai';
+import { modelText, userText } from '../test-utils/model-fixtures.js';
 
-// ─── userMentionsDiscard ───────────────────────────────────────────────────
+beforeEach(() => {
+  clearSessionCommits();
+});
+
+/** Asserts a block, and that the reason names `reasonPart` when given. */
+function expectBlocked(cmd: string, prompt: string, reasonPart?: string) {
+  const result = isDestructiveCommand(cmd, prompt);
+  expect(result).not.toBeNull();
+  expect(result!.blocked).toBe(true);
+  if (reasonPart !== undefined) expect(result!.reason).toContain(reasonPart);
+}
+
+function expectAllowed(commands: string[], prompt: string) {
+  for (const cmd of commands) {
+    expect(isDestructiveCommand(cmd, prompt)).toBeNull();
+  }
+}
 
 describe('userMentionsDiscard', () => {
   it('returns true for English discard keywords', () => {
@@ -36,8 +55,7 @@ describe('userMentionsDiscard', () => {
   });
 
   it('returns true for Chinese discard keywords', () => {
-    const prompts = ['丢弃所有修改', '清除工作区', '重置到初始状态'];
-    for (const prompt of prompts) {
+    for (const prompt of ['丢弃所有修改', '清除工作区', '重置到初始状态']) {
       expect(userMentionsDiscard(prompt)).toBe(true);
     }
   });
@@ -56,106 +74,61 @@ describe('userMentionsDiscard', () => {
   });
 });
 
-// ─── extractLastUserPrompt ─────────────────────────────────────────────────
-
 describe('extractLastUserPrompt', () => {
   it('returns undefined for empty messages', () => {
     expect(extractLastUserPrompt([])).toBeUndefined();
   });
 
   it('extracts text from the last user message', () => {
-    const messages: Content[] = [
-      { role: 'user', parts: [{ text: 'first message' }] },
-      { role: 'model', parts: [{ text: 'model response' }] },
-      { role: 'user', parts: [{ text: 'second message' }] },
+    const messages = [
+      userText('first message'),
+      modelText('model response'),
+      userText('second message'),
     ];
     expect(extractLastUserPrompt(messages)).toBe('second message');
   });
 
   it('skips model and function messages', () => {
-    const messages: Content[] = [
-      { role: 'model', parts: [{ text: 'model only' }] },
-      { role: 'user', parts: [{ text: 'user text' }] },
-      { role: 'model', parts: [{ text: 'another model' }] },
+    const messages = [
+      modelText('model only'),
+      userText('user text'),
+      modelText('another model'),
     ];
     expect(extractLastUserPrompt(messages)).toBe('user text');
   });
 
   it('returns undefined when no user messages exist', () => {
-    const messages: Content[] = [
-      { role: 'model', parts: [{ text: 'model only' }] },
-    ];
-    expect(extractLastUserPrompt(messages)).toBeUndefined();
+    expect(extractLastUserPrompt([modelText('model only')])).toBeUndefined();
   });
 });
 
-// ─── isDestructiveCommand — git patterns ───────────────────────────────────
-
 describe('isDestructiveCommand — git patterns', () => {
-  beforeEach(() => {
-    clearSessionCommits();
-  });
+  it.each<[string, string, string?]>([
+    ['git reset --hard', 'fix the bug', 'git reset --hard'],
+    ['git checkout -- .', 'fix the bug'],
+    ['git clean -fd', 'remove files'],
+    ['git clean -f', 'remove files'],
+    ['git clean -fdx', 'remove all'],
+    ['git stash drop', 'remove stash'],
+  ])('blocks %s', expectBlocked);
 
-  it('blocks git reset --hard', () => {
-    const result = isDestructiveCommand('git reset --hard', 'fix the bug');
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-    expect(result!.reason).toContain('git reset --hard');
-  });
-
-  it('blocks git checkout -- .', () => {
-    const result = isDestructiveCommand('git checkout -- .', 'fix the bug');
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
-
-  it('blocks git clean -fd', () => {
-    const result = isDestructiveCommand('git clean -fd', 'remove files');
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
-
-  it('blocks git clean -f', () => {
-    const result = isDestructiveCommand('git clean -f', 'remove files');
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
-
-  it('blocks git clean -fdx', () => {
-    const result = isDestructiveCommand('git clean -fdx', 'remove all');
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
-
-  it('blocks git stash drop', () => {
-    const result = isDestructiveCommand('git stash drop', 'remove stash');
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
-
-  it('allows git reset --hard when user mentions discard', () => {
-    const result = isDestructiveCommand(
+  it.each([
+    [
+      'allows git reset --hard when user mentions discard',
       'git reset --hard',
       'discard all local changes and reset',
-    );
-    expect(result).toBeNull();
-  });
-
-  it('allows git clean -fd when user mentions wipe', () => {
-    const result = isDestructiveCommand(
+    ],
+    [
+      'allows git clean -fd when user mentions wipe',
       'git clean -fd',
       'wipe the working tree clean',
-    );
-    expect(result).toBeNull();
-  });
-
-  it('allows git stash drop when user mentions discard', () => {
-    const result = isDestructiveCommand(
+    ],
+    [
+      'allows git stash drop when user mentions discard',
       'git stash drop',
       'discard all stashes',
-    );
-    expect(result).toBeNull();
-  });
+    ],
+  ])('%s', (_title, cmd, prompt) => expectAllowed([cmd], prompt));
 
   it('allows safe git commands', () => {
     const safeCommands = [
@@ -172,87 +145,31 @@ describe('isDestructiveCommand — git patterns', () => {
       'git stash pop',
       'git stash list',
     ];
-    for (const cmd of safeCommands) {
-      const result = isDestructiveCommand(cmd, 'do stuff');
-      expect(result).toBeNull();
-    }
+    expectAllowed(safeCommands, 'do stuff');
   });
 });
-
-// ─── isDestructiveCommand — shell indirection bypass ───────────────────────
 
 describe('isDestructiveCommand — shell indirection', () => {
-  beforeEach(() => {
-    clearSessionCommits();
-  });
-
-  it('blocks bash -c "git reset --hard"', () => {
-    const result = isDestructiveCommand(
-      'bash -c "git reset --hard"',
-      'fix something',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
-
-  it("blocks sh -c 'git clean -fd'", () => {
-    const result = isDestructiveCommand(
-      "sh -c 'git clean -fd'",
-      'remove untracked files',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
-
-  it('blocks zsh -c "git stash drop"', () => {
-    const result = isDestructiveCommand('zsh -c "git stash drop"', 'do stuff');
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
+  it.each([
+    ['bash -c "git reset --hard"', 'fix something'],
+    ["sh -c 'git clean -fd'", 'remove untracked files'],
+    ['zsh -c "git stash drop"', 'do stuff'],
+  ])('blocks %s', (cmd, prompt) => expectBlocked(cmd, prompt));
 
   it('allows bash -c with safe commands', () => {
-    const result = isDestructiveCommand(
-      'bash -c "git status && git log"',
-      'check status',
-    );
-    expect(result).toBeNull();
+    expectAllowed(['bash -c "git status && git log"'], 'check status');
   });
 });
 
-// ─── isDestructiveCommand — IaC patterns ──────────────────────────────────
-
 describe('isDestructiveCommand — IaC patterns', () => {
-  it('blocks terraform destroy', () => {
-    const result = isDestructiveCommand(
-      'terraform destroy',
-      'update infrastructure',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-    expect(result!.reason).toContain('terraform');
-  });
-
-  it('blocks pulumi destroy', () => {
-    const result = isDestructiveCommand(
-      'pulumi destroy',
-      'update infrastructure',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
-
-  it('blocks cdk destroy', () => {
-    const result = isDestructiveCommand('cdk destroy', 'update infra');
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-  });
+  it.each<[string, string, string?]>([
+    ['terraform destroy', 'update infrastructure', 'terraform'],
+    ['pulumi destroy', 'update infrastructure'],
+    ['cdk destroy', 'update infra'],
+  ])('blocks %s', expectBlocked);
 
   it('allows terraform destroy when user explicitly requests it', () => {
-    const result = isDestructiveCommand(
-      'terraform destroy',
-      'terraform destroy the staging stack',
-    );
-    expect(result).toBeNull();
+    expectAllowed(['terraform destroy'], 'terraform destroy the staging stack');
   });
 
   it('allows terraform apply and plan', () => {
@@ -263,69 +180,94 @@ describe('isDestructiveCommand — IaC patterns', () => {
       'pulumi up',
       'cdk deploy',
     ];
-    for (const cmd of safeCommands) {
-      const result = isDestructiveCommand(cmd, 'deploy');
-      expect(result).toBeNull();
-    }
+    expectAllowed(safeCommands, 'deploy');
   });
 });
 
-// ─── isDestructiveCommand — git commit --amend ────────────────────────────
-
 describe('isDestructiveCommand — git commit --amend', () => {
-  beforeEach(() => {
-    clearSessionCommits();
-  });
-
-  it('blocks git commit --amend when no session commits registered', () => {
-    const result = isDestructiveCommand(
-      'git commit --amend --no-edit',
-      'amend the commit',
-    );
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
-    expect(result!.reason).toContain('amend');
+  it('no longer hard-blocks an amend; it routes to approval', () => {
+    // #13570: the block had no escape hatch and fired ahead of the user's own
+    // ask rule. The mention now asks instead.
+    expectAllowed(['git commit --amend --no-edit'], 'amend the commit');
+    expect(amendNeedsApproval('git commit --amend --no-edit')).toBe(true);
   });
 
   it('allows git commit (without --amend)', () => {
-    const result = isDestructiveCommand(
-      'git commit -m "fix"',
-      'commit changes',
-    );
-    expect(result).toBeNull();
+    expectAllowed(['git commit -m "fix"'], 'commit changes');
+    expect(amendNeedsApproval('git commit -m "fix"')).toBe(false);
+  });
+
+  it.each([
+    'git commit --amend',
+    'git commit --amend --no-edit',
+    "bash -c 'git commit --amend'",
+    '/usr/bin/git commit --amend',
+    'git.exe commit --amend',
+    'git checkout HEAD~1 && git commit --amend',
+    // git accepts any unambiguous prefix of `--amend` from `--am` on.
+    'git commit --am',
+    'git commit --amen',
+    'GIT COMMIT --AMEND',
+    // Quote-split spellings: the raw text never contains `commit`, so only the
+    // quote-removed reading sees these. bash runs every one as an amend.
+    "git com''mit --amend",
+    'git "commit" --amend',
+    'git com""mit --amend',
+    "git commit --$'amend'",
+  ])('asks for %s', (command) => {
+    expect(amendNeedsApproval(command)).toBe(true);
+  });
+
+  it.each([
+    // The issue's own reproductions: text that only mentions the phrase must
+    // not hard-block. It still asks; inertness is #16604.
+    "grep -rn 'git commit --amend' docs/",
+    "echo 'the guard blocks git commit --amend'",
+    'node -e "console.log(\'git commit --amend\')"',
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    'git commit -m "docs: explain git commit --amend"',
+  ])('asks rather than blocks for inert text: %s', (command) => {
+    expectAllowed([command], 'look into the amend guard');
+    expect(amendNeedsApproval(command)).toBe(true);
+  });
+
+  it.each([
+    'git status',
+    'git log --oneline',
+    'git commit -m "fix"',
+    'git push origin main',
+    'npm run build',
+    "awk '{print $1}' data.csv",
+    'git push origin $BRANCH',
+    'echo $HOME; git commit -m x',
+    'git commit -am "feat: x"',
+  ])('does not ask for %s', (command) => {
+    expect(amendNeedsApproval(command)).toBe(false);
   });
 });
-
-// ─── session commit tracking ──────────────────────────────────────────────
 
 describe('session commit tracking', () => {
-  beforeEach(() => {
-    clearSessionCommits();
-  });
-
-  it('registerSessionCommit and clearSessionCommits work', () => {
+  it('clearSessionCommits empties the registry and bumps the generation', () => {
+    // A no-throw smoke test asserted nothing: the registry has no reader that
+    // takes a SHA, so observe it through the exported cwd reader (a real repo)
+    // and through the generation counter a deferred writer checks.
     registerSessionCommit('abc123');
-    // Can't test isAmendOfSessionCommit directly without a real git repo,
-    // but we can verify clearSessionCommits doesn't throw
+    const generation = getSessionCommitGeneration();
+    expect(isAmendOfSessionCommit(process.cwd())).toBe(false);
     clearSessionCommits();
+    expect(getSessionCommitGeneration()).toBe(generation + 1);
+    expect(isAmendOfSessionCommit(process.cwd())).toBe(false);
   });
 
-  it('isAmendOfSessionCommit returns false with no session commits', () => {
-    // isAmendOfSessionCommit is not exported, but we test it indirectly
-    // through isDestructiveCommand
-    const result = isDestructiveCommand('git commit --amend', 'amend commit');
-    expect(result).not.toBeNull();
-    expect(result!.blocked).toBe(true);
+  it('asks for an amend even when this session made the commit', () => {
+    // The registry resolved its target from the decision-time cwd, which
+    // wrappers and history moves disagree with, so it no longer waives the ask.
+    registerSessionCommit('abc123');
+    expect(amendNeedsApproval('git commit --amend')).toBe(true);
   });
 });
 
-// ─── non-shell commands ──────────────────────────────────────────────────
-
 describe('isDestructiveCommand — non-destructive commands', () => {
-  beforeEach(() => {
-    clearSessionCommits();
-  });
-
   it('returns null for non-git, non-IaC commands', () => {
     const commands = [
       'npm install',
@@ -335,9 +277,6 @@ describe('isDestructiveCommand — non-destructive commands', () => {
       'echo "hello"',
       'mkdir -p src',
     ];
-    for (const cmd of commands) {
-      const result = isDestructiveCommand(cmd, 'do stuff');
-      expect(result).toBeNull();
-    }
+    expectAllowed(commands, 'do stuff');
   });
 });

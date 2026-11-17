@@ -38,7 +38,7 @@ export const useFolderTrust = (
       const cwd = process.cwd();
       let trustLevel: TrustLevel;
 
-      const wasTrusted = isTrusted ?? true;
+      const wasTrusted = isTrusted ?? false;
 
       switch (choice) {
         case FolderTrustChoice.TRUST_FOLDER:

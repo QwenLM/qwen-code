@@ -335,13 +335,6 @@ describe('relaxSchemaForFunctionCalling', () => {
     ).toBe(false);
   });
 
-  it('keeps additionalProperties:false when there are no properties to promote', () => {
-    const empty = { type: 'object', additionalProperties: false };
-    expect(relaxSchemaForFunctionCalling(empty)['additionalProperties']).toBe(
-      false,
-    );
-  });
-
   it('relaxes nested object levels independently', () => {
     const nested = {
       type: 'object',
@@ -496,6 +489,59 @@ describe('relaxSchemaForFunctionCalling', () => {
           },
         },
         disabled: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+      },
+    });
+  });
+
+  it('removes grammar-hostile empty objects and repetition limits', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        empty: {
+          type: 'object',
+          properties: {},
+          additionalProperties: false,
+        },
+        closed: { type: 'object', additionalProperties: false },
+        typelessClosed: { additionalProperties: false },
+        nullableClosed: {
+          type: ['object', 'null'],
+          additionalProperties: false,
+        },
+        bounded: { type: 'string', maxLength: 1998 },
+        long: { type: 'string', maxLength: 1999 },
+        padded: { type: 'string', minLength: 1999 },
+        many: {
+          type: 'array',
+          maxItems: 1999,
+          items: { type: 'string' },
+        },
+        largeBatch: {
+          type: 'array',
+          minItems: 1999,
+          items: { type: 'string' },
+        },
+      },
+    };
+
+    expect(relaxSchemaForFunctionCalling(schema, true)).toEqual({
+      type: 'object',
+      properties: {
+        empty: { type: 'object' },
+        closed: { type: 'object' },
+        typelessClosed: {},
+        nullableClosed: { type: ['object', 'null'] },
+        bounded: { type: 'string', maxLength: 1998 },
+        long: { type: 'string' },
+        padded: { type: 'string' },
+        many: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+        largeBatch: {
           type: 'array',
           items: { type: 'string' },
         },

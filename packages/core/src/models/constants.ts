@@ -5,12 +5,25 @@
  */
 
 import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
+import { QWEN_SUBSCRIPTION_MODEL } from '../qwen/oauth-config.js';
 
 import type { ModelConfig } from './types.js';
 
 type AuthType = import('../core/contentGenerator.js').AuthType;
 type ContentGeneratorConfig =
   import('../core/contentGenerator.js').ContentGeneratorConfig;
+
+/**
+ * The Kimi K3 generation's 1M window, matched across every id shape it is
+ * served under: Moonshot's `kimi-k3` / `kimi-k3.1-pro`, and Kimi Code's bare
+ * aliases (`k3.1-pro`, `k3.1-pro-highspeed`). The curated window table and the
+ * catalog correction both read this one pattern, so a new sub-version needs no
+ * second entry in either place.
+ *
+ * `k3-256k` shares the prefix but not the window: it serves 262,144 tokens,
+ * so it is excluded here and named by its own row in the curated table.
+ */
+export const KIMI_K3_GENERATION = /^(?:kimi-)?k3(?!-256k)/;
 
 /**
  * Field keys for model-scoped generation config.
@@ -27,6 +40,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'retryMaxDelayMs',
   'retryErrorCodes',
   'enableCacheControl',
+  'enableRequestMetadata',
   'forceGlobalCacheScope',
   'cacheRetention',
   'cacheRetentionByBlock',
@@ -76,6 +90,11 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: ['OPENAI_BASE_URL'],
     model: ['OPENAI_MODEL', 'QWEN_MODEL'],
   },
+  'openai-responses': {
+    apiKey: ['OPENAI_API_KEY'],
+    baseUrl: ['OPENAI_BASE_URL'],
+    model: ['OPENAI_MODEL'],
+  },
   anthropic: {
     apiKey: ['ANTHROPIC_API_KEY'],
     baseUrl: ['ANTHROPIC_BASE_URL'],
@@ -96,11 +115,17 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: [],
   },
+  'qwen-subscription': {
+    apiKey: [],
+    baseUrl: [],
+    model: [],
+  },
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
   openai: MAINLINE_CODER_MODEL,
   'qwen-oauth': DEFAULT_QWEN_MODEL,
+  'qwen-subscription': QWEN_SUBSCRIPTION_MODEL,
 } as Partial<Record<AuthType, string>>;
 
 /**

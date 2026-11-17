@@ -130,6 +130,14 @@ export function createExtensionGitClient(
     // os.devNull's win32 value ('\\\\.\\nul') is rejected as
     // "fatal: unable to access '\\.\nul': Invalid argument".
     GIT_CONFIG_GLOBAL: '/dev/null',
+    // Never let Git ask for credentials interactively. It reads that prompt
+    // from /dev/tty, which the Ink TUI already holds in raw mode, so keystrokes
+    // reach Ink and never Git: the prompt can be neither answered nor
+    // dismissed, and nothing upstream cancels it. The /dev/null global config
+    // above also drops the user's credential helper, so there is no
+    // non-interactive fallback left. Without this, an extension whose Git
+    // source needs authentication hangs every startup (#13447).
+    GIT_TERMINAL_PROMPT: '0',
   };
   for (const key of [
     'PATH',

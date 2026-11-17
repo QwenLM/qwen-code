@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -15,7 +17,120 @@ import {
   findSupplementaryLicenseFiles,
   getFallbackLicenseText,
   normalizeRepositoryUrl,
+  runNoticeGeneration,
 } from './generate-notices.js';
+
+describe('ExcelJS browser source notices', () => {
+  it('uses installed dependencies and preserves their complete licenses', async () => {
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await runNoticeGeneration({});
+      expect(write).toHaveBeenCalledTimes(1);
+      const notices = String(write.mock.calls[0][1]);
+      for (const key of [
+        'exceljs@4.4.0',
+        'uuid@11.1.1',
+        'jszip@3.10.2',
+        'buffer@5.2.1',
+        'inherits@2.0.3',
+      ]) {
+        expect(notices).toContain(`\n${key}\n`);
+      }
+      expect(notices).not.toContain('\nuuid@8.3.2\n');
+      expect(notices).not.toContain('\njszip@3.10.1\n');
+      expect(notices).toContain('Copyright (c) 2012 Raynos.');
+      expect(notices).toContain(
+        await fs.readFile(
+          new URL('./licenses/saxes-5.0.1.txt', import.meta.url),
+          'utf-8',
+        ),
+      );
+      const pakoNotice = notices
+        .split('\npako@1.0.11\n')[1]
+        .split(
+          '============================================================\n',
+        )[0];
+      expect(pakoNotice).toContain(
+        (
+          await fs.readFile(
+            new URL('./licenses/pako-1.0.11-zlib.txt', import.meta.url),
+            'utf-8',
+          )
+        ).trim(),
+      );
+      expect(pakoNotice).toContain("This software is provided 'as-is'");
+      expect(pakoNotice).toContain('1995-2013 Jean-loup Gailly and Mark Adler');
+      expect(pakoNotice).toContain(
+        '2014-2017 Vitaly Puzrin and Andrey Tupitsin',
+      );
+      expect(pakoNotice).toContain(
+        '3. This notice may not be removed or altered from any source distribution.',
+      );
+      expect(notices).not.toContain('License text not found.');
+      const noticeCount = [
+        ...notices.matchAll(/^={60}\n(?=[^\n]+@[^\n]+\n\()/gm),
+      ].length;
+      expect(log).toHaveBeenCalledWith(`Total dependencies: ${noticeCount}`);
+    } finally {
+      write.mockRestore();
+      log.mockRestore();
+    }
+  });
+});
+
+describe('runNoticeGeneration', () => {
+  it('skips generation during dependency-only worktree setup', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    // Stubbed no-op so a regression that drops the early return rewrites the
+    // tracked NOTICES.txt instead of merely failing this assertion.
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+
+    try {
+      await runNoticeGeneration({
+        npm_lifecycle_event: 'generate:notices',
+        QWEN_SKIP_NOTICE_GENERATION: '1',
+      });
+
+      expect(log).toHaveBeenCalledWith(
+        'Skipping VS Code notice generation during worktree bootstrap.',
+      );
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+      write.mockRestore();
+    }
+  });
+
+  it('still generates notices when the skip flag is absent', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Empty dependency graph: main() reaches the write without touching the
+    // real node_modules, and a failing main() cannot process.exit the worker.
+    const read = vi.spyOn(fs, 'readFile').mockImplementation(async (file) => {
+      const name = String(file);
+      if (name.endsWith('package.json')) {
+        return JSON.stringify({ dependencies: {} });
+      }
+      throw Object.assign(new Error(`ENOENT: ${name}`), { code: 'ENOENT' });
+    });
+    const write = vi.spyOn(fs, 'writeFile').mockImplementation(async () => {});
+
+    try {
+      await runNoticeGeneration({ npm_lifecycle_event: 'generate:notices' });
+
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(String(write.mock.calls[0]?.[1])).toContain(
+        'third-party software notices and license terms',
+      );
+    } finally {
+      log.mockRestore();
+      error.mockRestore();
+      read.mockRestore();
+      write.mockRestore();
+    }
+  });
+});
 
 describe('findLicenseFile', () => {
   let packageDir;
@@ -38,6 +153,16 @@ describe('findLicenseFile', () => {
     const resolved = await findLicenseFile(packageDir);
 
     expect(resolved).toBe(path.join(packageDir, 'License'));
+  });
+
+  it('finds JSZip’s LICENSE.markdown attribution', async () => {
+    await fs.writeFile(
+      path.join(packageDir, 'LICENSE.markdown'),
+      'JSZip license',
+    );
+    expect(await findLicenseFile(packageDir)).toBe(
+      path.join(packageDir, 'LICENSE.markdown'),
+    );
   });
 
   it('prefers LICENSE over other variants', async () => {
@@ -65,24 +190,55 @@ describe('findLicenseFile', () => {
 });
 
 describe('collectDependencies', () => {
-  it('resolves workspace dependencies from the linked package location', () => {
-    const packageLock = {
-      packages: {
-        'packages/companion/node_modules/@qwen-code/core': {
-          link: true,
-          resolved: 'packages/core',
-        },
-        'packages/core': { dependencies: { nested: '1.0.0' } },
-        'packages/core/node_modules/nested': { version: '1.0.0' },
-      },
-    };
+  let root;
+
+  beforeEach(async () => {
+    // realpath: on macOS the temp dir sits behind /var -> /private/var, and
+    // the traversal reports real directories.
+    root = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'notices-tree-')),
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  async function writePackage(dir, manifest) {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, 'package.json'),
+      JSON.stringify(manifest),
+    );
+  }
+
+  it('follows a workspace link to its dependencies without listing it', async () => {
+    const companion = path.join(root, 'packages', 'companion');
+    const core = path.join(root, 'packages', 'core');
+    await writePackage(companion, { name: 'companion' });
+    await writePackage(core, {
+      name: '@qwen-code/core',
+      version: '0.1.0',
+      dependencies: { nested: '^1.0.0' },
+    });
+    await writePackage(path.join(core, 'node_modules', 'nested'), {
+      name: 'nested',
+      version: '1.0.0',
+    });
+    await fs.mkdir(path.join(root, 'node_modules', '@qwen-code'), {
+      recursive: true,
+    });
+    await fs.symlink(
+      core,
+      path.join(root, 'node_modules', '@qwen-code', 'core'),
+      'junction',
+    );
     const dependencies = new Map();
 
-    collectDependencies(
+    await collectDependencies(
       '@qwen-code/core',
-      packageLock,
+      companion,
       dependencies,
-      'packages/companion',
       new Set(),
     );
 
@@ -90,9 +246,141 @@ describe('collectDependencies', () => {
       {
         name: 'nested',
         version: '1.0.0',
-        resolvedKey: 'packages/core/node_modules/nested',
+        dir: path.join(core, 'node_modules', 'nested'),
       },
     ]);
+  });
+
+  it('excludes only ExcelJS Node-only branches while retaining other consumers', async () => {
+    await writePackage(path.join(root, 'node_modules', 'exceljs'), {
+      name: 'exceljs',
+      version: '4.4.0',
+      dependencies: { archiver: '*', unzipper: '*', tmp: '*', jszip: '*' },
+    });
+    for (const name of ['archiver', 'unzipper', 'tmp', 'jszip']) {
+      await writePackage(path.join(root, 'node_modules', name), {
+        name,
+        version: '1.0.0',
+      });
+    }
+    const dependencies = new Map();
+    await collectDependencies('exceljs', root, dependencies, new Set());
+    expect([...dependencies.keys()]).toEqual(['exceljs@4.4.0', 'jszip@1.0.0']);
+    await collectDependencies('archiver', root, dependencies, new Set());
+    expect(dependencies.has('archiver@1.0.0')).toBe(true);
+  });
+
+  it('resolves each dependency from the nearest node_modules above it', async () => {
+    const companion = path.join(root, 'packages', 'companion');
+    await writePackage(companion, { name: 'companion' });
+    await writePackage(path.join(root, 'node_modules', 'hoisted'), {
+      name: 'hoisted',
+      version: '2.0.0',
+      dependencies: { leaf: '^3.0.0' },
+    });
+    // The nested copy wins over the hoisted one for the package that nests it.
+    await writePackage(
+      path.join(root, 'node_modules', 'hoisted', 'node_modules', 'leaf'),
+      { name: 'leaf', version: '3.1.0' },
+    );
+    await writePackage(path.join(root, 'node_modules', 'leaf'), {
+      name: 'leaf',
+      version: '4.0.0',
+    });
+    const dependencies = new Map();
+
+    await collectDependencies('hoisted', companion, dependencies, new Set());
+
+    expect([...dependencies.keys()]).toEqual(['hoisted@2.0.0', 'leaf@3.1.0']);
+  });
+
+  it('rejects missing bundled seeds without overwriting committed attribution', async () => {
+    await writePackage(root, { bundledDevDependencies: ['missing-package'] });
+    const output = path.join(root, 'NOTICES.txt');
+    await fs.writeFile(output, 'EXISTING ATTRIBUTION');
+    await expect(
+      runNoticeGeneration({}, { packageDir: root, bundledOnly: true }),
+    ).rejects.toThrow('missing-package');
+    expect(await fs.readFile(output, 'utf8')).toBe('EXISTING ATTRIBUTION');
+  });
+
+  it('includes declared bundled dev dependencies and their notices, excluding other dev tools', async () => {
+    const workspace = path.join(root, 'packages', 'web-shell');
+    await writePackage(workspace, {
+      name: '@qwen-code/web-shell',
+      version: '1.0.0',
+      bundledDevDependencies: ['bundled'],
+      dependencies: { ordinary: '1.0.0' },
+      devDependencies: { bundled: '1.0.0', unused: '1.0.0' },
+    });
+    await fs.mkdir(path.join(root, 'node_modules', '@qwen-code'), {
+      recursive: true,
+    });
+    await fs.symlink(
+      workspace,
+      path.join(root, 'node_modules', '@qwen-code', 'web-shell'),
+      'junction',
+    );
+    for (const name of ['ordinary', 'unused', 'extra'])
+      await writePackage(path.join(root, 'node_modules', name), {
+        name,
+        version: '1.0.0',
+        license: 'MIT',
+      });
+    const bundled = path.join(root, 'node_modules', 'bundled');
+    await writePackage(bundled, {
+      name: 'bundled',
+      version: '1.0.0',
+      dependencies: { leaf: '1.0.0' },
+      bundledDevDependencies: ['extra'],
+    });
+    await fs.writeFile(path.join(bundled, 'LICENSE'), 'BUNDLED LICENSE');
+    await fs.writeFile(path.join(bundled, 'NOTICE.md'), 'DERIVED CODE CREDIT');
+    await writePackage(path.join(root, 'node_modules', 'leaf'), {
+      name: 'leaf',
+      version: '1.0.0',
+      license: 'MIT',
+    });
+    const dependencies = new Map();
+    await collectDependencies(
+      '@qwen-code/web-shell',
+      root,
+      dependencies,
+      new Set(),
+    );
+    expect([...dependencies.keys()]).toEqual([
+      'ordinary@1.0.0',
+      'bundled@1.0.0',
+      'leaf@1.0.0',
+    ]);
+    await runNoticeGeneration({}, { packageDir: workspace, bundledOnly: true });
+    const notice = await fs.readFile(
+      path.join(workspace, 'NOTICES.txt'),
+      'utf8',
+    );
+    expect(notice).toContain('bundled@1.0.0');
+    expect(notice).toContain('BUNDLED LICENSE');
+    expect(notice).toContain('DERIVED CODE CREDIT');
+    expect(notice).toContain('leaf@1.0.0');
+    expect(notice).not.toContain('unused');
+    expect(notice).not.toContain('ordinary');
+    await fs.unlink(path.join(workspace, 'NOTICES.txt'));
+    const result = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL('./generate-notices.js', import.meta.url)),
+        '--bundled',
+        workspace,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_SKIP_NOTICE_GENERATION: '' },
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(await fs.readFile(path.join(workspace, 'NOTICES.txt'), 'utf8')).toBe(
+      notice,
+    );
   });
 });
 

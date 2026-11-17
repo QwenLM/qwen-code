@@ -340,11 +340,17 @@ export function SubAgentPanel({
           }}
         >
           <StatusIcon status={displayStatus} />
-          <span className={chromeStyles.lineName}>
+          <span
+            className={chromeStyles.lineName}
+            {...(tool.agentPath ? { title: tool.agentPath } : {})}
+          >
             {localizeAgentTypeName(agentType, t)}:
           </span>
           {description && (
             <span className={styles.desc}>{truncateText(description, 50)}</span>
+          )}
+          {tool.backgroundResultPending && (
+            <span className={styles.meta}>· {t('background.pending')}</span>
           )}
           {isComplete && subToolCount > 0 && (
             <span className={styles.meta}>

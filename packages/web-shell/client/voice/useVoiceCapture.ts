@@ -11,6 +11,18 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
+import {
+  bearerSubprotocol,
+  describeMicError,
+  floatToPcm16,
+  toVoiceWebSocketUrl,
+  WS_AUTH_SUBPROTOCOL,
+} from './capture-utils';
+
+// Re-exported: existing callers and tests import it from this module.
+export { toVoiceWebSocketUrl };
 
 /**
  * Captures 16 kHz mono PCM in the browser and streams it to the immutable
@@ -55,6 +67,14 @@ export interface UseVoiceCaptureReturn {
   start: () => void;
   stop: () => void;
   abort: () => void;
+  /**
+   * Stop an active capture and resolve with its final transcript once the
+   * server finalizes ('' when idle, empty, failed, or aborted). While a flush
+   * is pending the final transcript is delivered only through this promise —
+   * `onFinal` is suppressed so the caller owns insertion (e.g. a send that
+   * must include the dictation).
+   */
+  flush: () => Promise<string>;
 }
 
 const SAMPLE_RATE = 16_000;
@@ -63,80 +83,6 @@ const START_TIMEOUT_MS = 60_000;
 const TRANSCRIPTION_TIMEOUT_MS = 60_000;
 const MAX_BUFFERED_PCM_BYTES =
   SAMPLE_RATE * Int16Array.BYTES_PER_ELEMENT * (START_TIMEOUT_MS / 1000);
-
-export function toVoiceWebSocketUrl(
-  baseUrl: string,
-  streamPath: string,
-): string {
-  const base = new URL(baseUrl);
-  const basePath = base.pathname.replace(/\/?$/, '/');
-  const url = new URL(
-    streamPath.replace(/^\/+/, ''),
-    `${base.origin}${basePath}`,
-  );
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  return url.toString();
-}
-
-// Browsers cannot set Authorization on a WebSocket. The daemon decodes this
-// bearer subprotocol during the upgrade; keep the prefix in sync with it.
-const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';
-// Non-secret marker offered alongside the bearer subprotocol. The daemon
-// completes the handshake by selecting THIS (never echoing the secret), which
-// also satisfies WS clients that require the server to pick an offered
-// subprotocol when any were requested. Must not start with the bearer prefix.
-const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
-
-function bearerSubprotocol(token: string): string {
-  const bytes = new TextEncoder().encode(token);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  const b64 = btoa(binary)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
-  return `${WS_BEARER_SUBPROTOCOL_PREFIX}${b64}`;
-}
-
-function describeMicError(err: unknown): string {
-  const name = (err as { name?: string } | undefined)?.name;
-  switch (name) {
-    case 'NotAllowedError':
-    case 'SecurityError':
-      return 'Microphone blocked. Click the camera/lock icon in the address bar to allow the mic for this site, and enable your browser under System Settings → Privacy → Microphone, then retry.';
-    case 'NotFoundError':
-    case 'DevicesNotFoundError':
-    case 'OverconstrainedError':
-      return 'No microphone found. Connect one and retry.';
-    case 'NotReadableError':
-    case 'TrackStartError':
-      return 'Microphone is in use by another app. Close it and retry.';
-    default:
-      return err instanceof Error ? err.message : String(err);
-  }
-}
-
-/** Float32 [-1,1] frame → Int16 PCM + RMS level. */
-function floatToPcm16(input: Float32Array): {
-  pcm: ArrayBuffer;
-  level: number;
-} {
-  const pcm = new Int16Array(input.length);
-  let sumSquares = 0;
-  for (let i = 0; i < input.length; i++) {
-    let s = input[i];
-    if (s > 1) s = 1;
-    else if (s < -1) s = -1;
-    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-    sumSquares += s * s;
-  }
-  return {
-    pcm: pcm.buffer,
-    level: input.length ? Math.sqrt(sumSquares / input.length) : 0,
-  };
-}
 
 interface CaptureResources {
   ws?: WebSocket;
@@ -160,6 +106,12 @@ interface CaptureSnapshot {
   onUnexpectedClose?: (event: VoiceUnexpectedClose) => void;
 }
 
+interface PendingFlush {
+  promise: Promise<string>;
+  resolve: (text: string) => void;
+  timeout?: ReturnType<typeof setTimeout>;
+}
+
 export function useVoiceCapture({
   baseUrl,
   token,
@@ -172,6 +124,7 @@ export function useVoiceCapture({
   const [interimText, setInterimText] = useState('');
   const [audioLevel, setAudioLevel] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string>();
+  const availability = useDaemonAvailabilityController();
 
   const resourcesRef = useRef<CaptureResources>({});
   const mountedRef = useRef(true);
@@ -179,6 +132,7 @@ export function useVoiceCapture({
   const stopWhenConnectedRef = useRef(false);
   const statusRef = useRef<VoiceCaptureStatus>('idle');
   const snapshotRef = useRef<CaptureSnapshot | undefined>(undefined);
+  const flushRef = useRef<PendingFlush | null>(null);
 
   const applyStatus = useCallback((next: VoiceCaptureStatus) => {
     statusRef.current = next;
@@ -190,6 +144,14 @@ export function useVoiceCapture({
     if (!resources.transcribeTimeout) return;
     clearTimeout(resources.transcribeTimeout);
     resources.transcribeTimeout = undefined;
+  }, []);
+
+  const settleFlush = useCallback((text: string) => {
+    const pending = flushRef.current;
+    if (!pending) return;
+    flushRef.current = null;
+    if (pending.timeout) clearTimeout(pending.timeout);
+    pending.resolve(text);
   }, []);
 
   const teardownAudio = useCallback(() => {
@@ -247,9 +209,15 @@ export function useVoiceCapture({
   );
 
   const fail = useCallback(
-    (message: string, snapshot: CaptureSnapshot) => {
+    (error: unknown, snapshot: CaptureSnapshot) => {
       if (!snapshotIsCurrent(snapshot)) return;
+      const message = isDaemonUnavailableError(error)
+        ? 'Cannot reach the service.'
+        : error instanceof Error
+          ? error.message
+          : String(error);
       cleanup();
+      settleFlush('');
       if (!mountedRef.current) return;
       applyStatus('error');
       setInterimText('');
@@ -257,20 +225,25 @@ export function useVoiceCapture({
       setErrorMessage(message);
       snapshot.onError?.(message);
     },
-    [applyStatus, cleanup, snapshotIsCurrent],
+    [applyStatus, cleanup, settleFlush, snapshotIsCurrent],
   );
 
   const finishWith = useCallback(
     (text: string, snapshot: CaptureSnapshot) => {
       if (!snapshotIsCurrent(snapshot)) return;
+      const flushing = flushRef.current !== null;
       cleanup();
+      settleFlush(text);
       if (!mountedRef.current) return;
       applyStatus('idle');
       setInterimText('');
       setAudioLevel(0);
-      snapshot.onFinal(text);
+      // A pending flush owns the transcript: its caller inserts the text
+      // (e.g. into the composer right before a send), so onFinal must not
+      // insert it a second time.
+      if (!flushing) snapshot.onFinal(text);
     },
-    [applyStatus, cleanup, snapshotIsCurrent],
+    [applyStatus, cleanup, settleFlush, snapshotIsCurrent],
   );
 
   const abort = useCallback(() => {
@@ -283,12 +256,13 @@ export function useVoiceCapture({
       }
     }
     cleanup();
+    settleFlush('');
     if (!mountedRef.current) return;
     applyStatus('idle');
     setInterimText('');
     setAudioLevel(0);
     setErrorMessage(undefined);
-  }, [applyStatus, cleanup]);
+  }, [applyStatus, cleanup, settleFlush]);
 
   const finalize = useCallback(
     (ws: WebSocket, snapshot: CaptureSnapshot) => {
@@ -355,6 +329,12 @@ export function useVoiceCapture({
       ...(onUnexpectedClose ? { onUnexpectedClose } : {}),
     };
     snapshotRef.current = snapshot;
+    try {
+      availability?.assertAvailable();
+    } catch (error) {
+      fail(error, snapshot);
+      return;
+    }
 
     if (!navigator.mediaDevices?.getUserMedia) {
       fail(
@@ -379,7 +359,7 @@ export function useVoiceCapture({
       contextReady =
         context.state === 'suspended' ? context.resume() : Promise.resolve();
     } catch (error) {
-      fail(error instanceof Error ? error.message : String(error), snapshot);
+      fail(error, snapshot);
       return;
     }
 
@@ -426,6 +406,7 @@ export function useVoiceCapture({
         resourcesRef.current.processor = processor;
         resourcesRef.current.sink = sink;
 
+        availability?.assertAvailable();
         const ws = new WebSocket(
           toVoiceWebSocketUrl(baseUrl, snapshot.streamPath),
           token ? [WS_AUTH_SUBPROTOCOL, bearerSubprotocol(token)] : undefined,
@@ -537,6 +518,8 @@ export function useVoiceCapture({
           ) {
             return;
           }
+          if (event.code < 4000 && event.code !== 1013)
+            void availability?.check();
           const code = event.code || 1006;
           const reason = event.reason || 'none';
           try {
@@ -554,11 +537,12 @@ export function useVoiceCapture({
           );
         };
       } catch (error) {
-        fail(error instanceof Error ? error.message : String(error), snapshot);
+        fail(error, snapshot);
       }
     })();
   }, [
     applyStatus,
+    availability,
     baseUrl,
     clearTranscribeTimeout,
     fail,
@@ -589,13 +573,49 @@ export function useVoiceCapture({
     finalize(ws, snapshot);
   }, [abort, clearTranscribeTimeout, finalize, teardownAudio]);
 
+  const flush = useCallback((): Promise<string> => {
+    if (flushRef.current) return flushRef.current.promise;
+    if (!snapshotRef.current) return Promise.resolve('');
+    let resolve!: (text: string) => void;
+    const promise = new Promise<string>((resolver) => {
+      resolve = resolver;
+    });
+    const pending: PendingFlush = { promise, resolve };
+    flushRef.current = pending;
+    // stop() while still connecting clears the start timeout, so a flush
+    // needs its own bound. Route the expiry through fail() like the regular
+    // transcribe timeout: the send proceeds without the dictation, but the
+    // user sees why instead of a silent abort that also clears the error.
+    pending.timeout = setTimeout(() => {
+      const snapshot = snapshotRef.current;
+      if (snapshot) fail('Transcription timed out.', snapshot);
+      else settleFlush('');
+    }, TRANSCRIPTION_TIMEOUT_MS);
+    stop();
+    return promise;
+  }, [fail, settleFlush, stop]);
+
+  useEffect(() => {
+    const unsubscribe = availability?.subscribe(() => {
+      const snapshot = snapshotRef.current;
+      if (snapshot && availability.getSnapshot() !== 'available') {
+        fail('Cannot reach the service.', snapshot);
+      }
+    });
+    return () => {
+      unsubscribe?.();
+      if (snapshotRef.current) abort();
+    };
+  }, [availability, abort, fail]);
+
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      settleFlush('');
       cleanup();
     };
-  }, [cleanup]);
+  }, [cleanup, settleFlush]);
 
   return {
     status,
@@ -605,5 +625,6 @@ export function useVoiceCapture({
     start,
     stop,
     abort,
+    flush,
   };
 }

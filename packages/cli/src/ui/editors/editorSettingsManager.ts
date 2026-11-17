@@ -7,8 +7,8 @@
 import {
   allowEditorTypeInSandbox,
   checkHasEditorType,
-  type EditorType,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/utils/editor.js';
+import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 
 export interface EditorDisplay {
   name: string;
@@ -29,13 +29,14 @@ export const EDITOR_DISPLAY_NAMES: Record<EditorType, string> = {
 };
 
 class EditorSettingsManager {
-  private readonly availableEditors: EditorDisplay[];
+  private availableEditors: EditorDisplay[] | undefined;
 
-  constructor() {
+  // Probing spawns a shell per editor, so it waits until a dialog asks.
+  getAvailableEditorDisplays(): EditorDisplay[] {
     const editorTypes = Object.keys(
       EDITOR_DISPLAY_NAMES,
     ).sort() as EditorType[];
-    this.availableEditors = [
+    this.availableEditors ??= [
       {
         name: 'None',
         type: 'not_set',
@@ -57,9 +58,6 @@ class EditorSettingsManager {
         };
       }),
     ];
-  }
-
-  getAvailableEditorDisplays(): EditorDisplay[] {
     return this.availableEditors;
   }
 }

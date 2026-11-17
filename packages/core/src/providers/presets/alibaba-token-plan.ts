@@ -21,60 +21,246 @@ export const TOKEN_PLAN_BASE_URL = TOKEN_PLAN_CHINA_BASE_URL;
 const TOKEN_PLAN_MODELS: ModelSpec[] = [
   {
     id: 'qwen3.7-plus',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
     contextWindowSize: 1000000,
     enableThinking: true,
     modalities: { image: true, video: true },
   },
   {
     id: 'qwen3.6-plus',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
     contextWindowSize: 1000000,
     enableThinking: true,
     modalities: { image: true, video: true },
   },
-  { id: 'qwen3.7-max', contextWindowSize: 1000000, enableThinking: true },
+  {
+    id: 'qwen3.7-max',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+    enableThinking: true,
+  },
   {
     id: 'qwen3.8-max',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'xhigh',
+        disableField: 'reasoning_effort',
+      },
+    },
     contextWindowSize: 1000000,
-    enableThinking: true,
-    thinkingMandatory: true,
-    modalities: { image: true, video: true },
-  },
-  {
-    id: 'qwen3.8-max-preview',
-    contextWindowSize: 1000000,
-    enableThinking: true,
-    thinkingMandatory: true,
     modalities: { image: true, video: true },
   },
   {
     id: 'qwen3.6-flash',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
     contextWindowSize: 1000000,
     enableThinking: true,
   },
-  { id: 'deepseek-v4-pro', contextWindowSize: 1000000 },
-  { id: 'deepseek-v4-flash-0731', contextWindowSize: 1000000 },
-  { id: 'deepseek-v3.2', contextWindowSize: 131072 },
+  {
+    id: 'deepseek-v4-pro',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['high', 'max'],
+        defaultEffort: 'high',
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+  },
+  {
+    id: 'deepseek-v4-flash-0731',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: 'high',
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+  },
+  {
+    id: 'deepseek-v4.1-flash',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: 'high',
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+    modalities: { image: true },
+  },
+  {
+    id: 'deepseek-v4.1-flash-1017',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: 'high',
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+    modalities: { image: true },
+  },
   {
     id: 'kimi-k2.7-code',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        canDisable: false,
+        disableField: 'enable_thinking',
+      },
+    },
     contextWindowSize: 262144,
     enableThinking: true,
     modalities: { image: true, video: true },
+    thinkingMandatory: true,
   },
   {
     id: 'kimi-k2.6',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
     contextWindowSize: 262144,
     enableThinking: true,
   },
   {
     id: 'kimi-k2.5',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
     contextWindowSize: 262144,
     enableThinking: true,
     modalities: { image: true, video: true },
   },
-  { id: 'glm-5.2', contextWindowSize: 1000000, enableThinking: true },
-  { id: 'glm-5.1', contextWindowSize: 202752, enableThinking: true },
-  { id: 'glm-5', contextWindowSize: 202752, enableThinking: true },
-  { id: 'MiniMax-M2.5', contextWindowSize: 196608 },
+  {
+    id: 'glm-5.3',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        canDisable: false,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+    enableThinking: true,
+    thinkingMandatory: true,
+  },
+  {
+    id: 'glm-5.2',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 1000000,
+    enableThinking: true,
+  },
+  {
+    id: 'glm-5.1',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 202752,
+    enableThinking: true,
+  },
+  {
+    id: 'glm-5',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 202752,
+    enableThinking: true,
+  },
+  {
+    id: 'MiniMax-M2.5',
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        toggleOnly: true,
+        canDisable: false,
+        disableField: 'enable_thinking',
+      },
+    },
+    contextWindowSize: 196608,
+    enableThinking: true,
+    thinkingMandatory: true,
+  },
+  {
+    id: 'qwen3.8-flash',
+    contextWindowSize: 1000000,
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'xhigh',
+        disableField: 'reasoning_effort',
+      },
+    },
+    modalities: { image: true, video: true },
+  },
+  {
+    id: 'deepseek-v4-pro-0813',
+    contextWindowSize: 1000000,
+    capabilities: {
+      reasoning: {
+        thinking: true,
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: 'high',
+        disableField: 'enable_thinking',
+      },
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -85,7 +271,7 @@ export const tokenPlanProvider: ProviderConfig = {
   id: 'token-plan',
   label: 'Token Plan',
   description:
-    'For teams and companies · Usage-based billing with dedicated endpoint',
+    'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)',
   protocol: AuthType.USE_OPENAI,
   baseUrl: [
     {
@@ -118,6 +304,10 @@ export const tokenPlanProvider: ProviderConfig = {
         model.baseUrl === TOKEN_PLAN_GLOBAL_BASE_URL)) ||
       (typeof model.name === 'string' &&
         model.name.startsWith('[ModelStudio Token Plan]'))),
+  // Same server-side search tools as the Standard endpoints, billed against
+  // the plan's quota (probe 2026-09-08: `web_search` + `web_extractor` both
+  // execute and are reported under `usage.x_tools`).
+  webSearch: { backend: 'dashscope' },
   uiGroup: 'alibaba',
   uiLabels: { flowTitle: 'Alibaba ModelStudio', baseUrlStepTitle: 'Region' },
 };

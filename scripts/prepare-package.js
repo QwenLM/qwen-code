@@ -15,6 +15,13 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import semver from 'semver';
+import os from 'node:os';
+import {
+  NPM_BUN_OPTIONAL_DEPENDENCIES,
+  NPM_OPENTUI_NATIVE_ASSETS,
+  prepareNpmOpenTuiAssets,
+  stageOpenTuiPackages,
+} from './opentui-package-assets.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,7 +29,7 @@ const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
 // The docker-sandbox E2E leg builds its image by running this script, so an
 // over-budget package turns main's E2E run red as well as blocking publishing.
-const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 128 * 1024 * 1024;
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 160 * 1024 * 1024;
 const PACKAGE_TEXT_FILE_RE =
   /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh|svg|map)$/i;
 const PACKAGE_SCAN_FORBIDDEN_LITERALS = [
@@ -39,24 +46,41 @@ export function preparePackage({
   requireNativeAudioCapture = process.env
     .QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1',
   maxPackageUnpackedBytes = DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES,
+  opentuiModulesDir,
+  npmDistribution = true,
 } = {}) {
   const distDir = path.join(rootDir, 'dist');
 
   verifyBundleArtifacts(rootDir, distDir);
+  if (npmDistribution) prepareNpmOpenTuiAssets(distDir, opentuiModulesDir);
   copyDocumentationFiles(rootDir, distDir);
   copyLocales(rootDir, distDir);
   copyExtensionExamples(rootDir, distDir);
   verifyNativeAudioCapturePackage(rootDir, distDir, {
     required: requireNativeAudioCapture,
   });
-  writeDistPackageJson(rootDir, distDir);
+  writeDistPackageJson(rootDir, distDir, npmDistribution);
   assertNoSensitivePackageScanLiterals(distDir);
   assertPreparedPackageSize(distDir, maxPackageUnpackedBytes);
   printPackageStructure(distDir);
 }
 
 if (isDirectRun()) {
-  preparePackage();
+  if (process.argv.includes('--host-runtime')) {
+    preparePackage({ npmDistribution: false });
+  } else {
+    const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-npm-opentui-'));
+    try {
+      const opentuiModulesDir = stageOpenTuiPackages(
+        defaultRootDir,
+        staging,
+        Object.keys(NPM_OPENTUI_NATIVE_ASSETS),
+      );
+      preparePackage({ opentuiModulesDir });
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
+    }
+  }
 }
 
 function isDirectRun() {
@@ -68,6 +92,16 @@ function isDirectRun() {
 function verifyBundleArtifacts(rootDir, distDir) {
   const requiredPaths = [
     path.join(distDir, 'cli.js'),
+    path.join(distDir, 'execution-worker.js'),
+    path.join(distDir, 'mem0', 'main.js'),
+    path.join(distDir, 'mem0', 'write-confirmation.js'),
+    path.join(distDir, 'generated-ui', 'main.js'),
+    path.join(distDir, 'generated-ui', 'app.html'),
+    path.join(distDir, 'generated-ui', 'skills', 'generated-ui', 'SKILL.md'),
+    path.join(distDir, 'generated-ui', 'THIRD_PARTY_NOTICES.txt'),
+    path.join(distDir, 'sandboxBwrapRelay.js'),
+    path.join(distDir, 'sandboxLandlockRelay.js'),
+    path.join(distDir, 'sandboxFileWorker.js'),
     path.join(distDir, 'vendor'),
     path.join(distDir, 'bundled', 'qc-helper', 'docs'),
     // The Web Shell ships with the published package ("Web Shell out of the
@@ -78,7 +112,10 @@ function verifyBundleArtifacts(rootDir, distDir) {
     // --cli-only dev bundles; this is the release gate.
     path.join(distDir, 'web-shell', 'index.html'),
     path.join(distDir, 'web-shell', 'assets'),
+    path.join(distDir, 'web-shell', 'manifest.webmanifest'),
+    path.join(distDir, 'web-shell', 'sw.js'),
     path.join(distDir, 'export-transcript-document.js'),
+    path.join(distDir, 'export-transcript-document.css'),
   ];
 
   if (!fs.existsSync(distDir)) {
@@ -264,7 +301,7 @@ function hasFileMatching(dir, predicate) {
   return false;
 }
 
-function writeDistPackageJson(rootDir, distDir) {
+function writeDistPackageJson(rootDir, distDir, npmDistribution) {
   console.log('Creating package.json for distribution...');
 
   const cliEntryPath = path.join(distDir, 'cli-entry.js');
@@ -275,31 +312,50 @@ function writeDistPackageJson(rootDir, distDir) {
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
-  let lockfile;
-  try {
-    lockfile = JSON.parse(
-      fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
-    );
-  } catch (error) {
-    throw new Error(`Cannot read package-lock.json: ${error.message}`);
-  }
   const coreManifest = JSON.parse(
     fs.readFileSync(
       path.join(rootDir, 'packages', 'core', 'package.json'),
       'utf-8',
     ),
   );
-  const sharpVersion =
-    lockfile.packages?.['packages/core/node_modules/sharp']?.version ??
-    lockfile.packages?.['node_modules/sharp']?.version;
+  // Resolve sharp the way core does at runtime — the nearest
+  // node_modules/sharp above packages/core — so the published manifest pins
+  // the version this release was built against, whichever package manager
+  // installed the tree.
+  let sharpVersion;
+  for (
+    let dir = path.join(rootDir, 'packages', 'core');
+    ;
+    dir = path.dirname(dir)
+  ) {
+    const manifest = path.join(dir, 'node_modules', 'sharp', 'package.json');
+    if (fs.existsSync(manifest)) {
+      sharpVersion = JSON.parse(fs.readFileSync(manifest, 'utf-8')).version;
+      break;
+    }
+    if (dir === rootDir || path.dirname(dir) === dir) break;
+  }
   const declared = coreManifest.dependencies?.sharp;
   if (!sharpVersion || !declared || !semver.satisfies(sharpVersion, declared)) {
     throw new Error(
-      `sharp version is not locked in package-lock.json ` +
-        `(resolved ${sharpVersion ?? 'none'}, ` +
+      `sharp is not installed at a version packages/core accepts ` +
+        `(installed ${sharpVersion ?? 'none'}, ` +
         `packages/core declares ${declared ?? 'none'})`,
     );
   }
+  // The six `@lydell/node-pty*` platform pins ship in the tarball's
+  // optionalDependencies and decide which bundled ConPTY `conpty.dll` /
+  // `OpenConsole.exe` real Windows users get. Derive them from
+  // packages/core/package.json — the single source conpty-host.ts verifies its
+  // release path against (and its pin tripwire asserts) — instead of a third
+  // hardcoded table, so a bump of the native backend in one manifest cannot
+  // silently ship an unverified pin here. Mirrors the sharp / audio-capture
+  // derivations above.
+  const nodePtyPins = Object.fromEntries(
+    Object.entries(coreManifest.optionalDependencies ?? {}).filter(([name]) =>
+      name.startsWith('@lydell/node-pty'),
+    ),
+  );
 
   const distPackageJson = {
     name: rootPackageJson.name,
@@ -315,11 +371,20 @@ function writeDistPackageJson(rootDir, distDir) {
     files: [
       'cli-entry.js',
       'cli.js',
+      'execution-worker.js',
       // Worker thread entry loaded by FzfWorkerHandle at runtime via
       // `resolveBundleDir(import.meta.url)` + `path.join(dir, 'fzfWorker.js')`.
       // Must ship in the tarball or the @-picker silently falls back to the
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
+      'glob-search-worker.js',
+      'codeModeHost.js',
+      'mod-worker.js',
+      'sandboxBwrapRelay.js',
+      'sandboxLandlockRelay.js',
+      'sandboxFileWorker.js',
+      'mem0',
+      'generated-ui',
       'chunks',
       'vendor',
       '*.sb',
@@ -330,28 +395,23 @@ function writeDistPackageJson(rootDir, distDir) {
       'bundled',
       'web-shell',
       'export-transcript-document.js',
-      // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
-      // web-tree-sitter wasm, native render library) are intentionally NOT
-      // published in the npm package — a multi-megabyte tree dominated by the
-      // native render library — against the unpacked-size budget. An npm
-      // install also has no @opentui/core dependency to resolve the assets
-      // against: below the runtime floor (Node < 26.4.0) the renderer gate
-      // never selects opentui, and at or above it, QWEN_TUI_RENDERER=opentui
-      // selects the renderer, the boot fails on the missing asset tree, and
-      // a stderr warning falls back to ink on every startup. The opt-in Bun
-      // standalone flavor (--runtime=bun) carries the assets via
-      // create-standalone-package.js instead.
+      'export-transcript-document.css',
+      ...(npmDistribution
+        ? [
+            'opentui-assets/@opentui/core',
+            'opentui-assets/web-tree-sitter',
+            ...Object.keys(NPM_OPENTUI_NATIVE_ASSETS).map(
+              (name) => `opentui-assets/${name}`,
+            ),
+          ]
+        : []),
     ],
     config: rootPackageJson.config,
     dependencies: {},
     optionalDependencies: {
+      ...(npmDistribution ? NPM_BUN_OPTIONAL_DEPENDENCIES : {}),
       '@qwen-code/audio-capture': rootPackageJson.version,
-      '@lydell/node-pty': '1.2.0-beta.10',
-      '@lydell/node-pty-darwin-arm64': '1.2.0-beta.10',
-      '@lydell/node-pty-darwin-x64': '1.2.0-beta.10',
-      '@lydell/node-pty-linux-x64': '1.2.0-beta.10',
-      '@lydell/node-pty-win32-arm64': '1.2.0-beta.10',
-      '@lydell/node-pty-win32-x64': '1.2.0-beta.10',
+      ...nodePtyPins,
       '@teddyzhu/clipboard': '0.0.5',
       '@teddyzhu/clipboard-darwin-arm64': '0.0.5',
       '@teddyzhu/clipboard-darwin-x64': '0.0.5',

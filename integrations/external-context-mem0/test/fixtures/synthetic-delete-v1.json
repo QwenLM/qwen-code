@@ -1,0 +1,29 @@
+{
+  "instance": {
+    "schemaVersion": 5,
+    "repositoryRoot": "/workspace/project",
+    "dialectPath": "/administrator/delete.dialect.json",
+    "endpoint": {
+      "origin": "https://memory.example.com",
+      "basePath": "/api",
+      "allowInsecureHttp": false
+    },
+    "credentialEnv": "SYNTHETIC_MEMORY_TOKEN",
+    "scope": {
+      "userId": "repository-memory"
+    },
+    "timeoutMs": 1000
+  },
+  "dialect": {
+    "deleteDialectVersion": 1,
+    "id": "synthetic-delete-v1",
+    "auth": "authorization-token",
+    "record": {
+      "pathPrefix": "/memories/",
+      "pathSuffix": "",
+      "idField": "id",
+      "contentField": "memory",
+      "notFound": "http-404"
+    }
+  }
+}

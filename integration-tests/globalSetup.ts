@@ -25,6 +25,8 @@ import { fileURLToPath } from 'node:url';
 
 import { DEFAULT_CONTEXT_FILENAME, Storage } from '@qwen-code/qwen-code-core';
 
+import { removeScratchDir } from './scratch-dir.js';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
 const integrationTestsDir = join(rootDir, '.integration-tests');
@@ -61,6 +63,7 @@ const ownsQwenHome = !process.env['QWEN_HOME'];
 if (ownsQwenHome) {
   process.env['QWEN_HOME'] = hermeticQwenHome;
 }
+process.env['QWEN_CODE_MODELS_DEV_REFRESH'] = 'off';
 
 // Read after the redirect so the save/restore below, the spawned CLIs, and
 // the tests all agree on one global qwen dir.
@@ -90,13 +93,17 @@ let originalMemoryContent: string | null = null;
  * the files without gambling on where CI's auth comes from.
  */
 async function carryOverHostConfig() {
+  // CI supplies auth through the environment. A pool host's live settings can
+  // select an auth type that conflicts with the tests' credentials, failing
+  // every spawned CLI; keep CI runs independent of that state.
+  if (process.env['CI']) return;
   for (const fileName of ['settings.json', 'oauth_creds.json']) {
     await copyFile(
       join(hostQwenDir, fileName),
       join(hermeticQwenHome, fileName),
     ).catch(() => {
-      // Absent on CI and on a machine that has never run the CLI, and absent
-      // for whichever auth type the developer is not using.
+      // Absent on a machine that has never run the CLI, and absent for
+      // whichever auth type the developer is not using.
     });
   }
 }
@@ -233,21 +240,7 @@ export async function teardown() {
   // Not gated on KEEP_OUTPUT: this is a scratch dir rather than a test
   // artifact, and it holds a copy of the developer's credentials.
   if (ownsQwenHome) {
-    try {
-      // A CLI child outliving its test keeps writing under `debug/`, so the
-      // walk can reach a directory that refills before the rmdir — retries
-      // absorb that. The catch is what matters: a cleanup that cannot finish
-      // must not exit an all-green run red, the way the memory-file restore
-      // did in #10325.
-      await rm(hermeticQwenHome, {
-        recursive: true,
-        force: true,
-        maxRetries: 5,
-        retryDelay: 200,
-      });
-    } catch (e) {
-      console.error(`Warning: could not remove ${hermeticQwenHome}:`, e);
-    }
+    await removeScratchDir(hermeticQwenHome);
   }
 }
 

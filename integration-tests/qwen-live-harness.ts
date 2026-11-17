@@ -13,10 +13,10 @@
  *     hermetic env (tmp data/discovery dirs, fake DashScope endpoint, a real
  *     `qwen serve` URL) and parses the single machine-readable stdout line,
  *     following the `_daemon-harness.spawnDaemon` pattern.
- *   - `FakeHost` speaks Host protocol v6 against the daemon's `/live/host`
+ *   - `FakeHost` speaks Host protocol v9 against the daemon's `/live/host`
  *     WebSocket: discovery-file lookup, Bearer token + `x-qwen-live-nonce`
  *     headers, `host.hello`, auto `host.pong`, auto success replies to
- *     `host.capture_screen_context`, `host.action`, binary input
+ *     `host.capture_visual`, `host.action`, binary input
  *     audio frames (8-byte BigUInt64BE epoch prefix + PCM16), and records
  *     `host.welcome`/`host.state` plus raw output PCM frames.
  *   - `bootLiveStack` assembles the full fixture: tmp workspace + HOME, a
@@ -72,8 +72,9 @@ const SERVE_TOKEN = 'qwen-live-e2e-token';
 const LIVE_LISTENING_RE = /qwen-live listening on http:\/\/127\.0\.0\.1:(\d+)/;
 const DISPOSE_GRACE_MS = 10_000;
 const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host';
-const LIVE_HOST_PROTOCOL_VERSION = 7;
+const LIVE_HOST_PROTOCOL_VERSION = 9;
 const LIVE_INPUT_AUDIO_EPOCH_BYTES = 8;
+const LIVE_OUTPUT_AUDIO_HEADER_BYTES = 16;
 
 // -- small async utilities ----------------------------------------------------
 
@@ -268,7 +269,7 @@ export async function spawnQwenLive(
   };
 }
 
-// -- fake Host (protocol v6) ---------------------------------------------------
+// -- fake Host (protocol v9) ---------------------------------------------------
 
 export interface FakeHostStateEntry {
   type: 'host.welcome' | 'host.state';
@@ -287,7 +288,7 @@ export class FakeHost {
   readonly messages: JsonObject[] = [];
   /** host.welcome / host.state frames, normalized. */
   readonly states: FakeHostStateEntry[] = [];
-  /** Raw binary output frames (bare PCM16). */
+  /** Decoded PCM16 payloads from framed daemon output audio. */
   readonly audioFrames: Buffer[] = [];
 
   private socket: WebSocket | undefined;
@@ -319,8 +320,12 @@ export class FakeHost {
           : Array.isArray(data)
             ? Buffer.concat(data)
             : Buffer.from(data as ArrayBuffer);
-        this.audioFrames.push(frame);
-        this.emitter.emit('audio', frame);
+        if (frame.byteLength <= LIVE_OUTPUT_AUDIO_HEADER_BYTES) return;
+        const pcm16 = Buffer.from(
+          frame.subarray(LIVE_OUTPUT_AUDIO_HEADER_BYTES),
+        );
+        this.audioFrames.push(pcm16);
+        this.emitter.emit('audio', pcm16);
         return;
       }
       let parsed: unknown;
@@ -334,14 +339,18 @@ export class FakeHost {
       this.messages.push(message);
       if (message['type'] === 'host.ping') {
         this.send({ type: 'host.pong', pingId: message['pingId'] });
-      } else if (message['type'] === 'host.capture_screen_context') {
-        // The hello advertises `appshot: true`, so the daemon may request a
-        // capture; settle it immediately (a real Host replies with a
-        // screenshot it wrote to disk plus the accessibility dump).
+      } else if (
+        message['type'] === 'host.capture_visual' &&
+        message['source'] === 'screen'
+      ) {
         this.send({
-          type: 'host.screen_context_result',
+          type: 'host.visual_capture_result',
           requestId: message['requestId'],
           success: true,
+          source: 'screen',
+          image: Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString('base64'),
+          width: 1280,
+          height: 720,
           appName: 'FakeApp',
           windowTitle: 'Fake Window',
           accessibilityText: 'fake accessibility text',
@@ -383,6 +392,7 @@ export class FakeHost {
       instanceNonce: this.hostInstanceNonce,
       permissions: {
         microphone: 'granted',
+        camera: 'granted',
         accessibility: 'granted',
         screenRecording: 'granted',
       },
@@ -487,11 +497,7 @@ export class FakeHost {
     this.socketOrThrow().send(JSON.stringify(message));
   }
 
-  /**
-   * Lazily materialize a real (1x1) PNG for `host.screen_context_result`:
-   * the daemon registers the path as an asset, so it should exist on disk.
-   * Written into the discovery dir, which the fixture already tears down.
-   */
+  /** Materialize the PNG handoff asset returned with a visual capture. */
   private fakeScreenshotPath(): string {
     if (!this.screenshotPath) {
       const file = path.join(this.discoveryDir, 'fake-appshot.png');
@@ -580,6 +586,39 @@ export async function waitForLiveLogEvents(
     }
     await sleep(25);
   }
+}
+
+/**
+ * For a single-tool continuation or a SPEAK_TO_USER item, wait for its next
+ * response request to complete in Live, not just be sent by the fake provider.
+ * The anchor must be from the current connection's inbox with no intervening
+ * user turn. Handoff receipts do not themselves request a continuation.
+ */
+export async function waitForLiveResponseAfter(
+  stack: Pick<LiveStack, 'fakeDash' | 'dataDir'>,
+  anchor: JsonObject,
+  authority: 'tool_continuation' | 'backend_speech',
+): Promise<void> {
+  const anchorIndex = stack.fakeDash.inbox.indexOf(anchor);
+  if (anchorIndex < 0) throw new Error('Response anchor is not in the inbox');
+  const request = await stack.fakeDash.waitForMessage(
+    (message) => message['type'] === 'response.create',
+    {
+      fromIndex: anchorIndex + 1,
+      description: `${authority} response request`,
+    },
+  );
+  const responseId = stack.fakeDash.autoResponseIdFor(request);
+  if (!responseId) throw new Error('Expected an auto-acknowledged response');
+  await waitForLiveLogEvents(
+    stack.dataDir,
+    (event) =>
+      event.type === 'response.done' &&
+      event.payload['responseId'] === responseId &&
+      event.payload['authority'] === authority &&
+      event.payload['status'] === 'completed',
+    { description: `${authority} ${responseId} completion` },
+  );
 }
 
 // -- full fixture ---------------------------------------------------------------

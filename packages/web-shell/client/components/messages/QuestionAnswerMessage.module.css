@@ -1,0 +1,21 @@
+.bubble {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.answers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+}
+
+.question {
+  margin-bottom: 4px;
+  color: var(--muted-foreground);
+}
+
+.answer {
+  margin: 0;
+}

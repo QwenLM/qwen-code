@@ -13,6 +13,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { SESSION_LIST_PAGE_SIZE } from '../constants/sessions';
+import { SESSION_CATALOG_ERROR_RETRY_MS } from '../session-catalog/session-catalog-store';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -95,6 +96,12 @@ describe('useOtherWorkspaceSessions', () => {
 
     expect(latest.sessions).toEqual([]);
     expect(listWorkspaceSessionsPage).not.toHaveBeenCalled();
+    // A disabled fan-out certifies nothing about the other workspaces: it must
+    // not report any cwd not-ready (that would block every prune in a
+    // workspace-locked split).
+    expect(latest.loading).toBe(false);
+    expect(latest.notReadyCwds).toEqual([]);
+    expect(latest.queriedCwds).toEqual([]);
   });
 
   it('returns [] and never queries the daemon without a workspaces list', async () => {
@@ -208,5 +215,159 @@ describe('useOtherWorkspaceSessions', () => {
       await Promise.resolve();
     });
     expect(latest.sessions.map((s) => s.sessionId)).toEqual(['c1']);
+  });
+
+  it('reports a failed first fetch as settled-but-not-ready, then settles once the retry lands', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      capabilities = {
+        workspaces: [ws('/w', true, true), ws('/b', false, true)],
+      };
+      let calls = 0;
+      listWorkspaceSessionsPage.mockImplementation(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('first fetch failed');
+        return { sessions: [session('b1', '/b')] };
+      });
+      render();
+      await flush();
+      // The first fetch failed: the workspace is settled (not in flight), so
+      // `loading` must NOT be pinned — but it is not-ready (errored with no
+      // page), so a consumer must not trust an absence from its list.
+      expect(latest.loading).toBe(false);
+      expect(latest.notReadyCwds).toEqual(['/b']);
+      expect(latest.sessions).toEqual([]);
+      // Advance past the store's error-retry window: it re-fetches /b and the
+      // retry lands a page, so the fan-out can prove absence again.
+      await act(async () => {
+        vi.advanceTimersByTime(SESSION_CATALOG_ERROR_RETRY_MS);
+      });
+      await flush();
+      await flush();
+      expect(latest.notReadyCwds).toEqual([]);
+      expect(latest.loading).toBe(false);
+      expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('treats a truncated fan-out page as not-ready for its cwd', async () => {
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+    listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [session('b1', '/b')],
+      truncated: true,
+    });
+    render();
+    await flush();
+    // A bounded page is not proof of absence: the cwd stays not-ready even
+    // though its sessions landed.
+    expect(latest.queriedCwds).toEqual(['/b']);
+    expect(latest.notReadyCwds).toEqual(['/b']);
+    expect(latest.loading).toBe(false);
+    expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
+  });
+
+  it('treats a fan-out page with a next cursor as not-ready for its cwd', async () => {
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+    listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [session('b1', '/b')],
+      nextCursor: 'cursor-2',
+    });
+    render();
+    await flush();
+    expect(latest.queriedCwds).toEqual(['/b']);
+    expect(latest.notReadyCwds).toEqual(['/b']);
+  });
+
+  it('treats a fan-out page whose live merge failed as not-ready for its cwd', async () => {
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+    listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [session('b1', '/b')],
+      liveMergeFailed: true,
+    });
+    render();
+    await flush();
+    expect(latest.queriedCwds).toEqual(['/b']);
+    expect(latest.notReadyCwds).toEqual(['/b']);
+  });
+
+  it('treats a never-landed fan-out page as not-ready, then ready once it lands', async () => {
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+    let resolveB: (v: { sessions: DaemonSessionSummary[] }) => void = () => {};
+    listWorkspaceSessionsPage.mockImplementation(
+      () =>
+        new Promise<{ sessions: DaemonSessionSummary[] }>((resolve) => {
+          resolveB = resolve;
+        }),
+    );
+    render();
+    await flush();
+    // The page never landed: absence from the (empty) list proves nothing.
+    expect(latest.notReadyCwds).toEqual(['/b']);
+    expect(latest.loading).toBe(true);
+    resolveB({ sessions: [session('b1', '/b')] });
+    await flush();
+    expect(latest.notReadyCwds).toEqual([]);
+    expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
+  });
+
+  it('keeps a stale-retained fan-out page not-ready after a failed refresh', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+    let calls = 0;
+    listWorkspaceSessionsPage.mockImplementation(async () => {
+      calls += 1;
+      if (calls === 1) return { sessions: [session('b1', '/b')] };
+      throw new Error('refresh failed');
+    });
+    render();
+    await flush();
+    // A fresh, complete page: absence can be proven.
+    expect(latest.notReadyCwds).toEqual([]);
+    // A failed refresh retains the page but marks it stale: it is no longer a
+    // fresh answer from the daemon, so absence from it proves nothing.
+    await act(async () => {
+      await latest.reload();
+    });
+    await flush();
+    expect(latest.notReadyCwds).toEqual(['/b']);
+    expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
+    warn.mockRestore();
+  });
+
+  it('treats a fan-out page mid-refresh as not-ready for its cwd', async () => {
+    capabilities = {
+      workspaces: [ws('/w', true, true), ws('/b', false, true)],
+    };
+    let calls = 0;
+    listWorkspaceSessionsPage.mockImplementation(() => {
+      calls += 1;
+      if (calls === 1)
+        return Promise.resolve({ sessions: [session('b1', '/b')] });
+      return new Promise(() => {});
+    });
+    render();
+    await flush();
+    expect(latest.notReadyCwds).toEqual([]);
+    // The store marks the retained page stale the moment a refresh starts,
+    // with no error yet: absence from it proves nothing until it lands.
+    act(() => {
+      void latest.reload();
+    });
+    expect(latest.notReadyCwds).toEqual(['/b']);
+    expect(latest.sessions.map((s) => s.sessionId)).toEqual(['b1']);
   });
 });

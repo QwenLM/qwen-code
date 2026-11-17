@@ -9,15 +9,14 @@ import type {
   DaemonClient,
   DaemonSettingUpdateResult,
   DaemonWorkspaceCapability,
-  DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonWorkspaceVoiceStatus,
 } from '@qwen-code/sdk/daemon';
 
 const PRIMARY_VOICE_FEATURE = 'voice_transcribe';
 const QUALIFIED_VOICE_FEATURE = 'workspace_qualified_voice';
-const QUALIFIED_CORE_FEATURE = 'workspace_qualified_rest_core';
-const WORKSPACE_SETTINGS_FEATURE = 'workspace_settings';
+export const QUALIFIED_CORE_FEATURE = 'workspace_qualified_rest_core';
+export const WORKSPACE_SETTINGS_FEATURE = 'workspace_settings';
 
 const MODERN_WORKSPACE_FEATURES = new Set([
   'dynamic_workspace_registration',
@@ -228,22 +227,6 @@ export async function loadVoiceStatus(
   if (target.cwd && status.workspaceCwd !== target.cwd) {
     throw new Error(
       'Voice status workspace does not match the selected target.',
-    );
-  }
-  return status;
-}
-
-export async function loadVoiceProviders(
-  client: DaemonClient,
-  target: VoiceWorkspaceTarget,
-): Promise<DaemonWorkspaceProvidersStatus> {
-  const status =
-    target.route === 'legacy-primary'
-      ? await client.workspaceProviders()
-      : await qualifiedClient(client, target)!.workspaceProviders();
-  if (target.cwd && status.workspaceCwd !== target.cwd) {
-    throw new Error(
-      'Voice provider workspace does not match the selected target.',
     );
   }
   return status;

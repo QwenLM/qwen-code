@@ -1,15 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
 import { sessionMatchesGitQuery } from '../sidebar/sessionSearch';
-import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  useConnection,
+  type DaemonSessionSummary,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../../daemon/availability.js';
 
 interface DeleteSessionDialogProps {
-  onDeleted: (sessionIds: string[]) => void;
+  /**
+   * `attachedSessionId` is the session this client was attached to when the
+   * delete was confirmed. The daemon publishes the terminal `session_closed`
+   * frame before it answers the delete request, so by the time this fires the
+   * caller can no longer read the attachment off the connection (#12619).
+   */
+  onDeleted: (
+    sessionIds: string[],
+    meta?: { attachedSessionId?: string },
+  ) => void;
   onError: (error: unknown) => void;
   onClose: () => void;
   workspaceCwd?: string;
@@ -25,6 +39,7 @@ export function DeleteSessionDialog({
   workspaceCwd,
 }: DeleteSessionDialogProps) {
   const { t } = useI18n();
+  const availability = useDaemonAvailability();
   const connection = useConnection();
   const {
     sessions,
@@ -37,6 +52,15 @@ export function DeleteSessionDialog({
     maxAgeMs: 1_000,
   });
   const currentSessionId = connection.sessionId;
+  const outageMessage =
+    availability !== 'available'
+      ? t(
+          availability === 'auth-required'
+            ? 'daemon.connection.authRequired'
+            : 'daemon.connection.unavailable',
+        )
+      : undefined;
+  const sessionErrorMessage = outageMessage ?? sessionsError?.message;
   const [deleting, setDeleting] = useState(false);
   // `selectedIdx` is the keyboard/hover cursor (roving highlight, -1 = none —
   // see ResumeDialog for the rationale); `selectedIds` is the multi-select set
@@ -57,22 +81,34 @@ export function DeleteSessionDialog({
 
   const filtered = useMemo(
     () =>
-      filterQuery
-        ? sessions.filter((s) => {
-            const q = filterQuery.toLowerCase();
-            return (
-              (s.displayName || '').toLowerCase().includes(q) ||
-              s.sessionId.toLowerCase().includes(q) ||
-              sessionMatchesGitQuery(s, q)
-            );
-          })
-        : sessions,
+      sessions.filter((session) => {
+        if (session.sourceType === 'qwen-live') return false;
+        const q = filterQuery.toLowerCase();
+        return (
+          !q ||
+          (session.displayName || '').toLowerCase().includes(q) ||
+          session.sessionId.toLowerCase().includes(q) ||
+          sessionMatchesGitQuery(session, q)
+        );
+      }),
     [sessions, filterQuery],
   );
 
+  // The current session is deletable (issue #12619), but deleting the session
+  // the client is attached to tears its runtime down — match the Session
+  // Overview's idle-only policy for that case.
+  const blocksCurrentDelete = useCallback(
+    (session: DaemonSessionSummary) =>
+      session.sessionId === currentSessionId &&
+      (Boolean(session.hasActivePrompt) ||
+        session.activeWorkState === 'active'),
+    [currentSessionId],
+  );
+
   const toggleSelection = useCallback(
-    (sessionId: string) => {
-      if (sessionId === currentSessionId) return;
+    (session: DaemonSessionSummary) => {
+      if (blocksCurrentDelete(session)) return;
+      const sessionId = session.sessionId;
       setSelectedIds((prev) => {
         const next = new Set(prev);
         if (next.has(sessionId)) {
@@ -83,7 +119,7 @@ export function DeleteSessionDialog({
         return next;
       });
     },
-    [currentSessionId],
+    [blocksCurrentDelete],
   );
 
   useEffect(() => {
@@ -120,12 +156,16 @@ export function DeleteSessionDialog({
     onActiveIndexChange: setSelectedIdx,
     onConfirm: (index) => {
       const session = filtered[index];
-      if (session) toggleSelection(session.sessionId);
+      if (session) toggleSelection(session);
     },
   });
 
   const handleDelete = useCallback(() => {
     if (deleting) return;
+    // Captured before the request: the daemon's terminal `session_closed`
+    // frame clears `connection.sessionId` before the delete resolves, so this
+    // is the last point where the attachment is still readable (#12619).
+    const attachedSessionId = currentSessionId;
 
     if (selectedIds.size > 0) {
       const filteredSet = new Set(filtered.map((s) => s.sessionId));
@@ -172,11 +212,15 @@ export function DeleteSessionDialog({
             return;
           }
 
-          onDeleted([...res.removed, ...res.notFound]);
+          onDeleted([...res.removed, ...res.notFound], { attachedSessionId });
           onClose();
         })
         .catch((error: unknown) => {
-          onError(error);
+          onError(
+            isDaemonUnavailableError(error)
+              ? new Error(outageMessage ?? t('daemon.connection.unavailable'))
+              : error,
+          );
           setDeleting(false);
         });
       return;
@@ -184,7 +228,7 @@ export function DeleteSessionDialog({
 
     const session = filtered[selectedIdx];
     if (!session) return;
-    if (session.sessionId === currentSessionId) {
+    if (blocksCurrentDelete(session)) {
       setMessage(t('delete.cannotCurrent'));
       return;
     }
@@ -196,14 +240,19 @@ export function DeleteSessionDialog({
           setDeleting(false);
           return;
         }
-        onDeleted([session.sessionId]);
+        onDeleted([session.sessionId], { attachedSessionId });
         onClose();
       })
       .catch((error: unknown) => {
-        onError(error);
+        onError(
+          isDaemonUnavailableError(error)
+            ? new Error(outageMessage ?? t('daemon.connection.unavailable'))
+            : error,
+        );
         setDeleting(false);
       });
   }, [
+    blocksCurrentDelete,
     currentSessionId,
     deleteSession,
     deleteSessions,
@@ -212,6 +261,7 @@ export function DeleteSessionDialog({
     onClose,
     onDeleted,
     onError,
+    outageMessage,
     selectedIdx,
     selectedIds,
     t,
@@ -243,7 +293,8 @@ export function DeleteSessionDialog({
           placeholder=""
         />
         <span className={dp('picker-search-hint')}>
-          {message ||
+          {outageMessage ||
+            message ||
             (deleting
               ? t('delete.deleting')
               : loading
@@ -268,13 +319,13 @@ export function DeleteSessionDialog({
         )}
         ref={listRef}
       >
-        {loading && (
+        {loading && !outageMessage && (
           <div className={dp('picker-empty')}>{t('common.loading')}</div>
         )}
-        {!loading && sessionsError && (
-          <div className={dp('picker-empty')}>{sessionsError.message}</div>
+        {(outageMessage || (!loading && sessionErrorMessage)) && (
+          <div className={dp('picker-empty')}>{sessionErrorMessage}</div>
         )}
-        {!loading && !sessionsError && filtered.length === 0 && (
+        {!loading && !sessionErrorMessage && filtered.length === 0 && (
           <div className={dp('picker-empty')}>
             {filterQuery
               ? t('delete.noMatch', { query: filterQuery })
@@ -285,6 +336,7 @@ export function DeleteSessionDialog({
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
             const isChecked = selectedIds.has(s.sessionId);
+            const deleteBlocked = blocksCurrentDelete(s);
             return (
               <SessionRow
                 key={s.sessionId}
@@ -293,7 +345,7 @@ export function DeleteSessionDialog({
                 active={i === selectedIdx}
                 ariaSelected={isChecked}
                 current={false}
-                disabled={isCurrent}
+                disabled={deleteBlocked}
                 leading={
                   <span
                     className={dp(
@@ -313,7 +365,7 @@ export function DeleteSessionDialog({
                 }
                 onClick={() => {
                   setSelectedIdx(i);
-                  if (!isCurrent) toggleSelection(s.sessionId);
+                  toggleSelection(s);
                 }}
                 onActivate={() => setSelectedIdx(i)}
               />

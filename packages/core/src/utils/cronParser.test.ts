@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { matches, nextFireTime, parseCron } from './cronParser.js';
 
 describe('parseCron', () => {
@@ -225,5 +225,69 @@ describe('nextFireTime', () => {
     expect(nextFireTime('0 0 15 * */3', after)).toEqual(
       new Date(2025, 0, 15, 0, 0),
     );
+  });
+});
+
+describe('nextFireTime across DST transitions', () => {
+  // America/New_York spring forward 2026-03-08 02:00, fall back 2026-11-01 02:00.
+  // The repeated local hour 01:00–01:59 on fall-back day exists twice
+  // (EDT = UTC-4 first, EST = UTC-5 second). Local Date setters resolve the
+  // ambiguous wall-clock to the earlier occurrence, which used to re-project
+  // a live instant into the past (see issue #11720).
+  const originalTz = process.env.TZ;
+
+  beforeAll(() => {
+    process.env.TZ = 'America/New_York';
+  });
+
+  afterAll(() => {
+    if (originalTz === undefined) {
+      delete process.env.TZ;
+    } else {
+      process.env.TZ = originalTz;
+    }
+  });
+
+  it('returns a strictly-later instant for an anchor inside the repeated hour', () => {
+    // 06:30:15Z is the second 01:30 (EST). The old local-setter scan snapped
+    // back to 05:31Z, 59 minutes before the input.
+    const after = new Date('2026-11-01T06:30:15.000Z');
+    const next = nextFireTime('* * * * *', after);
+    expect(next.toISOString()).toBe('2026-11-01T06:31:00.000Z');
+    expect(next.getTime()).toBeGreaterThan(after.getTime());
+  });
+
+  it('reaches the second occurrence of the repeated hour when scanning forward', () => {
+    // 05:59Z is the first 01:59 (EDT). Local setMinutes(60) built local
+    // 02:00 (EST only) and jumped straight to 07:00Z, skipping 06:00Z.
+    const after = new Date('2026-11-01T05:59:00.000Z');
+    const next = nextFireTime('* * * * *', after);
+    expect(next.toISOString()).toBe('2026-11-01T06:00:00.000Z');
+  });
+
+  it('fires a fixed-hour job in both occurrences of the repeated hour', () => {
+    // Anchored at the first 01:30 (05:30Z), the second 01:30 (06:30Z) must
+    // still be reachable rather than skipped to the next day.
+    const after = new Date('2026-11-01T05:30:00.000Z');
+    const next = nextFireTime('30 1 * * *', after);
+    expect(next.toISOString()).toBe('2026-11-01T06:30:00.000Z');
+  });
+
+  it('advances across the spring-forward gap', () => {
+    // 06:59Z is 01:59 EST; 02:00–02:59 does not exist that morning, so the
+    // next real minute is 03:00 EDT (07:00Z).
+    const after = new Date('2026-03-08T06:59:00.000Z');
+    const next = nextFireTime('* * * * *', after);
+    expect(next.toISOString()).toBe('2026-03-08T07:00:00.000Z');
+    expect(next.getTime()).toBeGreaterThan(after.getTime());
+  });
+
+  it('returns a strictly-later instant when anchored exactly on a repeated-hour match', () => {
+    // 06:00Z is exactly the second 01:00 (EST). The old scan re-materialised
+    // 01:01 as EDT (05:01Z), one minute before the input.
+    const after = new Date('2026-11-01T06:00:00.000Z');
+    const next = nextFireTime('* * * * *', after);
+    expect(next.toISOString()).toBe('2026-11-01T06:01:00.000Z');
+    expect(next.getTime()).toBeGreaterThan(after.getTime());
   });
 });

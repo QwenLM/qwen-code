@@ -32,6 +32,7 @@ import {
   deferred,
   startLiveCall,
   waitForLiveLogEvents,
+  waitForLiveResponseAfter,
   type Deferred,
   type LiveStack,
 } from './qwen-live-harness.js';
@@ -67,14 +68,20 @@ describeE2E('qwen-live M2 — injection window', () => {
     gates.set(task, gate);
     gateHandles.set(task, gate);
     const callId = `call-h${++callSeq}`;
-    conn.functionCall({
+    const fromIndex = stack.fakeDash.inbox.length;
+    conn.queueFunctionCall({
       name: 'handoff',
       argumentsJson: JSON.stringify({ task, ...extraArgs }),
       callId,
     });
+    conn.speakTranscript(`Please run ${task}.`);
     const receiptMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === callId,
-      { timeoutMs: 30_000, description: `handoff receipt for ${task}` },
+      {
+        fromIndex,
+        timeoutMs: 30_000,
+        description: `handoff receipt for ${task}`,
+      },
     );
     const receipt = JSON.parse(
       functionCallOutputOf(receiptMessage)!.output,
@@ -167,24 +174,42 @@ describeE2E('qwen-live M2 — injection window', () => {
       },
     );
     expect(contextTextOf(complete)).toContain('finished inject-window-task');
+    const spoken = await stack.fakeDash.waitForMessage(
+      (message) => {
+        const text = contextTextOf(message);
+        return (
+          text?.startsWith('[SPEAK_TO_USER] ') === true &&
+          text.includes('finished inject-window-task')
+        );
+      },
+      { fromIndex: stack.fakeDash.inbox.indexOf(complete) + 1 },
+    );
+    await waitForLiveResponseAfter(stack, spoken, 'backend_speech');
   });
 
   it('batches multiple completions into one context injection', async () => {
     // A second backend session so two independent turns can complete.
-    conn.functionCall({
+    const createIndex = stack.fakeDash.inbox.length;
+    conn.queueFunctionCall({
       name: 'session_create',
       argumentsJson: JSON.stringify({ label: 'second workstream' }),
       callId: 'call-sc',
     });
+    conn.speakTranscript('Create a second workstream.');
     const createdMessage = await stack.fakeDash.waitForMessage(
       (message) => functionCallOutputOf(message)?.callId === 'call-sc',
-      { timeoutMs: 30_000, description: 'session_create receipt' },
+      {
+        fromIndex: createIndex,
+        timeoutMs: 30_000,
+        description: 'session_create receipt',
+      },
     );
     const created = JSON.parse(
       functionCallOutputOf(createdMessage)!.output,
     ) as Record<string, unknown>;
     expect(created['status']).toBe('ok');
     const secondSession = String(created['handle']);
+    await waitForLiveResponseAfter(stack, createdMessage, 'tool_continuation');
 
     const receiptA = await gatedHandoff('batch-task-a');
     const receiptB = await gatedHandoff('batch-task-b', {

@@ -6,6 +6,10 @@
     "lib": ["ESNext", "DOM"],
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "paths": {
+      "@qwen-code/qwen-live/i18n": ["../qwen-live/src/i18n/messages.ts"],
+      "@qwen-code/qwen-live/subagents": ["../qwen-live/src/subagents/types.ts"]
+    },
     "noEmit": true,
     "noImplicitAny": true,
     "noUnusedLocals": true,

@@ -5,10 +5,11 @@
  */
 
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   NodeReplKernelManager,
   type KernelManagerOptions,
@@ -37,7 +38,7 @@ function texts(outcome: NodeReplExecOutcome): string[] {
 
 function makeManager(
   overrides: Partial<
-    Pick<KernelManagerOptions, 'policy' | 'readableRoots'>
+    Pick<KernelManagerOptions, 'policy' | 'readableRoots' | 'preloadCua'>
   > = {},
 ): NodeReplKernelManager {
   return new NodeReplKernelManager({
@@ -75,17 +76,174 @@ async function run(code: string, timeoutMs = EXEC_TIMEOUT) {
   return manager.exec({ code, timeoutMs });
 }
 
+// Starts a process from session code. It holds a connection to this test,
+// so its exit is seen even if nothing reaps it.
+async function startSessionProcess(script = '') {
+  const server = net.createServer();
+  const connection = new Promise<net.Socket>((resolve) =>
+    server.once('connection', resolve),
+  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as net.AddressInfo;
+  let pid = 0;
+  let exited = false;
+  const stop = () => {
+    if (pid > 0 && !exited) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
+    server.close();
+  };
+  try {
+    const started = await run(
+      `const { spawn } = await import('node:child_process');
+      const child = spawn(${JSON.stringify(process.execPath)}, ['-e', ${JSON.stringify(
+        `require('node:net').connect(${port}, '127.0.0.1'); ${script} setInterval(() => {}, 1000);`,
+      )}], { stdio: 'ignore' });
+      nodeRepl.write(String(child.pid));`,
+    );
+    expect(started.status).toBe('ok');
+    pid = Number(texts(started)[0]);
+    const socket = await connection;
+    socket.on('error', () => undefined);
+    const closed = new Promise<boolean>((resolve) =>
+      socket.once('close', () => {
+        exited = true;
+        resolve(true);
+      }),
+    );
+    const exitedWithin = (timeoutMs: number) =>
+      Promise.race([
+        closed,
+        new Promise<boolean>((resolve) =>
+          setTimeout(resolve, timeoutMs, false),
+        ),
+      ]);
+    return { exitedWithin, stop };
+  } catch (error) {
+    stop();
+    throw error;
+  }
+}
+
 beforeEach(() => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'node-repl-km-'));
   manager = makeManager();
 });
 
-afterEach(() => {
-  manager.dispose();
+afterEach(async () => {
+  await manager.dispose();
   fs.rmSync(workDir, { recursive: true, force: true });
 });
 
+it('forwards native UI disabling flags to the kernel without unrelated arguments', async () => {
+  await manager.dispose();
+  manager = makeManager({ preloadCua: false });
+  const original = process.argv.slice();
+  process.argv.push('--no-overlay', '--unrelated', '--no-pip');
+  try {
+    const root = path.join(workDir, 'node_modules');
+    createEsmPackage(
+      root,
+      'kernel-args',
+      'export const args = process.argv.slice(2);',
+    );
+    await manager.addModuleRoot(root);
+    const result = await run(
+      'nodeRepl.write(JSON.stringify((await import("kernel-args")).args))',
+    );
+    expect(result.status).toBe('ok');
+    expect(texts(result).join('')).toBe('["--no-overlay","--no-pip"]');
+  } finally {
+    process.argv.splice(0, process.argv.length, ...original);
+  }
+});
+
 describe('NodeReplKernelManager', () => {
+  it('awaits Computer Use session cleanup on reset and disposal', async () => {
+    const marker = path.join(workDir, 'cua-cleanup.txt');
+    createEsmPackage(
+      path.join(workDir, 'node_modules'),
+      'cua-cleanup-fixture',
+      `
+      import fs from 'node:fs';
+      import { setTimeout } from 'node:timers/promises';
+      export const cua = { async [Symbol.asyncDispose]() {
+        await setTimeout(30);
+        fs.appendFileSync(${JSON.stringify(marker)}, ${JSON.stringify('released\n')});
+      } };
+    `,
+    );
+    const install = `globalThis.cua = (await import('cua-cleanup-fixture')).cua;`;
+    expect((await run(install)).status).toBe('ok');
+    await manager.reset();
+    expect(fs.readFileSync(marker, 'utf8')).toBe('released\n');
+    expect((await run(install)).status).toBe('ok');
+    await manager.dispose();
+    expect(fs.readFileSync(marker, 'utf8')).toBe('released\nreleased\n');
+  });
+
+  it('preserves bounded error diagnostics without invoking getters or custom inspectors', async () => {
+    const result = await run(`
+      var invoked = 0;
+      var details = {
+        action: { operation: 'fill', performed: true },
+        verification: { status: 'failed', reason: 'value_mismatch' },
+        image: 'x'.repeat(100_000),
+        get unsafe() { invoked++; throw new Error('getter ran'); },
+        [Symbol.for('nodejs.util.inspect.custom')]() { invoked++; throw new Error('inspector ran'); },
+      };
+      details.self = details;
+      throw Object.assign(new Error('Verification failed'), { code: 'verification_failed', details });
+    `);
+    expect(result.status).toBe('error');
+    expect(result.error?.code).toBe('verification_failed');
+    expect(result.error?.details).toContain("operation: 'fill'");
+    expect(result.error?.details).toContain('performed: true');
+    expect(result.error?.details).toContain("reason: 'value_mismatch'");
+    expect(result.error?.details).toContain('Circular');
+    expect(result.error?.details?.length).toBeLessThan(4200);
+    const followUp = await run('nodeRepl.write(invoked);');
+    expect(followUp.error).toBeUndefined();
+    expect(texts(followUp)).toContain('0');
+  });
+
+  it('keeps the original error when optional diagnostics are unreadable', async () => {
+    const result = await run(`
+      var invoked = 0;
+      throw Object.defineProperties(new Error('original'), {
+        code: { get() { invoked++; throw new Error('code getter'); } },
+        details: { get() { invoked++; throw new Error('details getter'); } },
+      });
+    `);
+    expect(result.error?.message).toBe('original');
+    expect(result.error?.code).toBeUndefined();
+    expect(result.error?.details).toBeUndefined();
+    expect(texts(await run('nodeRepl.write(invoked);'))).toContain('0');
+  });
+
+  it(
+    'executes compact and nested await operands without merging tokens',
+    async () => {
+      createEsmPackage(
+        path.join(workDir, 'node_modules'),
+        'smoke-sdk',
+        'export class ComputerUse { static async create() { return 42; } }',
+      );
+      const result = await run(
+        'var computer=await(await import("smoke-sdk")).ComputerUse.create();' +
+          'nodeRepl.write(computer);' +
+          'nodeRepl.write(await(Promise.resolve(7)));',
+      );
+      expect(result.status).toBe('ok');
+      expect(texts(result)).toEqual(['42', '7']);
+    },
+    TEST_TIMEOUT,
+  );
+
   it(
     'persists declarations without returning ordinary expressions',
     async () => {
@@ -115,12 +273,246 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'keeps an earlier closure when a later cell assigns its carried binding',
+    'keeps earlier closures on the same binding when later cells assign it',
     async () => {
       await run('let x = 1; const readX = () => x;');
       const result = await run('x = 2; nodeRepl.write(`${readX()}|${x}`);');
       expect(result.status).toBe('ok');
-      expect(texts(result)).toEqual(['1|2']);
+      expect(texts(result)).toEqual(['2|2']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'refreshes observation helpers and shares writes in both directions',
+    async () => {
+      await run(
+        'var state = {token:"old"}; let count=0; const read=()=>state.token; const next=()=>++count;',
+      );
+      expect(
+        texts(
+          await run(
+            'state={token:"fresh"}; nodeRepl.write([read(),state.token,next(),count]);',
+          ),
+        ),
+      ).toEqual(["[ 'fresh', 'fresh', 1, 1 ]"]);
+      expect(
+        texts(
+          await run(
+            'nodeRepl.write([state={token:"newer"},read(),++count,next(),count].slice(1));',
+          ),
+        ),
+      ).toEqual(["[ 'newer', 2, 3, 3 ]"]);
+      expect(
+        texts(
+          await run('var state={token:"redeclared"}; nodeRepl.write(read());'),
+        ),
+      ).toEqual(['redeclared']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'keeps carried assignments live in destructuring and loop declarations',
+    async () => {
+      await run('var value=1; const read=()=>value;');
+      expect(
+        texts(
+          await run(
+            'var {value, other=read()}={value:2}; nodeRepl.write([read(),other]);',
+          ),
+        ),
+      ).toEqual(['[ 2, 2 ]']);
+      expect(
+        texts(
+          await run(
+            'var [value, last=read()]=[3]; nodeRepl.write([read(),last]);',
+          ),
+        ),
+      ).toEqual(['[ 3, 3 ]']);
+      expect(
+        texts(
+          await run(
+            'for(var value=4;value<6;value++) { nodeRepl.write(read()); }',
+          ),
+        ),
+      ).toEqual(['4', '5']);
+      expect(
+        texts(
+          await run(
+            'for(var {value, inside=read()} of [{value:7}]) nodeRepl.write([read(),inside]);',
+          ),
+        ),
+      ).toEqual(['[ 7, 7 ]']);
+      expect(
+        texts(await run('for(var value in {key:0}) nodeRepl.write(read());')),
+      ).toEqual(['key']);
+      expect(
+        manager
+          .getBindingNames()
+          .some((name) => name.startsWith('__qwen_repl_')),
+      ).toBe(false);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'preserves inner scopes, parameter defaults and bare-call receivers',
+    async () => {
+      await run(
+        'let value=10; function plain(){return this===undefined;} const old=()=>value;',
+      );
+      const result = await run(
+        [
+          'value=11;',
+          'const local=(value)=>value+1;',
+          'function defaulted(v=value){var value=99; return v;}',
+          'const named=function value(){return typeof value;};',
+          'const object={value, [value](value){return value;}};',
+          'nodeRepl.write([local(2),defaulted(),named(),object.value,object[11](3),plain(),plain?.(),old()]);',
+          'nodeRepl.write([(plain)(),((plain))?.(),plain`tag`]);',
+          '{let value=88; nodeRepl.write(value);}',
+          'try{throw 77;}catch(value){nodeRepl.write(value);}',
+          'for(let value of [66]) nodeRepl.write(value);',
+          'nodeRepl.write(value);',
+        ].join('\n'),
+      );
+      expect(result.status).toBe('ok');
+      expect(texts(result)).toEqual([
+        "[ 3, 11, 'function', 11, 3, true, true, 11 ]",
+        '[ true, true, true ]',
+        '88',
+        '77',
+        '66',
+        '11',
+      ]);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'does not expose carried bindings as globals or to imported modules',
+    async () => {
+      fs.writeFileSync(
+        path.join(workDir, 'private-probe.mjs'),
+        'export const result=[typeof privateCell,typeof Buffer];',
+      );
+      await run(
+        'globalThis.privateCell="global"; let privateCell=1; let Buffer="shadow"; const read=()=>privateCell;',
+      );
+      const result = await run(
+        'privateCell=2; const probe=await import("./private-probe.mjs"); nodeRepl.write([read(),globalThis.privateCell,Buffer,...probe.result]);',
+      );
+      expect(texts(result)).toEqual([
+        "[ 2, 'global', 'shadow', 'string', 'function' ]",
+      ]);
+      await run('let __proto__=3; const protoRead=()=>__proto__;');
+      expect(
+        texts(await run('__proto__=4; nodeRepl.write(protoRead());')),
+      ).toEqual(['4']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'restores live closures to error checkpoints and cell-entry cancellation values',
+    async () => {
+      await run('let value=0; const read=()=>value;');
+      expect(
+        (await run('value=1; {value=2;throw Error("stop");}')).status,
+      ).toBe('error');
+      expect(texts(await run('nodeRepl.write([value,read()]);'))).toEqual([
+        '[ 1, 1 ]',
+      ]);
+      const controller = new AbortController();
+      const pending = manager.exec({
+        code: 'value=3; await new Promise(()=>{});',
+        timeoutMs: 15000,
+        signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(), 200);
+      expect((await pending).status).toBe('cancelled');
+      expect(texts(await run('nodeRepl.write([value,read()]);'))).toEqual([
+        '[ 1, 1 ]',
+      ]);
+      expect((await run('value=4; while(true){}', 100)).status).toBe('timeout');
+      expect(texts(await run('nodeRepl.write([value,read()]);'))).toEqual([
+        '[ 1, 1 ]',
+      ]);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'retains identifier early errors and shorthand property semantics',
+    async () => {
+      await run('var x=1; const read=()=>x; var __proto__={marker:2};');
+      for (const code of [
+        'x=2; delete x;',
+        'x=3; delete (x);',
+        'x=9; delete (/*comment*/x);',
+      ]) {
+        const result = await run(code);
+        expect(result.status).toBe('error');
+        expect(result.error?.message).toContain(
+          'Delete of an unqualified identifier',
+        );
+        expect(texts(await run('nodeRepl.write([x,read()]);'))).toEqual([
+          '[ 1, 1 ]',
+        ]);
+      }
+      expect(
+        texts(
+          await run(
+            'const object={__proto__}; nodeRepl.write([Object.hasOwn(object,"__proto__"),object.__proto__.marker,Object.getPrototypeOf(object)===Object.prototype]);',
+          ),
+        ),
+      ).toEqual(['[ true, 2, true ]']);
+    },
+    TEST_TIMEOUT,
+  );
+
+  it(
+    'preserves inferred names before class static initialization',
+    async () => {
+      await run('var fn; var C;');
+      expect(texts(await run('fn=()=>{}; nodeRepl.write(fn.name);'))).toEqual([
+        'fn',
+      ]);
+      expect(
+        texts(await run('var fn=function(){}; nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(await run('fn=null; fn ||= ()=>{}; nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(
+          await run(
+            'C=class{static n=this.name;}; nodeRepl.write([C.name,C.n]);',
+          ),
+        ),
+      ).toEqual(["[ 'C', 'C' ]"]);
+      expect(
+        texts(await run('({fn=()=>{}}={}); nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(await run('[fn=function*(){}]=[]; nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(await run('fn=(/*comment*/()=>{}); nodeRepl.write(fn.name);')),
+      ).toEqual(['fn']);
+      expect(
+        texts(
+          await run(
+            'C=(/*comment*/class{static n=this.name;}); nodeRepl.write([C.name,C.n]);',
+          ),
+        ),
+      ).toEqual(["[ 'C', 'C' ]"]);
+      expect(
+        texts(
+          await run('({fn=(/*comment*/()=>{})}={}); nodeRepl.write(fn.name);'),
+        ),
+      ).toEqual(['fn']);
     },
     TEST_TIMEOUT,
   );
@@ -929,7 +1321,7 @@ describe('NodeReplKernelManager', () => {
       fs.mkdirSync(readableRoot);
       const original = path.join(readableRoot, 'original.png');
       fs.writeFileSync(original, Buffer.from(PNG_BASE64, 'base64'));
-      manager.dispose();
+      await manager.dispose();
       manager = makeManager({ readableRoots: [readableRoot] });
       expect(
         (
@@ -1041,6 +1433,60 @@ describe('NodeReplKernelManager', () => {
       expect(result.stats.generation).toBeGreaterThan(oldGeneration);
     },
     TEST_TIMEOUT,
+  );
+
+  it.each([
+    {
+      name: 'a timed-out cancellation barrier',
+      code: 'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+      status: 'timeout',
+    },
+    {
+      name: 'an explicitly cancelled barrier',
+      code: 'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+      status: 'cancelled',
+    },
+    {
+      name: 'a blocked event loop after an asynchronous boundary',
+      code: 'await new Promise(resolve => setTimeout(resolve, 1)); while (true) {}',
+      status: 'timeout',
+    },
+  ])(
+    'recovers from $name within a bounded cancellation interval',
+    async ({ code, status }) => {
+      await run('const retainedBeforeHang = 42;');
+      const pid = manager.getKernelPid();
+      const generation = manager.getGeneration();
+      const readyFile = path.join(workDir, 'hang-started');
+      const controller = new AbortController();
+      const pending = manager.exec({
+        code: `const fs = await import('node:fs'); fs.writeFileSync(${JSON.stringify(readyFile)}, 'ready'); nodeRepl.write('before hang'); ${code}`,
+        // The timeout must comfortably exceed kernel start-up on a loaded
+        // shared runner: if the cancel frame arrives while the kernel is
+        // still suspended at the pre-hang await, the kernel cancels cleanly
+        // and survives, so no replacement is observed.
+        timeoutMs: status === 'cancelled' ? 60_000 : 2_000,
+        signal: controller.signal,
+      });
+      await expect.poll(() => fs.existsSync(readyFile)).toBe(true);
+      if (status === 'cancelled') controller.abort();
+      const queued = run('nodeRepl.write(typeof retainedBeforeHang);');
+
+      const outcome = await pending;
+      expect(outcome.status).toBe(status);
+      expect(outcome.stats.kernelReplaced).toBe(true);
+      expect(outcome.stats.pid).toBe(pid);
+      expect(outcome.error?.message).toMatch(/bindings were lost/);
+      expect(outcome.error?.message).toMatch(/external.*state/i);
+      expect(texts(outcome)).toContain('before hang');
+
+      const recovered = await queued;
+      expect(recovered.status).toBe('ok');
+      expect(texts(recovered)).toEqual(['undefined']);
+      expect(manager.getKernelPid()).not.toBe(pid);
+      expect(manager.getGeneration()).toBeGreaterThan(generation);
+    },
+    20_000,
   );
 
   it(
@@ -1164,7 +1610,7 @@ describe('NodeReplKernelManager', () => {
       expect(
         texts(
           await run(
-            'nodeRepl.write(`${nativeLifecycle.operation}|${nativeLifecycle.userContinuation}`);',
+            'await new Promise(resolve => setTimeout(resolve, 5500)); nodeRepl.write(`${nativeLifecycle.operation}|${nativeLifecycle.userContinuation}`);',
           ),
         ),
       ).toEqual(['committed|false']);
@@ -1212,7 +1658,7 @@ describe('NodeReplKernelManager', () => {
     async () => {
       const volatileCwd = path.join(workDir, 'volatile-cwd');
       fs.mkdirSync(volatileCwd);
-      manager.dispose();
+      await manager.dispose();
       manager = new NodeReplKernelManager({
         cwd: volatileCwd,
         homeDir: os.homedir(),
@@ -1249,6 +1695,149 @@ describe('NodeReplKernelManager', () => {
     TEST_TIMEOUT,
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'lets an idle kernel exit on reset and disposal before any signal',
+    async () => {
+      await run('nodeRepl.write("up");');
+      const realKill = process.kill.bind(process);
+      const signalledRunningKernels: number[] = [];
+      const kill = vi
+        .spyOn(process, 'kill')
+        .mockImplementation((pid, signal) => {
+          try {
+            realKill(Math.abs(pid), 0);
+            signalledRunningKernels.push(pid);
+          } catch {
+            // The kernel had already exited.
+          }
+          return realKill(pid, signal);
+        });
+      try {
+        await manager.reset();
+        await run('nodeRepl.write("up");');
+        await manager.dispose();
+        expect(signalledRunningKernels).toEqual([]);
+      } finally {
+        kill.mockRestore();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32').each([
+    { name: 'reset', terminate: () => manager.reset() },
+    { name: 'disposal', terminate: () => manager.dispose() },
+    {
+      name: 'a timed-out cancellation barrier',
+      terminate: async () => {
+        const outcome = await run(
+          'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+          2_000,
+        );
+        expect(outcome.status).toBe('timeout');
+        expect(outcome.stats.kernelReplaced).toBe(true);
+      },
+    },
+  ])(
+    'stops processes the session started on $name',
+    async ({ terminate }) => {
+      const child = await startSessionProcess();
+      try {
+        await terminate();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'kills a session process that ignores SIGTERM on reset',
+    async () => {
+      const child = await startSessionProcess(
+        "process.on('SIGTERM', () => {});",
+      );
+      try {
+        await manager.reset();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'lets a session process handle SIGTERM before it is killed on reset',
+    async () => {
+      const marker = path.join(workDir, 'sigterm-marker');
+      const child = await startSessionProcess(
+        `process.on('SIGTERM', () => { require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'flushed'); process.exit(0); });`,
+      );
+      try {
+        await manager.reset();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+        expect(fs.readFileSync(marker, 'utf8')).toBe('flushed');
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'kills a session process that ignores SIGTERM when the kernel exits on its own after the grace period',
+    async () => {
+      // Cleanup outlasts the 2500 ms grace period, so the group gets SIGTERM
+      // while the kernel is still running. The kernel ignores it once shutdown
+      // has started and exits when cleanup ends, during the 500 ms that follow.
+      createEsmPackage(
+        path.join(workDir, 'node_modules'),
+        'cua-slow-cleanup-fixture',
+        `export const cua = { async [Symbol.asyncDispose]() {
+          const until = Date.now() + 2750;
+          while (Date.now() < until);
+        } };`,
+      );
+      const child = await startSessionProcess(
+        "process.on('SIGTERM', () => {});",
+      );
+      try {
+        const install = await run(
+          `globalThis.cua = (await import('cua-slow-cleanup-fixture')).cua;`,
+        );
+        expect(install.status).toBe('ok');
+        const kernelPid = manager.getKernelPid()!;
+        const realKill = process.kill.bind(process);
+        const signalledRunningKernel: Array<[number, unknown]> = [];
+        const kill = vi
+          .spyOn(process, 'kill')
+          .mockImplementation((pid, signal) => {
+            try {
+              realKill(kernelPid, 0);
+              signalledRunningKernel.push([pid, signal]);
+            } catch {
+              // The kernel had already exited.
+            }
+            return realKill(pid, signal);
+          });
+        try {
+          await manager.reset();
+        } finally {
+          kill.mockRestore();
+        }
+        // Without this the kernel could exit before any signal and the case
+        // would pass without reaching the path it is named for.
+        expect(signalledRunningKernel).toContainEqual([-kernelPid, 'SIGTERM']);
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
   it(
     'disposes the process and temp directory and settles in-flight work',
     async () => {
@@ -1261,11 +1850,11 @@ describe('NodeReplKernelManager', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       const queuedReset = manager.reset();
-      manager.dispose();
+      const disposal = manager.dispose();
 
       expect((await pending).status).toBe('cancelled');
       await expect(queuedReset).rejects.toThrow(/disposed/);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await disposal;
       expect(() => process.kill(pid, 0)).toThrow();
       expect(fs.existsSync(tmpDir)).toBe(false);
       await expect(run('1;')).rejects.toThrow(/disposed/);

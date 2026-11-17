@@ -194,6 +194,82 @@ describe('verify-capture helper', () => {
       expect(colourOnly.equals(boldOnly)).toBe(false);
     }));
 
+  // The image build asserts the bold face itself, so no text model of the
+  // apt command decides the pin. The check must be the last RUN so every
+  // layer that can purge the package or delete the font is behind it; moved
+  // earlier, a later cleanup could ship a fontless image green.
+  it('checks the bold face, ffmpeg and Chromium in the final image', () => {
+    const dockerfile = readFileSync(
+      path.join(repoRoot, 'scripts/ci/ephemeral-runner/Dockerfile'),
+      'utf8',
+    );
+    // Fold continuations first: the assertion is one RUN spread over lines,
+    // and reading it line by line would take its first line for the whole.
+    const runs = dockerfile
+      .replace(/\\\n\s*/g, ' ')
+      .split('\n')
+      .filter((line) => /^RUN\s/.test(line));
+    const last = runs.at(-1);
+    expect(
+      last,
+      'the image build must assert the bold face after every layer that can change it',
+    ).toContain(
+      'test -f /usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf',
+    );
+    // The same RUN carries the other two things a later layer could remove
+    // while the visuals job stays green until it runs: the GIF transcoder, and
+    // a Chromium per playwright the lockfile names. The count is against that
+    // list, not a fixed number, so a dependency bump cannot make it stale.
+    expect(last, 'the GIF transcoder must be asserted too').toContain(
+      'command -v ffmpeg',
+    );
+    expect(last).toContain('/opt/ci-playwright/versions');
+    expect(last).toContain('-name chrome');
+    expect(last, 'a launch, not just a file that exists').toContain(
+      '"${chrome}" --version',
+    );
+  });
+
+  // The image's build context is its own directory, so it cannot read the
+  // lockfile and the playwright list is written into the Dockerfile instead.
+  // This is the pin that keeps the two in step: every playwright the tree
+  // resolves picks its own browser revision, and one missing from the image is
+  // a ~110 MB download paid inside a job — the cost the pre-install exists to
+  // remove. A bump fails here, naming the version, rather than in a visuals job
+  // six minutes into a download.
+  it('pre-installs a browser for every playwright the tree resolves', () => {
+    const dockerfile = readFileSync(
+      path.join(repoRoot, 'scripts/ci/ephemeral-runner/Dockerfile'),
+      'utf8',
+    );
+    const declared = /^ARG PLAYWRIGHT_VERSIONS="([^"]+)"$/m.exec(dockerfile);
+    expect(
+      declared,
+      'the Dockerfile must declare its playwright list',
+    ).not.toBe(null);
+    const lockfile = readFileSync(
+      path.join(repoRoot, 'pnpm-lock.yaml'),
+      'utf8',
+    );
+    // Both package names resolve a browser: the tree carries `playwright` at
+    // the root and `playwright-core` under browser-use, and their revisions
+    // differ. Anchored on the snapshot keys, which are the resolved set.
+    const resolved = new Set();
+    for (const match of lockfile.matchAll(
+      /^ {2}(?:playwright|playwright-core)@(\d+\.\d+\.\d+):$/gm,
+    )) {
+      resolved.add(match[1]);
+    }
+    expect(
+      resolved.size,
+      'no playwright found in the lockfile',
+    ).toBeGreaterThan(0);
+    expect(
+      [...declared[1].split(/\s+/)].sort(),
+      'the image must bake a browser for every resolved playwright version',
+    ).toEqual([...resolved].sort());
+  });
+
   // 256-colour and truecolor sequences produce getFgColor() values >= 16,
   // which the bounds guard maps to FG_DEFAULT (#d4d4d4). Decode pixels and
   // assert the fallback grey is present, so deleting the guard cannot ship
@@ -213,15 +289,35 @@ describe('verify-capture helper', () => {
     const { data, info } = await sharp(png)
       .raw()
       .toBuffer({ resolveWithObject: true });
-    // FG_DEFAULT is #d4d4d4 — look for a pixel matching it.
-    let hasFallback = false;
+    // FG_DEFAULT is #d4d4d4. Text is anti-aliased, so how many pixels land
+    // exactly on it depends on the host's font rasterisation, and the exact
+    // scan flaked. Count bright near-neutral pixels instead — both ends of
+    // the blend axis (#d4d4d4 over #1e1e1e) are neutral, so every blend of
+    // them is neutral at any coverage, while a grossly tinted FG_DEFAULT or
+    // the hardcoded #9cdcfe title fill is not and cannot satisfy the count
+    // in the fallback's place. The bound is tight because this pipeline never
+    // fringes (measured max spread 0) — slack would only let a tinted
+    // FG_DEFAULT (#d4d4c8) pass; the floor is strict to keep a mid-grey
+    // FG_DEFAULT (#808080) out. Deleting the guard ships fill="undefined",
+    // which librsvg paints black, never this bright on #1e1e1e.
+    let fallbackPixels = 0;
     for (let i = 0; i + 2 < data.length; i += info.channels) {
-      if (data[i] === 0xd4 && data[i + 1] === 0xd4 && data[i + 2] === 0xd4) {
-        hasFallback = true;
-        break;
+      const spread =
+        Math.max(data[i], data[i + 1], data[i + 2]) -
+        Math.min(data[i], data[i + 1], data[i + 2]);
+      if (
+        data[i] > 0x80 &&
+        data[i + 1] > 0x80 &&
+        data[i + 2] > 0x80 &&
+        spread <= 4
+      ) {
+        fallbackPixels += 1;
       }
     }
-    expect(hasFallback, '256-colour text did not render as #d4d4d4').toBe(true);
+    expect(
+      fallbackPixels,
+      '256-colour text did not render as #d4d4d4',
+    ).toBeGreaterThan(0);
   });
 
   // SGR 30 maps to #1e1e1e — identical to the canvas BG — so black-foreground

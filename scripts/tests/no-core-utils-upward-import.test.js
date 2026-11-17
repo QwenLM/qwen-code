@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { Linter } from 'eslint';
 import tsParser from '@typescript-eslint/parser';
-import rule from '../../eslint-rules/no-core-utils-upward-import.js';
+import rule, {
+  resolveExportTarget,
+} from '../../eslint-rules/no-core-utils-upward-import.js';
 
 function runRule(code, filename) {
   const linter = new Linter({ configType: 'flat', cwd: '/' });
@@ -27,6 +29,15 @@ function runRule(code, filename) {
 }
 
 describe('no-core-utils-upward-import', () => {
+  it('uses Node pattern ordering when literal prefixes tie', () => {
+    expect(
+      resolveExportTarget('./tools/x.js', {
+        './tools/*': './dist/src/utils/*',
+        './tools/*.js': './dist/src/tools/*.js',
+      }),
+    ).toBe('./dist/src/tools/x.js');
+  });
+
   it('rejects value imports that leave utils/', () => {
     expect(
       runRule(
@@ -214,6 +225,52 @@ describe('no-core-utils-upward-import', () => {
       runRule(
         "import { X } from '../tools/foo.js';",
         'packages/core/src/tools/bar.ts',
+      ),
+    ).toHaveLength(0);
+  });
+  it('resolves self-reference subpaths through the exports wildcard', () => {
+    // `packages/core/package.json` carries a `./*` catch-all, so a deep
+    // specifier resolves at runtime without matching any named export key.
+    // Without pattern matching in the rule these read as unresolvable and go
+    // unreported, which would let the utils layer regain upward runtime
+    // dependencies with lint, typecheck and CI all green.
+    expect(
+      runRule(
+        "import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(1);
+    expect(
+      runRule(
+        "import { X } from '@qwen-code/qwen-code-core/tools/tools.js';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('keeps exact export keys ahead of the wildcard', () => {
+    // The fixture must be a specifier whose two resolutions disagree, or this
+    // test cannot see the regression it names: the rule verdicts by directory
+    // layer and never checks file existence. `transcriptRecords` maps exactly
+    // to utils/transcript-records.js (inside utils/ — allowed), while the
+    // `./*` wildcard would resolve it to a `transcriptRecords` path outside
+    // utils/ (a violation). Dropping the exact-key branch of
+    // resolveExportTarget flips the expectation from 0 to 1; a fixture like
+    // `goalWire` — whose exact and wildcard resolutions both land outside
+    // utils/ — reports 1 either way and would stay green on the mutant.
+    expect(
+      runRule(
+        "import { X } from '@qwen-code/qwen-code-core/transcriptRecords';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('allows a sibling utils module reached through the wildcard', () => {
+    expect(
+      runRule(
+        "import { X } from '@qwen-code/qwen-code-core/utils/paths.js';",
+        'packages/core/src/utils/foo.ts',
       ),
     ).toHaveLength(0);
   });

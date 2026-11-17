@@ -282,6 +282,8 @@ export interface SameHostToolTextWriteRequest {
  * threaded through every operation.
  */
 export interface WorkspaceFileSystem {
+  /** Permanent regular-file deletion; absent on SSH/custom factories. */
+  deleteFile?(input: string): Promise<ResolvedPath>;
   resolve(input: string, intent: Intent): Promise<ResolvedPath>;
   stat(p: ResolvedPath): Promise<FsStat>;
   readText(
@@ -294,7 +296,10 @@ export interface WorkspaceFileSystem {
     opts?: ReadBytesOptions,
   ): Promise<ReadBytesOutcome>;
   list(p: ResolvedPath, opts?: ListOptions): Promise<FsEntry[]>;
-  glob(pattern: string, opts?: GlobOptions): Promise<ResolvedPath[]>;
+  glob(
+    pattern: string,
+    opts?: GlobOptions,
+  ): Promise<ResolvedPath[] & { truncated?: boolean }>;
   writeTextAtomic(
     p: ResolvedPath,
     content: string,
@@ -363,6 +368,10 @@ export interface WorkspaceFileSystem {
    * at `0o755` (modulo the process umask).
    */
   mkdir(p: ResolvedPath, opts?: { recursive?: boolean }): Promise<void>;
+  /** Create one new directory under an existing parent; local factories only. */
+  createDirectory?(input: string): Promise<ResolvedPath>;
+  /** Permanently remove a local directory and its contents. */
+  deleteDirectory?(input: string): Promise<ResolvedPath>;
 }
 
 /**
@@ -370,6 +379,7 @@ export interface WorkspaceFileSystem {
  * `forRequest` per HTTP route invocation.
  */
 export interface WorkspaceFileSystemFactory {
+  readonly sshWorkspace?: import('@qwen-code/qwen-code-core/services/ssh-workspace.js').SshWorkspace;
   forRequest(ctx: RequestContext): WorkspaceFileSystem;
   assertCanWrite(): void;
   /** Optional so existing custom factories remain workspace-only by default. */
@@ -587,13 +597,13 @@ async function resolveSameHostToolWriteTarget(input: string): Promise<string> {
 
   let leaf: Awaited<ReturnType<typeof fsp.lstat>>;
   try {
-    leaf = await fsp.lstat(input);
+    leaf = await fsp.lstat(input, { bigint: true });
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
       throw err;
     }
     const parent = await fsp.realpath(path.dirname(input));
-    const parentStat = await fsp.lstat(parent);
+    const parentStat = await fsp.lstat(parent, { bigint: true });
     if (!parentStat.isDirectory()) {
       throw new FsError(
         'parse_error',
@@ -614,7 +624,7 @@ async function resolveSameHostToolWriteTarget(input: string): Promise<string> {
     throw new FsError('parse_error', `path is not a regular file: ${input}`);
   }
   const canonical = await fsp.realpath(input);
-  const canonicalStat = await fsp.lstat(canonical);
+  const canonicalStat = await fsp.lstat(canonical, { bigint: true });
   if (!canonicalStat.isFile()) {
     throw new FsError(
       'parse_error',
@@ -1612,6 +1622,236 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       throw this.recordAndWrap(err, 'write', p as string, {
         audit: !(isFsError(err) && err.kind === 'file_already_exists'),
       });
+    }
+  }
+
+  async deleteFile(input: string): Promise<ResolvedPath> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'delete');
+      const basename = path.basename(input);
+      if (
+        !input ||
+        input.includes('\0') ||
+        hasSuspiciousPathPattern(input) ||
+        input.endsWith('/') ||
+        input.endsWith(path.sep) ||
+        basename === '.' ||
+        basename === '..'
+      ) {
+        throw new FsError(
+          'parse_error',
+          'Deletion requires a regular file path',
+        );
+      }
+      // Resolve only the parent: resolving the leaf would follow symlinks.
+      const parent = await resolveWithinWorkspace(
+        path.dirname(input),
+        this.deps.workspaces.map((workspace) => workspace.path),
+        'delete',
+      );
+      const target = path.join(parent, basename) as ResolvedPath;
+      if (
+        !this.workspaceForPath(target) ||
+        this.deps.workspaces.some((workspace) => workspace.path === target)
+      ) {
+        throw new FsError(
+          'path_outside_workspace',
+          'Cannot delete a workspace root',
+        );
+      }
+      return await this.deps.pathLocks.runExclusive(target, async () => {
+        this.deps.generationGuard?.assertOpen();
+        assertTrustedForIntent(this.deps.trusted, 'delete');
+        if ((await fsp.realpath(parent)) !== parent) {
+          throw new FsError('symlink_escape', 'Deletion parent changed');
+        }
+        const stat = await fsp.lstat(target);
+        if (!stat.isFile()) {
+          throw new FsError(
+            stat.isSymbolicLink() ? 'symlink_escape' : 'parse_error',
+            'Only regular files can be deleted',
+          );
+        }
+        if ((await fsp.realpath(parent)) !== parent) {
+          throw new FsError('symlink_escape', 'Deletion parent changed');
+        }
+        this.deps.generationGuard?.assertOpen();
+        assertTrustedForIntent(this.deps.trusted, 'delete');
+        const verdict = this.ignoreVerdict(target, 'file');
+        await fsp.unlink(target);
+        this.deps.audit.recordAccess(this.deps.ctx, {
+          intent: 'delete',
+          absolute: target,
+          durationMs: performance.now() - start,
+          sizeBytes: stat.size,
+          matchedIgnore: verdict.ignored ? verdict.category : undefined,
+        });
+        return target;
+      });
+    } catch (err) {
+      throw this.recordAndWrap(err, 'delete', input);
+    }
+  }
+
+  async deleteDirectory(input: string): Promise<ResolvedPath> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'delete');
+      const basename = path.basename(input);
+      if (
+        !input ||
+        input.includes('\0') ||
+        input.endsWith('/') ||
+        input.endsWith(path.sep) ||
+        basename === '.' ||
+        basename === '..'
+      ) {
+        throw new FsError('parse_error', 'Deletion requires a directory path');
+      }
+      if (hasSuspiciousPathPattern(input)) {
+        throw new FsError(
+          'path_outside_workspace',
+          'path contains a suspicious pattern',
+        );
+      }
+      const parent = await resolveWithinWorkspace(
+        path.dirname(input),
+        this.deps.workspaces.map((workspace) => workspace.path),
+        'delete',
+      );
+      const target = path.join(parent, basename) as ResolvedPath;
+      if (
+        !this.workspaceForPath(target) ||
+        this.deps.workspaces.some((workspace) => workspace.path === target)
+      ) {
+        throw new FsError(
+          'path_outside_workspace',
+          'Cannot delete a workspace root',
+        );
+      }
+      return await this.deps.pathLocks.runExclusive(target, async () => {
+        this.deps.generationGuard?.assertOpen();
+        assertTrustedForIntent(this.deps.trusted, 'delete');
+        if ((await fsp.realpath(parent)) !== parent) {
+          throw new FsError('symlink_escape', 'Deletion parent changed');
+        }
+        const stat = await fsp.lstat(target);
+        if (!stat.isDirectory()) {
+          throw new FsError(
+            stat.isSymbolicLink() ? 'symlink_escape' : 'parse_error',
+            'Only directories can be deleted',
+          );
+        }
+        if ((await fsp.realpath(target)) !== target) {
+          throw new FsError('symlink_escape', 'Deletion directory changed');
+        }
+        this.deps.generationGuard?.assertOpen();
+        assertTrustedForIntent(this.deps.trusted, 'delete');
+        try {
+          await fsp.rm(target, { recursive: true, force: false });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOTEMPTY') {
+            throw new FsError(
+              'io_error',
+              'Directory contents changed during removal',
+              {
+                cause: error,
+                hint: 'Retry deleting the directory.',
+              },
+            );
+          }
+          throw error;
+        }
+        const verdict = this.ignoreVerdict(target, 'directory');
+        this.deps.audit.recordAccess(this.deps.ctx, {
+          intent: 'delete',
+          operation: 'rm',
+          absolute: target,
+          durationMs: performance.now() - start,
+          matchedIgnore: verdict.ignored ? verdict.category : undefined,
+        });
+        return target;
+      });
+    } catch (error) {
+      throw this.recordAndWrap(error, 'delete', input);
+    }
+  }
+
+  async createDirectory(input: string): Promise<ResolvedPath> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      const basename = path.basename(input);
+      if (
+        !input ||
+        input.includes('\0') ||
+        input.endsWith('/') ||
+        input.endsWith(path.sep) ||
+        basename === '.' ||
+        basename === '..'
+      ) {
+        throw new FsError('parse_error', 'path must name a new directory');
+      }
+      if (hasSuspiciousPathPattern(input)) {
+        throw new FsError(
+          'path_outside_workspace',
+          'path contains a suspicious pattern',
+        );
+      }
+      const parent = await resolveWithinWorkspace(
+        path.dirname(input),
+        this.deps.workspaces.map((workspace) => workspace.path),
+        'list',
+      );
+      const target = path.join(parent, basename) as ResolvedPath;
+      return await this.deps.pathLocks.runExclusive(target, async () => {
+        this.deps.generationGuard?.assertOpen();
+        assertTrustedForIntent(this.deps.trusted, 'write');
+        try {
+          const existing = await fsp.lstat(target);
+          if (existing.isSymbolicLink()) {
+            throw new FsError('symlink_escape', 'directory path is a symlink');
+          }
+          throw new FsError('file_already_exists', 'path already exists');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        const parentStat = await fsp.lstat(parent);
+        if (
+          !parentStat.isDirectory() ||
+          (await fsp.realpath(parent)) !== parent
+        ) {
+          throw new FsError('symlink_escape', 'directory parent changed');
+        }
+        this.deps.generationGuard?.assertOpen();
+        try {
+          await fsp.mkdir(target, { mode: 0o755 });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+            throw new FsError('file_already_exists', 'path already exists');
+          }
+          throw error;
+        }
+        if (!(await fsp.lstat(target)).isDirectory()) {
+          throw new FsError('symlink_escape', 'created directory changed');
+        }
+        const verdict = this.ignoreVerdict(target, 'directory');
+        this.deps.audit.recordAccess(this.deps.ctx, {
+          intent: 'write',
+          operation: 'mkdir',
+          absolute: target,
+          durationMs: performance.now() - start,
+          sizeBytes: 0,
+          matchedIgnore: verdict.ignored ? verdict.category : undefined,
+        });
+        return target;
+      });
+    } catch (error) {
+      throw this.recordAndWrap(error, 'write', input);
     }
   }
 

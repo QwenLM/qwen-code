@@ -94,3 +94,12 @@ export function runWithTeammateIdentity<T>(
 ): T {
   return teammateIdentityStore.run(identity, fn);
 }
+
+/**
+ * Run a function outside any teammate identity context, so work done on
+ * behalf of the session that owns a resource is not attributed to whichever
+ * teammate happened to trigger it.
+ */
+export function runOutsideTeammateIdentity<T>(fn: () => T): T {
+  return teammateIdentityStore.exit(fn);
+}

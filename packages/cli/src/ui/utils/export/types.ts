@@ -5,6 +5,7 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
+import type { GoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core';
 
 export interface ExportToolLocation {
   path: string;
@@ -52,6 +53,13 @@ export interface ExportMessage {
   /** Model used for assistant messages */
   model?: string;
 
+  /**
+   * The workspace agent that wrote this message (an `agent_message` reply, or
+   * a message an agent posted into the session). Unset for the user's own
+   * messages and the session's own assistant.
+   */
+  author?: ExportMessageAuthor;
+
   /** Token usage for this message (mainly for assistant messages) */
   usageMetadata?: GenerateContentResponseUsageMetadata;
 
@@ -62,6 +70,7 @@ export interface ExportMessage {
     title: string | object;
     status: 'pending' | 'in_progress' | 'completed' | 'failed';
     rawInput?: string | object;
+    rawOutput?: unknown;
     content?: Array<{
       type: string;
       [key: string]: unknown;
@@ -72,6 +81,21 @@ export interface ExportMessage {
     }>;
     timestamp?: number;
   };
+
+  /**
+   * For system messages that record a Goal transition: the journaled
+   * `goal_state` record, including the bookkeeping ones the transcript view
+   * hides, so an export shows every verdict and stop the Goal went through.
+   * The payload is carried whole: the blocked audit and a pending checkpoint
+   * are part of why a Goal continued or stopped.
+   */
+  goalState?: GoalStateRecordPayloadV2;
+}
+
+/** Who wrote a message other than the user or the session's assistant. */
+export interface ExportMessageAuthor {
+  /** The agent's display name. */
+  name: string;
 }
 
 /**

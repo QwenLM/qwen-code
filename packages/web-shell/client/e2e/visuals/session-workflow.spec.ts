@@ -18,6 +18,7 @@ import {
 } from '../utils/mockDaemon';
 import {
   captureScreenshot,
+  clearFocus,
   gotoSession,
   installScenario,
   resolveBaseURL,
@@ -49,10 +50,10 @@ const sessionWorkflowSetting: DaemonSettingDescriptor = {
 
 // A diamond so the capture exercises what the graph exists to draw: more than
 // one layer, a node with two upstreams, and a step that unblocks two others.
-// Stable ids and dependency edges travel in `_meta.qwenTodo`, not as
-// top-level fields — `parseTodoItemsFromEntries` reads them from there, and a
-// fixture that puts `blockedBy` at the top level silently produces a plan with
-// no edges and the flat layout instead of the graph.
+// Stable ids and dependency edges travel in `_meta.qwenTodo`, and that is
+// what this capture exercises. `parseTodoItemsFromEntries` reads `blockedBy`
+// from there first and falls back to a top-level `blockedBy` when `_meta` is
+// absent — the `_meta` copy always wins when both are present.
 const todo = (
   id: string,
   content: string,
@@ -179,8 +180,23 @@ for (const theme of [
     // the todo graph. A broken tool-call ↔ task linkage (e.g. a `toolUseId`
     // drift) still renders the canvas but silently drops the runtime metric
     // and the inspector's agent row. `1m 14s` is `formatRuntime(runtimeMs)`
-    // for the fixture's running task — locale-independent.
-    await expect(page.getByText('1m 14s')).toBeVisible();
+    // for the fixture's running task — locale-independent. It prints on
+    // both the node face and the inspector's agent row, so a page-wide
+    // locator would match both and throw a strict-mode violation; gate each
+    // surface separately, keeping both halves load-bearing.
+    await expect(
+      page.locator('[data-plan-node-id="inspect-package"]').getByText('1m 14s'),
+    ).toBeVisible();
+    await expect(
+      page.locator('[data-testid="workflow-step-detail"]').getByText('1m 14s'),
+    ).toBeVisible();
+    // The cockpit focuses its back button on mount, and whether Chrome paints
+    // the `:focus-visible` ring for that programmatic focus is a heuristic —
+    // so this view rendered with and without a ring off one unchanged tree,
+    // each flip scoring 0.05% against the 0.02% threshold (#11465). The ring is
+    // not the subject of the capture; drop it. See `clearFocus` for why this is
+    // per-scenario rather than inside `captureScreenshot`.
+    await clearFocus(page);
     await captureScreenshot(page, `session-workflow-cockpit-${theme}`);
   });
 }

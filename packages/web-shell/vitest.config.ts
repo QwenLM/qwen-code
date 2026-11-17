@@ -1,7 +1,9 @@
 import { configDefaults, defineConfig } from 'vitest/config';
 import { resolve } from 'node:path';
+import { pierreResources } from './pierre-build';
 
 export default defineConfig({
+  plugins: [pierreResources()],
   root: 'client',
   resolve: {
     alias: {
@@ -9,10 +11,15 @@ export default defineConfig({
         __dirname,
         './client/daemon-react-sdk.ts',
       ),
+      '@qwen-code/web-shell/transcript': resolve(
+        __dirname,
+        './client/transcript.ts',
+      ),
       '@': resolve(__dirname, './client'),
     },
   },
   test: {
+    server: { deps: { inline: ['@pierre/diffs'] } },
     setupFiles: ['./test/setup.ts'],
     // Same shared-ECS ceilings as packages/cli: the jsdom component tests
     // here were the bulk of the release failures at vitest's 5s default.

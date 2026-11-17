@@ -177,6 +177,20 @@ export function buildPermissionRequestContent(
     });
   }
 
+  if (confirmation.type === 'exec' && confirmation.approvalText !== undefined) {
+    content.push({
+      type: 'content',
+      content: { type: 'text', text: confirmation.approvalText },
+    });
+  }
+
+  if (confirmation.type === 'info' && confirmation.renderPromptAsPlainText) {
+    content.push({
+      type: 'content',
+      content: { type: 'text', text: confirmation.prompt },
+    });
+  }
+
   return content;
 }
 

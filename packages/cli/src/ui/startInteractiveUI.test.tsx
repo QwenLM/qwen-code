@@ -20,6 +20,12 @@ import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 
 const registerSession = vi.hoisted(() => vi.fn());
+
+/**
+ * What `registerSession` reports for the interactive UI: the record
+ * landed, in the one shared slot a single-session process owns.
+ */
+const REGISTERED = { registered: true, slot: 'shared' };
 const registerCleanup = vi.hoisted(() => vi.fn());
 const inkRender = vi.hoisted(() => vi.fn());
 const lastPeerInboxFailure = vi.hoisted(() => ({ value: null as unknown }));
@@ -144,8 +150,13 @@ type TestConfig = Config & {
   updateSessionRegistryIpcPath: ReturnType<typeof vi.fn>;
 };
 
-function makeConfig(): TestConfig {
-  const trackSessionRegistration = vi.fn((registration: Promise<boolean>) => {
+// The gate reads the two session-level suppressions off the Config, so the
+// double models them. Neither is in force unless a case says so: the
+// settings argument these suites pass is what the gate otherwise defers to.
+function makeConfig(
+  suppression: { isSafeMode?: boolean; getBareMode?: boolean } = {},
+): TestConfig {
+  const trackSessionRegistration = vi.fn((registration: Promise<unknown>) => {
     void registration.catch(() => undefined);
   });
   return {
@@ -155,6 +166,8 @@ function makeConfig(): TestConfig {
     getChatRecordingService: () => undefined,
     isTelemetryInitializationDeferred: () => false,
     getApprovalMode: () => 'default',
+    isSafeMode: () => suppression.isSafeMode === true,
+    getBareMode: () => suppression.getBareMode === true,
     trackSessionRegistration,
     whenSessionRegistered: vi.fn().mockResolvedValue(true),
     updateSessionRegistryIpcPath: vi.fn().mockResolvedValue(undefined),
@@ -162,7 +175,17 @@ function makeConfig(): TestConfig {
   } as unknown as TestConfig;
 }
 
+// Messaging is on by default, and on it adds its own teardown entry; these
+// suites count the registry pair alone, so they turn it off explicitly.
+// The cross-session suite below is where "unset" is exercised.
 const settings = {
+  merged: {
+    ui: { hideWindowTitle: true },
+    agents: { crossSessionMessaging: false },
+  },
+} as unknown as LoadedSettings;
+
+const settingsWithoutTheKey = {
   merged: { ui: { hideWindowTitle: true } },
 } as unknown as LoadedSettings;
 
@@ -185,25 +208,29 @@ describe('startInteractiveUI session registration', () => {
     vi.clearAllMocks();
   });
 
-  it('registers the session with its id, target dir, and CLI version', async () => {
-    registerSession.mockResolvedValue(true);
+  it('registers the session with its id, target dir, CLI version, and kind', async () => {
+    registerSession.mockResolvedValue(REGISTERED);
     const config = makeConfig();
 
     await start(config);
 
+    // `kind` is stated rather than left to the default: this is the one
+    // registrant a listing describes as someone sitting at a terminal,
+    // and it is the only place that claim is made.
     expect(registerSession).toHaveBeenCalledWith({
       sessionId: 'session-123',
       cwd: '/work/app',
       qwenVersion: '9.9.9',
+      kind: 'tui',
     });
     expect(config.trackSessionRegistration).toHaveBeenCalledTimes(1);
     await expect(
       config.trackSessionRegistration.mock.calls[0]?.[0],
-    ).resolves.toBe(true);
+    ).resolves.toEqual(REGISTERED);
   });
 
   it('arms teardown before serialized registry cleanup', async () => {
-    registerSession.mockResolvedValue(true);
+    registerSession.mockResolvedValue(REGISTERED);
     const config = makeConfig();
     await start(config);
 
@@ -215,7 +242,7 @@ describe('startInteractiveUI session registration', () => {
   });
 
   it('does not await a stalled registration before returning startup', async () => {
-    registerSession.mockReturnValue(new Promise<boolean>(() => undefined));
+    registerSession.mockReturnValue(new Promise(() => undefined));
     const config = makeConfig();
 
     const result = await Promise.race([
@@ -239,18 +266,21 @@ describe('startInteractiveUI session registration', () => {
 });
 
 describe('startInteractiveUI cross-session messaging', () => {
+  // Turned on by hand: the user scope wrote it, so the merged value is
+  // true and the opt-in reader sees it too.
   const enabledSettings = {
     merged: {
       ui: { hideWindowTitle: true },
       agents: { crossSessionMessaging: true },
     },
+    user: { settings: { agents: { crossSessionMessaging: true } } },
   } as unknown as LoadedSettings;
 
   beforeEach(() => {
     vi.clearAllMocks();
     lastPeerInboxFailure.value = null;
     observedPeerInboxFailure.value = null;
-    registerSession.mockResolvedValue(true);
+    registerSession.mockResolvedValue(REGISTERED);
     peerMessagingStart.mockResolvedValue({
       close: vi.fn().mockResolvedValue(undefined),
     });
@@ -389,7 +419,7 @@ describe('startInteractiveUI cross-session messaging', () => {
     expect(options.getSessionId()).toBe('session-after-clear');
   });
 
-  it('does not bind an inbox unless the setting is on', async () => {
+  it('does not bind an inbox when the setting is off', async () => {
     const config = makeConfig();
 
     await start(config);
@@ -401,6 +431,17 @@ describe('startInteractiveUI cross-session messaging', () => {
     expect(peerMessagingStart).not.toHaveBeenCalled();
     // No inbox, no extra teardown: the registry pair is still all there is.
     expect(registerCleanup).toHaveBeenCalledTimes(2);
+  });
+
+  it('binds an inbox when nothing set the key: on is the default', async () => {
+    // Merged settings carry only what a scope wrote, so the schema default
+    // never reaches this code as a value. An unset key has to mean on here,
+    // or the default would be on in the docs and off in practice.
+    const config = makeConfig();
+
+    await start(config, settingsWithoutTheKey);
+
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalledTimes(1));
   });
 
   it('waits for registration to be queued before binding', async () => {
@@ -457,6 +498,85 @@ describe('startInteractiveUI cross-session messaging', () => {
     }
   });
 
+  async function observeFailureAfterStart(
+    used: LoadedSettings,
+  ): Promise<unknown> {
+    await start(makeConfig(), used);
+    await vi.waitFor(() => expect(peerMessagingStart).toHaveBeenCalled());
+    const appTree = inkRender.mock.calls[0]?.[0] as ReactElement;
+    const mounted = renderDom(appTree);
+    try {
+      // Give the provider a turn to publish whatever it decided to.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return observedPeerInboxFailure.value;
+    } finally {
+      mounted.unmount();
+    }
+  }
+
+  const unsupportedPlatform = {
+    cause: 'unsupported_platform',
+    socketPath: 'C:\\Users\\me\\qwen-socks\\1.sock',
+    detail: 'automatic peer inbox paths are not supported on Windows',
+    hint: 'Disable cross-session messaging for this session.',
+    attempts: 1,
+  };
+
+  it('keeps an unsupported platform quiet when nothing set the key', async () => {
+    // On by default means every user of a platform without a transport
+    // would otherwise be greeted with a failure about a feature they
+    // never asked for.
+    lastPeerInboxFailure.value = unsupportedPlatform;
+    peerMessagingStart.mockResolvedValue(null);
+
+    expect(await observeFailureAfterStart(settingsWithoutTheKey)).toBeNull();
+  });
+
+  it('says an unsupported platform to a user who turned the switch on', async () => {
+    lastPeerInboxFailure.value = unsupportedPlatform;
+    peerMessagingStart.mockResolvedValue(null);
+
+    expect(await observeFailureAfterStart(enabledSettings)).toEqual(
+      unsupportedPlatform,
+    );
+  });
+
+  it('keeps an unsupported platform quiet when only an operator default turned the switch on', async () => {
+    // The merged value is true, but nobody at this session wrote it: a
+    // fleet's system-defaults file is not an opt-in by hand.
+    lastPeerInboxFailure.value = unsupportedPlatform;
+    peerMessagingStart.mockResolvedValue(null);
+    const operatorOn = {
+      merged: {
+        ui: { hideWindowTitle: true },
+        agents: { crossSessionMessaging: true },
+      },
+      systemDefaults: {
+        settings: { agents: { crossSessionMessaging: true } },
+      },
+    } as unknown as LoadedSettings;
+
+    expect(await observeFailureAfterStart(operatorOn)).toBeNull();
+  });
+
+  it('says a real bind failure even when nothing set the key', async () => {
+    // Unreachable is unreachable whoever asked for the inbox: this line
+    // is the only place the user learns their session cannot be messaged.
+    const failure = {
+      cause: 'permission',
+      socketPath: '/run/user/1000/qwen-socks/1.sock',
+      detail: 'EACCES',
+      hint: 'Choose a directory you own.',
+      attempts: 3,
+    };
+    lastPeerInboxFailure.value = failure;
+    peerMessagingStart.mockResolvedValue(null);
+
+    expect(await observeFailureAfterStart(settingsWithoutTheKey)).toEqual(
+      failure,
+    );
+  });
+
   it('closes the inbox from exit cleanup', async () => {
     const close = vi.fn().mockResolvedValue(undefined);
     peerMessagingStart.mockResolvedValue({ close });
@@ -494,5 +614,52 @@ describe('startInteractiveUI cross-session messaging', () => {
     await cleanup;
 
     expect(peerMessagingStart).not.toHaveBeenCalled();
+  });
+
+  // Both suppressions rather than one: a gate answering only for safe mode
+  // would leave `--bare` binding an inbox and publishing its socket path, in
+  // the mode documented as skipping implicit startup work.
+  it.each([
+    ['safe mode', { isSafeMode: true }],
+    ['bare mode', { getBareMode: true }],
+  ])(
+    'does not bind when the session runs in %s whatever the setting says',
+    async (_label, suppression) => {
+      const config = makeConfig(suppression);
+
+      await start(config, enabledSettings);
+
+      expect(config.whenSessionRegistered).not.toHaveBeenCalled();
+      expect(peerMessagingStart).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not explain a bind failure for an inbox a suppressed session never asked for', async () => {
+    // The null a suppressed session publishes is deliberate, not a failure.
+    // Gating this branch on the setting alone would hand the user a cause
+    // that never happened — the same invented-cause defect `/peers` had,
+    // one file over. A leftover failure from an earlier bind is what makes
+    // that reachable rather than theoretical.
+    lastPeerInboxFailure.value = {
+      cause: 'permission',
+      socketPath: '/run/user/1000/qwen-socks/1.sock',
+      detail: 'EACCES',
+      hint: 'Choose a directory you own.',
+      attempts: 3,
+    };
+    const config = makeConfig({ isSafeMode: true });
+
+    await start(config, enabledSettings);
+    await vi.waitFor(() =>
+      expect(config.trackSessionRegistration).toHaveBeenCalled(),
+    );
+    const appTree = inkRender.mock.calls[0]?.[0] as ReactElement;
+    const mounted = renderDom(appTree);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(observedPeerInboxFailure.value).toBeNull();
+    } finally {
+      mounted.unmount();
+    }
   });
 });

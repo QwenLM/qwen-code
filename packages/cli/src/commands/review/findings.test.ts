@@ -14,6 +14,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -1444,7 +1445,7 @@ describe('findings (command boundary)', () => {
     ).toThrow(/--to-anchors must not be a symlink/);
   });
 
-  it('refuses a --to-anchors hardlinked to a sibling file', () => {
+  it('refuses a --to-anchors hardlinked to a sibling file', (ctx) => {
     // realpathSync never resolves hard links: two names of one inode compare
     // as different path strings, so a string-identity guard admits them and
     // both writes hit the same file — the exact destruction the guard exists
@@ -1455,6 +1456,16 @@ describe('findings (command boundary)', () => {
     writeFileSync(out, JSON.stringify([base])); // a previous run's artifact
     const anchors = join(dir, 'anchors.json');
     linkSync(out, anchors);
+    // The guard needs the volume to expose a file id at all. `isSameFile`
+    // stats with `{ bigint: true }` (the #11848 conversion), so a 64-bit
+    // NTFS id above 2^53 arrives exact and the alias is refused there too;
+    // only an ino-0 volume (FAT/exFAT/SMB) still degrades to canonical
+    // spellings, which cannot see a hard link — that skip is by design.
+    const inode = statSync(out).ino;
+    if (inode <= 0) {
+      ctx.skip();
+      return;
+    }
     expect(() =>
       (findingsCommand.handler as (a: unknown) => void)({
         input,

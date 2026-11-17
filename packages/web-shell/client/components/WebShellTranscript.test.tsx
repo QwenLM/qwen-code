@@ -173,6 +173,7 @@ describe('WebShellTranscript contract', () => {
   it('provides visual customization without enabling interactive mode', () => {
     const renderToolHeaderExtra = vi.fn();
     const renderAssistantTurnFooter = vi.fn();
+    const artifact = { renderImage: vi.fn() };
     mount(
       <WebShellTranscript
         blocks={[]}
@@ -183,6 +184,7 @@ describe('WebShellTranscript contract', () => {
         collapseCompletedTurns={false}
         markdownTableMode="advanced"
         composerTagIcons={{ file: '/file.svg' }}
+        artifact={artifact}
         renderToolHeaderExtra={renderToolHeaderExtra}
         renderAssistantTurnFooter={renderAssistantTurnFooter}
       />,
@@ -200,6 +202,7 @@ describe('WebShellTranscript contract', () => {
       collapseCompletedTurns: false,
       markdownTableMode: 'advanced',
       composerTagIcons: { file: '/file.svg' },
+      artifact,
       renderToolHeaderExtra,
       renderAssistantTurnFooter,
     });
@@ -207,6 +210,9 @@ describe('WebShellTranscript contract', () => {
     expect(root?.classList.contains('dark')).toBe(false);
     expect(root?.lang).toBe('zh-CN');
     expect(root?.style.getPropertyValue('--chat-content-width')).toBe('720px');
+    expect(
+      root?.style.getPropertyValue('--chat-responsive-content-width'),
+    ).toBe('min(720px, clamp(440px, 85cqw, calc(100cqw - 128px)))');
   });
 
   it('uses the non-virtualized, expanded document boundary', () => {

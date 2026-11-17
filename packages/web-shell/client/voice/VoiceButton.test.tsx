@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { VoiceButton } from './VoiceButton';
+import { VoiceButton, type VoiceButtonHandle } from './VoiceButton';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import type {
   UseVoiceCaptureOptions,
   UseVoiceCaptureReturn,
@@ -43,6 +44,7 @@ const mocks = vi.hoisted(() => ({
     start: vi.fn(),
     stop: vi.fn(),
     abort: vi.fn(),
+    flush: vi.fn(async () => ''),
   },
 }));
 
@@ -181,6 +183,7 @@ beforeEach(() => {
   mocks.capture.start.mockReset();
   mocks.capture.stop.mockReset();
   mocks.capture.abort.mockReset();
+  mocks.capture.flush.mockReset().mockResolvedValue('');
 });
 
 afterEach(() => {
@@ -192,6 +195,121 @@ afterEach(() => {
 });
 
 describe('VoiceButton', () => {
+  const localizedVoice = (language: WebShellLanguage, disabled = false) => (
+    <I18nProvider language={language}>
+      <VoiceButton
+        disabled={disabled}
+        onInsert={() => {}}
+        target={legacyTarget}
+      />
+    </I18nProvider>
+  );
+
+  it.each(['en', 'zh-CN'] as const)(
+    'localizes error feedback and restores the microphone on dismissal in %s',
+    async (language) => {
+      const { root, container } = mount(true);
+      await flush();
+      mocks.capture.status = 'error';
+      mocks.capture.errorMessage =
+        'No voice model is configured for this workspace.';
+      act(() => root.render(localizedVoice(language, true)));
+      await flush();
+      const message =
+        language === 'en'
+          ? 'No voice model is configured for this workspace.'
+          : '当前工作区未配置语音模型。';
+      const microphone = container.querySelector('button')!;
+      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+        message,
+      );
+      expect(microphone.title).toBe(message);
+      expect(microphone.getAttribute('aria-label')).toContain(message);
+      expect(microphone.className).toContain('error');
+
+      const dismiss = container.querySelector<HTMLButtonElement>(
+        '[data-slot="button"]',
+      )!;
+      expect(dismiss.getAttribute('aria-label')).toBe(
+        language === 'en' ? 'Dismiss voice message' : '关闭语音提示',
+      );
+      expect(dismiss.disabled).toBe(false);
+      mocks.capture.abort.mockImplementation(() => {
+        mocks.capture.status = 'idle';
+        mocks.capture.errorMessage = undefined;
+        root.render(localizedVoice(language, true));
+      });
+      click(dismiss);
+
+      expect(mocks.capture.abort).toHaveBeenCalledOnce();
+      expect(mocks.capture.start).not.toHaveBeenCalled();
+      expect(container.querySelector('[role="status"]')).toBeNull();
+      expect(microphone.className).not.toContain('error');
+      expect(microphone.title).toBe(
+        language === 'en' ? 'Start voice dictation' : '开始语音输入',
+      );
+    },
+  );
+
+  it('updates a visible error in all three presentation sites when language changes', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    mocks.capture.status = 'error';
+    mocks.capture.errorMessage = 'Transcription timed out.';
+    act(() => root.render(localizedVoice('en')));
+    await flush();
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'Transcription timed out.',
+    );
+
+    act(() => root.render(localizedVoice('zh-CN')));
+    const microphone = container.querySelector('button')!;
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      '语音转写超时，请重试。',
+    );
+    expect(microphone.title).toBe('语音转写超时，请重试。');
+    expect(microphone.getAttribute('aria-label')).toBe(
+      '语音错误 — 点击重试：语音转写超时，请重试。',
+    );
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+  });
+
+  it('updates a visible no-speech notice on language change and dismisses without aborting', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    act(() => root.render(localizedVoice('en')));
+    await flush();
+    act(() => mocks.onFinal?.(''));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'No speech detected.',
+    );
+
+    act(() => root.render(localizedVoice('zh-CN')));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      '未检测到语音。',
+    );
+    expect(container.querySelector('button')?.title).toBe('未检测到语音。');
+    click(container.querySelector<HTMLButtonElement>('[data-slot="button"]')!);
+
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.querySelector('button')?.title).toBe('开始语音输入');
+    expect(document.activeElement).toBe(container.querySelector('button'));
+    expect(mocks.capture.abort).not.toHaveBeenCalled();
+    expect(mocks.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('keeps live interim transcripts as recording content', async () => {
+    mocks.capture.status = 'recording';
+    mocks.capture.interimText = 'Dictated words';
+    const { container } = mount(false);
+    await flush();
+
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'Dictated words',
+    );
+    expect(container.querySelector('[data-slot="button"]')).toBeNull();
+  });
+
   it('renders only when workspace voice is enabled', async () => {
     expect(await render(false)).not.toBeNull();
 
@@ -944,6 +1062,16 @@ describe('VoiceButton', () => {
     expect(onActiveChange).toHaveBeenLastCalledWith(false);
   });
 
+  it('preserves the unavailable-service reason from capture', async () => {
+    mocks.capture.status = 'error';
+    mocks.capture.errorMessage = 'Cannot reach the service.';
+    const { container } = mount(false);
+    await flush();
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'daemon.connection.unavailable',
+    );
+  });
+
   it('clears the no-speech notice after two seconds', async () => {
     vi.useFakeTimers();
     const { container } = mount(false);
@@ -968,5 +1096,145 @@ describe('VoiceButton', () => {
     expect(button.disabled).toBe(true);
 
     expect(mocks.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('exposes capture flush through the imperative handle', async () => {
+    mocks.capture.flush.mockResolvedValue('final transcript');
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(ref.current).not.toBeNull();
+    expect(await ref.current!.flush()).toBe('final transcript');
+    expect(mocks.capture.flush).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces the no-speech notice when a send finalizes an empty transcript', async () => {
+    mocks.capture.status = 'recording';
+    mocks.capture.flush.mockResolvedValue('');
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    await act(async () => {
+      expect(await ref.current!.flush()).toBe('');
+    });
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'No speech detected.',
+    );
+  });
+
+  it('does not show the no-speech notice for a flush while idle', async () => {
+    mocks.capture.flush.mockResolvedValue('');
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    await act(async () => {
+      expect(await ref.current!.flush()).toBe('');
+    });
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('does not raise the no-speech notice when the owner changes mid-flush', async () => {
+    mocks.capture.status = 'recording';
+    let resolveFlush!: (text: string) => void;
+    mocks.capture.flush.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveFlush = resolve;
+        }),
+    );
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    let pending!: Promise<string>;
+    act(() => {
+      pending = ref.current!.flush();
+    });
+    // Session switch mid-flush: the app tears the capture down (abort
+    // settles ''), so the empty result is not the user's silence.
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={{
+              ...legacyTarget,
+              ownerKey: 'primary:session-2',
+              sessionId: 'session-2',
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      resolveFlush('');
+      expect(await pending).toBe('');
+    });
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 });

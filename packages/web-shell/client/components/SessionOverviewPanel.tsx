@@ -4,25 +4,40 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useDaemonAvailability } from '../daemon/availability-context.js';
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   useActions,
   useConnection,
   useStatusReport,
   useWorkspace,
+  type DaemonProductSessionContext,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import type {
-  DaemonSessionGroupPresetColor,
-  DaemonSessionPrInfo,
-  DaemonSessionSummary,
-  DaemonStatusReportSession,
-  SessionMetadataResult,
+import {
+  STANDALONE_SESSIONS_CAPABILITY,
+  type DaemonSessionGroupPresetColor,
+  type DaemonSessionPrInfo,
+  type DaemonSessionSummary,
+  type DaemonStandaloneSessionSummary,
+  type DaemonStatusReportSession,
+  type SessionMetadataResult,
 } from '@qwen-code/sdk/daemon';
 import {
   ArchiveIcon,
   ArrowUpDownIcon,
-  CheckIcon,
-  CopyIcon,
+  CircleIcon,
+  CircleHelpIcon,
+  GitPullRequestIcon,
+  InfoIcon,
+  ShieldQuestionIcon,
   DownloadIcon,
   FunnelIcon,
   PenLineIcon,
@@ -41,14 +56,10 @@ import {
   useReactTable,
 } from '@tanstack/react-table';
 import { useI18n } from '../i18n';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 import { SessionPrBadge } from './SessionPrBadge';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
-import {
-  warnClipboardWriteFailure,
-  writeClipboardText,
-} from '../utils/clipboard';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
-import { isExternalOpenUrl } from '../utils/externalOpen';
 import { workspaceLabel, workspaceLabelForCwd } from '../utils/workspace';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
@@ -56,12 +67,18 @@ import { useWorkspaceSessionLiveState } from '../session-catalog/workspace-sessi
 import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
 import { getDaemonToken } from '../config/daemon';
 import {
+  SESSION_ARCHIVE_BATCH_SIZE,
   SESSION_LIST_PAGE_SIZE,
   SESSION_LIVE_STATE_FEATURE,
   SESSION_ORGANIZATION_FEATURE,
 } from '../constants/sessions';
 import { ErrorBoundary } from './ErrorBoundary';
+import {
+  BindSessionPrDialog,
+  type BindSessionPrPayload,
+} from './dialogs/BindSessionPrDialog';
 import { SessionDetailsTooltip } from './sidebar/SessionDetailsTooltip';
+import { isAbsolutePath } from './sidebar/WorkspaceSection';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { Checkbox } from './ui/checkbox';
@@ -74,12 +91,7 @@ import {
   DataTablePagination,
   type DataTableColumnMeta,
 } from './ui/data-table';
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from './ui/tooltip';
+import { TooltipProvider } from './ui/tooltip';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -100,70 +112,11 @@ import styles from './SessionOverviewPanel.module.css';
 const LIST_POLL_MS = 3000;
 const STATUS_POLL_MS = 10000;
 const PAGE_SIZE = 50;
+// The standalone route accepts up to 100 entries per page; 50 matches the
+// sidebar's standalone walk so both views fetch the same page shape.
+const STANDALONE_SESSIONS_PAGE_SIZE = 50;
 const PAGE_SIZES = [10, 50, 100] as const;
 const PAGE_SIZE_STORAGE_KEY = 'qwen-web-shell-session-overview-page-size';
-
-function SessionIdCell({ sessionId }: { sessionId: string }) {
-  const { t } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const resetTimerRef = useRef<number | undefined>(undefined);
-
-  useEffect(() => () => window.clearTimeout(resetTimerRef.current), []);
-
-  return (
-    <div className="flex min-w-0 items-center gap-1">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span
-            className="block min-w-0 flex-1 truncate whitespace-nowrap text-xs text-current"
-            data-web-shell-session-id
-          >
-            {sessionId}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent>{sessionId}</TooltipContent>
-      </Tooltip>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-xs"
-            className={cx(
-              'size-5 shrink-0 cursor-pointer text-current transition-opacity focus-visible:opacity-100',
-              copied ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
-            )}
-            aria-label={
-              copied ? t('sidebar.sessionIdCopied') : t('sidebar.copySessionId')
-            }
-            data-web-shell-session-id-copy
-            onClick={(event) => {
-              event.stopPropagation();
-              void writeClipboardText(sessionId)
-                .then(() => {
-                  setCopied(true);
-                  window.clearTimeout(resetTimerRef.current);
-                  resetTimerRef.current = window.setTimeout(
-                    () => setCopied(false),
-                    2000,
-                  );
-                })
-                .catch(warnClipboardWriteFailure);
-            }}
-          >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </Button>
-        </TooltipTrigger>
-        <TooltipContent>
-          {copied ? t('sidebar.sessionIdCopied') : t('sidebar.copySessionId')}
-        </TooltipContent>
-      </Tooltip>
-      <span className="sr-only" aria-live="polite">
-        {copied ? t('sidebar.sessionIdCopied') : ''}
-      </span>
-    </div>
-  );
-}
 
 function readPageSize(): number {
   if (typeof window === 'undefined') return PAGE_SIZE;
@@ -203,6 +156,29 @@ export interface SessionCard {
   gitBranch?: string;
   /** The workspace the session lives in. */
   workspaceCwd: string;
+  /** Catalog the session came from; 'standalone' has no workspace of its own. */
+  sourceType?: string;
+}
+
+type SessionStatusFilter = 'all' | 'attention' | 'running' | 'idle';
+
+const STATUS_FILTERS: SessionStatusFilter[] = [
+  'all',
+  'attention',
+  'running',
+  'idle',
+];
+
+function matchesStatus(
+  card: SessionCard,
+  filter: SessionStatusFilter,
+): boolean {
+  return (
+    filter === 'all' ||
+    (filter === 'attention'
+      ? card.status === 'needsApproval' || card.status === 'askUserQuestion'
+      : card.status === filter)
+  );
 }
 
 type SessionIdentity = Pick<SessionCard, 'sessionId' | 'workspaceCwd'>;
@@ -211,15 +187,35 @@ function getSessionIdentity(session: SessionIdentity): string {
   return `${session.workspaceCwd}\0${session.sessionId}`;
 }
 
+/**
+ * Standalone conversations live outside every workspace catalog, so opening
+ * one through the workspace route would fail: rows from the standalone
+ * catalog carry the standalone context to the open handler. The catalog
+ * discriminator decides, never the cwd — an empty cwd means the primary
+ * workspace everywhere else in this panel, and a standalone row's cwd is the
+ * daemon's internal Conversations root.
+ */
+function openSessionContext(
+  card: Pick<SessionCard, 'sourceType'>,
+): DaemonProductSessionContext | undefined {
+  return card.sourceType === 'standalone' ? { kind: 'standalone' } : undefined;
+}
+
 function isCurrentSession(
-  session: SessionIdentity,
+  session: Pick<SessionCard, 'sessionId' | 'workspaceCwd' | 'sourceType'>,
   currentSessionId: string | undefined,
   currentWorkspaceCwd: string | undefined,
+  currentContextKind?: string,
 ): boolean {
-  return (
-    session.sessionId === currentSessionId &&
-    (!currentWorkspaceCwd || session.workspaceCwd === currentWorkspaceCwd)
-  );
+  if (session.sessionId !== currentSessionId) return false;
+  // A standalone open session carries no product workspace cwd, so the cwd
+  // comparison can never match its internal-root card; key on the context
+  // kind plus the catalog discriminator instead (the sidebar matches on the
+  // id alone).
+  if (currentContextKind === 'standalone') {
+    return session.sourceType === 'standalone';
+  }
+  return !currentWorkspaceCwd || session.workspaceCwd === currentWorkspaceCwd;
 }
 
 const STATUS_PRIORITY: Record<SessionCardStatus, number> = {
@@ -245,6 +241,7 @@ export function deriveSessionCards(
   currentSessionId: string | undefined,
   statusSessions: DaemonStatusReportSession[] = [],
   currentWorkspaceCwd?: string,
+  currentContextKind?: string,
 ): SessionCard[] {
   const statusByIdentity = new Map(
     statusSessions.map((session) => [getSessionIdentity(session), session]),
@@ -263,7 +260,8 @@ export function deriveSessionCards(
         ? 'needsApproval'
         : askUserQuestion
           ? 'askUserQuestion'
-          : (session.hasActivePrompt ?? status?.hasActivePrompt)
+          : (session.hasActivePrompt ?? status?.hasActivePrompt) ||
+              session.activeWorkState === 'active'
             ? 'running'
             : 'idle',
       updatedAt: session.updatedAt || session.createdAt,
@@ -272,10 +270,12 @@ export function deriveSessionCards(
         session,
         currentSessionId,
         currentWorkspaceCwd,
+        currentContextKind,
       ),
       prs: session.prs,
       gitBranch: session.worktree?.branch ?? session.branch?.name,
       workspaceCwd: session.workspaceCwd,
+      sourceType: session.sourceType,
     };
   });
   cards.sort((a, b) => {
@@ -319,8 +319,13 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces,
   workspaceCwd,
   manageLiveState,
+  onLiveStateWorkspaceCwdsChange,
 }: {
-  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
+  onOpenSession: (
+    sessionId: string,
+    workspaceCwd?: string,
+    sessionContext?: DaemonProductSessionContext,
+  ) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   onCurrentSessionRemoved?: (
     session: SessionIdentity,
@@ -328,8 +333,10 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces: boolean;
   workspaceCwd?: string;
   manageLiveState: boolean;
+  onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
 }) {
   const { t } = useI18n();
+  const generatedUiOwner = useContext(McpAppGeneratedUiOwnerContext);
   const connection = useConnection();
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
@@ -339,6 +346,11 @@ function SessionOverviewPanelInner({
   );
   const actions = useActions();
   const currentSessionId = connection.sessionId;
+  // The open session's product context (workspace/standalone/live); absent
+  // for legacy opens. A standalone context carries no product workspace cwd,
+  // so a standalone current session must match its rows by the context
+  // kind, not a cwd.
+  const currentContextKind = connection.sessionContext?.kind;
   const organizationEnabled =
     connection.capabilities?.features?.includes(SESSION_ORGANIZATION_FEATURE) ??
     false;
@@ -371,42 +383,61 @@ function SessionOverviewPanelInner({
   const currentWorkspaceCwd =
     connection.workspaceCwd || workspaceCwd || primaryCwd;
 
-  // Live-state (2s channel) is the sidebar's refresh path: it patches the
+  // Live-state is the sidebar's refresh path: it patches the
   // catalog store's sessions with hasActivePrompt / isWaitingForPermission /
   // isWaitingForUserQuestion and coordinates full-catalog reconciles only when
   // something actually changed. Adopt it only when trusted live-state routes
   // cover every visible workspace; otherwise fall back to catalog polling.
-  const liveStateWorkspaceCwds = useMemo(() => {
-    if (!workspaceCatalogAdvertised) {
-      const legacyCwd = workspaceCwd || primaryCwd;
-      return legacyCwd ? [legacyCwd] : [];
-    }
-    const visible = workspaceCwd
+  const visibleWorkspaces = useMemo(() => {
+    if (!workspaceCatalogAdvertised) return undefined;
+    return workspaceCwd
       ? (registeredWorkspaces ?? []).filter(
           (entry) => entry.cwd === workspaceCwd,
         )
       : (registeredWorkspaces ?? []).filter(
           (entry) => entry.primary || entry.trusted,
         );
-    return visible.length > 0 && visible.every((entry) => entry.trusted)
-      ? visible.map((entry) => entry.cwd)
+  }, [registeredWorkspaces, workspaceCatalogAdvertised, workspaceCwd]);
+  const liveStateWorkspaceCwds = useMemo(() => {
+    if (!visibleWorkspaces) {
+      const legacyCwd = workspaceCwd || primaryCwd;
+      return legacyCwd ? [legacyCwd] : [];
+    }
+    return visibleWorkspaces.length > 0 &&
+      visibleWorkspaces.every((entry) => entry.trusted && entry.kind !== 'live')
+      ? visibleWorkspaces.map((entry) => entry.cwd)
       : [];
-  }, [
-    primaryCwd,
-    registeredWorkspaces,
-    workspaceCatalogAdvertised,
-    workspaceCwd,
-  ]);
+  }, [visibleWorkspaces, primaryCwd, workspaceCwd]);
+  // The app-level sidebarless poller covers workspaces per entry, so report
+  // the pollable subset of the displayed set even when the panel's own
+  // all-or-nothing adoption above falls back to catalog polling (#16355).
+  const reportableLiveStateWorkspaceCwds = useMemo(() => {
+    if (!visibleWorkspaces) return liveStateWorkspaceCwds;
+    return visibleWorkspaces
+      .filter(
+        (entry) =>
+          entry.trusted && entry.kind !== 'live' && isAbsolutePath(entry.cwd),
+      )
+      .map((entry) => entry.cwd);
+  }, [visibleWorkspaces, liveStateWorkspaceCwds]);
+  useEffect(() => {
+    onLiveStateWorkspaceCwdsChange?.(reportableLiveStateWorkspaceCwds);
+  }, [onLiveStateWorkspaceCwdsChange, reportableLiveStateWorkspaceCwds]);
+  useEffect(
+    () => () => onLiveStateWorkspaceCwdsChange?.([]),
+    [onLiveStateWorkspaceCwdsChange],
+  );
   const liveStateEnabled =
     (connection.capabilities?.features?.includes(SESSION_LIVE_STATE_FEATURE) ??
       false) &&
     liveStateWorkspaceCwds.length > 0;
   // Live state only replaces catalog/status polling when this panel runs the
-  // channel itself. When the sidebar owns it, its trusted-only coverage can
-  // miss workspaces this panel shows — so this panel keeps polling then.
+  // channel itself. When another view owns it, keep the fallback because that
+  // view may cover a narrower workspace set.
   const liveStateActive = manageLiveState && liveStateEnabled;
   useWorkspaceSessionLiveState(workspace.client, {
     enabled: liveStateActive,
+    pollIntervalMs: workspace.capabilities?.sessionLiveStatePollIntervalMs,
     workspaceCwds: liveStateWorkspaceCwds,
     groupWorkspaceCwds: [],
   });
@@ -428,11 +459,101 @@ function SessionOverviewPanelInner({
       includeOtherWorkspaces && !workspaceCwd,
       liveStateActive ? undefined : LIST_POLL_MS,
     );
-  const mergedSessions = useMemo(
-    () =>
-      otherSessions.length === 0 ? sessions : [...sessions, ...otherSessions],
-    [sessions, otherSessions],
-  );
+  // Standalone (no-workspace) sessions never appear in any workspace catalog,
+  // so without this the overview would miss every conversation the user has
+  // outside a workspace. Gated on the capability: daemons without the route
+  // must not get the request at all. A host-locked shell (workspaceCwd set)
+  // is confined to that workspace, so the process-global standalone catalog
+  // stays hidden there too — the same !workspaceCwd scope the
+  // other-workspace fold above honours.
+  const standaloneFeatures = connection.capabilities?.features;
+  const standaloneSessionsSupported =
+    !workspaceCwd &&
+    standaloneFeatures?.includes(STANDALONE_SESSIONS_CAPABILITY) === true;
+  const [standaloneSessions, setStandaloneSessions] = useState<
+    DaemonStandaloneSessionSummary[]
+  >([]);
+  // A re-run or unmount supersedes an in-flight walk: its pages must not
+  // land after the effect they belonged to is gone.
+  const standalonePollGenerationRef = useRef(0);
+  const standaloneWalkInFlightRef = useRef(false);
+  // One full paginated walk, shared by the poll interval and post-mutation
+  // refreshes. A partial walk would hide the tail of the list for a whole
+  // poll interval, and an in-flight walk is never overlapped, so a stale page
+  // set cannot overwrite a newer one.
+  const reloadStandalone = useCallback(async () => {
+    if (!standaloneSessionsSupported) {
+      setStandaloneSessions((prev) => (prev.length === 0 ? prev : []));
+      return;
+    }
+    if (standaloneWalkInFlightRef.current) return;
+    standaloneWalkInFlightRef.current = true;
+    const generation = standalonePollGenerationRef.current;
+    const collected: DaemonStandaloneSessionSummary[] = [];
+    let cursor: string | undefined;
+    try {
+      do {
+        const page = await workspace.client.listStandaloneSessionsPage({
+          archiveState: 'active',
+          pageSize: STANDALONE_SESSIONS_PAGE_SIZE,
+          ...(cursor ? { cursor } : {}),
+        });
+        if (standalonePollGenerationRef.current !== generation) return;
+        collected.push(...page.sessions);
+        cursor = page.nextCursor;
+      } while (cursor);
+      if (standalonePollGenerationRef.current === generation) {
+        setStandaloneSessions(collected);
+      }
+    } catch (error) {
+      if (standalonePollGenerationRef.current === generation) {
+        console.warn(
+          '[web-shell] overview standalone sessions list failed:',
+          error,
+        );
+      }
+    } finally {
+      standaloneWalkInFlightRef.current = false;
+    }
+  }, [standaloneSessionsSupported, workspace.client]);
+  useEffect(() => {
+    if (!standaloneSessionsSupported) {
+      setStandaloneSessions([]);
+      return;
+    }
+    standalonePollGenerationRef.current += 1;
+    void reloadStandalone();
+    // Same cadence as the workspace catalog poll above; unlike that poll,
+    // the live-state channel does not cover standalone sessions, so this is
+    // their only refresh path — it pauses only while the tab is hidden,
+    // like the status poll below.
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      void reloadStandalone();
+    }, LIST_POLL_MS);
+    return () => {
+      window.clearInterval(timer);
+      standalonePollGenerationRef.current += 1;
+    };
+  }, [standaloneSessionsSupported, reloadStandalone]);
+  const mergedSessions = useMemo(() => {
+    // Deduplicate on the row identity (workspaceCwd + sessionId): a session
+    // can surface in more than one of the lists, and duplicate row ids would
+    // break the table.
+    const seen = new Set<string>();
+    const merged: DaemonSessionSummary[] = [];
+    for (const session of [
+      ...sessions,
+      ...otherSessions,
+      ...standaloneSessions,
+    ]) {
+      const identity = getSessionIdentity(session);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      merged.push(session);
+    }
+    return merged;
+  }, [sessions, otherSessions, standaloneSessions]);
   const sessionByIdentity = useMemo(
     () =>
       new Map(
@@ -451,9 +572,10 @@ function SessionOverviewPanelInner({
   const statusReload = status.reload;
   const statusReport = status.report;
 
+  const available = useDaemonAvailability() === 'available';
   const statusInFlight = useRef(false);
   useEffect(() => {
-    if (liveStateActive) return;
+    if (!available || liveStateActive) return;
     const timer = window.setInterval(() => {
       if (document.hidden || statusInFlight.current) return;
       statusInFlight.current = true;
@@ -462,7 +584,7 @@ function SessionOverviewPanelInner({
       });
     }, STATUS_POLL_MS);
     return () => window.clearInterval(timer);
-  }, [liveStateActive, statusReload]);
+  }, [available, liveStateActive, statusReload]);
 
   const cards = useMemo(
     () =>
@@ -471,11 +593,13 @@ function SessionOverviewPanelInner({
         currentSessionId,
         liveStateActive ? [] : (statusReport?.full?.sessions ?? []),
         currentWorkspaceCwd,
+        currentContextKind,
       ),
     [
       mergedSessions,
       currentSessionId,
       currentWorkspaceCwd,
+      currentContextKind,
       liveStateActive,
       statusReport,
     ],
@@ -483,22 +607,36 @@ function SessionOverviewPanelInner({
   const [popupBlocked, setPopupBlocked] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<SessionStatusFilter>('all');
   const [excludedWorkspaceCwds, setExcludedWorkspaceCwds] = useState<
     Set<string>
   >(() => new Set());
   const [workspaceFilterOpen, setWorkspaceFilterOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState<{
+    identity: string;
+    click: boolean;
+  } | null>(null);
+  // One replacement owner for every details entry point of this panel, so
+  // the focus rescue only fires within the overview.
+  const sessionDetailsOwner = useId();
+  // Stable column renderers keep the hover anchor mounted as details change.
+  const detailsOpenRef = useRef(detailsOpen);
+  detailsOpenRef.current = detailsOpen;
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   const [actionError, setActionError] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<SessionCard[] | null>(
     null,
   );
   const [deleteTarget, setDeleteTarget] = useState<SessionCard[] | null>(null);
+  const [bindPrTarget, setBindPrTarget] = useState<SessionCard | null>(null);
+  const [bindPrError, setBindPrError] = useState<string | undefined>();
   const [batchBusy, setBatchBusy] = useState(false);
   const [footerSticky, setFooterSticky] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   // Inline rename state — mirrors the sidebar's double-click/rename flow.
   const [editingCard, setEditingCard] = useState<SessionCard | null>(null);
   const [editingName, setEditingName] = useState('');
+  const focusSortAfterRenameRef = useRef(false);
   const editingIdentity = editingCard
     ? getSessionIdentity(editingCard)
     : undefined;
@@ -509,6 +647,7 @@ function SessionOverviewPanelInner({
         card,
         current.sessionId,
         current.workspaceCwd || workspaceCwd || primaryCwd,
+        current.sessionContext?.kind,
       );
     },
     [primaryCwd, workspaceCwd],
@@ -520,11 +659,17 @@ function SessionOverviewPanelInner({
     if (workspaceCwd || !multiWorkspace) return [];
     const workspaces = registeredWorkspaces ?? [];
     const listed = workspaces.filter((entry) => entry.primary || entry.trusted);
+    // The live entry is the daemon's internal Conversations runtime that
+    // standalone rows carry as their cwd; it is not a project, so its facet
+    // reads the same "No workspace" the rows do.
     return listed.map((entry) => ({
       cwd: entry.cwd,
-      label: workspaceLabel(entry),
+      label:
+        entry.kind === 'live'
+          ? t('sidebar.noWorkspace')
+          : workspaceLabel(entry),
     }));
-  }, [multiWorkspace, registeredWorkspaces, workspaceCwd]);
+  }, [multiWorkspace, registeredWorkspaces, t, workspaceCwd]);
 
   // Exclusions are only manageable through the filter popover. When the
   // option set shrinks — most sharply when the host locks the panel to one
@@ -547,7 +692,7 @@ function SessionOverviewPanelInner({
     });
   }, [excludedWorkspaceCwds, workspaceOptions]);
 
-  const filteredCards = useMemo(() => {
+  const searchedCards = useMemo(() => {
     let list = cards;
     if (excludedWorkspaceCwds.size > 0) {
       list = list.filter(
@@ -559,11 +704,55 @@ function SessionOverviewPanelInner({
       list = list.filter(
         (card) =>
           card.label.toLowerCase().includes(query) ||
-          card.sessionId.toLowerCase().includes(query),
+          card.sessionId.toLowerCase().includes(query) ||
+          card.gitBranch?.toLowerCase().includes(query) ||
+          card.prs?.some((pr) => `#${pr.number}`.includes(query)),
       );
     }
     return list;
   }, [cards, excludedWorkspaceCwds, searchQuery]);
+  const filteredCards = useMemo(
+    () => searchedCards.filter((card) => matchesStatus(card, statusFilter)),
+    [searchedCards, statusFilter],
+  );
+  const sessionDetailsProps = useCallback(
+    (card: SessionCard, click = false) => {
+      const identity = getSessionIdentity(card);
+      return {
+        openOnClick: click,
+        ownerToken: sessionDetailsOwner,
+        open:
+          detailsOpenRef.current?.identity === identity &&
+          detailsOpenRef.current.click === click,
+        onOpenChange: (open: boolean) =>
+          setDetailsOpen((current) =>
+            open
+              ? { identity, click }
+              : current?.identity === identity && current.click === click
+                ? null
+                : current,
+          ),
+        session: {
+          ...sessionByIdentity.get(getSessionIdentity(card)),
+          sessionId: card.sessionId,
+          workspaceCwd: card.workspaceCwd,
+          hasActivePrompt: card.status === 'running',
+          isWaitingForPermission: card.status === 'needsApproval',
+          isWaitingForUserQuestion: card.status === 'askUserQuestion',
+        },
+        // A standalone row's cwd is the daemon's internal Conversations root,
+        // a routing detail that must not be shown as a project — the sidebar
+        // labels the same session "No workspace".
+        workspaceLabel: openSessionContext(card)
+          ? t('sidebar.noWorkspace')
+          : undefined,
+        label: card.label,
+        time: card.updatedAt ? formatRelativeTime(card.updatedAt, t) : '',
+        completedUnread: false,
+      };
+    },
+    [sessionByIdentity, sessionDetailsOwner, t],
+  );
 
   const isPrimaryCard = useCallback(
     (card: SessionCard) => {
@@ -602,14 +791,19 @@ function SessionOverviewPanelInner({
   const canArchiveCard = useCallback(
     (card: SessionCard) =>
       sessionArchiveEnabled &&
+      sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
+        'qwen-live' &&
       card.status === 'idle' &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionArchiveEnabled],
+    [canUseSessionMutation, sessionArchiveEnabled, sessionByIdentity],
   );
   const canDeleteCard = useCallback(
     (card: SessionCard) =>
-      card.status === 'idle' && canUseSessionMutation(card),
-    [canUseSessionMutation],
+      sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
+        'qwen-live' &&
+      card.status === 'idle' &&
+      canUseSessionMutation(card),
+    [canUseSessionMutation, sessionByIdentity],
   );
   const canRenameCard = useCallback(
     (card: SessionCard) =>
@@ -669,8 +863,9 @@ function SessionOverviewPanelInner({
         liveStateActive
           ? Promise.resolve()
           : statusReload().catch(() => undefined),
+        reloadStandalone().catch(() => undefined),
       ]),
-    [liveStateActive, reload, reloadOther, statusReload],
+    [liveStateActive, reload, reloadOther, reloadStandalone, statusReload],
   );
   const refresh = useCallback(() => {
     if (refreshing) return;
@@ -679,7 +874,11 @@ function SessionOverviewPanelInner({
     void reloadData().finally(() => setRefreshing(false));
   }, [refreshing, reloadData]);
 
-  // Route each batch through its owning workspace client.
+  // Route each batch through its owning client: workspace-qualified routes
+  // per secondary workspace, the standalone client routes for no-workspace
+  // sessions (their workspaceCwd is the daemon's internal Conversations
+  // root, so a workspace-qualified call would land but skip the standalone
+  // lifecycle — working dir, deletion journal, live-runtime guard).
   const mutateCards = useCallback(
     async (cards: SessionCard[], mutation: 'archive' | 'delete') => {
       const canMutate = mutation === 'archive' ? canArchiveCard : canDeleteCard;
@@ -687,7 +886,12 @@ function SessionOverviewPanelInner({
         throw new Error(t('sessionsOverview.actionUnavailable'));
       }
       const byCwd = new Map<string, SessionCard[]>();
+      const standaloneCards: SessionCard[] = [];
       for (const card of cards) {
+        if (openSessionContext(card)) {
+          standaloneCards.push(card);
+          continue;
+        }
         const key =
           !card.workspaceCwd || card.workspaceCwd === primaryCwd
             ? ''
@@ -695,6 +899,7 @@ function SessionOverviewPanelInner({
         byCwd.set(key, [...(byCwd.get(key) ?? []), card]);
       }
       const succeededIdentities = new Set<string>();
+      const deleteFailures: string[] = [];
       let firstError: Error | undefined;
       for (const [cwd, group] of byCwd) {
         const ids = group.map((card) => card.sessionId);
@@ -707,42 +912,121 @@ function SessionOverviewPanelInner({
             group.map((card) => [card.sessionId, card]),
           );
           if (mutation === 'archive') {
-            const result = await client.archiveSessionsData(ids);
-            for (const id of [
-              ...result.archived,
-              ...result.alreadyArchived,
-              ...result.notFound,
-            ]) {
-              const card = cardsById.get(id);
-              if (card) succeededIdentities.add(getSessionIdentity(card));
+            for (
+              let offset = 0;
+              offset < ids.length;
+              offset += SESSION_ARCHIVE_BATCH_SIZE
+            ) {
+              const result = await client.archiveSessionsData(
+                ids.slice(offset, offset + SESSION_ARCHIVE_BATCH_SIZE),
+              );
+              for (const id of [
+                ...result.archived,
+                ...result.alreadyArchived,
+                ...result.notFound,
+              ]) {
+                const card = cardsById.get(id);
+                if (card) succeededIdentities.add(getSessionIdentity(card));
+              }
+              firstError ??= result.errors[0]
+                ? new Error(result.errors[0].error)
+                : undefined;
             }
-            firstError ??= result.errors[0]
-              ? new Error(result.errors[0].error)
-              : undefined;
           } else {
-            const result = await client.deleteSessionsData(ids);
-            for (const id of [...result.removed, ...result.notFound]) {
-              const card = cardsById.get(id);
-              if (card) succeededIdentities.add(getSessionIdentity(card));
+            for (
+              let offset = 0;
+              offset < ids.length;
+              offset += SESSION_ARCHIVE_BATCH_SIZE
+            ) {
+              const invalidateDeleted =
+                generatedUiOwner?.captureSessionDeletion(ownerCwd);
+              const result = await client.deleteSessionsData(
+                ids.slice(offset, offset + SESSION_ARCHIVE_BATCH_SIZE),
+              );
+              invalidateDeleted?.([...result.removed, ...result.notFound]);
+              for (const id of [...result.removed, ...result.notFound]) {
+                const card = cardsById.get(id);
+                if (card) succeededIdentities.add(getSessionIdentity(card));
+              }
+              deleteFailures.push(...result.errors.map(({ error }) => error));
             }
-            firstError ??= result.errors[0]
-              ? new Error(result.errors[0].error)
-              : undefined;
           }
         } catch (error) {
-          firstError ??=
+          const requestError =
             error instanceof Error ? error : new Error(String(error));
+          if (mutation === 'delete') {
+            deleteFailures.push(requestError.message);
+          } else {
+            firstError ??= requestError;
+          }
         } finally {
           if (ownerCwd) {
             sessionCatalogController.refreshWorkspace(ownerCwd);
           }
         }
       }
-      return { succeededIdentities, error: firstError };
+      // The standalone batch routes reject more than 100 ids per request,
+      // the same cap the workspace archive batches above honour.
+      for (
+        let offset = 0;
+        offset < standaloneCards.length;
+        offset += SESSION_ARCHIVE_BATCH_SIZE
+      ) {
+        const batch = standaloneCards.slice(
+          offset,
+          offset + SESSION_ARCHIVE_BATCH_SIZE,
+        );
+        const ids = batch.map((card) => card.sessionId);
+        try {
+          if (mutation === 'archive') {
+            const result =
+              await workspace.client.archiveStandaloneSessions(ids);
+            for (const id of [
+              ...result.archived,
+              ...result.alreadyArchived,
+              ...result.notFound,
+            ]) {
+              const card = batch.find((entry) => entry.sessionId === id);
+              if (card) succeededIdentities.add(getSessionIdentity(card));
+            }
+            firstError ??= result.errors[0]
+              ? new Error(result.errors[0].message)
+              : undefined;
+          } else {
+            const result = await workspace.client.deleteStandaloneSessions(ids);
+            for (const id of [...result.removed, ...result.notFound]) {
+              const card = batch.find((entry) => entry.sessionId === id);
+              if (card) succeededIdentities.add(getSessionIdentity(card));
+            }
+            for (const id of result.fileCleanupPending) {
+              console.warn(
+                '[web-shell] standalone session file cleanup pending:',
+                id,
+              );
+            }
+            deleteFailures.push(...result.errors.map(({ message }) => message));
+          }
+        } catch (error) {
+          const requestError =
+            error instanceof Error ? error : new Error(String(error));
+          if (mutation === 'delete') {
+            deleteFailures.push(requestError.message);
+          } else {
+            firstError ??= requestError;
+          }
+        }
+      }
+      return {
+        succeededIdentities,
+        error: deleteFailures.length
+          ? new Error(deleteFailures.join('; '))
+          : firstError,
+      };
     },
     [
       canArchiveCard,
       canDeleteCard,
+      generatedUiOwner,
       primaryCwd,
       sessionCatalogController,
       t,
@@ -769,6 +1053,7 @@ function SessionOverviewPanelInner({
 
   const startRename = useCallback((card: SessionCard) => {
     setActionError(null);
+    setDetailsOpen(null);
     setEditingCard(card);
     setEditingName(card.label);
   }, []);
@@ -798,12 +1083,24 @@ function SessionOverviewPanelInner({
     cancelRename();
     void runBusy(card, async () => {
       const ownerCwd = card.workspaceCwd || primaryCwd;
+      // Standalone rows live in the daemon's internal Conversations runtime;
+      // the workspace-qualified metadata routes cannot see them, so they take
+      // the standalone client route the sidebar uses.
+      const standalone = openSessionContext(card) !== undefined;
       try {
-        // The current session renames through its own session actions (the
-        // daemon only allows it there); other sessions update metadata on the
-        // owning workspace client — mirroring the sidebar.
-        let result: SessionMetadataResult | void;
-        if (isCurrentCard(card)) {
+        // Standalone rows rename through the standalone route even when they
+        // are the open session — the same route App's /rename takes for a
+        // standalone context. The current workspace session renames through
+        // its own session actions (the daemon only allows it there); other
+        // sessions update metadata on the owning workspace client — mirroring
+        // the sidebar.
+        let result: SessionMetadataResult | undefined = undefined;
+        if (standalone) {
+          await workspace.client.renameStandaloneSession(
+            card.sessionId,
+            nextName,
+          );
+        } else if (isCurrentCard(card)) {
           result = await actions.renameSession(nextName);
         } else if (card.workspaceCwd) {
           result = await workspace.client
@@ -817,7 +1114,7 @@ function SessionOverviewPanelInner({
             },
           );
         }
-        if (ownerCwd) {
+        if (ownerCwd && !standalone) {
           sessionCatalogController.renamed(
             ownerCwd,
             card.sessionId,
@@ -827,7 +1124,7 @@ function SessionOverviewPanelInner({
         }
         await reloadData();
       } catch (err) {
-        if (ownerCwd) {
+        if (ownerCwd && !standalone) {
           sessionCatalogController.refreshWorkspace(ownerCwd);
         }
         setActionError(
@@ -852,6 +1149,81 @@ function SessionOverviewPanelInner({
     t,
     workspace.client,
   ]);
+
+  const startBindPr = useCallback((card: SessionCard) => {
+    setActionError(null);
+    setBindPrError(undefined);
+    setBindPrTarget(card);
+  }, []);
+
+  // Supplementary PR registration — mirrors saveRename's workspace routing
+  // (current session → own session actions; other sessions → the owning
+  // workspace's metadata route; cwd-less cards → the global route). Standalone
+  // cards are excluded by the button gate (openSessionContext), not by
+  // canRenameCard — which is true for them — since their metadata route only
+  // accepts displayName.
+  const bindPrTargetRef = useRef(bindPrTarget);
+  bindPrTargetRef.current = bindPrTarget;
+  const submitBindPr = useCallback(
+    (pr: BindSessionPrPayload) => {
+      const card = bindPrTarget;
+      if (!card || batchBusy) return;
+      const ownerCwd = card.workspaceCwd || primaryCwd;
+      void runBusy(card, async () => {
+        setBindPrError(undefined);
+        try {
+          if (isCurrentCard(card)) {
+            await actions.bindSessionPr(pr);
+          } else if (card.workspaceCwd) {
+            await workspace.client
+              .workspaceByCwd(card.workspaceCwd)
+              .updateSessionMetadata(card.sessionId, { pr });
+          } else {
+            await workspace.client.updateSessionMetadata(card.sessionId, {
+              pr,
+            });
+          }
+          // A late completion must not close a dialog the user has since
+          // opened for another card.
+          if (bindPrTargetRef.current === card) {
+            setBindPrTarget(null);
+          }
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          await reloadData();
+        } catch (err) {
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          const message =
+            err instanceof Error
+              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+              : t('sessionsOverview.bindPrFailed');
+          // Surface the failure on the still-open dialog, or on the panel's
+          // error row if the user already dismissed it.
+          if (bindPrTargetRef.current === card) {
+            setBindPrError(message);
+          } else {
+            setActionError(message);
+          }
+        }
+      });
+    },
+    [
+      actions,
+      batchBusy,
+      bindPrTarget,
+      isCurrentCard,
+      primaryCwd,
+      reloadData,
+      runBusy,
+      sessionCatalogController,
+      t,
+      workspace.client,
+    ],
+  );
+
   const editingNameRef = useRef(editingName);
   const saveRenameRef = useRef(saveRename);
   editingNameRef.current = editingName;
@@ -869,8 +1241,11 @@ function SessionOverviewPanelInner({
       }
       void runBusy(card, async () => {
         try {
-          const result =
-            !card.workspaceCwd || card.workspaceCwd === primaryCwd
+          const result = openSessionContext(card)
+            ? await workspace.client.exportStandaloneSession(card.sessionId, {
+                format: 'html',
+              })
+            : !card.workspaceCwd || card.workspaceCwd === primaryCwd
               ? await workspace.actions.exportSession(card.sessionId, 'html')
               : await workspace.client
                   .workspaceByCwd(card.workspaceCwd)
@@ -1017,7 +1392,8 @@ function SessionOverviewPanelInner({
       prev.pageIndex === 0 ? prev : { ...prev, pageIndex: 0 },
     );
     setRowSelection({});
-  }, [excludedWorkspaceCwds, searchQuery]);
+    setDetailsOpen(null);
+  }, [excludedWorkspaceCwds, searchQuery, statusFilter]);
   useEffect(() => {
     const validIds = new Set(filteredCards.map(getSessionIdentity));
     setRowSelection((prev) => {
@@ -1077,267 +1453,202 @@ function SessionOverviewPanelInner({
         cell: ({ row }) => {
           const card = row.original;
           return (
-            <div className="flex min-w-0 items-center gap-2">
-              {card.color && (
-                <span
-                  className={cx(styles.colorDot, colorDotClass(card.color))}
-                  aria-hidden="true"
-                />
-              )}
-              {editingIdentity === getSessionIdentity(card) ? (
-                <form
-                  className="min-w-0 flex-1"
-                  onClick={(event) => event.stopPropagation()}
-                  onKeyDown={(event) => event.stopPropagation()}
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    saveRenameRef.current();
-                  }}
-                >
-                  <Input
-                    autoFocus
-                    value={editingNameRef.current}
-                    onChange={(event) => setEditingName(event.target.value)}
-                    onBlur={cancelRename}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') {
-                        event.preventDefault();
-                        cancelRename();
-                      }
-                    }}
-                    aria-label={`${t('sidebar.rename')}: ${card.label}`}
-                    maxLength={256}
-                    className="h-7 w-full text-xs"
+            <div className="min-w-0 space-y-1 py-0">
+              <div className="flex min-h-7 min-w-0 items-center gap-2">
+                {card.color && (
+                  <span
+                    className={cx(styles.colorDot, colorDotClass(card.color))}
+                    aria-hidden="true"
                   />
-                </form>
-              ) : (
-                <div className="flex min-w-0 flex-1 items-center gap-1 px-1 font-semibold text-current">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
+                )}
+                {editingIdentity === getSessionIdentity(card) ? (
+                  <form
+                    className="min-w-0 flex-1"
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => event.stopPropagation()}
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      saveRenameRef.current();
+                    }}
+                  >
+                    <Input
+                      autoFocus
+                      value={editingNameRef.current}
+                      onChange={(event) => setEditingName(event.target.value)}
+                      onBlur={cancelRename}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault();
+                          cancelRename();
+                        }
+                      }}
+                      aria-label={`${t('sidebar.rename')}: ${card.label}`}
+                      maxLength={256}
+                      className="h-7 w-full text-xs"
+                    />
+                  </form>
+                ) : (
+                  <div className="flex min-w-0 flex-1 items-center gap-1 px-1 font-semibold text-current">
+                    {card.status !== 'idle' && (
+                      <span
+                        className={cx('inline-flex shrink-0', styles.attention)}
+                        data-web-shell-session-status-cue={card.status}
+                        aria-hidden="true"
+                        title={t(`sessionsOverview.status.${card.status}`)}
+                      >
+                        {card.status === 'running' ? (
+                          <span className={styles.loading} aria-hidden="true" />
+                        ) : card.status === 'needsApproval' ? (
+                          <ShieldQuestionIcon
+                            className="size-3.5"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <CircleHelpIcon
+                            className="size-3.5"
+                            aria-hidden="true"
+                          />
+                        )}
+                      </span>
+                    )}
+                    <SessionDetailsTooltip {...sessionDetailsProps(card)}>
                       <button
                         type="button"
-                        className="inline-block w-fit min-w-0 max-w-full cursor-pointer truncate border-0 bg-transparent p-0 text-left text-xs leading-5 text-current"
+                        className="inline-block w-fit min-w-0 max-w-full cursor-pointer truncate border-0 bg-transparent p-0 text-left text-sm leading-5 text-current"
                         data-web-shell-session-title
                         onClick={(event) => {
                           event.stopPropagation();
-                          onOpenSession(card.sessionId, card.workspaceCwd);
+                          if (
+                            event.detail > 0 &&
+                            window.getSelection()?.isCollapsed === false
+                          )
+                            return;
+                          onOpenSession(
+                            card.sessionId,
+                            card.workspaceCwd,
+                            openSessionContext(card),
+                          );
                         }}
                       >
                         {card.label}
                       </button>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-sm whitespace-normal">
-                      {card.label}
-                    </TooltipContent>
-                  </Tooltip>
-                  {card.status !== 'idle' && (
-                    <span
-                      className={styles.loading}
-                      data-web-shell-session-loading
-                      aria-label={t(`sessionsOverview.status.${card.status}`)}
-                      title={t(`sessionsOverview.status.${card.status}`)}
-                    />
-                  )}
-                  {card.isCurrent && (
-                    <Badge
-                      variant="secondary"
-                      className={cx(
-                        'shrink-0 text-[11px]',
-                        styles.currentBadge,
+                    </SessionDetailsTooltip>
+                    {card.isCurrent && (
+                      <Badge
+                        variant="secondary"
+                        className={cx(
+                          'shrink-0 text-[11px]',
+                          styles.currentBadge,
+                        )}
+                      >
+                        {t('sessionsOverview.current')}
+                      </Badge>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+                <span
+                  className="max-w-[40%] truncate"
+                  data-web-shell-session-workspace
+                  title={
+                    openSessionContext(card)
+                      ? t('sidebar.noWorkspace')
+                      : card.workspaceCwd
+                  }
+                >
+                  {openSessionContext(card)
+                    ? t('sidebar.noWorkspace')
+                    : workspaceLabelForCwd(
+                        card.workspaceCwd,
+                        registeredWorkspaces,
                       )}
+                </span>
+                {card.gitBranch && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span
+                      className="min-w-0 truncate"
+                      data-web-shell-session-git
+                      title={card.gitBranch}
                     >
-                      {t('sessionsOverview.current')}
-                    </Badge>
-                  )}
-                </div>
-              )}
+                      {card.gitBranch}
+                    </span>
+                  </>
+                )}
+                <SessionPrBadge prs={card.prs ?? []} />
+              </div>
             </div>
           );
         },
         meta: {
           fixed: 'left',
           fixedEdge: true,
-          width: 224,
-          fluidWeight: 22,
+          width: 260,
+          fluidWeight: 80,
           truncate: (card) => editingIdentity !== getSessionIdentity(card),
         } satisfies DataTableColumnMeta<SessionCard>,
       },
       {
-        id: 'git',
-        header: t('sessionsOverview.worktree'),
+        id: 'status',
+        header: t('sessionsOverview.statusColumn'),
         cell: ({ row }) => {
-          const card = row.original;
-          const { gitBranch, prs } = card;
-          const session = sessionByIdentity.get(getSessionIdentity(card)) ?? {
-            sessionId: card.sessionId,
-            workspaceCwd: card.workspaceCwd,
-            clientCount: 0,
-            hasActivePrompt: card.status !== 'idle',
-            prs,
-            branch: gitBranch ? { name: gitBranch, baseBranch: '' } : undefined,
-          };
-          const content = (
-            <div className="flex min-w-0 items-center">
-              <span
-                className={cx(
-                  'block min-w-0 text-xs text-current',
-                  gitBranch && 'flex-1 truncate',
-                )}
-                data-web-shell-session-git
-              >
-                {gitBranch ?? '-'}
-              </span>
-              <SessionPrBadge prs={prs ?? []} />
-            </div>
-          );
-          if (!gitBranch && !prs?.some((pr) => isExternalOpenUrl(pr.url))) {
-            return content;
-          }
+          const { status } = row.original;
+          const StatusIcon =
+            status === 'needsApproval'
+              ? ShieldQuestionIcon
+              : status === 'askUserQuestion'
+                ? CircleHelpIcon
+                : CircleIcon;
           return (
-            <SessionDetailsTooltip
-              session={session}
-              label={card.label}
-              time={card.updatedAt ? formatRelativeTime(card.updatedAt, t) : ''}
-              completedUnread={false}
-              worktreeOnly
+            <span
+              className={cx(
+                'inline-flex items-center gap-1.5 text-xs',
+                (status === 'needsApproval' || status === 'askUserQuestion') &&
+                  styles.attention,
+                status === 'idle' && 'text-muted-foreground',
+              )}
+              data-web-shell-session-status={status}
+              title={t(`sessionsOverview.status.${status}`)}
             >
-              {content}
-            </SessionDetailsTooltip>
+              {status === 'running' ? (
+                <span
+                  className={styles.loading}
+                  data-web-shell-session-loading
+                  aria-hidden="true"
+                />
+              ) : (
+                <StatusIcon className="size-3.5" aria-hidden="true" />
+              )}
+              {t(`sessionsOverview.status.${status}`)}
+            </span>
           );
         },
-        meta: {
-          width: 144,
-          fluidWeight: 20,
-        } satisfies DataTableColumnMeta,
-      },
-      {
-        id: 'sessionId',
-        header: t('sessionsOverview.sessionId'),
-        cell: ({ row }) => <SessionIdCell sessionId={row.original.sessionId} />,
-        meta: {
-          width: 136,
-          fluidWeight: 18,
-        } satisfies DataTableColumnMeta,
-      },
-      {
-        id: 'workspace',
-        header: () => (
-          <div className="flex min-w-0 items-center gap-1">
-            <span>{t('sessionsOverview.folder')}</span>
-            {workspaceOptions.length > 1 && (
-              <Popover
-                open={workspaceFilterOpen}
-                onOpenChange={setWorkspaceFilterOpen}
-              >
-                <PopoverTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    className={cx(
-                      'size-5 cursor-pointer',
-                      workspaceOptions.some((option) =>
-                        excludedWorkspaceCwds.has(option.cwd),
-                      ) && 'text-primary',
-                    )}
-                    aria-label={t('sessionsOverview.workspaceFilter')}
-                    title={t('sessionsOverview.workspaceFilter')}
-                  >
-                    <FunnelIcon />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent
-                  align="start"
-                  sideOffset={2}
-                  className="w-56 gap-1.5 p-2"
-                  role="dialog"
-                  aria-label={t('sessionsOverview.workspaceFilter')}
-                >
-                  <Label
-                    htmlFor="session-overview-workspace-all"
-                    className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
-                  >
-                    <Checkbox
-                      id="session-overview-workspace-all"
-                      checked={
-                        workspaceOptions.every(
-                          (option) => !excludedWorkspaceCwds.has(option.cwd),
-                        ) ||
-                        (workspaceOptions.some(
-                          (option) => !excludedWorkspaceCwds.has(option.cwd),
-                        ) &&
-                          'indeterminate')
-                      }
-                      onCheckedChange={(checked) =>
-                        setExcludedWorkspaceCwds(
-                          checked === true
-                            ? new Set()
-                            : new Set(workspaceOptions.map(({ cwd }) => cwd)),
-                        )
-                      }
-                    />
-                    <span>{t('sessionsOverview.allWorkspaces')}</span>
-                  </Label>
-                  <div className="max-h-48 overflow-auto rounded-md border bg-muted/50 p-0.5">
-                    {workspaceOptions.map((option, index) => {
-                      const id = `session-overview-workspace-${index}`;
-                      return (
-                        <Label
-                          key={option.cwd}
-                          htmlFor={id}
-                          className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
-                        >
-                          <Checkbox
-                            id={id}
-                            checked={!excludedWorkspaceCwds.has(option.cwd)}
-                            onCheckedChange={(checked) => {
-                              setExcludedWorkspaceCwds((current) => {
-                                const next = new Set(current);
-                                if (checked === true) next.delete(option.cwd);
-                                else next.add(option.cwd);
-                                return next;
-                              });
-                            }}
-                          />
-                          <span className="min-w-0 flex-1 truncate">
-                            {option.label}
-                          </span>
-                        </Label>
-                      );
-                    })}
-                  </div>
-                </PopoverContent>
-              </Popover>
-            )}
-          </div>
-        ),
-        cell: ({ row }) => (
-          <span
-            className="block max-w-full truncate text-xs text-current"
-            data-web-shell-session-workspace
-          >
-            {workspaceLabelForCwd(
-              row.original.workspaceCwd,
-              registeredWorkspaces,
-            )}
-          </span>
-        ),
-        meta: {
-          width: 128,
-          fluidWeight: 12,
-          tooltip: (card) => card.workspaceCwd,
-        } satisfies DataTableColumnMeta<SessionCard>,
+        meta: { width: 144, fluidWeight: 0 } satisfies DataTableColumnMeta,
       },
       {
         id: 'updatedAt',
         accessorFn: (card) => card.updatedAt ?? '',
         header: ({ column }) => (
           <Button
+            ref={(button) => {
+              // Ending rename recreates the header; focus its new button.
+              if (button && focusSortAfterRenameRef.current) {
+                focusSortAfterRenameRef.current = false;
+                button.focus();
+              }
+            }}
             type="button"
             variant="ghost"
             size="xs"
             className="px-0 text-sm"
-            onClick={() => column.toggleSorting()}
+            onClick={() => {
+              if (editingIdentity) {
+                focusSortAfterRenameRef.current = true;
+                cancelRename();
+              }
+              column.toggleSorting();
+            }}
           >
             {t('sessionsOverview.time')}
             <ArrowUpDownIcon className="size-3" />
@@ -1351,7 +1662,7 @@ function SessionOverviewPanelInner({
           </span>
         ),
         meta: {
-          width: 112,
+          width: 96,
           fluidWeight: 5,
         } satisfies DataTableColumnMeta,
       },
@@ -1367,6 +1678,21 @@ function SessionOverviewPanelInner({
           const canExport = canExportCard(card);
           return (
             <div className="flex items-center justify-center gap-1 [&_button]:cursor-pointer">
+              <SessionDetailsTooltip {...sessionDetailsProps(card, true)}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="shrink-0 text-muted-foreground hover:text-foreground"
+                  disabled={Boolean(editingIdentity)}
+                  aria-label={t('sessionsOverview.details', {
+                    name: card.label,
+                  })}
+                  data-web-shell-session-details
+                >
+                  <InfoIcon className="size-4" />
+                </Button>
+              </SessionDetailsTooltip>
               {(isCurrentCard(card) || sessionMetadataEnabled) && (
                 <Button
                   type="button"
@@ -1385,6 +1711,25 @@ function SessionOverviewPanelInner({
                   <PenLineIcon className="size-4" />
                 </Button>
               )}
+              {(isCurrentCard(card) || sessionMetadataEnabled) &&
+                !openSessionContext(card) && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                    disabled={batchBusy || busy || !canRename}
+                    onClick={() => startBindPr(card)}
+                    aria-label={t('sessionsOverview.bindPr')}
+                    title={
+                      canRename
+                        ? t('sessionsOverview.bindPr')
+                        : t('sessionsOverview.actionUnavailable')
+                    }
+                  >
+                    <GitPullRequestIcon className="size-4" />
+                  </Button>
+                )}
               {(canExportSessions || canExportWorkspaceSessions) && (
                 <Button
                   type="button"
@@ -1441,7 +1786,7 @@ function SessionOverviewPanelInner({
         meta: {
           fixed: 'right',
           fixedEdge: true,
-          width: 128,
+          width: 180,
           fixedWidth: true,
           headerClassName: 'text-center',
           stopRowClick: true,
@@ -1463,13 +1808,11 @@ function SessionOverviewPanelInner({
       isCurrentCard,
       onOpenSession,
       registeredWorkspaces,
-      excludedWorkspaceCwds,
       sessionMetadataEnabled,
-      sessionByIdentity,
+      sessionDetailsProps,
+      startBindPr,
       startRename,
       t,
-      workspaceOptions,
-      workspaceFilterOpen,
     ],
   );
 
@@ -1486,6 +1829,24 @@ function SessionOverviewPanelInner({
     getRowId: getSessionIdentity,
     autoResetPageIndex: false,
   });
+  const visibleRows = table.getRowModel().rows;
+  const clampPending =
+    pagination.pageIndex > Math.max(0, table.getPageCount() - 1);
+  useEffect(() => {
+    // A shrinking catalog can leave the page empty until the clamp commits.
+    if (clampPending) return;
+    if (
+      editingIdentity &&
+      !visibleRows.some((row) => row.id === editingIdentity)
+    ) {
+      cancelRename();
+    }
+    setDetailsOpen((current) =>
+      current && !visibleRows.some((row) => row.id === current.identity)
+        ? null
+        : current,
+    );
+  }, [visibleRows, clampPending, editingIdentity, cancelRename]);
   const selectedCards = table
     .getSortedRowModel()
     .rows.filter((row) => row.getIsSelected())
@@ -1500,7 +1861,10 @@ function SessionOverviewPanelInner({
           card.sessionId !== selected.sessionId ||
           card.workspaceCwd === selected.workspaceCwd,
       ),
-    );
+    ) &&
+    // Standalone rows open through the standalone route only: the split/tab
+    // paths sanitize them away, so an enabled button would no-op silently.
+    selectedCards.every((selected) => !openSessionContext(selected));
   const canArchiveSelection =
     selectedCount > 0 && selectedCards.every(canArchiveCard);
   const canDeleteSelection =
@@ -1547,6 +1911,16 @@ function SessionOverviewPanelInner({
     return () => observer.disconnect();
   }, [filteredCards.length, pagination.pageSize]);
 
+  const workspaceFilterLabel =
+    excludedWorkspaceCwds.size === 0
+      ? t('sessionsOverview.workspaceAll')
+      : t('sessionsOverview.workspacesSelected', {
+          count: workspaceOptions.filter(
+            (option) => !excludedWorkspaceCwds.has(option.cwd),
+          ).length,
+          total: workspaceOptions.length,
+        });
+
   const toolbar = (
     <div className="flex flex-wrap items-center gap-2">
       <div className="relative w-full max-w-[300px]">
@@ -1559,6 +1933,92 @@ function SessionOverviewPanelInner({
           aria-label={t('sessionsOverview.searchPlaceholder')}
         />
       </div>
+      {workspaceOptions.length > 1 && (
+        <Popover
+          open={workspaceFilterOpen}
+          onOpenChange={setWorkspaceFilterOpen}
+        >
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={cx(
+                'cursor-pointer',
+                workspaceOptions.some((option) =>
+                  excludedWorkspaceCwds.has(option.cwd),
+                ) && 'text-primary',
+              )}
+              aria-label={`${t('sessionsOverview.workspaceFilter')}: ${workspaceFilterLabel}`}
+              title={t('sessionsOverview.workspaceFilter')}
+            >
+              <FunnelIcon />
+              {workspaceFilterLabel}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            align="start"
+            sideOffset={2}
+            className="w-56 gap-1.5 p-2"
+            role="dialog"
+            aria-label={t('sessionsOverview.workspaceFilter')}
+          >
+            <Label
+              htmlFor="session-overview-workspace-all"
+              className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
+            >
+              <Checkbox
+                id="session-overview-workspace-all"
+                checked={
+                  workspaceOptions.every(
+                    (option) => !excludedWorkspaceCwds.has(option.cwd),
+                  ) ||
+                  (workspaceOptions.some(
+                    (option) => !excludedWorkspaceCwds.has(option.cwd),
+                  ) &&
+                    'indeterminate')
+                }
+                onCheckedChange={(checked) =>
+                  setExcludedWorkspaceCwds(
+                    checked === true
+                      ? new Set()
+                      : new Set(workspaceOptions.map(({ cwd }) => cwd)),
+                  )
+                }
+              />
+              <span>{t('sessionsOverview.allWorkspaces')}</span>
+            </Label>
+            <div className="max-h-48 overflow-auto rounded-md border bg-muted/50 p-0.5">
+              {workspaceOptions.map((option, index) => {
+                const id = `session-overview-workspace-${index}`;
+                return (
+                  <Label
+                    key={option.cwd}
+                    htmlFor={id}
+                    className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
+                  >
+                    <Checkbox
+                      id={id}
+                      checked={!excludedWorkspaceCwds.has(option.cwd)}
+                      onCheckedChange={(checked) => {
+                        setExcludedWorkspaceCwds((current) => {
+                          const next = new Set(current);
+                          if (checked === true) next.delete(option.cwd);
+                          else next.add(option.cwd);
+                          return next;
+                        });
+                      }}
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      {option.label}
+                    </span>
+                  </Label>
+                );
+              })}
+            </div>
+          </PopoverContent>
+        </Popover>
+      )}
       <Button
         type="button"
         size="sm"
@@ -1578,9 +2038,49 @@ function SessionOverviewPanelInner({
   );
 
   return (
-    <div ref={panelRef} className={styles.panel} data-web-shell-session-panel>
-      {/* Row 1: search + workspace filter + refresh (right). */}
+    <div
+      ref={panelRef}
+      tabIndex={-1}
+      className={styles.panel}
+      data-web-shell-session-panel
+      onMouseDownCapture={(event) => {
+        const target = event.target as HTMLElement;
+        if (
+          editingCard &&
+          event.button === 0 &&
+          target.closest('[data-web-shell-session-table-viewport] tr') &&
+          !target.closest('input')
+        ) {
+          event.preventDefault();
+        }
+      }}
+    >
+      {/* Search, workspace filter, and manual refresh. */}
       {toolbar}
+      <div
+        className="flex flex-wrap items-center gap-1"
+        role="group"
+        aria-label={t('sessionsOverview.statusFilter')}
+      >
+        {STATUS_FILTERS.map((filter) => (
+          <Button
+            key={filter}
+            type="button"
+            size="sm"
+            variant={statusFilter === filter ? 'secondary' : 'ghost'}
+            aria-pressed={statusFilter === filter}
+            onClick={() => setStatusFilter(filter)}
+          >
+            {t(`sessionsOverview.filter.${filter}`)}
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {
+                searchedCards.filter((card) => matchesStatus(card, filter))
+                  .length
+              }
+            </span>
+          </Button>
+        ))}
+      </div>
 
       {popupBlocked && (
         <div className={styles.notice} role="alert">
@@ -1611,7 +2111,16 @@ function SessionOverviewPanelInner({
           }
           className={styles.tableViewport}
           rowClassName="cursor-pointer"
-          onRowClick={(row) => row.toggleSelected()}
+          onRowClick={(row) => {
+            if (editingCard || window.getSelection()?.isCollapsed === false)
+              return;
+            const card = row.original;
+            onOpenSession(
+              card.sessionId,
+              card.workspaceCwd,
+              openSessionContext(card),
+            );
+          }}
           data-web-shell-session-table-viewport
         />
       </TooltipProvider>
@@ -1626,71 +2135,78 @@ function SessionOverviewPanelInner({
           data-web-shell-session-footer
         >
           <span className="text-xs text-muted-foreground">
-            {t('sessionsOverview.selectedRows', {
-              count: selectedCount,
-              total: filteredCards.length,
-            })}
+            {t(
+              selectedCount > 0
+                ? 'sessionsOverview.selectedRows'
+                : 'sessionsOverview.sessionCount',
+              {
+                count: selectedCount,
+                total: filteredCards.length,
+              },
+            )}
           </span>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={!canArchiveSelection || batchBusy}
-              onClick={() => setArchiveTarget(selectedCards)}
-              title={t('sessionsOverview.bulkArchiveHint', {
-                count: selectedCount,
-              })}
-            >
-              {t('sessionsOverview.bulkArchive')}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={!canDeleteSelection || batchBusy}
-              onClick={() => setDeleteTarget(selectedCards)}
-              title={t('sessionsOverview.bulkDeleteHint', {
-                count: selectedCount,
-              })}
-            >
-              {t('sessionsOverview.bulkDelete')}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={!canOpenSelection}
-              onClick={() => openInNewTab(splitIds)}
-              title={
-                selectedCount > MAX_SPLIT_PANES
-                  ? t('sessionsOverview.splitLimit', {
-                      max: MAX_SPLIT_PANES,
-                    })
-                  : t('sessionsOverview.openInTabHint')
-              }
-            >
-              {t('sessionsOverview.openInTab')}
-            </Button>
-            {onOpenSplit && (
+          {selectedCount > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!canArchiveSelection || batchBusy}
+                onClick={() => setArchiveTarget(selectedCards)}
+                title={t('sessionsOverview.bulkArchiveHint', {
+                  count: selectedCount,
+                })}
+              >
+                {t('sessionsOverview.bulkArchive')}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!canDeleteSelection || batchBusy}
+                onClick={() => setDeleteTarget(selectedCards)}
+                title={t('sessionsOverview.bulkDeleteHint', {
+                  count: selectedCount,
+                })}
+              >
+                {t('sessionsOverview.bulkDelete')}
+              </Button>
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
                 disabled={!canOpenSelection}
-                onClick={() => onOpenSplit(splitIds)}
+                onClick={() => openInNewTab(splitIds)}
                 title={
                   selectedCount > MAX_SPLIT_PANES
                     ? t('sessionsOverview.splitLimit', {
                         max: MAX_SPLIT_PANES,
                       })
-                    : t('sessionsOverview.openInSplitHint')
+                    : t('sessionsOverview.openInTabHint')
                 }
               >
-                {t('sessionsOverview.openInSplit')}
+                {t('sessionsOverview.openInTab')}
               </Button>
-            )}
-          </div>
+              {onOpenSplit && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={!canOpenSelection}
+                  onClick={() => onOpenSplit(splitIds)}
+                  title={
+                    selectedCount > MAX_SPLIT_PANES
+                      ? t('sessionsOverview.splitLimit', {
+                          max: MAX_SPLIT_PANES,
+                        })
+                      : t('sessionsOverview.openInSplitHint')
+                  }
+                >
+                  {t('sessionsOverview.openInSplit')}
+                </Button>
+              )}
+            </div>
+          )}
           <DataTablePagination
             table={table}
             pageSizes={PAGE_SIZES}
@@ -1782,6 +2298,16 @@ function SessionOverviewPanelInner({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {bindPrTarget && (
+        <BindSessionPrDialog
+          workspaceCwd={bindPrTarget.workspaceCwd ?? ''}
+          busy={busyIds.has(getSessionIdentity(bindPrTarget))}
+          error={bindPrError}
+          onSubmit={submitBindPr}
+          onClose={() => setBindPrTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1797,8 +2323,13 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces = true,
   workspaceCwd,
   manageLiveState = true,
+  onLiveStateWorkspaceCwdsChange,
 }: {
-  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
+  onOpenSession: (
+    sessionId: string,
+    workspaceCwd?: string,
+    sessionContext?: DaemonProductSessionContext,
+  ) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   onCurrentSessionRemoved?: (
     session: SessionIdentity,
@@ -1806,6 +2337,7 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces?: boolean;
   workspaceCwd?: string;
   manageLiveState?: boolean;
+  onLiveStateWorkspaceCwdsChange?: (cwds: readonly string[]) => void;
 }) {
   const { t } = useI18n();
   return (
@@ -1826,6 +2358,7 @@ export function SessionOverviewPanel({
         includeOtherWorkspaces={includeOtherWorkspaces}
         workspaceCwd={workspaceCwd}
         manageLiveState={manageLiveState}
+        onLiveStateWorkspaceCwdsChange={onLiveStateWorkspaceCwdsChange}
       />
     </ErrorBoundary>
   );

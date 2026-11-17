@@ -56,11 +56,10 @@ export class LspResponseNormalizer {
       return null;
     }
 
-    const message =
-      typeof itemObj['message'] === 'string'
-        ? (itemObj['message'] as string)
-        : '';
-    if (!message) {
+    // An empty-string message is a valid diagnostic; only a missing or
+    // non-string message makes the item unusable.
+    const message = itemObj['message'];
+    if (typeof message !== 'string') {
       return null;
     }
 

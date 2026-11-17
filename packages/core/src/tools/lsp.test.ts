@@ -4,19 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Config } from '../config/config.js';
 import type {
-  LspCallHierarchyIncomingCall,
   LspCallHierarchyItem,
-  LspCallHierarchyOutgoingCall,
-  LspClient,
-  LspDefinition,
-  LspHoverResult,
   LspLocation,
-  LspReference,
   LspSymbolInformation,
 } from '../lsp/types.js';
 import { LspTool, type LspToolParams, type LspOperation } from './lsp.js';
@@ -24,63 +18,107 @@ import { LspTool, type LspToolParams, type LspOperation } from './lsp.js';
 const abortSignal = new AbortController().signal;
 const workspaceRoot = '/test/workspace';
 
-/**
- * Helper to resolve a path relative to workspace root.
- */
 const resolvePath = (...segments: string[]) =>
   path.join(workspaceRoot, ...segments);
-
-/**
- * Helper to convert file path to URI.
- */
 const toUri = (filePath: string) => pathToFileURL(filePath).toString();
+const appPath = resolvePath('src', 'app.ts');
 
-/**
- * Helper to create a mock LspLocation.
- */
+const lineSpan = (line: number, from: number, to: number) => ({
+  start: { line, character: from },
+  end: { line, character: to },
+});
+/** Zero-width location at the given 0-based position. */
 const createLocation = (
   filePath: string,
   line: number,
   character: number,
 ): LspLocation => ({
   uri: toUri(filePath),
+  range: lineSpan(line, character, character),
+});
+/** Symbol in src/app.ts at 0-based line:0. */
+const symbol = (
+  name: string,
+  kind: string,
+  line: number,
+  extra: Partial<LspSymbolInformation> = {},
+): LspSymbolInformation => ({
+  name,
+  kind,
+  location: createLocation(appPath, line, 0),
+  ...extra,
+});
+/** Item in src/<file> spanning lines start..end, named at start:9-19. */
+const callItem = (
+  name: string,
+  file: string,
+  start: number,
+  end: number,
+  extra: Partial<LspCallHierarchyItem> = {},
+): LspCallHierarchyItem => ({
+  name,
+  uri: toUri(resolvePath('src', file)),
   range: {
-    start: { line, character },
-    end: { line, character },
+    start: { line: start, character: 0 },
+    end: { line: end, character: 1 },
   },
+  selectionRange: lineSpan(start, 9, 19),
+  ...extra,
+});
+const testItem = (): LspCallHierarchyItem => ({
+  name: 'testFunc',
+  uri: 'file:///test.ts',
+  range: lineSpan(0, 0, 10),
+  selectionRange: lineSpan(0, 0, 10),
 });
 
-/**
- * Create a mock LspClient with all methods mocked.
- */
-const createMockClient = (): LspClient =>
-  ({
-    workspaceSymbols: vi.fn().mockResolvedValue([]),
-    hover: vi.fn().mockResolvedValue(null),
-    documentSymbols: vi.fn().mockResolvedValue([]),
-    definitions: vi.fn().mockResolvedValue([]),
-    implementations: vi.fn().mockResolvedValue([]),
-    references: vi.fn().mockResolvedValue([]),
-    prepareCallHierarchy: vi.fn().mockResolvedValue([]),
-    incomingCalls: vi.fn().mockResolvedValue([]),
-    outgoingCalls: vi.fn().mockResolvedValue([]),
-  }) as unknown as LspClient;
+/** LspClient whose methods are all mocks resolving to empty results. */
+const createMockClient = () => ({
+  workspaceSymbols: vi.fn().mockResolvedValue([]),
+  hover: vi.fn().mockResolvedValue(null),
+  documentSymbols: vi.fn().mockResolvedValue([]),
+  definitions: vi.fn().mockResolvedValue([]),
+  implementations: vi.fn().mockResolvedValue([]),
+  references: vi.fn().mockResolvedValue([]),
+  prepareCallHierarchy: vi.fn().mockResolvedValue([]),
+  incomingCalls: vi.fn().mockResolvedValue([]),
+  outgoingCalls: vi.fn().mockResolvedValue([]),
+});
+type MockClient = ReturnType<typeof createMockClient>;
 
-/**
- * Create a mock Config for testing.
- */
-const createMockConfig = (client?: LspClient, enabled = true): Config =>
-  ({
+const createTool = (client?: MockClient, enabled = true) =>
+  new LspTool({
     getLspClient: () => client,
     isLspEnabled: () => enabled,
     getProjectRoot: () => workspaceRoot,
-  }) as unknown as Config;
+  } as unknown as Config);
 
-/**
- * Create a LspTool with mock config.
- */
-const createTool = (client?: LspClient, enabled = true) =>
-  new LspTool(createMockConfig(client, enabled));
+/** Location params: src/app.ts at 1-based 5:10 unless overridden. */
+const at = (
+  operation: LspOperation,
+  extra: Partial<LspToolParams> = {},
+): LspToolParams => ({
+  operation,
+  filePath: 'src/app.ts',
+  line: 5,
+  character: 10,
+  ...extra,
+});
+const hoverParams = () => at('hover', { line: 10, character: 5 });
+
+/** Fresh client, optional mock setup, then one execute. */
+const run = async (
+  params: LspToolParams,
+  configure?: (client: MockClient) => void,
+) => {
+  const client = createMockClient();
+  configure?.(client);
+  const result = await createTool(client).build(params).execute(abortSignal);
+  return { client, result };
+};
+const expectContains = (text: unknown, ...parts: string[]) => {
+  for (const part of parts) expect(text).toContain(part);
+};
 
 describe('LspTool', () => {
   describe('validateToolParams', () => {
@@ -89,6 +127,16 @@ describe('LspTool', () => {
     beforeEach(() => {
       tool = createTool();
     });
+
+    const validate = (params: Partial<LspToolParams>) =>
+      tool.validateToolParams(params as LspToolParams);
+    /** One test per [title, params, expected error or null] row. */
+    const cases = (
+      rows: Array<[string, Partial<LspToolParams>, string | null]>,
+    ) =>
+      it.each(rows)('%s', (_title, params, expected) => {
+        expect(validate(params)).toBe(expected);
+      });
 
     describe('location-based operations', () => {
       const locationOperations: LspOperation[] = [
@@ -102,211 +150,149 @@ describe('LspTool', () => {
       it.each(locationOperations)(
         'requires filePath for %s operation',
         (operation) => {
-          const result = tool.validateToolParams({
-            operation,
-          } as LspToolParams);
-          expect(result).toBe(`filePath is required for ${operation}.`);
+          expect(validate({ operation })).toBe(
+            `filePath is required for ${operation}.`,
+          );
         },
       );
 
       it.each(locationOperations)(
         'requires line for %s operation',
         (operation) => {
-          const result = tool.validateToolParams({
-            operation,
-            filePath: 'src/app.ts',
-          } as LspToolParams);
-          expect(result).toBe(`line is required for ${operation}.`);
+          expect(validate({ operation, filePath: 'src/app.ts' })).toBe(
+            `line is required for ${operation}.`,
+          );
         },
       );
 
       it.each(locationOperations)(
         'passes validation with valid params for %s',
         (operation) => {
-          const result = tool.validateToolParams({
-            operation,
-            filePath: 'src/app.ts',
-            line: 10,
-            character: 5,
-          } as LspToolParams);
-          expect(result).toBeNull();
+          expect(
+            validate({
+              operation,
+              filePath: 'src/app.ts',
+              line: 10,
+              character: 5,
+            }),
+          ).toBeNull();
         },
       );
     });
 
     describe('documentSymbol operation', () => {
-      it('requires filePath for documentSymbol', () => {
-        const result = tool.validateToolParams({
-          operation: 'documentSymbol',
-        } as LspToolParams);
-        expect(result).toBe('filePath is required for documentSymbol.');
-      });
-
-      it('passes validation with filePath', () => {
-        const result = tool.validateToolParams({
-          operation: 'documentSymbol',
-          filePath: 'src/app.ts',
-        } as LspToolParams);
-        expect(result).toBeNull();
-      });
+      cases([
+        [
+          'requires filePath for documentSymbol',
+          { operation: 'documentSymbol' },
+          'filePath is required for documentSymbol.',
+        ],
+        [
+          'passes validation with filePath',
+          { operation: 'documentSymbol', filePath: 'src/app.ts' },
+          null,
+        ],
+      ]);
     });
 
     describe('workspaceSymbol operation', () => {
-      it('requires query for workspaceSymbol', () => {
-        const result = tool.validateToolParams({
-          operation: 'workspaceSymbol',
-        } as LspToolParams);
-        expect(result).toBe('query is required for workspaceSymbol.');
-      });
-
-      it('rejects empty query', () => {
-        const result = tool.validateToolParams({
-          operation: 'workspaceSymbol',
-          query: '   ',
-        } as LspToolParams);
-        expect(result).toBe('query is required for workspaceSymbol.');
-      });
-
-      it('passes validation with query', () => {
-        const result = tool.validateToolParams({
-          operation: 'workspaceSymbol',
-          query: 'Widget',
-        } as LspToolParams);
-        expect(result).toBeNull();
-      });
+      cases([
+        [
+          'requires query for workspaceSymbol',
+          { operation: 'workspaceSymbol' },
+          'query is required for workspaceSymbol.',
+        ],
+        [
+          'rejects empty query',
+          { operation: 'workspaceSymbol', query: '   ' },
+          'query is required for workspaceSymbol.',
+        ],
+        [
+          'passes validation with query',
+          { operation: 'workspaceSymbol', query: 'Widget' },
+          null,
+        ],
+      ]);
     });
 
     describe('call hierarchy operations', () => {
-      it('requires callHierarchyItem for incomingCalls', () => {
-        const result = tool.validateToolParams({
-          operation: 'incomingCalls',
-        } as LspToolParams);
-        expect(result).toBe('callHierarchyItem is required for incomingCalls.');
-      });
-
-      it('requires callHierarchyItem for outgoingCalls', () => {
-        const result = tool.validateToolParams({
-          operation: 'outgoingCalls',
-        } as LspToolParams);
-        expect(result).toBe('callHierarchyItem is required for outgoingCalls.');
-      });
-
-      it('passes validation with callHierarchyItem', () => {
-        const item: LspCallHierarchyItem = {
-          name: 'testFunc',
-          uri: 'file:///test.ts',
-          range: {
-            start: { line: 0, character: 0 },
-            end: { line: 0, character: 10 },
-          },
-          selectionRange: {
-            start: { line: 0, character: 0 },
-            end: { line: 0, character: 10 },
-          },
-        };
-        const result = tool.validateToolParams({
-          operation: 'incomingCalls',
-          callHierarchyItem: item,
-        } as LspToolParams);
-        expect(result).toBeNull();
-      });
+      cases([
+        [
+          'requires callHierarchyItem for incomingCalls',
+          { operation: 'incomingCalls' },
+          'callHierarchyItem is required for incomingCalls.',
+        ],
+        [
+          'requires callHierarchyItem for outgoingCalls',
+          { operation: 'outgoingCalls' },
+          'callHierarchyItem is required for outgoingCalls.',
+        ],
+        [
+          'passes validation with callHierarchyItem',
+          { operation: 'incomingCalls', callHierarchyItem: testItem() },
+          null,
+        ],
+      ]);
     });
 
     describe('numeric parameter validation', () => {
-      it('rejects non-positive line', () => {
-        const result = tool.validateToolParams({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: 0,
-        } as LspToolParams);
-        expect(result).toBe('line must be a positive number.');
+      const def = (extra: Partial<LspToolParams>) => ({
+        operation: 'goToDefinition' as const,
+        filePath: 'src/app.ts',
+        ...extra,
       });
-
-      it('rejects negative line', () => {
-        const result = tool.validateToolParams({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: -1,
-        } as LspToolParams);
-        expect(result).toBe('line must be a positive number.');
+      const docs = (limit: number) => ({
+        operation: 'documentSymbol' as const,
+        filePath: 'src/app.ts',
+        limit,
       });
-
-      it('rejects non-positive character', () => {
-        const result = tool.validateToolParams({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: 1,
-          character: 0,
-        } as LspToolParams);
-        expect(result).toBe('character must be a positive number.');
-      });
-
-      it('rejects non-positive limit', () => {
-        const result = tool.validateToolParams({
-          operation: 'documentSymbol',
-          filePath: 'src/app.ts',
-          limit: 0,
-        } as LspToolParams);
-        expect(result).toBe('params/limit must be >= 1');
-      });
-
-      it('rejects negative integer limit', () => {
-        const result = tool.validateToolParams({
-          operation: 'documentSymbol',
-          filePath: 'src/app.ts',
-          limit: -1,
-        } as LspToolParams);
-        expect(result).toBe('params/limit must be >= 1');
-      });
-
-      it('rejects fractional limit', () => {
-        const result = tool.validateToolParams({
-          operation: 'documentSymbol',
-          filePath: 'src/app.ts',
-          limit: 1.5,
-        } as LspToolParams);
-        expect(result).toBe('params/limit must be integer');
-      });
+      const lineError = 'line must be a positive number.';
+      cases([
+        ['rejects non-positive line', def({ line: 0 }), lineError],
+        ['rejects negative line', def({ line: -1 }), lineError],
+        [
+          'rejects non-positive character',
+          def({ line: 1, character: 0 }),
+          'character must be a positive number.',
+        ],
+        ['rejects non-positive limit', docs(0), 'params/limit must be >= 1'],
+        [
+          'rejects negative integer limit',
+          docs(-1),
+          'params/limit must be >= 1',
+        ],
+        ['rejects fractional limit', docs(1.5), 'params/limit must be integer'],
+      ]);
     });
 
     describe('edge case validation', () => {
-      it('rejects empty filePath', () => {
-        const result = tool.validateToolParams({
-          operation: 'goToDefinition',
-          filePath: '',
-          line: 1,
-        } as LspToolParams);
-        expect(result).toBe('filePath is required for goToDefinition.');
-      });
-
-      it('rejects whitespace-only filePath', () => {
-        const result = tool.validateToolParams({
-          operation: 'goToDefinition',
-          filePath: '   ',
-          line: 1,
-        } as LspToolParams);
-        expect(result).toBe('filePath is required for goToDefinition.');
-      });
-
-      it('rejects whitespace-only query', () => {
-        const result = tool.validateToolParams({
-          operation: 'workspaceSymbol',
-          query: '  \t\n  ',
-        } as LspToolParams);
-        expect(result).toBe('query is required for workspaceSymbol.');
-      });
+      cases([
+        [
+          'rejects empty filePath',
+          { operation: 'goToDefinition', filePath: '', line: 1 },
+          'filePath is required for goToDefinition.',
+        ],
+        [
+          'rejects whitespace-only filePath',
+          { operation: 'goToDefinition', filePath: '   ', line: 1 },
+          'filePath is required for goToDefinition.',
+        ],
+        [
+          'rejects whitespace-only query',
+          { operation: 'workspaceSymbol', query: '  \t\n  ' },
+          'query is required for workspaceSymbol.',
+        ],
+      ]);
 
       it.skipIf(process.platform === 'win32')(
         'should unescape shell-escaped filePath',
         () => {
-          const params: LspToolParams = {
-            operation: 'goToDefinition',
+          const params = at('goToDefinition', {
             filePath: 'src/app\\ file.ts',
             line: 10,
             character: 5,
-          };
-          const result = tool.validateToolParams(params);
-          expect(result).toBeNull();
+          });
+          expect(tool.validateToolParams(params)).toBeNull();
           expect(params.filePath).toBe('src/app file.ts');
         },
       );
@@ -316,27 +302,20 @@ describe('LspTool', () => {
   describe('execute', () => {
     describe('LSP disabled or unavailable', () => {
       it('returns unavailable message when LSP is disabled', async () => {
-        const tool = createTool(undefined, false);
-        const invocation = tool.build({
-          operation: 'hover',
-          filePath: 'src/app.ts',
-          line: 1,
-          character: 1,
-        });
-        const result = await invocation.execute(abortSignal);
-        expect(result.llmContent).toContain('LSP hover is unavailable');
-        expect(result.llmContent).toContain('LSP disabled or not initialized');
+        const result = await createTool(undefined, false)
+          .build(at('hover', { line: 1, character: 1 }))
+          .execute(abortSignal);
+        expectContains(
+          result.llmContent,
+          'LSP hover is unavailable',
+          'LSP disabled or not initialized',
+        );
       });
 
       it('returns unavailable message when no LSP client', async () => {
-        const tool = createTool(undefined, true);
-        const invocation = tool.build({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: 1,
-          character: 1,
-        });
-        const result = await invocation.execute(abortSignal);
+        const result = await createTool(undefined, true)
+          .build(at('goToDefinition', { line: 1, character: 1 }))
+          .execute(abortSignal);
         // Note: operation labels are formatted (e.g., "go-to-definition")
         expect(result.llmContent).toContain(
           'LSP go-to-definition is unavailable',
@@ -346,26 +325,15 @@ describe('LspTool', () => {
 
     describe('goToDefinition operation', () => {
       it('dispatches to definitions and formats results', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const filePath = resolvePath('src', 'app.ts');
-        const definition: LspDefinition = {
-          ...createLocation(filePath, 10, 5),
-          serverName: 'tsserver',
-        };
-        (client.definitions as Mock).mockResolvedValue([definition]);
-
-        const invocation = tool.build({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: 5,
-          character: 10,
-        });
-        const result = await invocation.execute(abortSignal);
+        const { client, result } = await run(at('goToDefinition'), (c) =>
+          c.definitions.mockResolvedValue([
+            { ...createLocation(appPath, 10, 5), serverName: 'tsserver' },
+          ]),
+        );
 
         expect(client.definitions).toHaveBeenCalledWith(
           expect.objectContaining({
-            uri: toUri(filePath),
+            uri: toUri(appPath),
             range: expect.objectContaining({
               start: { line: 4, character: 9 }, // 1-based to 0-based conversion
             }),
@@ -373,184 +341,118 @@ describe('LspTool', () => {
           undefined,
           20,
         );
-        expect(result.llmContent).toContain('Definitions for');
-        expect(result.llmContent).toContain('1.');
+        expectContains(result.llmContent, 'Definitions for', '1.');
       });
 
       it('handles empty results', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        (client.definitions as Mock).mockResolvedValue([]);
-
-        const invocation = tool.build({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: 5,
-          character: 10,
-        });
-        const result = await invocation.execute(abortSignal);
-
+        const { result } = await run(at('goToDefinition'), (c) =>
+          c.definitions.mockResolvedValue([]),
+        );
         expect(result.llmContent).toContain('No definitions found');
       });
     });
 
     describe('findReferences operation', () => {
       it('dispatches to references and formats results', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const filePath = resolvePath('src', 'app.ts');
-        const refs: LspReference[] = [
-          { ...createLocation(filePath, 10, 5), serverName: 'tsserver' },
-          { ...createLocation(filePath, 20, 8) },
-        ];
-        (client.references as Mock).mockResolvedValue(refs);
-
-        const invocation = tool.build({
-          operation: 'findReferences',
-          filePath: 'src/app.ts',
-          line: 5,
-          character: 10,
-          includeDeclaration: true,
-        });
-        const result = await invocation.execute(abortSignal);
+        const { client, result } = await run(
+          at('findReferences', { includeDeclaration: true }),
+          (c) =>
+            c.references.mockResolvedValue([
+              { ...createLocation(appPath, 10, 5), serverName: 'tsserver' },
+              createLocation(appPath, 20, 8),
+            ]),
+        );
 
         // Default limit for references is 50
         expect(client.references).toHaveBeenCalledWith(
-          expect.objectContaining({ uri: toUri(filePath) }),
+          expect.objectContaining({ uri: toUri(appPath) }),
           undefined,
           true,
           50,
         );
-        expect(result.llmContent).toContain('References for');
-        expect(result.llmContent).toContain('1.');
-        expect(result.llmContent).toContain('2.');
+        expectContains(result.llmContent, 'References for', '1.', '2.');
       });
     });
 
     describe('hover operation', () => {
       it('dispatches to hover and formats results', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const hoverResult: LspHoverResult = {
-          contents: '**Type**: string\n\nA sample variable.',
-        };
-        (client.hover as Mock).mockResolvedValue(hoverResult);
-
-        const invocation = tool.build({
-          operation: 'hover',
-          filePath: 'src/app.ts',
-          line: 10,
-          character: 5,
-        });
-        const result = await invocation.execute(abortSignal);
-
+        const { client, result } = await run(hoverParams(), (c) =>
+          c.hover.mockResolvedValue({
+            contents: '**Type**: string\n\nA sample variable.',
+          }),
+        );
         expect(client.hover).toHaveBeenCalled();
-        expect(result.llmContent).toContain('Hover for');
-        expect(result.llmContent).toContain('Type');
+        expectContains(result.llmContent, 'Hover for', 'Type');
       });
 
       it('handles null hover result', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        (client.hover as Mock).mockResolvedValue(null);
-
-        const invocation = tool.build({
-          operation: 'hover',
-          filePath: 'src/app.ts',
-          line: 10,
-          character: 5,
-        });
-        const result = await invocation.execute(abortSignal);
-
+        const { result } = await run(hoverParams(), (c) =>
+          c.hover.mockResolvedValue(null),
+        );
         expect(result.llmContent).toContain('No hover information found');
       });
     });
 
     describe('documentSymbol operation', () => {
       it('dispatches to documentSymbols and formats results', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const filePath = resolvePath('src', 'app.ts');
-        const symbols: LspSymbolInformation[] = [
-          {
-            name: 'MyClass',
-            kind: 'Class',
-            containerName: 'app',
-            location: createLocation(filePath, 5, 0),
-            serverName: 'tsserver',
-          },
-          {
-            name: 'myFunction',
-            kind: 'Function',
-            location: createLocation(filePath, 20, 0),
-          },
-        ];
-        (client.documentSymbols as Mock).mockResolvedValue(symbols);
-
-        const invocation = tool.build({
-          operation: 'documentSymbol',
-          filePath: 'src/app.ts',
-        });
-        const result = await invocation.execute(abortSignal);
+        const { client, result } = await run(
+          { operation: 'documentSymbol', filePath: 'src/app.ts' },
+          (c) =>
+            c.documentSymbols.mockResolvedValue([
+              symbol('MyClass', 'Class', 5, {
+                containerName: 'app',
+                serverName: 'tsserver',
+              }),
+              symbol('myFunction', 'Function', 20),
+            ]),
+        );
 
         // Default limit for documentSymbols is 50
         expect(client.documentSymbols).toHaveBeenCalledWith(
-          toUri(filePath),
+          toUri(appPath),
           undefined,
           50,
         );
-        expect(result.llmContent).toContain('Document symbols for');
-        expect(result.llmContent).toContain('MyClass');
-        expect(result.llmContent).toContain('myFunction');
+        expectContains(
+          result.llmContent,
+          'Document symbols for',
+          'MyClass',
+          'myFunction',
+        );
       });
     });
 
     describe('workspaceSymbol operation', () => {
       it('dispatches to workspaceSymbols and formats results', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const filePath = resolvePath('src', 'app.ts');
-        const symbols: LspSymbolInformation[] = [
-          {
-            name: 'Widget',
-            kind: 'Class',
-            location: createLocation(filePath, 10, 0),
+        const { client, result } = await run(
+          { operation: 'workspaceSymbol', query: 'Widget', limit: 10 },
+          (c) => {
+            c.workspaceSymbols.mockResolvedValue([
+              symbol('Widget', 'Class', 10),
+            ]);
+            c.references.mockResolvedValue([]);
           },
-        ];
-        (client.workspaceSymbols as Mock).mockResolvedValue(symbols);
-        (client.references as Mock).mockResolvedValue([]);
-
-        const invocation = tool.build({
-          operation: 'workspaceSymbol',
-          query: 'Widget',
-          limit: 10,
-        });
-        const result = await invocation.execute(abortSignal);
+        );
 
         expect(client.workspaceSymbols).toHaveBeenCalledWith('Widget', 10);
-        expect(result.llmContent).toContain('symbols for query "Widget"');
-        expect(result.llmContent).toContain('Widget');
+        expectContains(
+          result.llmContent,
+          'symbols for query "Widget"',
+          'Widget',
+        );
       });
     });
 
     describe('goToImplementation operation', () => {
       it('dispatches to implementations and formats results', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const filePath = resolvePath('src', 'impl.ts');
-        const impl: LspDefinition = {
-          ...createLocation(filePath, 15, 2),
-          serverName: 'tsserver',
-        };
-        (client.implementations as Mock).mockResolvedValue([impl]);
-
-        const invocation = tool.build({
-          operation: 'goToImplementation',
-          filePath: 'src/interface.ts',
-          line: 5,
-          character: 10,
-        });
-        const result = await invocation.execute(abortSignal);
+        const implPath = resolvePath('src', 'impl.ts');
+        const { client, result } = await run(
+          at('goToImplementation', { filePath: 'src/interface.ts' }),
+          (c) =>
+            c.implementations.mockResolvedValue([
+              { ...createLocation(implPath, 15, 2), serverName: 'tsserver' },
+            ]),
+        );
 
         expect(client.implementations).toHaveBeenCalled();
         expect(result.llmContent).toContain('Implementations for');
@@ -559,422 +461,249 @@ describe('LspTool', () => {
 
     describe('prepareCallHierarchy operation', () => {
       it('dispatches to prepareCallHierarchy and formats results with JSON', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const filePath = resolvePath('src', 'app.ts');
-        const item: LspCallHierarchyItem = {
-          name: 'myFunction',
+        const item = callItem('myFunction', 'app.ts', 10, 20, {
           kind: 'Function',
           detail: '(param: string)',
-          uri: toUri(filePath),
-          range: {
-            start: { line: 10, character: 0 },
-            end: { line: 20, character: 1 },
-          },
-          selectionRange: {
-            start: { line: 10, character: 9 },
-            end: { line: 10, character: 19 },
-          },
           serverName: 'tsserver',
-        };
-        (client.prepareCallHierarchy as Mock).mockResolvedValue([item]);
-
-        const invocation = tool.build({
-          operation: 'prepareCallHierarchy',
-          filePath: 'src/app.ts',
-          line: 11,
-          character: 15,
         });
-        const result = await invocation.execute(abortSignal);
+        const { client, result } = await run(
+          at('prepareCallHierarchy', { line: 11, character: 15 }),
+          (c) => c.prepareCallHierarchy.mockResolvedValue([item]),
+        );
 
         expect(client.prepareCallHierarchy).toHaveBeenCalled();
-        expect(result.llmContent).toContain('Call hierarchy items for');
-        expect(result.llmContent).toContain('myFunction');
-        expect(result.llmContent).toContain('Call hierarchy items (JSON):');
-        expect(result.llmContent).toContain('"name": "myFunction"');
+        expectContains(
+          result.llmContent,
+          'Call hierarchy items for',
+          'myFunction',
+          'Call hierarchy items (JSON):',
+          '"name": "myFunction"',
+        );
       });
     });
 
     describe('incomingCalls operation', () => {
       it('dispatches to incomingCalls and formats results', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const targetPath = resolvePath('src', 'target.ts');
-        const callerPath = resolvePath('src', 'caller.ts');
-
-        const targetItem: LspCallHierarchyItem = {
-          name: 'targetFunc',
-          uri: toUri(targetPath),
-          range: {
-            start: { line: 5, character: 0 },
-            end: { line: 10, character: 1 },
-          },
-          selectionRange: {
-            start: { line: 5, character: 9 },
-            end: { line: 5, character: 19 },
-          },
+        const targetItem = callItem('targetFunc', 'target.ts', 5, 10, {
           serverName: 'tsserver',
-        };
-
-        const callerItem: LspCallHierarchyItem = {
-          name: 'callerFunc',
-          kind: 'Function',
-          uri: toUri(callerPath),
-          range: {
-            start: { line: 20, character: 0 },
-            end: { line: 30, character: 1 },
-          },
-          selectionRange: {
-            start: { line: 20, character: 9 },
-            end: { line: 20, character: 19 },
-          },
-        };
-
-        const incomingCall: LspCallHierarchyIncomingCall = {
-          from: callerItem,
-          fromRanges: [
-            {
-              start: { line: 25, character: 4 },
-              end: { line: 25, character: 14 },
-            },
-          ],
-        };
-        (client.incomingCalls as Mock).mockResolvedValue([incomingCall]);
-
-        const invocation = tool.build({
-          operation: 'incomingCalls',
-          callHierarchyItem: targetItem,
         });
-        const result = await invocation.execute(abortSignal);
+        const callerItem = callItem('callerFunc', 'caller.ts', 20, 30, {
+          kind: 'Function',
+        });
+        const { client, result } = await run(
+          { operation: 'incomingCalls', callHierarchyItem: targetItem },
+          (c) =>
+            c.incomingCalls.mockResolvedValue([
+              { from: callerItem, fromRanges: [lineSpan(25, 4, 14)] },
+            ]),
+        );
 
         expect(client.incomingCalls).toHaveBeenCalledWith(
           targetItem,
           'tsserver',
           20,
         );
-        expect(result.llmContent).toContain('Incoming calls for targetFunc');
-        expect(result.llmContent).toContain('callerFunc');
-        expect(result.llmContent).toContain('Incoming calls (JSON):');
+        expectContains(
+          result.llmContent,
+          'Incoming calls for targetFunc',
+          'callerFunc',
+          'Incoming calls (JSON):',
+        );
       });
     });
 
     describe('outgoingCalls operation', () => {
       it('dispatches to outgoingCalls and formats results', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const sourcePath = resolvePath('src', 'source.ts');
-        const targetPath = resolvePath('src', 'target.ts');
-
-        const sourceItem: LspCallHierarchyItem = {
-          name: 'sourceFunc',
-          uri: toUri(sourcePath),
-          range: {
-            start: { line: 5, character: 0 },
-            end: { line: 15, character: 1 },
-          },
-          selectionRange: {
-            start: { line: 5, character: 9 },
-            end: { line: 5, character: 19 },
-          },
-        };
-
-        const targetItem: LspCallHierarchyItem = {
-          name: 'targetFunc',
+        const sourceItem = callItem('sourceFunc', 'source.ts', 5, 15);
+        const targetItem = callItem('targetFunc', 'target.ts', 20, 30, {
           kind: 'Function',
-          uri: toUri(targetPath),
-          range: {
-            start: { line: 20, character: 0 },
-            end: { line: 30, character: 1 },
-          },
-          selectionRange: {
-            start: { line: 20, character: 9 },
-            end: { line: 20, character: 19 },
-          },
           serverName: 'tsserver',
-        };
-
-        const outgoingCall: LspCallHierarchyOutgoingCall = {
-          to: targetItem,
-          fromRanges: [
-            {
-              start: { line: 10, character: 4 },
-              end: { line: 10, character: 14 },
-            },
-          ],
-        };
-        (client.outgoingCalls as Mock).mockResolvedValue([outgoingCall]);
-
-        const invocation = tool.build({
-          operation: 'outgoingCalls',
-          callHierarchyItem: sourceItem,
         });
-        const result = await invocation.execute(abortSignal);
+        const { client, result } = await run(
+          { operation: 'outgoingCalls', callHierarchyItem: sourceItem },
+          (c) =>
+            c.outgoingCalls.mockResolvedValue([
+              { to: targetItem, fromRanges: [lineSpan(10, 4, 14)] },
+            ]),
+        );
 
         expect(client.outgoingCalls).toHaveBeenCalled();
-        expect(result.llmContent).toContain('Outgoing calls for sourceFunc');
-        expect(result.llmContent).toContain('targetFunc');
-        expect(result.llmContent).toContain('Outgoing calls (JSON):');
+        expectContains(
+          result.llmContent,
+          'Outgoing calls for sourceFunc',
+          'targetFunc',
+          'Outgoing calls (JSON):',
+        );
       });
     });
 
     describe('error handling', () => {
-      it('handles LSP client errors gracefully', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        (client.definitions as Mock).mockRejectedValue(
-          new Error('Connection refused'),
+      it.each([
+        [
+          'handles LSP client errors gracefully',
+          'definitions',
+          'goToDefinition',
+          'Connection refused',
+        ],
+        ['handles hover operation errors', 'hover', 'hover', 'Server timeout'],
+        [
+          'handles call hierarchy errors',
+          'prepareCallHierarchy',
+          'prepareCallHierarchy',
+          'Not supported',
+        ],
+      ] as const)('%s', async (_title, method, operation, message) => {
+        const { result } = await run(at(operation), (c) =>
+          c[method].mockRejectedValue(new Error(message)),
         );
-
-        const invocation = tool.build({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: 5,
-          character: 10,
-        });
-        const result = await invocation.execute(abortSignal);
-
-        expect(result.llmContent).toContain('failed');
-        expect(result.llmContent).toContain('Connection refused');
-      });
-
-      it('handles hover operation errors', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        (client.hover as Mock).mockRejectedValue(new Error('Server timeout'));
-
-        const invocation = tool.build({
-          operation: 'hover',
-          filePath: 'src/app.ts',
-          line: 5,
-          character: 10,
-        });
-        const result = await invocation.execute(abortSignal);
-
-        expect(result.llmContent).toContain('failed');
-        expect(result.llmContent).toContain('Server timeout');
-      });
-
-      it('handles call hierarchy errors', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        (client.prepareCallHierarchy as Mock).mockRejectedValue(
-          new Error('Not supported'),
-        );
-
-        const invocation = tool.build({
-          operation: 'prepareCallHierarchy',
-          filePath: 'src/app.ts',
-          line: 5,
-          character: 10,
-        });
-        const result = await invocation.execute(abortSignal);
-
-        expect(result.llmContent).toContain('failed');
-        expect(result.llmContent).toContain('Not supported');
+        expectContains(result.llmContent, 'failed', message);
       });
     });
 
     describe('workspaceSymbol with references', () => {
       it('fetches references for top match when available', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const filePath = resolvePath('src', 'app.ts');
         const refPath = resolvePath('src', 'other.ts');
-        const symbols: LspSymbolInformation[] = [
-          {
-            name: 'TopWidget',
-            kind: 'Class',
-            location: createLocation(filePath, 10, 0),
-            serverName: 'tsserver',
-          },
-        ];
-        const references: LspReference[] = [
-          { ...createLocation(refPath, 5, 10), serverName: 'tsserver' },
-          { ...createLocation(refPath, 20, 5) },
-        ];
-        (client.workspaceSymbols as Mock).mockResolvedValue(symbols);
-        (client.references as Mock).mockResolvedValue(references);
-
-        const invocation = tool.build({
-          operation: 'workspaceSymbol',
-          query: 'TopWidget',
+        const top = symbol('TopWidget', 'Class', 10, {
+          serverName: 'tsserver',
         });
-        const result = await invocation.execute(abortSignal);
+        const { client, result } = await run(
+          { operation: 'workspaceSymbol', query: 'TopWidget' },
+          (c) => {
+            c.workspaceSymbols.mockResolvedValue([top]);
+            c.references.mockResolvedValue([
+              { ...createLocation(refPath, 5, 10), serverName: 'tsserver' },
+              createLocation(refPath, 20, 5),
+            ]);
+          },
+        );
 
         // Should fetch references for top match
         expect(client.references).toHaveBeenCalledWith(
-          symbols[0].location,
+          top.location,
           'tsserver',
           false,
           expect.any(Number),
         );
-        expect(result.llmContent).toContain('References for top match');
-        expect(result.llmContent).toContain('TopWidget');
+        expectContains(
+          result.llmContent,
+          'References for top match',
+          'TopWidget',
+        );
       });
 
       it('handles reference lookup failure gracefully', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const filePath = resolvePath('src', 'app.ts');
-        const symbols: LspSymbolInformation[] = [
-          {
-            name: 'Widget',
-            kind: 'Class',
-            location: createLocation(filePath, 10, 0),
+        const { result } = await run(
+          { operation: 'workspaceSymbol', query: 'Widget' },
+          (c) => {
+            c.workspaceSymbols.mockResolvedValue([
+              symbol('Widget', 'Class', 10),
+            ]);
+            c.references.mockRejectedValue(
+              new Error('References not supported'),
+            );
           },
-        ];
-        (client.workspaceSymbols as Mock).mockResolvedValue(symbols);
-        (client.references as Mock).mockRejectedValue(
-          new Error('References not supported'),
         );
 
-        const invocation = tool.build({
-          operation: 'workspaceSymbol',
-          query: 'Widget',
-        });
-        const result = await invocation.execute(abortSignal);
-
         // Should still return symbols even if references fail
-        expect(result.llmContent).toContain('Widget');
-        expect(result.llmContent).toContain('References lookup failed');
+        expectContains(result.llmContent, 'Widget', 'References lookup failed');
       });
     });
 
     describe('returnDisplay verification', () => {
       it('returns formatted display for definitions', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const filePath = resolvePath('src', 'app.ts');
-        const definition: LspDefinition = {
-          ...createLocation(filePath, 10, 5),
-          serverName: 'tsserver',
-        };
-        (client.definitions as Mock).mockResolvedValue([definition]);
-
-        const invocation = tool.build({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: 5,
-          character: 10,
-        });
-        const result = await invocation.execute(abortSignal);
+        const { result } = await run(at('goToDefinition'), (c) =>
+          c.definitions.mockResolvedValue([
+            { ...createLocation(appPath, 10, 5), serverName: 'tsserver' },
+          ]),
+        );
 
         // returnDisplay should be concise (without heading)
         expect(result.returnDisplay).toBeDefined();
-        expect(result.returnDisplay).toContain('1.');
-        expect(result.returnDisplay).toContain('[tsserver]');
+        expectContains(result.returnDisplay, '1.', '[tsserver]');
       });
 
       it('returns formatted display for hover with trimmed content', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        const hoverResult: LspHoverResult = {
-          contents: '  \n  Type: string  \n  ',
-        };
-        (client.hover as Mock).mockResolvedValue(hoverResult);
-
-        const invocation = tool.build({
-          operation: 'hover',
-          filePath: 'src/app.ts',
-          line: 10,
-          character: 5,
-        });
-        const result = await invocation.execute(abortSignal);
-
+        const { result } = await run(hoverParams(), (c) =>
+          c.hover.mockResolvedValue({ contents: '  \n  Type: string  \n  ' }),
+        );
         // returnDisplay should be trimmed
         expect(result.returnDisplay).toBe('Type: string');
       });
     });
 
     describe('serverName and limit parameter passing', () => {
-      it('passes serverName to client methods', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        (client.definitions as Mock).mockResolvedValue([]);
-
-        const invocation = tool.build({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: 5,
-          character: 10,
-          serverName: 'pylsp',
-        });
-        await invocation.execute(abortSignal);
-
-        expect(client.definitions).toHaveBeenCalledWith(
-          expect.anything(),
+      it.each([
+        [
+          'passes serverName to client methods',
+          { serverName: 'pylsp' },
           'pylsp',
           expect.any(Number),
+        ],
+        ['passes custom limit to client methods', { limit: 5 }, undefined, 5],
+      ])('%s', async (_title, extra, serverName, limit) => {
+        const { client } = await run(at('goToDefinition', extra), (c) =>
+          c.definitions.mockResolvedValue([]),
         );
-      });
-
-      it('passes custom limit to client methods', async () => {
-        const client = createMockClient();
-        const tool = createTool(client);
-        (client.definitions as Mock).mockResolvedValue([]);
-
-        const invocation = tool.build({
-          operation: 'goToDefinition',
-          filePath: 'src/app.ts',
-          line: 5,
-          character: 10,
-          limit: 5,
-        });
-        await invocation.execute(abortSignal);
-
         expect(client.definitions).toHaveBeenCalledWith(
           expect.anything(),
-          undefined,
-          5,
+          serverName,
+          limit,
         );
       });
     });
   });
 
   describe('schema compatibility with Claude Code', () => {
-    /**
-     * Claude Code LSP tool schema reference:
-     * {
-     *   "name": "lsp",
-     *   "input_schema": {
-     *     "type": "object",
-     *     "properties": {
-     *       "operation": { "type": "string", "enum": [...] },
-     *       "filePath": { "type": "string" },
-     *       "line": { "type": "number" },
-     *       "character": { "type": "number" },
-     *       "includeDeclaration": { "type": "boolean" },
-     *       "query": { "type": "string" },
-     *       "callHierarchyItem": { ... }
-     *     },
-     *     "required": ["operation"]
-     *   }
-     * }
-     */
+    // Reference: Claude Code's LSP tool is named "lsp" and its input_schema is
+    // an object whose only required field is "operation" (string enum), with
+    // filePath (string), line and character (number), includeDeclaration
+    // (boolean), query (string) and callHierarchyItem.
+    type SchemaNode = {
+      type?: string;
+      minimum?: number;
+      $ref?: string;
+      enum?: string[];
+      required?: string[];
+      properties?: { [K in SchemaProp]?: SchemaNode };
+      definitions?: {
+        [K in 'LspCallHierarchyItem' | 'LspPosition' | 'LspRange']?: SchemaNode;
+      };
+    };
+    type SchemaProp =
+      | 'operation'
+      | 'filePath'
+      | 'line'
+      | 'character'
+      | 'limit'
+      | 'includeDeclaration'
+      | 'callHierarchyItem'
+      | 'rawKind'
+      | 'start'
+      | 'end'
+      | 'range'
+      | 'selectionRange';
+    const schema = () => createTool().schema.parametersJsonSchema as SchemaNode;
+    // Core properties that must match Claude Code
+    const coreProperties = [
+      'operation',
+      'filePath',
+      'line',
+      'character',
+      'includeDeclaration',
+      'query',
+      'callHierarchyItem',
+    ];
 
     it('has correct tool name', () => {
-      const tool = createTool();
-      expect(tool.schema.name).toBe('lsp');
+      expect(createTool().schema.name).toBe('lsp');
     });
 
     it('has operation as only required field', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        required?: string[];
-      };
-      expect(schema.required).toEqual(['operation']);
+      expect(schema().required).toEqual(['operation']);
     });
 
     it('operation enum matches Claude Code exactly', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        properties?: {
-          operation?: {
-            enum?: string[];
-          };
-        };
-      };
-      const expectedOperations = [
+      expect(schema().properties?.operation?.enum).toEqual([
         'goToDefinition',
         'findReferences',
         'hover',
@@ -987,42 +716,20 @@ describe('LspTool', () => {
         'diagnostics',
         'workspaceDiagnostics',
         'codeActions',
-      ];
-      expect(schema.properties?.operation?.enum).toEqual(expectedOperations);
+      ]);
     });
 
     it('has all Claude Code core properties', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        properties?: Record<string, unknown>;
-      };
-      const properties = Object.keys(schema.properties ?? {});
-
-      // Core properties that must match Claude Code
-      const coreProperties = [
-        'operation',
-        'filePath',
-        'line',
-        'character',
-        'includeDeclaration',
-        'query',
-        'callHierarchyItem',
-      ];
-
+      const properties = Object.keys(schema().properties ?? {});
       for (const prop of coreProperties) {
         expect(properties).toContain(prop);
       }
     });
 
     it('extension properties are documented', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        properties?: Record<string, unknown>;
-      };
-      const properties = Object.keys(schema.properties ?? {});
-
-      // Our extensions beyond Claude Code
-      const extensionProperties = [
+      // Every property is either core or one of our documented extensions.
+      const knownProperties = [
+        ...coreProperties,
         'serverName',
         'limit',
         'endLine',
@@ -1030,79 +737,33 @@ describe('LspTool', () => {
         'diagnostics',
         'codeActionKinds',
       ];
-
-      // All properties should be either core or documented extensions
-      const knownProperties = [
-        'operation',
-        'filePath',
-        'line',
-        'character',
-        'includeDeclaration',
-        'query',
-        'callHierarchyItem',
-        ...extensionProperties,
-      ];
-
-      for (const prop of properties) {
+      for (const prop of Object.keys(schema().properties ?? {})) {
         expect(knownProperties).toContain(prop);
       }
     });
 
     it('filePath property has correct type', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        properties?: {
-          filePath?: { type?: string };
-        };
-      };
-      expect(schema.properties?.filePath?.type).toBe('string');
+      expect(schema().properties?.filePath?.type).toBe('string');
     });
 
     it('line and character properties have correct type', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        properties?: {
-          line?: { type?: string };
-          character?: { type?: string };
-        };
-      };
-      expect(schema.properties?.line?.type).toBe('number');
-      expect(schema.properties?.character?.type).toBe('number');
+      const { properties } = schema();
+      expect(properties?.line?.type).toBe('number');
+      expect(properties?.character?.type).toBe('number');
     });
 
     it('limit extension property has integer type', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        properties?: {
-          limit?: { type?: string; minimum?: number };
-        };
-      };
-      expect(schema.properties?.limit?.type).toBe('integer');
-      expect(schema.properties?.limit?.minimum).toBe(1);
+      const limit = schema().properties?.limit;
+      expect(limit?.type).toBe('integer');
+      expect(limit?.minimum).toBe(1);
     });
 
     it('includeDeclaration property has correct type', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        properties?: {
-          includeDeclaration?: { type?: string };
-        };
-      };
-      expect(schema.properties?.includeDeclaration?.type).toBe('boolean');
+      expect(schema().properties?.includeDeclaration?.type).toBe('boolean');
     });
 
     it('callHierarchyItem has required structure', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        definitions?: {
-          LspCallHierarchyItem?: {
-            type?: string;
-            properties?: Record<string, unknown>;
-            required?: string[];
-          };
-        };
-      };
-      const itemDef = schema.definitions?.LspCallHierarchyItem;
+      const itemDef = schema().definitions?.LspCallHierarchyItem;
       expect(itemDef?.type).toBe('object');
       expect(itemDef?.required).toEqual([
         'name',
@@ -1110,44 +771,19 @@ describe('LspTool', () => {
         'range',
         'selectionRange',
       ]);
-      expect(itemDef?.properties).toHaveProperty('name');
-      expect(itemDef?.properties).toHaveProperty('kind');
-      expect(itemDef?.properties).toHaveProperty('uri');
-      expect(itemDef?.properties).toHaveProperty('range');
-      expect(itemDef?.properties).toHaveProperty('selectionRange');
+      for (const prop of ['name', 'kind', 'uri', 'range', 'selectionRange']) {
+        expect(itemDef?.properties).toHaveProperty(prop);
+      }
     });
 
     it('supports rawKind for SymbolKind numeric preservation', () => {
-      const tool = createTool();
-      const schema = tool.schema.parametersJsonSchema as {
-        definitions?: {
-          LspCallHierarchyItem?: {
-            properties?: {
-              rawKind?: { type?: string };
-            };
-          };
-        };
-      };
-      const itemDef = schema.definitions?.LspCallHierarchyItem;
+      const itemDef = schema().definitions?.LspCallHierarchyItem;
       expect(itemDef?.properties?.rawKind?.type).toBe('number');
     });
 
     describe('schema definitions deep validation', () => {
       it('has LspPosition definition with correct structure', () => {
-        const tool = createTool();
-        const schema = tool.schema.parametersJsonSchema as {
-          definitions?: {
-            LspPosition?: {
-              type?: string;
-              properties?: {
-                line?: { type?: string };
-                character?: { type?: string };
-              };
-              required?: string[];
-            };
-          };
-        };
-        const posDef = schema.definitions?.LspPosition;
+        const posDef = schema().definitions?.LspPosition;
         expect(posDef).toBeDefined();
         expect(posDef?.type).toBe('object');
         expect(posDef?.properties?.line?.type).toBe('number');
@@ -1156,20 +792,7 @@ describe('LspTool', () => {
       });
 
       it('has LspRange definition with correct structure', () => {
-        const tool = createTool();
-        const schema = tool.schema.parametersJsonSchema as {
-          definitions?: {
-            LspRange?: {
-              type?: string;
-              properties?: {
-                start?: { $ref?: string };
-                end?: { $ref?: string };
-              };
-              required?: string[];
-            };
-          };
-        };
-        const rangeDef = schema.definitions?.LspRange;
+        const rangeDef = schema().definitions?.LspRange;
         expect(rangeDef).toBeDefined();
         expect(rangeDef?.type).toBe('object');
         expect(rangeDef?.properties?.start?.$ref).toBe(
@@ -1182,26 +805,13 @@ describe('LspTool', () => {
       });
 
       it('callHierarchyItem uses $ref for range fields', () => {
-        const tool = createTool();
-        const schema = tool.schema.parametersJsonSchema as {
-          properties?: {
-            callHierarchyItem?: { $ref?: string };
-          };
-          definitions?: {
-            LspCallHierarchyItem?: {
-              properties?: {
-                range?: { $ref?: string };
-                selectionRange?: { $ref?: string };
-              };
-            };
-          };
-        };
+        const { properties, definitions } = schema();
         // callHierarchyItem property should reference the definition
-        expect(schema.properties?.callHierarchyItem?.$ref).toBe(
+        expect(properties?.callHierarchyItem?.$ref).toBe(
           '#/definitions/LspCallHierarchyItem',
         );
         // range and selectionRange should use LspRange $ref
-        const itemDef = schema.definitions?.LspCallHierarchyItem;
+        const itemDef = definitions?.LspCallHierarchyItem;
         expect(itemDef?.properties?.range?.$ref).toBe('#/definitions/LspRange');
         expect(itemDef?.properties?.selectionRange?.$ref).toBe(
           '#/definitions/LspRange',
@@ -1209,13 +819,8 @@ describe('LspTool', () => {
       });
 
       it('all definitions are present and accounted for', () => {
-        const tool = createTool();
-        const schema = tool.schema.parametersJsonSchema as {
-          definitions?: Record<string, unknown>;
-        };
-        const definitionNames = Object.keys(schema.definitions ?? {});
         // Should include at least these definitions
-        expect(definitionNames).toEqual(
+        expect(Object.keys(schema().definitions ?? {})).toEqual(
           expect.arrayContaining([
             'LspCallHierarchyItem',
             'LspDiagnostic',
@@ -1228,50 +833,29 @@ describe('LspTool', () => {
   });
 
   describe('invocation description', () => {
-    it('describes goToDefinition correctly', () => {
-      const tool = createTool();
-      const invocation = tool.build({
-        operation: 'goToDefinition',
-        filePath: 'src/app.ts',
-        line: 10,
-        character: 5,
-      });
-      // Uses formatted label "go-to-definition"
-      expect(invocation.getDescription()).toContain('go-to-definition');
-      expect(invocation.getDescription()).toContain('src/app.ts:10:5');
-    });
-
-    it('describes workspaceSymbol correctly', () => {
-      const tool = createTool();
-      const invocation = tool.build({
-        operation: 'workspaceSymbol',
-        query: 'Widget',
-      });
-      // Uses formatted label "workspace symbol search"
-      expect(invocation.getDescription()).toContain('workspace symbol search');
-      expect(invocation.getDescription()).toContain('Widget');
-    });
-
-    it('describes incomingCalls correctly', () => {
-      const tool = createTool();
-      const invocation = tool.build({
-        operation: 'incomingCalls',
-        callHierarchyItem: {
-          name: 'testFunc',
-          uri: 'file:///test.ts',
-          range: {
-            start: { line: 0, character: 0 },
-            end: { line: 0, character: 10 },
-          },
-          selectionRange: {
-            start: { line: 0, character: 0 },
-            end: { line: 0, character: 10 },
-          },
-        },
-      });
-      // Uses formatted label "incoming calls"
-      expect(invocation.getDescription()).toContain('incoming calls');
-      expect(invocation.getDescription()).toContain('testFunc');
+    // Each description uses the formatted operation label
+    // ("go-to-definition", "workspace symbol search", "incoming calls").
+    it.each<[string, LspToolParams, string[]]>([
+      [
+        'describes goToDefinition correctly',
+        at('goToDefinition', { line: 10, character: 5 }),
+        ['go-to-definition', 'src/app.ts:10:5'],
+      ],
+      [
+        'describes workspaceSymbol correctly',
+        { operation: 'workspaceSymbol', query: 'Widget' },
+        ['workspace symbol search', 'Widget'],
+      ],
+      [
+        'describes incomingCalls correctly',
+        { operation: 'incomingCalls', callHierarchyItem: testItem() },
+        ['incoming calls', 'testFunc'],
+      ],
+    ])('%s', (_title, params, parts) => {
+      const invocation = createTool().build(params);
+      for (const part of parts) {
+        expect(invocation.getDescription()).toContain(part);
+      }
     });
   });
 });

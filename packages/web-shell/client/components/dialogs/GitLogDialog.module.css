@@ -117,10 +117,17 @@
   font-size: 12px;
 }
 
-.commitDetail {
-  padding: 8px 10px 12px;
+.detailRow {
+  display: flex;
+  align-items: stretch;
   border-top: 1px solid var(--border);
   background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.commitDetail {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px 12px;
 }
 
 .commitBody {
@@ -208,4 +215,95 @@
 
 .loadMore:hover {
   background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 8px;
+}
+
+.search {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted-foreground);
+}
+
+.search:focus-within {
+  border-color: var(--agent-blue-500, var(--muted-foreground));
+}
+
+.searchInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.toggle {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.toggle:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.toggleOn {
+  color: inherit;
+  border-color: var(--agent-blue-500, var(--muted-foreground));
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.graph {
+  position: relative;
+  flex-shrink: 0;
+  align-self: stretch;
+  margin-left: 6px;
+}
+
+/* Absolute so the stretched row, not the viewBox ratio, sets the height. */
+.graphSvg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke-width: 2;
+  overflow: visible;
+}
+
+.graphNode {
+  position: absolute;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  border: 2px solid;
+  border-radius: 50%;
+  transform: translateY(-50%);
+}
+
+.graphNodeMerge {
+  background: var(--background, #fff);
 }

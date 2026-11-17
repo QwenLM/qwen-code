@@ -16,7 +16,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import * as os from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -26,9 +26,15 @@ import {
   revalidateConversationRoot,
 } from './conversation-workspace.js';
 import { ConversationDirectoryIdentityError } from '../../utils/conversation-directory-identity.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const plantOnExpectedInspect = vi.hoisted(() => ({ armed: false }));
 const enoentOnInspect = vi.hoisted(() => ({ armed: false }));
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, platform: vi.fn(actual.platform) };
+});
 
 vi.mock(
   '../../utils/conversation-directory-identity.js',
@@ -70,6 +76,7 @@ const cleanup: string[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.mocked(os.platform).mockReset();
   await Promise.all(
     cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
@@ -77,13 +84,78 @@ afterEach(async () => {
 
 async function tempHome(): Promise<string> {
   const home = await mkdtemp(
-    join(realpathSync.native(tmpdir()), 'qwen-live-home-'),
+    join(realpathSync.native(os.tmpdir()), 'qwen-live-home-'),
   );
   cleanup.push(home);
   return home;
 }
 
 describe('Live conversation workspace root', () => {
+  it('uses an explicit root lazily and reuses its deterministic child after restart', async () => {
+    const home = await tempHome();
+    const rootPath = join(home, 'persistent files ');
+    const workspace = new ConversationWorkspace({ homeDir: home, rootPath });
+    expect(workspace.rootPath).toBe(rootPath);
+    await expect(lstat(rootPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const sessionId = '22345678-1234-4234-9234-123456789ABC';
+    const child = await workspace.materializeConversationDirectory(sessionId);
+    expect(dirname(child)).toBe(realpathSync.native(rootPath));
+    await writeFile(join(child, 'persistent.txt'), 'kept');
+    const restarted = new ConversationWorkspace({ rootPath });
+    expect(
+      await restarted.materializeConversationDirectory(sessionId.toLowerCase()),
+    ).toBe(child);
+    expect(
+      await restarted.ensureStandaloneDirectory(sessionId.toLowerCase()),
+    ).toMatchObject({
+      status: 'ready',
+      identity: { canonicalPath: child },
+    });
+    expect((await lstat(join(child, 'persistent.txt'))).isFile()).toBe(true);
+    await expect(lstat(getConversationRootPath(home))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it.each(['', ' ', 'relative/root', '~/conversations', '/root\0invalid'])(
+    'rejects invalid explicit root %j without falling back',
+    (rootPath) => {
+      expect(() => new ConversationWorkspace({ rootPath })).toThrow(
+        /QWEN_CONVERSATIONS_DIR.*fully qualified absolute path/,
+      );
+    },
+  );
+
+  it.each(['C:relative', '\\rooted', '/rooted', '\\\\server'])(
+    'rejects Windows root %j that depends on the current drive or lacks a share',
+    (rootPath) => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      expect(() => new ConversationWorkspace({ rootPath })).toThrow(
+        /fully qualified absolute path/,
+      );
+    },
+  );
+
+  it('keeps filesystem acceptance lazy and rejects an explicit symlink root', async () => {
+    const home = await tempHome();
+    const rootPath = join(home, 'configured');
+    const target = join(home, 'target');
+    await mkdir(target, { mode: 0o700 });
+    await symlink(
+      target,
+      rootPath,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const workspace = new ConversationWorkspace({ homeDir: home, rootPath });
+    await expect(workspace.getRoot()).rejects.toThrow(
+      `Live conversation root ${JSON.stringify(rootPath)} must be a non-symlink directory; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
+    );
+    await expect(lstat(getConversationRootPath(home))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('lazily creates the injected default root with a private canonical identity', async () => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
@@ -142,11 +214,14 @@ describe('Live conversation workspace root', () => {
     const permissiveRoot = getConversationRootPath(permissiveHome);
     await mkdir(permissiveRoot, { recursive: true, mode: 0o700 });
     await chmod(permissiveRoot, 0o755);
-    await expect(
-      new ConversationWorkspace({ homeDir: permissiveHome }).getRoot(),
-    ).rejects.toThrow(/only to its owner/);
+    await expect
+      .soft(new ConversationWorkspace({ rootPath: permissiveRoot }).getRoot())
+      .rejects.toThrow(
+        `Live conversation root ${JSON.stringify(permissiveRoot)} must be accessible only to its owner; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
+      );
 
     const ownerHome = await tempHome();
+    const ownerRoot = getConversationRootPath(ownerHome);
     const getuid = process.getuid;
     if (!getuid) return;
     const originalDescriptor = Object.getOwnPropertyDescriptor(
@@ -158,9 +233,11 @@ describe('Live conversation workspace root', () => {
       value: () => getuid() + 1,
     });
     try {
-      await expect(
-        new ConversationWorkspace({ homeDir: ownerHome }).getRoot(),
-      ).rejects.toThrow(/owned by the daemon user/);
+      await expect
+        .soft(new ConversationWorkspace({ rootPath: ownerRoot }).getRoot())
+        .rejects.toThrow(
+          `Live conversation root ${JSON.stringify(ownerRoot)} must be owned by the daemon user; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`,
+        );
     } finally {
       if (originalDescriptor) {
         Object.defineProperty(process, 'getuid', originalDescriptor);
@@ -170,13 +247,22 @@ describe('Live conversation workspace root', () => {
     }
   });
 
-  it('revalidates both canonical identity and the configured path', async () => {
+  it('revalidates both canonical identity and the configured path', async (ctx) => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
     const identity = await workspace.getRoot();
 
+    // Both revalidations return the SAME object and skip the inode whenever
+    // `inodeVerifiable` is false on both sides, so they hold on a host with
+    // unverifiable inodes — gate them away and a mutant returning a fresh
+    // object goes undetected there. Only the swap below needs a real inode.
     expect(await workspace.revalidate()).toBe(identity);
     expect(await revalidateConversationRoot(identity)).toBe(identity);
+
+    if (!identity.inodeVerifiable) {
+      ctx.skip();
+      return;
+    }
 
     await rename(identity.configuredRoot, `${identity.configuredRoot}-old`);
     await mkdir(identity.configuredRoot, { mode: 0o700 });
@@ -184,7 +270,29 @@ describe('Live conversation workspace root', () => {
     await expect(workspace.revalidate()).rejects.toThrow(/identity changed/);
   });
 
-  it('preserves Live filesystem errors while standalone keeps root scope', async () => {
+  it('identifies an invalid root during revalidation without changing standalone errors', async () => {
+    const home = await tempHome();
+    const rootPath = join(home, 'configured');
+    const workspace = new ConversationWorkspace({ rootPath });
+    const root = await workspace.getRoot();
+    await rename(rootPath, `${rootPath}-old`);
+    await writeFile(rootPath, 'not a directory');
+    const message = `Live conversation root ${JSON.stringify(rootPath)} must be a non-symlink directory; check --conversations-dir / QWEN_CONVERSATIONS_DIR.`;
+
+    await expect(revalidateConversationRoot(root)).rejects.toThrow(message);
+    await expect(assertExactConversationRoot(root, rootPath)).rejects.toThrow(
+      message,
+    );
+    await expect(
+      workspace.inspectStandaloneDirectory('standalone'),
+    ).rejects.toMatchObject({
+      name: 'ConversationDirectoryIdentityError',
+      scope: 'root',
+      reason: 'not_directory',
+    });
+  });
+
+  it('preserves Live filesystem errors while standalone keeps root scope', async (ctx) => {
     const liveHome = await tempHome();
     const liveWorkspace = new ConversationWorkspace({ homeDir: liveHome });
     const liveRoot = await liveWorkspace.getRoot();
@@ -198,6 +306,10 @@ describe('Live conversation workspace root', () => {
       homeDir: standaloneHome,
     });
     const standaloneRoot = await standaloneWorkspace.getRoot();
+    if (!standaloneRoot.inodeVerifiable) {
+      ctx.skip();
+      return;
+    }
     await rename(
       standaloneRoot.configuredRoot,
       `${standaloneRoot.configuredRoot}-old`,
@@ -345,34 +457,36 @@ describe('Live conversation workspace root', () => {
     }
   });
 
-  it('sanitizes standalone child filesystem errors', async () => {
-    if (process.platform === 'win32') return;
-    // Root bypasses the 0o000 chmod below via CAP_DAC_OVERRIDE, so the
-    // EACCES guard this test provokes never fires (e.g. CI in a container).
-    if (process.getuid && process.getuid() === 0) return;
-    const home = await tempHome();
-    const workspace = new ConversationWorkspace({ homeDir: home });
-    const prepared = await workspace.prepareStandaloneDirectory('standalone');
-    await chmod(prepared.identity.canonicalPath, 0o000);
-    try {
-      const error = await workspace
-        .prepareStandaloneDirectory('standalone')
-        .catch((cause: unknown) => cause);
-      expect(error).toMatchObject({
-        name: 'ConversationDirectoryIdentityError',
-        scope: 'child',
-        reason: 'io_error',
-      });
-      expect((error as Error).message).not.toContain(
-        prepared.identity.canonicalPath,
-      );
-      expect(JSON.stringify(error)).not.toContain(
-        prepared.identity.canonicalPath,
-      );
-    } finally {
-      await chmod(prepared.identity.canonicalPath, 0o700);
-    }
-  });
+  // Where permission bits do not bind (Windows, or root bypassing the
+  // 0o000 chmod below via CAP_DAC_OVERRIDE), the EACCES guard this test
+  // provokes never fires.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'sanitizes standalone child filesystem errors',
+    async () => {
+      const home = await tempHome();
+      const workspace = new ConversationWorkspace({ homeDir: home });
+      const prepared = await workspace.prepareStandaloneDirectory('standalone');
+      await chmod(prepared.identity.canonicalPath, 0o000);
+      try {
+        const error = await workspace
+          .prepareStandaloneDirectory('standalone')
+          .catch((cause: unknown) => cause);
+        expect(error).toMatchObject({
+          name: 'ConversationDirectoryIdentityError',
+          scope: 'child',
+          reason: 'io_error',
+        });
+        expect((error as Error).message).not.toContain(
+          prepared.identity.canonicalPath,
+        );
+        expect(JSON.stringify(error)).not.toContain(
+          prepared.identity.canonicalPath,
+        );
+      } finally {
+        await chmod(prepared.identity.canonicalPath, 0o700);
+      }
+    },
+  );
 
   it('inspects, creates, and rejects replaced standalone child identities', async () => {
     const home = await tempHome();
@@ -704,10 +818,14 @@ describe('Live conversation workspace root', () => {
     expect(inspected.error.reason).toBe('unexpected_identity');
   });
 
-  it('rejects a replacement directory during deletion staging', async () => {
+  it('rejects a replacement directory during deletion staging', async (ctx) => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
     const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    if (prepared.identity.inode === 0) {
+      ctx.skip();
+      return;
+    }
     await rename(
       prepared.identity.canonicalPath,
       `${prepared.identity.canonicalPath}.preserved`,

@@ -5,14 +5,18 @@
  */
 // @vitest-environment jsdom
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
+import { execFile, execFileSync } from 'child_process';
 import { renderHook, act } from '@testing-library/react';
 import type React from 'react';
 import { useVim } from './vim.js';
 import type { Key } from './useKeypress.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
-import { textBufferReducer } from '../components/shared/text-buffer.js';
+import {
+  textBufferReducer,
+  useTextBuffer,
+} from '../components/shared/text-buffer.js';
 
 // Prevent real system clipboard commands (clip, pbpaste, xclip, etc.) from
 // spawning during tests — they hang or fail in headless CI environments.
@@ -219,6 +223,164 @@ describe('useVim hook', () => {
     mockVimContext.vimMode = 'NORMAL';
     mockVimContext.toggleVimEnabled.mockClear();
     mockVimContext.setVimMode.mockClear();
+  });
+
+  describe('keys delivered before the next render', () => {
+    const renderBuffer = (initialText: string) =>
+      renderHook(() => {
+        const buffer = useTextBuffer({
+          initialText,
+          initialCursorOffset: 0,
+          viewport: { width: 80, height: 12 },
+          isValidPath: () => false,
+        });
+        return { buffer, vim: useVim(buffer, mockHandleFinalSubmit) };
+      });
+
+    it.each([
+      { keys: '2dw', seed: 'one two three', text: 'three', col: 0 },
+      { keys: '2dw.', seed: 'one two three four five', text: 'five', col: 0 },
+      { keys: 'fx;', seed: 'a x b x c', text: 'a x b x c', col: 6 },
+      { keys: 'iabc\u001b', seed: 'ZZ', text: 'abcZZ', col: 2 },
+    ])('$keys has the same result in one batch and paced input', (scenario) => {
+      for (const batched of [false, true]) {
+        const { result, unmount } = renderBuffer(scenario.seed);
+        const keys = [...scenario.keys].map((sequence) =>
+          makeKey(sequence, sequence === '\u001b' ? 'escape' : ''),
+        );
+        const send = (key: Key) =>
+          expect(result.current.vim.handleInput(key)).toBe(true);
+        if (batched) act(() => keys.forEach(send));
+        else for (const key of keys) act(() => send(key));
+
+        expect(result.current.buffer.text).toBe(scenario.text);
+        expect(result.current.buffer.cursor).toEqual([0, scenario.col]);
+        expect(result.current.vim.mode).toBe('NORMAL');
+        expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+        expect(execFile).not.toHaveBeenCalled();
+        unmount();
+      }
+    });
+
+    it.each(['r', 'f', 'F', 't', 'T'])(
+      '%s keeps Enter inside the pending character read until Escape',
+      (command) => {
+        const { result } = renderBuffer('one two three');
+        const handleInput = result.current.vim.handleInput;
+        act(() => {
+          expect(handleInput(makeKey(command))).toBe(true);
+          expect(handleInput(makeKey('\r', 'return'))).toBe(true);
+          expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+          expect(result.current.buffer.text).toBe('one two three');
+          expect(handleInput(TEST_SEQUENCES.ESCAPE)).toBe(true);
+          expect(handleInput(makeKey('\r', 'return'))).toBe(true);
+        });
+        expect(mockHandleFinalSubmit).toHaveBeenCalledExactlyOnceWith(
+          'one two three',
+        );
+        expect(result.current.buffer.text).toBe('one two three');
+      },
+    );
+
+    describe.each(['global-first', 'composer-first'] as const)(
+      'Escape ownership with %s subscribers',
+      (order) => {
+        it.each(['r', 'f', 'F', 't', 'T', 'd', 'c', 'y', 'g', '>', '<', 'i'])(
+          '%s owns only the consumed Escape broadcast',
+          (command) => {
+            const { result } = renderBuffer('pending draft');
+            const { handleInput, ownsEscape } = result.current.vim;
+            const escape = makeKey('\u001b', 'escape');
+            const nextEscape = makeKey('\u001b', 'escape');
+            act(() => {
+              expect(handleInput(makeKey(command))).toBe(true);
+              expect(ownsEscape(makeKey('\r', 'return'))).toBe(false);
+              const globalSubscriber = () =>
+                expect(ownsEscape(escape)).toBe(true);
+              const composerSubscriber = () =>
+                expect(handleInput(escape)).toBe(true);
+              const subscribers =
+                order === 'global-first'
+                  ? [globalSubscriber, composerSubscriber]
+                  : [composerSubscriber, globalSubscriber];
+              subscribers.forEach((subscriber) => subscriber());
+              expect(ownsEscape(escape)).toBe(true);
+              expect(ownsEscape(nextEscape)).toBe(false);
+              expect(handleInput(nextEscape)).toBe(false);
+              expect(ownsEscape(nextEscape)).toBe(false);
+            });
+            expect(result.current.buffer.text).toBe('pending draft');
+            expect(result.current.vim.mode).toBe('NORMAL');
+            expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+          },
+        );
+      },
+    );
+
+    it.each(['', '2'])(
+      'leaves bare NORMAL Escape with count %s to the global handler',
+      (count) => {
+        const { result } = renderBuffer('pending draft');
+        const escape = makeKey('\u001b', 'escape');
+        act(() => {
+          if (count) {
+            expect(result.current.vim.handleInput(makeKey(count))).toBe(true);
+          }
+          expect(result.current.vim.ownsEscape(escape)).toBe(false);
+          expect(result.current.vim.handleInput(escape)).toBe(false);
+          expect(result.current.vim.ownsEscape(escape)).toBe(false);
+        });
+        expect(result.current.buffer.text).toBe('pending draft');
+      },
+    );
+
+    it('does not own an Escape after Vim is disabled', () => {
+      const { result, rerender } = renderBuffer('pending draft');
+      const escape = makeKey('\u001b', 'escape');
+      act(() => {
+        result.current.vim.handleInput(makeKey('r'));
+        expect(result.current.vim.handleInput(escape)).toBe(true);
+      });
+      expect(result.current.vim.ownsEscape(escape)).toBe(true);
+      mockVimContext.vimEnabled = false;
+      rerender();
+      expect(result.current.vim.ownsEscape(escape)).toBe(false);
+      expect(result.current.vim.handleInput(makeKey('\u001b', 'escape'))).toBe(
+        false,
+      );
+      expect(result.current.buffer.text).toBe('pending draft');
+    });
+
+    it('uses the existing external-mode synchronization for Escape ownership', () => {
+      const { result, rerender } = renderBuffer('pending draft');
+      mockVimContext.vimMode = 'INSERT';
+      rerender();
+      const escape = makeKey('\u001b', 'escape');
+      expect(result.current.vim.ownsEscape(escape)).toBe(true);
+      act(() => expect(result.current.vim.handleInput(escape)).toBe(true));
+      expect(result.current.vim.ownsEscape(escape)).toBe(true);
+      mockVimContext.vimMode = 'NORMAL';
+      rerender();
+      expect(result.current.vim.ownsEscape(makeKey('\u001b', 'escape'))).toBe(
+        false,
+      );
+      expect(result.current.buffer.text).toBe('pending draft');
+    });
+
+    it('honors an external mode change before the next input batch', () => {
+      const { result, rerender } = renderBuffer('ZZ');
+      mockVimContext.vimMode = 'INSERT';
+      rerender();
+      act(() => {
+        result.current.vim.handleInput(makeKey('a'));
+        result.current.vim.handleInput(TEST_SEQUENCES.ESCAPE);
+        result.current.vim.handleInput(makeKey('x'));
+      });
+      expect(result.current.buffer.text).toBe('ZZ');
+      expect(result.current.buffer.cursor).toEqual([0, 0]);
+      expect(result.current.vim.mode).toBe('NORMAL');
+      expect(mockHandleFinalSubmit).not.toHaveBeenCalled();
+    });
   });
 
   describe('Mode switching', () => {
@@ -2200,6 +2362,39 @@ describe('useVim hook', () => {
     });
 
     describe('p (paste after)', () => {
+      it.each(['p', 'P'])(
+        'invalidates imported text before %s inserts a register value',
+        (key) => {
+          const buffer = createMockBuffer('workflow history', [0, 0]);
+          const onPaste = vi.fn(() => {
+            expect(buffer.replaceRange).not.toHaveBeenCalled();
+          });
+          const { result } = renderHook(() =>
+            useVim(
+              buffer as unknown as TextBuffer,
+              mockHandleFinalSubmit,
+              onPaste,
+            ),
+          );
+          act(() => result.current.handleInput(makeKey('y')));
+          act(() => result.current.handleInput(makeKey('w')));
+          expect(onPaste).not.toHaveBeenCalled();
+          act(() => result.current.handleInput(makeKey(key)));
+          expect(onPaste).toHaveBeenCalledOnce();
+          expect(buffer.replaceRange).toHaveBeenCalledOnce();
+        },
+      );
+
+      it.each(['p', 'P'])('does not invalidate an empty %s paste', (key) => {
+        vi.mocked(execFileSync).mockReturnValue('');
+        const onPaste = vi.fn();
+        const { result } = renderHook(() =>
+          useVim(mockBuffer as TextBuffer, mockHandleFinalSubmit, onPaste),
+        );
+        act(() => result.current.handleInput(makeKey(key)));
+        expect(onPaste).not.toHaveBeenCalled();
+      });
+
       it('should paste after cursor', () => {
         const buffer = createMockBuffer('hello world', [0, 0]);
         const { result } = renderHook(() =>
@@ -2236,6 +2431,123 @@ describe('useVim hook', () => {
       });
     });
 
+    describe('system clipboard paste on Windows', () => {
+      const realPlatform = process.platform;
+
+      beforeEach(() => {
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        (execFileSync as unknown as Mock).mockReset();
+      });
+
+      afterEach(() => {
+        Object.defineProperty(process, 'platform', { value: realPlatform });
+      });
+
+      it('pastes a single-line clipboard characterwise', () => {
+        // Get-Clipboard renders the clipboard with a trailing CRLF.
+        (execFileSync as unknown as Mock).mockReturnValue('hello\r\n');
+        const buffer = createMockBuffer('foo bar', [0, 3]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+
+        // Trailing CRLF stripped: pasted after the cursor, not as a new line.
+        expect(buffer.replaceRange).toHaveBeenCalledWith(0, 4, 0, 4, 'hello');
+        expect(buffer.vimMoveLeft).toHaveBeenCalledWith(1);
+      });
+
+      it('normalizes CRLF and pastes a multi-line clipboard linewise', () => {
+        (execFileSync as unknown as Mock).mockReturnValue('line1\r\nline2\r\n');
+        const buffer = createMockBuffer('foo', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+
+        expect(buffer.replaceRange).toHaveBeenCalledWith(
+          0,
+          3,
+          0,
+          3,
+          '\nline1\nline2',
+        );
+      });
+
+      it('reads the clipboard with -NoProfile, pinned UTF-8 output, and a generous timeout', () => {
+        (execFileSync as unknown as Mock).mockReturnValue('');
+        const buffer = createMockBuffer('foo', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+
+        expect(execFileSync).toHaveBeenCalledWith(
+          'powershell',
+          [
+            '-NoProfile',
+            '-c',
+            '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-Clipboard',
+          ],
+          expect.objectContaining({ timeout: 5000 }),
+        );
+      });
+
+      it('pastes a multi-line clipboard below the cursor line mid-buffer', () => {
+        (execFileSync as unknown as Mock).mockReturnValue('line1\r\nline2\r\n');
+        const buffer = createMockBuffer('top\nbottom', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+
+        expect(buffer.replaceRange).toHaveBeenCalledWith(
+          1,
+          0,
+          1,
+          0,
+          'line1\nline2\n',
+        );
+        expect(buffer.vimMoveToLine).toHaveBeenCalledWith(2);
+      });
+
+      it('remembers a failed clipboard read and does not respawn powershell', async () => {
+        vi.resetModules();
+        const { useVim: freshUseVim } = await import('./vim.js');
+        (execFileSync as unknown as Mock).mockImplementation(() => {
+          throw new Error('spawn powershell ETIMEDOUT');
+        });
+        const buffer = createMockBuffer('foo', [0, 0]);
+        const { result } = renderHook(() =>
+          freshUseVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        act(() => result.current.handleInput(makeKey('p')));
+        act(() => result.current.handleInput(makeKey('p')));
+
+        expect(execFileSync).toHaveBeenCalledTimes(1);
+      });
+
+      it('swallows a failing clipboard read and pastes nothing', () => {
+        (execFileSync as unknown as Mock).mockImplementation(() => {
+          throw new Error('spawn powershell ETIMEDOUT');
+        });
+        const buffer = createMockBuffer('foo', [0, 0]);
+        const { result } = renderHook(() =>
+          useVim(buffer as unknown as TextBuffer, mockHandleFinalSubmit),
+        );
+
+        expect(() =>
+          act(() => result.current.handleInput(makeKey('p'))),
+        ).not.toThrow();
+        expect(buffer.replaceRange).not.toHaveBeenCalled();
+      });
+    });
+
     describe('Enter (submit in NORMAL mode)', () => {
       it('should submit text when Enter is pressed in NORMAL mode', () => {
         const buffer = createMockBuffer('hello world');
@@ -2246,7 +2558,7 @@ describe('useVim hook', () => {
         act(() => result.current.handleInput(makeKey('\r', 'return')));
 
         expect(mockHandleFinalSubmit).toHaveBeenCalledWith('hello world');
-        expect(buffer.setText).toHaveBeenCalledWith('');
+        expect(buffer.setText).not.toHaveBeenCalled();
       });
 
       it('should not submit empty text', () => {

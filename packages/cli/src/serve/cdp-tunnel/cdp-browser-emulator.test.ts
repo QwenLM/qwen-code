@@ -180,6 +180,58 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     });
   });
 
+  it('errors on Target.createTarget instead of faking a targetId', async () => {
+    const { emu, replies, log } = setup();
+    await emu.handleFromClient({
+      id: 60,
+      method: 'Target.createTarget',
+      params: { url: 'about:blank' },
+    });
+    expect(replies[0].result).toBeUndefined();
+    expect(replies[0]).toMatchObject({ id: 60, error: { code: -32000 } });
+    expect((replies[0].error as { message: string }).message).toContain(
+      'Target.createTarget',
+    );
+    // An explicit case must not be reported as an unsupported-method gap.
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it('errors on target/browser-context mutations the tunnel cannot perform', async () => {
+    const { emu, replies } = setup();
+    const methods = [
+      'Target.closeTarget',
+      'Target.createBrowserContext',
+      'Target.disposeBrowserContext',
+    ];
+    for (const [index, method] of methods.entries()) {
+      await emu.handleFromClient({ id: 70 + index, method, params: {} });
+    }
+    expect(replies).toHaveLength(methods.length);
+    for (const [index, method] of methods.entries()) {
+      expect(replies[index].result).toBeUndefined();
+      expect(replies[index]).toMatchObject({
+        id: 70 + index,
+        error: { code: -32000 },
+      });
+      expect((replies[index].error as { message: string }).message).toContain(
+        method,
+      );
+    }
+  });
+
+  it('still acks unknown browser-level commands so optional ones cannot hang', async () => {
+    const { emu, replies, log } = setup();
+    await emu.handleFromClient({
+      id: 80,
+      method: 'Browser.setDownloadBehavior',
+      params: {},
+    });
+    expect(replies[0]).toEqual({ id: 80, result: {} });
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('unsupported browser-level CDP method'),
+    );
+  });
+
   it('reports that the selected page has no DevTools target', async () => {
     const { emu, replies, log } = setup();
     await emu.handleFromClient({

@@ -8,15 +8,13 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const sentinelMode = process.env.CUA_E2E_SENTINEL === '1';
-const nativeWayland = process.platform === 'linux' && Boolean(process.env.WAYLAND_DISPLAY);
-const customCuaCompositor = process.env.CUA_E2E_WAYLAND_SESSION === 'cua-compositor';
 const fixtureJournalUrl = process.env.CUA_E2E_FIXTURE_JOURNAL_URL || '';
 const sentinelJournalPath = process.env.CUA_E2E_SENTINEL_JOURNAL || '';
 if (process.env.CUA_E2E_USER_DATA_DIR) {
   app.setPath('userData', process.env.CUA_E2E_USER_DATA_DIR);
 }
-if (process.platform === 'linux' && process.env.WAYLAND_DISPLAY) {
-  app.commandLine.appendSwitch('ozone-platform', 'wayland');
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('ozone-platform', 'x11');
   app.commandLine.appendSwitch('enable-features', 'UseOzonePlatform');
 }
 
@@ -78,15 +76,11 @@ function createWindow() {
     title: fixedTitle,
     // Map the normal harness immediately. Xvfb/Openbox can enumerate a
     // deferred BrowserWindow while never painting it into the root desktop.
-    // The sentinel normally stays hidden until it has maximized and claimed
-    // focus. cua-compositor has no window-policy transition to perform, so map
-    // it at construction time; a synchronous show() after DOMContentLoaded can
-    // otherwise stall Chromium before the renderer paints or schedules timers.
-    show: !sentinelMode || customCuaCompositor,
+    show: !sentinelMode,
     // A floating-level macOS window is omitted by cua-driver's deliberate
     // layer-0 top-level window contract. Foreground + maximized is sufficient
     // for occlusion there and lets an unexpected target raise remain visible.
-    alwaysOnTop: sentinelMode && process.platform !== 'darwin' && !nativeWayland,
+    alwaysOnTop: sentinelMode && process.platform !== 'darwin',
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,
@@ -117,14 +111,7 @@ function createWindow() {
   }));
   mainWindow.webContents.on('did-create-window', child => {
     child.once('ready-to-show', () => {
-      // Mutter may activate a newly mapped native-Wayland child even when
-      // Electron requests showInactive(), which makes a background AX action
-      // appear to steal focus. The scenario's behavioral oracle is child
-      // creation, so keep the child hidden on native Wayland and preserve the
-      // visible non-activating window contract on the other backends.
-      if (!nativeWayland || customCuaCompositor) {
-        child.showInactive();
-      }
+      child.showInactive();
     });
   });
 
@@ -138,9 +125,7 @@ function createWindow() {
         mainWindow.setTitle(fixedTitle);
         if (sentinelMode) {
           // Drive the clock from the main process but require the renderer to
-          // handle each probe before it can journal a heartbeat. Native
-          // Wayland fullscreen surfaces can suspend renderer-owned interval
-          // timers even while renderer IPC remains healthy.
+          // handle each probe before it can journal a heartbeat.
           if (!sentinelHeartbeatTimer) {
             sentinelHeartbeatTimer = setInterval(() => {
               if (mainWindow && !mainWindow.isDestroyed()) {
@@ -149,25 +134,12 @@ function createWindow() {
             }, 100);
             sentinelHeartbeatTimer.unref();
           }
-          if (process.platform !== 'darwin' && !nativeWayland) {
+          if (process.platform !== 'darwin') {
             mainWindow.setAlwaysOnTop(true);
           }
-          if (nativeWayland && !customCuaCompositor) {
-            mainWindow.setFullScreen(true);
-          } else if (!customCuaCompositor) {
-            mainWindow.maximize();
-          }
-          // The minimal nested cua-compositor intentionally has no fullscreen
-          // policy implementation. Requesting fullscreen leaves Chromium
-          // waiting on a configure transition and stops the heartbeat oracle.
-          // Its 1280x900 sentinel already covers the smaller fixture at origin.
-          // cua-compositor mapped and focused this toplevel at construction
-          // time. Avoid a second synchronous show/configure/focus transition
-          // after the renderer has emitted its ready event.
-          if (!customCuaCompositor) {
-            mainWindow.show();
-            mainWindow.focus();
-          }
+          mainWindow.maximize();
+          mainWindow.show();
+          mainWindow.focus();
         } else {
           // Xvfb/Openbox can keep a showInactive window inspectable through
           // AT-SPI while never mapping it onto the captured root desktop.

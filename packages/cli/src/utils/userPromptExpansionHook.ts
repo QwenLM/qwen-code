@@ -5,10 +5,8 @@
  */
 
 import type { PartListUnion } from '@google/genai';
-import {
-  partToString,
-  sanitizeUserPromptExpansionAdditionalContext,
-} from '@qwen-code/qwen-code-core';
+import { sanitizeUserPromptExpansionAdditionalContext } from '@qwen-code/qwen-code-core/hooks/types.js';
+import { partToString } from '@qwen-code/qwen-code-core/utils/partUtils.js';
 
 export function appendUserPromptExpansionAdditionalContext(
   content: PartListUnion,

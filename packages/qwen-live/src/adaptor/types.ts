@@ -51,6 +51,8 @@ export interface PromptReceipt {
   note?: string;
   /** For steering: the instruction joined the currently running turn. */
   joinedActiveTurn?: boolean;
+  /** Exact acknowledgement id later associated by a turn_joined event. */
+  joinedMessageId?: string;
 }
 
 export type ContentBlock =
@@ -75,6 +77,13 @@ export interface PermissionOption {
 
 export type BackendEvent =
   | { type: 'turn_started'; jobRef?: string }
+  | { type: 'turn_joined'; messageId: string; jobRef: string }
+  | {
+      type: 'activity';
+      jobRef?: string;
+      kind: 'message' | 'plan' | 'tool';
+      text: string;
+    }
   | { type: 'progress'; jobRef?: string; summary: string }
   | { type: 'speak'; text: string }
   | {
@@ -97,6 +106,8 @@ export type BackendEvent =
   | { type: 'session_closed' };
 
 export type PermissionDecision = 'allow' | 'deny' | 'cancel';
+
+export type CancelJobResult = 'stopping' | 'stopped' | 'not_found';
 
 export interface BackendAdaptor {
   readonly name: string;
@@ -137,6 +148,9 @@ export interface BackendAdaptor {
   isBusy(handle: BackendHandle): boolean;
 
   cancel(handle: BackendHandle): Promise<void>;
+
+  /** Cancel only this ref; unknown refs must never cancel a different turn. */
+  cancelJob?(handle: BackendHandle, jobRef: string): Promise<CancelJobResult>;
 
   respondPermission(
     handle: BackendHandle,

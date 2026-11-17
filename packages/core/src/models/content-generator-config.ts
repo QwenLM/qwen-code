@@ -14,21 +14,63 @@
 
 import type { Config } from '../config/config.js';
 import {
+  resolveReasoningForModel,
+  resolveReasoningCapabilities,
+} from '../core/reasoning-overrides.js';
+import {
+  AuthType,
   createContentGenerator,
-  type AuthType,
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import {
+  DEFAULT_DASHSCOPE_BASE_URL,
+  DEFAULT_OPENAI_BASE_URL,
+  normalizeOpenAiWireBaseUrl,
+} from '../core/openaiContentGenerator/constants.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   AUTH_ENV_MAPPINGS,
   MODEL_GENERATION_CONFIG_FIELDS,
 } from './constants.js';
 import type { ResolvedModelConfig } from './types.js';
+import {
+  clampReasoningEffort,
+  getGptReasoningCapabilities,
+  REASONING_EFFORT_TIERS,
+  reasoningEffortsForCapability,
+  setGeneratorReasoningEffort,
+  type ReasoningEffort,
+} from '../core/reasoning-effort.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AGENT_CONTENT_GENERATOR');
 
 export interface AuthOverrides {
+  registryBaseUrl?: string | null;
+  isolatedRoute?: boolean;
   authType: string;
   apiKey?: string;
   baseUrl?: string;
+}
+
+export interface AgentContentGeneratorOptions {
+  /**
+   * Reasoning effort for this agent alone, written onto the agent's own copy of
+   * the config and never onto the session's; {@link resolveAgentReasoningTier}
+   * decides which tier lands. An explicit tier also drops a thinking budget the
+   * copy inherited, because Anthropic honours an explicit budget before the
+   * tier. A thinking knob fixed in the provider settings (`extra_body`,
+   * `samplingParams`) is left alone and still outranks the tier on the wire,
+   * exactly as it outranks the session tier set by `/effort`.
+   */
+  reasoningEffort?: ReasoningEffort;
+  /**
+   * Refuse to start an interactive login while building this generator. A
+   * derived per-agent generator runs headless, so missing credentials must
+   * fail fast instead of opening a device-authorization flow; a refresh of
+   * cached credentials still happens.
+   */
+  requireCachedCredentials?: boolean;
 }
 
 /**
@@ -45,6 +87,132 @@ export function buildAgentContentGeneratorConfig(
   base: Config,
   modelId: string | undefined,
   authOverrides: AuthOverrides,
+  options: AgentContentGeneratorOptions = {},
+): ContentGeneratorConfig {
+  const nextConfig = buildInheritedAgentContentGeneratorConfig(
+    base,
+    modelId,
+    authOverrides,
+  );
+  if (options.reasoningEffort !== undefined) {
+    applyAgentReasoningEffort(base, nextConfig, options.reasoningEffort);
+  }
+  return nextConfig;
+}
+
+/**
+ * The tier a per-agent `reasoningEffort` request lands as on a config shaped
+ * like `target`, or `undefined` when it cannot land and the agent keeps the
+ * effort it would otherwise have.
+ *
+ * The tier is limited to the tiers `/effort` offers for the target model
+ * ({@link reasoningEffortsForCapability}). A model whose settings declare no
+ * tiers falls back to its provider's built-in table, because the Responses
+ * wire forwards a tier verbatim with no provider-side clamp. `/effort` refuses a
+ * tier outside the set; an agent gets the closest tier the model does offer
+ * instead (the next stronger one, else the strongest), so a script written for
+ * one model still runs on another. Nothing lands when the model offers no
+ * tiers, or when thinking is turned off for the session or on the target
+ * config: a per-agent tier never re-enables thinking that was switched off,
+ * including across a provider switch that cleared the session's
+ * `reasoning: false` from the copy.
+ */
+export function resolveAgentReasoningTier(
+  base: Config,
+  target: Pick<
+    ContentGeneratorConfig,
+    'authType' | 'model' | 'baseUrl' | 'reasoning'
+  >,
+  requested: ReasoningEffort,
+): ReasoningEffort | undefined {
+  if (
+    target.reasoning === false ||
+    base.getContentGeneratorConfig().reasoning === false
+  ) {
+    debugLogger.debug(
+      `Per-agent reasoning effort '${requested}' ignored: thinking is turned off.`,
+    );
+    return undefined;
+  }
+  const offered = offeredReasoningEfforts(base, target);
+  if (offered.length === 0) {
+    debugLogger.debug(
+      `Per-agent reasoning effort '${requested}' ignored: model '${target.model}' offers no reasoning effort tiers.`,
+    );
+    return undefined;
+  }
+  const tier = clampReasoningEffort(requested, offered);
+  if (tier !== requested) {
+    debugLogger.debug(
+      `Per-agent reasoning effort '${requested}' is not offered by model '${target.model}'; using '${tier}'.`,
+    );
+  }
+  return tier;
+}
+
+function offeredReasoningEfforts(
+  base: Config,
+  target: Pick<ContentGeneratorConfig, 'authType' | 'model' | 'baseUrl'>,
+): readonly ReasoningEffort[] {
+  if ('reasoningSnapshot' in target && target.reasoningSnapshot) {
+    const resolved = resolveReasoningForModel(
+      base,
+      target as ContentGeneratorConfig,
+    );
+    if (resolved) return reasoningEffortsForCapability(resolved);
+    return (
+      getGptReasoningCapabilities(target.model)?.efforts ??
+      REASONING_EFFORT_TIERS
+    );
+  }
+  if (target.authType && target.model) {
+    const models = base.getModelsConfig();
+    // Exact id + baseUrl first, then any entry with the same id: a gateway or
+    // proxy base URL must not hide the tiers the registry declares (the same
+    // fallback modelsConfig applies to this miss).
+    const resolved =
+      (target.baseUrl !== undefined
+        ? models.getResolvedModel(target.authType, target.model, target.baseUrl)
+        : undefined) ?? models.getResolvedModel(target.authType, target.model);
+    const declared = resolveReasoningCapabilities(
+      target,
+      resolved?.capabilities?.reasoning,
+    );
+    if (declared) return reasoningEffortsForCapability(declared);
+  }
+  return (
+    getGptReasoningCapabilities(target.model)?.efforts ?? REASONING_EFFORT_TIERS
+  );
+}
+
+/**
+ * Put the landed tier on `target` with the session setter's rule, then make it
+ * authoritative on this copy: an inherited `budget_tokens` would otherwise
+ * outrank it, because Anthropic honours an explicit budget before the tier, so
+ * the copy drops it. The session's own block is never touched.
+ */
+function applyAgentReasoningEffort(
+  base: Config,
+  target: ContentGeneratorConfig,
+  requested: ReasoningEffort,
+): void {
+  const tier = resolveAgentReasoningTier(base, target, requested);
+  if (tier === undefined || !setGeneratorReasoningEffort(target, tier)) {
+    return;
+  }
+  if (target.reasoning && target.reasoning.budget_tokens !== undefined) {
+    const { budget_tokens: inheritedBudget, ...rest } = target.reasoning;
+    target.reasoning = rest;
+    debugLogger.debug(
+      `Per-agent reasoning effort '${tier}' replaces an inherited thinking budget of ${inheritedBudget} tokens.`,
+    );
+  }
+}
+
+function buildInheritedAgentContentGeneratorConfig(
+  base: Config,
+  modelId: string | undefined,
+  authOverrides: AuthOverrides,
 ): ContentGeneratorConfig {
   const parentConfig = base.getContentGeneratorConfig();
   const sameProvider = authOverrides.authType === parentConfig.authType;
@@ -53,17 +221,34 @@ export function buildAgentContentGeneratorConfig(
     ? modelsConfig.getResolvedModel(
         authOverrides.authType as AuthType,
         modelId,
-        authOverrides.baseUrl,
+        authOverrides.registryBaseUrl !== undefined
+          ? authOverrides.registryBaseUrl
+          : authOverrides.baseUrl,
       )
     : undefined;
-  if (resolvedModel?.imageOnly) {
+  if (
+    modelId &&
+    authOverrides.registryBaseUrl !== undefined &&
+    (!resolvedModel ||
+      (resolvedModel.registryBaseUrl ?? null) !== authOverrides.registryBaseUrl)
+  ) {
     throw new Error(
-      `Image-only model '${resolvedModel.id}' cannot be used for content generation`,
+      `Model '${modelId}' is no longer configured at the selected endpoint`,
+    );
+  }
+  if (
+    resolvedModel?.imageOnly ||
+    resolvedModel?.voiceOnly ||
+    resolvedModel?.realtimeOnly
+  ) {
+    throw new Error(
+      `${resolvedModel.imageOnly ? 'Image' : resolvedModel.voiceOnly ? 'Voice' : 'Realtime'}-only model '${resolvedModel.id}' cannot be used for content generation`,
     );
   }
 
   const nextConfig: ContentGeneratorConfig = {
     ...parentConfig,
+    ...(authOverrides.isolatedRoute && { isolatedRoute: true }),
     model: modelId ?? parentConfig.model,
     authType: authOverrides.authType as AuthType,
   };
@@ -97,6 +282,13 @@ export function buildAgentContentGeneratorConfig(
     authOverrides.authType,
     'apiKey',
   );
+  if (
+    !sameProvider ||
+    nextConfig.model !== parentConfig.model ||
+    (authOverrides.baseUrl !== undefined &&
+      authOverrides.baseUrl !== parentConfig.baseUrl)
+  )
+    nextConfig.reasoningRouteBaseUrl = authOverrides.baseUrl;
   nextConfig.baseUrl =
     authOverrides.baseUrl ??
     resolveCredentialField(
@@ -127,17 +319,78 @@ export async function createRuntimeContentGeneratorView(
   contentGeneratorOwner: Config,
   modelId: string | undefined,
   authOverrides: AuthOverrides,
+  options: AgentContentGeneratorOptions = {},
 ): Promise<RuntimeContentGeneratorView> {
   const contentGeneratorConfig = buildAgentContentGeneratorConfig(
     base,
     modelId,
     authOverrides,
+    options,
   );
-  const contentGenerator = await createContentGenerator(
-    contentGeneratorConfig,
-    contentGeneratorOwner,
-  );
+  const contentGenerator = options.requireCachedCredentials
+    ? await createContentGenerator(
+        contentGeneratorConfig,
+        contentGeneratorOwner,
+        // isInitialAuth: refuse an interactive login for a derived generator.
+        true,
+      )
+    : await createContentGenerator(
+        contentGeneratorConfig,
+        contentGeneratorOwner,
+      );
   return { contentGenerator, contentGeneratorConfig };
+}
+
+function openAiApiPrefix(
+  authType: AuthType,
+  baseUrl: string | undefined,
+): string | undefined {
+  if (authType === AuthType.USE_OPENAI) {
+    // DashScope supplies a URL when the setting is absent. An explicit empty
+    // string goes to the OpenAI SDK, which uses its native default instead.
+    const sdkBaseUrl =
+      baseUrl === undefined ? DEFAULT_DASHSCOPE_BASE_URL : baseUrl;
+    return (sdkBaseUrl || DEFAULT_OPENAI_BASE_URL).replace(/\/$/, '');
+  }
+  if (authType === AuthType.USE_OPENAI_RESPONSES) {
+    // Responses appends /v1 even when the configured URL has another prefix.
+    return `${normalizeOpenAiWireBaseUrl(baseUrl)}/v1`;
+  }
+  return undefined;
+}
+
+function matchesIsolatedEndpoint(
+  parent: ContentGeneratorConfig,
+  targetAuthType: AuthType,
+  targetBaseUrl: string | undefined,
+): boolean {
+  const { authType, baseUrl } = parent;
+  if (
+    authType === AuthType.USE_OPENAI ||
+    authType === AuthType.USE_OPENAI_RESPONSES
+  ) {
+    const prefix = openAiApiPrefix(authType, baseUrl);
+    return (
+      prefix !== undefined &&
+      prefix === openAiApiPrefix(targetAuthType, targetBaseUrl)
+    );
+  }
+  if (authType !== targetAuthType) return false;
+  if (authType === AuthType.USE_GEMINI || authType === AuthType.USE_VERTEX_AI) {
+    const useVertex = authType === AuthType.USE_VERTEX_AI;
+    // The isolated transport fixes the protocol and rejects ambient URLs.
+    const ambientMode =
+      process.env['GOOGLE_GENAI_USE_ENTERPRISE'] ??
+      process.env['GOOGLE_GENAI_USE_VERTEXAI'];
+    const parentUsesVertex =
+      parent.vertexai ??
+      (useVertex || ambientMode?.trim().toLowerCase() === 'true');
+    return (
+      parentUsesVertex === useVertex &&
+      (baseUrl || undefined) === (targetBaseUrl || undefined)
+    );
+  }
+  return baseUrl === targetBaseUrl;
 }
 
 function applyResolvedModelConfig(
@@ -147,37 +400,95 @@ function applyResolvedModelConfig(
   authOverrides: AuthOverrides,
 ): void {
   const sameProvider = authOverrides.authType === parentConfig.authType;
+  const targetBaseUrl = authOverrides.baseUrl ?? resolvedModel.baseUrl;
+  const sameEndpoint = authOverrides.isolatedRoute
+    ? matchesIsolatedEndpoint(
+        parentConfig,
+        resolvedModel.authType,
+        targetBaseUrl,
+      )
+    : sameProvider && resolvedModel.baseUrl === parentConfig.baseUrl;
+  const inheritCredentials =
+    !authOverrides.isolatedRoute && authOverrides.registryBaseUrl === undefined
+      ? sameProvider
+      : sameEndpoint &&
+        resolvedModel.envKey === parentConfig.apiKeyEnvKey &&
+        (sameProvider || !!resolvedModel.envKey);
+  if (authOverrides.isolatedRoute || !inheritCredentials) {
+    targetConfig.customHeaders = undefined;
+  }
+  targetConfig.reasoningRouteBaseUrl = resolvedModel.registryBaseUrl ?? null;
   targetConfig.model = resolvedModel.id;
   targetConfig.authType = resolvedModel.authType;
   targetConfig.baseUrl =
-    authOverrides.baseUrl ??
-    resolvedModel.baseUrl ??
-    (sameProvider ? parentConfig.baseUrl : undefined);
+    targetBaseUrl ??
+    (sameProvider && !authOverrides.isolatedRoute
+      ? parentConfig.baseUrl
+      : undefined);
 
   if (resolvedModel.envKey) {
     targetConfig.apiKey =
       authOverrides.apiKey ??
       process.env[resolvedModel.envKey] ??
-      (sameProvider ? parentConfig.apiKey : undefined);
+      (inheritCredentials ? parentConfig.apiKey : undefined);
     targetConfig.apiKeyEnvKey = resolvedModel.envKey;
   } else {
-    targetConfig.apiKey = resolveCredentialField(
-      authOverrides.apiKey,
-      sameProvider ? parentConfig.apiKey : undefined,
-      authOverrides.authType,
-      'apiKey',
-    );
-    targetConfig.apiKeyEnvKey = sameProvider
+    let apiKey = authOverrides.apiKey;
+    if (authOverrides.isolatedRoute && apiKey === undefined) {
+      apiKey = resolveCredentialField(
+        undefined,
+        undefined,
+        authOverrides.authType,
+        'apiKey',
+      );
+      // Block implicit credential reuse across endpoints before validation can
+      // choose a different principal (e.g. Vertex ADC).
+      if (
+        apiKey !== undefined &&
+        apiKey.trim() === parentConfig.apiKey?.trim() &&
+        !sameEndpoint
+      ) {
+        throw new Error(
+          `Model '${resolvedModel.id}' cannot use the primary model's implicit API key. Configure an envKey for this model.`,
+        );
+      }
+    }
+    targetConfig.apiKey =
+      authOverrides.registryBaseUrl !== undefined && !inheritCredentials
+        ? apiKey
+        : resolveCredentialField(
+            apiKey,
+            inheritCredentials ? parentConfig.apiKey : undefined,
+            authOverrides.authType,
+            'apiKey',
+          );
+    targetConfig.apiKeyEnvKey = inheritCredentials
       ? parentConfig.apiKeyEnvKey
       : undefined;
   }
 
-  // Cross-provider fields are cleared by buildAgentContentGeneratorConfig.
-  // Same-provider fields inherit unless the registry overrides them, except
-  // model capabilities such as thinkingMandatory, which must not leak.
+  // Two rows for the same model can share a URL and API key but use different
+  // custom auth headers or request fields.
+  const differentRowForSameModel =
+    resolvedModel.id === parentConfig.model &&
+    targetConfig.reasoningRouteBaseUrl !== parentConfig.reasoningRouteBaseUrl;
+  const isolateGenerationConfig =
+    authOverrides.isolatedRoute &&
+    (differentRowForSameModel ||
+      !inheritCredentials ||
+      targetConfig.apiKey !== parentConfig.apiKey);
+  // Other same-provider fields inherit unless the registry overrides them, except
+  // model capabilities such as thinkingMandatory, which must not leak, and
+  // enableRequestMetadata, which is a per-model decision: an inherited true
+  // would ship the DashScope tracing object to a vendor-forwarded side model.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
-    if (registryValue !== undefined || field === 'thinkingMandatory') {
+    if (
+      isolateGenerationConfig ||
+      registryValue !== undefined ||
+      field === 'thinkingMandatory' ||
+      field === 'enableRequestMetadata'
+    ) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;
     }

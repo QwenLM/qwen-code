@@ -49,8 +49,10 @@ export interface ReadLoopTaskFileOptions {
   /**
    * When false, the project `.qwen/loop.md` candidate is skipped entirely — it
    * is repo-controlled, so an untrusted workspace must not read it and feed it
-   * to the model (mirrors the folder-trust gate on project hooks). The
-   * home/global `~/.qwen/loop.md` is user-owned and always allowed.
+   * to the model. Callers pass the legacy folder-trust check: loop.md is prompt
+   * content, while the stricter explicit-trust gate covers executable repo
+   * content such as project hooks. The home/global `~/.qwen/loop.md` is
+   * user-owned and always allowed.
    *
    * Defaults to false (fail-secure): this function is re-exported from the core
    * barrel, so a caller that omits the option must NOT silently read an

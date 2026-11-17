@@ -14,78 +14,94 @@ import {
   QODER_PLUGIN_MANIFEST,
 } from './qoder-converter.js';
 
+const NAME = 'sample-qoder-plugin';
+const mcpJson = (mcpServers: unknown) => JSON.stringify({ mcpServers });
+const SAMPLE_MCP_JSON = mcpJson({
+  sample: { type: 'http', url: 'https://example.com/mcp' },
+});
+
+const readConfig = (dir: string) =>
+  JSON.parse(
+    fs.readFileSync(path.join(dir, 'qwen-extension.json'), 'utf-8'),
+  ) as Record<string, unknown>;
+
 describe('convertQoderPlugin', () => {
   let root: string;
+  // Directories removed after each case: root, converted output, externals.
+  let cleanup: string[];
 
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-plugin-'));
     fs.mkdirSync(path.join(root, '.qoder-plugin'), { recursive: true });
+    cleanup = [root];
   });
 
   afterEach(() => {
-    fs.rmSync(root, { recursive: true, force: true });
+    for (const dir of cleanup) fs.rmSync(dir, { recursive: true, force: true });
   });
 
   function writeManifest(config: Record<string, unknown>): void {
-    fs.writeFileSync(
-      path.join(root, QODER_PLUGIN_MANIFEST),
-      JSON.stringify(config),
-      'utf-8',
-    );
+    write(QODER_PLUGIN_MANIFEST, JSON.stringify(config));
   }
+
+  /** Writes `content` at `relPath` under the plugin root, creating parents. */
+  function write(relPath: string, content: string): void {
+    const file = path.join(root, relPath);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content, 'utf-8');
+  }
+
+  function makeExternalDir(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-external-'));
+    cleanup.push(dir);
+    return dir;
+  }
+
+  async function convert() {
+    const result = await convertQoderPlugin(root);
+    cleanup.push(result.convertedDir);
+    return result;
+  }
+
+  async function expectSanitizedError(pattern: RegExp): Promise<void> {
+    const error = await convertQoderPlugin(root).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\u001b');
+    expect((error as Error).message).toMatch(pattern);
+  }
+
+  const exists = (dir: string, ...parts: string[]) =>
+    fs.existsSync(path.join(dir, ...parts));
 
   it('converts metadata, resources, MCP, and root context files', async () => {
     writeManifest({
-      name: 'sample-qoder-plugin',
+      name: NAME,
       version: '2.0.0',
       displayName: 'Sample plugin',
       description: 'A synthetic Qoder plugin',
     });
-    fs.writeFileSync(path.join(root, 'QWEN.md'), '# Qwen context', 'utf-8');
-    fs.writeFileSync(
-      path.join(root, 'system-prompt.md'),
-      '# System context',
-      'utf-8',
-    );
-    fs.writeFileSync(
-      path.join(root, '.mcp.json'),
-      JSON.stringify({
-        mcpServers: {
-          sample: { type: 'http', url: 'https://example.com/mcp' },
-        },
-      }),
-      'utf-8',
-    );
-    const skillDir = path.join(root, 'skills', 'sample-skill');
-    fs.mkdirSync(skillDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(skillDir, 'SKILL.md'),
+    write('QWEN.md', '# Qwen context');
+    write('system-prompt.md', '# System context');
+    write('.mcp.json', SAMPLE_MCP_JSON);
+    write(
+      'skills/sample-skill/SKILL.md',
       '---\nname: sample-skill\ndescription: Synthetic skill\n---\n',
-      'utf-8',
     );
-    fs.mkdirSync(path.join(root, 'commands'), { recursive: true });
-    fs.writeFileSync(
-      path.join(root, 'commands', 'sample.md'),
-      '# Sample command',
-      'utf-8',
-    );
-    fs.mkdirSync(path.join(root, 'agents'), { recursive: true });
-    fs.writeFileSync(
-      path.join(root, 'agents', 'sample.md'),
+    write('commands/sample.md', '# Sample command');
+    write(
+      'agents/sample.md',
       '---\nname: sample\ndescription: Synthetic agent\n---\nPrompt',
-      'utf-8',
     );
-    fs.writeFileSync(
-      path.join(root, 'NOTICE.txt'),
-      'Synthetic resource',
-      'utf-8',
-    );
+    write('NOTICE.txt', 'Synthetic resource');
     fs.mkdirSync(path.join(root, '.git'), { recursive: true });
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
+    const out = result.convertedDir;
 
     expect(result.config).toMatchObject({
-      name: 'sample-qoder-plugin',
+      name: NAME,
       version: '2.0.0',
       displayName: 'Sample plugin',
       description: 'A synthetic Qoder plugin',
@@ -94,53 +110,30 @@ describe('convertQoderPlugin', () => {
     expect(result.config.mcpServers?.['sample']).toMatchObject({
       httpUrl: 'https://example.com/mcp',
     });
-    expect(
-      fs.existsSync(
-        path.join(result.convertedDir, 'skills', 'sample-skill', 'SKILL.md'),
-      ),
-    ).toBe(true);
-    expect(
-      fs.existsSync(path.join(result.convertedDir, 'commands', 'sample.md')),
-    ).toBe(true);
-    expect(
-      fs.existsSync(path.join(result.convertedDir, 'agents', 'sample.md')),
-    ).toBe(true);
-    expect(fs.existsSync(path.join(result.convertedDir, 'NOTICE.txt'))).toBe(
-      true,
-    );
-    expect(fs.existsSync(path.join(result.convertedDir, '.git'))).toBe(false);
-
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    expect(exists(out, 'skills', 'sample-skill', 'SKILL.md')).toBe(true);
+    expect(exists(out, 'commands', 'sample.md')).toBe(true);
+    expect(exists(out, 'agents', 'sample.md')).toBe(true);
+    expect(exists(out, 'NOTICE.txt')).toBe(true);
+    expect(exists(out, '.git')).toBe(false);
   });
 
   it('defaults the version and reports Qoder as the origin', async () => {
-    writeManifest({ name: 'sample-qoder-plugin' });
-    fs.writeFileSync(
-      path.join(root, 'system-prompt.md'),
-      '# System context',
-      'utf-8',
-    );
+    writeManifest({ name: NAME });
+    write('system-prompt.md', '# System context');
 
     const result = await convertCompatibleExtension(root);
+    cleanup.push(result.extensionDir);
 
     expect(result.originSource).toBe('Qoder');
-    const converted = JSON.parse(
-      fs.readFileSync(
-        path.join(result.extensionDir, 'qwen-extension.json'),
-        'utf-8',
-      ),
-    ) as Record<string, unknown>;
+    const converted = readConfig(result.extensionDir);
     expect(converted['version']).toBe('1.0.0');
     expect(converted['contextFileName']).toEqual(['system-prompt.md']);
-
-    fs.rmSync(result.extensionDir, { recursive: true, force: true });
   });
 
   it('honors an explicit marketplace selection over a root Qoder manifest', async () => {
-    writeManifest({ name: 'sample-qoder-plugin', version: '9.9.9' });
-    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
-    fs.writeFileSync(
-      path.join(root, '.claude-plugin', 'marketplace.json'),
+    writeManifest({ name: NAME, version: '9.9.9' });
+    write(
+      '.claude-plugin/marketplace.json',
       JSON.stringify({
         name: 'sample-marketplace',
         owner: { name: 'Test Owner', email: 'owner@example.com' },
@@ -152,220 +145,132 @@ describe('convertQoderPlugin', () => {
           },
         ],
       }),
-      'utf-8',
     );
-    const pluginSourceDir = path.join(root, 'plugin-src');
-    fs.mkdirSync(path.join(pluginSourceDir, '.claude-plugin'), {
-      recursive: true,
-    });
-    fs.writeFileSync(
-      path.join(pluginSourceDir, '.claude-plugin', 'plugin.json'),
+    write(
+      'plugin-src/.claude-plugin/plugin.json',
       JSON.stringify({ name: 'requested-plugin', version: '2.0.0' }),
-      'utf-8',
     );
 
     const selected = await convertCompatibleExtension(root, 'requested-plugin');
     expect(selected.originSource).toBe('Claude');
-    const selectedConfig = JSON.parse(
-      fs.readFileSync(
-        path.join(selected.extensionDir, 'qwen-extension.json'),
-        'utf-8',
-      ),
-    ) as Record<string, unknown>;
+    const selectedConfig = readConfig(selected.extensionDir);
     expect(selectedConfig['name']).toBe('requested-plugin');
     expect(selectedConfig['version']).toBe('2.0.0');
     fs.rmSync(selected.extensionDir, { recursive: true, force: true });
 
     const unselected = await convertCompatibleExtension(root);
+    cleanup.push(unselected.extensionDir);
     expect(unselected.originSource).toBe('Qoder');
-    const unselectedConfig = JSON.parse(
-      fs.readFileSync(
-        path.join(unselected.extensionDir, 'qwen-extension.json'),
-        'utf-8',
-      ),
-    ) as Record<string, unknown>;
-    expect(unselectedConfig['name']).toBe('sample-qoder-plugin');
+    const unselectedConfig = readConfig(unselected.extensionDir);
+    expect(unselectedConfig['name']).toBe(NAME);
     expect(unselectedConfig['version']).toBe('9.9.9');
-    fs.rmSync(unselected.extensionDir, { recursive: true, force: true });
   });
 
   it('omits null optional metadata from the generated config', async () => {
-    writeManifest({
-      name: 'sample-qoder-plugin',
-      displayName: null,
-      description: null,
-    });
+    writeManifest({ name: NAME, displayName: null, description: null });
 
-    const result = await convertQoderPlugin(root);
-    const generated = JSON.parse(
-      fs.readFileSync(
-        path.join(result.convertedDir, 'qwen-extension.json'),
-        'utf-8',
-      ),
-    ) as Record<string, unknown>;
+    const result = await convert();
+    const generated = readConfig(result.convertedDir);
 
     expect(result.config.displayName).toBeUndefined();
     expect(result.config.description).toBeUndefined();
     expect(generated).not.toHaveProperty('displayName');
     expect(generated).not.toHaveProperty('description');
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
   it('merges explicit context with system-prompt.md without duplicates', async () => {
     writeManifest({
-      name: 'sample-qoder-plugin',
+      name: NAME,
       contextFileName: ['custom.md', 42, 'custom.md', './system-prompt.md'],
     });
-    fs.writeFileSync(path.join(root, 'QWEN.md'), '# Qwen context', 'utf-8');
-    fs.writeFileSync(path.join(root, 'custom.md'), '# Custom', 'utf-8');
-    fs.writeFileSync(
-      path.join(root, 'system-prompt.md'),
-      '# System context',
-      'utf-8',
-    );
+    write('QWEN.md', '# Qwen context');
+    write('custom.md', '# Custom');
+    write('system-prompt.md', '# System context');
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(result.config.contextFileName).toEqual([
       'QWEN.md',
       'custom.md',
       'system-prompt.md',
     ]);
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
   it('loads path-valued MCP config from the standard wrapper', async () => {
-    writeManifest({
-      name: 'sample-qoder-plugin',
-      mcpServers: '.mcp.json',
-    });
-    fs.writeFileSync(
-      path.join(root, '.mcp.json'),
-      JSON.stringify({
-        mcpServers: {
-          sample: { type: 'http', url: 'https://example.com/mcp' },
-        },
-      }),
-      'utf-8',
-    );
+    writeManifest({ name: NAME, mcpServers: '.mcp.json' });
+    write('.mcp.json', SAMPLE_MCP_JSON);
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(Object.keys(result.config.mcpServers ?? {})).toEqual(['sample']);
     expect(result.config.mcpServers?.['sample']).toMatchObject({
       httpUrl: 'https://example.com/mcp',
     });
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
   it('prefers inline MCP config over the root MCP file', async () => {
     writeManifest({
-      name: 'sample-qoder-plugin',
+      name: NAME,
       mcpServers: {
         inline: { type: 'http', url: 'https://example.com/inline' },
       },
     });
-    fs.writeFileSync(
-      path.join(root, '.mcp.json'),
-      JSON.stringify({
-        mcpServers: {
-          root: { type: 'http', url: 'https://example.com/root' },
-        },
-      }),
-      'utf-8',
+    write(
+      '.mcp.json',
+      mcpJson({ root: { type: 'http', url: 'https://example.com/root' } }),
     );
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(Object.keys(result.config.mcpServers ?? {})).toEqual(['inline']);
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
   it('treats null mcpServers as absent and falls back to the root MCP file', async () => {
-    writeManifest({
-      name: 'sample-qoder-plugin',
-      mcpServers: null,
-    });
-    fs.writeFileSync(
-      path.join(root, '.mcp.json'),
-      JSON.stringify({
-        mcpServers: {
-          sample: { type: 'http', url: 'https://example.com/mcp' },
-        },
-      }),
-      'utf-8',
-    );
+    writeManifest({ name: NAME, mcpServers: null });
+    write('.mcp.json', SAMPLE_MCP_JSON);
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(Object.keys(result.config.mcpServers ?? {})).toEqual(['sample']);
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
   it('treats null mcpServers without a root MCP file as absent', async () => {
-    writeManifest({
-      name: 'sample-qoder-plugin',
-      mcpServers: null,
-    });
+    writeManifest({ name: NAME, mcpServers: null });
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(result.config.mcpServers).toBeUndefined();
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
   it('rejects malformed root MCP config', async () => {
-    writeManifest({ name: 'sample-qoder-plugin' });
-    fs.writeFileSync(path.join(root, '.mcp.json'), '\u001b[31m{', 'utf-8');
+    writeManifest({ name: NAME });
+    write('.mcp.json', '\u001b[31m{');
 
-    const error = await convertQoderPlugin(root).catch(
-      (caught: unknown) => caught,
-    );
-
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).not.toContain('\u001b');
-    expect((error as Error).message).toMatch(/Invalid Qoder MCP configuration/);
+    await expectSanitizedError(/Invalid Qoder MCP configuration/);
   });
 
   it.skipIf(process.platform === 'win32').each([
     ['JSON value', 'null', /expected a JSON object/],
-    [
-      'wrapper',
-      JSON.stringify({ mcpServers: null }),
-      /expected an "mcpServers" object/,
-    ],
+    ['wrapper', mcpJson(null), /expected an "mcpServers" object/],
     [
       'server entry',
-      JSON.stringify({ mcpServers: { invalid: null } }),
+      mcpJson({ invalid: null }),
       /server entries must be JSON objects/,
     ],
   ])(
     'sanitizes control sequences in MCP %s errors',
     async (_case, body, errorPattern) => {
       const mcpFile = 'mcp\u001b[31m.json';
-      writeManifest({ name: 'sample-qoder-plugin', mcpServers: mcpFile });
-      fs.writeFileSync(path.join(root, mcpFile), body, 'utf-8');
+      writeManifest({ name: NAME, mcpServers: mcpFile });
+      write(mcpFile, body);
 
-      const error = await convertQoderPlugin(root).catch(
-        (caught: unknown) => caught,
-      );
-
-      expect(error).toBeInstanceOf(Error);
-      expect((error as Error).message).not.toContain('\u001b');
-      expect((error as Error).message).toMatch(errorPattern);
+      await expectSanitizedError(errorPattern);
     },
   );
 
   it('rejects an invalid MCP wrapper from a configured path', async () => {
-    writeManifest({
-      name: 'sample-qoder-plugin',
-      mcpServers: '.mcp.json',
-    });
-    fs.writeFileSync(
-      path.join(root, '.mcp.json'),
-      JSON.stringify({ mcpServers: null }),
-      'utf-8',
-    );
+    writeManifest({ name: NAME, mcpServers: '.mcp.json' });
+    write('.mcp.json', mcpJson(null));
 
     await expect(convertQoderPlugin(root)).rejects.toThrow(
       /expected an "mcpServers" object/,
@@ -376,18 +281,12 @@ describe('convertQoderPlugin', () => {
     'rejects non-object MCP server entries from %s config',
     async (source) => {
       writeManifest({
-        name: 'sample-qoder-plugin',
+        name: NAME,
         ...(source === 'inline'
           ? { mcpServers: { invalid: null } }
           : undefined),
       });
-      if (source === 'root') {
-        fs.writeFileSync(
-          path.join(root, '.mcp.json'),
-          JSON.stringify({ mcpServers: { invalid: null } }),
-          'utf-8',
-        );
-      }
+      if (source === 'root') write('.mcp.json', mcpJson({ invalid: null }));
 
       await expect(convertQoderPlugin(root)).rejects.toThrow(
         /server entries must be JSON objects/,
@@ -396,50 +295,32 @@ describe('convertQoderPlugin', () => {
   );
 
   it('does not load an escaping root MCP symlink', async () => {
-    const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-external-'));
-    const externalMcp = path.join(external, '.mcp.json');
-    fs.writeFileSync(
-      externalMcp,
-      JSON.stringify({
-        mcpServers: {
-          sample: { type: 'http', url: 'https://example.com/mcp' },
-        },
-      }),
-      'utf-8',
-    );
-    writeManifest({ name: 'sample-qoder-plugin' });
+    const externalMcp = path.join(makeExternalDir(), '.mcp.json');
+    fs.writeFileSync(externalMcp, SAMPLE_MCP_JSON, 'utf-8');
+    writeManifest({ name: NAME });
     fs.symlinkSync(externalMcp, path.join(root, '.mcp.json'));
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(result.config.mcpServers).toBeUndefined();
-    expect(fs.existsSync(path.join(result.convertedDir, '.mcp.json'))).toBe(
-      false,
-    );
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
-    fs.rmSync(external, { recursive: true, force: true });
+    expect(exists(result.convertedDir, '.mcp.json')).toBe(false);
   });
 
   it('loads QWEN.md with system-prompt.md when context is not configured', async () => {
-    writeManifest({ name: 'sample-qoder-plugin', contextFileName: [] });
-    fs.writeFileSync(path.join(root, 'QWEN.md'), '# Qwen context', 'utf-8');
-    fs.writeFileSync(
-      path.join(root, 'system-prompt.md'),
-      '# System context',
-      'utf-8',
-    );
+    writeManifest({ name: NAME, contextFileName: [] });
+    write('QWEN.md', '# Qwen context');
+    write('system-prompt.md', '# System context');
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(result.config.contextFileName).toEqual([
       'QWEN.md',
       'system-prompt.md',
     ]);
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
   it('rejects invalid manifests and escaping manifest symlinks', async () => {
-    fs.writeFileSync(path.join(root, QODER_PLUGIN_MANIFEST), 'null', 'utf-8');
+    write(QODER_PLUGIN_MANIFEST, 'null');
     await expect(convertQoderPlugin(root)).rejects.toThrow(
       /expected a JSON object/,
     );
@@ -454,8 +335,7 @@ describe('convertQoderPlugin', () => {
       /must have name field/,
     );
 
-    const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-external-'));
-    const externalManifest = path.join(external, 'plugin.json');
+    const externalManifest = path.join(makeExternalDir(), 'plugin.json');
     fs.writeFileSync(
       externalManifest,
       JSON.stringify({ name: 'external-plugin' }),
@@ -467,104 +347,65 @@ describe('convertQoderPlugin', () => {
     await expect(convertQoderPlugin(root)).rejects.toThrow(
       /resolves through a symlink outside/,
     );
-    fs.rmSync(external, { recursive: true, force: true });
   });
 
   it('sanitizes control sequences from manifest parse errors', async () => {
-    fs.writeFileSync(
-      path.join(root, QODER_PLUGIN_MANIFEST),
-      '\u001b[31minvalid',
-      'utf-8',
-    );
+    write(QODER_PLUGIN_MANIFEST, '\u001b[31minvalid');
 
-    const error = await convertQoderPlugin(root).catch(
-      (caught: unknown) => caught,
-    );
-
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).not.toContain('\u001b');
-    expect((error as Error).message).toMatch(
-      /Invalid Qoder plugin configuration/,
-    );
+    await expectSanitizedError(/Invalid Qoder plugin configuration/);
   });
 
   it('does not copy escaping symlinks or load unsafe context paths', async () => {
-    const external = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-external-'));
-    const externalFile = path.join(external, 'private.txt');
+    const externalFile = path.join(makeExternalDir(), 'private.txt');
     fs.writeFileSync(externalFile, 'private', 'utf-8');
-    writeManifest({
-      name: 'sample-qoder-plugin',
-      contextFileName: 'leak.md',
-    });
+    writeManifest({ name: NAME, contextFileName: 'leak.md' });
     fs.symlinkSync(externalFile, path.join(root, 'leak.md'));
     fs.mkdirSync(path.join(root, 'skills'), { recursive: true });
     fs.symlinkSync(externalFile, path.join(root, 'skills', 'leak.txt'));
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(result.config.contextFileName).toBeUndefined();
-    expect(
-      fs.existsSync(path.join(result.convertedDir, 'skills', 'leak.txt')),
-    ).toBe(false);
-
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
-    fs.rmSync(external, { recursive: true, force: true });
+    expect(exists(result.convertedDir, 'skills', 'leak.txt')).toBe(false);
   });
 
   it.each(['QWEN.md', 'system-prompt.md'])(
     'does not load an escaping default %s symlink',
     async (contextFile) => {
-      const external = fs.mkdtempSync(
-        path.join(os.tmpdir(), 'qoder-external-'),
-      );
-      const externalFile = path.join(external, contextFile);
+      const externalFile = path.join(makeExternalDir(), contextFile);
       fs.writeFileSync(externalFile, 'External context', 'utf-8');
-      writeManifest({ name: 'sample-qoder-plugin' });
+      writeManifest({ name: NAME });
       fs.symlinkSync(externalFile, path.join(root, contextFile));
 
-      const result = await convertQoderPlugin(root);
+      const result = await convert();
 
       expect(result.config.contextFileName).toBeUndefined();
-      expect(fs.existsSync(path.join(result.convertedDir, contextFile))).toBe(
-        false,
-      );
-      fs.rmSync(result.convertedDir, { recursive: true, force: true });
-      fs.rmSync(external, { recursive: true, force: true });
+      expect(exists(result.convertedDir, contextFile)).toBe(false);
     },
   );
 
   it('drops context files removed during selective resource collection', async () => {
     writeManifest({
-      name: 'sample-qoder-plugin',
+      name: NAME,
       commands: 'commands/kept.md',
       contextFileName: 'commands/removed.md',
     });
-    fs.mkdirSync(path.join(root, 'commands'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'commands', 'kept.md'), '# Kept');
-    fs.writeFileSync(path.join(root, 'commands', 'removed.md'), '# Removed');
+    write('commands/kept.md', '# Kept');
+    write('commands/removed.md', '# Removed');
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(result.config.contextFileName).toBeUndefined();
-    expect(
-      fs.existsSync(path.join(result.convertedDir, 'commands', 'kept.md')),
-    ).toBe(true);
-    expect(
-      fs.existsSync(path.join(result.convertedDir, 'commands', 'removed.md')),
-    ).toBe(false);
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    expect(exists(result.convertedDir, 'commands', 'kept.md')).toBe(true);
+    expect(exists(result.convertedDir, 'commands', 'removed.md')).toBe(false);
   });
 
   it('ignores context paths that resolve to directories', async () => {
-    writeManifest({
-      name: 'sample-qoder-plugin',
-      contextFileName: 'docs',
-    });
+    writeManifest({ name: NAME, contextFileName: 'docs' });
     fs.mkdirSync(path.join(root, 'docs'));
 
-    const result = await convertQoderPlugin(root);
+    const result = await convert();
 
     expect(result.config.contextFileName).toBeUndefined();
-    fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 });

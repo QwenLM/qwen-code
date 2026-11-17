@@ -8,7 +8,7 @@ export const QUESTION_CARD_TEMPLATE_ID =
 const DINGTALK_API = 'https://api.dingtalk.com';
 const CARD_FETCH_TIMEOUT_MS = 10_000;
 
-function isRetryableStatus(status: number): boolean {
+export function isRetryableDingtalkStatus(status: number): boolean {
   return (
     status === 408 ||
     status === 425 ||
@@ -186,7 +186,7 @@ export class DingtalkInteractiveCardClient {
         const detail = (await response.text().catch(() => '')).slice(0, 300);
         throw new DingtalkCardRequestError(
           `DingTalk Card OpenAPI ${method} ${path} failed${templateId ? ` for ${templateId}` : ''}: HTTP ${response.status}${detail ? ` ${detail}` : ''}`,
-          isRetryableStatus(response.status),
+          isRetryableDingtalkStatus(response.status),
         );
       }
       return response.json().catch(() => undefined);

@@ -225,7 +225,7 @@ describe('repository context validation', () => {
 
   it('accepts every role the allow-list admits', () => {
     // Hardcoded, not spread from the constant: the accept side must pin
-    // all 13 roles, or dropping one from REPOSITORY_CONTEXT_ROLES ships
+    // all 15 roles, or dropping one from REPOSITORY_CONTEXT_ROLES ships
     // green (`satisfies readonly RoleId[]` still compiles, the type
     // narrows silently) and every consumer fails closed on a valid
     // manifest's required agent.
@@ -242,6 +242,8 @@ describe('repository context validation', () => {
       '6a',
       '6b',
       '6c',
+      '6d',
+      'prose-exec',
       'test-matrix',
     ];
     expect([...REPOSITORY_CONTEXT_ROLES]).toEqual(allRoles);

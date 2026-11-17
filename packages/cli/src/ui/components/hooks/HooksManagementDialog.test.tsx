@@ -4,13 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  onTestFinished,
+} from 'vitest';
 import { cleanup } from 'ink-testing-library';
 import { HookEventName } from '@qwen-code/qwen-code-core';
 import { HooksManagementDialog } from './HooksManagementDialog.js';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { useSettings } from '../../contexts/SettingsContext.js';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
 import type { Key } from '../../contexts/KeypressContext.js';
 import { DISPLAY_HOOK_EVENTS } from './constants.js';
@@ -21,6 +30,7 @@ vi.mock('../../hooks/useKeypress.js', () => ({
 
 const mockedUseKeypress = vi.mocked(useKeypress);
 const mockedUseConfig = vi.mocked(useConfig);
+const mockedUseSettings = vi.mocked(useSettings);
 const mockedLoadSettings = vi.mocked(loadSettings);
 let keypressHandler: ((key: Key) => void) | null = null;
 
@@ -42,6 +52,8 @@ function disabledHooksConfig(): ReturnType<typeof useConfig> {
       })),
     })),
     getSessionId: vi.fn(() => 'test-session-id'),
+    isProjectHooksPendingApproval: vi.fn(() => false),
+    isProjectHooksRejected: vi.fn(() => false),
   } as unknown as ReturnType<typeof useConfig>;
 }
 
@@ -88,6 +100,8 @@ vi.mock('../../contexts/ConfigContext.js', async (importOriginal) => {
         })),
       })),
       getSessionId: vi.fn(() => 'test-session-id'),
+      isProjectHooksPendingApproval: vi.fn(() => false),
+      isProjectHooksRejected: vi.fn(() => false),
     })),
   };
 });
@@ -101,6 +115,12 @@ vi.mock('../../../config/settings.js', async (importOriginal) => {
       forScope: vi.fn(() => ({ settings: {} })),
     })),
   };
+});
+
+vi.mock('../../contexts/SettingsContext.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../contexts/SettingsContext.js')>();
+  return { ...actual, useSettings: vi.fn() };
 });
 
 vi.mock('../../semantic-colors.js', () => ({
@@ -146,13 +166,20 @@ function createKey(name: string, sequence = ''): Key {
   };
 }
 
-function mockSettingsHooks(userHooks: Record<string, unknown>): void {
-  mockedLoadSettings.mockReturnValue({
+function mockSettingsHooks(
+  userHooks: Record<string, unknown>,
+  workspaceHooks: Record<string, unknown> = {},
+): void {
+  mockedUseSettings.mockReturnValue({
     forScope: vi.fn((scope: SettingScope) => ({
       settings:
-        scope === SettingScope.User ? { hooks: userHooks } : { hooks: {} },
+        scope === SettingScope.User
+          ? { hooks: userHooks }
+          : scope === SettingScope.Workspace
+            ? { hooks: workspaceHooks }
+            : { hooks: {} },
     })),
-  } as unknown as ReturnType<typeof loadSettings>);
+  } as unknown as ReturnType<typeof useSettings>);
 }
 
 function pressKey(name: string, sequence = ''): void {
@@ -166,6 +193,7 @@ describe('HooksManagementDialog', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSettingsHooks({});
     keypressHandler = null;
 
     mockedUseKeypress.mockImplementation((handler) => {
@@ -186,6 +214,26 @@ describe('HooksManagementDialog', () => {
     expect(lastFrame()).toContain('Loading hooks');
   });
 
+  it('uses live session settings without reading settings files again', async () => {
+    mockSettingsHooks({
+      PreToolUse: [
+        {
+          matcher: 'Read',
+          hooks: [{ type: 'command', command: 'echo session-settings' }],
+        },
+      ],
+    });
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('1 hook configured');
+    });
+    expect(mockedLoadSettings).not.toHaveBeenCalled();
+    expect(mockedUseSettings).toHaveBeenCalled();
+  });
+
   it('should allow Escape to close during loading state', () => {
     renderWithProviders(<HooksManagementDialog onClose={mockOnClose} />);
 
@@ -193,6 +241,24 @@ describe('HooksManagementDialog', () => {
     keypressHandler!(createKey('escape', '\x1b'));
 
     expect(mockOnClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not advertise reload when the session has no hook system', async () => {
+    const config = mockedUseConfig()!;
+    vi.mocked(config.getHookSystem).mockReturnValue(undefined);
+    await mockedUseConfig.withImplementation(
+      () => config,
+      async () => {
+        const { lastFrame } = renderWithProviders(
+          <HooksManagementDialog onClose={mockOnClose} />,
+        );
+
+        await vi.waitFor(() => {
+          expect(lastFrame()).toContain('This menu is read-only.');
+        });
+        expect(lastFrame()).not.toContain('Reopen this menu');
+      },
+    );
   });
 
   it('should register the keypress handler with isActive: true', () => {
@@ -365,6 +431,103 @@ describe('HooksManagementDialog', () => {
     await vi.waitFor(() => {
       expect(lastFrame()).toContain('Hook details');
       expect(lastFrame()).toContain('echo stop two');
+    });
+  });
+
+  it.each([
+    [false, 'approved)'],
+    [true, 'rejected)'],
+  ])(
+    'marks withheld project hooks (rejected: %s) as %s',
+    async (rejected, label) => {
+      const defaultConfig = mockedUseConfig.getMockImplementation();
+      onTestFinished(() => {
+        mockedUseConfig.mockImplementation(defaultConfig!);
+      });
+      mockedUseConfig.mockImplementation(
+        () =>
+          ({
+            ...disabledHooksConfig(),
+            getDisableAllHooks: vi.fn(() => false),
+            isProjectHooksPendingApproval: vi.fn(() => true),
+            isProjectHooksRejected: vi.fn(() => rejected),
+          }) as unknown as ReturnType<typeof useConfig>,
+      );
+      mockSettingsHooks(
+        {},
+        {
+          PreToolUse: [
+            {
+              matcher: 'Bash',
+              hooks: [{ type: 'command', command: './repo-hook.sh' }],
+            },
+          ],
+        },
+      );
+
+      const { lastFrame } = renderWithProviders(
+        <HooksManagementDialog onClose={mockOnClose} />,
+      );
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain('Hooks');
+      });
+      pressKey('return');
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain('Bash');
+      });
+      pressKey('return');
+
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain('./repo-hook.sh');
+        expect(lastFrame()).toContain('Local Settings · disabled');
+        expect(lastFrame()).toContain(label);
+      });
+    },
+  );
+
+  it('marks project hooks disabled when an ungated session lacks folder trust', async () => {
+    const defaultConfig = mockedUseConfig.getMockImplementation();
+    onTestFinished(() => {
+      mockedUseConfig.mockImplementation(defaultConfig!);
+    });
+    mockedUseConfig.mockImplementation(
+      () =>
+        ({
+          ...disabledHooksConfig(),
+          getDisableAllHooks: vi.fn(() => false),
+          isProjectHooksPendingApproval: vi.fn(() => false),
+          isProjectHooksRejected: vi.fn(() => false),
+          getProjectHooks: vi.fn(() => undefined),
+        }) as unknown as ReturnType<typeof useConfig>,
+    );
+    mockSettingsHooks(
+      {},
+      {
+        PreToolUse: [
+          {
+            matcher: 'Bash',
+            hooks: [{ type: 'command', command: './repo-hook.sh' }],
+          },
+        ],
+      },
+    );
+
+    const { lastFrame } = renderWithProviders(
+      <HooksManagementDialog onClose={mockOnClose} />,
+    );
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Hooks');
+    });
+    pressKey('return');
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('Bash');
+    });
+    pressKey('return');
+
+    await vi.waitFor(() => {
+      expect(lastFrame()).toContain('./repo-hook.sh');
+      expect(lastFrame()).toContain('Local Settings · disabled');
+      expect(lastFrame()).not.toContain('not approved');
     });
   });
 });

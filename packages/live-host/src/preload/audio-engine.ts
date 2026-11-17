@@ -1,4 +1,5 @@
 import { ipcRenderer } from 'electron';
+import { liveMessage } from '@qwen-code/qwen-live/i18n';
 import { HostAudioLifecycle } from './audio-lifecycle.ts';
 import {
   audioInputConstraints,
@@ -6,8 +7,14 @@ import {
   isUnavailableDevicePreference,
   shouldRecheckAudioInput,
 } from './audio-input-policy.ts';
-import { scheduleOutputFrame } from './audio-output-queue.ts';
+import {
+  OutputPlaybackTracker,
+  scheduleOutputFrame,
+} from './audio-output-queue.ts';
+import type { OutputFrameAdmission } from './audio-output-queue.ts';
+import { StreamingOutputResampler } from './audio-output-resampler.ts';
 import type { AudioInputDevice } from '../shared/host-api.ts';
+import type { PlaybackIdentity } from '../shared/protocol.ts';
 
 const OUTPUT_SAMPLE_RATE = 24_000;
 const MICROPHONE_DEVICE_STORAGE_KEY = 'qwen-live-microphone-input-device-id';
@@ -38,6 +45,13 @@ export class HostAudioEngine {
   private outputSources = new Set<AudioBufferSourceNode>();
   private outputCursor = 0;
   private outputGeneration = 0;
+  private outputQueue: Promise<void> = Promise.resolve();
+  private readonly outputPlayback = new OutputPlaybackTracker();
+  private readonly outputResamplers = new Map<
+    string,
+    StreamingOutputResampler
+  >();
+  private outputEndMarkerMode = false;
   private outputMuted = false;
   private captureRequested = false;
   private inputMuted = false;
@@ -56,8 +70,12 @@ export class HostAudioEngine {
       event: string,
       details: AudioDiagnosticDetails,
     ) => void = () => {},
-    private readonly onPlaybackStarted: () => void = () => {},
-    private readonly onPlaybackCompleted: () => void = () => {},
+    private readonly onPlaybackStarted: (
+      identity: PlaybackIdentity,
+    ) => void = () => {},
+    private readonly onPlaybackCompleted: (
+      identity: PlaybackIdentity,
+    ) => void = () => {},
   ) {}
 
   private readonly handleDeviceChange = (): void => {
@@ -93,7 +111,9 @@ export class HostAudioEngine {
       )
       .map((device, index) => ({
         deviceId: device.deviceId,
-        label: device.label || `麦克风 ${index + 1}`,
+        label:
+          device.label ||
+          liveMessage('host.device.fallback', { index: index + 1 }),
         selected: device.deviceId === selectedDeviceId,
       }));
   }
@@ -174,18 +194,28 @@ export class HostAudioEngine {
     this.inputMuted = muted;
     this.captureEpoch = epoch;
     if (epochChanged) this.firstCaptureFrameEpoch = undefined;
-    if (!enabled) {
+    if (!enabled || muted) {
       this.onInputLevel(0);
       await this.stopCapture();
+      if (enabled) {
+        this.onDiagnostic('capture_ready', {
+          epoch,
+          muted,
+          capturing: false,
+        });
+      }
       return;
     }
     if (epochChanged && this.captureContext) await this.stopCapture();
     await this.startCapture();
-    this.setCaptureMuted(muted);
     this.onDiagnostic('capture_ready', {
       epoch,
       muted,
+      capturing: this.captureStream !== undefined,
       contextState: this.captureContext?.state,
+      contextSampleRate: this.captureContext?.sampleRate,
+      inputSampleRate: this.captureStream?.getAudioTracks()[0]?.getSettings()
+        .sampleRate,
     });
   }
 
@@ -194,23 +224,124 @@ export class HostAudioEngine {
     if (muted) this.clearOutput();
   }
 
-  async play(frame: Uint8Array): Promise<void> {
+  setOutputEndMarkerMode(enabled: boolean): void {
+    const next = enabled === true;
+    if (next === this.outputEndMarkerMode) return;
+    this.outputEndMarkerMode = next;
+    this.outputPlayback.setEndMarkerRequired(next);
+    this.clearOutput();
+    this.onDiagnostic('output_end_marker_mode_changed', { enabled: next });
+  }
+
+  play(frame: Uint8Array, identity: PlaybackIdentity): Promise<void> {
     if (
       !this.serviceActive ||
       this.outputMuted ||
       frame.byteLength === 0 ||
-      frame.byteLength % 2 !== 0
+      frame.byteLength % 2 !== 0 ||
+      !Number.isSafeInteger(identity.epoch) ||
+      identity.epoch < 0 ||
+      !Number.isSafeInteger(identity.outputId) ||
+      identity.outputId < 0
     ) {
       this.onDiagnostic('output_frame_skipped', {
         bytes: frame.byteLength,
         serviceActive: this.serviceActive,
         outputMuted: this.outputMuted,
+        epoch: identity.epoch,
+        outputId: identity.outputId,
       });
-      return;
+      return Promise.resolve();
     }
+    const playbackIdentity = { ...identity };
     const generation = this.outputGeneration;
-    const context = await this.ensureOutputContext();
-    if (generation !== this.outputGeneration || this.outputMuted) {
+    return this.enqueueOutput(() =>
+      this.playCurrent(frame, playbackIdentity, generation),
+    );
+  }
+
+  finishOutputAudio(identity: PlaybackIdentity): Promise<void> {
+    const playbackIdentity = { ...identity };
+    const generation = this.outputGeneration;
+    return this.enqueueOutput(() => {
+      if (
+        !this.outputEndMarkerMode ||
+        generation !== this.outputGeneration ||
+        !Number.isSafeInteger(playbackIdentity.epoch) ||
+        playbackIdentity.epoch < 0 ||
+        !Number.isSafeInteger(playbackIdentity.outputId) ||
+        playbackIdentity.outputId < 0
+      ) {
+        this.onDiagnostic('output_finish_skipped', {
+          epoch: playbackIdentity.epoch,
+          outputId: playbackIdentity.outputId,
+          generation,
+          currentGeneration: this.outputGeneration,
+          markerMode: this.outputEndMarkerMode,
+        });
+        return;
+      }
+      const key = this.outputKey(playbackIdentity);
+      const resampler = this.outputResamplers.get(key);
+      try {
+        if (resampler && this.outputContext) {
+          this.outputResamplers.delete(key);
+          const tail = resampler.finish();
+          if (tail.length > 0) {
+            const admission = this.outputPlayback.beginFrame(playbackIdentity);
+            if (admission) {
+              this.scheduleOutput(
+                this.outputContext,
+                tail,
+                this.outputContext.sampleRate,
+                admission,
+                generation,
+                { bytes: 0, tail: true },
+              );
+            }
+          }
+        }
+      } catch (error) {
+        this.clearOutput();
+        throw error;
+      }
+      const transition = this.outputPlayback.finish(playbackIdentity);
+      if (!transition.accepted) {
+        this.onDiagnostic('output_finish_stale', {
+          epoch: playbackIdentity.epoch,
+          outputId: playbackIdentity.outputId,
+          generation,
+        });
+        return;
+      }
+      this.onDiagnostic('output_finish_received', {
+        epoch: playbackIdentity.epoch,
+        outputId: playbackIdentity.outputId,
+        generation,
+        activeSources: this.outputSources.size,
+      });
+      if (transition.completed) {
+        this.onPlaybackCompleted(transition.completed);
+      }
+    });
+  }
+
+  private enqueueOutput(operation: () => Promise<void> | void): Promise<void> {
+    const result = this.outputQueue.catch(() => undefined).then(operation);
+    this.outputQueue = result.catch(() => undefined);
+    return result;
+  }
+
+  private async playCurrent(
+    frame: Uint8Array,
+    playbackIdentity: PlaybackIdentity,
+    generation: number,
+  ): Promise<void> {
+    if (
+      generation !== this.outputGeneration ||
+      !this.serviceActive ||
+      this.outputMuted
+    ) {
       this.onDiagnostic('output_frame_stale', {
         bytes: frame.byteLength,
         generation,
@@ -219,63 +350,154 @@ export class HostAudioEngine {
       });
       return;
     }
-
-    const samples = frame.byteLength / 2;
-    const audioBuffer = context.createBuffer(1, samples, OUTPUT_SAMPLE_RATE);
-    const channel = audioBuffer.getChannelData(0);
-    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
-    let peak = 0;
-    let sumSquares = 0;
-    let zeroCrossings = 0;
-    let previous = 0;
-    for (let index = 0; index < samples; index += 1) {
-      const sample = view.getInt16(index * 2, true) / 0x8000;
-      channel[index] = sample;
-      peak = Math.max(peak, Math.abs(sample));
-      sumSquares += sample * sample;
+    try {
+      const context = await this.ensureOutputContext();
       if (
-        index > 0 &&
-        ((previous < 0 && sample >= 0) || (previous >= 0 && sample < 0))
+        generation !== this.outputGeneration ||
+        !this.serviceActive ||
+        this.outputMuted
       ) {
-        zeroCrossings += 1;
+        this.onDiagnostic('output_frame_stale', {
+          bytes: frame.byteLength,
+          generation,
+          currentGeneration: this.outputGeneration,
+          outputMuted: this.outputMuted,
+        });
+        return;
       }
-      previous = sample;
+
+      const admission = this.outputPlayback.beginFrame(playbackIdentity);
+      if (!admission) {
+        this.onDiagnostic('output_frame_identity_skipped', {
+          epoch: playbackIdentity.epoch,
+          outputId: playbackIdentity.outputId,
+          generation,
+        });
+        return;
+      }
+      const samples = frame.byteLength / 2;
+      const channel = new Float32Array(samples);
+      const view = new DataView(
+        frame.buffer,
+        frame.byteOffset,
+        frame.byteLength,
+      );
+      let peak = 0;
+      let sumSquares = 0;
+      let zeroCrossings = 0;
+      let previous = 0;
+      for (let index = 0; index < samples; index += 1) {
+        const sample = view.getInt16(index * 2, true) / 0x8000;
+        channel[index] = sample;
+        peak = Math.max(peak, Math.abs(sample));
+        sumSquares += sample * sample;
+        if (
+          index > 0 &&
+          ((previous < 0 && sample >= 0) || (previous >= 0 && sample < 0))
+        ) {
+          zeroCrossings += 1;
+        }
+        previous = sample;
+      }
+      let outputSamples: Float32Array = channel;
+      let sampleRate = OUTPUT_SAMPLE_RATE;
+      // Legacy peers cannot mark the end, so retain their per-frame drain path.
+      if (this.outputEndMarkerMode) {
+        const key = this.outputKey(playbackIdentity);
+        let resampler = this.outputResamplers.get(key);
+        if (!resampler) {
+          resampler = new StreamingOutputResampler(
+            OUTPUT_SAMPLE_RATE,
+            context.sampleRate,
+          );
+          this.outputResamplers.set(key, resampler);
+        }
+        outputSamples = resampler.push(channel);
+        sampleRate = context.sampleRate;
+      }
+      this.scheduleOutput(
+        context,
+        outputSamples,
+        sampleRate,
+        admission,
+        generation,
+        {
+          bytes: frame.byteLength,
+          rms: Math.sqrt(sumSquares / samples),
+          peak,
+          zeroCrossings,
+        },
+      );
+    } catch (error) {
+      if (generation !== this.outputGeneration) {
+        this.onDiagnostic('output_frame_stale', {
+          bytes: frame.byteLength,
+          generation,
+          currentGeneration: this.outputGeneration,
+          outputMuted: this.outputMuted,
+        });
+        return;
+      }
+      this.clearOutput();
+      throw error;
     }
+  }
+
+  private outputKey(identity: PlaybackIdentity): string {
+    return `${identity.epoch}:${identity.outputId}`;
+  }
+
+  private scheduleOutput(
+    context: AudioContext,
+    samples: Float32Array,
+    sampleRate: number,
+    admission: OutputFrameAdmission,
+    generation: number,
+    details: AudioDiagnosticDetails,
+  ): void {
+    const capturedOutput = admission.output;
+    const playbackIdentity = capturedOutput.identity;
+    if (samples.length === 0) {
+      this.outputPlayback.endFrame(capturedOutput);
+      if (admission.playbackStarted) {
+        this.onPlaybackStarted(playbackIdentity);
+      }
+      return;
+    }
+    const audioBuffer = context.createBuffer(1, samples.length, sampleRate);
+    audioBuffer.getChannelData(0).set(samples);
     const schedule = scheduleOutputFrame(
       context.currentTime,
       this.outputCursor,
       audioBuffer.duration,
+      this.outputEndMarkerMode ? context.sampleRate : undefined,
     );
-
     const source = context.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(context.destination);
     source.onended = () => {
       this.outputSources.delete(source);
+      source.disconnect();
+      const transition = this.outputPlayback.endFrame(capturedOutput);
       this.onDiagnostic('output_source_ended', {
         generation,
         currentGeneration: this.outputGeneration,
         remainingSources: this.outputSources.size,
       });
-      // Only fire completion for a natural end (generation matches);
-      // clearOutput increments generation before stopping sources,
-      // so a stop-triggered onended sees a mismatch and stays silent.
-      if (
-        this.outputSources.size === 0 &&
-        generation === this.outputGeneration
-      ) {
-        this.onPlaybackCompleted();
+      if (transition.completed) {
+        this.onPlaybackCompleted(transition.completed);
       }
     };
-    const wasEmpty = this.outputSources.size === 0;
     this.outputSources.add(source);
     source.start(schedule.startAt);
     this.outputCursor = schedule.endAt;
-    if (wasEmpty) {
-      this.onPlaybackStarted();
+    if (admission.playbackStarted) {
+      this.onPlaybackStarted(playbackIdentity);
     }
     this.onDiagnostic('output_frame_scheduled', {
-      bytes: frame.byteLength,
+      ...details,
+      epoch: playbackIdentity.epoch,
+      outputId: playbackIdentity.outputId,
       generation,
       contextState: context.state,
       contextTime: context.currentTime,
@@ -284,10 +506,8 @@ export class HostAudioEngine {
       queuedSeconds: Math.max(0, schedule.endAt - context.currentTime),
       activeSources: this.outputSources.size,
       contextSampleRate: context.sampleRate,
-      sourceSampleRate: OUTPUT_SAMPLE_RATE,
-      rms: Math.sqrt(sumSquares / samples),
-      peak,
-      zeroCrossings,
+      inputSampleRate: OUTPUT_SAMPLE_RATE,
+      sourceSampleRate: sampleRate,
     });
   }
 
@@ -300,6 +520,8 @@ export class HostAudioEngine {
       outputCursor: this.outputCursor,
     });
     this.outputGeneration += 1;
+    this.outputPlayback.clear();
+    this.outputResamplers.clear();
     for (const source of this.outputSources) {
       try {
         source.stop();
@@ -353,27 +575,43 @@ export class HostAudioEngine {
   }
 
   private async ensureOutputContext(): Promise<AudioContext> {
+    const created = this.outputContext === undefined;
     const context =
       this.outputContext ??
       new AudioContext({
+        // Keep the device clock; changing it can disrupt other apps' audio.
         latencyHint: 'interactive',
       });
     this.outputContext = context;
     if (context.state === 'suspended') await context.resume();
     if (context.state !== 'running')
       throw new Error('audio_output_unavailable');
+    if (created) {
+      this.onDiagnostic('output_context_ready', {
+        sourceSampleRate: OUTPUT_SAMPLE_RATE,
+        contextSampleRate: context.sampleRate,
+        resampling: context.sampleRate !== OUTPUT_SAMPLE_RATE,
+        contextState: context.state,
+      });
+    }
     return context;
   }
 
   private async startCapture(): Promise<void> {
     const epoch = this.captureEpoch;
-    if (this.captureContext || !this.captureRequested || epoch === undefined)
+    if (
+      this.captureContext ||
+      !this.captureRequested ||
+      this.inputMuted ||
+      epoch === undefined
+    )
       return;
     const generation = ++this.captureGeneration;
     const stream = await this.openInputStream();
     if (
       generation !== this.captureGeneration ||
       !this.captureRequested ||
+      this.inputMuted ||
       this.captureEpoch !== epoch
     ) {
       for (const track of stream.getTracks()) track.stop();
@@ -388,6 +626,7 @@ export class HostAudioEngine {
       if (
         generation !== this.captureGeneration ||
         !this.captureRequested ||
+        this.inputMuted ||
         this.captureEpoch !== epoch
       ) {
         for (const track of stream.getTracks()) track.stop();
@@ -407,14 +646,19 @@ export class HostAudioEngine {
       worklet.port.onmessage = (
         event: MessageEvent<{ level: number; pcm16: ArrayBuffer }>,
       ) => {
+        if (
+          !this.serviceActive ||
+          !this.captureRequested ||
+          this.inputMuted ||
+          this.captureContext !== context ||
+          this.captureNode !== worklet ||
+          this.captureEpoch !== epoch
+        ) {
+          return;
+        }
         const { level, pcm16 } = event.data;
         this.onInputLevel(level);
-        if (
-          !this.inputMuted &&
-          this.captureRequested &&
-          this.captureEpoch === epoch &&
-          pcm16.byteLength > 0
-        ) {
+        if (pcm16.byteLength > 0) {
           ipcRenderer.send('live:audio:input', {
             epoch,
             pcm16: new Uint8Array(pcm16),
@@ -434,7 +678,6 @@ export class HostAudioEngine {
       this.captureSource = source;
       this.captureContext = context;
       this.captureNode = worklet;
-      this.setCaptureMuted(this.inputMuted);
       this.monitorInputTracks(stream, generation);
       if (context.state === 'suspended') await context.resume();
     } catch (error) {
@@ -446,6 +689,7 @@ export class HostAudioEngine {
 
   private async stopCapture(): Promise<void> {
     this.captureGeneration += 1;
+    this.firstCaptureFrameEpoch = undefined;
     const source = this.captureSource;
     const node = this.captureNode;
     const stream = this.captureStream;
@@ -466,20 +710,19 @@ export class HostAudioEngine {
   private async refreshCaptureInput(): Promise<void> {
     const context = this.captureContext;
     const worklet = this.captureNode;
-    if (!context || !worklet || !this.captureRequested) return;
+    if (!context || !worklet || !this.captureRequested || this.inputMuted)
+      return;
     const generation = ++this.captureGeneration;
     const stream = await this.openInputStream();
     if (
       generation !== this.captureGeneration ||
       !this.captureRequested ||
+      this.inputMuted ||
       context !== this.captureContext ||
       worklet !== this.captureNode
     ) {
       for (const track of stream.getTracks()) track.stop();
       return;
-    }
-    for (const track of stream.getAudioTracks()) {
-      track.enabled = !this.inputMuted;
     }
     const source = context.createMediaStreamSource(stream);
     source.connect(worklet);
@@ -500,12 +743,6 @@ export class HostAudioEngine {
         }
       };
       track.addEventListener('ended', handleUnavailable, { once: true });
-    }
-  }
-
-  private setCaptureMuted(muted: boolean): void {
-    for (const track of this.captureStream?.getAudioTracks() ?? []) {
-      track.enabled = !muted;
     }
   }
 

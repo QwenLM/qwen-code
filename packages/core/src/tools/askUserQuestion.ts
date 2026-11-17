@@ -22,24 +22,9 @@ import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { resolveInteractionMode } from '../core/prompts.js';
 import { InputFormat } from '../output/types.js';
+import { parseAnswerQuestionIndex } from '../permissions/trusted-user-answers.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
-
-function parseAnswerQuestionIndex(
-  key: string,
-  questionCount: number,
-): number | undefined {
-  const index = Number(key);
-  if (
-    !Number.isSafeInteger(index) ||
-    index < 0 ||
-    index >= questionCount ||
-    String(index) !== key
-  ) {
-    return undefined;
-  }
-  return index;
-}
 
 export interface QuestionOption {
   label: string;
@@ -172,6 +157,10 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
     return `Ask user ${questionCount} question${questionCount > 1 ? 's' : ''}`;
   }
 
+  override canAutoApproveOnAllow(): boolean {
+    return false;
+  }
+
   /**
    * Whether a host is present that can put the questions in front of the
    * user *and* answer them. ACP hosts (VSCode extension, Zed, stream-json
@@ -261,7 +250,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
     return details;
   }
 
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
       // In non-interactive mode without ACP support, we cannot collect user input
       if (!this.canCollectAnswers()) {
@@ -278,10 +267,14 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         return {
           llmContent: cancellationMessage,
           returnDisplay: cancellationMessage,
+          // Only a cancelled turn leaves the questions unanswered; a plain
+          // decline is a completed decision, not interrupted work.
+          ...(signal.aborted ? { interruptedBeforeCompletion: true } : {}),
         };
       }
 
       // Format the answers for LLM consumption
+      const answers: Array<{ question: string; answer: string }> = [];
       const answersContent = Object.entries(this.userAnswers)
         .flatMap(([key, value]) => {
           const questionIndex = parseAnswerQuestionIndex(
@@ -290,6 +283,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
           );
           if (questionIndex === undefined) return [];
           const question = this.params.questions[questionIndex]!;
+          answers.push({ question: question.question, answer: value });
           return `**${question.header || `Question ${questionIndex + 1}`}**: ${value}`;
         })
         .join('\n');
@@ -298,12 +292,15 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         answersContent.length > 0
           ? answersContent
           : 'No valid answers were provided.';
-      const llmMessage = `User has provided the following answers:\n\n${messageBody}`;
-      const displayMessage = `User has provided the following answers:\n\n${messageBody}`;
+      const message = `User has provided the following answers:\n\n${messageBody}`;
 
       return {
-        llmContent: llmMessage,
-        returnDisplay: displayMessage,
+        llmContent: message,
+        returnDisplay: {
+          type: 'ask_user_question_answers',
+          text: message,
+          answers,
+        },
       };
     } catch (error) {
       const errorMessage =

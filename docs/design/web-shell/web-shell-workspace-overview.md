@@ -13,7 +13,7 @@ issue — a frontend-only change on top of daemon routes that already exist.
 
 ### Folder header
 
-- The header keeps its name, badges and git chip. It gains session counts at
+- The header keeps its name and badges. It gains session counts at
   its right edge: sessions waiting on the user (warning tone), sessions with a
   prompt in flight (success tone), and the total. A total from a truncated
   catalog page shows as `N+`. Collapsing a row disables its catalog query, so
@@ -28,10 +28,17 @@ issue — a frontend-only change on top of daemon routes that already exist.
 
 ### Facet chips
 
-While a trusted workspace is expanded, a chip row summarizes MCP servers
+A trusted workspace's hover details popover summarizes MCP servers
 (`connected/enabled`), skills (enabled), extensions (active, or
 `active/total` when they differ), channels (`connected/configured`) and
-context files (count). Hooks are available but off by default.
+context files (count). Hooks are available but off by default. Facets load
+only while the popover or the workspace header menu is open; the last
+snapshot stays put while both are closed.
+
+The same popover's branch row is interactive: it opens that workspace's Git
+picker (branch checkout, pull/push, View Changes, Commit) and carries the
+branch's dirty or conflicted state as a dot beside the name. A workspace with
+no Git wiring keeps the plain-text summary the demand-loading pass left.
 
 - MCP, skills and hooks are discovered by the workspace's ACP child. Until it
   reports `initialized`, the chip shows `—` and the tooltip says the runtime
@@ -95,11 +102,13 @@ boundary (a cwd change, the section collapsing) advances an epoch, and a
 round launched before the boundary can neither book misses into the fresh
 session nor refill it with a stale success.
 
-Fetching is gated on the section being expanded, the workspace trusted and the
-default header rendered (a locked sidebar's custom header has no chip or menu
-to feed), and polls every 30 s only while the document is visible, plus a
-refetch on window focus and on the sidebar's reload token. Collapsed rows cost
-nothing, and a synthetic fallback workspace without a real cwd is never asked.
+Fetching is gated on the workspace being trusted, the default header rendered
+(a locked sidebar's custom header has no details popover or menu to feed) and
+a consumer being open — the hover details popover or the header menu — and
+polls every 30 s only while a consumer is open and the document is visible,
+plus a refetch on window focus and on the sidebar's reload token. Rows with no
+open consumer cost nothing, and a synthetic fallback workspace without a real
+cwd is never asked.
 
 Measured against the mock daemon (`npm run dev`, React StrictMode, 5 trusted
 workspaces all expanded, tab visible): after the initial round the sidebar
@@ -151,7 +160,7 @@ of every registered workspace, styled after the Session Overview panel:
 name with primary/untrusted badges, path, active session counts (running /
 needs-attention, 30 s cadence), MCP health (`connected/configured`, unknown
 while the runtime is not initialized), branch plus dirty count (60 s, the
-sidebar chip's discipline) and last activity. Daemon-owned `kind: 'live'`
+sidebar Git discipline) and last activity. Daemon-owned `kind: 'live'`
 runtimes are not rows. Per-row actions: New task (targets that workspace)
 and Remove where the sidebar row would offer it. Entries: a "Manage
 workspaces…" row at the end of the Projects section (hidden when the

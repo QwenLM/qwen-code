@@ -5,8 +5,12 @@
  */
 
 import {
+  appendFileSync,
+  cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -78,7 +82,7 @@ export function isolateOperatorReviewSettings(): {
   };
 }
 
-/** Seed the report `parse-args` tees, so the effort fallback has something to read. */
+/** Seed the report `parse-args --out` writes, so the effort fallback has something to read. */
 export function seedParseArgs(dir: string, effort: unknown): void {
   mkdirSync(join(dir, dirname(PARSE_ARGS_REPORT)), { recursive: true });
   writeFileSync(
@@ -175,4 +179,97 @@ export const FOREIGN_DIGEST = 'ab'.repeat(32);
 /** Write (or overwrite) the stamp beside the fixture's bundle. */
 export function stampDigest(fs: FixtureFs, repo: string, digest: string): void {
   fs.writeFileSync(join(repo, 'dist', DIGEST_FILE), digest);
+}
+
+/**
+ * The admin entry `<tree>/.git` names, spelled the way git spelled it.
+ *
+ * Read rather than derived: the gates ask git where the repository is, so a
+ * fixture that guesses the entry's path can build a plant git never resolves.
+ */
+export function adminEntryOf(tree: string): string {
+  return readFileSync(join(tree, '.git'), 'utf8')
+    .trim()
+    .replace('gitdir: ', '');
+}
+
+/**
+ * A repository the reviewed code planted, carrying a content filter git
+ * EXECUTES. The oracle every host-execution witness shares, so a fixture that
+ * quietly stops being an attack fails in one place instead of in each suite.
+ *
+ * `filter` names the driver to arm, because the routes differ in what makes
+ * git run one: `clean` (the default) for the READ routes, where an index
+ * refresh re-hashes a file whose stat changed and re-hashing runs the clean
+ * filter; `smudge` for the CHECKOUT routes; `process` where a suite has to
+ * slip past the repo-local `smudge|clean` screen and still execute. `clean`
+ * and `smudge` pass the content through — a filter that swallows it turns the
+ * command into a different failure than the one under test.
+ *
+ * The marker goes in `info/attributes`, not a `.gitattributes`: the tree's own
+ * working files are not the subject, and a tracked one would show up as residue.
+ */
+export function plantRepository(
+  dir: string,
+  from: string,
+  canary: string,
+  filter: 'clean' | 'smudge' | 'process' = 'clean',
+): string {
+  cpSync(from, dir, { recursive: true });
+  // The copy carries the real repository's admin entries; leaving them makes
+  // the plant answer for trees it was never given.
+  rmSync(join(dir, 'worktrees'), { recursive: true, force: true });
+  const command =
+    filter === 'process'
+      ? `sh -c "echo PWNED > ${canary}"`
+      : `sh -c "echo PWNED > ${canary}; cat"`;
+  appendFileSync(
+    join(dir, 'config'),
+    `\n[filter "evil"]\n\t${filter} = ${command}\n`,
+  );
+  mkdirSync(join(dir, 'info'), { recursive: true });
+  writeFileSync(join(dir, 'info', 'attributes'), '* filter=evil\n');
+  return dir;
+}
+
+/**
+ * Rewrite `<tree>/.git` to name an admin entry the reviewed code planted,
+ * copying `from` so the plant is coherent: it round-trips, and `rev-parse`
+ * through it answers the shas the identity gates pin.
+ *
+ * The backpointer in `<entry>/gitdir` is BARE, which is the only form git
+ * writes there. The `gitdir: ` prefix belongs to the TREE's own `.git` file; a
+ * prefixed backpointer fails the round-trip identity check the residue and
+ * probe-tree routes run first, which turns a witness into a green statement
+ * about the wrong refusal.
+ */
+export function plantAdminEntry(
+  entry: string,
+  from: string,
+  tree: string,
+  commonDir: string,
+): string {
+  cpSync(from, entry, { recursive: true });
+  writeFileSync(join(entry, 'commondir'), `${commonDir}\n`);
+  writeFileSync(join(entry, 'gitdir'), `${join(tree, '.git')}\n`);
+  rmSync(join(tree, '.git'), { force: true });
+  writeFileSync(join(tree, '.git'), `gitdir: ${entry}\n`);
+  return entry;
+}
+
+/**
+ * Whether the capture's cache candidate at `path` is the ledger-only shape
+ * (#12657): present — a local round's ledger has nowhere else to live — but
+ * carrying NO anchor state. The invariant the old "withheld" assertions
+ * protected is the absence of an anchor, and that is what this checks.
+ */
+export function isLedgerOnlyCandidate(path: string): boolean {
+  if (!existsSync(path)) return false;
+  const c = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  return (
+    typeof c['ledgerOnly'] === 'string' &&
+    typeof c['stateId'] === 'string' &&
+    c['stateId'].startsWith('ledger-') &&
+    ['files', 'headSha', 'lastModelId', 'untracked'].every((key) => !(key in c))
+  );
 }

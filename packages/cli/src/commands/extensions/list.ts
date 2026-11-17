@@ -8,11 +8,7 @@ import type { CommandModule } from 'yargs';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { extensionToOutputString, getExtensionManager } from './utils.js';
-import {
-  t,
-  initializeI18n,
-  resolveLanguageSetting,
-} from '../../i18n/index.js';
+import { t, initializeI18n, resolveLanguageSetting } from '../../i18n/index.js';
 import { loadSettings } from '../../config/settings.js';
 
 export async function handleList() {

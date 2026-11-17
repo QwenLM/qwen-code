@@ -54,10 +54,16 @@ export class MistralOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
+    if (
+      !isMistralHostname(this.contentGeneratorConfig) &&
+      this.getReasoningCapabilities(request.model)?.profile ===
+        'deepseek-openai'
+    )
+      return baseRequest;
 
     return {
       ...baseRequest,
-      messages: baseRequest.messages.map(stripReasoningContent),
+      messages: baseRequest.messages.flatMap(stripReasoningContent),
     };
   }
 }

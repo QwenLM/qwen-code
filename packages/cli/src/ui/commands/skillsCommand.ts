@@ -13,7 +13,7 @@ import {
 import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { normalizeSkillPriority } from '@qwen-code/qwen-code-core';
-import { levelLabel } from '../utils/skill-level-label.js';
+import { skillOriginLabel } from '../utils/skill-level-label.js';
 
 export const skillsCommand: SlashCommand = {
   name: 'skills',
@@ -94,7 +94,7 @@ export const skillsCommand: SlashCommand = {
     const lines = sortedSkills.map(
       (s) =>
         `  - ${s.name}${s.description ? `  ${sanitize(s.description, 80)}` : ''}` +
-        `${s.level ? `  (${levelLabel(s.level)})` : ''}`,
+        `${s.level ? `  ${skillOriginLabel(s)}` : ''}`,
     );
     return {
       type: 'message' as const,

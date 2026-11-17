@@ -15,6 +15,9 @@ import {
   readJson,
   validateVersion,
 } from './lib/release-helpers.js';
+import { PUBLISHED_PACKAGES } from './assert-release-version.mjs';
+
+export { PUBLISHED_PACKAGES };
 
 function getVersionFromNPM(distTag) {
   const command = `npm view @qwen-code/qwen-code version --tag=${distTag}`;
@@ -176,82 +179,23 @@ function detectRollbackAndGetBaseline(npmDistTag) {
   };
 }
 
-/**
- * All packages that share the same release version. A version is considered
- * "taken" if it exists on *any* of them — not just the main package.
- */
-export const PUBLISHED_PACKAGES = [
-  '@qwen-code/qwen-code',
-  '@qwen-code/external-context-mem0',
-  '@qwen-code/audio-capture',
-  '@qwen-code/channel-base',
-  '@qwen-code/channel-dingtalk',
-  '@qwen-code/channel-dws',
-  '@qwen-code/channel-feishu',
-  '@qwen-code/channel-github',
-  '@qwen-code/channel-qqbot',
-  '@qwen-code/channel-telegram',
-  '@qwen-code/channel-wecom',
-  '@qwen-code/channel-weixin',
-];
-
-function doesVersionExist(version, { strict = false, shippedTo } = {}) {
+function doesVersionExist(version) {
   // Check NPM across all published packages
-  const shippedPackages = [];
   for (const pkg of PUBLISHED_PACKAGES) {
     try {
-      // The best-effort path silences npm's expected E404 noise; strict
-      // mode needs that stderr to tell "absent" from a failed probe.
-      const command = strict
-        ? `npm view ${pkg}@${version} version`
-        : `npm view ${pkg}@${version} version 2>/dev/null`;
+      const command = `npm view ${pkg}@${version} version 2>/dev/null`;
       const output = execSync(command).toString().trim();
       if (output === version) {
-        if (!strict) {
-          console.error(`Version ${version} already exists on NPM (${pkg}).`);
-          return true;
-        }
-        shippedPackages.push(pkg);
+        console.error(`Version ${version} already exists on NPM (${pkg}).`);
+        return true;
       }
-    } catch (error) {
-      // E404 means the version is absent from this package. Strict mode
-      // guards the force push, so any other probe failure is "cannot
-      // verify" and must throw instead of passing — but once a package
-      // has shipped the refusal is decided, and a throw would mask its
-      // recovery guidance with a probe-failure exit.
-      if (
-        strict &&
-        shippedPackages.length === 0 &&
-        !error.message?.includes('E404')
-      ) {
-        throw new Error(
-          `Failed to verify ${pkg}@${version} on npm: ${error.message}`,
-        );
-      }
+    } catch {
+      // Missing packages and transient registry failures are best effort here.
     }
-  }
-  // Strict mode scans every package instead of stopping at the first hit
-  // so a partial publish's refusal can name everything that shipped. A hit
-  // ends the check: the remaining probes can no longer change the outcome,
-  // and a failed one would mask the refusal's recovery guidance.
-  if (shippedPackages.length > 0) {
-    console.error(
-      `Version ${version} already exists on NPM (${shippedPackages.join(', ')}).`,
-    );
-    shippedTo?.push(...shippedPackages);
-    return true;
   }
 
-  // Check Git tags. Push-time callers pass strict: the checkout at job
-  // start can only know tags that existed when the job began, and the
-  // version may ship between that fetch and this push — check origin.
+  // Check local Git tags.
   try {
-    if (strict) {
-      execSync(`git ls-remote --exit-code origin "refs/tags/v${version}"`);
-      console.error(`Git tag v${version} already exists on origin.`);
-      shippedTo?.push(`origin tag v${version}`);
-      return true;
-    }
     const command = `git tag -l 'v${version}'`;
     const tagOutput = execSync(command).toString().trim();
     if (tagOutput === `v${version}`) {
@@ -259,18 +203,7 @@ function doesVersionExist(version, { strict = false, shippedTo } = {}) {
       return true;
     }
   } catch (error) {
-    if (strict) {
-      // ls-remote exits 2 when no ref matches; that is "tag absent". Any
-      // other failure means the check could not run — fail the push
-      // instead of reading a failed check as "unreleased".
-      if (error.status !== 2) {
-        throw new Error(
-          `Failed to verify tag v${version} on origin: ${error.message}`,
-        );
-      }
-    } else {
-      console.error(`Failed to check git tags for conflicts: ${error.message}`);
-    }
+    console.error(`Failed to check git tags for conflicts: ${error.message}`);
   }
 
   // Check GitHub releases
@@ -279,16 +212,10 @@ function doesVersionExist(version, { strict = false, shippedTo } = {}) {
     const output = execSync(command).toString().trim();
     if (output === `v${version}`) {
       console.error(`GitHub release v${version} already exists.`);
-      shippedTo?.push(`GitHub release v${version}`);
       return true;
     }
   } catch (error) {
     if (!isExpectedMissingGitHubRelease(error)) {
-      if (strict) {
-        throw new Error(
-          `Failed to verify release v${version} on GitHub: ${error.message}`,
-        );
-      }
       console.error(
         `Failed to check GitHub releases for conflicts: ${error.message}`,
       );
@@ -296,28 +223,6 @@ function doesVersionExist(version, { strict = false, shippedTo } = {}) {
   }
 
   return false;
-}
-
-/**
- * Push-time re-validation of prepare's doesVersionExist invariant, for the
- * release branch force push. Throws when the version has shipped anywhere
- * (an error coded VERSION_SHIPPED, naming where it was found), or when a
- * probe cannot run — a failed probe must not read as "unreleased".
- */
-export function assertVersionUnreleased(version) {
-  if (typeof version !== 'string' || version.length === 0) {
-    throw new Error(
-      'assert-unreleased requires a version, e.g. --assert-unreleased=1.2.3',
-    );
-  }
-  const shippedTo = [];
-  if (doesVersionExist(version, { strict: true, shippedTo })) {
-    const error = new Error(
-      `Version ${version} has already shipped; refusing to force-push the release branch over it. Found on: ${shippedTo.join(', ')}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`,
-    );
-    error.code = 'VERSION_SHIPPED';
-    throw error;
-  }
 }
 
 function getAndVerifyTags(npmDistTag, _gitTagPattern) {
@@ -422,6 +327,60 @@ function getNightlyVersion() {
   };
 }
 
+// A channel base at or below the published stable would repeat a shipped
+// version or move the `latest` tag backwards, so target the next patch after
+// `latest` instead. Returns the base unchanged when no bump is needed.
+// Read through the rollback-aware lookup so a rolled-back dist-tag can never
+// become the base.
+function bumpPastPublishedLatest(baseVersion, label, target, refBase) {
+  const latestStable =
+    getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]')?.latestVersion ?? '';
+  // A ref behind the published stable would publish its own content
+  // under a version it never contained, whether the preview base is ahead of
+  // latest (a release/0.25 dispatch mid-cycle) or behind it. Check before the
+  // no-bump early return so both states are caught.
+  if (
+    refBase &&
+    semver.valid(latestStable) &&
+    semver.lt(refBase, latestStable)
+  ) {
+    throw new Error(
+      `Published latest ${latestStable} is ahead of the checked-out package.json version ${refBase}. Refusing a stale or cross-line stable release.`,
+    );
+  }
+  // When the preview base already leads `latest`, no bump is computed below,
+  // so the bumped-version check cannot fire. Only a base on another release
+  // line is refused here: a patch ahead on the ref's own line is the ordinary
+  // next release.
+  if (
+    refBase &&
+    semver.valid(baseVersion) &&
+    semver.lt(refBase, baseVersion) &&
+    semver.diff(refBase, baseVersion) !== 'patch'
+  ) {
+    throw new Error(
+      `Derived base ${baseVersion} is on a different release line than the checked-out package.json version ${refBase}. Refusing a cross-line stable release.`,
+    );
+  }
+  if (
+    !semver.valid(latestStable) ||
+    !semver.valid(baseVersion) ||
+    semver.lt(latestStable, baseVersion)
+  ) {
+    return baseVersion;
+  }
+  const bumped = semver.inc(latestStable, 'patch');
+  if (refBase && semver.lt(bumped, refBase)) {
+    throw new Error(
+      `Bumping to ${bumped} would publish the checked-out ${refBase} content on an older release line. Refusing a cross-line stable release.`,
+    );
+  }
+  console.error(
+    `${label} ${baseVersion} is at or below published latest ${latestStable}; bumping ${target} ${bumped}.`,
+  );
+  return bumped;
+}
+
 function getStableVersion(args) {
   const tagResult = getAndVerifyTags('preview', 'v*-preview*');
   let releaseVersion;
@@ -432,20 +391,23 @@ function getStableVersion(args) {
   } else if (tagResult) {
     releaseVersion = tagResult.latestVersion.replace(/-preview.*/, '');
     validateVersion(releaseVersion, 'X.Y.Z', 'derived from preview dist-tag');
-    const latestStable = getVersionFromNPM('latest');
-    if (
-      latestStable &&
-      semver.valid(latestStable) &&
-      semver.gt(latestStable, releaseVersion)
-    ) {
-      throw new Error(
-        `Derived stable version ${releaseVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
-      );
-    }
+    const refBase = readJson('package.json').version.split('-')[0];
+    releaseVersion = bumpPastPublishedLatest(
+      releaseVersion,
+      'Preview baseline',
+      'the stable base to at least',
+      refBase,
+    );
   } else {
     const packageJson = readJson('package.json');
     releaseVersion = packageJson.version.split('-')[0];
     validateVersion(releaseVersion, 'X.Y.Z', 'package.json version');
+    releaseVersion = bumpPastPublishedLatest(
+      releaseVersion,
+      'Package version',
+      'the stable base to at least',
+      releaseVersion,
+    );
   }
 
   return {
@@ -470,23 +432,11 @@ function getPreviewVersion(args) {
     // When the nightly base is already published as stable, the preview must
     // target the next patch — otherwise the scheduled Tuesday release derives
     // a version whose channel packages already exist on npm (E403).
-    // Use the rollback-aware lookup so a rolled-back dist-tag doesn't produce
-    // a retrograde preview base.
-    const latestTagResult = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
-    const latestStable = latestTagResult?.latestVersion ?? '';
-    if (
-      latestStable &&
-      semver.valid(latestStable) &&
-      semver.valid(baseVersion)
-    ) {
-      if (semver.gte(latestStable, baseVersion)) {
-        const bumped = semver.inc(latestStable, 'patch');
-        console.error(
-          `Nightly base ${baseVersion} is at or below published latest ${latestStable}; bumping preview base to ${bumped}.`,
-        );
-        baseVersion = bumped;
-      }
-    }
+    baseVersion = bumpPastPublishedLatest(
+      baseVersion,
+      'Nightly base',
+      'preview base to',
+    );
     releaseVersion = baseVersion + '-preview.0';
     validateVersion(
       releaseVersion,
@@ -621,26 +571,19 @@ export function getVersion(options = {}) {
 }
 
 /**
- * CLI dispatch, exported for tests: `--assert-unreleased=<version>` runs
- * the push-time guard; anything else prints the version JSON. Returns the
- * exit code. Guard codes: 0 = unreleased, 3 = already shipped (a decisive,
- * benign refusal the workflow marks to skip the release-failed
- * notification), 2 = probe or usage failure. 1 is never returned on
- * purpose: node exits 1 on uncaught errors, and those must stay on the
- * real-failure path.
+ * CLI dispatch, exported for tests: prints the version JSON and returns the
+ * exit code.
+ *
+ * The push-time guard is deliberately *not* reachable from here. This file is
+ * supplied by the operator-selected release ref, while the guard must run from
+ * the workflow-pinned SHA — `release.yml` invokes
+ * `.release-workflow/scripts/assert-release-version.mjs` directly, and
+ * `scripts/tests/release-workflow.test.js` forbids the
+ * `node scripts/get-release-version.js --assert-unreleased=` spelling. Adding a
+ * dispatch back here would let a ref that has already shipped supply its own
+ * relaxed guard and force-push over a published version.
  */
 export function runCli(args) {
-  if (args['assert-unreleased'] !== undefined) {
-    try {
-      assertVersionUnreleased(args['assert-unreleased']);
-    } catch (error) {
-      // stdout, not stderr: the runner parses workflow commands from
-      // stdout only, so ::error:: on stderr would never annotate.
-      console.log(`::error::${error.message}`);
-      return error.code === 'VERSION_SHIPPED' ? 3 : 2;
-    }
-    return 0;
-  }
   console.log(JSON.stringify(getVersion(args), null, 2));
   return 0;
 }

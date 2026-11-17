@@ -5,6 +5,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import { dp } from './dialogStyles';
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
+import { DaemonUnavailableError } from '../../daemon/availability.js';
+import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -39,6 +42,8 @@ let sessions: DaemonSessionSummary[] = [
 const deleteSessionMock = vi.fn();
 const deleteSessionsMock = vi.fn();
 let scopedSessionsOptions: unknown;
+let scopedSessionsError: Error | undefined;
+let scopedSessionsLoading = false;
 const initialSessions = sessions.slice();
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
@@ -50,8 +55,8 @@ vi.mock('../../hooks/useScopedSessions', () => ({
     scopedSessionsOptions = options;
     return {
       sessions,
-      loading: false,
-      error: undefined,
+      loading: scopedSessionsLoading,
+      error: scopedSessionsError,
       deleteSession: deleteSessionMock,
       deleteSessions: deleteSessionsMock,
     };
@@ -66,19 +71,28 @@ let onDeleted: ReturnType<typeof vi.fn>;
 let onError: ReturnType<typeof vi.fn>;
 let onClose: ReturnType<typeof vi.fn>;
 
-function renderDialog() {
+function renderDialog(availability?: ReturnType<typeof offlineDaemon>) {
+  const dialog = (
+    <DeleteSessionDialog
+      onDeleted={onDeleted}
+      onError={onError}
+      onClose={onClose}
+    />
+  );
   root!.render(
     <I18nProvider language="en">
-      <DeleteSessionDialog
-        onDeleted={onDeleted}
-        onError={onError}
-        onClose={onClose}
-      />
+      {availability ? (
+        <DaemonAvailabilityContext.Provider value={availability.availability}>
+          {dialog}
+        </DaemonAvailabilityContext.Provider>
+      ) : (
+        dialog
+      )}
     </I18nProvider>,
   );
 }
 
-function mount() {
+function mount(availability?: ReturnType<typeof offlineDaemon>) {
   onDeleted = vi.fn();
   onError = vi.fn();
   onClose = vi.fn();
@@ -86,7 +100,7 @@ function mount() {
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    renderDialog();
+    renderDialog(availability);
   });
 }
 
@@ -98,6 +112,13 @@ function rerender() {
 
 function rows(): HTMLElement[] {
   return Array.from(container!.querySelectorAll('[role="option"]'));
+}
+
+function hint(): string {
+  return (
+    container!.querySelector<HTMLElement>(`.${dp('picker-search-hint')}`)
+      ?.textContent ?? ''
+  );
 }
 
 function dangerButton(): HTMLButtonElement {
@@ -139,6 +160,8 @@ const isChecked = (el: HTMLElement) => el.textContent?.includes('[x]') === true;
 beforeEach(() => {
   deleteSessionMock.mockReset();
   deleteSessionsMock.mockReset();
+  scopedSessionsError = undefined;
+  scopedSessionsLoading = false;
 });
 
 afterEach(() => {
@@ -150,6 +173,21 @@ afterEach(() => {
 });
 
 describe('DeleteSessionDialog selection', () => {
+  it('excludes Qwen Live tasks from permanent deletion', () => {
+    sessions = [
+      {
+        ...initialSessions[0],
+        sourceType: 'qwen-live',
+        displayName: 'Live task',
+      },
+      initialSessions[1],
+    ];
+    mount();
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('S1');
+    expect(container!.textContent).not.toContain('Live task');
+  });
+
   it('keeps the keyboard cursor separate from the checked set; Enter only toggles', () => {
     mount();
 
@@ -192,14 +230,54 @@ describe('DeleteSessionDialog selection', () => {
     expect(isChecked(rows()[0])).toBe(true);
   });
 
-  it('does not check the current session row', () => {
+  it('checks and deletes the current session row when it is idle', async () => {
+    deleteSessionsMock.mockResolvedValue({
+      removed: ['me'],
+      notFound: [],
+      errors: [],
+    });
+    mount();
+
+    // A click checks the current session row like any other row (#12619).
+    clickRow(2);
+    expect(isChecked(rows()[2])).toBe(true);
+    expect(dangerButton().disabled).toBe(false);
+
+    // Keyboard Enter toggles the current row's checkbox too.
+    press('ArrowDown');
+    press('ArrowDown');
+    press('ArrowDown');
+    expect(isCursor(rows()[2])).toBe(true);
+    press('Enter');
+    expect(isChecked(rows()[2])).toBe(false);
+    press('Enter');
+    expect(isChecked(rows()[2])).toBe(true);
+
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(deleteSessionsMock).toHaveBeenCalledWith(['me']);
+    expect(onDeleted).toHaveBeenCalledWith(['me'], {
+      attachedSessionId: 'me',
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the current session row unselectable while it is running', () => {
+    sessions = [
+      initialSessions[0],
+      initialSessions[1],
+      { ...initialSessions[2], hasActivePrompt: true },
+    ];
     mount();
 
     clickRow(2);
     expect(isChecked(rows()[2])).toBe(false);
     expect(dangerButton().disabled).toBe(true);
 
-    // Keyboard Enter on the current session row must not check it either.
+    // Keyboard Enter on the running current row must not check it either.
     press('ArrowDown');
     press('ArrowDown');
     press('ArrowDown');
@@ -275,6 +353,87 @@ describe('DeleteSessionDialog selection', () => {
     expect(dangerButton().disabled).toBe(true);
   });
 
+  it('shows a delete outcome ahead of a stale load error', async () => {
+    scopedSessionsError = new Error('boom');
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's0', error: 'locked' }],
+    });
+    mount();
+
+    clickRow(0);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    expect(hint()).not.toContain('boom');
+  });
+
+  it('keeps the loading placeholder above a stale load error', () => {
+    scopedSessionsLoading = true;
+    scopedSessionsError = new Error('boom');
+    mount();
+
+    const list = container!.querySelector('[role="listbox"]')!;
+    expect(list.textContent).toContain('Loading...');
+    expect(list.textContent).not.toContain('boom');
+  });
+
+  it('keeps the outage copy visible while the catalog reports loading', async () => {
+    scopedSessionsLoading = true;
+    const { availability } = offlineDaemon();
+    mount({ availability });
+    await act(async () => {
+      await availability.check(true);
+    });
+
+    const list = container!.querySelector('[role="listbox"]')!;
+    expect(list.textContent).toContain('Cannot reach the service.');
+    availability.dispose();
+  });
+
+  it('reports an outage during delete as the localized service message', async () => {
+    const { availability } = offlineDaemon();
+    deleteSessionsMock.mockRejectedValue(new DaemonUnavailableError());
+    mount({ availability });
+    await act(async () => {
+      await availability.check(true);
+    });
+    clickRow(0);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0][0] as Error).message).toBe(
+      'Cannot reach the service.',
+    );
+    availability.dispose();
+  });
+
+  it('keeps the outage copy ahead of a delete outcome', async () => {
+    const { availability } = offlineDaemon();
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's0', error: 'locked' }],
+    });
+    mount({ availability });
+    await act(async () => {
+      await availability.check(true);
+    });
+    clickRow(0);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(hint()).toContain('Cannot reach the service.');
+    expect(hint()).not.toContain('Failed to delete 1 session(s): locked');
+    availability.dispose();
+  });
+
   it('deletes the checked sessions via the batch API and closes', async () => {
     deleteSessionsMock.mockResolvedValue({
       removed: ['s0', 's1'],
@@ -292,7 +451,9 @@ describe('DeleteSessionDialog selection', () => {
     });
 
     expect(deleteSessionsMock).toHaveBeenCalledWith(['s0', 's1']);
-    expect(onDeleted).toHaveBeenCalledWith(['s0', 's1']);
+    expect(onDeleted).toHaveBeenCalledWith(['s0', 's1'], {
+      attachedSessionId: 'me',
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
   });

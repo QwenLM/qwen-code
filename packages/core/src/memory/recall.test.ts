@@ -4,28 +4,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  buildRelevantAutoMemoryPrompt,
   MAX_FAST_RECALL_DOCS,
+  RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV,
   resolveRelevantAutoMemoryPromptForQuery,
   selectRelevantAutoMemoryDocuments,
 } from './recall.js';
-import type { ScannedAutoMemoryDocument } from './scan.js';
 import type { Config } from '../config/config.js';
-import { scanAllAutoMemoryTopicDocuments } from './scan.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
+import {
+  parseAutoMemoryTopicDocument,
+  rereadAutoMemoryDocument,
+  scanAllAutoMemoryTopicDocuments,
+  scanAllUserAutoMemoryTopicDocuments,
+  scanAutoMemorySnapshot,
+  type MemorySourceStatus,
+  type ScannedAutoMemoryDocument,
+} from './scan.js';
+import { logMemoryRecall } from '../telemetry/index.js';
+import { toAutoMemoryRef } from './tree.js';
+
+const debugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => debugLogger,
+}));
 
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
   return {
     ...actual,
+    scanAutoMemorySnapshot: vi.fn(),
     scanAllAutoMemoryTopicDocuments: vi.fn(),
-    // Explicit mock — recall now unions user-level docs into the pool, so
-    // leaving this on the real implementation would silently fall through
-    // to the filesystem (only "works" because the path doesn't exist and
-    // listMarkdownFiles swallows ENOENT). Defaults to an empty pool.
+    // Explicit mock: the real implementation silently scans the user's
+    // memory directory when it exists, so the empty pool must stay hermetic.
     scanAllUserAutoMemoryTopicDocuments: vi.fn().mockResolvedValue([]),
+    rereadAutoMemoryDocument: vi.fn(),
   };
 });
 
@@ -33,41 +53,45 @@ vi.mock('./relevanceSelector.js', () => ({
   selectRelevantAutoMemoryDocumentsByModel: vi.fn(),
 }));
 
+vi.mock('../telemetry/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../telemetry/index.js')>()),
+  logMemoryRecall: vi.fn(),
+}));
+
 const docs: ScannedAutoMemoryDocument[] = [
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/reference.md',
     relativePath: 'reference.md',
     filename: 'reference.md',
     title: 'Reference Memory',
     description: 'Dashboards and external docs',
-    body: '# Reference Memory\n\n- Grafana dashboard: grafana.internal/d/api-latency',
+    category: 'project_introduction',
+    keywords: ['latency dashboard'],
+    usageScenarios: ['checking latency dashboards'],
+    body: 'Grafana dashboard: grafana.internal/d/api-latency',
     mtimeMs: 3,
   },
   {
+    scope: 'project',
     type: 'project',
     filePath: '/tmp/project.md',
     relativePath: 'project.md',
     filename: 'project.md',
     title: 'Project Memory',
     description: 'Project constraints and release context',
-    body: '# Project Memory\n\n- Release freeze starts Friday.',
+    category: 'important_decision',
+    keywords: [],
+    usageScenarios: ['planning release work'],
+    body: 'Release freeze starts Friday.',
     mtimeMs: 2,
-  },
-  {
-    type: 'user',
-    filePath: '/tmp/user.md',
-    relativePath: 'user.md',
-    filename: 'user.md',
-    title: 'User Memory',
-    description: 'User preferences',
-    body: '# User Memory\n\n- User prefers terse responses.',
-    mtimeMs: 1,
   },
 ];
 
 const activeToolDocs: ScannedAutoMemoryDocument[] = [
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/ata-tool.md',
     relativePath: 'ata-tool.md',
@@ -75,30 +99,56 @@ const activeToolDocs: ScannedAutoMemoryDocument[] = [
     title: 'ATA tool schema notes',
     description:
       'article-list-query parameter schema and failed tool-call attempts',
-    body: '# ATA tool schema notes\n\n- ata::article-list-query failed with guessed field mappings.',
+    category: 'tool_experience',
+    keywords: [],
+    usageScenarios: ['using ATA tool schema'],
+    body: 'ata::article-list-query failed with guessed field mappings.',
     mtimeMs: 4,
   },
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/ata-gotcha.md',
     relativePath: 'ata-gotcha.md',
     filename: 'ata-gotcha.md',
     title: 'ATA tool gotcha',
     description: 'article-list-query known workaround for transient failures',
-    body: '# ATA tool gotcha\n\n- mcp__ata__article-list-query can return systemError during index rotation; retry after checking the ATA oncall note.',
+    category: 'common_pitfall',
+    keywords: [],
+    usageScenarios: ['handling ATA failures'],
+    body: 'Retry after checking the ATA oncall note.',
     mtimeMs: 6,
   },
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/ata-owner.md',
     relativePath: 'ata-owner.md',
     filename: 'ata-owner.md',
     title: 'ATA escalation',
     description: 'ATA service owner and escalation path',
-    body: '# ATA escalation\n\n- Ask the ATA oncall when the service returns systemError.',
+    category: 'tool_experience',
+    keywords: [],
+    usageScenarios: ['escalating ATA issues'],
+    body: 'Ask the ATA oncall when the service returns systemError.',
     mtimeMs: 5,
   },
 ];
+
+const completeSourceStatus: MemorySourceStatus = {
+  requestedScopes: ['project', 'user'],
+  searchedScopes: ['project', 'user'],
+  unavailableScopes: [],
+  complete: true,
+  incompleteScopes: [],
+};
+
+function mockSnapshot(snapshotDocs: ScannedAutoMemoryDocument[]): void {
+  vi.mocked(scanAutoMemorySnapshot).mockResolvedValue({
+    docs: snapshotDocs,
+    sourceStatus: completeSourceStatus,
+  });
+}
 
 function memoryDoc(
   filename: string,
@@ -108,12 +158,16 @@ function memoryDoc(
   body: string,
 ): ScannedAutoMemoryDocument {
   return {
+    scope: 'project',
     type,
     filePath: `/tmp/${filename}`,
     relativePath: filename,
     filename,
     title,
     description,
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     body,
     mtimeMs: 1,
   };
@@ -241,22 +295,195 @@ const multilingualRecallCases: Array<
 ];
 
 describe('auto-memory relevant recall', () => {
+  const bodyPresentVersions = new Map<string, number>();
+  const config = {
+    getFastModel: vi.fn().mockReturnValue('fast-model'),
+    getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+    getMemoryManager: vi.fn().mockReturnValue({
+      getBodyPresentVersionsInHistory: vi
+        .fn()
+        .mockReturnValue(bodyPresentVersions),
+    }),
+  } as unknown as Config;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    bodyPresentVersions.clear();
+    vi.mocked(config.getFastModel).mockReturnValue('fast-model');
+    vi.mocked(config.getMemoryRecallMode).mockReturnValue('structured');
+    mockSnapshot(docs);
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+    vi.mocked(rereadAutoMemoryDocument).mockImplementation(async (doc) => doc);
   });
 
-  it('selects the most relevant documents for a query', () => {
-    const selected = selectRelevantAutoMemoryDocuments(
-      'check the dashboard reference for latency',
-      docs,
+  it('selects matching documents in heuristic mode', () => {
+    expect(
+      selectRelevantAutoMemoryDocuments('check the latency dashboard', docs),
+    ).toEqual([docs[0]]);
+    expect(
+      selectRelevantAutoMemoryDocuments('unrelated weather', docs),
+    ).toEqual([]);
+  });
+
+  it('does not double-score text echoed across metadata fields', () => {
+    const parseDoc = (
+      relativePath: string,
+      frontmatter: string[],
+    ): ScannedAutoMemoryDocument => {
+      const doc = parseAutoMemoryTopicDocument(
+        `/tmp/${relativePath}`,
+        ['---', ...frontmatter, '---', '', 'unrelated body text'].join('\n'),
+        1,
+        relativePath,
+        'project',
+      );
+      expect(doc).not.toBeNull();
+      return doc!;
+    };
+
+    // >64 chars: the legacy usage_scenarios fallback is the description cut
+    // at 64 chars, which can never string-equal the full description.
+    const description = `tersemarker ${'x'.repeat(70)}`;
+    const echoDoc = parseDoc('echo.md', [
+      'type: project',
+      'name: Unrelated name',
+      `description: ${description}`,
+    ]);
+    expect(echoDoc.usageScenarios).toHaveLength(1);
+    const titleDoc = parseDoc('title.md', [
+      'type: project',
+      'name: tersemarker handbook',
+      'description: Completely unrelated operational text',
+      'usage_scenarios: []',
+    ]);
+    // Pre-fix the echoed scenario scored the same text a second time (+3),
+    // outranking the exact title match.
+    expect(
+      selectRelevantAutoMemoryDocuments('tersemarker', [echoDoc, titleDoc]),
+    ).toEqual([titleDoc, echoDoc]);
+
+    const dupKeywordDoc = parseDoc('dup-keyword.md', [
+      'type: project',
+      'name: tersemarker',
+      'description: Completely unrelated operational text',
+      'keywords:',
+      '  - tersemarker',
+      'usage_scenarios: []',
+    ]);
+    const richDoc = parseDoc('rich.md', [
+      'type: project',
+      'name: tersemarker notes',
+      'description: tersemarker in the description',
+      'usage_scenarios: []',
+    ]);
+    // Pre-fix the title-duplicating keyword scored 4+4=8, beating the
+    // title+description 4+3=7 of a genuinely richer match.
+    expect(
+      selectRelevantAutoMemoryDocuments('tersemarker', [
+        dupKeywordDoc,
+        richDoc,
+      ]),
+    ).toEqual([richDoc, dupKeywordDoc]);
+  });
+
+  it('scans the structured memory universe uncapped like the legacy branch', async () => {
+    await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', 'latency', {
+      config,
+    });
+
+    expect(scanAutoMemorySnapshot).toHaveBeenCalledWith(
+      '/tmp/project',
+      expect.objectContaining({ uncapped: true }),
     );
-
-    expect(selected[0]?.type).toBe('reference');
-    expect(selected.map((doc) => doc.type)).toContain('reference');
   });
 
-  it('returns an empty list for an empty query', () => {
+  it('uses keywords and usage scenarios in heuristic mode', () => {
+    const metadataOnlyDoc: ScannedAutoMemoryDocument = {
+      ...docs[1]!,
+      title: 'Operational note',
+      description: 'Durable operational context',
+      keywords: ['provider fallback'],
+      usageScenarios: ['diagnosing selector failures'],
+      body: 'No matching query terms in this body.',
+    };
+
+    expect(
+      selectRelevantAutoMemoryDocuments('provider fallback', [metadataOnlyDoc]),
+    ).toEqual([metadataOnlyDoc]);
+    expect(
+      selectRelevantAutoMemoryDocuments('diagnosing selector failures', [
+        metadataOnlyDoc,
+      ]),
+    ).toEqual([metadataOnlyDoc]);
+  });
+
+  it('does not score a description twice through its legacy scenario fallback', () => {
+    const single = memoryDoc(
+      'single.md',
+      'reference',
+      'Operational note',
+      'shared match',
+      '',
+    );
+    const duplicated = {
+      ...single,
+      filename: 'duplicated.md',
+      filePath: '/tmp/duplicated.md',
+      relativePath: 'duplicated.md',
+      usageScenarios: ['shared match'],
+    };
+
+    expect(
+      selectRelevantAutoMemoryDocuments('shared match', [single, duplicated]),
+    ).toEqual([single, duplicated]);
+  });
+
+  it('matches Chinese metadata in heuristic mode', () => {
+    const chineseDoc: ScannedAutoMemoryDocument = {
+      ...docs[1]!,
+      title: '发布说明',
+      description: '数据库集成测试必须连接真实服务',
+      keywords: ['数据库测试', '真实依赖'],
+      usageScenarios: ['排查集成测试失败'],
+      body: '不要使用数据库 mock。',
+    };
+
+    expect(
+      selectRelevantAutoMemoryDocuments('集成测试为什么不能使用模拟数据库', [
+        chineseDoc,
+      ]),
+    ).toEqual([chineseDoc]);
+    expect(
+      selectRelevantAutoMemoryDocuments('前端按钮应该使用什么颜色', [
+        chineseDoc,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('matches two-character Chinese terms and NFKC-normalized metadata', () => {
+    const normalizedDoc: ScannedAutoMemoryDocument = {
+      ...docs[1]!,
+      title: '召回检查',
+      description: 'ＡＰＩ 调用记录',
+      keywords: ['召回'],
+      usageScenarios: [],
+      body: '',
+    };
+
+    expect(
+      selectRelevantAutoMemoryDocuments('检查记忆召回效果', [normalizedDoc]),
+    ).toEqual([normalizedDoc]);
+    expect(
+      selectRelevantAutoMemoryDocuments('API 调用为什么失败', [normalizedDoc]),
+    ).toEqual([normalizedDoc]);
+  });
+
+  it('returns no heuristic matches for empty or unrelated queries', () => {
     expect(selectRelevantAutoMemoryDocuments('   ', docs)).toEqual([]);
+    expect(
+      selectRelevantAutoMemoryDocuments('unrelated weather question', docs),
+    ).toEqual([]);
   });
 
   it.each(multilingualRecallCases)('%s', (_name, query, expectedFilename) => {
@@ -501,31 +728,946 @@ describe('auto-memory relevant recall', () => {
     expect(selectRelevantAutoMemoryDocuments('late marker', [doc])).toEqual([]);
   });
 
-  it('formats selected documents as a prompt block', () => {
-    const prompt = buildRelevantAutoMemoryPrompt([docs[0], docs[2]]);
+  it('preserves Main body scoring in legacy mode', () => {
+    const bodyOnly = memoryDoc(
+      'legacy-body.md',
+      'reference',
+      'General note',
+      '',
+      '接口延迟排查入口。',
+    );
 
-    expect(prompt).toContain('## Relevant memory');
-    expect(prompt).toContain('Reference Memory (reference.md)');
-    expect(prompt).toContain('User Memory (user.md)');
+    expect(
+      selectRelevantAutoMemoryDocuments('延迟排查', [bodyOnly], 5, false),
+    ).toEqual([bodyOnly]);
   });
 
-  it('uses model-driven selection when config is provided', async () => {
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
+  it('returns selector-selected memory bodies in legacy mode without a tree', async () => {
+    vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+      docs[0]!,
+    ]);
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config },
+    );
+
+    expect(result.treeSnapshot).toBeUndefined();
+    expect(result.prompt).toContain('## Relevant memory');
+    expect(result.prompt).toContain('grafana.internal/d/api-latency');
+    expect(result.prompt).not.toContain('Complete memory tree');
+  });
+
+  it('threads folder trust into the legacy project scan universe', async () => {
+    // The repo-local root only joins the scan for a trusted folder; an
+    // untrusted folder must not have repo-shipped memory injected.
+    vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const trusting = {
+      ...config,
+      isTrustedFolder: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+    const distrusting = {
+      ...config,
+      isTrustedFolder: vi.fn().mockReturnValue(false),
+    } as unknown as Config;
+
+    await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', 'query', {
+      config: trusting,
+    });
+    // Fourth argument: the recall scan is best-effort per root — one
+    // unlistable repo-local root must not discard the healthy roots.
+    expect(scanAllAutoMemoryTopicDocuments).toHaveBeenLastCalledWith(
+      '/tmp/project',
+      undefined,
+      true,
+      true,
+    );
+
+    await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', 'query', {
+      config: distrusting,
+    });
+    expect(scanAllAutoMemoryTopicDocuments).toHaveBeenLastCalledWith(
+      '/tmp/project',
+      undefined,
+      false,
+      true,
+    );
+  });
+
+  it('preserves legacy exclusion of memory bodies already surfaced', async () => {
+    vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config, excludedFilePaths: [docs[0]!.filePath] },
+    );
+
+    expect(result.selectedDocs).toEqual([]);
+    expect(result.prompt).toBe('');
+    expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledWith(
+      config,
+      'check the latency dashboard',
+      expect.not.arrayContaining([docs[0]]),
+      5,
+      [],
+      undefined,
+    );
+  });
+
+  it('uses a placeholder only when the selected body version is present', async () => {
+    mockSnapshot(docs);
+    bodyPresentVersions.set('project:reference.md', docs[0]!.mtimeMs);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
       docs[0],
     ]);
 
     const result = await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
-      'check the dashboard reference for latency',
-      {
-        config: {} as Config,
+      'check the latency dashboard',
+      { config },
+    );
+
+    expect(result.prompt).toContain(
+      '[内容已在当前上下文] [project:reference.md]',
+    );
+    expect(result.prompt).toContain('关键词：latency dashboard');
+    expect(result.prompt).not.toContain('Dashboards and external docs');
+  });
+
+  it('does not use a placeholder for a body evicted from history', async () => {
+    mockSnapshot(docs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+      docs[0],
+    ]);
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config },
+    );
+
+    expect(result.prompt).not.toContain('[内容已在当前上下文]');
+    expect(result.prompt).toContain('摘要：Dashboards and external docs');
+  });
+
+  it('publishes only strong metadata matches in the fast focused subtree', async () => {
+    const bodyOnly = memoryDoc(
+      'body-only-fast.md',
+      'reference',
+      'General operational note',
+      '',
+      'rare rollback marker',
+    );
+    mockSnapshot([bodyOnly]);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'rare rollback marker',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult).toHaveBeenCalledOnce();
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([]);
+    expect(onFastResult.mock.calls[0]?.[0].treeSnapshot.routerPrompt).toContain(
+      'Complete memory tree',
+    );
+  });
+
+  it('admits an exact stored keyword to the fast focused subtree', async () => {
+    const exact = {
+      ...docs[0]!,
+      keywords: ['provider fallback'],
+    };
+    mockSnapshot([exact]);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'We hit provider fallback again.',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([exact]);
+    expect(onFastResult.mock.calls[0]?.[0].focusedPrompt).toContain(
+      '[project:reference.md]',
+    );
+  });
+
+  it('does not treat a short keyword as a substring of a larger word', async () => {
+    const shortKeyword = {
+      ...docs[0]!,
+      description: 'Explain notes',
+      keywords: ['ai'],
+    };
+    mockSnapshot([shortKeyword]);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'explain this behavior',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([]);
+  });
+
+  it('prioritizes a lexically matched memory whose body version is stale', async () => {
+    const stale = {
+      ...docs[0]!,
+      title: 'Fork setup',
+      description: 'Repository migration notes',
+      keywords: [],
+      usageScenarios: [],
+      mtimeMs: 42,
+    };
+    const strong = {
+      ...docs[1]!,
+      keywords: ['migration update'],
+    };
+    mockSnapshot([strong, stale]);
+    bodyPresentVersions.set('project:reference.md', 41);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'Check the migration update.',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs[0]).toEqual(stale);
+    expect(onFastResult.mock.calls[0]?.[0].focusedPrompt).toContain(
+      '[内容已更新，需要重新读取] [project:reference.md]',
+    );
+  });
+
+  describe('selector skip on a unique strong hit (#13003)', () => {
+    const exact = { ...docs[0]!, keywords: ['provider fallback'] };
+    const query = 'We hit provider fallback again.';
+
+    beforeEach(() => {
+      process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = '1';
+      vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    });
+
+    afterEach(() => {
+      delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
+    });
+
+    it.each([
+      ['1', 'keyword', 'provider fallback', query],
+      [' TRUE ', 'keyword', 'provider fallback', query],
+      ['1', 'title', 'provider fallback', query],
+      ['1', 'title', 'api+docs', 'api+docs'],
+      ['1', 'title', 'Git文档', '请解释Git文档的格式'],
+      ['1', 'keyword', '文档git', '请查看文档git的格式'],
+      ['1', 'title', '生产部署', '检查生产部署流程'],
+      ['1', 'title', '生产部署', 'abc生产部署xyz'],
+    ])(
+      'skips the selector with flag %s and a %s hit %s in %s',
+      async (flag, field, value, searchQuery) => {
+        process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = flag;
+        const hit =
+          field === 'title'
+            ? { ...exact, title: value, keywords: [] }
+            : { ...exact, keywords: [value] };
+        // docs[1] is a weaker candidate the selector could have added; the skip
+        // narrows proactive injection to the unique strong hit on purpose.
+        mockSnapshot([hit, docs[1]!]);
+        const onFastResult = vi.fn();
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          searchQuery,
+          { config, onFastResult },
+        );
+
+        expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+        expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([hit]);
+        expect(result.selectedDocs).toEqual([hit]);
+        expect(result.strategy).toBe('heuristic');
+        expect(result.selectorSkipped).toBe(true);
+        expect(result.treeSnapshot).toBe(
+          onFastResult.mock.calls[0]?.[0].treeSnapshot,
+        );
+        expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+          config,
+          expect.objectContaining({
+            strategy: 'heuristic',
+            selector_skipped: true,
+            selector_duration_ms: 0,
+          }),
+        );
       },
     );
 
-    expect(result.strategy).toBe('model');
-    expect(result.selectedDocs).toEqual([docs[0]]);
-    expect(result.prompt).toContain('Reference Memory (reference.md)');
+    it.each([undefined, '0'])(
+      'keeps the selector when the knob is %s',
+      async (flag) => {
+        if (flag === undefined) {
+          delete process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV];
+        } else {
+          process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = flag;
+        }
+        mockSnapshot([exact, docs[1]!]);
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          query,
+          { config, onFastResult: vi.fn() },
+        );
+
+        expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+        expect(result.selectorSkipped).toBeUndefined();
+        expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+          config,
+          expect.objectContaining({ selector_skipped: false }),
+        );
+      },
+    );
+
+    it('leaves selector_skipped unset for a legacy-mode recall even with the knob on', async () => {
+      // The skip guard does not exist in legacy mode, so the recall has no
+      // skip decision to report; a constant `false` would mix into the
+      // experiment's control series.
+      process.env[RECALL_SKIP_SELECTOR_ON_UNIQUE_STRONG_HIT_ENV] = '1';
+      vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+        onFastResult: vi.fn(),
+      });
+
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
+    it('leaves selector_skipped unset when an empty corpus short-circuits the recall', async () => {
+      // The short circuit at the top of the entry point never reaches the
+      // selector, so the recall made no skip decision. `false` here would read
+      // as "the selector ran and was not skipped" and would put a trivially
+      // fast recall into the ablation's control arm, which the treatment arm
+      // structurally cannot contain — a skip requires exactly one candidate.
+      mockSnapshot([]);
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'We hit provider fallback again.',
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(result.strategy).toBe('none');
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
+    it('leaves selector_skipped unset for a whitespace-only query', async () => {
+      mockSnapshot([exact]);
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        '   ',
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(result.strategy).toBe('none');
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
+    it('keeps the selector when the unique strong fast document has a stale body', async () => {
+      const stale = {
+        ...exact,
+        mtimeMs: 42,
+      };
+      mockSnapshot([stale]);
+      bodyPresentVersions.set('project:reference.md', 41);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([stale]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it.each(['changed', 'disappeared'])(
+      'keeps the selector when the unique strong document has %s',
+      async (state) => {
+        mockSnapshot([exact]);
+        const current =
+          state === 'changed' ? { ...exact, mtimeMs: exact.mtimeMs + 1 } : null;
+        vi.mocked(rereadAutoMemoryDocument).mockResolvedValue(current);
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+          exact,
+        ]);
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          query,
+          { config, onFastResult: vi.fn() },
+        );
+
+        expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+        expect(result.selectorSkipped).toBeUndefined();
+        expect(result.selectedDocs).toEqual(current ? [current] : []);
+      },
+    );
+
+    it('keeps the selector when the strong body enters history during reread', async () => {
+      mockSnapshot([exact]);
+      vi.mocked(rereadAutoMemoryDocument).mockImplementationOnce(
+        async (doc) => {
+          bodyPresentVersions.set('project:reference.md', doc.mtimeMs);
+          return doc;
+        },
+      );
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector for a metadata-only substring match', async () => {
+      const weak = {
+        ...exact,
+        title: 'Runtime dashboard',
+        keywords: [],
+        description: 'provider fallback',
+        usageScenarios: [],
+      };
+      mockSnapshot([weak]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([weak]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a short title only matches inside a larger word', async () => {
+      // `ai` sits inside `explain` — the collision the design doc names for
+      // keywords. The keyword arm guards it; the skip gate must not accept it
+      // through the title arm, because the match then cancels the very model
+      // call that would have dropped the memory.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'ai',
+        keywords: [],
+        description: 'provider fallback',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'Explain provider fallback.',
+        { config, onFastResult },
+      );
+      // Ranking is untouched: the memory is still published as a fast
+      // candidate, it just no longer suppresses the selector.
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a longer title only matches inside a larger word', async () => {
+      // `log` sits inside `catalog` and inside `logging`. The keyword arm's
+      // boundary rule is gated on 1-2 characters, so the strict title arm has
+      // to carry its own: without it the strict and loose arms are byte-identical
+      // for every Latin title of three or more characters.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'log',
+        keywords: [],
+        description: 'logging conventions',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'explain the catalog of our logging setup',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a keyword only matches inside a larger word', async () => {
+      // `log` sits inside `catalog` — the collision the gate's own rationale
+      // names. The keyword arm reached the boundary rule only for one or two
+      // characters, so a three-character keyword kept the loose arm.
+      const innerSubstringKeyword = {
+        ...exact,
+        title: 'Build Notes',
+        keywords: ['log'],
+        description: 'the builds we ship',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringKeyword]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'explain the catalog of our builds',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringKeyword,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a multi-word title matches inside a larger word', async () => {
+      // `log conventions` sits inside `catalog conventions`, and a title with
+      // a space never reached the strict arm's single-word allowlist.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'log conventions',
+        keywords: [],
+        description: 'conventions we follow',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'explain the catalog conventions we use',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a non-Latin title matches inside a larger word', async () => {
+      // `ток` sits inside `поток`. The strict arm's allowlist was `[a-z0-9]`,
+      // so every single-word title outside Latin kept the loose arm.
+      const innerSubstringTitle = {
+        ...exact,
+        title: 'ток',
+        keywords: [],
+        description: 'поток памяти',
+        usageScenarios: [],
+      };
+      mockSnapshot([innerSubstringTitle]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'объясни поток памяти',
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+        innerSubstringTitle,
+      ]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it.each([
+      ['title', 'Git文档', '请解释 Legit文档 的格式'],
+      ['keyword', 'git文档', '请解释 Legit文档 的格式'],
+      ['title', '文档Git', '请解释 文档GitHub 的格式'],
+      ['keyword', '文档git', '请解释 文档gitHub 的格式'],
+    ])(
+      'keeps the selector when a mixed-script %s %s matches inside a larger word',
+      async (field, value, searchQuery) => {
+        const innerSubstring = {
+          ...exact,
+          title: field === 'title' ? value : 'Build Notes',
+          keywords: field === 'keyword' ? [value] : [],
+          description: '',
+          usageScenarios: [],
+        };
+        mockSnapshot([innerSubstring]);
+        const onFastResult = vi.fn();
+
+        const result = await resolveRelevantAutoMemoryPromptForQuery(
+          '/tmp/project',
+          searchQuery,
+          { config, onFastResult },
+        );
+
+        expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([
+          innerSubstring,
+        ]);
+        expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+        expect(result.selectorSkipped).toBeUndefined();
+      },
+    );
+
+    it('keeps the selector when the prompt budget trims a second fast candidate', async () => {
+      const usageScenarios = [0, 1, 2].map((n) => String(n) + 'x'.repeat(63));
+      const first = {
+        ...exact,
+        description: 'x'.repeat(512),
+        usageScenarios,
+      };
+      const longPath = Array(18).fill('中'.repeat(30)).join('/') + '/b.md';
+      const second = {
+        ...docs[1]!,
+        filePath: '/tmp/m/' + longPath,
+        relativePath: longPath,
+        filename: 'b.md',
+        title: 'Ops notes',
+        description: ('provider again ' + 'x'.repeat(512)).slice(0, 512),
+        keywords: ['alpha', 'beta'],
+        usageScenarios,
+        body: 'unrelated',
+      };
+      mockSnapshot([first, second]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([first]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when CJK-adjacent short keywords have a competing title', async () => {
+      const hit = {
+        ...memoryDoc(
+          'a-usage.md',
+          'reference',
+          'Usage notes',
+          '代码说明',
+          'unrelated text',
+        ),
+        keywords: ['ai', 'coding'],
+        mtimeMs: 1,
+      };
+      const competitor = {
+        ...memoryDoc(
+          'b-ai.md',
+          'reference',
+          'AI',
+          'general guidance',
+          'unrelated text',
+        ),
+        keywords: ['models', 'usage'],
+        mtimeMs: 2,
+      };
+      mockSnapshot([hit, competitor]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        '请用ai给出代码说明',
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([hit]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock.calls[0]?.[2],
+      ).toContainEqual(competitor);
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when a competing keyword match scores zero lexically', async () => {
+      // B's only strong-match evidence is a keyword that is a proper substring
+      // of a query token, so the whole-token scorer gives it 0 and it never
+      // enters the lexical ranking — yet it is eligible and recent, so it sits
+      // in the pool handed to the suppressed selector.
+      const unique = {
+        ...memoryDoc(
+          'a-runbook.md',
+          'reference',
+          'Deployment runbook',
+          'release steps',
+          'unrelated text',
+        ),
+        keywords: ['deployment'],
+        mtimeMs: 1,
+      };
+      const zeroScoreCompetitor = {
+        ...memoryDoc(
+          'b-deploy.md',
+          'reference',
+          'Ops notes',
+          'misc guidance',
+          'unrelated text',
+        ),
+        keywords: ['deploy'],
+        mtimeMs: 2,
+      };
+      mockSnapshot([unique, zeroScoreCompetitor]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'Check the deployment runbook.',
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([unique]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock
+          .calls[0]?.[2] ?? [],
+      ).toContainEqual(zeroScoreCompetitor);
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('leaves selector_skipped unset when the recall throws before the selector', async () => {
+      // `onFastResult` throws inside the same try that wraps the selector, so
+      // the recall reaches the heuristic fallback having made no skip decision.
+      // A constant `true` for `selectorDecided` would stamp `false` here and
+      // absorb pre-selector throws into the ablation's control series.
+      mockSnapshot([exact]);
+      const onFastResult = vi.fn().mockImplementation(() => {
+        throw new Error('fast delivery failed');
+      });
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).not.toHaveBeenCalled();
+      expect(result.strategy).toBe('heuristic');
+      const event = vi.mocked(logMemoryRecall).mock.calls.at(-1)?.[1] as {
+        selector_skipped?: boolean;
+      };
+      expect(event.selector_skipped).toBeUndefined();
+    });
+
+    it('keeps the selector when the matching body is already present', async () => {
+      mockSnapshot([exact, docs[1]!]);
+      bodyPresentVersions.set('project:reference.md', exact.mtimeMs);
+      vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+        docs[1]!,
+      ]);
+      const onFastResult = vi.fn();
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        query,
+        { config, onFastResult },
+      );
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([exact]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      expect(result.selectedDocs).toContainEqual(docs[1]!);
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when two strong matches compete', async () => {
+      const second = { ...docs[1]!, keywords: ['provider fallback'] };
+      mockSnapshot([exact, second]);
+      const onFastResult = vi.fn();
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+        onFastResult,
+      });
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toHaveLength(2);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector when a second strong match sits below the published window', async () => {
+      // Uniqueness has to be judged against the pool the suppressed selector
+      // would have been handed, not just the published fast list. Doc B is a
+      // title match ranked 7th lexically, so `fallbackDocs` (top
+      // MAX_RELEVANT_DOCS) never contains it while `modelCandidates` does.
+      const ranked = 'deploy timeout provider fallback';
+      const strongTop = {
+        ...memoryDoc(
+          'a-deploy-timeout.md',
+          'reference',
+          'deploy timeout',
+          'runbook alpha',
+          'deploy timeout provider fallback',
+        ),
+        mtimeMs: 100,
+      };
+      // Each filler outscores B (one title token plus four body tokens) while
+      // carrying exactly one query token in its metadata, so no filler is a
+      // strong match and B stays below the published window.
+      const fillers = [1, 2, 3, 4, 5].map((n) => ({
+        ...memoryDoc(
+          `filler-${n}.md`,
+          'reference',
+          `deploy notes ${n}`,
+          'alpha group checklist',
+          'deploy timeout provider fallback',
+        ),
+        mtimeMs: 90 - n,
+      }));
+      const strongBelowWindow = {
+        ...memoryDoc(
+          'b-provider-glossary.md',
+          'reference',
+          'provider',
+          'glossary entry alpha',
+          'unrelated alpha text',
+        ),
+        mtimeMs: 1,
+      };
+      mockSnapshot([strongTop, ...fillers, strongBelowWindow]);
+      const onFastResult = vi.fn();
+
+      const result = await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        ranked,
+        { config, onFastResult },
+      );
+
+      expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([strongTop]);
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+      // The suppressed selector would have seen B, so the recall was ambiguous.
+      expect(
+        vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mock
+          .calls[0]?.[2] ?? [],
+      ).toContainEqual(strongBelowWindow);
+      expect(result.selectorSkipped).toBeUndefined();
+    });
+
+    it('keeps the selector when nothing matches strongly', async () => {
+      mockSnapshot(docs);
+
+      await resolveRelevantAutoMemoryPromptForQuery(
+        '/tmp/project',
+        'unrelated weather',
+        { config, onFastResult: vi.fn() },
+      );
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector on the legacy path', async () => {
+      vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+      vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([exact]);
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+        onFastResult: vi.fn(),
+      });
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the selector when no fast result is delivered', async () => {
+      mockSnapshot([exact]);
+
+      await resolveRelevantAutoMemoryPromptForQuery('/tmp/project', query, {
+        config,
+      });
+
+      expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+    });
+  });
+
+  it('does not include selected document rereads in selector duration', async () => {
+    vi.useFakeTimers();
+    mockSnapshot(docs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return [docs[0]!];
+      },
+    );
+    vi.mocked(rereadAutoMemoryDocument).mockImplementation(async (doc) => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return doc;
+    });
+
+    const promise = resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'latency dashboard',
+      { config },
+    );
+    await vi.advanceTimersByTimeAsync(140);
+    await promise;
+
+    expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({ selector_duration_ms: 40 }),
+    );
+    vi.useRealTimers();
+  });
+
+  it('warns when a selected document is unavailable or changes during reread', async () => {
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue(docs);
+    vi.mocked(rereadAutoMemoryDocument).mockImplementation(async (doc) =>
+      doc === docs[0] ? null : doc,
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'project constraints',
+      { config },
+    );
+
+    expect(result.selectedDocs).toEqual([docs[1]]);
+    expect(debugLogger.warn).toHaveBeenCalledWith(
+      'Selected memory dropped before injection (unavailable or changed during the read): project:reference.md',
+    );
+  });
+
+  it('does not publish an unrelated stale memory in the fast result', async () => {
+    const stale = {
+      ...docs[0]!,
+      title: 'Fork setup',
+      description: 'Repository migration notes',
+      keywords: [],
+      usageScenarios: [],
+      mtimeMs: 42,
+    };
+    mockSnapshot([stale]);
+    bodyPresentVersions.set('project:reference.md', 41);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'Explain HTTP status 429.',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([]);
   });
 
   it('bounds model candidates while retaining lexical and recent documents', async () => {
@@ -559,11 +1701,7 @@ describe('auto-memory relevant recall', () => {
       ),
       mtimeMs: 0,
     };
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
-      ...lexicalDocs,
-      ...recentDocs,
-      lexicalTarget,
-    ]);
+    mockSnapshot([...lexicalDocs, ...recentDocs, lexicalTarget]);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
       async (_config, _query, candidates) =>
         candidates.includes(lexicalTarget) ? [lexicalTarget] : [],
@@ -572,7 +1710,7 @@ describe('auto-memory relevant recall', () => {
     const result = await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
       'find the overflow zephyr marker',
-      { config: {} as Config },
+      { config },
     );
 
     const modelCandidates = vi.mocked(selectRelevantAutoMemoryDocumentsByModel)
@@ -606,16 +1744,13 @@ describe('auto-memory relevant recall', () => {
       ),
       mtimeMs: 250 - index,
     }));
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
-      ...lexicalDocs,
-      ...recentDocs,
-    ]);
+    mockSnapshot([...lexicalDocs, ...recentDocs]);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
 
     await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
       'find the sparse target',
-      { config: {} as Config },
+      { config },
     );
 
     const modelCandidates = vi.mocked(selectRelevantAutoMemoryDocumentsByModel)
@@ -628,33 +1763,63 @@ describe('auto-memory relevant recall', () => {
   });
 
   it('falls back to heuristic selection when model-driven selection fails', async () => {
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    mockSnapshot(docs);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
-      new Error('selector failed'),
+      new Error('selector unavailable'),
     );
 
     const result = await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
-      'check the dashboard reference for latency',
-      {
-        config: {} as Config,
-        excludedFilePaths: ['/tmp/user.md'],
-      },
+      'check the latency dashboard',
+      { config },
     );
 
     expect(result.strategy).toBe('heuristic');
-    expect(result.selectedDocs.map((doc) => doc.filePath)).toContain(
-      '/tmp/reference.md',
-    );
-    expect(result.selectedDocs.map((doc) => doc.filePath)).not.toContain(
-      '/tmp/user.md',
+    expect(result.selectedDocs).toEqual([docs[0]]);
+    // The selector ran and then failed: a genuine control sample, so the field
+    // is reported as `false` rather than left off the series.
+    expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({ selector_skipped: false }),
     );
   });
 
-  it('keeps active tool schemas out of heuristic fallback', async () => {
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
-      activeToolDocs,
+  it('excludes already surfaced bodies before legacy heuristic fallback', async () => {
+    vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+    mockSnapshot(docs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
+      new Error('selector unavailable'),
     );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config, excludedFilePaths: new Set([docs[0]!.filePath]) },
+    );
+
+    expect(result.strategy).toBe('none');
+    expect(result.selectedDocs).not.toContain(docs[0]);
+  });
+
+  it('keeps model selection enabled when no fast model is configured', async () => {
+    vi.mocked(config.getFastModel).mockReturnValue(undefined);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+      docs[0],
+    ]);
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config },
+    );
+
+    expect(result.strategy).toBe('model');
+    expect(result.selectedDocs).toEqual([docs[0]]);
+    expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
+  });
+
+  it('keeps active tool schemas out of heuristic fallback', async () => {
+    mockSnapshot(activeToolDocs);
     let modelCandidates: ScannedAutoMemoryDocument[] = [];
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
       async (_config, _query, candidates) => {
@@ -666,10 +1831,7 @@ describe('auto-memory relevant recall', () => {
     const result = await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
       'read the ATA article with article-list-query',
-      {
-        config: {} as Config,
-        recentTools: ['mcp__ata__article-list-query'],
-      },
+      { config, recentTools: ['mcp__ata__article-list-query'] },
     );
 
     expect(modelCandidates.map((doc) => doc.filePath)).not.toContain(
@@ -688,5 +1850,104 @@ describe('auto-memory relevant recall', () => {
     expect(result.selectedDocs.map((doc) => doc.filePath)).toContain(
       '/tmp/ata-owner.md',
     );
+  });
+
+  it('applies active tool filtering to keyword and scenario matches', async () => {
+    const metadataToolDoc: ScannedAutoMemoryDocument = {
+      ...docs[0]!,
+      filePath: '/tmp/metadata-tool.md',
+      relativePath: 'metadata-tool.md',
+      title: 'Archived operational note',
+      description: 'Generic historical details',
+      keywords: ['article-list-query'],
+      usageScenarios: ['checking parameter schema'],
+      body: 'No active tool name or usage marker in the body.',
+    };
+    vi.mocked(scanAutoMemorySnapshot).mockResolvedValue({
+      docs: [metadataToolDoc],
+      sourceStatus: completeSourceStatus,
+    });
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
+      new Error('selector unavailable'),
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'use article-list-query',
+      { config, recentTools: ['mcp__ata__article-list-query'] },
+    );
+
+    expect(result.selectedDocs).toEqual([]);
+  });
+
+  it('never returns more than five documents', async () => {
+    vi.mocked(config.getFastModel).mockReturnValue(undefined);
+    vi.mocked(scanAutoMemorySnapshot).mockResolvedValue({
+      docs: Array.from({ length: 8 }, (_, index) => ({
+        ...docs[1],
+        filePath: `/tmp/project-${index}.md`,
+        relativePath: `project-${index}.md`,
+        filename: `project-${index}.md`,
+        description: `Shared release context ${index}`,
+        mtimeMs: index,
+      })),
+      sourceStatus: completeSourceStatus,
+    });
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'shared release context',
+      { config, limit: 99 },
+    );
+
+    expect(result.selectedDocs).toHaveLength(5);
+  });
+
+  it('reports only the documents the focused prompt actually rendered', async () => {
+    const capSizedDocs: ScannedAutoMemoryDocument[] = Array.from(
+      { length: 5 },
+      (_, index) => ({
+        ...docs[1]!,
+        filePath: `/tmp/cap-${index}.md`,
+        relativePath: `cap-${index}.md`,
+        filename: `cap-${index}.md`,
+        title: `t${index}${'t'.repeat(253)}`,
+        description: `d${index}${'d'.repeat(510)}`,
+        keywords: Array.from(
+          { length: 8 },
+          (_, k) => `k${index}-${k}-${'k'.repeat(58)}`,
+        ),
+        usageScenarios: Array.from(
+          { length: 3 },
+          (_, k) => `s${index}-${k}-${'s'.repeat(57)}`,
+        ),
+        mtimeMs: index,
+      }),
+    );
+    mockSnapshot(capSizedDocs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue(
+      capSizedDocs,
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'shared release context',
+      { config },
+    );
+
+    // The five cap-sized documents overflow the 6000-char focused budget, so
+    // the render trims the tail; selectedDocs must not claim undelivered docs.
+    expect(result.selectedDocs.length).toBeGreaterThan(0);
+    expect(result.selectedDocs.length).toBeLessThan(capSizedDocs.length);
+    for (const doc of result.selectedDocs) {
+      expect(result.focusedPrompt).toContain(toAutoMemoryRef(doc));
+    }
+    expect(result.focusedPrompt).toContain('另 ');
+    const renderedRefs = new Set(result.selectedDocs.map(toAutoMemoryRef));
+    for (const doc of capSizedDocs) {
+      if (!renderedRefs.has(toAutoMemoryRef(doc))) {
+        expect(result.focusedPrompt).not.toContain(toAutoMemoryRef(doc));
+      }
+    }
   });
 });

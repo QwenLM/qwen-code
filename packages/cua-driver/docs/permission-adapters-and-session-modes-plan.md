@@ -1,5 +1,10 @@
 # Active Permission Adapters and Trusted Per-Session Modes
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 **Status:** Reviewed; implementation sequencing accepted
 
 **Issues:** #2385 and #2437

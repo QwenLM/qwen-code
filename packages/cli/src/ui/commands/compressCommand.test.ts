@@ -233,12 +233,55 @@ describe('compressCommand', () => {
     }
 
     expect(messages).toEqual([
-      { messageType: 'info', content: 'Compressing context...' },
+      {
+        messageType: 'info',
+        content: 'Compressing context...',
+        contextCompression: { phase: 'progress' },
+      },
       {
         messageType: 'error',
         content: 'Could not compress chat history due to an API error.',
       },
     ]);
+  });
+
+  it('carries the ACP truncation notice on its own key', async () => {
+    const long = 'x'.repeat(3000);
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: {
+          getLlmClient: () =>
+            ({
+              tryCompressChat: mockTryCompressChat,
+            }) as unknown as LlmClient,
+        },
+      },
+      invocation: { raw: `/compress ${long}`, name: 'compress', args: long },
+    });
+
+    const result = await compressCommand.action!(ctx, '');
+    const messages = [];
+    if (result?.type === 'stream_messages') {
+      for await (const message of result.messages) {
+        messages.push(message);
+      }
+    }
+
+    // The notice keeps the daemon's sentence for text-only hosts, and carries
+    // the payload on its own key: the result frame merges into the same block
+    // and would overwrite a shared one.
+    expect(messages[0]).toEqual({
+      messageType: 'info',
+      content: expect.stringContaining('truncated'),
+      contextCompressionNotice: {
+        phase: 'notice',
+        instructionsLimit: 2000,
+      },
+    });
+    expect(messages[1]).toMatchObject({
+      contextCompression: { phase: 'progress' },
+    });
   });
 
   it('should mark estimated counts in the non-interactive message', async () => {
@@ -306,8 +349,75 @@ describe('compressCommand', () => {
       }
     }
     expect(messages).toEqual([
-      { messageType: 'info', content: 'Compressing context...' },
-      { messageType: 'info', content: 'Context compressed (~200 -> 100).' },
+      {
+        messageType: 'info',
+        content: 'Compressing context...',
+        contextCompression: { phase: 'progress' },
+      },
+      {
+        messageType: 'info',
+        content: 'Context compressed (~200 -> 100).',
+        contextCompression: {
+          phase: 'done',
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: false,
+        },
+      },
+    ]);
+  });
+
+  it('should carry a compaction warning on the ACP result payload', async () => {
+    // A host that renders the result in its own language reads the warning from
+    // this payload, so one that rode only the English sentence would be lost.
+    mockTryCompressChat.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      compressionStatus: CompressionStatus.COMPRESSED,
+      warning: 'Compaction model "small" context window too small',
+    } satisfies ChatCompressionInfo);
+
+    const ctx = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: {
+          getLlmClient: () =>
+            ({
+              tryCompressChat: mockTryCompressChat,
+            }) as unknown as LlmClient,
+        },
+      },
+    });
+
+    const result = await compressCommand.action!(ctx, '');
+
+    expect(result?.type).toBe('stream_messages');
+    const messages = [];
+    if (result?.type === 'stream_messages') {
+      for await (const message of result.messages) {
+        messages.push(message);
+      }
+    }
+    expect(messages).toEqual([
+      {
+        messageType: 'info',
+        content: 'Compressing context...',
+        contextCompression: { phase: 'progress' },
+      },
+      {
+        messageType: 'info',
+        content:
+          'Context compressed (200 -> 100).\n⚠️ Compaction model "small" context window too small',
+        contextCompression: {
+          phase: 'done',
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: false,
+          warning: 'Compaction model "small" context window too small',
+        },
+      },
     ]);
   });
 

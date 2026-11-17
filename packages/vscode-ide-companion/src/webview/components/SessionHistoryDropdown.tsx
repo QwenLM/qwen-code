@@ -33,6 +33,11 @@ function groupSessions(
   today.setHours(0, 0, 0, 0);
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
+  // Monday-first start of the current calendar week, derived from the same
+  // local day boundary as `today`/`yesterday`. Use setDate rather than
+  // millisecond arithmetic so a DST transition cannot shift the bucket edge.
+  const weekStart = new Date(today);
+  weekStart.setDate(today.getDate() - ((today.getDay() + 6) % 7));
   const groups = new Map<string, DaemonSessionSummary[]>([
     [t('group.today'), []],
     [t('group.yesterday'), []],
@@ -50,7 +55,7 @@ function groupSessions(
       if (day.getTime() === today.getTime()) label = t('group.today');
       else if (day.getTime() === yesterday.getTime()) {
         label = t('group.yesterday');
-      } else if (day.getTime() > today.getTime() - 7 * 86_400_000) {
+      } else if (day.getTime() >= weekStart.getTime()) {
         label = t('group.thisWeek');
       }
     }
@@ -578,7 +583,7 @@ export function SessionHistoryDropdown({
             </div>
           ))}
 
-          {!loading && filtered.length === 0 && (
+          {!loading && !hasMore && filtered.length === 0 && (
             <div
               style={{
                 padding: 20,
@@ -610,6 +615,24 @@ export function SessionHistoryDropdown({
             </div>
           )}
         </div>
+        {hasMore && !loading && (
+          <button
+            type="button"
+            className="qwen-session-icon-button"
+            onClick={onLoadMore}
+            style={{
+              padding: 8,
+              border: 0,
+              borderRadius: 3,
+              background: 'transparent',
+              color: 'inherit',
+              font: 'inherit',
+              cursor: 'pointer',
+            }}
+          >
+            {t('session.loadMore')}
+          </button>
+        )}
       </div>
     </>
   );

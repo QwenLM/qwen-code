@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonBackgroundTurn,
+  DaemonSessionArtifactInput,
+  DaemonInputAnnotation,
+  QwenAgentMessageMeta,
+} from '@qwen-code/sdk/daemon';
+
+import type { components } from '../components/managed/generated/managed-agent-api.js';
 
 export interface AttachmentPreviewRequest {
   name: string;
@@ -52,17 +59,32 @@ export interface DaemonMessageToolCall {
   toolName: string;
   args?: Record<string, unknown>;
   executionMode?: 'foreground' | 'background';
+  subagentSessionReady?: boolean;
+  backgroundResultPending?: boolean;
   status: DaemonMessageToolCallStatus;
   parentToolCallId?: string;
+  /** The producer's own call ID when `callId` is keyed by something else. */
+  toolCallId?: string;
+  /** Stable producer identity from the daemon tool-block projection only. */
+  generatedUiToolCallId?: string;
   title?: string;
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
+  toolResult?: components['schemas']['PublicToolResult'];
+  toolDetailsRevision?: number;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
   startTime?: number;
   endTime?: number;
   wasCancelled?: boolean;
   subContent?: string;
+  /**
+   * Path-style identity of the agent that produced this call's sub-content,
+   * e.g. `/root/general-purpose`. Carried from the transcript block's `agent`
+   * field so the panel can name a subagent precisely instead of by type alone
+   * — two parallel subagents of the same type are otherwise indistinguishable.
+   */
+  agentPath?: string;
   subTools?: DaemonMessageToolCall[];
   /** Transcript blocks folded into this tool presentation. */
   sourceBlockIds?: string[];
@@ -77,10 +99,34 @@ export interface DaemonMessageTodoItem {
 }
 
 /**
+ * Who wrote a message when a transcript has more than one assistant voice, as
+ * in a conversation several workspace agents work in. Absent in an ordinary
+ * session, where the assistant needs no name.
+ */
+export interface DaemonMessageAuthor {
+  name: string;
+  /** The agent's own color, when it has one. */
+  color?: string;
+}
+
+/**
  * Fields shared by every history message. Kept as a base interface so a new
  * cross-cutting field is declared once rather than on each role.
  */
 export interface DaemonMessageMeta {
+  sourceRecordIds?: string[];
+  localCommandId?: string;
+  backgroundTurn?: DaemonBackgroundTurn;
+  /**
+   * Admitted prompt this message belongs to, copied from the daemon-stamped
+   * `promptId` of the transcript blocks it was built from.
+   *
+   * Unlike a block id (a per-projection ordinal), this survives a reload: the
+   * live stream stamps it on assistant blocks, and a replay stamps it on the
+   * user block, which is the same value the turn's persisted record carries.
+   * Undefined for locally appended messages the daemon has not echoed yet.
+   */
+  promptId?: string;
   /**
    * Wall-clock epoch milliseconds when the backing transcript block was first
    * observed, populated from `serverTimestamp ?? clientReceivedAt`. Surfaced
@@ -90,6 +136,7 @@ export interface DaemonMessageMeta {
   timestamp?: number;
   /** Stable transcript blocks folded into this rendered message. */
   sourceBlockIds?: string[];
+  author?: DaemonMessageAuthor;
 }
 
 export interface DaemonUserMessage extends DaemonMessageMeta {
@@ -111,9 +158,12 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
   }>;
   inputAnnotations?: DaemonInputAnnotation[];
   source?: string;
+  /** `_meta.qwenAgentMessage` of an @-mention (`kind: 'agent_mention'`). */
+  agentMessage?: QwenAgentMessageMeta;
 }
 
 export interface DaemonAssistantMessage extends DaemonMessageMeta {
+  reportedArtifacts?: DaemonSessionArtifactInput[];
   id: string;
   role: 'assistant';
   content: string;
@@ -126,6 +176,11 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
    * Absent on sessions whose agent predates usage stamping.
    */
   usage?: { inputTokens: number; outputTokens: number; cachedTokens?: number };
+  /**
+   * `_meta.qwenAgentMessage` of a workspace agent's reply in this session
+   * (`kind: 'agent_message'`): its run status, error, steps and tokens.
+   */
+  agentMessage?: QwenAgentMessageMeta;
 }
 
 export interface DaemonThinkingMessage extends DaemonMessageMeta {

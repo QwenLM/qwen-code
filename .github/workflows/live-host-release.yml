@@ -49,7 +49,9 @@ env:
 jobs:
   prepare:
     name: 'Prepare Live Host release'
-    runs-on: 'ubuntu-latest'
+    # PR runs stay hosted; only release dispatches use the persistent pool.
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     outputs:
       tag: '${{ steps.version.outputs.tag }}'
@@ -357,10 +359,11 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: 'Install dependencies'
-        run: 'npm install --ignore-scripts'
+        run: 'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only'
 
-      - name: 'Build dependency chain (core → acp-bridge → sdk → qwen-live)'
+      - name: 'Build dependency chain (browser-use → core → acp-bridge → sdk → qwen-live)'
         run: |-
+          npm run build --workspace @qwen-code/browser-use
           npm run build --workspace @qwen-code/qwen-code-core
           npm run build --workspace @qwen-code/acp-bridge
           npm run build --workspace @qwen-code/sdk

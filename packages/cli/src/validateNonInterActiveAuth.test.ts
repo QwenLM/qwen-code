@@ -290,6 +290,26 @@ describe('validateNonInterActiveAuth', () => {
     expect(processExitSpy).toHaveBeenCalledWith(1);
   });
 
+  it('does not broaden enforced OpenAI auth to the Responses API', async () => {
+    mockSettings.merged.security!.auth!.enforcedType = AuthType.USE_OPENAI;
+    const nonInteractiveConfig = createMockConfig({
+      refreshAuth: refreshAuthMock,
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi
+          .fn()
+          .mockReturnValue(AuthType.USE_OPENAI_RESPONSES),
+      }),
+    });
+
+    await expect(
+      validateNonInteractiveAuth(undefined, nonInteractiveConfig, mockSettings),
+    ).rejects.toThrow('process.exit(1) called');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'The configured auth type is openai, but the current auth type is openai-responses. Please re-authenticate with the correct type.',
+    );
+    expect(refreshAuthMock).not.toHaveBeenCalled();
+  });
+
   describe('JSON output mode', () => {
     let emitResultMock: ReturnType<typeof vi.fn>;
     let runExitCleanupMock: ReturnType<typeof vi.fn>;

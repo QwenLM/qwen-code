@@ -1,0 +1,27 @@
+name: 'Prepare isolated release runner'
+description: 'Wipes the workspace and isolates Git/npm/Docker/gh state before a release job checks out on a persistent self-hosted machine. No-op on GitHub-hosted runners.'
+
+runs:
+  using: 'composite'
+  steps:
+    # This runs before actions/checkout, so the scripts are not on disk yet and
+    # have to come from the API at the pinned workflow SHA.
+    - name: 'Prepare isolated release runner'
+      if: "${{ runner.environment == 'self-hosted' }}"
+      working-directory: '${{ runner.temp }}'
+      env:
+        GH_TOKEN: '${{ github.token }}'
+        WORKFLOW_SHA: '${{ github.workflow_sha }}'
+      shell: 'bash'
+      run: |-
+        set -euo pipefail
+        bootstrap=$(mktemp -d "${RUNNER_TEMP:?}/release-bootstrap.XXXXXX")
+        trap 'rm -rf -- "$bootstrap"' EXIT
+        export GH_CONFIG_DIR="$bootstrap/gh"
+        mkdir -p "$GH_CONFIG_DIR"
+        for script in prepare-release-runner.sh check-disk-floor.sh; do
+          gh api "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/${script}?ref=${WORKFLOW_SHA}" --jq .content | base64 --decode > "$bootstrap/$script"
+        done
+        bash "$bootstrap/prepare-release-runner.sh"
+        node -e 'if (Number(process.versions.node.split(".")[0]) !== 22) throw new Error("Release hosts require Node 22")'
+        bash "$bootstrap/check-disk-floor.sh" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"

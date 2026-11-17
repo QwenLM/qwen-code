@@ -8,11 +8,14 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 
 const cleanupFunctions: Array<(() => void) | (() => Promise<void>)> = [];
+let exitCleanupPromise: Promise<void> | undefined;
 
 export function registerCleanup(
   fn: (() => void) | (() => Promise<void>),
+  options: { first?: boolean } = {},
 ): () => void {
-  cleanupFunctions.push(fn);
+  if (options.first) cleanupFunctions.unshift(fn);
+  else cleanupFunctions.push(fn);
   return () => {
     const index = cleanupFunctions.indexOf(fn);
     if (index !== -1) cleanupFunctions.splice(index, 1);
@@ -65,8 +68,19 @@ export interface RunExitCleanupOptions {
   _testOverallTimeoutMs?: number;
 }
 
-export async function runExitCleanup(
+export function runExitCleanup(
   options: RunExitCleanupOptions = {},
+): Promise<void> {
+  if (exitCleanupPromise) return exitCleanupPromise;
+  const cleanup = runExitCleanupPass(options).finally(() => {
+    if (exitCleanupPromise === cleanup) exitCleanupPromise = undefined;
+  });
+  exitCleanupPromise = cleanup;
+  return cleanup;
+}
+
+async function runExitCleanupPass(
+  options: RunExitCleanupOptions,
 ): Promise<void> {
   const perFn = options._testPerFnTimeoutMs ?? PER_CLEANUP_TIMEOUT_MS;
   const overall = options._testOverallTimeoutMs ?? OVERALL_CLEANUP_TIMEOUT_MS;
@@ -106,6 +120,7 @@ export async function runExitCleanup(
  */
 export function _resetCleanupFunctionsForTest(): void {
   cleanupFunctions.length = 0;
+  exitCleanupPromise = undefined;
 }
 
 export async function cleanupCheckpoints() {

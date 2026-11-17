@@ -12,6 +12,7 @@ rm -rf dist/
 rm -rf "$ROOT_DIR/native-host/dist/"
 rm -f "$ROOT_DIR/native-host/tsconfig.tsbuildinfo"
 rm -f chrome-extension.zip
+rm -f chrome-extension-store.zip
 
 # Remove log files (ignore permission issues)
 rm -f "$HOME/.qwen/chrome-bridge/qwen-bridge-host.log" 2>/dev/null || true

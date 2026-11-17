@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { reportError } from './errorReporting.js';
+import { userText } from '../test-utils/model-fixtures.js';
 
 const debugLoggerSpy = vi.hoisted(() => ({
   error: vi.fn(),
@@ -54,10 +55,7 @@ describe('reportError', () => {
     const error = new Error('API failed');
     const baseMessage = 'Error generating text content via API.';
     const context = [
-      {
-        role: 'user',
-        parts: [{ text: 'secret prompt that should not be in debug logs' }],
-      },
+      userText('secret prompt that should not be in debug logs'),
     ];
 
     await reportError(error, baseMessage, context, 'generateText-api');
@@ -74,12 +72,7 @@ describe('reportError', () => {
     const error = new Error('API failed');
     const baseMessage = 'Error generating text content via API.';
     const context = {
-      requestContents: [
-        {
-          role: 'user',
-          parts: [{ text: 'secret object prompt' }],
-        },
-      ],
+      requestContents: [userText('secret object prompt')],
       requestConfig: { apiKey: 'secret-api-key' },
     };
 

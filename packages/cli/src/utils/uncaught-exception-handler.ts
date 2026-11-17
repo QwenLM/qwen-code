@@ -28,9 +28,16 @@ export function isExpectedPtyRaceError(error: unknown): boolean {
   const message = error.message;
   const code = getErrnoCode(error);
 
+  // The direction of the failed I/O does not change the class of the race:
+  // `write EIO` is the same pty teardown as `read EIO`, only observed from the
+  // other side. It is what Ink's throttled log write raises once the terminal
+  // is closed or detached, and node delivers it asynchronously out of the
+  // stream write callback, so it lands here as an uncaughtException (#11783).
   if (
     (code === 'EIO' && message.includes('read')) ||
-    message.includes('read EIO')
+    message.includes('read EIO') ||
+    (code === 'EIO' && message.includes('write')) ||
+    message.includes('write EIO')
   ) {
     return true;
   }

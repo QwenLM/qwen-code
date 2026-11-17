@@ -307,3 +307,208 @@ describe('resolveChannelWorkspaceGroups', () => {
     });
   });
 });
+
+describe('resolveChannelWorkspaceGroups preferredOwners', () => {
+  const sharedEntry = { telegram: { type: 'telegram' } };
+
+  it('breaks an ambiguous tie in favor of the workspace that asked', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces(),
+      selection: { mode: 'names', names: ['telegram'] },
+      loadChannelsConfig: loader({
+        [PRIMARY]: sharedEntry,
+        [SECONDARY]: sharedEntry,
+      }),
+      preferredOwners: new Map([['telegram', SECONDARY]]),
+    });
+    expect(result).toEqual({
+      ok: true,
+      groups: [
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['telegram'] },
+        },
+      ],
+    });
+  });
+
+  it('ignores a hint that names a workspace which does not own the channel', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces(),
+      selection: { mode: 'names', names: ['telegram'] },
+      loadChannelsConfig: loader({
+        [PRIMARY]: sharedEntry,
+        [SECONDARY]: sharedEntry,
+      }),
+      preferredOwners: new Map([['telegram', UNREGISTERED]]),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe('ambiguous_channel_workspace');
+    }
+  });
+
+  it('still applies the owner trust check to a hinted workspace', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces({ secondary: false }),
+      selection: { mode: 'names', names: ['telegram'] },
+      loadChannelsConfig: loader({
+        [PRIMARY]: sharedEntry,
+        [SECONDARY]: sharedEntry,
+      }),
+      preferredOwners: new Map([['telegram', SECONDARY]]),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatchObject({
+        code: 'untrusted_workspace',
+        channel: 'telegram',
+      });
+    }
+  });
+
+  it('does not move a channel that already has exactly one owner', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces(),
+      selection: { mode: 'names', names: ['telegram'] },
+      loadChannelsConfig: loader({
+        [PRIMARY]: { telegram: { type: 'telegram' } },
+      }),
+      preferredOwners: new Map([['telegram', SECONDARY]]),
+    });
+    expect(result).toEqual({
+      ok: true,
+      groups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['telegram'] },
+        },
+      ],
+    });
+  });
+});
+
+describe('resolveChannelWorkspaceGroups tolerant names', () => {
+  it('drops a tolerated name and keeps grouping the rest', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces(),
+      selection: { mode: 'names', names: ['telegram', 'feishu'] },
+      loadChannelsConfig: loader({
+        [PRIMARY]: { feishu: { type: 'feishu' } },
+      }),
+      tolerant: new Set(['telegram']),
+    });
+    expect(result).toEqual({
+      ok: true,
+      groups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['feishu'] },
+        },
+      ],
+      skipped: [
+        {
+          code: 'channel_workspace_mismatch',
+          channel: 'telegram',
+          message: expect.stringContaining('"telegram"'),
+        },
+      ],
+    });
+  });
+
+  it('keeps a name outside the tolerant set fail-fast', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces(),
+      selection: { mode: 'names', names: ['telegram', 'feishu'] },
+      loadChannelsConfig: loader({}),
+      tolerant: new Set(['telegram']),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatchObject({
+        code: 'channel_workspace_mismatch',
+        channel: 'feishu',
+      });
+    }
+  });
+
+  it('tolerates an untrusted owner and an ambiguous name alike', () => {
+    const shared = { telegram: { type: 'telegram' } };
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces({ secondary: false }),
+      selection: { mode: 'names', names: ['telegram', 'feishu'] },
+      loadChannelsConfig: loader({
+        [PRIMARY]: { ...shared, feishu: { type: 'feishu' } },
+        [SECONDARY]: { feishu: { type: 'feishu' } },
+      }),
+      tolerant: new Set(['telegram', 'feishu']),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.groups).toEqual([
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['telegram'] },
+        },
+      ]);
+      expect(result.skipped).toEqual([
+        {
+          code: 'ambiguous_channel_workspace',
+          channel: 'feishu',
+          message: expect.stringContaining('multiple registered workspaces'),
+        },
+      ]);
+    }
+  });
+
+  it('returns no groups when every name is skipped', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces(),
+      selection: { mode: 'names', names: ['telegram', 'feishu'] },
+      loadChannelsConfig: loader({}),
+      tolerant: new Set(['telegram', 'feishu']),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.groups).toEqual([]);
+      expect(result.skipped?.map((skip) => skip.channel)).toEqual([
+        'telegram',
+        'feishu',
+      ]);
+    }
+  });
+
+  it('resolves a tolerated name normally when a hint settles it', () => {
+    const shared = { telegram: { type: 'telegram' } };
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces(),
+      selection: { mode: 'names', names: ['telegram'] },
+      loadChannelsConfig: loader({ [PRIMARY]: shared, [SECONDARY]: shared }),
+      preferredOwners: new Map([['telegram', SECONDARY]]),
+      tolerant: new Set(['telegram']),
+    });
+    expect(result).toEqual({
+      ok: true,
+      groups: [
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['telegram'] },
+        },
+      ],
+    });
+  });
+
+  it('omits `skipped` entirely when the caller passes neither option', () => {
+    const result = resolveChannelWorkspaceGroups({
+      workspaces: workspaces(),
+      selection: { mode: 'names', names: ['telegram'] },
+      loadChannelsConfig: loader({
+        [PRIMARY]: { telegram: { type: 'telegram' } },
+      }),
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(Object.hasOwn(result, 'skipped')).toBe(false);
+    }
+  });
+});

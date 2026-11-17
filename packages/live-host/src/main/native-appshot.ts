@@ -15,11 +15,26 @@ export type NativeAppshotCapture = {
   screenshot: Uint8Array;
 };
 
+export type NativeDisplay = {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+};
+
+export type NativeDisplayCapture = {
+  displayId: string;
+  screenshot: Uint8Array;
+};
+
 export type NativeAppshot = {
   getPermissionState: () => NativeAppshotPermissions;
   requestAccessibility: () => boolean;
   requestScreenRecording: () => boolean;
   captureAppshot: () => Promise<NativeAppshotCapture>;
+  listDisplays: () => NativeDisplay[];
+  captureDisplay: (displayId: string) => Promise<NativeDisplayCapture>;
 };
 
 let loaded: NativeAppshot | undefined;

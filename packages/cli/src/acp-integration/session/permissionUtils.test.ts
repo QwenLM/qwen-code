@@ -273,6 +273,47 @@ describe('permissionUtils', () => {
     });
   });
 
+  it('forwards the complete plain-text Goal approval prompt', () => {
+    const prompt = 'Replace the paused Goal?\n\nOutcome: fix **all** tests.';
+    expect(
+      buildPermissionRequestContent({
+        type: 'info',
+        title: 'Set this as the session Goal?',
+        prompt,
+        renderPromptAsPlainText: true,
+        onConfirm: async () => undefined,
+      }),
+    ).toEqual([{ type: 'content', content: { type: 'text', text: prompt } }]);
+  });
+
+  it('preserves the existing content contract for other info approvals', () => {
+    expect(
+      buildPermissionRequestContent({
+        type: 'info',
+        title: 'Confirm',
+        prompt: 'Existing informational prompt',
+        onConfirm: async () => undefined,
+      }),
+    ).toEqual([]);
+  });
+
+  it('forwards explicit execution approval details without changing other exec approvals', () => {
+    const confirmation = {
+      type: 'exec' as const,
+      title: 'Delegate to another workspace',
+      command: 'Summarize the README.\nInclude the version.',
+      rootCommand: 'create_sub_session',
+      onConfirm: async () => undefined,
+    };
+    const approvalText = `Workspace: "/repos/b"\n\n${confirmation.command}`;
+    expect(
+      buildPermissionRequestContent({ ...confirmation, approvalText }),
+    ).toEqual([
+      { type: 'content', content: { type: 'text', text: approvalText } },
+    ]);
+    expect(buildPermissionRequestContent(confirmation)).toEqual([]);
+  });
+
   it('places warnings before edit diff content', () => {
     const content = buildPermissionRequestContent({
       type: 'edit',

@@ -36,7 +36,7 @@ const argv = yargs(hideBin(process.argv))
     alias: 'skip-npm-install-build',
     type: 'boolean',
     default: false,
-    description: 'skip npm install + npm run build',
+    description: 'skip dependency install + npm run build',
   })
   .option('f', {
     alias: 'dockerfile',
@@ -91,7 +91,7 @@ if (!image.length) {
 }
 
 if (!argv.s) {
-  execSync('npm install', { stdio: 'inherit' });
+  execSync('corepack pnpm install --frozen-lockfile', { stdio: 'inherit' });
   execSync('npm run build', { stdio: 'inherit' });
 
   console.log('bundling...');

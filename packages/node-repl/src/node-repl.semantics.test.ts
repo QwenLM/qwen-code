@@ -25,8 +25,8 @@ function makeManager(): NodeReplKernelManager {
   return manager;
 }
 
-afterEach(() => {
-  while (managers.length > 0) managers.pop()?.dispose();
+afterEach(async () => {
+  await Promise.all(managers.splice(0).map((manager) => manager.dispose()));
 });
 
 function textOf(events: Array<{ type: string; text?: string }>): string {
@@ -37,6 +37,24 @@ function textOf(events: Array<{ type: string; text?: string }>): string {
 }
 
 describe('binding semantics through the real kernel', () => {
+  it.each([
+    ['1 + 1', ''],
+    ['nodeRepl.write(carried)', '1'],
+    ['carried += 1\nnodeRepl.write(carried) // trailing comment', '2'],
+  ])(
+    'accepts a semicolon-free cell after carried bindings: %s',
+    async (code, expected) => {
+      const manager = makeManager();
+      expect(
+        (await manager.exec({ code: 'var carried = 1;', timeoutMs: 30_000 }))
+          .status,
+      ).toBe('ok');
+      const result = await manager.exec({ code, timeoutMs: 30_000 });
+      expect(result.status).toBe('ok');
+      expect(textOf(result.events).trim()).toBe(expected);
+    },
+  );
+
   it('persists a var declared inside a block across cells', async () => {
     const manager = makeManager();
     const first = await manager.exec({
@@ -314,6 +332,69 @@ describe('binding semantics through the real kernel', () => {
     expect(viaBytes.events.some((e) => e.type === 'image')).toBe(true);
   });
 
+  it('carries structured image metadata across the kernel boundary', async () => {
+    const manager = makeManager();
+    const png =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const result = await manager.exec({
+      code: `await nodeRepl.emitImage({ bytes: Uint8Array.from(atob("${png}"), (c) => c.charCodeAt(0)), mimeType: "image/png", metadata: { width: 1, height: 1, coordinateSpace: "css-pixels" } });`,
+      timeoutMs: 30_000,
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.events.find((event) => event.type === 'image')).toMatchObject(
+      {
+        metadata: '{"width":1,"height":1,"coordinateSpace":"css-pixels"}',
+      },
+    );
+  });
+
+  it('preserves large metadata without a separate size cap', async () => {
+    const manager = makeManager();
+    const png =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const result = await manager.exec({
+      code: `await nodeRepl.emitImage({ bytes: Uint8Array.from(atob("${png}"), c => c.charCodeAt(0)), mimeType: "image/png", metadata: "界".repeat(20000) });`,
+      timeoutMs: 30_000,
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.events.find((event) => event.type === 'image')).toMatchObject(
+      { metadata: JSON.stringify('界'.repeat(20000)) },
+    );
+  });
+
+  it.each([
+    ['function', '() => {}', /metadata must be JSON-serializable/],
+    ['bigint', '1n', /BigInt/],
+    [
+      'circular',
+      '(() => { const value = {}; value.self = value; return value; })()',
+      /circular/i,
+    ],
+  ])(
+    'rejects %s metadata without emitting its image',
+    async (_, value, error) => {
+      const manager = makeManager();
+      const png =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      const result = await manager.exec({
+        code: `await nodeRepl.emitImage({ bytes: Uint8Array.from(atob("${png}"), c => c.charCodeAt(0)), mimeType: "image/png", metadata: ${value} });`,
+        timeoutMs: 30_000,
+      });
+
+      expect(result.status).toBe('error');
+      expect(result.error?.message).toMatch(error);
+      expect(result.events.some((event) => event.type === 'image')).toBe(false);
+      const next = await manager.exec({
+        code: 'nodeRepl.write("still usable");',
+        timeoutMs: 30_000,
+      });
+      expect(next.status).toBe('ok');
+      expect(textOf(next.events)).toBe('still usable');
+    },
+  );
+
   it('caps live sandbox timers instead of letting one cell saturate the loop', async () => {
     const manager = makeManager();
     const r = await manager.exec({
@@ -373,7 +454,7 @@ describe('binding semantics through the real kernel', () => {
       // The kernel child's cwd is `work`; on Windows a directory that is any
       // process's cwd cannot be removed (EBUSY). Dispose first, then retry
       // the removal across the child's asynchronous teardown.
-      manager.dispose();
+      await manager.dispose();
       fs.rmSync(store, {
         recursive: true,
         force: true,

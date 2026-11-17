@@ -18,7 +18,7 @@ import {
   type BackgroundApproval,
 } from '@qwen-code/qwen-code-core';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
-import * as useStatusLineModule from '../hooks/useStatusLine.js';
+import * as useStatusLineModule from '../hooks/use-ink-status-line.js';
 import * as useMCPHealthModule from '../hooks/useMCPHealth.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
 import {
@@ -36,7 +36,7 @@ import { StreamingState } from '../types.js';
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
-vi.mock('../hooks/useStatusLine.js');
+vi.mock('../hooks/use-ink-status-line.js');
 const useStatusLineMock = vi.mocked(useStatusLineModule.useStatusLine);
 
 vi.mock('../hooks/useMCPHealth.js');
@@ -189,6 +189,7 @@ const createBackgroundTaskState = (
   selectedIndex: 0,
   dialogMode: 'closed',
   dialogOpen: false,
+  autoOpened: false,
   pillFocused: false,
   livePanelFocused: false,
   livePanelSelectedIndex: 0,
@@ -266,6 +267,26 @@ const renderAtLayoutWidth = (
 };
 
 describe('<Footer />', () => {
+  it.each([true, false])(
+    'shows persistent requested mode separately from keyword state (available=%s)',
+    (available) => {
+      const { lastFrame } = renderWithWidth(
+        180,
+        createMockUIState({ workflowKeywordActive: false }),
+        {
+          getWorkflowMode: () => ({
+            requested: true,
+            available,
+            effective: available,
+          }),
+        },
+      );
+      expect(lastFrame()).toContain(
+        available ? 'Workflow mode: on' : 'Workflow mode: on (unavailable)',
+      );
+      expect(lastFrame()).not.toContain('workflow active');
+    },
+  );
   beforeEach(() => {
     useStatusLineMock.mockReturnValue({
       lines: [],
@@ -281,6 +302,21 @@ describe('<Footer />', () => {
       connectingCount: 0,
       connectedCount: 0,
     });
+  });
+
+  it('shows the current runtime tool policy in the footer', () => {
+    const { lastFrame } = renderWithWidth(180, createMockUIState(), {
+      getShellExecutionSandbox: () => ({
+        requestedBackend: 'bwrap',
+        effectiveBackend: 'bwrap',
+        enforcement: 'full',
+        filesystem: 'read-only',
+        network: 'closed',
+      }),
+    });
+    expect(lastFrame()).toContain(
+      'tools / bwrap → bwrap (full) / read-only / command network: closed',
+    );
   });
 
   it('attaches the selectable-region ref to its outer box', () => {

@@ -14,7 +14,9 @@
 use super::bindings::*;
 use super::window_scope::{decide_window_scope, TopLevelCandidate, WindowScope};
 use core_foundation::base::{CFEqual, CFHash, CFRelease, CFRetain, CFTypeRef};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::time::{Duration, Instant};
 
 /// Default maximum depth for AX tree walks. Deep menus and complex web views
 /// can nest deeply; 25 covers realistic app chrome without exploding on
@@ -41,8 +43,29 @@ pub const DEFAULT_MAX_ELEMENTS: usize = 2_000;
 /// indefinitely.
 const AX_MESSAGING_TIMEOUT_SECONDS: f32 = 2.0;
 
-unsafe fn set_messaging_timeout(element: AXUIElementRef) {
-    let _ = AXUIElementSetMessagingTimeout(element, AX_MESSAGING_TIMEOUT_SECONDS);
+#[derive(Default)]
+struct ObservationWalkBudget {
+    started: Option<Instant>,
+    exhausted: bool,
+}
+
+impl ObservationWalkBudget {
+    fn admit(&mut self) -> bool {
+        let started = self.started.get_or_insert_with(Instant::now);
+        self.exhausted |= started.elapsed() >= Duration::from_secs(1);
+        !self.exhausted
+    }
+}
+
+unsafe fn set_messaging_timeout(element: AXUIElementRef, deadline: Option<Instant>) {
+    let timeout = deadline.map_or(AX_MESSAGING_TIMEOUT_SECONDS, |deadline| {
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_secs_f32()
+            .min(AX_MESSAGING_TIMEOUT_SECONDS)
+            .max(0.001)
+    });
+    let _ = AXUIElementSetMessagingTimeout(element, timeout);
 }
 
 #[derive(Debug)]
@@ -117,7 +140,7 @@ impl Hash for AXIdentity {
 }
 
 /// A single node in the AX tree.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AXNode {
     /// 0-based index (Some = actionable, None = non-actionable display-only node)
     pub element_index: Option<usize>,
@@ -131,6 +154,11 @@ pub struct AXNode {
     /// Calculator buttons where AXTitle="" but AXDescription="2".
     pub description: Option<String>,
     pub identifier: Option<String>,
+    pub rich_text: Option<super::app_text::RichText>,
+    pub url: Option<String>,
+    pub title_ui_element: Option<AXIdentity>,
+    pub selectable: bool,
+    pub table_row: bool,
     pub help: Option<String>,
     pub actions: Vec<String>,
     /// The raw AXUIElementRef pointer value, for caching.
@@ -165,6 +193,8 @@ pub struct AXNode {
     /// This trust marker is independent of actionable ancestry because
     /// AXWebArea is commonly non-actionable and therefore has no element index.
     pub in_web_content: bool,
+    pub focused: Option<bool>,
+    pub focusable_or_selectable: bool,
 }
 
 #[derive(Default)]
@@ -209,10 +239,12 @@ pub struct TreeWalkResult {
     pub tree_markdown: String,
     pub nodes: Vec<AXNode>,
     pub complete: bool,
+    /// All attempted AX reads succeeded, even if traversal reached a budget.
+    pub read_complete: bool,
     /// Bounded trace naming why `complete` is false (attribute + AX error),
     /// drained from the walk's thread-local recorder. Empty on complete walks.
     pub incomplete_notes: Vec<String>,
-    /// True when the walk was cut short by the MAX_ELEMENTS cap.
+    /// True when the walk was cut short by a node, depth or time budget.
     pub truncated: bool,
     /// Whether the requested `window_id` actually resolved to an AX surface,
     /// and if not, why. `None` when no `window_id` was requested.
@@ -264,6 +296,86 @@ pub fn walk_tree_bounded(
     max_elements: usize,
     max_depth: usize,
 ) -> TreeWalkResult {
+    walk_tree_with_deadline(
+        pid,
+        window_id,
+        query,
+        max_elements,
+        max_depth,
+        false,
+        None,
+        None,
+        None,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalkMode {
+    Legacy,
+    AppWindow,
+    AppMenu,
+}
+
+fn observation_text(value: Option<&str>, mode: WalkMode) -> String {
+    let value = value.unwrap_or_default();
+    if mode == WalkMode::Legacy {
+        value.trim().to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+pub(crate) fn walk_tree_with_context(
+    pid: i32,
+    window_id: Option<u32>,
+    query: Option<&str>,
+    max_elements: usize,
+    max_depth: usize,
+    app_context: bool,
+    readiness_deadline: Option<Instant>,
+) -> TreeWalkResult {
+    walk_tree_with_deadline(
+        pid,
+        window_id,
+        query,
+        max_elements,
+        max_depth,
+        app_context,
+        readiness_deadline,
+        None,
+        Some(ObservationWalkBudget::default()),
+    )
+}
+
+pub(crate) fn walk_tree_for_recording(
+    pid: i32,
+    window_id: u32,
+    budget: Duration,
+) -> TreeWalkResult {
+    walk_tree_with_deadline(
+        pid,
+        Some(window_id),
+        None,
+        DEFAULT_MAX_ELEMENTS,
+        DEFAULT_MAX_DEPTH,
+        false,
+        None,
+        Some(Instant::now() + budget),
+        None,
+    )
+}
+
+fn walk_tree_with_deadline(
+    pid: i32,
+    window_id: Option<u32>,
+    query: Option<&str>,
+    max_elements: usize,
+    max_depth: usize,
+    app_context: bool,
+    readiness_deadline: Option<Instant>,
+    deadline: Option<Instant>,
+    mut observation_budget: Option<ObservationWalkBudget>,
+) -> TreeWalkResult {
     let mut nodes: Vec<AXNode> = Vec::new();
     let mut lines: Vec<(usize, String)> = Vec::new(); // (depth, line)
     let mut index_counter = 0usize;
@@ -272,7 +384,8 @@ pub fn walk_tree_bounded(
     // Set to true only when walk_element actually stops early due to the cap —
     // avoids a false-positive when the tree naturally ends on exactly the cap.
     let mut truncated = false;
-    let mut complete = true;
+    let mut complete: bool;
+    let mut web_area_seen = false;
     let mut window_scope: Option<WindowScope> = None;
     super::bindings::reset_incomplete_notes();
 
@@ -283,6 +396,7 @@ pub fn walk_tree_bounded(
             return TreeWalkResult {
                 tree_markdown: String::new(),
                 nodes,
+                read_complete: false,
                 complete: false,
                 incomplete_notes: super::bindings::take_incomplete_notes(),
                 truncated: false,
@@ -291,53 +405,57 @@ pub fn walk_tree_bounded(
                 window_scope: window_id.map(|_| WindowScope::AxUnresolved { ax_window_count: 0 }),
             };
         }
-        set_messaging_timeout(app_elem);
+        set_messaging_timeout(app_elem, deadline);
 
         // Chromium/Electron apps (Arc, VS Code, Electron shells) ship their
         // web-content AX tree OFF and only build it once an assistive client
         // asks for it. Without this, the first walk of such an app returns an
         // empty/title-bar-only tree (#1616). Flip the enablement attribute,
-        // then — only when the flip actually took and only the first time we
-        // see this process lifetime — let the asynchronously-built tree settle
-        // before we read it. Native Cocoa apps reject the attribute, so they
-        // pay no settle cost. This relies on the MAX_ELEMENTS node cap to keep
-        // the now-materialized (potentially large) tree bounded.
-        super::enablement::ensure_chromium_ax_enabled(pid, app_elem);
+        // then let an explicit AX observation wait within its shared readiness
+        // deadline. Recording and action/fact readers never wait for a WebArea.
+        // The materialized tree remains subject to the existing traversal caps.
+        let readiness =
+            super::enablement::ensure_chromium_ax_enabled(pid, app_elem, readiness_deadline);
+        set_messaging_timeout(app_elem, deadline);
 
-        // Union AXChildren + AXWindows — the only way to see background windows.
-        // AXChildren omits windows when the app isn't frontmost (AppKit limitation).
-        // AXWindows returns the window list regardless of activation state.
-        let from_children = copy_children_with_status(app_elem);
-        let from_windows = copy_ax_windows_with_status(app_elem);
-        complete &= from_children.complete && from_windows.complete;
+        let launch_deadline = super::launch::lookup_deadline(readiness_deadline);
+        let mut remote_probe_attempted = false;
+        let (mut walk_these, top_level) = 'resolve: loop {
+            let attempt_started = Instant::now();
+            complete = true;
+            super::bindings::reset_incomplete_notes();
+            // Union AXChildren + AXWindows — the only way to see background windows.
+            // AXChildren omits windows when the app isn't frontmost (AppKit limitation).
+            // AXWindows returns the window list regardless of activation state.
+            let from_children = copy_children_with_status(app_elem);
+            let from_windows = copy_ax_windows_with_status(app_elem);
+            complete &= from_children.complete && from_windows.complete;
 
-        let mut top_level = from_children.elements;
-        for w in from_windows.elements {
-            // AXChildren and AXWindows can return different proxy pointers for
-            // the same native window. CFEqual compares their AX identity;
-            // pointer equality alone duplicates the whole subtree and can turn
-            // one exact dialog action into a false ambiguity.
-            if !top_level
-                .iter()
-                .any(|&e| CFEqual(e as CFTypeRef, w as CFTypeRef) != 0)
-            {
-                top_level.push(w);
-            } else {
-                // Already present — release the extra retain from copy_ax_windows.
-                CFRelease(w as CFTypeRef);
+            let mut top_level = from_children.elements;
+            for w in from_windows.elements {
+                // AXChildren and AXWindows can return different proxy pointers for
+                // the same native window. CFEqual compares their AX identity;
+                // pointer equality alone duplicates the whole subtree and can turn
+                // one exact dialog action into a false ambiguity.
+                if !top_level
+                    .iter()
+                    .any(|&e| CFEqual(e as CFTypeRef, w as CFTypeRef) != 0)
+                {
+                    top_level.push(w);
+                } else {
+                    // Already present — release the extra retain from copy_ax_windows.
+                    CFRelease(w as CFTypeRef);
+                }
             }
-        }
 
-        // Scope: keep non-window children (menu bar) + the target window —
-        // but ONLY once the target window has actually been identified. When
-        // nothing claims the requested id, `decide_window_scope` reports why
-        // and walks nothing; it must never fall back to "everything that isn't
-        // a window", which is how issue #2237 returned menu bars as panels.
-        let walk_these: Vec<AXUIElementRef> = if let Some(wid) = window_id {
-            let candidates: Vec<TopLevelCandidate> = top_level
-                .iter()
-                .map(|&child| {
-                    set_messaging_timeout(child);
+            // Scope: keep non-window children (menu bar) + the target window —
+            // but ONLY once the target window has actually been identified. When
+            // nothing claims the requested id, `decide_window_scope` reports why
+            // and walks nothing; it must never fall back to "everything that isn't
+            // a window", which is how issue #2237 returned menu bars as panels.
+            let walk_these: Vec<AXUIElementRef> = if let Some(wid) = window_id {
+                let describe = |child, complete: &mut bool, proven_window_id: Option<u32>| {
+                    set_messaging_timeout(child, deadline);
                     let role_read = copy_string_attr_with_status(child, "AXRole");
                     if role_read.complete && role_read.value.is_none() {
                         super::bindings::note_incomplete(
@@ -345,16 +463,16 @@ pub fn walk_tree_bounded(
                             "top-level element with no role value",
                         );
                     }
-                    complete &= role_read.complete && role_read.value.is_some();
+                    *complete &= role_read.complete && role_read.value.is_some();
                     let role = role_read.value.unwrap_or_default();
                     let subrole_read = copy_string_attr_with_status(child, "AXSubrole");
-                    complete &= subrole_read.complete;
+                    *complete &= subrole_read.complete;
                     let identifier_read = copy_string_attr_with_status(child, "AXIdentifier");
-                    complete &= identifier_read.complete;
+                    *complete &= identifier_read.complete;
                     // Match AX window element → CGWindowID via private SPI.
                     // Only windows carry one, so skip the round-trip elsewhere.
-                    let ax_window_id = if role == "AXWindow" {
-                        ax_get_window_id(child)
+                    let ax_window_id = if matches!(role.as_str(), "AXWindow" | "AXSheet") {
+                        proven_window_id.or_else(|| ax_get_window_id(child))
                     } else {
                         None
                     };
@@ -364,29 +482,156 @@ pub fn walk_tree_bounded(
                         identifier: identifier_read.value,
                         ax_window_id,
                     }
-                })
-                .collect();
-            let decision = decide_window_scope(&candidates, wid, || {
-                crate::windows::resolve_window_owner(pid, wid)
-            });
-            let walk = decision
-                .walk
-                .iter()
-                .map(|&index| top_level[index])
-                .collect();
-            window_scope = Some(decision.scope);
-            walk
-        } else {
-            top_level.to_vec()
+                };
+                let mut candidates: Vec<TopLevelCandidate> = top_level
+                    .iter()
+                    .map(|&child| describe(child, &mut complete, None))
+                    .collect();
+                let mut decision = decide_window_scope(&candidates, wid, || {
+                    crate::windows::resolve_window_owner(pid, wid)
+                });
+                if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+                    // AppKit can omit every window from both arrays while these
+                    // references still resolve to the requested window.
+                    for attribute in ["AXFocusedWindow", "AXMainWindow"] {
+                        let selection = copy_element_attr_with_status(app_elem, attribute);
+                        complete &= selection.complete;
+                        let Some(window) = selection.value else {
+                            continue;
+                        };
+                        let mut owner = 0;
+                        if AXUIElementGetPid(window, &mut owner) == kAXErrorSuccess
+                            && owner == pid
+                            && !top_level
+                                .iter()
+                                .any(|&seen| CFEqual(seen as CFTypeRef, window as CFTypeRef) != 0)
+                        {
+                            let candidate = describe(window, &mut complete, None);
+                            if matches!(candidate.role.as_str(), "AXWindow" | "AXSheet")
+                                && candidate.ax_window_id == Some(wid)
+                            {
+                                top_level.push(window);
+                                candidates.push(candidate);
+                                continue;
+                            }
+                        }
+                        CFRelease(window as CFTypeRef);
+                    }
+                    decision = decide_window_scope(&candidates, wid, || {
+                        crate::windows::resolve_window_owner(pid, wid)
+                    });
+                }
+                if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+                    let (sheets, discovery_complete) =
+                        super::sheets::copy_attached_sheets(&top_level);
+                    complete &= discovery_complete;
+                    if discovery_complete {
+                        for sheet in sheets {
+                            let element = sheet.element.as_ptr() as AXUIElementRef;
+                            if !top_level
+                                .iter()
+                                .any(|&seen| CFEqual(seen as CFTypeRef, element as CFTypeRef) != 0)
+                            {
+                                CFRetain(element as CFTypeRef);
+                                top_level.push(element);
+                                candidates.push(TopLevelCandidate::new("AXSheet", sheet.window_id));
+                            }
+                        }
+                        decision = decide_window_scope(&candidates, wid, || {
+                            crate::windows::resolve_window_owner(pid, wid)
+                        });
+                    }
+                }
+                if !remote_probe_attempted
+                    && complete
+                    && matches!(decision.scope, WindowScope::AxUnresolved { .. })
+                {
+                    remote_probe_attempted = true;
+                    if let Some(window) = copy_remote_window_for_id(pid, wid, deadline) {
+                        let candidate = describe(window, &mut complete, Some(wid));
+                        if complete && candidate.role == "AXWindow" {
+                            top_level.push(window);
+                            candidates.push(candidate);
+                            decision = decide_window_scope(&candidates, wid, || {
+                                crate::windows::resolve_window_owner(pid, wid)
+                            });
+                        } else {
+                            CFRelease(window as CFTypeRef);
+                        }
+                    }
+                }
+                if matches!(decision.scope, WindowScope::AxUnresolved { .. }) {
+                    if let Some(pause) =
+                        super::launch::retry_pause(pid, launch_deadline, attempt_started)
+                    {
+                        for child in top_level {
+                            CFRelease(child as CFTypeRef);
+                        }
+                        std::thread::sleep(pause);
+                        if launch_deadline.is_some_and(|limit| Instant::now() >= limit) {
+                            window_scope = Some(decision.scope);
+                            complete = false;
+                            super::bindings::note_incomplete(
+                                "AXWindow",
+                                "application launch lookup exhausted its retry budget",
+                            );
+                            break 'resolve (Vec::new(), Vec::new());
+                        }
+                        continue 'resolve;
+                    }
+                    if launch_deadline.is_some() && super::launch::is_still_launching(pid) {
+                        complete = false;
+                        super::bindings::note_incomplete(
+                            "AXWindow",
+                            "application is still launching; exact window is unavailable",
+                        );
+                    }
+                }
+                let walk = decision
+                    .walk
+                    .iter()
+                    .map(|&index| top_level[index])
+                    .collect();
+                window_scope = Some(decision.scope);
+                walk
+            } else {
+                top_level.to_vec()
+            };
+
+            break (walk_these, top_level);
         };
 
+        let mut mode = if app_context {
+            WalkMode::AppWindow
+        } else {
+            WalkMode::Legacy
+        };
+        let open_menu = if app_context
+            && window_scope
+                .as_ref()
+                .is_some_and(|scope| scope.is_matched())
+        {
+            let (menu, menu_complete) = super::bindings::copy_open_menu_context(app_elem);
+            complete &= menu_complete;
+            menu
+        } else {
+            None
+        };
+        if let Some(menu) = open_menu {
+            walk_these = vec![menu];
+            mode = WalkMode::AppMenu;
+        }
+
         // Walk each top-level child at depth 0.
+        let mut visited_identities = HashSet::new();
         for child in walk_these {
             walk_element(
                 child,
                 0,
                 None,
                 false,
+                mode,
+                &mut visited_identities,
                 &mut nodes,
                 &mut lines,
                 &mut index_counter,
@@ -395,7 +640,19 @@ pub fn walk_tree_bounded(
                 &mut complete,
                 max_elements,
                 max_depth,
+                deadline,
+                &mut observation_budget,
+                &mut web_area_seen,
             );
+        }
+
+        if !super::enablement::complete_chromium_observation(pid, readiness, web_area_seen) {
+            complete = false;
+            super::bindings::note_incomplete("Chromium accessibility", "web content is not ready");
+        }
+
+        if let Some(menu) = open_menu {
+            CFRelease(menu as CFTypeRef);
         }
 
         // Release all top-level elements (copy_children / copy_ax_windows both retain).
@@ -406,6 +663,23 @@ pub fn walk_tree_bounded(
         CFRelease(app_elem as CFTypeRef);
     }
 
+    if app_context {
+        nodes = super::projection::project_app_nodes(nodes);
+        lines = nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.depth,
+                    match node.element_index {
+                        Some(index) => {
+                            format!("[{index}] {}", super::projection::format_app_body(node))
+                        }
+                        None => super::projection::format_app_body(node),
+                    },
+                )
+            })
+            .collect();
+    }
     let truncated_flag = truncated;
     let raw_markdown = render_lines(&lines);
     let mut tree_markdown = if let Some(q) = query {
@@ -414,9 +688,16 @@ pub fn walk_tree_bounded(
         raw_markdown
     };
 
-    if truncated_flag {
+    if observation_budget.is_some_and(|budget| budget.exhausted) {
+        tree_markdown.push_str(
+            "\n⚠️  AX tree truncated by the 1-second observation time budget. \
+             Listed elements remain valid; missing elements were not observed.",
+        );
+    } else if truncated_flag && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        tree_markdown.push_str("\n⚠️  AX tree truncated by the recording time budget.");
+    } else if truncated_flag {
         tree_markdown.push_str(&format!(
-            "\n⚠️  AX tree truncated at {max_elements} nodes \
+            "\n⚠️  AX tree truncated by traversal limits ({max_elements} nodes, depth {max_depth}) \
              (app has a very large accessibility tree — Arc, Electron, or similar). \
              Element indices above are still valid. Use pixel clicks for elements \
              not visible in this partial tree."
@@ -427,6 +708,7 @@ pub fn walk_tree_bounded(
         tree_markdown,
         nodes,
         complete: complete && !truncated_flag,
+        read_complete: complete,
         incomplete_notes: super::bindings::take_incomplete_notes(),
         truncated: truncated_flag,
         window_scope,
@@ -439,6 +721,8 @@ unsafe fn walk_element(
     depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
+    mode: WalkMode,
+    visited_identities: &mut HashSet<AXIdentity>,
     nodes: &mut Vec<AXNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
@@ -447,10 +731,75 @@ unsafe fn walk_element(
     complete: &mut bool,
     max_elements: usize,
     max_depth: usize,
+    deadline: Option<Instant>,
+    observation_budget: &mut Option<ObservationWalkBudget>,
+    web_area_seen: &mut bool,
+) {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        super::bindings::note_incomplete("walk", "recording time budget exhausted");
+        *truncated = true;
+        *complete = false;
+        return;
+    }
+    let identity = AXIdentity::retained(element);
+    if visited_identities.contains(&identity) {
+        return;
+    }
+    if depth <= max_depth && *visited_count < max_elements {
+        if observation_budget
+            .as_mut()
+            .is_some_and(|budget| !budget.admit())
+        {
+            super::bindings::note_incomplete("walk", "observation time budget exhausted");
+            *truncated = true;
+            return;
+        }
+        visited_identities.insert(identity);
+    }
+    walk_element_contents(
+        element,
+        depth,
+        parent_index,
+        in_web_content,
+        mode,
+        visited_identities,
+        nodes,
+        lines,
+        counter,
+        visited_count,
+        truncated,
+        complete,
+        max_elements,
+        max_depth,
+        deadline,
+        observation_budget,
+        web_area_seen,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn walk_element_contents(
+    element: AXUIElementRef,
+    depth: usize,
+    parent_index: Option<usize>,
+    in_web_content: bool,
+    mode: WalkMode,
+    visited_identities: &mut HashSet<AXIdentity>,
+    nodes: &mut Vec<AXNode>,
+    lines: &mut Vec<(usize, String)>,
+    counter: &mut usize,
+    visited_count: &mut usize,
+    truncated: &mut bool,
+    complete: &mut bool,
+    max_elements: usize,
+    max_depth: usize,
+    deadline: Option<Instant>,
+    observation_budget: &mut Option<ObservationWalkBudget>,
+    web_area_seen: &mut bool,
 ) {
     if depth > max_depth {
         super::bindings::note_incomplete("walk", "max_depth exceeded");
-        *complete = false;
+        *truncated = true;
         return;
     }
     // Enforce total-node cap — mirrors Swift's maxElements guard.
@@ -458,26 +807,32 @@ unsafe fn walk_element(
     if *visited_count >= max_elements {
         super::bindings::note_incomplete("walk", "max_elements truncated");
         *truncated = true;
-        *complete = false;
         return;
     }
     *visited_count += 1;
 
     // Messaging timeouts are per AX object, not inherited from the application
     // element, so every descendant must be bounded before any attribute read.
-    set_messaging_timeout(element);
+    set_messaging_timeout(element, deadline);
 
     let role_read = copy_string_attr_with_status(element, "AXRole");
+    if role_read.complete
+        && role_read.value.is_none()
+        && super::placeholder::is_empty_search_field_leaf(element)
+    {
+        return;
+    }
     if role_read.complete && role_read.value.is_none() {
-        super::bindings::note_incomplete("AXRole", "success with no role value");
+        super::bindings::note_incomplete("AXRole", "required role value unavailable");
     }
     *complete &= role_read.complete && role_read.value.is_some();
     let role = role_read.value.unwrap_or_else(|| "AXUnknown".into());
+    *web_area_seen |= role == "AXWebArea";
 
     let in_web_content = in_web_content || is_web_content_role(&role);
 
     // Skip pure layout containers that have no interesting content.
-    if role == "AXScrollArea" || role == "AXGroup" {
+    if mode == WalkMode::Legacy && (role == "AXScrollArea" || role == "AXGroup") {
         // Still recurse — children may be interesting. Layout containers
         // collapse, so children inherit the parent's depth AND the same
         // parent_index (no actionable node was emitted here).
@@ -489,6 +844,8 @@ unsafe fn walk_element(
                 depth,
                 parent_index,
                 in_web_content,
+                mode,
+                visited_identities,
                 nodes,
                 lines,
                 counter,
@@ -497,6 +854,9 @@ unsafe fn walk_element(
                 complete,
                 max_elements,
                 max_depth,
+                deadline,
+                observation_budget,
+                web_area_seen,
             );
             CFRelease(child as CFTypeRef);
         }
@@ -510,7 +870,14 @@ unsafe fn walk_element(
     // (parens), breaking _find_calc_button which searches for "(2)".
     let title_read = copy_string_attr_with_status(element, "AXTitle");
     *complete &= title_read.complete;
-    let title = title_read.value;
+    let title_relation = (mode != WalkMode::Legacy)
+        .then(|| super::app_text::associated_title(element, complete))
+        .flatten();
+    let title = title_read
+        .value
+        .filter(|value| mode == WalkMode::Legacy || !value.is_empty())
+        .or_else(|| title_relation.as_ref().and_then(|(_, title)| title.clone()));
+    let title_ui_element = title_relation.map(|(identity, _)| identity);
     // Read AXValue once with enough type information to preserve the existing
     // string-only markdown while also exposing numeric/boolean control state.
     let copied_value_read = copy_stringish_attr_with_status(element, "AXValue");
@@ -522,7 +889,7 @@ unsafe fn walk_element(
     // AXPlaceholderValue as fallback for empty text fields.
     let value = if value
         .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+        .is_some_and(|value| mode != WalkMode::Legacy || !value.trim().is_empty())
     {
         value
     } else {
@@ -541,11 +908,15 @@ unsafe fn walk_element(
     let help = help_read.value.filter(|h| !h.trim().is_empty());
     let actions_read = copy_action_names_with_status(element);
     *complete &= actions_read.complete;
-    let actions = actions_read.actions;
+    let native_actions = actions_read.actions;
+    let has_actionable_action = native_actions.iter().any(|action| {
+        mode == WalkMode::Legacy
+            || !matches!(action.as_str(), "AXShowAlternateUI" | "AXShowDefaultUI")
+    });
 
-    let visible_title = title.as_deref().unwrap_or("").trim().to_owned();
-    let visible_description = description.as_deref().unwrap_or("").trim().to_owned();
-    let visible_value = value.as_deref().unwrap_or("").trim().to_owned();
+    let visible_title = observation_text(title.as_deref(), mode);
+    let visible_description = observation_text(description.as_deref(), mode);
+    let visible_value = observation_text(value.as_deref(), mode);
 
     let has_content =
         !visible_title.is_empty() || !visible_description.is_empty() || !visible_value.is_empty();
@@ -555,27 +926,90 @@ unsafe fn walk_element(
     // field but unable to call set_value on it. Probe writability only for the
     // small family of value controls so arbitrary display nodes do not pay an
     // extra AX round trip.
-    let value_settable = if actions.is_empty() && role_supports_value_addressing(&role) {
+    let value_settable = if (!has_actionable_action && role_supports_value_addressing(&role))
+        || (mode != WalkMode::Legacy
+            && native_actions
+                .iter()
+                .any(|action| matches!(action.as_str(), "AXIncrement" | "AXDecrement")))
+    {
         let settable = is_attribute_settable_with_status(element, "AXValue");
         *complete &= settable.complete;
         settable.value.unwrap_or(false)
     } else {
         false
     };
+    let actions = native_actions
+        .into_iter()
+        .filter(|action| {
+            mode == WalkMode::Legacy
+                || super::projection::app_action_is_interesting(
+                    action,
+                    &role,
+                    value_settable,
+                    |attribute| {
+                        let scrollbar = copy_element_attr_with_status(element, attribute);
+                        *complete &= scrollbar.complete;
+                        if let Some(scrollbar) = scrollbar.value {
+                            CFRelease(scrollbar as CFTypeRef);
+                            true
+                        } else {
+                            !scrollbar.complete
+                        }
+                    },
+                )
+        })
+        .collect::<Vec<_>>();
     // A closed submenu can keep its descendants in AXChildren while reporting
     // those controls disabled. Never assign such a row a live element index:
     // the same native state also causes dispatch to refuse it, and exposing an
     // index for it invites agents to retain an unusable menu target.
-    let enabled = if !actions.is_empty() || value_settable {
+    let enabled = if mode != WalkMode::Legacy || !actions.is_empty() || value_settable {
         let enabled = copy_bool_attr_with_status(element, "AXEnabled");
         *complete &= enabled.complete;
         enabled.value
     } else {
         None
     };
-    let is_actionable = is_addressable(!actions.is_empty(), value_settable, enabled);
+    let focused = if mode != WalkMode::Legacy {
+        let read = copy_bool_attr_with_status(element, "AXFocused");
+        *complete &= read.complete;
+        read.value
+    } else {
+        None
+    };
+    let selectable = if mode != WalkMode::Legacy {
+        let selection = is_attribute_settable_with_status(element, "AXSelected");
+        *complete &= selection.complete;
+        selection.value == Some(true)
+    } else {
+        false
+    };
+    let table_row = if selectable && role != "AXTable" {
+        let subrole = copy_string_attr_with_status(element, "AXSubrole");
+        *complete &= subrole.complete;
+        subrole.value.as_deref() == Some("AXTableRow")
+    } else {
+        false
+    };
+    let focusable_or_selectable = if mode != WalkMode::Legacy && actions.is_empty() {
+        let focus = is_attribute_settable_with_status(element, "AXFocused");
+        *complete &= focus.complete;
+        focus.value == Some(true) || selectable
+    } else {
+        selectable
+    };
+    let is_actionable = is_addressable(
+        has_actionable_action,
+        value_settable || focusable_or_selectable,
+        enabled,
+    );
 
-    if !is_actionable && !has_content && role != "AXWindow" && role != "AXSheet" {
+    if mode == WalkMode::Legacy
+        && !is_actionable
+        && !has_content
+        && role != "AXWindow"
+        && role != "AXSheet"
+    {
         let children = copy_children_with_status(element);
         *complete &= children.complete;
         for child in children.elements {
@@ -584,6 +1018,8 @@ unsafe fn walk_element(
                 depth + 1,
                 parent_index,
                 in_web_content,
+                mode,
+                visited_identities,
                 nodes,
                 lines,
                 counter,
@@ -592,6 +1028,9 @@ unsafe fn walk_element(
                 complete,
                 max_elements,
                 max_depth,
+                deadline,
+                observation_budget,
+                web_area_seen,
             );
             CFRelease(child as CFTypeRef);
         }
@@ -603,34 +1042,40 @@ unsafe fn walk_element(
     let frame_read = element_screen_rect_with_status(element);
     *complete &= frame_read.complete;
     let frame = frame_read.value;
-    // Structured `elements` only contains actionable nodes. Keep all new AX
-    // round-trips behind that same gate so display-only rows pay no cost.
-    let control_state = read_control_state_if_actionable(is_actionable, || {
-        let value_description = copy_string_attr_with_status(element, "AXValueDescription");
-        *complete &= value_description.complete;
-        let min_value = copy_number_attr_with_status(element, "AXMinValue");
-        *complete &= min_value.complete;
-        let max_value = copy_number_attr_with_status(element, "AXMaxValue");
-        *complete &= max_value.complete;
-        let selected = copy_bool_attr_with_status(element, "AXSelected");
-        *complete &= selected.complete;
-        ControlState {
-            value_state: copied_value
-                .map(|copied| copied.state_value)
-                .filter(|v| !v.trim().is_empty())
-                .or_else(|| value.clone())
-                .map(|v| v.trim().to_owned())
-                .filter(|v| !v.is_empty()),
-            value_description: value_description
-                .value
-                .map(|v| v.trim().to_owned())
-                .filter(|v| !v.is_empty()),
-            min_value: min_value.value,
-            max_value: max_value.value,
-            enabled,
-            selected: selected.value,
-        }
-    });
+    // App projection also needs state on descriptive, disabled display nodes.
+    let control_state =
+        read_control_state_if_actionable(is_actionable || mode != WalkMode::Legacy, || {
+            let value_description = copy_string_attr_with_status(element, "AXValueDescription");
+            *complete &= value_description.complete;
+            let min_value = copy_number_attr_with_status(element, "AXMinValue");
+            *complete &= min_value.complete;
+            let max_value = copy_number_attr_with_status(element, "AXMaxValue");
+            *complete &= max_value.complete;
+            let selected = copy_bool_attr_with_status(element, "AXSelected");
+            *complete &= selected.complete;
+            ControlState {
+                value_state: copied_value
+                    .map(|copied| copied.state_value)
+                    .filter(|value| mode != WalkMode::Legacy || !value.trim().is_empty())
+                    .or_else(|| value.clone())
+                    .map(|v| observation_text(Some(&v), mode))
+                    .filter(|v| !v.is_empty()),
+                value_description: value_description
+                    .value
+                    .map(|v| v.trim().to_owned())
+                    .filter(|v| !v.is_empty()),
+                min_value: min_value.value,
+                max_value: max_value.value,
+                enabled,
+                selected: selected.value,
+            }
+        });
+    let rich_text = (mode != WalkMode::Legacy)
+        .then(|| super::app_text::read_rich_text(element, &role, value.as_deref()))
+        .flatten();
+    let url = (mode != WalkMode::Legacy && role == "AXLink")
+        .then(|| super::app_text::element_url(element))
+        .flatten();
     let node = if is_actionable {
         let idx = *counter;
         *counter += 1;
@@ -656,6 +1101,11 @@ unsafe fn walk_element(
                 Some(visible_description.clone())
             },
             identifier: identifier.clone(),
+            rich_text,
+            url,
+            title_ui_element,
+            selectable,
+            table_row,
             help: help.clone(),
             actions: actions.clone(),
             element_ptr,
@@ -670,6 +1120,8 @@ unsafe fn walk_element(
             enabled: control_state.enabled,
             selected: control_state.selected,
             in_web_content,
+            focused,
+            focusable_or_selectable,
         }
     } else {
         AXNode {
@@ -691,8 +1143,17 @@ unsafe fn walk_element(
                 Some(visible_description.clone())
             },
             identifier: identifier.clone(),
+            rich_text,
+            url,
+            title_ui_element,
+            selectable,
+            table_row,
             help: help.clone(),
-            actions: vec![],
+            actions: if mode == WalkMode::Legacy {
+                vec![]
+            } else {
+                actions.clone()
+            },
             element_ptr,
             identity,
             depth,
@@ -705,6 +1166,8 @@ unsafe fn walk_element(
             enabled: control_state.enabled,
             selected: control_state.selected,
             in_web_content,
+            focused,
+            focusable_or_selectable,
         }
     };
 
@@ -717,6 +1180,10 @@ unsafe fn walk_element(
     lines.push((depth, line));
     nodes.push(node);
 
+    if mode == WalkMode::AppWindow && role == "AXMenuBarItem" {
+        return;
+    }
+
     let children = copy_children_with_status(element);
     *complete &= children.complete;
     for child in children.elements {
@@ -725,6 +1192,8 @@ unsafe fn walk_element(
             depth + 1,
             next_parent,
             in_web_content,
+            mode,
+            visited_identities,
             nodes,
             lines,
             counter,
@@ -733,6 +1202,9 @@ unsafe fn walk_element(
             complete,
             max_elements,
             max_depth,
+            deadline,
+            observation_budget,
+            web_area_seen,
         );
         CFRelease(child as CFTypeRef);
     }
@@ -970,6 +1442,135 @@ fn leading_indent_depth(line: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn observation_deadline_preserves_completed_prefix_and_read_status() {
+        use super::*;
+        unsafe {
+            let element = AXUIElementCreateApplication(std::process::id() as i32);
+            assert!(!element.is_null());
+            for reads_ok in [true, false] {
+                let mut nodes = vec![AXNode {
+                    role: "AXButton".into(),
+                    ..Default::default()
+                }];
+                let mut lines = vec![(0, "completed prefix".into())];
+                let mut visited = 1;
+                let mut truncated = false;
+                let mut complete = reads_ok;
+                let mut budget = Some(ObservationWalkBudget {
+                    started: Some(Instant::now() - Duration::from_secs(2)),
+                    exhausted: false,
+                });
+                super::super::bindings::reset_incomplete_notes();
+                walk_element(
+                    element,
+                    0,
+                    None,
+                    false,
+                    WalkMode::Legacy,
+                    &mut HashSet::new(),
+                    &mut nodes,
+                    &mut lines,
+                    &mut 0,
+                    &mut visited,
+                    &mut truncated,
+                    &mut complete,
+                    2000,
+                    25,
+                    None,
+                    &mut budget,
+                    &mut false,
+                );
+                assert!(truncated);
+                assert_eq!(complete, reads_ok);
+                assert_eq!(visited, 1);
+                assert_eq!(nodes.len(), 1);
+                assert_eq!(lines, vec![(0, "completed prefix".into())]);
+                assert!(super::super::bindings::take_incomplete_notes()
+                    .iter()
+                    .any(|note| note.contains("observation time budget exhausted")));
+            }
+            CFRelease(element as CFTypeRef);
+        }
+    }
+
+    #[test]
+    fn recording_deadline_stops_before_native_read_and_preserves_partial_tree() {
+        use super::*;
+        let mut nodes = vec![AXNode {
+            role: "AXButton".into(),
+            ..Default::default()
+        }];
+        let mut lines = vec![(0, "completed prefix".into())];
+        let mut visited = 1;
+        let mut truncated = false;
+        let mut complete = true;
+        super::super::bindings::reset_incomplete_notes();
+        unsafe {
+            walk_element(
+                std::ptr::null_mut(),
+                0,
+                None,
+                false,
+                WalkMode::Legacy,
+                &mut HashSet::new(),
+                &mut nodes,
+                &mut lines,
+                &mut 0,
+                &mut visited,
+                &mut truncated,
+                &mut complete,
+                2000,
+                25,
+                Some(Instant::now()),
+                &mut None,
+                &mut false,
+            );
+        }
+        assert!(truncated);
+        assert!(!complete);
+        assert_eq!(visited, 1);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(lines, vec![(0, "completed prefix".into())]);
+        assert!(super::super::bindings::take_incomplete_notes()
+            .iter()
+            .any(|note| note.contains("recording time budget exhausted")));
+    }
+
+    #[test]
+    fn traversal_limits_do_not_hide_read_failures() {
+        for (depth, visited) in [(26, 0), (0, 2000)] {
+            for reads_ok in [true, false] {
+                let mut complete = reads_ok;
+                let mut truncated = false;
+                let mut visited = visited;
+                unsafe {
+                    walk_element_contents(
+                        std::ptr::null_mut(),
+                        depth,
+                        None,
+                        false,
+                        WalkMode::Legacy,
+                        &mut HashSet::new(),
+                        &mut Vec::new(),
+                        &mut Vec::new(),
+                        &mut 0,
+                        &mut visited,
+                        &mut truncated,
+                        &mut complete,
+                        2000,
+                        25,
+                        None,
+                        &mut None,
+                        &mut false,
+                    );
+                }
+                assert!(truncated);
+                assert_eq!(complete, reads_ok);
+            }
+        }
+    }
+
     use super::*;
     use std::cell::Cell;
 
@@ -1029,6 +1630,11 @@ mod tests {
             value: None,
             description: None,
             identifier: None,
+            rich_text: None,
+            url: None,
+            title_ui_element: None,
+            selectable: false,
+            table_row: false,
             help: None,
             actions: vec!["AXPress".to_owned(), "AXShowMenu".to_owned()],
             element_ptr: 0,
@@ -1043,6 +1649,8 @@ mod tests {
             enabled: Some(false),
             selected: Some(true),
             in_web_content: true,
+            focused: None,
+            focusable_or_selectable: false,
         };
 
         assert_eq!(
@@ -1054,5 +1662,53 @@ mod tests {
                 "in_web_content=true",
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod app_text_tests {
+    use super::{observation_text, WalkMode};
+    use crate::ax::projection::format_app_body;
+    use crate::ax::tree::AXNode;
+    use cua_driver_core::observation_revision::{
+        CapturedNode, ObservationLineage, ObservationMode,
+    };
+
+    #[test]
+    fn app_capture_preserves_literal_whitespace_and_legacy_stays_trimmed() {
+        for value in ["  indented\n", "\n", " \t", "中文_é_🙂\n"] {
+            for mode in [WalkMode::AppWindow, WalkMode::AppMenu] {
+                assert_eq!(observation_text(Some(value), mode), value);
+            }
+            assert_eq!(
+                observation_text(Some(value), WalkMode::Legacy),
+                value.trim()
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_newline_changes_are_observable_revision_changes() {
+        let capture = |value| {
+            vec![CapturedNode {
+                identity: "editor",
+                depth: 0,
+                actionable_index: Some(0),
+                body: format_app_body(&AXNode {
+                    role: "AXTextArea".into(),
+                    value: Some(observation_text(Some(value), WalkMode::AppWindow)),
+                    ..Default::default()
+                }),
+            }]
+        };
+        let mut lineage = ObservationLineage::new("literal-text", 8)
+            .unwrap()
+            .for_app();
+        let before = lineage.observe(capture("saved"), None, false).unwrap();
+        let after = lineage
+            .observe(capture("saved\n"), Some(&before.revision_id), false)
+            .unwrap();
+        assert_ne!(after.mode, ObservationMode::NoChange);
+        assert!(after.text.contains("saved\\n"));
     }
 }

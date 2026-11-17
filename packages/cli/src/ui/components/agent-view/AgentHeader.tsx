@@ -12,7 +12,10 @@
 
 import type React from 'react';
 import { Box, Text } from 'ink';
-import { shortenPath, tildeifyPath } from '@qwen-code/qwen-code-core';
+import {
+  shortenPath,
+  tildeifyPath,
+} from '@qwen-code/qwen-code-core/utils/paths.js';
 import { theme } from '../../semantic-colors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 

@@ -10,6 +10,7 @@ import {
   OutputFormat,
   FatalInputError,
   ToolErrorType,
+  parseAndFormatApiError,
 } from '@qwen-code/qwen-code-core';
 import {
   AlreadyReportedError,
@@ -18,6 +19,7 @@ import {
   handleError,
   handleToolError,
   handleCancellationError,
+  handleBudgetExceededError,
   handleMaxTurnsExceededError,
 } from './errors.js';
 import { _resetCleanupFunctionsForTest, registerCleanup } from './cleanup.js';
@@ -190,6 +192,19 @@ describe('errors', () => {
 
         expect(mockWriteStderrLine).toHaveBeenCalledWith(
           'API Error: Test error',
+        );
+      });
+
+      it('passes the host translator to API error formatting', async () => {
+        const error = new Error('quota');
+        const translate = vi.fn((key: string) => key);
+        await expect(
+          handleError(error, mockConfig, undefined, translate),
+        ).rejects.toThrow(error);
+        expect(parseAndFormatApiError).toHaveBeenCalledWith(
+          error,
+          mockConfig.getContentGeneratorConfig()?.authType,
+          translate,
         );
       });
 
@@ -549,7 +564,7 @@ describe('errors', () => {
     });
 
     describe('permission denied warnings', () => {
-      it('should show warning when EXECUTION_DENIED in non-interactive text mode', () => {
+      it('shows the approval hint when the call was denied for approval in non-interactive text mode', () => {
         (mockConfig.getDebugMode as Mock).mockReturnValue(false);
         (mockConfig.isInteractive as Mock).mockReturnValue(false);
         (
@@ -561,6 +576,8 @@ describe('errors', () => {
           toolError,
           mockConfig,
           ToolErrorType.EXECUTION_DENIED,
+          undefined,
+          { approvalRequired: true },
         );
 
         expect(processStderrWriteSpy).toHaveBeenCalledWith(
@@ -572,6 +589,84 @@ describe('errors', () => {
           expect.stringContaining('use the -y flag (YOLO mode)'),
         );
         expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('reports the denial reason instead of the approval hint for other denials', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        handleToolError(
+          toolName,
+          new Error('no shell today'),
+          mockConfig,
+          ToolErrorType.EXECUTION_DENIED,
+          'no shell today',
+        );
+
+        expect(processStderrWriteSpy).toHaveBeenCalledWith(
+          'Warning: Tool "test-tool" was not run: no shell today\n\n',
+        );
+        const written = processStderrWriteSpy.mock.calls
+          .map((call) => String(call[0]))
+          .join('');
+        expect(written).not.toContain('requires user approval');
+        expect(written).not.toContain('-y flag');
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('falls back to the error message when a denial has no display text', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        handleToolError(
+          toolName,
+          new Error('Matching deny rule: "Bash"'),
+          mockConfig,
+          ToolErrorType.EXECUTION_DENIED,
+        );
+
+        expect(processStderrWriteSpy).toHaveBeenCalledWith(
+          'Warning: Tool "test-tool" was not run: Matching deny rule: "Bash"\n\n',
+        );
+      });
+
+      it('strips terminal escapes from the echoed reason and bounds its length', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+        const hostile =
+          '\u001b]52;c;cHduZWQ=\u0007\u202Eblocked\u200B by\nhook ' +
+          'x'.repeat(600);
+
+        handleToolError(
+          '\u001b[2Jtool',
+          new Error(hostile),
+          mockConfig,
+          ToolErrorType.EXECUTION_DENIED,
+          hostile,
+        );
+
+        const written = String(processStderrWriteSpy.mock.calls[0]?.[0]);
+        expect(written.startsWith('Warning: Tool "tool" was not run: ')).toBe(
+          true,
+        );
+        const reason = written
+          .slice('Warning: Tool "tool" was not run: '.length)
+          .replace(/\n\n$/, '');
+        // eslint-disable-next-line no-control-regex
+        expect(reason).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+        expect(reason).not.toMatch(/\p{Cf}/u);
+        expect(reason.startsWith('blocked by hook x')).toBe(true);
+        expect(reason.length).toBe(501);
+        expect(reason.endsWith('…')).toBe(true);
       });
 
       it('should not show warning when EXECUTION_DENIED in interactive mode', () => {
@@ -773,6 +868,106 @@ describe('errors', () => {
       });
     });
   });
+
+  describe.each([
+    ['cancellation', OutputFormat.JSON, 130],
+    ['cancellation', OutputFormat.STREAM_JSON, 130],
+    ['budget', OutputFormat.JSON, 55],
+    ['budget', OutputFormat.STREAM_JSON, 55],
+  ] as const)(
+    '%s exit commitment observer in %s',
+    (reason, outputFormat, exitCode) => {
+      beforeEach(() => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(outputFormat);
+      });
+
+      afterEach(() => {
+        mockWriteStderrLine.mockReset();
+      });
+
+      const terminate = (onExitCommitted: () => void) =>
+        reason === 'cancellation'
+          ? handleCancellationError(mockConfig, onExitCommitted)
+          : handleBudgetExceededError(
+              mockConfig,
+              {
+                kind: 'wall-time',
+                limit: 1,
+                observed: 1,
+                message: 'Run aborted: wall-time budget exceeded',
+              },
+              onExitCommitted,
+            );
+
+      it('does not commit exit when stderr throws and permits a later exit', async () => {
+        const writeError = new Error('stderr write failed');
+        const onExitCommitted = vi.fn();
+        const cleanup = vi.fn();
+        registerCleanup(cleanup);
+        mockWriteStderrLine.mockImplementationOnce(() => {
+          throw writeError;
+        });
+
+        await expect(terminate(onExitCommitted)).rejects.toBe(writeError);
+
+        expect(onExitCommitted).not.toHaveBeenCalled();
+        expect(cleanup).not.toHaveBeenCalled();
+        expect(processExitSpy).not.toHaveBeenCalled();
+
+        await expect(terminate(onExitCommitted)).rejects.toThrow(
+          `process.exit called with code: ${exitCode}`,
+        );
+        expect(onExitCommitted).toHaveBeenCalledOnce();
+        expect(cleanup).toHaveBeenCalledOnce();
+        expect(processExitSpy).toHaveBeenCalledExactlyOnceWith(exitCode);
+      });
+
+      it('notifies once before cleanup and exit, excluding a reentrant handler', async () => {
+        const events: string[] = [];
+        mockWriteStderrLine.mockImplementation(() => {
+          events.push('write');
+        });
+        const onReentrantExitCommitted = vi.fn();
+        let reentrantSettled = false;
+        const onExitCommitted = vi.fn(() => {
+          events.push('committed');
+          void terminate(onReentrantExitCommitted).then(
+            () => {
+              reentrantSettled = true;
+            },
+            () => {
+              reentrantSettled = true;
+            },
+          );
+        });
+        const cleanup = vi.fn(() => {
+          events.push('cleanup');
+        });
+        registerCleanup(cleanup);
+        processExitSpy.mockImplementation((code) => {
+          events.push(`exit:${code}`);
+          throw new Error(`process.exit called with code: ${code}`);
+        });
+
+        await expect(terminate(onExitCommitted)).rejects.toThrow(
+          `process.exit called with code: ${exitCode}`,
+        );
+
+        expect(events).toEqual([
+          'write',
+          'committed',
+          'write',
+          'cleanup',
+          `exit:${exitCode}`,
+        ]);
+        expect(onExitCommitted).toHaveBeenCalledOnce();
+        expect(onReentrantExitCommitted).not.toHaveBeenCalled();
+        expect(cleanup).toHaveBeenCalledOnce();
+        expect(processExitSpy).toHaveBeenCalledExactlyOnceWith(exitCode);
+        expect(reentrantSettled).toBe(false);
+      });
+    },
+  );
 
   describe('cleanup-before-exit invariant', () => {
     // Regression: previously these handlers called process.exit synchronously,

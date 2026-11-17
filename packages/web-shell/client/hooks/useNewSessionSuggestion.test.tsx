@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   useNewSessionSuggestion,
   type NewSessionSuggestionState,
+  type UseNewSessionSuggestionOptions,
 } from './useNewSessionSuggestion';
 import type { Message } from '../adapters/types';
 
@@ -30,7 +31,8 @@ const testState = {
   isRunning: false,
   dialogOpen: false,
   hasAttachments: false as boolean | null,
-  generateContent: vi.fn(async function* () {}),
+  generateContent:
+    vi.fn<NonNullable<UseNewSessionSuggestionOptions['generateContent']>>(),
 };
 
 function Host() {
@@ -89,6 +91,47 @@ afterEach(async () => {
 });
 
 describe('useNewSessionSuggestion', () => {
+  it('keeps an in-flight request on ratio-only updates and uses the latest ratio on the next edit', async () => {
+    vi.useFakeTimers();
+    testState.inputText = 'Analyze the release architecture';
+    testState.contextUsageRatio = 0.4;
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    testState.generateContent.mockImplementation(async function* () {
+      await pending;
+      yield {
+        type: 'done',
+        requestId: 'ratio-request',
+        model: 'fast-model',
+        modelSource: 'fast',
+      };
+    });
+    await renderHost();
+    act(() => vi.advanceTimersByTime(701));
+    await flush(3);
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+    const signal = testState.generateContent.mock.calls[0][1]!.signal!;
+    expect(signal.aborted).toBe(false);
+
+    testState.contextUsageRatio = 0.05;
+    await rerenderHost();
+    expect(signal.aborted).toBe(false);
+    act(() => vi.advanceTimersByTime(701));
+    await flush(3);
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+
+    testState.inputText = 'Analyze the release architecture in detail';
+    await rerenderHost();
+    expect(signal.aborted).toBe(true);
+    act(() => vi.advanceTimersByTime(701));
+    await flush(3);
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(latestSuggestion).toBeNull();
+    await act(async () => finish());
+  });
+
   it('does not suggest a new session for explicit new-task wording when there is almost no prior context', async () => {
     vi.useFakeTimers();
     testState.inputText = '帮我写一篇新的设计文档，主题是 Web Shell 新功能方案';

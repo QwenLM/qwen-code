@@ -372,6 +372,22 @@ describe('checkI18n', () => {
     expect(result.stats.unusedKeys).toEqual([]);
   });
 
+  it('includes shared Core translator keys in the default scan', async () => {
+    const { localesDir } = makeFixture();
+    const key =
+      "You've used up your weekly credits.{{reset}} Please try again after the reset.";
+    writeLocale(localesDir, 'en', {
+      [key]: key,
+      'Unused quota fixture': 'Unused quota fixture',
+    });
+    const result = await checkI18n({
+      localesDir,
+      supportedLanguages: languages('en'),
+      mustTranslateKeys: [],
+    });
+    expect(result.stats.unusedKeys).toEqual(['Unused quota fixture']);
+  });
+
   it('flags Mainland-Chinese vocabulary and variant Traditional chars in zh-TW values', async () => {
     const { localesDir, sourceDir } = makeFixture();
     writeLocale(localesDir, 'en', {

@@ -17,6 +17,10 @@ import {
   resolvePath,
   runSideQuery,
 } from '@qwen-code/qwen-code-core';
+import {
+  appendAutoMemoryContext,
+  withoutAutoMemorySnapshots,
+} from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { HistoryItemSummary } from '../types.js';
 import { t } from '../../i18n/index.js';
 
@@ -174,10 +178,12 @@ export const summaryCommand: SlashCommand = {
       history: ReturnType<typeof getChatHistory>,
     ): Promise<string> => {
       // Build the conversation context for summary generation
-      const conversationContext = history.map((message) => ({
-        role: message.role,
-        parts: message.parts,
-      }));
+      const conversationContext = withoutAutoMemorySnapshots(history).map(
+        (message) => ({
+          role: message.role,
+          parts: message.parts,
+        }),
+      );
 
       // Carry over the main session's system instruction. Without this the
       // model sees only chat history + the summary prompt, losing the coding-
@@ -196,17 +202,23 @@ export const summaryCommand: SlashCommand = {
         skipOutputLanguagePreference: true,
         model: config.getModel(),
         systemInstruction: chatSystemInstruction,
-        contents: [
-          ...conversationContext,
-          {
-            role: 'user',
-            parts: [
-              {
-                text: getProjectSummaryPrompt(),
-              },
-            ],
-          },
-        ],
+        // The inherited system instruction carries the memory policy, which
+        // promises the catalog at the request tail. This side query bypasses
+        // LlmChat, so append the catalog here.
+        contents: appendAutoMemoryContext(
+          [
+            ...conversationContext,
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: getProjectSummaryPrompt(),
+                },
+              ],
+            },
+          ],
+          config.getAutoMemoryContext(),
+        ),
         abortSignal: abortSignal ?? new AbortController().signal,
       });
 

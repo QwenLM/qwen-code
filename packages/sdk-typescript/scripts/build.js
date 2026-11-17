@@ -17,6 +17,10 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
 import { serveBridgeBinBuildOptions } from './serve-bridge-bin-build-options.js';
+import {
+  assertPeerBundle,
+  assertPeerDeclarations,
+} from './peer-build-assertions.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -35,7 +39,7 @@ const MAX_TRANSCRIPT_BROWSER_BUNDLE_BYTES = 192 * 1024;
 rmSync(join(rootDir, 'dist'), { recursive: true, force: true });
 mkdirSync(join(rootDir, 'dist'), { recursive: true });
 
-execSync('tsc --project tsconfig.build.json', {
+execSync('tsc --build tsconfig.reference.json', {
   stdio: 'inherit',
   cwd: rootDir,
 });
@@ -144,6 +148,36 @@ await esbuild.build({
   treeShaking: true,
 });
 
+// UI event normalizer subpath (`@qwen-code/sdk/daemon/ui`). Kept out of the
+// default daemon barrel so browser consumers that never render normalized UI
+// events do not pay for the normalizer.
+for (const [format, platform, target, outfile] of [
+  [
+    'esm',
+    'browser',
+    'es2022',
+    join(rootDir, 'dist', 'daemon', 'ui', 'index.js'),
+  ],
+  ['cjs', 'node', 'node22', join(rootDir, 'dist', 'daemon', 'ui', 'index.cjs')],
+]) {
+  await esbuild.build({
+    entryPoints: [join(rootDir, 'src', 'daemon', 'ui', 'index.ts')],
+    bundle: true,
+    format,
+    platform,
+    target,
+    outfile,
+    sourcemap: false,
+    minify: true,
+    minifyWhitespace: true,
+    minifyIdentifiers: true,
+    minifySyntax: true,
+    legalComments: 'none',
+    keepNames: false,
+    treeShaking: true,
+  });
+}
+
 // Opt-in transports subpath (`@qwen-code/sdk/daemon/transports`): the concrete
 // ACP transports + negotiateTransport. Kept out of the default daemon barrel
 // (and its byte budget) so REST-only consumers stay tree-shaken; consumers who
@@ -220,6 +254,33 @@ await esbuild.build({
   keepNames: false,
   treeShaking: true,
 });
+
+// Opt-in peer subpath (`@qwen-code/sdk/peer`): the cross-session protocol for
+// a program that is not a Qwen Code session. Node-only, so it never joins a
+// browser bundle, and it must stay free of every runtime dependency.
+for (const [format, outfile] of [
+  ['esm', join(rootDir, 'dist', 'peer', 'index.js')],
+  ['cjs', join(rootDir, 'dist', 'peer', 'index.cjs')],
+]) {
+  await esbuild.build({
+    entryPoints: [join(rootDir, 'src', 'peer', 'index.ts')],
+    bundle: true,
+    format,
+    platform: 'node',
+    target: 'node22',
+    outfile,
+    sourcemap: false,
+    minify: true,
+    minifyWhitespace: true,
+    minifyIdentifiers: true,
+    minifySyntax: true,
+    legalComments: 'none',
+    keepNames: false,
+    treeShaking: true,
+  });
+  assertPeerBundle(outfile);
+}
+assertPeerDeclarations(join(rootDir, 'dist', 'peer'));
 
 // Build serve-bridge CLI bin entry. The options — including the absence of a
 // hashbang `banner`, see `serveBridgeBinBuildOptions` — are shared with the

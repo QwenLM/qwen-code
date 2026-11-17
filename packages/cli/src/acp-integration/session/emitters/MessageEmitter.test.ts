@@ -120,6 +120,68 @@ describe('MessageEmitter', () => {
         _meta: { source: 'slash_command' },
       });
     });
+
+    it('should carry the files the command wrote beside the message', async () => {
+      const artifacts = [
+        {
+          kind: 'file' as const,
+          storage: 'workspace' as const,
+          title: 'qwen-code-export-2026-01-01T00-00-00-000Z.md',
+          workspacePath: 'qwen-code-export-2026-01-01T00-00-00-000Z.md',
+          mimeType: 'text/markdown; charset=utf-8',
+          sizeBytes: 42,
+        },
+      ];
+
+      await emitter.emitSlashCommandOutput(
+        'Session exported to markdown: qwen-code-export-2026-01-01T00-00-00-000Z.md',
+        undefined,
+        artifacts,
+      );
+
+      // Not `artifacts`: the bridge strips that key from published frames and
+      // only ingests it on tool-call frames, so the payload must ride its own.
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: 'Session exported to markdown: qwen-code-export-2026-01-01T00-00-00-000Z.md',
+        },
+        _meta: { source: 'slash_command', sessionArtifacts: artifacts },
+      });
+    });
+
+    it('should omit the artifact key when the command wrote nothing', async () => {
+      await emitter.emitSlashCommandOutput('No active session found.', 0, []);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'No active session found.' },
+        _meta: { source: 'slash_command', timestamp: 0 },
+      });
+    });
+
+    it('should carry structured payloads without letting them displace its own keys', async () => {
+      await emitter.emitSlashCommandOutput(
+        'Compressing context...',
+        undefined,
+        undefined,
+        {
+          contextCompression: { phase: 'progress' },
+          // A payload must never be able to re-label the frame.
+          source: 'spoofed',
+        },
+      );
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Compressing context...' },
+        _meta: {
+          contextCompression: { phase: 'progress' },
+          source: 'slash_command',
+        },
+      });
+    });
   });
 
   describe('emitGoalStatus', () => {
@@ -138,6 +200,32 @@ describe('MessageEmitter', () => {
         content: { type: 'text', text: '' },
         _meta: {
           goalStatus: status,
+        },
+      });
+    });
+  });
+
+  describe('emitStopHookLoop', () => {
+    it('sends loop metadata and no legacy goal projection', async () => {
+      // Exact equality, not `objectContaining`: the three assertions that
+      // observe this payload through the real emitter in `Session.test.ts` all
+      // match on a subset, so re-attaching the first-generation `goal`
+      // sub-object -- a partial revert, or a badly resolved merge -- would put
+      // a second, stale Goal projection back on the ACP wire beside
+      // `_meta.goalState` and leave the whole suite green. A surplus key fails
+      // this assertion.
+      await emitter.emitStopHookLoop(2, ['first reason', 'second reason'], 3);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          stopHookLoop: {
+            iterationCount: 2,
+            reasons: ['first reason', 'second reason'],
+            stopHookCount: 3,
+          },
         },
       });
     });

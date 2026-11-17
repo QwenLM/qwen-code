@@ -16,6 +16,23 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { getProjectHash } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
+// Shared with the daemon's session-creation cap (standalone-sessions.ts uses
+// this constant for its `modelServiceId`) so a model service id accepted for a
+// session is always schedulable, and vice versa.
+export const MAX_CRON_TASK_ROUTING_ID_LENGTH = 256;
+
+export function isValidCronTaskRoutingId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_CRON_TASK_ROUTING_ID_LENGTH &&
+    !Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    })
+  );
+}
+
 /**
  * One entry in a recurring task's bounded run history — a record that the
  * task actually fired, surfaced by the Web Shell scheduled-tasks page. Only
@@ -48,6 +65,13 @@ export interface CronTaskRun {
    * Absent means the dispatch did not fail (or predates this field). */
   sessionDispatchFailed?: boolean;
   /**
+   * How the task's gate (see {@link DurableCronTask.gate}) decided this fire.
+   * Quiet fires are never booked as runs — a one-minute gate would flush the
+   * ring in twenty minutes — so a present value is always one that reached a
+   * session: the prompt with the gate's output, or a failure/blocked notice.
+   */
+  gate?: CronGateRunOutcome;
+  /**
    * READ-ONLY backward-compatibility field. A pre-removal version stamped this
    * on a fire whose precondition withheld the prompt (it was booked as a run
    * but nothing executed). The isolated/precondition machinery is gone, so this
@@ -74,6 +98,35 @@ export interface CronTaskDelivery {
     type: 'user' | 'chat';
     id: string;
   };
+}
+
+/** A gate outcome that reached a session (quiet fires reach nothing). */
+export type CronGateRunOutcome = 'delivered' | 'failed' | 'blocked';
+
+export type CronGateOutcome = 'quiet' | CronGateRunOutcome;
+
+/**
+ * Running summary of a task's gate, kept on the job and persisted for
+ * durable tasks so a management UI can show "quiet ×41 · last delivered
+ * 13:05 · 0 failures" without reading the run ring.
+ */
+export interface CronGateStatus {
+  /** Fire time (epoch ms) of the most recent gate run. */
+  lastAt: number;
+  lastOutcome: CronGateOutcome;
+  /** Quiet fires since the last delivery (reset when the gate delivers). */
+  quietSinceDelivery: number;
+  /** Epoch ms of the last fire whose output reached a session. */
+  lastDeliveredAt?: number;
+  /**
+   * Failed and blocked fires since the last quiet or delivered one. A notice
+   * goes out when the streak starts and when it changes (failed to blocked
+   * or back, another reason to block); the rest are counted here so
+   * `cron_list` and the task card can still show them.
+   */
+  consecutiveFailures: number;
+  /** One line describing the most recent failure; cleared on success. */
+  lastError?: string;
 }
 
 export interface DurableCronTask {
@@ -115,6 +168,11 @@ export interface DurableCronTask {
   /** Where executions run. Absent defaults to the historical behavior:
    * every fire reuses the task's bound session. */
   sessionMode?: 'persistent' | 'per_run';
+  /** Model service selected for each fresh per-run session. Absent uses the
+   * workspace default. */
+  modelServiceId?: string;
+  /** Named session group assigned to each fresh per-run session. */
+  groupId?: string;
   delivery?: CronTaskDelivery;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
@@ -122,6 +180,39 @@ export interface DurableCronTask {
    * Appended at the scheduler's persist sites via {@link appendCronRun}.
    */
   runs?: CronTaskRun[];
+  /**
+   * Shell command the scheduler runs at each fire, outside the model. Empty
+   * stdout and exit 0 skip the fire; output delivers the fire with the output
+   * attached; a non-zero exit or timeout is reported when the gate starts
+   * failing, not at every fire. See
+   * `docs/design/2026-10-21-scheduled-task-gate.md`. Always written together
+   * with {@link DurableCronTask.condition} through {@link withTaskGate}.
+   */
+  gate?: string;
+  gateStatus?: CronGateStatus;
+  /**
+   * Downgrade fuse for `gate`. Older binaries ignore `gate` and would fire a
+   * gated task unconditionally; they do, however, fail closed on a non-empty
+   * `condition` (the removed isolated-mode precondition). The writer mirrors
+   * the gate here so an older reader withholds the task instead of running it
+   * every slot. This version never reads it except in
+   * {@link taskHasLegacyCondition}, which ignores it when `gate` is present.
+   */
+  condition?: string;
+}
+
+/**
+ * Sets or clears a task's gate. The downgrade fuse must move with the gate:
+ * a gate without the fuse runs unconditionally on an older binary, and a fuse
+ * without the gate makes this version treat the task as a legacy precondition
+ * and never fire it. Returns a fresh task.
+ */
+export function withTaskGate(
+  task: DurableCronTask,
+  gate: string | undefined,
+): DurableCronTask {
+  const { gate: _gate, condition: _condition, ...rest } = task;
+  return gate ? { ...rest, gate, condition: gate } : rest;
 }
 
 /** How a per-run fire's fresh-session dispatch ended: the session the run
@@ -165,7 +256,11 @@ export function appendCronRun(
   entry: CronTaskRun,
 ): CronTaskRun[] {
   const base = Array.isArray(runs) ? runs : [];
-  const next = [...base, entry];
+  // In time order: a gated fire is booked when its gate settles, under its
+  // own slot, which can be older than a manual run booked meanwhile.
+  let at = base.length;
+  while (at > 0 && base[at - 1]!.at > entry.at) at--;
+  const next = [...base.slice(0, at), entry, ...base.slice(at)];
   return next.length > MAX_TASK_RUNS
     ? next.slice(next.length - MAX_TASK_RUNS)
     : next;
@@ -182,10 +277,38 @@ export function appendCronRun(
  * the manual `/run` endpoint — uses this to FAIL CLOSED (skip / block / reject)
  * so a removed safety gate ("only run when X") can never silently degrade into
  * "always run" on any path. The user re-creates the task if they still want it.
+ *
+ * A task with a `gate` is not legacy: its `condition` is the downgrade fuse
+ * written by {@link withTaskGate} for older readers, and this version runs
+ * the gate instead.
  */
 export function taskHasLegacyCondition(task: DurableCronTask): boolean {
+  if (typeof task.gate === 'string' && task.gate.length > 0) return false;
   const condition = (task as unknown as Record<string, unknown>)['condition'];
   return typeof condition === 'string' && condition.length > 0;
+}
+
+const GATE_OUTCOMES: ReadonlySet<string> = new Set([
+  'quiet',
+  'delivered',
+  'failed',
+  'blocked',
+]);
+
+function isValidGateStatus(value: unknown): value is CronGateStatus {
+  if (typeof value !== 'object' || value === null) return false;
+  const status = value as Record<string, unknown>;
+  return (
+    isFiniteTimestamp(status['lastAt']) &&
+    typeof status['lastOutcome'] === 'string' &&
+    GATE_OUTCOMES.has(status['lastOutcome']) &&
+    typeof status['quietSinceDelivery'] === 'number' &&
+    typeof status['consecutiveFailures'] === 'number' &&
+    (status['lastDeliveredAt'] === undefined ||
+      isFiniteTimestamp(status['lastDeliveredAt'])) &&
+    (status['lastError'] === undefined ||
+      typeof status['lastError'] === 'string')
+  );
 }
 
 /**
@@ -244,6 +367,22 @@ let updateStaleSeq = 0;
 // cleanup hook at this lifetime.
 const updateMutexes = new Map<string, Mutex>();
 
+// Per-task tombstones are durable because scheduled-task routes run in the
+// daemon while the scheduler that may restore a consumed one-shot runs in an
+// ACP child. Both files are read and written under the task-file lock below.
+const MAX_TASK_DELETION_GENERATIONS = 10_000;
+
+interface CronTaskDeletionGenerations {
+  version: 2;
+  watermark: number;
+  entries: Array<[string, number]>;
+}
+
+interface CronTaskDeletionState {
+  generations: Map<string, number>;
+  watermark: number;
+}
+
 function getUpdateMutex(filePath: string): Mutex {
   let mutex = updateMutexes.get(filePath);
   if (!mutex) {
@@ -251,6 +390,96 @@ function getUpdateMutex(filePath: string): Mutex {
     updateMutexes.set(filePath, mutex);
   }
   return mutex;
+}
+
+async function readTaskDeletionGenerations(
+  filePath: string,
+): Promise<CronTaskDeletionState> {
+  const statePath = `${filePath}.deletions`;
+  let raw: string;
+  try {
+    raw = await fs.readFile(statePath, 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { generations: new Map(), watermark: 0 };
+    }
+    throw error;
+  }
+
+  const parsed = JSON.parse(raw) as {
+    version?: unknown;
+    watermark?: unknown;
+    entries?: unknown;
+  };
+  if (
+    parsed.version !== 2 ||
+    !Number.isSafeInteger(parsed.watermark) ||
+    (parsed.watermark as number) < 0 ||
+    !Array.isArray(parsed.entries)
+  ) {
+    throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
+  }
+  const generations = new Map<string, number>();
+  let maximumGeneration = 0;
+  for (const entry of parsed.entries) {
+    if (
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== 'string' ||
+      !Number.isSafeInteger(entry[1]) ||
+      entry[1] < 1 ||
+      generations.has(entry[0])
+    ) {
+      throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
+    }
+    generations.set(entry[0], entry[1]);
+    maximumGeneration = Math.max(maximumGeneration, entry[1]);
+  }
+  const watermark = parsed.watermark as number;
+  if (watermark < maximumGeneration) {
+    throw new Error(`Invalid scheduled-task deletion state: ${statePath}`);
+  }
+  return { generations, watermark };
+}
+
+/**
+ * Best-effort variant of {@link readTaskDeletionGenerations} for
+ * updateCronTasks: a torn or stale sidecar (the atomic write's in-place
+ * fallback can leave one after a crash) must not fail the tasks write it
+ * rides on. Returns undefined for "state unknown" — observers then skip
+ * recording (a cross-process restore declines rather than resurrecting a
+ * deleted task), while a deletion write rebuilds the file from empty.
+ */
+async function readTaskDeletionGenerationsOrUnknown(
+  filePath: string,
+): Promise<CronTaskDeletionState | undefined> {
+  try {
+    return await readTaskDeletionGenerations(filePath);
+  } catch (error) {
+    // eslint-disable-next-line no-console -- operator-facing remediation breadcrumb for a corrupt sidecar
+    console.warn(
+      `Ignoring unreadable scheduled-task deletion state at ${filePath}.deletions ` +
+        `(${error instanceof Error ? error.message : String(error)}) — task ` +
+        'updates proceed without it; delete the file to rebuild it.',
+    );
+    return undefined;
+  }
+}
+
+async function writeTaskDeletionGenerations(
+  filePath: string,
+  deletionState: CronTaskDeletionState,
+  assertCanCommit?: () => void,
+): Promise<void> {
+  const state: CronTaskDeletionGenerations = {
+    version: 2,
+    watermark: deletionState.watermark,
+    entries: [...deletionState.generations],
+  };
+  await atomicWriteJSON(`${filePath}.deletions`, state, {
+    noFollow: true,
+    assertCanCommit,
+  });
 }
 
 export function getCronFilePath(projectRoot: string): string {
@@ -296,14 +525,34 @@ export async function readCronTasks(
       `Expected a JSON array in ${filePath} — fix or delete the file; refusing to treat it as an empty schedule.`,
     );
   }
-  for (const [index, task] of parsed.entries()) {
+  // Tolerate routing fields stranded on a non-per-run task (a version
+  // downgrade, a hand edit): they are inert without per-run dispatch, so strip
+  // them rather than fail the whole file — the same normalization the PATCH
+  // route applies on write. The stripped view reaches the next write through
+  // updateCronTasks, so the file self-heals on the next real mutation.
+  const normalized = parsed.map((entry) => {
+    if (typeof entry !== 'object' || entry === null) return entry;
+    const record = entry as Record<string, unknown>;
+    if (
+      (record['modelServiceId'] !== undefined ||
+        record['groupId'] !== undefined) &&
+      record['sessionMode'] !== 'per_run'
+    ) {
+      const copy = { ...record };
+      delete copy['modelServiceId'];
+      delete copy['groupId'];
+      return copy;
+    }
+    return entry;
+  });
+  for (const [index, task] of normalized.entries()) {
     if (!isValidTask(task)) {
       throw new Error(
         `Invalid task entry at index ${index} in ${filePath} — fix or delete the entry; refusing to drop it from the schedule.`,
       );
     }
   }
-  return parsed;
+  return normalized;
 }
 
 export async function writeCronTasks(
@@ -385,6 +634,16 @@ async function acquireUpdateLock(
   }
 }
 
+export function cronTaskSessionDeletionId(sessionId: string): string {
+  const canonicalId =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      sessionId,
+    )
+      ? sessionId.toLowerCase()
+      : sessionId;
+  return `session:${canonicalId}`;
+}
+
 /**
  * Applies `mutate` to the on-disk task list in a single read-modify-write
  * cycle. Cycles are serialized — by a mutex within this process, guarded
@@ -397,14 +656,90 @@ async function acquireUpdateLock(
 export async function updateCronTasks(
   projectRoot: string,
   mutate: (tasks: DurableCronTask[]) => DurableCronTask[],
-  options: { assertCanCommit?: () => void } = {},
+  options: {
+    assertCanCommit?: () => void;
+    deletionIds?: readonly string[] | (() => readonly string[]);
+    observeDeletionIds?:
+      | readonly string[]
+      | ((tasks: readonly DurableCronTask[]) => readonly string[]);
+    onDeletionGenerations?: (generations: ReadonlyMap<string, number>) => void;
+  } = {},
 ): Promise<void> {
   const filePath = getCronFilePath(projectRoot);
   return getUpdateMutex(filePath).runExclusive(async () => {
     const release = await acquireUpdateLock(filePath);
     try {
       const tasks = await readCronTasks(projectRoot);
+      const observedIds = new Set(
+        typeof options.observeDeletionIds === 'function'
+          ? options.observeDeletionIds(tasks)
+          : (options.observeDeletionIds ?? []),
+      );
+      let deletionState: CronTaskDeletionState | undefined;
+      // Loaded lazily, at most once per update: an unreadable sidecar is
+      // reported a single time and remembered as "unknown" (undefined).
+      let deletionStateUnknown = false;
+      const loadDeletionState = async () => {
+        if (deletionState === undefined && !deletionStateUnknown) {
+          const state = await readTaskDeletionGenerationsOrUnknown(filePath);
+          if (state === undefined) {
+            deletionStateUnknown = true;
+          } else {
+            deletionState = state;
+          }
+        }
+        return deletionState;
+      };
+      if (observedIds.size > 0) {
+        const observedDeletionState = await loadDeletionState();
+        if (observedDeletionState !== undefined) {
+          options.onDeletionGenerations?.(
+            new Map(
+              [...observedIds].map((id) => [
+                id,
+                observedDeletionState.generations.get(id) ?? 0,
+              ]),
+            ),
+          );
+        }
+        // Unreadable sidecar: skip the observation entirely so consumers
+        // decline a restore instead of recording a fabricated "never
+        // deleted" generation.
+      }
       const next = mutate(tasks);
+      const deletionIds =
+        typeof options.deletionIds === 'function'
+          ? options.deletionIds()
+          : options.deletionIds;
+      if (deletionIds?.length) {
+        // An unreadable sidecar is rebuilt from empty: the new tombstones
+        // land, and any pre-corruption generation a restore observed can no
+        // longer match, so the restore declines rather than resurrecting.
+        deletionState = (await loadDeletionState()) ?? {
+          generations: new Map(),
+          watermark: 0,
+        };
+        for (const id of new Set(deletionIds)) {
+          if (deletionState.watermark === Number.MAX_SAFE_INTEGER) {
+            throw new Error(
+              `Scheduled-task deletion generation overflow for ${id}`,
+            );
+          }
+          deletionState.watermark += 1;
+          deletionState.generations.delete(id);
+          deletionState.generations.set(id, deletionState.watermark);
+        }
+        while (deletionState.generations.size > MAX_TASK_DELETION_GENERATIONS) {
+          const oldest = deletionState.generations.keys().next().value;
+          if (oldest === undefined) break;
+          deletionState.generations.delete(oldest);
+        }
+        await writeTaskDeletionGenerations(
+          filePath,
+          deletionState,
+          options.assertCanCommit,
+        );
+      }
       if (next !== tasks) {
         await writeCronTasks(projectRoot, next, options);
       }
@@ -427,17 +762,25 @@ export async function removeCronTasks(
   ids: string[],
 ): Promise<number> {
   const idSet = new Set(ids);
-  // Lock-free pre-check: a miss must be entirely side-effect free — taking
-  // the update lock would mkdir .qwen/ just to discover there is nothing
-  // to remove. The authoritative filter re-runs under the lock below.
-  const current = await readCronTasks(projectRoot);
-  if (!current.some((t) => idSet.has(t.id))) return 0;
+  // Avoid creating the tasks directory for a project with no task file. When
+  // the file exists, even a miss records the delete tombstone so an in-flight
+  // cross-process restore cannot resurrect the task.
+  try {
+    await fs.access(getCronFilePath(projectRoot));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw error;
+  }
   let removed = 0;
-  await updateCronTasks(projectRoot, (tasks) => {
-    const remaining = tasks.filter((t) => !idSet.has(t.id));
-    removed = tasks.length - remaining.length;
-    return removed === 0 ? tasks : remaining;
-  });
+  await updateCronTasks(
+    projectRoot,
+    (tasks) => {
+      const remaining = tasks.filter((t) => !idSet.has(t.id));
+      removed = tasks.length - remaining.length;
+      return removed === 0 ? tasks : remaining;
+    },
+    { deletionIds: ids },
+  );
   return removed;
 }
 
@@ -466,6 +809,8 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
         typeof run['sessionId'] === 'string') &&
       (run['sessionDispatchFailed'] === undefined ||
         typeof run['sessionDispatchFailed'] === 'boolean') &&
+      (run['gate'] === undefined ||
+        (typeof run['gate'] === 'string' && GATE_OUTCOMES.has(run['gate']))) &&
       // Read-only legacy compat: validate so a stored `withheld` marker isn't
       // rejected on read (it is never written anymore).
       (run['withheld'] === undefined || typeof run['withheld'] === 'boolean')
@@ -528,7 +873,16 @@ function isValidTask(value: unknown): value is DurableCronTask {
     (obj['sessionMode'] === undefined ||
       obj['sessionMode'] === 'persistent' ||
       obj['sessionMode'] === 'per_run') &&
+    (obj['modelServiceId'] === undefined ||
+      isValidCronTaskRoutingId(obj['modelServiceId'])) &&
+    (obj['groupId'] === undefined ||
+      isValidCronTaskRoutingId(obj['groupId'])) &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
-    (obj['runs'] === undefined || isValidRuns(obj['runs']))
+    (obj['runs'] === undefined || isValidRuns(obj['runs'])) &&
+    // A gate is a command: an empty string would be run as nothing and
+    // deliver on every slot, so it fails validation like any corrupt field.
+    (obj['gate'] === undefined ||
+      (typeof obj['gate'] === 'string' && obj['gate'].length > 0)) &&
+    (obj['gateStatus'] === undefined || isValidGateStatus(obj['gateStatus']))
   );
 }

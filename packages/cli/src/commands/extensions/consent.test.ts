@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import stripAnsi from 'strip-ansi';
 import {
   extensionConsentString,
   requestConsentOrFail,
@@ -266,6 +267,29 @@ describe('extensionConsentString', () => {
     expect(result).toContain('agent1');
     expect(result).toContain('Agent 1 description');
   });
+
+  it('should include workflows with their descriptions flattened to plain text', () => {
+    const config: ExtensionConfig = {
+      name: 'gcp',
+      version: '1.0.0',
+    };
+
+    const result = extensionConsentString(config, [], [], [], 'QwenCode', [
+      {
+        name: 'gcp:audit',
+        extensionName: 'gcp',
+        scriptPath: '/ext/gcp/workflows/audit.js',
+        contentDigest: '0123456789abcdef',
+        description: 'Audits\n\u001b[31mthe project\u001b[0m',
+      },
+    ]);
+
+    expect(result).toContain(
+      'This extension will install the following workflows (JavaScript scripts that can start subagents):',
+    );
+    expect(stripAnsi(result)).toContain('  * gcp:audit: Audits the project');
+    expect(result).not.toContain('\u001b[31m');
+  });
 });
 
 describe('requestConsentOrFail', () => {
@@ -331,6 +355,69 @@ describe('requestConsentOrFail', () => {
     });
 
     expect(mockRequestConsent).toHaveBeenCalled();
+  });
+
+  describe('workflows', () => {
+    const extensionConfig: ExtensionConfig = { name: 'gcp', version: '1.0.0' };
+    const audit = {
+      name: 'gcp:audit',
+      extensionName: 'gcp',
+      scriptPath: '/ext/gcp/workflows/audit.js',
+      contentDigest: '0123456789abcdef',
+      description: 'Audits the project',
+    };
+
+    it('should request consent when an update adds a workflow', async () => {
+      mockRequestConsent.mockResolvedValueOnce(true);
+
+      await requestConsentOrFail(mockRequestConsent, {
+        extensionConfig,
+        workflows: [audit],
+        previousExtensionConfig: extensionConfig,
+        previousWorkflows: [],
+        originSource: 'QwenCode',
+      });
+
+      expect(mockRequestConsent).toHaveBeenCalledWith(
+        expect.stringContaining('gcp:audit'),
+      );
+      // A new workflow has no earlier script to have changed from.
+      expect(mockRequestConsent).not.toHaveBeenCalledWith(
+        expect.stringContaining('changed since the installed version'),
+      );
+    });
+
+    // The consent text lists names and descriptions, so a code-only update
+    // produces identical text; the digest comparison is what asks again.
+    it('should request consent naming the scripts whose code changed', async () => {
+      mockRequestConsent.mockResolvedValueOnce(true);
+
+      await requestConsentOrFail(mockRequestConsent, {
+        extensionConfig,
+        workflows: [{ ...audit, contentDigest: 'fedcba9876543210' }],
+        previousExtensionConfig: extensionConfig,
+        previousWorkflows: [audit],
+        originSource: 'QwenCode',
+      });
+
+      expect(mockRequestConsent).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'These workflow scripts changed since the installed version: gcp:audit.',
+        ),
+      );
+    });
+
+    it('should skip consent when the workflows are unchanged', async () => {
+      await requestConsentOrFail(mockRequestConsent, {
+        extensionConfig,
+        workflows: [audit],
+        previousExtensionConfig: extensionConfig,
+        previousWorkflows: [audit],
+        originSource: 'QwenCode',
+      });
+
+      expect(mockRequestConsent).not.toHaveBeenCalled();
+    });
   });
 });
 

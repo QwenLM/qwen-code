@@ -121,14 +121,31 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
     }
 
     // Parse @path
+    //
+    // A URL ref (`@https://…`) is delimited differently from a filesystem
+    // path. The punctuation terminators below exist to stop a path at a
+    // sentence boundary ("see file.txt, then…"), but `?`, `&`, `,` and `;`
+    // are structural in a URL — a presigned OSS/S3 link carries its signature
+    // in the query string, so terminating at `?` would silently drop it and
+    // the request would fail with HTTP 403.
+    //
+    // Instead a URL runs to the first character RFC 3986 does not permit
+    // unencoded. That covers whitespace and also CJK prose written with no
+    // space ("@https://host/a.mp4。分析一下"), which a whitespace-only rule
+    // would swallow into the URL.
+    const isUrlRef = /^https?:\/\//i.test(query.slice(atIndex + 1));
+    // unreserved / gen-delims / sub-delims / pct-encoding, per RFC 3986.
+    const NON_URL_CHAR = /[^A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]/;
     let pathEndIndex = atIndex + 1;
     let inEscape = false;
     while (pathEndIndex < query.length) {
-      const char = query[pathEndIndex];
+      const char = query[pathEndIndex]!;
       if (inEscape) {
         inEscape = false;
       } else if (char === '\\') {
         inEscape = true;
+      } else if (isUrlRef) {
+        if (NON_URL_CHAR.test(char)) break;
       } else if (/[,\s;!?()[\]{}]/.test(char)) {
         // Path ends at first whitespace or punctuation not escaped
         break;
@@ -143,7 +160,18 @@ function parseAllAtCommands(query: string): AtCommandPart[] {
       }
       pathEndIndex++;
     }
-    const rawAtPath = query.substring(atIndex, pathEndIndex);
+    let rawAtPath = query.substring(atIndex, pathEndIndex);
+    if (isUrlRef) {
+      // `.`/`,`/`;`/`!`/`?` are legal URL characters but are usually prose
+      // when they land at the very end ("@https://host/a.mp4. Explain it").
+      // Trimmed after the scan rather than treated as terminators, so they
+      // can never cut a URL short mid-query. Brackets and parens are left
+      // alone: they appear balanced inside real URLs, and a wrapped URL still
+      // yields a named error rather than a silently mangled request.
+      const trimmed = rawAtPath.replace(/[.,;:!?]+$/, '');
+      pathEndIndex = atIndex + trimmed.length;
+      rawAtPath = trimmed;
+    }
     // unescapePath expects the @ symbol to be present, and will handle it.
     const atPath = unescapePath(rawAtPath);
     parts.push({ type: 'atPath', content: atPath });
@@ -280,6 +308,19 @@ export async function resolveAtCommandQuery({
     ref: { id?: string; title?: string };
   }> = [];
 
+  // URL media references (`@https://…`) collected during the loop and
+  // localized (downloaded → recognized → promoted into the omni object
+  // store) after it. Only active when omni delivery is on; otherwise URL
+  // tokens keep today's fall-through behavior (left as text).
+  const urlMediaRefs: Array<{ originalAtPath: string; url: string }> = [];
+  /** `@`-referenced media whose bytes are gone but whose memory survives:
+   * re-anchored to a session handle so recall stays reachable. */
+  const rememberedMediaRefs: Array<{
+    originalAtPath: string;
+    pathName: string;
+    annotation: string;
+  }> = [];
+
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
 
@@ -291,6 +332,23 @@ export async function resolveAtCommandQuery({
     }
 
     const pathName = originalAtPath.substring(1);
+
+    // URL media reference (`@https://…`): detected BEFORE every other
+    // parser — a URL can't be an extension/session/MCP ref, and without
+    // this branch it would fall through to filesystem resolution where the
+    // ENOENT skip silently drops it. Only intercepted when omni delivery
+    // is active; otherwise preserve the legacy text fall-through.
+    if (/^https?:\/\//i.test(pathName) && config.isOmniEnabled?.()) {
+      const omni = await import('@qwen-code/qwen-code-core/omni');
+      if (omni.isOmniDeliveryActive(config) && omni.parseHttpUrlRef(pathName)) {
+        if (!urlMediaRefs.some((r) => r.url === pathName)) {
+          urlMediaRefs.push({ originalAtPath, url: pathName });
+        }
+        // Keep the URL verbatim in the text sent to the model.
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        continue;
+      }
+    }
 
     // Extension reference (`@ext:<name>`): detected BEFORE MCP/filesystem
     // resolution. Only matches when the path starts with `ext:` and the name
@@ -470,9 +528,43 @@ export async function resolveAtCommandQuery({
       }
     }
     if (!resolvedSuccessfully && sawNotFound) {
-      onDebugMessage(
-        `Path ${pathName} not found. Path ${pathName} will be skipped.`,
-      );
+      // The bytes are gone, but media memory may still hold everything
+      // that was ever derived from them (transcripts, keyframes, the
+      // processing history). A handle is normally minted only at delivery,
+      // which needs the bytes — so that knowledge used to be unreachable
+      // for good. The user's own `@`-reference is the same authorization a
+      // delivery carries, so re-anchor from the recorded identity and hand
+      // the model a handle it can recall with (design M §9.2.1).
+      let reanchored = false;
+      if (config.isOmniEnabled?.()) {
+        const { reanchorRememberedMedia } = await import(
+          '@qwen-code/qwen-code-core/omni'
+        );
+        for (const dir of config.getWorkspaceContext().getDirectories()) {
+          const anchor = await reanchorRememberedMedia(
+            config,
+            path.resolve(dir, pathName),
+          );
+          if (!anchor) continue;
+          rememberedMediaRefs.push({
+            originalAtPath,
+            pathName,
+            annotation: anchor.annotation,
+          });
+          atPathToResolvedSpecMap.set(originalAtPath, pathName);
+          onDebugMessage(
+            `Path ${pathName} is gone but remembered; re-anchored as ` +
+              `${anchor.resourceId} (bytes unavailable).`,
+          );
+          reanchored = true;
+          break;
+        }
+      }
+      if (!reanchored) {
+        onDebugMessage(
+          `Path ${pathName} not found. Path ${pathName} will be skipped.`,
+        );
+      }
     }
     if (!resolvedSuccessfully && deferredIgnoreReason) {
       ignoredByReason[deferredIgnoreReason].push(pathName);
@@ -546,6 +638,214 @@ export async function resolveAtCommandQuery({
     ),
   );
 
+  // URL media localization: download → recognize → promote into the omni
+  // object store → upload → fileData part. Sequential (media downloads can
+  // be large; parallel GiB transfers would contend), failure-isolated per
+  // URL (an error card is shown and the turn continues — mirroring the MCP
+  // resource block's Promise.allSettled semantics).
+  const urlMediaParts: Part[] = [];
+  const urlMediaDisplays: IndividualToolCallDisplay[] = [];
+  const urlMediaLabels: string[] = [];
+  if (urlMediaRefs.length > 0) {
+    const core = await import('@qwen-code/qwen-code-core/omni');
+    for (let i = 0; i < urlMediaRefs.length; i++) {
+      const ref = urlMediaRefs[i];
+      const callId = `client-url-media-${userMessageTimestamp}-${i}`;
+      const hostLabel = (() => {
+        try {
+          return new URL(ref.url).hostname;
+        } catch {
+          return 'invalid-url';
+        }
+      })();
+      let tempPartPath: string | undefined;
+      try {
+        const store = new core.OmniObjectStore(config.storage.getQwenDir());
+        const downloadsDir = path.join(store.getOmniRootDir(), 'downloads');
+        const downloaded = await core.downloadMediaUrl({
+          url: ref.url,
+          downloadsDir,
+          maxBytes: core.effectiveMaxDownloadFileBytes(config),
+          signal,
+        });
+        tempPartPath = downloaded.partPath;
+        // Full local-file pipeline on the downloaded bytes: sniff/probe/
+        // hash again (the design requires re-recognition from the local
+        // file — never trust transfer-time observations), guard, store,
+        // upload. Displays and error messages need a stable name; use the
+        // URL basename.
+        const urlBase = path.basename(new URL(ref.url).pathname) || hostLabel;
+        // Per-modality gate, mirroring the local-file path in fileUtils:
+        // media the active model cannot consume must not be stored and
+        // uploaded — the fileData part would only be replaced by an
+        // unsupported-modality placeholder in the converter, after paying
+        // for the upload. (The download itself is unavoidable: modality
+        // is only knowable from the bytes.) A null sniff falls through to
+        // the pipeline, whose recognition failure names the problem.
+        const modalities =
+          config.getContentGeneratorConfig?.()?.modalities ?? {};
+        const sniffedModality = await core.sniffFileModality(
+          downloaded.partPath,
+        );
+        if (sniffedModality && !modalities[sniffedModality]) {
+          urlMediaDisplays.push({
+            callId,
+            name: 'Fetch Media URL',
+            description: `Download ${ref.url}`,
+            status: ToolCallStatus.Error,
+            resultDisplay: `Skipped ${urlBase}: the active model does not accept ${sniffedModality} input.`,
+            confirmationDetails: undefined,
+          });
+          continue;
+        }
+        const delivery = await core.processMediaForOmniDelivery(
+          downloaded.partPath,
+          config,
+          // displayName: guard/error messages must name the URL's file, not
+          // the opaque staging path the download landed under. sourceUrl:
+          // the staging path is deleted in the finally below, so memory
+          // must anchor this media's identity to the object store and
+          // record the URL as its source — a handle bound to the staging
+          // path would resolve to ENOENT for the rest of the session.
+          { signal, displayName: urlBase, sourceUrl: ref.url },
+        );
+        // §6.2/D8 ordering contract documented on buildTranscriptParts.
+        const transcriptParts = core.buildTranscriptParts(
+          urlBase,
+          delivery.transcripts,
+        );
+        // Additional media Parts (multi-output fixed policies): follow the
+        // primary media slot in every branch below.
+        const additionalParts = core.buildAdditionalMediaParts(
+          urlBase,
+          delivery.additionalMedia,
+        );
+        // Session resource handle (memory design M §5.2): leads the part
+        // group in every branch below, exactly as readMediaViaOmniDelivery
+        // does it. Without this, URL-delivered media accrues memory records
+        // and an issued registry binding that the model is never told about
+        // — active recall rejects the unknown handle and the passive
+        // selector finds no handles to consult, so the session can never
+        // recall what it just spent an upload collecting. Placed FIRST so
+        // the disclosure keeps its D8 adjacency to the media part.
+        const handleParts = delivery.resourceId
+          ? [
+              {
+                text: core.formatResourceHandleText(
+                  urlBase,
+                  delivery.resourceId,
+                ),
+              },
+            ]
+          : [];
+        if (delivery.omission) {
+          // Explicit omission (policy design §10.2): the media is withheld
+          // and the omission notice text stands in its place — mirroring
+          // readMediaViaOmniDelivery. Not an error: the fetch succeeded;
+          // the transport guard's verdict is the content.
+          urlMediaParts.push(...handleParts);
+          urlMediaParts.push({
+            text: core.formatOmissionText(urlBase, delivery.omission.reason),
+          });
+          urlMediaParts.push(...additionalParts);
+          urlMediaParts.push(...transcriptParts);
+          urlMediaLabels.push(ref.url);
+          urlMediaDisplays.push({
+            callId,
+            name: 'Fetch Media URL',
+            description: `Downloaded ${ref.url}`,
+            status: ToolCallStatus.Success,
+            resultDisplay: `Media omitted by the omni transport guard: ${urlBase}`,
+            confirmationDetails: undefined,
+          });
+          continue;
+        }
+        if (!delivery.fileUri && transcriptParts.length > 0) {
+          // Pure-transcript delivery (§6.2): the policies replaced the
+          // media with text-only deliverables — no media Part is emitted
+          // for the primary (additional deliverables, if any, still are).
+          // The primary disclosure (chained prior lossy steps, decision
+          // D8) still renders: the transcript was derived through them.
+          urlMediaParts.push(...handleParts);
+          if (delivery.disclosure) {
+            urlMediaParts.push({
+              text: core.formatDisclosureText(urlBase, delivery.disclosure),
+            });
+          }
+          urlMediaParts.push(...additionalParts);
+          urlMediaParts.push(...transcriptParts);
+          urlMediaLabels.push(ref.url);
+          urlMediaDisplays.push({
+            callId,
+            name: 'Fetch Media URL',
+            description: `Downloaded ${ref.url}`,
+            status: ToolCallStatus.Success,
+            resultDisplay: `Localized ${urlBase} and delivered as transcript (omni policy).`,
+            confirmationDetails: undefined,
+          });
+          continue;
+        }
+        urlMediaParts.push(...handleParts);
+        // Disclosure IMMEDIATELY before its media part (decision D8):
+        // provider converters that relocate media move the pair together.
+        if (delivery.disclosure) {
+          urlMediaParts.push({
+            text: core.formatDisclosureText(urlBase, delivery.disclosure),
+          });
+        }
+        urlMediaParts.push({
+          fileData: {
+            fileUri: delivery.fileUri,
+            mimeType: delivery.mimeType,
+            displayName: urlBase,
+          },
+        });
+        urlMediaParts.push(...additionalParts);
+        urlMediaParts.push(...transcriptParts);
+        urlMediaLabels.push(ref.url);
+        urlMediaDisplays.push({
+          callId,
+          name: 'Fetch Media URL',
+          description: `Downloaded ${ref.url}`,
+          status: ToolCallStatus.Success,
+          resultDisplay: `Localized ${urlBase} (${delivery.recognized.modality}, ${(delivery.recognized.sizeBytes / 1024 / 1024).toFixed(1)}MB) and delivered via omni upload${delivery.degraded ? ' (degraded by media policy)' : ''}.`,
+          confirmationDetails: undefined,
+        });
+      } catch (error) {
+        if (signal.aborted) {
+          // User cancelled mid-download: end the turn quietly instead of
+          // throwing — resolveAtCommandQuery has no throw contract, and a
+          // rejection here would surface as an unhandled-rejection banner
+          // (cancelOngoingRequest already handles the UI reset).
+          if (tempPartPath) {
+            await fs.rm(tempPartPath, { force: true }).catch(() => {});
+          }
+          return {
+            processedQuery: null,
+            shouldProceed: false,
+            toolDisplays: [...urlMediaDisplays],
+            filesRead: urlMediaLabels,
+            // No chat-recording entry for a user-cancelled resolution.
+          };
+        }
+        const reason = getErrorMessage(error);
+        onDebugMessage(`Failed to localize media URL ${ref.url}: ${reason}`);
+        urlMediaDisplays.push({
+          callId,
+          name: 'Fetch Media URL',
+          description: `Download ${ref.url}`,
+          status: ToolCallStatus.Error,
+          resultDisplay: `Failed to fetch media from ${hostLabel}: ${reason}`,
+          confirmationDetails: undefined,
+        });
+      } finally {
+        if (tempPartPath) {
+          await fs.rm(tempPartPath, { force: true }).catch(() => {});
+        }
+      }
+    }
+  }
+
   const resourceParts: Part[] = [];
   const resourceDisplays: IndividualToolCallDisplay[] = [];
   const resourceLabels: string[] = [];
@@ -606,7 +906,11 @@ export async function resolveAtCommandQuery({
     mcpResourceRefs.length === 0 &&
     mcpServerMentions.length === 0 &&
     extensionMentions.length === 0 &&
-    sessionMentions.length === 0
+    sessionMentions.length === 0 &&
+    // URL media refs count as content too: without this, a URL-only prompt
+    // would run the whole download→upload pipeline and then discard the
+    // delivered parts (and their display cards) via this early return.
+    urlMediaRefs.length === 0
   ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
@@ -951,6 +1255,7 @@ export async function resolveAtCommandQuery({
         ...scopedMentionLabels,
         ...contentLabelsForDisplay,
         ...resourceLabels,
+        ...urlMediaLabels,
       ];
       return {
         processedQuery: null,
@@ -958,6 +1263,7 @@ export async function resolveAtCommandQuery({
         toolDisplays: [
           ...scopedMentionDisplays,
           ...resourceDisplays,
+          ...urlMediaDisplays,
           errorToolCallDisplay,
         ],
         filesRead: labelsOnError,
@@ -975,16 +1281,30 @@ export async function resolveAtCommandQuery({
   // its content block via the "--- Content from ... ---" delimiter labels (and
   // the verbatim `@server:uri` / `@path` left in the prompt text), not by
   // positional alignment, so grouping is safe.
+  // Re-anchored media: a handle annotation plus an explicit note that the
+  // bytes are gone, so the model recalls instead of trying to read.
+  const rememberedMediaParts: Part[] = rememberedMediaRefs.flatMap((ref) => [
+    { text: ref.annotation },
+    {
+      text:
+        `【媒体缺失】${ref.pathName}：文件已不在磁盘上，无法投递画面/音频。` +
+        `其处理记忆仍可用——用上面的句柄调用 omni_recall_media_memory 取回。`,
+    },
+  ]);
   const processedQueryParts: PartListUnion = [
     { text: initialQueryText },
     ...scopedMentionParts,
     ...fileParts,
     ...resourceParts,
+    ...urlMediaParts,
+    ...rememberedMediaParts,
   ];
   const allLabels = [
     ...scopedMentionLabels,
     ...contentLabelsForDisplay,
     ...resourceLabels,
+    ...urlMediaLabels,
+    ...rememberedMediaRefs.map((ref) => `${ref.pathName} (记忆)`),
   ];
 
   return {
@@ -994,6 +1314,7 @@ export async function resolveAtCommandQuery({
       ...scopedMentionDisplays,
       ...fileDisplays,
       ...resourceDisplays,
+      ...urlMediaDisplays,
     ],
     filesRead: allLabels,
     recording: {

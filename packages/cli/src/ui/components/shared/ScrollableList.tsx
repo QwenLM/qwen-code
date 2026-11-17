@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useRef, forwardRef, useImperativeHandle, useCallback } from 'react';
+import {
+  useRef,
+  forwardRef,
+  useImperativeHandle,
+  useCallback,
+  useEffect,
+} from 'react';
 import type React from 'react';
 import {
   VirtualizedList,
@@ -146,6 +152,13 @@ function ScrollableList<T>(
     pendingDragRow.current = null;
     cancelScrollFlush();
   }, [cancelScrollFlush]);
+
+  // Losing focus unsubscribes the keypress and mouse handlers, so a still-armed
+  // flush belongs to a gesture the user can no longer steer. Letting it fire
+  // after the flip scrolls the surface out from under whatever took focus.
+  useEffect(() => {
+    if (!hasFocus) cancelPendingScroll();
+  }, [hasFocus, cancelPendingScroll]);
 
   const handleMouseEvent = useCallback(
     (event: MouseEvent) => {

@@ -38,11 +38,20 @@
 import { randomUUID } from 'node:crypto';
 import {
   createDebugLogger,
-  escapeXml,
   SessionService,
+  Storage,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
+import {
+  escapeXml,
+  escapeXmlWithinBudget,
+} from '@qwen-code/qwen-code-core/utils/xml.js';
+import {
+  APPROVAL_MODES,
+  ApprovalMode,
+} from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
   BridgeBackgroundNotification,
@@ -51,6 +60,7 @@ import type {
 import type {
   CreateSubSessionInfo,
   CreateSubSessionResult,
+  ResolveSubSessionWorkspaceHandler,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import {
   isReservedStandaloneSessionSourceType,
@@ -58,6 +68,17 @@ import {
 } from '@qwen-code/acp-bridge/sessionSource';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
+import type { SessionArchiveCoordinator } from './server/session-archive.js';
+import { createSessionOrganizationService } from './session-organization-helpers.js';
+import {
+  WorkspaceGenerationClosedError,
+  type WorkspaceRegistry,
+  type WorkspaceRuntime,
+} from './workspace-registry.js';
+import {
+  isPortableAbsolutePath,
+  resolveRegisteredWorkspaceRuntimeByPathSelector,
+} from './workspace-route-runtime.js';
 
 type StandaloneSubSessionService = Pick<
   StandaloneSessionService,
@@ -97,6 +118,8 @@ export const MAX_CONCURRENT_SUB_SESSIONS_TOTAL = 24;
  * the caller forever. On timeout we return whatever text accumulated so far. */
 const FIRST_TURN_TIMEOUT_MS = 5 * 60_000;
 
+const SENT_MODE_DISPATCH_TIMEOUT_MS = 30_000;
+
 /** Wall-clock ceiling for the sent-mode background drain. Generous enough for
  * long-running sub-sessions but prevents a hung turn from permanently consuming
  * a concurrency slot (the idle reaper may not fire if the sub-session is still
@@ -110,6 +133,12 @@ const RECOVERED_PARENT_NOTIFICATION_TIMEOUT_MS = 30 * 60_000;
 
 const SENT_COMPLETION_DELIVERY_RETRY_MS = 100;
 const SENT_COMPLETION_DELIVERY_MAX_RETRY_MS = 30_000;
+
+/** The rollback watchdog bounds a closeSession that already gives the agent
+ * ACTIVE_WORK_CLOSE_TIMEOUT_MS to exit, so it must strictly outlast that inner
+ * timeout — two equal timers can fire in either order, and the watchdog
+ * winning would skip the transcript cleanup below entirely. */
+const ROLLBACK_CLOSE_WATCHDOG_SLACK_MS = 5_000;
 
 /** Cap on returned first-turn text so a runaway sub-session can't flood the
  * caller's context. Excess is dropped with a truncation marker. */
@@ -132,14 +161,48 @@ export interface SubSessionLauncher {
   /** The `onCreateSubSession` callback wired into the bridge. Returns a Promise
    * the child's tool awaits. */
   launch(info: CreateSubSessionInfo): Promise<CreateSubSessionResult>;
+  resolveDestination: ResolveSubSessionWorkspaceHandler;
+  /**
+   * Run a launch on behalf of a caller in another workspace. The caller's
+   * launcher has already run the caller-side checks; this one spawns on its
+   * own bridge, under its own caps.
+   */
+  launchForRemoteCaller(
+    info: CreateSubSessionInfo,
+    caller: RemoteSubSessionCaller,
+  ): Promise<CreateSubSessionResult>;
   /** Stop accepting new sub-sessions (daemon shutdown). Idempotent. */
-  stop(): void;
+  stop(reason?: 'workspace_stopped'): void;
 }
 
+/** What a target launcher needs to know about a caller in another workspace. */
+export interface RemoteSubSessionCaller {
+  /** The caller's live approval mode at admission. */
+  approvalMode: ApprovalMode;
+  assertCurrent(): void;
+  /** Hand a `sent` completion to the caller, on the caller's own bridge. */
+  deliverCompletion(notification: BridgeBackgroundNotification): Promise<void>;
+  releaseCompletionSlot?: () => void;
+}
+
+/** How a launcher finds another registered workspace's launcher. */
+export type SubSessionWorkspaceResolution =
+  | {
+      kind: 'found';
+      launcher: SubSessionLauncher;
+      workspaceId: string;
+      workspaceCwd: string;
+      workspaceGeneration: string;
+      assertCurrent(): void;
+    }
+  | { kind: 'refused'; reason: string };
+
 export interface CreateSubSessionLauncherOptions {
+  getArchiveCoordinator?: () => SessionArchiveCoordinator | undefined;
   getBridge: () => AcpSessionBridge | undefined;
   getStandaloneSessionService?: () => StandaloneSubSessionService | undefined;
   boundWorkspace: string;
+  runtimeBaseDir?: string;
   /** Return sent-mode completions to the parent as automatic follow-up turns.
    * Enabled only for the Live conversation runtime. */
   notifySentCompletion?: boolean;
@@ -153,12 +216,142 @@ export interface CreateSubSessionLauncherOptions {
   /** Sent-mode background-drain ceiling; defaults to
    * {@link SENT_MODE_DRAIN_TIMEOUT_MS}. Exposed for tests. */
   sentModeDrainTimeoutMs?: number;
+  /** Named sent-mode dispatch ceiling. Exposed for tests. */
+  sentModeDispatchTimeoutMs?: number;
   /** Per-caller concurrency cap; defaults to
    * {@link MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER}. */
   maxConcurrentPerCaller?: number;
   /** Workspace-wide concurrency cap; defaults to
    * {@link MAX_CONCURRENT_SUB_SESSIONS_TOTAL}. */
   maxConcurrentTotal?: number;
+  /**
+   * Resolve a request's `workspace` to that workspace's launcher. Absent
+   * means this launcher cannot run sub-sessions in another workspace.
+   */
+  resolveWorkspace?: (selector: string) => SubSessionWorkspaceResolution;
+  /** Whether this launcher's own workspace is trusted, read per launch. */
+  isTrusted?: (bridge: AcpSessionBridge) => boolean;
+}
+
+/**
+ * The daemon's index of sub-session launchers by workspace, and the two
+ * readers every launcher is given: which launcher a request's `workspace`
+ * names, and whether a launcher's own workspace is trusted.
+ *
+ * Only the registry's public list can be named, so internal and Live
+ * conversation runtimes are out of reach, and only a trusted workspace can
+ * be a target. Nothing falls back to another workspace.
+ */
+export function createSubSessionWorkspaceIndex(
+  getRegistry: () => WorkspaceRegistry | undefined,
+) {
+  const launchers = new WeakMap<
+    WorkspaceRuntime,
+    { launcher: SubSessionLauncher; workspaceGeneration: string }
+  >();
+  const nameable = (registry: WorkspaceRegistry): string =>
+    registry
+      .list()
+      .filter((runtime) => runtime.trusted && launchers.has(runtime))
+      .map((runtime) =>
+        runtime.displayName
+          ? `${runtime.displayName} (${runtime.workspaceCwd})`
+          : runtime.workspaceCwd,
+      )
+      .join(', ') || 'none';
+  return {
+    register(runtime: WorkspaceRuntime, launcher: SubSessionLauncher): void {
+      launchers.set(runtime, { launcher, workspaceGeneration: randomUUID() });
+    },
+    getLauncher: (runtime: WorkspaceRuntime) =>
+      launchers.get(runtime)?.launcher,
+    resolve(selector: string): SubSessionWorkspaceResolution {
+      const registry = getRegistry();
+      if (!registry) {
+        return { kind: 'refused', reason: 'Workspaces are not available yet.' };
+      }
+      const runtime =
+        registry.getByWorkspaceId(selector) ??
+        (isPortableAbsolutePath(selector)
+          ? resolveRegisteredWorkspaceRuntimeByPathSelector(registry, selector)
+          : undefined);
+      const registered = runtime && launchers.get(runtime);
+      if (!runtime || !registered) {
+        return {
+          kind: 'refused',
+          reason: `No registered workspace matches "${selector}". Workspaces you can use: ${nameable(registry)}.`,
+        };
+      }
+      if (!runtime.trusted) {
+        return {
+          kind: 'refused',
+          reason: `Workspace ${runtime.workspaceCwd} is not trusted. Workspaces you can use: ${nameable(registry)}.`,
+        };
+      }
+      return {
+        kind: 'found',
+        ...registered,
+        workspaceId: runtime.workspaceId,
+        workspaceCwd: runtime.workspaceCwd,
+        assertCurrent() {
+          runtime.generationGuard?.assertOpen();
+          if (
+            registry.getByWorkspaceCwd(runtime.workspaceCwd) !== runtime ||
+            launchers.get(runtime) !== registered
+          ) {
+            throw new WorkspaceGenerationClosedError();
+          }
+        },
+      };
+    },
+    isTrusted(workspaceCwd: string, bridge: AcpSessionBridge): boolean {
+      const runtime = getRegistry()?.getByWorkspaceCwd(workspaceCwd);
+      return (
+        runtime?.bridge === bridge &&
+        runtime.trusted &&
+        runtime.generationGuard?.closed !== true
+      );
+    },
+  };
+}
+
+function delegatedApprovalMode(
+  caller: ApprovalMode,
+  target: ApprovalMode,
+): ApprovalMode {
+  if (caller === target || caller === ApprovalMode.YOLO) return target;
+  if (target === ApprovalMode.YOLO) return caller;
+  // AUTO can approve shell commands that AUTO_EDIT would prompt for, and
+  // leaving AUTO on the target restores its broad permission rules.
+  if (
+    target === ApprovalMode.AUTO ||
+    (caller === ApprovalMode.AUTO && target === ApprovalMode.AUTO_EDIT)
+  ) {
+    throw new Error(
+      `Cannot combine caller approval mode "${caller}" with target mode "${target}" for cross-workspace delegation.`,
+    );
+  }
+  if (caller === ApprovalMode.PLAN || target === ApprovalMode.PLAN) {
+    return ApprovalMode.PLAN;
+  }
+  return ApprovalMode.DEFAULT;
+}
+
+async function readApprovalMode(bridge: AcpSessionBridge, sessionId: string) {
+  const assertCurrent = bridge.captureSessionApprovalModeGuard(sessionId);
+  const status = await bridge.getSessionContextStatus(sessionId);
+  assertCurrent();
+  const { modes } = status.state;
+  const modeId =
+    typeof modes === 'object' && modes && 'currentModeId' in modes
+      ? modes.currentModeId
+      : undefined;
+  return {
+    mode: APPROVAL_MODES.find((mode) => mode === modeId),
+    assertCurrent,
+    canAcceptBackgroundNotifications:
+      status.canAcceptBackgroundNotifications === true,
+  };
 }
 
 type IsolatedWorkspace = NonNullable<
@@ -209,40 +402,12 @@ function truncateCodePoints(value: string, max: number): string {
   return `${codePoints.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
-function escapeXmlWithinBudget(value: string, budget: number): string {
-  if (budget <= 0) return '';
-  const escapedCodePoints: string[] = [];
-  let length = 0;
-  let truncated = false;
-  for (const codePoint of value) {
-    const escaped = escapeXml(codePoint);
-    if (length + escaped.length > budget) {
-      truncated = true;
-      break;
-    }
-    escapedCodePoints.push(escaped);
-    length += escaped.length;
-  }
-  if (!truncated) return escapedCodePoints.join('');
-
-  while (
-    escapedCodePoints.length > 0 &&
-    length + SENT_COMPLETION_RESULT_TRUNCATION_MARKER.length > budget
-  ) {
-    length -= escapedCodePoints.pop()!.length;
-  }
-  return `${escapedCodePoints.join('')}${
-    SENT_COMPLETION_RESULT_TRUNCATION_MARKER.length <= budget - length
-      ? SENT_COMPLETION_RESULT_TRUNCATION_MARKER
-      : ''
-  }`;
-}
-
 function buildSentCompletionNotification(
   sessionId: string,
   label: string,
   result: string,
   stopReason: string,
+  workspaceCwd?: string,
 ) {
   const status = sentCompletionStatus(stopReason);
   const boundedStopReason = truncateCodePoints(stopReason, 128);
@@ -252,7 +417,12 @@ function buildSentCompletionNotification(
       : status === 'cancelled'
         ? 'was cancelled'
         : `failed (${boundedStopReason})`;
-  const sessionLink = `[🧵 ${sessionId.slice(0, 8)}](qwen-session://${sessionId})`;
+  const sessionUrl =
+    `qwen-session://${sessionId}` +
+    (workspaceCwd
+      ? `?${new URLSearchParams({ workspace: workspaceCwd })}`
+      : '');
+  const sessionLink = `[🧵 ${sessionId.slice(0, 8)}](${sessionUrl})`;
   const safeResult =
     result.trim() || `No text output (stopReason: ${stopReason}).`;
   const modelSessionId = truncateCodePoints(sessionId, 256);
@@ -262,7 +432,7 @@ function buildSentCompletionNotification(
     `<task-id>${escapeXml(modelSessionId)}</task-id>`,
     `<status>${status}</status>`,
     `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
-    `<session-link>qwen-session://${escapeXml(modelSessionId)}</session-link>`,
+    `<session-link>${escapeXml(sessionUrl)}</session-link>`,
     '<result>',
   ].join('');
   const modelTextSuffix = '</result></task-notification>';
@@ -272,16 +442,25 @@ function buildSentCompletionNotification(
       modelTextPrefix.length -
       modelTextSuffix.length,
   );
-  const modelText = `${modelTextPrefix}${escapeXmlWithinBudget(
-    safeResult,
-    resultBudget,
-  )}${modelTextSuffix}`;
+  let preview = escapeXmlWithinBudget(safeResult, resultBudget);
+  const marker = SENT_COMPLETION_RESULT_TRUNCATION_MARKER;
+  if (preview.truncated && marker.length <= resultBudget) {
+    preview = escapeXmlWithinBudget(safeResult, resultBudget - marker.length);
+    preview.text += marker;
+  }
+  const modelText = `${modelTextPrefix}${preview.text}${modelTextSuffix}`;
   return {
     displayText: `Sub-session ${sessionLink} ${statusText}.`,
     modelText,
     taskId: sessionId,
     status,
     kind: 'agent' as const,
+    // `subSessionName` strips bidi and control marks and trims, so a name that
+    // was only those characters leaves an empty label -- which the receiving
+    // gate rejects as invalid params. The acceptance wait treats that as
+    // retryable and gives up 30 minutes later, so the parent's completion turn
+    // never runs. An absent label is valid; an empty one is not.
+    ...(modelLabel.trim() ? { label: modelLabel } : {}),
   };
 }
 
@@ -669,11 +848,19 @@ async function awaitFirstTurn(
     })) {
       if (e.type === 'session_update') {
         const d = e.data as {
-          update?: { sessionUpdate?: string; content?: { text?: string } };
+          update?: {
+            sessionUpdate?: string;
+            content?: { text?: string };
+            _meta?: { source?: string };
+          };
         };
         if (
           d?.update?.sessionUpdate === 'agent_message_chunk' &&
-          typeof d.update.content?.text === 'string'
+          typeof d.update.content?.text === 'string' &&
+          (e.promptId === undefined || e.promptId === promptId) &&
+          d.update._meta?.source !== 'background_task_completed' &&
+          d.update._meta?.source !== 'background_notification' &&
+          d.update._meta?.source !== 'background_notification_turn_started'
         ) {
           appendChunk(d.update.content.text);
         }
@@ -724,12 +911,18 @@ export function createSubSessionLauncher(
 ): SubSessionLauncher {
   const {
     getBridge,
+    getArchiveCoordinator,
     getStandaloneSessionService,
     boundWorkspace,
+    runtimeBaseDir,
     notifySentCompletion = false,
     isolatedWorkspace,
+    resolveWorkspace,
+    isTrusted,
   } = opts;
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
+  const sentModeDispatchTimeoutMs =
+    opts.sentModeDispatchTimeoutMs ?? SENT_MODE_DISPATCH_TIMEOUT_MS;
   const sentModeDrainTimeoutMs =
     opts.sentModeDrainTimeoutMs ?? SENT_MODE_DRAIN_TIMEOUT_MS;
   const maxConcurrentPerCaller =
@@ -757,6 +950,7 @@ export function createSubSessionLauncher(
   // Sum of `inflight`, tracked separately so the workspace-wide cap holds even
   // when a caller opens a fresh bucket per launch.
   let inflightTotal = 0;
+  let outstandingRemoteCompletions = 0;
 
   const release = (key: string): void => {
     const n = (inflight.get(key) ?? 1) - 1;
@@ -774,8 +968,106 @@ export function createSubSessionLauncher(
     }
   };
 
-  const launch = async (
+  const rollbackChildSession = async (
+    bridge: AcpSessionBridge,
+    sessionId: string,
+    opts: { removeUnusedTranscript: boolean; named: boolean },
+  ): Promise<void> => {
+    const isMissing = (error: unknown) =>
+      error instanceof SessionNotFoundError &&
+      error.code === 'session_not_found';
+    const childIsClosed = () => {
+      try {
+        bridge.getSessionSummary(sessionId);
+        return false;
+      } catch (error) {
+        return isMissing(error);
+      }
+    };
+    let sessionClosed = false;
+    let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // The launcher itself has one registration. Keep an attached child's
+      // session open for any other client that joined through the catalog.
+      if (opts.named && bridge.getSessionSummary(sessionId).clientCount > 1)
+        return;
+      await Promise.race([
+        bridge.closeSession(sessionId, undefined, {
+          reason: 'sub_session_rollback',
+          ...(opts.named
+            ? { closeIfUnheld: true }
+            : { agentCloseTimeoutMs: ACTIVE_WORK_CLOSE_TIMEOUT_MS }),
+        }),
+        new Promise<never>((_, reject) => {
+          closeTimer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `Timed out closing rolled-back sub-session ${sessionId}`,
+                ),
+              ),
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS + ROLLBACK_CLOSE_WATCHDOG_SLACK_MS,
+          );
+          closeTimer.unref();
+        }),
+      ]);
+      sessionClosed = !opts.named;
+    } catch (error) {
+      sessionClosed = isMissing(error);
+      log.debug('sub-session: closeSession threw', sessionId, error);
+    } finally {
+      clearTimeout(closeTimer);
+    }
+    if (!sessionClosed && !opts.named) {
+      try {
+        await bridge.killSession(sessionId, {
+          requireZeroAttaches: true,
+        });
+      } catch (error) {
+        log.debug('sub-session: killSession threw', sessionId, error);
+      }
+    }
+    if (!sessionClosed && opts.removeUnusedTranscript) {
+      sessionClosed = childIsClosed();
+    }
+    if (sessionClosed && opts.removeUnusedTranscript) {
+      try {
+        const removeTranscript = async () => {
+          const service = new SessionService(boundWorkspace);
+          if (!opts.named) return service.removeSession(sessionId);
+          const coordinator = getArchiveCoordinator?.();
+          if (!coordinator) return false;
+          const canRemove = () =>
+            isTrusted?.(bridge) === true &&
+            !bridge.hasSessionOrPendingRegistration(sessionId);
+          return coordinator.runExclusiveMany([sessionId], async () => {
+            if (!canRemove()) return false;
+            return service.removeUnusedSubSession(sessionId, () => {
+              if (!canRemove()) {
+                throw new Error(
+                  'The sub-session or its runtime changed during rollback.',
+                );
+              }
+            });
+          });
+        };
+        const transcriptRemoved = runtimeBaseDir
+          ? await Storage.runWithResolvedRuntimeBaseDir(
+              runtimeBaseDir,
+              removeTranscript,
+            )
+          : await removeTranscript();
+        if (transcriptRemoved) bridge.markSessionCatalogChanged();
+      } catch (error) {
+        log.debug('sub-session: transcript cleanup failed', sessionId, error);
+      }
+    }
+  };
+
+  const run = async (
     info: CreateSubSessionInfo,
+    remote?: RemoteSubSessionCaller,
+    assertLocalCurrent?: () => void,
   ): Promise<CreateSubSessionResult> => {
     if (stopAc.signal.aborted) {
       throw new Error(
@@ -787,32 +1079,30 @@ export function createSubSessionLauncher(
       throw new Error('Session bridge is not available.');
     }
 
-    // Depth-1 gate. Every daemon session wires a spawner, sub-sessions included,
-    // and each gets its own bucket — so without this a sub-session can spawn
-    // more, each of which spawns more (capⁿ), exhausting `maxSessions` from
-    // one prompt. `callerSessionId` is required and authenticated at the
-    // bridge (`ownsSession`), so it can neither be forged nor omitted to
-    // sidestep this gate or the per-caller cap below.
-    // The in-memory set catches children created by this launcher. The
-    // persisted parent lineage catches the same child after a daemon restart,
-    // when the launcher set is empty but the restored bridge entry has been
-    // re-seeded from its transcript metadata.
-    const caller = bridge.getSessionSummary(info.callerSessionId);
-    const standalone = isReservedStandaloneSessionSourceType(caller.sourceType);
-    const standaloneService = standalone
-      ? getStandaloneSessionService?.()
-      : undefined;
-    if (standalone && !standaloneService) {
-      throw new Error('Standalone session service is unavailable.');
-    }
-    if (
-      spawnedSessionIds.has(info.callerSessionId) ||
-      caller.parentSessionId !== undefined
-    ) {
-      throw new Error(
-        'A sub-session cannot create further sub-sessions (nesting is capped ' +
-          'at one level).',
-      );
+    // `callerSessionId` is required and authenticated at the bridge
+    // (`ownsSession`), so it can neither be forged nor omitted to sidestep the
+    // depth gate (`assertMayDelegate`) or the per-caller cap below.
+    let standalone = false;
+    let standaloneService: StandaloneSubSessionService | undefined;
+    if (remote) {
+      // The caller lives in another workspace, and its launcher ran the
+      // caller-side checks. Daemon-owned directories mean nothing there.
+      if (isolatedWorkspace || getStandaloneSessionService) {
+        throw new Error(
+          'This workspace cannot run sub-sessions for another workspace.',
+        );
+      }
+      remote.assertCurrent();
+    } else {
+      const caller = bridge.getSessionSummary(info.callerSessionId);
+      standalone = isReservedStandaloneSessionSourceType(caller.sourceType);
+      standaloneService = standalone
+        ? getStandaloneSessionService?.()
+        : undefined;
+      if (standalone && !standaloneService) {
+        throw new Error('Standalone session service is unavailable.');
+      }
+      assertMayDelegate(info.callerSessionId, caller.parentSessionId);
     }
 
     // Per-caller concurrency key. Always a real, bridge-authenticated session
@@ -851,7 +1141,25 @@ export function createSubSessionLauncher(
     // we roll this session back so it isn't orphaned (the slot was consumed and
     // the prompt may have been dispatched, but launch() reports failure).
     let spawnedSession: BridgeSession | undefined;
+    let promptAdmitted = false;
     let promptDispatched = false;
+    let promptWriteStarted = false;
+    let queuedTurn: ReturnType<AcpSessionBridge['sendPrompt']> | undefined;
+    let onPromptDispatched: (() => void) | undefined;
+    const named = remote !== undefined || assertLocalCurrent !== undefined;
+    const dispatch =
+      info.completion === 'sent' && named
+        ? new Promise<void>((resolve) => {
+            onPromptDispatched = () => {
+              promptDispatched = true;
+              resolve();
+            };
+          })
+        : undefined;
+    const dispatchAbort = dispatch ? new AbortController() : undefined;
+    const dispatchSignal = dispatchAbort
+      ? AbortSignal.any([stopAc.signal, dispatchAbort.signal])
+      : undefined;
 
     try {
       const promptId = randomUUID();
@@ -865,6 +1173,8 @@ export function createSubSessionLauncher(
             sessionId: randomUUID(),
             parentSessionId: info.callerSessionId,
             promptId,
+            ...(info.sourceType ? { sourceType: info.sourceType } : {}),
+            ...(info.sourceId ? { sourceId: info.sourceId } : {}),
             ...(info.model ? { modelServiceId: info.model } : {}),
           },
           info.prompt,
@@ -872,7 +1182,6 @@ export function createSubSessionLauncher(
         sub = created.session;
         lastEventId = created.initialPrompt.lastEventId;
         turn = created.initialPrompt.turn;
-        promptDispatched = true;
       } else {
         sub = await bridge.spawnOrAttach({
           workspaceCwd: boundWorkspace,
@@ -887,6 +1196,17 @@ export function createSubSessionLauncher(
       }
       spawnedSession = sub;
       const sessionId = sub.sessionId;
+      // Fail closed only for scheduled-task runs; every other caller keeps
+      // the bridge's best-effort contract (warn and stay on the agent's
+      // default model rather than tearing down the spawned session).
+      if (
+        !standalone &&
+        isScheduledTaskRunSource(info) &&
+        info.model &&
+        sub.modelApplied === false
+      ) {
+        throw new Error(`sub-session model selection failed: ${info.model}`);
+      }
       if (isolatedWorkspace && !standalone) {
         const isolatedCwd =
           await isolatedWorkspace.materializeDirectory(sessionId);
@@ -902,6 +1222,47 @@ export function createSubSessionLauncher(
         }
       }
       rememberSpawned(sessionId);
+      let dispatchApproval:
+        | {
+            assertCanDispatch(): void;
+            expectedApprovalMode: ApprovalMode;
+          }
+        | undefined;
+      if (remote) {
+        let childApproval = await readApprovalMode(bridge, sessionId);
+        if (childApproval.mode === undefined) {
+          throw new Error(
+            'The new session did not report its approval mode; it was not used.',
+          );
+        }
+        remote.assertCurrent();
+        const mode = delegatedApprovalMode(
+          remote.approvalMode,
+          childApproval.mode,
+        );
+        if (mode !== childApproval.mode) {
+          const change = await bridge.setSessionApprovalMode(sessionId, mode, {
+            persist: false,
+          });
+          if (change.mode !== mode) {
+            throw new Error('The new session did not apply its approval mode.');
+          }
+          childApproval = await readApprovalMode(bridge, sessionId);
+          if (childApproval.mode !== mode) {
+            throw new Error(
+              'The new session approval mode changed before dispatch.',
+            );
+          }
+        }
+        dispatchApproval = {
+          assertCanDispatch() {
+            remote.assertCurrent();
+            childApproval.assertCurrent();
+          },
+          expectedApprovalMode: mode,
+        };
+        dispatchApproval.assertCanDispatch();
+      }
 
       try {
         bridge.updateSessionMetadata(sessionId, {
@@ -918,21 +1279,43 @@ export function createSubSessionLauncher(
       }
 
       if (!standalone) {
+        assertLocalCurrent?.();
+        if (remote && stopAc.signal.aborted) {
+          throw new Error('The target workspace stopped before dispatch.');
+        }
         lastEventId = bridge.getSessionLastEventId(sessionId);
         let markPromptAdmitted!: () => void;
         promptAdmission = new Promise<void>((resolve) => {
           markPromptAdmitted = resolve;
         });
+        const onPromptAdmitted = () => {
+          promptAdmitted = true;
+          markPromptAdmitted();
+        };
         turn = bridge.sendPrompt(
           sessionId,
           {
             sessionId,
             prompt: [{ type: 'text', text: info.prompt }],
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
-          undefined,
-          { promptId, onPromptAdmitted: markPromptAdmitted },
+          dispatchSignal ?? (remote ? stopAc.signal : undefined),
+          {
+            promptId,
+            onPromptAdmitted,
+            onPromptDispatched,
+            dispatchSignal,
+            ...(named
+              ? {
+                  onPromptWriteStarted: () => {
+                    promptWriteStarted = true;
+                  },
+                }
+              : {}),
+            assertCanDispatch: assertLocalCurrent,
+            ...dispatchApproval,
+          },
         );
-        promptDispatched = true;
+        queuedTurn = turn;
       }
 
       // The result comes from the event stream (turn_error surfaces failures);
@@ -942,21 +1325,68 @@ export function createSubSessionLauncher(
         log.debug('sub-session: sendPrompt rejected', sessionId, String(err));
       });
 
-      if (info.completion === 'sent') {
-        if (isScheduledTaskRunSource(info) && promptAdmission) {
-          await Promise.race([
-            promptAdmission,
-            turn.then(
-              () => undefined,
-              (err) =>
-                Promise.reject(
-                  new Error(
-                    `sub-session dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
-                  ),
-                ),
-            ),
-          ]);
+      if (dispatch && dispatchAbort) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            const error = new Error(
+              promptWriteStarted
+                ? `Sub-session prompt dispatch timed out. Session ${sessionId} may have received the prompt.`
+                : 'Sub-session prompt dispatch timed out.',
+            );
+            reject(error);
+            dispatchAbort.abort(error);
+          }, sentModeDispatchTimeoutMs);
+          timer.unref();
+        });
+        try {
+          await Promise.race([dispatch, turn, deadline]);
+          if (!promptDispatched) {
+            throw new Error('The sub-session prompt was not dispatched.');
+          }
+        } finally {
+          clearTimeout(timer);
         }
+      }
+
+      if (isScheduledTaskRunSource(info) && promptAdmission) {
+        await Promise.race([
+          promptAdmission,
+          turn.then(
+            () => undefined,
+            (err) =>
+              Promise.reject(
+                new Error(
+                  `sub-session dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              ),
+          ),
+        ]);
+      }
+
+      if (info.groupId) {
+        try {
+          const assign = () =>
+            createSessionOrganizationService(
+              boundWorkspace,
+            ).updateSessionOrganization(sessionId, {
+              groupId: info.groupId,
+              color: null,
+            });
+          if (runtimeBaseDir) {
+            await Storage.runWithResolvedRuntimeBaseDir(runtimeBaseDir, assign);
+          } else {
+            await assign();
+          }
+          bridge.markSessionCatalogChanged();
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: scheduled-task session ${sessionId} could not be assigned to group ${info.groupId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      if (info.completion === 'sent') {
         // Hold the concurrency slot until the sub-session's turn finishes
         // (or the daemon shuts down via stop(), or a wall-clock ceiling is
         // reached). Without this the cap is a no-op for sent mode — the
@@ -965,6 +1395,8 @@ export function createSubSessionLauncher(
         // isolated task exhaust the daemon's session pool.
         const drainAc = new AbortController();
         const drainSignal = AbortSignal.any([stopAc.signal, drainAc.signal]);
+        const targetStopped = () =>
+          remote !== undefined && stopAc.signal.reason === 'workspace_stopped';
         void (async () => {
           try {
             let notification:
@@ -991,7 +1423,7 @@ export function createSubSessionLauncher(
                 ),
                 turnError,
               ]);
-              if (stopAc.signal.aborted) return;
+              if (stopAc.signal.aborted && !targetStopped()) return;
               if (completion.stopReason === 'timeout') {
                 writeStderrLine(
                   `qwen serve: sub-session ${sessionId} drain timed out after ` +
@@ -999,36 +1431,47 @@ export function createSubSessionLauncher(
                     `concurrency slot (the sub-session may still be running)`,
                 );
               }
-              if (notifySentCompletion) {
+              if (notifySentCompletion || remote) {
                 notification = buildSentCompletionNotification(
                   sessionId,
-                  subSessionName(info.name ?? info.prompt),
+                  subSessionName(info.name ?? info.prompt, false),
                   completion.result,
                   completion.stopReason,
+                  remote ? boundWorkspace : undefined,
                 );
               }
             } catch (err) {
-              if (stopAc.signal.aborted) return;
-              if (!notifySentCompletion) return;
+              if (stopAc.signal.aborted && !targetStopped()) return;
+              if (!notifySentCompletion && !remote) return;
               const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
-                subSessionName(info.name ?? info.prompt),
+                subSessionName(info.name ?? info.prompt, false),
                 message,
-                'error',
+                targetStopped() ? 'shutdown' : 'error',
+                remote ? boundWorkspace : undefined,
               );
+            } finally {
+              if (remote) {
+                drainAc.abort();
+                releaseOnce();
+              }
             }
             if (!notification) return;
             try {
-              await deliverSentCompletion(
-                bridge,
-                boundWorkspace,
-                info.callerSessionId,
-                notification,
-                stopAc.signal,
-                isolatedWorkspace,
-                standaloneService,
-              );
+              if (remote) {
+                await remote.deliverCompletion(notification);
+              } else {
+                await deliverSentCompletion(
+                  bridge,
+                  boundWorkspace,
+                  info.callerSessionId,
+                  notification,
+                  stopAc.signal,
+                  isolatedWorkspace,
+                  standaloneService,
+                );
+              }
             } catch (notificationError) {
               if (!stopAc.signal.aborted) {
                 writeStderrLine(
@@ -1042,10 +1485,12 @@ export function createSubSessionLauncher(
             // outer catch also fires release, using raw release would double-
             // free the slot.
             releaseOnce();
+            remote?.releaseCompletionSlot?.();
           }
         })();
         return {
           sessionId,
+          ...(remote ? { workspaceCwd: boundWorkspace } : {}),
           ...(sub.parentSessionPersisted !== undefined
             ? { parentSessionPersisted: sub.parentSessionPersisted }
             : {}),
@@ -1082,6 +1527,7 @@ export function createSubSessionLauncher(
         ]);
         return {
           sessionId,
+          ...(remote ? { workspaceCwd: boundWorkspace } : {}),
           result,
           stopReason,
           ...(sub.parentSessionPersisted !== undefined
@@ -1092,73 +1538,78 @@ export function createSubSessionLauncher(
         releaseOnce();
       }
     } catch (err) {
-      // Spawn/admission failure — surface it as the tool's error.
+      // Spawn/admission/dispatch failure — surface it as the tool's error.
       releaseOnce();
+      remote?.releaseCompletionSlot?.();
       // If the spawn succeeded but a later step failed (e.g. sendPrompt threw
       // synchronously), roll back the orphaned session so it doesn't leak a slot
       // in the bridge's session pool while this launch reports failure.
       if (spawnedSession !== undefined && isolatedWorkspace && !standalone) {
+        const sessionId = spawnedSession.sessionId;
         let sessionClosed = false;
         try {
           if (spawnedSession.attached) {
             if (spawnedSession.clientId) {
-              await bridge.detachClient(
-                spawnedSession.sessionId,
-                spawnedSession.clientId,
-              );
+              await bridge.detachClient(sessionId, spawnedSession.clientId);
             }
           } else {
-            sessionClosed = await bridge.killSession(spawnedSession.sessionId, {
+            sessionClosed = await bridge.killSession(sessionId, {
               requireZeroAttaches: true,
             });
           }
         } catch (cleanupError) {
           log.debug(
             'sub-session: isolated session rollback failed',
-            spawnedSession.sessionId,
+            sessionId,
             cleanupError,
           );
         }
         if (sessionClosed) {
-          if (!promptDispatched) {
+          if (!promptAdmitted) {
             try {
-              const transcriptRemoved = await new SessionService(
-                boundWorkspace,
-              ).removeSession(spawnedSession.sessionId);
+              const removeTranscript = () =>
+                new SessionService(boundWorkspace).removeSession(sessionId);
+              const transcriptRemoved = runtimeBaseDir
+                ? await Storage.runWithResolvedRuntimeBaseDir(
+                    runtimeBaseDir,
+                    removeTranscript,
+                  )
+                : await removeTranscript();
               if (transcriptRemoved) bridge.markSessionCatalogChanged();
             } catch (cleanupError) {
               log.debug(
                 'sub-session: isolated transcript cleanup failed',
-                spawnedSession.sessionId,
+                sessionId,
                 cleanupError,
               );
             }
           }
           try {
-            await isolatedWorkspace.discardEmptyDirectory(
-              spawnedSession.sessionId,
-            );
+            await isolatedWorkspace.discardEmptyDirectory(sessionId);
           } catch (cleanupError) {
             log.debug(
               'sub-session: isolated workspace cleanup failed',
-              spawnedSession.sessionId,
+              sessionId,
               cleanupError,
             );
           }
         }
       } else if (spawnedSession !== undefined && !standalone) {
-        // Both guards are load-bearing. `.catch()` swallows the async
-        // rejection; the try/catch contains a SYNCHRONOUS throw. We are already
-        // inside the catch block, so an escaping throw here would replace `err`
-        // — the real launch failure — with the cleanup failure.
-        try {
-          void bridge.closeSession(spawnedSession.sessionId).catch(() => {});
-        } catch (closeErr) {
-          log.debug(
-            'sub-session: closeSession threw',
-            spawnedSession.sessionId,
-            closeErr,
-          );
+        const sessionId = spawnedSession.sessionId;
+        const timedOut = dispatchAbort?.signal.aborted === true;
+        const removeUnusedTranscript = named
+          ? !promptWriteStarted && !promptDispatched
+          : !promptAdmitted;
+        const rollback = () =>
+          rollbackChildSession(bridge, sessionId, {
+            removeUnusedTranscript,
+            named,
+          });
+        if (!timedOut && (!named || removeUnusedTranscript)) {
+          await rollback();
+        } else if (timedOut && removeUnusedTranscript && queuedTurn) {
+          // Let the cancelled turn drop its queue slot before the idle close.
+          void queuedTurn.then(rollback, rollback);
         }
       }
       writeStderrLine(
@@ -1168,10 +1619,161 @@ export function createSubSessionLauncher(
     }
   };
 
-  return {
+  /**
+   * Depth-1 gate. Every daemon session wires a spawner, sub-sessions
+   * included, and each gets its own bucket — so without this a sub-session
+   * can spawn more, each of which spawns more (capⁿ), exhausting
+   * `maxSessions` from one prompt. The in-memory set catches children this
+   * launcher created; the persisted parent lineage catches the same child
+   * after a daemon restart, and a child another workspace's launcher created.
+   */
+  const assertMayDelegate = (
+    callerSessionId: string,
+    callerParentSessionId: string | undefined,
+  ): void => {
+    if (
+      spawnedSessionIds.has(callerSessionId) ||
+      callerParentSessionId !== undefined
+    ) {
+      throw new Error(
+        'A sub-session cannot create further sub-sessions (nesting is capped ' +
+          'at one level).',
+      );
+    }
+  };
+
+  const getNamedTarget = (callerSessionId: string, workspace: string) => {
+    if (stopAc.signal.aborted) {
+      throw new Error(
+        'The daemon is shutting down; cannot create a sub-session.',
+      );
+    }
+    const bridge = getBridge();
+    if (!bridge) {
+      throw new Error('Session bridge is not available.');
+    }
+    const caller = bridge.getSessionSummary(callerSessionId);
+    if (
+      isolatedWorkspace ||
+      isReservedStandaloneSessionSourceType(caller.sourceType)
+    ) {
+      throw new Error(
+        'This session cannot create sub-sessions in another workspace.',
+      );
+    }
+    assertMayDelegate(callerSessionId, caller.parentSessionId);
+    if (!resolveWorkspace) {
+      throw new Error(
+        'Sub-sessions in another workspace are not available here.',
+      );
+    }
+    const assertCallerCurrent = () => {
+      if (stopAc.signal.aborted || isTrusted?.(bridge) !== true) {
+        throw new Error(
+          'This workspace is not trusted or is no longer active, so its sessions ' +
+            'cannot run sub-sessions in another workspace.',
+        );
+      }
+    };
+    assertCallerCurrent();
+    const target = resolveWorkspace(workspace);
+    if (target.kind === 'refused') throw new Error(target.reason);
+    target.assertCurrent();
+    return { bridge, target, assertCallerCurrent };
+  };
+
+  const resolveDestination: ResolveSubSessionWorkspaceHandler = (
+    callerSessionId,
+    workspace,
+  ) => {
+    const { target } = getNamedTarget(callerSessionId, workspace);
+    return {
+      workspaceId: target.workspaceId,
+      workspaceCwd: target.workspaceCwd,
+      workspaceGeneration: target.workspaceGeneration,
+    };
+  };
+
+  const launch = async (
+    info: CreateSubSessionInfo,
+  ): Promise<CreateSubSessionResult> => {
+    const { workspace, workspaceGeneration, ...local } = info;
+    if (workspace === undefined) return run(local);
+    const { bridge, target, assertCallerCurrent } = getNamedTarget(
+      info.callerSessionId,
+      workspace,
+    );
+    if (
+      !workspaceGeneration ||
+      target.workspaceGeneration !== workspaceGeneration
+    ) {
+      throw new Error('The workspace target changed. Request approval again.');
+    }
+    const assertTargetCurrent = () => {
+      assertCallerCurrent();
+      target.assertCurrent();
+    };
+    if (target.launcher === launcher) {
+      return run(local, undefined, assertTargetCurrent);
+    }
+    const callerApproval = await readApprovalMode(bridge, info.callerSessionId);
+    if (callerApproval.mode === undefined) {
+      throw new Error(
+        'This session did not report its approval mode, so it cannot run ' +
+          'sub-sessions in another workspace.',
+      );
+    }
+    let releaseCompletionSlot: (() => void) | undefined;
+    if (local.completion === 'sent') {
+      if (!callerApproval.canAcceptBackgroundNotifications) {
+        throw new Error(
+          'Cross-workspace sent completion requires chat recording in the caller. Use first-turn to wait for the result.',
+        );
+      }
+      if (outstandingRemoteCompletions >= maxConcurrentTotal) {
+        throw new Error(
+          `Too many pending cross-workspace completions in this workspace (cap ${maxConcurrentTotal}); wait for one to finish.`,
+        );
+      }
+      outstandingRemoteCompletions += 1;
+      releaseCompletionSlot = () => {
+        if (!releaseCompletionSlot) return;
+        releaseCompletionSlot = undefined;
+        outstandingRemoteCompletions -= 1;
+      };
+    }
+    try {
+      return await target.launcher.launchForRemoteCaller(local, {
+        approvalMode: callerApproval.mode,
+        assertCurrent() {
+          assertTargetCurrent();
+          callerApproval.assertCurrent();
+        },
+        deliverCompletion: async (notification) => {
+          assertCallerCurrent();
+          await deliverSentCompletion(
+            bridge,
+            boundWorkspace,
+            info.callerSessionId,
+            notification,
+            stopAc.signal,
+          );
+        },
+        ...(releaseCompletionSlot ? { releaseCompletionSlot } : {}),
+      });
+    } catch (error) {
+      releaseCompletionSlot?.();
+      throw error;
+    }
+  };
+
+  const launcher: SubSessionLauncher = {
     launch,
-    stop: () => {
-      stopAc.abort(); // tears down every active subscription → releases slots
+    resolveDestination,
+    launchForRemoteCaller: (info, caller) => run(info, caller),
+    stop: (reason) => {
+      stopAc.abort(reason); // tears down every active subscription → releases slots
     },
   };
+  return launcher;
 }

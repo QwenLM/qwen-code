@@ -9,10 +9,12 @@ import {
   canSpawnNestedAgent,
   childLaunchDepth,
   getCurrentAgentDepth,
+  getCurrentAgentDisallowedTools,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   isTopLevelSession,
   runWithAgentContext,
+  runWithAgentDisallowedTools,
   runWithRuntimeContentGenerator,
   spawnBlockReason,
   type RuntimeContentGeneratorView,
@@ -34,6 +36,32 @@ function makeView(model: string): RuntimeContentGeneratorView {
     } as ContentGeneratorConfig,
   };
 }
+
+describe('agent-context (disallowedTools)', () => {
+  it('is undefined outside any frame', () => {
+    expect(getCurrentAgentDisallowedTools()).toBeUndefined();
+  });
+
+  it('exposes the blocklist inside the frame', async () => {
+    await runWithAgentDisallowedTools(['mcp__slack'], async () => {
+      expect(getCurrentAgentDisallowedTools()).toEqual(['mcp__slack']);
+    });
+    expect(getCurrentAgentDisallowedTools()).toBeUndefined();
+  });
+
+  it('a nested frame without a blocklist shadows the parent, it does not inherit', async () => {
+    // One-level inheritance only: the fork reads its IMMEDIATE parent's
+    // blocklist. A nested agent with no disallowedTools of its own must not
+    // leak the outer frame's, or a blocklist would become transitive without
+    // anyone configuring it.
+    await runWithAgentDisallowedTools(['mcp__slack'], async () => {
+      await runWithAgentDisallowedTools(undefined, async () => {
+        expect(getCurrentAgentDisallowedTools()).toBeUndefined();
+      });
+      expect(getCurrentAgentDisallowedTools()).toEqual(['mcp__slack']);
+    });
+  });
+});
 
 describe('agent-context (agentId)', () => {
   it('returns null outside any frame', () => {

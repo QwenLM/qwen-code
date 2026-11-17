@@ -1,0 +1,471 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { startLogin, waitForLogin, type WeixinLoginEvent } from './login.js';
+
+const API_BASE = 'https://ilink-bot.example.com';
+
+/**
+ * The iLink identity every Bot API request must declare; produced by
+ * `buildHeaders()` in api.ts. `X-WECHAT-UIN` is random per call, so the
+ * assertions below match partially rather than comparing whole header objects.
+ */
+const ILINK_IDENTITY = {
+  'iLink-App-Id': 'bot',
+  'iLink-App-ClientVersion': expect.stringMatching(/^\d+$/),
+};
+
+function response(body: unknown) {
+  return {
+    ok: true,
+    status: 200,
+    json: vi.fn().mockResolvedValue(body),
+  };
+}
+
+function stubFetch(body: unknown) {
+  const fetchMock = vi.fn().mockResolvedValue(response(body));
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+/** One body per call; the last repeats once the script is exhausted. */
+function stubFetchSequence(bodies: unknown[]) {
+  let call = 0;
+  const fetchMock = vi.fn().mockImplementation(async () => {
+    const body = bodies[Math.min(call, bodies.length - 1)];
+    call += 1;
+    return response(body);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+describe('weixin login iLink request headers', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('declares the iLink client version when minting the QR code', async () => {
+    const fetchMock = stubFetch({
+      qrcode: 'qrcode-1',
+      qrcode_img_content: 'https://scan.example/qr-1',
+    });
+
+    await expect(startLogin(API_BASE)).resolves.toEqual({
+      qrcodeId: 'qrcode-1',
+      qrcodeUrl: 'https://scan.example/qr-1',
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${API_BASE}/ilink/bot/get_bot_qrcode?bot_type=3`,
+      expect.objectContaining({
+        headers: expect.objectContaining(ILINK_IDENTITY),
+      }),
+    );
+  });
+
+  it('returns no qrcodeUrl when the server omits the image content', async () => {
+    stubFetch({ qrcode: 'qrcode-1' });
+
+    await expect(startLogin(API_BASE)).resolves.toEqual({
+      qrcodeId: 'qrcode-1',
+      qrcodeUrl: undefined,
+    });
+  });
+
+  it('bounds the QR mint so a hung upstream cannot hold a flow slot', async () => {
+    // The daemon holds a flow slot for the whole mint, so an unanswered mint
+    // would wedge the cap. A fetch that settles only on abort proves the
+    // signal is actually wired, not merely present.
+    let abortedAt: number | undefined;
+    const fetchMock = vi.fn().mockImplementation(
+      (_url: string, init: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            abortedAt = Date.now();
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          });
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const startedAt = Date.now();
+    // Shrink the bound so the pin costs milliseconds; the wiring is what is
+    // being proven, not the 30 s default.
+    await expect(startLogin(API_BASE, { timeoutMs: 50 })).rejects.toThrow();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(abortedAt).toBeDefined();
+    expect(abortedAt! - startedAt).toBeGreaterThanOrEqual(40);
+    expect(abortedAt! - startedAt).toBeLessThan(5_000);
+  });
+
+  it('declares the iLink client version when polling the scan status', async () => {
+    const fetchMock = stubFetch({
+      status: 'confirmed',
+      bot_token: 'token-1',
+      baseurl: API_BASE,
+      ilink_user_id: 'user-1',
+    });
+
+    const result = await waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      timeoutMs: 1000,
+    });
+
+    expect(result.connected).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${API_BASE}/ilink/bot/get_qrcode_status?qrcode=qrcode-1`,
+      expect.objectContaining({
+        headers: expect.objectContaining(ILINK_IDENTITY),
+      }),
+    );
+  });
+});
+
+describe('weixin login progress events', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('reports a scan and then the confirmed credentials', async () => {
+    vi.useFakeTimers();
+    stubFetchSequence([
+      { status: 'scaned' },
+      {
+        status: 'confirmed',
+        bot_token: 'token-1',
+        baseurl: API_BASE,
+        ilink_user_id: 'user-1',
+      },
+    ]);
+    const events: WeixinLoginEvent[] = [];
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      onEvent: (event) => events.push(event),
+    });
+    await vi.advanceTimersByTimeAsync(1100);
+    const result = await pending;
+
+    expect(events).toEqual([{ type: 'scanned' }]);
+    expect(result).toEqual({
+      connected: true,
+      token: 'token-1',
+      baseUrl: API_BASE,
+      userId: 'user-1',
+      message: 'Connected to WeChat successfully!',
+    });
+  });
+
+  it('reports the expiry and the replacement QR code', async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubFetchSequence([
+      { status: 'expired' },
+      { qrcode: 'qrcode-2', qrcode_img_content: 'https://scan.example/qr-2' },
+      { status: 'confirmed', bot_token: 'token-2' },
+    ]);
+    const events: WeixinLoginEvent[] = [];
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      onEvent: (event) => events.push(event),
+    });
+    await vi.advanceTimersByTimeAsync(1100);
+    const result = await pending;
+
+    expect(events).toEqual([
+      { type: 'expired' },
+      {
+        type: 'qrcode',
+        qrcodeId: 'qrcode-2',
+        qrcodeUrl: 'https://scan.example/qr-2',
+      },
+    ]);
+    expect(result.connected).toBe(true);
+    // The poll after the refresh must carry the replacement id, not the
+    // expired one — otherwise the operator scans a QR nobody is watching.
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${API_BASE}/ilink/bot/get_qrcode_status?qrcode=qrcode-2`,
+      expect.anything(),
+    );
+  });
+
+  it('stops after the refresh budget instead of looping forever', async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubFetchSequence([
+      { status: 'expired' },
+      { qrcode: 'qrcode-2', qrcode_img_content: 'https://scan.example/qr-2' },
+      { status: 'expired' },
+      { qrcode: 'qrcode-3', qrcode_img_content: 'https://scan.example/qr-3' },
+      { status: 'expired' },
+    ]);
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+    });
+    await vi.advanceTimersByTimeAsync(3100);
+    const result = await pending;
+
+    expect(result).toEqual({
+      connected: false,
+      message: 'QR code expired after maximum retries.',
+      reason: 'expired',
+    });
+    // Two refreshes, then the third expiry terminates: the budget is checked
+    // before minting, so the loop never issues a fourth QR request.
+    const qrCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes('get_bot_qrcode'),
+    );
+    expect(qrCalls).toHaveLength(2);
+  });
+
+  it('does not publish a refresh that has no scannable URL', async () => {
+    // A URL-less replacement would overwrite the view with one that has
+    // nothing to scan and no link to open, and a live flow renders no retry
+    // action — the operator would be stuck. Keep the expired id instead and
+    // let the retry budget end the flow.
+    vi.useFakeTimers();
+    const fetchMock = stubFetchSequence([
+      { status: 'expired' },
+      { qrcode: 'qrcode-2' },
+      { status: 'expired' },
+      { qrcode: 'qrcode-3' },
+      { status: 'expired' },
+    ]);
+    const events: WeixinLoginEvent[] = [];
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      onEvent: (event) => events.push(event),
+    });
+    await vi.advanceTimersByTimeAsync(3100);
+    const result = await pending;
+
+    expect(result).toMatchObject({ connected: false, reason: 'expired' });
+    expect(events.filter((event) => event.type === 'qrcode')).toEqual([]);
+    expect(events.filter((event) => event.type === 'expired')).toHaveLength(2);
+    // Both refresh mints were still attempted; only their publication is held.
+    const qrCalls = fetchMock.mock.calls.filter(([url]) =>
+      String(url).includes('get_bot_qrcode'),
+    );
+    expect(qrCalls).toHaveLength(2);
+  });
+
+  it('retries a refresh mint that outlives its bound', async () => {
+    // `AbortSignal.timeout` rejects with TimeoutError, not AbortError. A catch
+    // that retries only AbortError turns one stalled refresh into a failed
+    // login with most of the 480 s budget unspent.
+    vi.useFakeTimers();
+    let mintCalls = 0;
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes('get_bot_qrcode')) {
+        mintCalls += 1;
+        return Promise.reject(
+          Object.assign(new Error('The operation was aborted due to timeout'), {
+            name: 'TimeoutError',
+          }),
+        );
+      }
+      return Promise.resolve(response({ status: 'expired' }));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+    });
+    await vi.advanceTimersByTimeAsync(3100);
+
+    // The retry budget, not the first timeout, decides when this ends.
+    await expect(pending).resolves.toMatchObject({
+      connected: false,
+      reason: 'expired',
+    });
+    expect(mintCalls).toBe(2);
+  });
+});
+
+describe('weixin login cancellation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('cancels the refresh mint too, not just the poll', async () => {
+    // The expired branch mints a replacement. Without the caller's signal on
+    // that request, cancel/revoke/shutdown return while it stays open for the
+    // whole mint bound.
+    vi.useFakeTimers();
+    let mintAborted = false;
+    let call = 0;
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((url: string, init: { signal?: AbortSignal }) => {
+        call += 1;
+        if (String(url).includes('get_bot_qrcode')) {
+          return new Promise((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => {
+              mintAborted = true;
+              reject(
+                Object.assign(new Error('aborted'), { name: 'AbortError' }),
+              );
+            });
+          });
+        }
+        return Promise.resolve(response({ status: 'expired' }));
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      signal: controller.signal,
+    });
+    // Let the poll report expiry and the refresh mint start.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(call).toBeGreaterThanOrEqual(2);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1100);
+
+    await expect(pending).resolves.toMatchObject({
+      connected: false,
+      reason: 'cancelled',
+    });
+    expect(mintAborted).toBe(true);
+  });
+
+  it('keeps cancellation armed until the response body is consumed', async () => {
+    // `fetch` resolves at the headers. If the abort listener is detached
+    // there, an upstream that sends headers and then stalls is uncancellable:
+    // cancel, revoke and shutdown all return while the request stays open.
+    vi.useFakeTimers();
+    let bodyAborted = false;
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((_url: string, init: { signal?: AbortSignal }) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          // The body never completes on its own — only an abort ends it.
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init.signal?.addEventListener('abort', () => {
+                bodyAborted = true;
+                reject(
+                  Object.assign(new Error('aborted'), { name: 'AbortError' }),
+                );
+              });
+            }),
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      signal: controller.signal,
+    });
+    // Headers land and the body read starts.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1100);
+
+    await expect(pending).resolves.toMatchObject({
+      connected: false,
+      reason: 'cancelled',
+    });
+    expect(bodyAborted).toBe(true);
+  });
+
+  it('settles as cancelled when the signal aborts mid-poll', async () => {
+    vi.useFakeTimers();
+    const fetchMock = stubFetch({ status: 'waiting' });
+    const controller = new AbortController();
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      signal: controller.signal,
+    });
+    // Let the first poll land so the abort hits a live loop, not a cold start.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1100);
+
+    await expect(pending).resolves.toEqual({
+      connected: false,
+      message: 'Login cancelled.',
+      reason: 'cancelled',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns immediately when the signal is already aborted', async () => {
+    const fetchMock = stubFetch({ status: 'waiting' });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      waitForLogin({
+        qrcodeId: 'qrcode-1',
+        apiBaseUrl: API_BASE,
+        signal: controller.signal,
+      }),
+    ).resolves.toEqual({
+      connected: false,
+      message: 'Login cancelled.',
+      reason: 'cancelled',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('detaches every abort listener it attaches across poll ticks', async () => {
+    vi.useFakeTimers();
+    stubFetch({ status: 'waiting' });
+    const controller = new AbortController();
+    const addSpy = vi.spyOn(controller.signal, 'addEventListener');
+    const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
+
+    const pending = waitForLogin({
+      qrcodeId: 'qrcode-1',
+      apiBaseUrl: API_BASE,
+      signal: controller.signal,
+      timeoutMs: 5000,
+    });
+    await vi.advanceTimersByTimeAsync(5000);
+    await pending;
+
+    const abortAdds = addSpy.mock.calls.filter(
+      ([type]) => type === 'abort',
+    ).length;
+    const abortRemovals = removeSpy.mock.calls.filter(
+      ([type]) => type === 'abort',
+    ).length;
+    // The loop never aborted, so every attach must have an explicit detach.
+    // A sleep that left its listener behind would make adds exceed removals
+    // by one per tick.
+    expect(abortAdds).toBeGreaterThan(0);
+    expect(abortRemovals).toBe(abortAdds);
+    expect(controller.signal.aborted).toBe(false);
+  });
+});

@@ -27,12 +27,30 @@
  *                    its result to the caller (default).
  */
 
-import type { ToolInvocation, ToolResult } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolInvocation,
+  ToolResult,
+} from './tools.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+  ToolConfirmationOutcome,
+} from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import type { Config } from '../config/config.js';
+import { StructuredToolError, ToolErrorType } from './tool-error.js';
+import { buildPermissionCheckContext } from '../core/permission-helpers.js';
+import type { Config, SubSessionWorkspaceBinding } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
-import { MAX_SUB_SESSION_PROMPT_CHARS } from './sub-session-constants.js';
+import {
+  MAX_SUB_SESSION_PROMPT_CHARS,
+  MAX_SUB_SESSION_WORKSPACE_CHARS,
+} from './sub-session-constants.js';
+import {
+  isValidCronTaskRoutingId,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
+} from '../services/cronTasksFile.js';
 
 export { MAX_SUB_SESSION_PROMPT_CHARS } from './sub-session-constants.js';
 
@@ -41,6 +59,7 @@ export interface CreateSubSessionParams {
   completion?: 'sent' | 'first-turn';
   model?: string;
   name?: string;
+  workspace?: string;
 }
 
 const DAEMON_ONLY_MESSAGE =
@@ -92,6 +111,9 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
   CreateSubSessionParams,
   ToolResult
 > {
+  private destination?: SubSessionWorkspaceBinding;
+  private approvedDestination?: SubSessionWorkspaceBinding;
+
   constructor(
     private config: Config,
     params: CreateSubSessionParams,
@@ -107,7 +129,10 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     // eslint-disable-next-line no-control-regex -- stripping C0 control chars
     const cleaned = raw.replace(/[\r\n\t\x00-\x1f]/g, ' ').trim();
     const label = cleaned.length > 80 ? cleaned.slice(0, 77) + '…' : cleaned;
-    return `[${mode}] ${label}`;
+    const workspace = this.destination?.workspaceCwd ?? this.params.workspace;
+    return workspace
+      ? `[${mode}] in ${JSON.stringify(workspace)}: ${label}`
+      : `[${mode}] ${label}`;
   }
 
   /**
@@ -121,6 +146,69 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     return 'ask';
+  }
+
+  override requiresUserInteraction(): boolean {
+    return this.params.workspace !== undefined;
+  }
+
+  override async getConfirmationDetails(
+    abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    if (this.params.workspace === undefined) {
+      return super.getConfirmationDetails(abortSignal);
+    }
+    const resolveWorkspace = this.config.getSubSessionWorkspaceResolver();
+    if (!resolveWorkspace) throw new Error(DAEMON_ONLY_MESSAGE);
+
+    const destination = await resolveWorkspace(this.params.workspace);
+    abortSignal.throwIfAborted();
+    this.assertWorkspaceAllowed(destination);
+    this.destination = destination;
+    return {
+      type: 'exec',
+      title: this.getDescription(),
+      command: this.params.prompt.trim(),
+      approvalText: `Workspace: ${JSON.stringify(destination.workspaceCwd)}\n\n${this.params.prompt.trim()}`,
+      rootCommand: ToolNames.CREATE_SUB_SESSION,
+      // A tool-wide rule cannot record which workspace the user approved.
+      hideAlwaysAllow: true,
+      permissionRules: [],
+      onConfirm: async (outcome) => {
+        this.approvedDestination =
+          outcome === ToolConfirmationOutcome.ProceedOnce ||
+          outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault
+            ? destination
+            : undefined;
+      },
+    };
+  }
+
+  private assertWorkspaceAllowed(
+    destination: SubSessionWorkspaceBinding,
+  ): void {
+    const permissions = this.config.getPermissionManager?.();
+    if (!permissions) return;
+
+    // Rules apply to both the requested selector and the registered identity.
+    const selectors = new Set([
+      this.params.workspace,
+      destination.workspaceCwd,
+      destination.workspaceId,
+    ]);
+    for (const workspace of selectors) {
+      const context = buildPermissionCheckContext(
+        ToolNames.CREATE_SUB_SESSION,
+        { ...this.params, workspace },
+        this.config.getTargetDir?.() ?? '',
+      );
+      if (permissions.findMatchingDenyRule(context)) {
+        throw new StructuredToolError(
+          'This create_sub_session destination was denied by permission rules.',
+          ToolErrorType.EXECUTION_DENIED,
+        );
+      }
+    }
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -143,12 +231,24 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
 
     try {
       const res = await raceCancellation(() => {
+        const destination = this.approvedDestination;
+        this.approvedDestination = undefined;
+        if (this.params.workspace !== undefined && !destination) {
+          throw new Error('A named workspace requires one-time approval.');
+        }
+        if (destination) this.assertWorkspaceAllowed(destination);
         spawnStarted = true;
         return spawner({
           prompt,
           completion,
           ...(this.params.model ? { model: this.params.model } : {}),
           ...(this.params.name ? { name: this.params.name } : {}),
+          ...(this.params.workspace !== undefined
+            ? {
+                workspace: this.params.workspace,
+                workspaceGeneration: destination?.workspaceGeneration,
+              }
+            : {}),
         });
       }, signal);
 
@@ -163,13 +263,22 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
             'been created; it runs independently and is not cancelled.'
           : 'create_sub_session was cancelled before it started. No ' +
             'sub-session was created.';
-        return { llmContent: message, returnDisplay: 'Cancelled' };
+        return {
+          llmContent: message,
+          returnDisplay: 'Cancelled',
+          // The turn was cancelled mid-flight, so the call never reported a
+          // spawn result; the scheduler must not call it completed.
+          interruptedBeforeCompletion: true,
+        };
       }
 
       // Embed a clickable session link in the display output so the web shell
       // can render a "jump to session" button. The `qwen-session://` scheme is
       // intercepted by the markdown renderer and dispatched as a DOM event.
-      const sessionLink = `[🧵 ${res.sessionId.slice(0, 8)}](qwen-session://${res.sessionId})`;
+      const workspaceQuery = res.workspaceCwd
+        ? `?${new URLSearchParams({ workspace: res.workspaceCwd })}`
+        : '';
+      const sessionLink = `[🧵 ${res.sessionId.slice(0, 8)}](qwen-session://${res.sessionId}${workspaceQuery})`;
 
       // The sub-session exists and is linked in memory, but the daemon reported
       // that the parent lineage was NOT durably written to its transcript — so
@@ -209,7 +318,12 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       return {
         llmContent: `Error creating sub-session: ${message}`,
         returnDisplay: message,
-        error: { message },
+        error: {
+          message,
+          ...(error instanceof StructuredToolError
+            ? { type: error.errorType }
+            : {}),
+        },
       };
     }
   }
@@ -237,7 +351,14 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         'back.\n' +
         '- `sent`: returns immediately after dispatching the prompt, without ' +
         'waiting. Use for fire-and-forget launches whose output you do not ' +
-        'need inline.\n\n' +
+        'need inline. When the sub-session runs in another workspace, ' +
+        'you are told when it finishes, with its result.\n\n' +
+        '## Another workspace\n' +
+        'Set `workspace` to run the sub-session in another workspace ' +
+        "registered with this daemon, with that workspace's own instructions, " +
+        'skills and settings. The user approves each call that names a ' +
+        'workspace. Both workspaces must be trusted; an unknown name is ' +
+        'refused with the list of workspaces you can use.\n\n' +
         'The sub-session runs the prompt with full tool access, starting from ' +
         'zero context — brief it completely in `prompt` (it cannot see this ' +
         'conversation).',
@@ -264,12 +385,21 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
             type: 'string',
             description:
               'Optional model service id for the sub-session. Omit to use the ' +
-              'default model.',
+              'default model. Must be a non-empty string of at most ' +
+              `${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control ` +
+              'characters; the daemon rejects the call otherwise.',
           },
           name: {
             type: 'string',
             description:
               'Optional display name for the sub-session in the session list.',
+          },
+          workspace: {
+            type: 'string',
+            description:
+              'Optional absolute path or id of another workspace registered ' +
+              'with this daemon to run the sub-session in. Omit to use the ' +
+              'current workspace.',
           },
         },
         required: ['prompt'],
@@ -305,6 +435,17 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
     ) {
       return 'Parameter "completion" must be "sent" or "first-turn".';
     }
+    // Mirror the daemon's boundary check so the model gets the rejection
+    // here, with the limit, instead of as an opaque spawn failure.
+    if (params.model !== undefined && !isValidCronTaskRoutingId(params.model)) {
+      return `Parameter "model" must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters.`;
+    }
+    if (
+      params.workspace !== undefined &&
+      !isValidWorkspaceSelector(params.workspace)
+    ) {
+      return `Parameter "workspace" must be a non-empty string of at most ${MAX_SUB_SESSION_WORKSPACE_CHARS} characters without control characters.`;
+    }
     return null;
   }
 
@@ -321,6 +462,16 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
       prompt: params.prompt,
       completion: params.completion ?? 'first-turn',
       ...(params.model ? { model: params.model } : {}),
+      ...(params.workspace ? { workspace: params.workspace } : {}),
     };
   }
+}
+
+function isValidWorkspaceSelector(value: string): boolean {
+  return (
+    value.trim().length > 0 &&
+    value.length <= MAX_SUB_SESSION_WORKSPACE_CHARS &&
+    // eslint-disable-next-line no-control-regex -- rejecting C0 control chars
+    !/[\x00-\x1f\x7f]/.test(value)
+  );
 }

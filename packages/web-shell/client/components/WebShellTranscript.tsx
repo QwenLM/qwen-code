@@ -1,5 +1,6 @@
-import 'katex/dist/katex.min.css';
+import { getSourceEntries } from './sources/sourceEntries';
 import '../styles/globals.css';
+import 'katex/dist/katex.min.css';
 import {
   useLayoutEffect,
   useMemo,
@@ -8,11 +9,16 @@ import {
   type CSSProperties,
   type ReactElement,
 } from 'react';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonTranscriptBlock,
+  SessionSource,
+  DaemonSessionAttachmentReference,
+} from '@qwen-code/sdk/daemon';
 import { CompactModeContext, TodoContextsProvider } from '../WebShellContexts';
 import {
   WebShellCustomizationProvider,
   type AssistantTurnFooterRenderer,
+  type WebShellArtifactCustomization,
   type ComposerTagRenderer,
   type MarkdownTableMode,
   type ToolHeaderExtraRenderer,
@@ -20,6 +26,9 @@ import {
   type UserMessageContentRenderer,
   type WebShellComposerTagIconMap,
   type WebShellMarkdownCustomization,
+  type WebShellSource,
+  type WebShellSourceReference,
+  type WebShellSourceIconResolver,
 } from '../customization';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageList } from './MessageList';
@@ -30,7 +39,7 @@ import {
   normalizeLanguage,
   type WebShellLanguage,
 } from '../i18n';
-import { transcriptBlocksToLocalizedMessages } from '../hooks/useMessages';
+import { transcriptBlocksToLocalizedMessages } from '../adapters/localizedMessages';
 import { WebShellPortalRootContext } from '../portalRoot';
 import { computeTodoDetails, computeTodoTimeline } from '../utils/todos';
 import {
@@ -52,7 +61,7 @@ export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
   renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
+  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru';
   className?: string;
   style?: CSSProperties;
   chatMaxWidth?: number;
@@ -63,8 +72,15 @@ export interface WebShellTranscriptProps {
   markdownTableMode?: MarkdownTableMode;
   virtualScrollThreshold?: number;
   markdown?: WebShellMarkdownCustomization;
+  sourceSessionId?: string;
+  sources?: readonly SessionSource[];
+  sourceAttachments?: readonly DaemonSessionAttachmentReference[];
+  sourceReferences?: readonly WebShellSourceReference[];
+  getAssistantSourcesIcon?: WebShellSourceIconResolver;
+  onSourceOpen?: (source: WebShellSource) => void;
   composerTagIcons?: WebShellComposerTagIconMap;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  artifact?: WebShellArtifactCustomization;
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   renderComposerTag?: ComposerTagRenderer;
@@ -92,11 +108,15 @@ function getChatWidthStyle(chatMaxWidth: number | undefined): CSSProperties {
       ? chatMaxWidth
       : DEFAULT_CHAT_MAX_WIDTH;
   const contentWidth = `${width}px`;
-  const shellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  // Reserve timeline gutters where they fit without over-shrinking phone layouts.
+  const responsiveContentWidth = `min(${contentWidth}, clamp(440px, 85cqw, calc(100cqw - 128px)))`;
+  const regularShellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
-    '--chat-regular-shell-width': shellWidth,
+    '--chat-regular-shell-width': regularShellWidth,
     '--chat-content-width': contentWidth,
+    '--chat-responsive-content-width': responsiveContentWidth,
     '--chat-shell-width': shellWidth,
   } as CSSProperties;
 }
@@ -116,7 +136,14 @@ function WebShellTranscriptContent({
   markdownTableMode = 'basic',
   virtualScrollThreshold,
   markdown,
+  sourceSessionId,
+  sources,
+  sourceAttachments,
+  sourceReferences,
+  getAssistantSourcesIcon,
+  onSourceOpen,
   composerTagIcons,
+  artifact,
   renderToolHeaderExtra,
   parseUserMessageContent,
   renderUserMessageContent,
@@ -135,10 +162,15 @@ function WebShellTranscriptContent({
     () => transcriptBlocksToLocalizedMessages(blocks, t, documentMode),
     [blocks, documentMode, t],
   );
+  const sourceEntries = useMemo(
+    () => getSourceEntries(sources ?? [], sourceAttachments ?? []),
+    [sources, sourceAttachments],
+  );
   const todoDetails = useMemo(() => computeTodoDetails(messages), [messages]);
   const todoTimeline = useMemo(() => computeTodoTimeline(messages), [messages]);
   const customization = useMemo(
     () => ({
+      artifact,
       composerTagIcons,
       renderToolHeaderExtra,
       parseUserMessageContent,
@@ -150,12 +182,17 @@ function WebShellTranscriptContent({
       collapseCompletedTurns: effectiveCollapseCompletedTurns,
       markdownTableMode: effectiveMarkdownTableMode,
       markdown,
+      sourceReferences,
+      getAssistantSourcesIcon,
     }),
     [
+      artifact,
       effectiveCollapseCompletedTurns,
       compactThinking,
       composerTagIcons,
       markdown,
+      sourceReferences,
+      getAssistantSourcesIcon,
       effectiveMarkdownTableMode,
       parseUserMessageContent,
       renderAssistantTurnFooter,
@@ -274,6 +311,11 @@ function WebShellTranscriptContent({
                         >
                           <MessageList
                             messages={messages}
+                            sourceSessionId={sourceSessionId}
+                            sourceEntries={
+                              documentMode ? undefined : sourceEntries
+                            }
+                            onSourceOpen={onSourceOpen}
                             pendingApproval={null}
                             isResponding={false}
                             workspaceCwd={workspaceCwd}

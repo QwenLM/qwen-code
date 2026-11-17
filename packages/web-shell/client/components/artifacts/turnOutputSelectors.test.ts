@@ -22,6 +22,127 @@ function toolGroup(id: string, tools: ACPToolCall[]): ToolGroupMessage {
 }
 
 describe('turnOutputSelectors', () => {
+  it('associates a slash-command export with its turn through transcript metadata', () => {
+    const descriptor = {
+      kind: 'html',
+      storage: 'workspace',
+      title: 'export.html',
+      workspacePath: 'export.html',
+    };
+    const blocks: DaemonTranscriptBlock[] = [
+      { id: 'export-user', kind: 'user', text: '/export html' },
+      {
+        id: 'export-result',
+        kind: 'assistant',
+        text: 'Session exported to HTML: export.html',
+        meta: { source: 'slash_command', sessionArtifacts: [descriptor] },
+      },
+      { id: 'next-user', kind: 'user', text: 'Next turn' },
+    ].map((block) => ({
+      ...block,
+      createdAt: 1,
+      updatedAt: 1,
+      clientReceivedAt: 1,
+    })) as DaemonTranscriptBlock[];
+    const messages = transcriptBlocksToDaemonMessages(blocks);
+    const artifact: DaemonSessionArtifact = {
+      ...descriptor,
+      kind: 'html',
+      storage: 'workspace',
+      id: 'export-artifact',
+      source: 'client',
+      status: 'available',
+      retention: 'ephemeral',
+      clientRetained: false,
+      createdAt: '2026-09-16',
+      updatedAt: '2026-09-16',
+    };
+    const byTurn = getArtifactsByTurn(messages, [artifact], '/workspace');
+    expect(byTurn.get('export-user')).toEqual([artifact]);
+    expect(byTurn.has('next-user')).toBe(false);
+    expect(getArtifactsByTurn(messages, [], '/workspace').size).toBe(0);
+  });
+
+  it('keeps each saved version in its original turn and omits the matching local latest card', () => {
+    const latestUrl = 'file:///tmp/publications/latest/index.html';
+    const messages = [
+      userMessage('u1', 'build'),
+      toolGroup('t1', [
+        { callId: 'publish-1', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u2', 'update'),
+      toolGroup('t2', [
+        { callId: 'publish-2', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u3', 'record latest link'),
+      toolGroup('t3', [
+        {
+          callId: 'record',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { url: latestUrl },
+        },
+      ]),
+    ];
+    const first = {
+      id: 'first',
+      toolCallId: 'publish-1',
+      storage: 'published',
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        publishedUrl: latestUrl,
+      },
+    } as DaemonSessionArtifact;
+    const second = { ...first, id: 'second', toolCallId: 'publish-2' };
+    const latest = {
+      id: 'latest',
+      toolCallId: 'publish-2',
+      storage: 'published',
+      url: latestUrl,
+    } as DaemonSessionArtifact;
+    expect(
+      getArtifactsByTurn(messages.slice(0, 4), [first, second, latest]).get(
+        'u2',
+      ),
+    ).toEqual([second]);
+    const grouped = getArtifactsByTurn(messages, [first, second, latest]);
+    expect(grouped.get('u1')).toEqual([first]);
+    expect(grouped.get('u2')).toEqual([second]);
+    expect(grouped.get('u3')).toEqual([latest]);
+  });
+
+  it('keeps the matching latest card when its published page is browser-openable', () => {
+    const messages = [
+      userMessage('u1', 'build'),
+      toolGroup('t1', [
+        { callId: 'publish-1', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u2', 'update'),
+      toolGroup('t2', [
+        { callId: 'publish-2', toolName: 'Artifact', status: 'completed' },
+      ]),
+    ];
+    const first = {
+      id: 'first',
+      toolCallId: 'publish-1',
+      storage: 'published',
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        publishedUrl: 'https://example.com/latest',
+      },
+    } as DaemonSessionArtifact;
+    const second = { ...first, id: 'second', toolCallId: 'publish-2' };
+    const latest = {
+      id: 'latest',
+      toolCallId: 'publish-2',
+      storage: 'published',
+      url: 'https://example.com/latest',
+    } as DaemonSessionArtifact;
+    const grouped = getArtifactsByTurn(messages, [first, second, latest]);
+    expect(grouped.get('u1')).toEqual([first]);
+    expect(grouped.get('u2')).toEqual([second, latest]);
+  });
+
   it('attaches expanded directory files to the recorded folder turn', () => {
     const messages = [
       userMessage('u1', 'export excel'),
@@ -191,6 +312,70 @@ describe('turnOutputSelectors', () => {
     expect(getArtifactsByTurn(messages, artifacts).get('u1')).toEqual(
       artifacts,
     );
+  });
+
+  it('also shows a recorded workspace artifact in the turn that last wrote it', () => {
+    const messages = [
+      userMessage('u1', 'record notes'),
+      toolGroup('tg1', [
+        {
+          callId: 'record-1',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { workspacePath: 'notes.md' },
+        },
+      ]),
+      userMessage('u2', 'tidy notes'),
+      toolGroup('tg2', [
+        {
+          callId: 'edit-2',
+          toolName: 'edit',
+          status: 'completed',
+          args: { file_path: 'notes.md' },
+        },
+      ]),
+    ];
+    const artifact = {
+      id: 'notes',
+      storage: 'workspace',
+      workspacePath: 'notes.md',
+      toolCallId: 'edit-2',
+    } as DaemonSessionArtifact;
+
+    const byTurn = getArtifactsByTurn(messages, [artifact]);
+    expect(byTurn.get('u1')).toEqual([artifact]);
+    expect(byTurn.get('u2')).toEqual([artifact]);
+    expect(getFileChangesByTurn(messages, byTurn).get('u2')).toEqual([
+      expect.objectContaining({ path: 'notes.md', isArtifact: true }),
+    ]);
+  });
+
+  it('keeps a recorded published artifact out of the turn that produced it', () => {
+    const messages = [
+      userMessage('u1', 'publish'),
+      toolGroup('tg1', [
+        { callId: 'publish-1', toolName: 'Artifact', status: 'completed' },
+      ]),
+      userMessage('u2', 'record link'),
+      toolGroup('tg2', [
+        {
+          callId: 'record-2',
+          toolName: 'record_artifact',
+          status: 'completed',
+          args: { url: 'https://example.com/page' },
+        },
+      ]),
+    ];
+    const artifact = {
+      id: 'page',
+      storage: 'published',
+      url: 'https://example.com/page',
+      toolCallId: 'publish-1',
+    } as DaemonSessionArtifact;
+
+    const byTurn = getArtifactsByTurn(messages, [artifact]);
+    expect(byTurn.has('u1')).toBe(false);
+    expect(byTurn.get('u2')).toEqual([artifact]);
   });
 
   it('merges multiple edits for the same file in one turn', () => {

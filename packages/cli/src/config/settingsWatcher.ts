@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
@@ -150,6 +151,8 @@ export class SettingsWatcher {
   private watchTargetDir(scope: SettingScope, settingsPath: string): void {
     const dir = path.dirname(settingsPath);
     const targetBasename = path.basename(settingsPath);
+    const resolvedDir = path.resolve(dir);
+    const resolvedSettingsPath = path.resolve(settingsPath);
     const gen = this.bumpGeneration(scope);
 
     try {
@@ -158,7 +161,11 @@ export class SettingsWatcher {
         depth: 0,
         ignored: (filePath: string, stats?: fs.Stats) => {
           if (stats && !stats.isFile() && !stats.isDirectory()) return true;
-          return false;
+          const resolvedPath = path.resolve(filePath);
+          return (
+            resolvedPath !== resolvedDir &&
+            resolvedPath !== resolvedSettingsPath
+          );
         },
       })
         .on('all', (event: string, changedPath: string) => {
@@ -272,7 +279,7 @@ export class SettingsWatcher {
     this.watchStage.delete(scope);
     if (watcher) {
       try {
-        await watcher.close();
+        await closeFileWatcher(watcher);
       } catch (err) {
         debugLogger.warn('Settings watcher close error:', err);
       }
@@ -289,7 +296,7 @@ export class SettingsWatcher {
     if (!this.started) return;
     this.started = false;
     for (const [, watcher] of this.watchers) {
-      watcher.close().catch((err) => {
+      closeFileWatcher(watcher).catch((err) => {
         debugLogger.warn('Settings watcher close error:', err);
       });
     }

@@ -19,6 +19,7 @@ const TERMINAL_HEARTBEAT_MS = 15_000;
 export interface WebTerminalWorkspaceContext {
   workspaceCwd: string;
   env: Readonly<NodeJS.ProcessEnv>;
+  command?: { file: string; args: string[] };
 }
 
 type TerminalControl =
@@ -151,6 +152,14 @@ export function createTerminalWsHandler(
         ws.close(4004, 'Terminal released');
         return;
       }
+      if (url.searchParams.get('replay') !== '1') {
+        sendControl(ws, {
+          type: 'error',
+          message: 'Terminal protocol changed; reload this page.',
+        });
+        ws.close(4002, 'Terminal protocol mismatch');
+        return;
+      }
       const workspaceSelector = selector;
 
       let created = false;
@@ -194,6 +203,7 @@ export function createTerminalWsHandler(
             terminalId,
             workspaceCwd: workspace.workspaceCwd,
             env: workspace.env,
+            command: workspace.command,
           });
         } catch {
           result = { error: 'Failed to create terminal' } as const;
@@ -228,13 +238,18 @@ export function createTerminalWsHandler(
       }
 
       let cleaned = false;
-      const detach: { output?: () => void; exit?: () => void } = {};
+      const detach: {
+        output?: () => void;
+        exit?: () => void;
+        failure?: () => void;
+      } = {};
       const cleanup = () => {
         if (cleaned) return;
         cleaned = true;
         stopHeartbeat();
         detach.output?.();
         detach.exit?.();
+        detach.failure?.();
         ws.off('message', onMessage);
       };
       const finishExited = (
@@ -314,11 +329,51 @@ export function createTerminalWsHandler(
       detach.exit = registry.addExitListener(terminalId, (event) =>
         finishExited(event.exitCode),
       );
+      // A backend-side resource failure is the terminal state: surface the
+      // explicit error frame and close — never a fabricated exit frame.
+      detach.failure = registry.addFailureListener(terminalId, (message) => {
+        sendControl(ws, { type: 'error', message });
+        cleanup();
+        ws.close(4001, 'Terminal failed');
+      });
       snapshot = registry.readSnapshot(terminalId);
       if (!snapshot || snapshot.workspaceCwd !== workspace.workspaceCwd) {
         cleanup();
         sendControl(ws, { type: 'error', message: 'Session unavailable' });
         ws.close(4002, 'Session unavailable');
+        return;
+      }
+      if (snapshot.failed) {
+        // The registry keeps a failed session's buffer for exactly this
+        // replay. The client must receive the snapshot control before its
+        // first binary frame, just as on the live/exited path below.
+        let replaySent = false;
+        try {
+          sendControl(ws, {
+            type: 'snapshot',
+            replay: !created,
+            handlesPrimaryDa: snapshot.handlesPrimaryDa === true,
+          });
+          replaySent = sendOutput(ws, snapshot.output);
+          if (replaySent) {
+            sendControl(ws, {
+              type: 'error',
+              message: snapshot.failureMessage ?? 'Terminal failed',
+            });
+          }
+        } finally {
+          try {
+            cleanup();
+          } finally {
+            // This is a logical failed state; the existing registry failure
+            // guard releases retained state without sending another signal.
+            registry.release(terminalId, workspace.workspaceCwd);
+          }
+        }
+        ws.close(
+          replaySent ? 4001 : 1013,
+          replaySent ? 'Terminal failed' : 'Terminal output backpressure',
+        );
         return;
       }
 
@@ -328,6 +383,11 @@ export function createTerminalWsHandler(
       ws.off('error', markClosed);
       ws.on('error', cleanup);
       if (!ensureWorkspaceAvailable()) return;
+      sendControl(ws, {
+        type: 'snapshot',
+        replay: !created,
+        handlesPrimaryDa: snapshot.handlesPrimaryDa === true,
+      });
       if (!sendOutput(ws, snapshot.output)) {
         cleanup();
         ws.close(1013, 'Terminal output backpressure');

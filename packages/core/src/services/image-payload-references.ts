@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, ContentListUnion } from '@google/genai';
 import type { Part } from '@google/genai';
 import { createHash } from 'node:crypto';
 import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
@@ -55,6 +55,10 @@ export function countAllInlineImages(contents: Content[]): number {
   let count = 0;
   for (const _part of inlineImageParts(contents)) count++;
   return count;
+}
+
+export function hasImagePayloadReferences(contents: Content[]): boolean {
+  return collectReferencedImageIds(contents).size > 0;
 }
 
 /**
@@ -130,12 +134,51 @@ export function buildReattachParts(
   if (recent.length === 0) return [];
   return [
     {
-      text:
-        'Recent images reattached for visual context: ' +
-        recent.map((img) => `Image #${img.id}`).join(', '),
+      text: reattachContextText(recent.map((img) => img.id)),
+      partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
     },
-    ...recent.map(storedImageToPart),
+    ...recent.flatMap(labeledReattachParts),
   ];
+}
+
+/**
+ * `partMetadata` key stamped on the first part of a trailing volatile region:
+ * one that is re-generated per request and never enters stored history.
+ * `buildReattachParts` marks the reattach region's leading text marker, and
+ * `appendAutoMemoryContext` marks the request-only auto-memory catalog. The
+ * provider cache passes use this marker to place the conversation breakpoint
+ * *before* the volatile tail instead of after it — keeping the cached prefix
+ * stable across turns (issue #11627).
+ * It is client-side metadata only: the OpenAI-compatible converters never
+ * serialize `partMetadata`, and the native SDK generator strips it in
+ * `LlmContentGenerator.stripPartFields` before the request is built, so it
+ * never reaches the wire.
+ */
+export const REATTACH_BOUNDARY_METADATA = 'qwen-code:reattach-boundary';
+
+/**
+ * Number of trailing parts of the last content that belong to a volatile
+ * region, or 0 when the request ends without one. Each such part (one
+ * text marker, then a text label and an inline image per replayed image; or
+ * the catalog's single text part) converts to exactly one content block on
+ * both the OpenAI-compatible and the Anthropic wire, so this equals the
+ * trailing volatile block count.
+ */
+export function trailingReattachPartCount(contents: ContentListUnion): number {
+  const last = Array.isArray(contents) ? contents.at(-1) : undefined;
+  const parts =
+    last && typeof last === 'object' && 'parts' in last
+      ? last.parts
+      : undefined;
+  if (!Array.isArray(parts) || parts.length === 0) return 0;
+  const firstMarked = parts.findIndex(
+    (part) =>
+      typeof part === 'object' &&
+      part !== null &&
+      part.partMetadata?.[REATTACH_BOUNDARY_METADATA] === true,
+  );
+  if (firstMarked === -1) return 0;
+  return parts.length - firstMarked;
 }
 
 export function prepareImagePayloadsForRequest(
@@ -201,11 +244,9 @@ export function prepareImagePayloadsForRequest(
 
   const reattachParts: Part[] = [
     {
-      text:
-        'Recent images reattached for visual context: ' +
-        [...reattachById.keys()].map((id) => `Image #${id}`).join(', '),
+      text: reattachContextText([...reattachById.keys()]),
     },
-    ...[...reattachById.values()].map(storedImageToPart),
+    ...[...reattachById.values()].flatMap(labeledReattachParts),
   ];
 
   const last = transformed.at(-1);
@@ -333,6 +374,29 @@ function imagePartToStoredPayload(part: Part): StoredImagePayload {
 
 function imageReferenceText(stored: StoredImagePayload): string {
   return `[Image #${stored.id}: ${safeImageMimeType(stored.mimeType)}, ${stored.bytes} bytes]`;
+}
+
+function reattachContextText(ids: readonly string[]): string {
+  return (
+    'Images read earlier in this session (may be OUTDATED, do not treat as current UI state): ' +
+    ids.map((id) => `Image #${id}`).join(', ') +
+    '. Each one is labeled with its id below.'
+  );
+}
+
+// A lone id list above N unlabeled images cannot be mapped back to them, so
+// a one-image turn followed by several replays reads as "the old images are
+// the new ones" (#12544). Label every replayed image with its id. The label
+// deliberately makes no claim about which turn an image belongs to: this
+// module cannot tell where the current turn starts, and a wrong claim in
+// either direction misleads the model more than the header's caveat does.
+function labeledReattachParts(stored: StoredImagePayload): Part[] {
+  return [
+    {
+      text: `Image #${stored.id}: replayed snapshot from earlier in this session, may be OUTDATED`,
+    },
+    storedImageToPart(stored),
+  ];
 }
 
 function safeImageMimeType(mimeType: string): string {

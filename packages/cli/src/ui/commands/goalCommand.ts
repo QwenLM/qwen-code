@@ -12,6 +12,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   emptyGoalSnapshot,
+  GOAL_PAUSE_REASON_COMMAND,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -108,8 +109,8 @@ export const goalCommand: SlashCommand = {
 
     // Starting or re-driving an autonomous Goal ingests workspace context
     // (QWEN.md, files) without per-tool confirmation, so it requires a trusted
-    // workspace — the same boundary the legacy hook path enforces. `status`,
-    // `clear`, and `pause` only read or reduce work, so they stay available.
+    // workspace. `status`, `clear`, and `pause` only read or reduce work, so
+    // they stay available.
     const requiresTrustedFolder =
       operation.kind === 'set' ||
       operation.kind === 'edit' ||
@@ -181,7 +182,13 @@ export const goalCommand: SlashCommand = {
               objective: operation.objective,
               ...version,
             }
-          : { action: operation.kind, ...version };
+          : operation.kind === 'pause'
+            ? {
+                action: 'pause',
+                ...version,
+                reason: GOAL_PAUSE_REASON_COMMAND,
+              }
+            : { action: operation.kind, ...version };
       return goalControl(
         operation,
         await runtime.dispatch(request),

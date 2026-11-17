@@ -9,7 +9,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ExportResultCode } from '@opentelemetry/core';
-import { FileSpanExporter } from './file-exporters.js';
+import type { ReadableLogRecord } from '@opentelemetry/sdk-logs';
+import { FileLogExporter, FileSpanExporter } from './file-exporters.js';
 
 type SerializeAccess = { serialize: (data: unknown) => string };
 
@@ -54,6 +55,35 @@ describe('FileExporter.serialize', () => {
     expect(out).toContain('"name": "span-1"');
     expect(out).toContain('"[Circular]"');
     expect(out.endsWith('\n')).toBe(true);
+  });
+
+  // Pins the outfile sink's key-absent contract: when logPrompts is off the
+  // producer emits request_text/response_text as undefined, and safeJsonStringify
+  // (JSON.stringify) drops undefined-valued keys instead of writing `null` or an
+  // empty string. FileLogExporter inherits FileExporter.serialize unchanged.
+  it('FileLogExporter omits undefined-valued attributes (logPrompts off)', async () => {
+    const outfile = path.join(tmpDir, 'logs.jsonl');
+    const logExporter = new FileLogExporter(outfile);
+    const logRecord = {
+      body: 'api response',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {
+        request_text: undefined,
+        response_text: 'visible',
+      },
+    } as unknown as ReadableLogRecord;
+
+    await new Promise<void>((resolve) => {
+      logExporter.export([logRecord], (result) => {
+        expect(result.code).toBe(ExportResultCode.SUCCESS);
+        resolve();
+      });
+    });
+    await logExporter.shutdown();
+
+    const out = fs.readFileSync(outfile, 'utf8');
+    expect(out).not.toContain('request_text');
+    expect(out).toContain('"response_text": "visible"');
   });
 });
 

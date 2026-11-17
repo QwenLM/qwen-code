@@ -1,3 +1,4 @@
+import { useBrandName } from '../../brandContext';
 import { useI18n } from '../../i18n';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './StatusMessage.module.css';
@@ -40,12 +41,13 @@ function Row({
 
 export function StatusMessage({ info }: { info: StatusInfo }) {
   const { t } = useI18n();
+  const brandName = useBrandName();
 
   return (
     <div className={styles.panel}>
       <div className={styles.title}>{t('about.title')}</div>
       {info.cliVersion && (
-        <Row label={t('about.qwenCode')}>
+        <Row label={brandName}>
           <span className={styles.accent}>{info.cliVersion}</span>
         </Row>
       )}

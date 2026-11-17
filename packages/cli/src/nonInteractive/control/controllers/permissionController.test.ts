@@ -25,6 +25,7 @@ function createContext(canUseToolTimeoutMs?: number): IControlContext {
       getDebugMode: vi.fn().mockReturnValue(false),
       getInputFormat: vi.fn().mockReturnValue(InputFormat.STREAM_JSON),
       getWorkflowRunRegistry: vi.fn(),
+      setApprovalMode: vi.fn(),
     } as unknown as IControlContext['config'],
     streamJson: {
       send: vi.fn(),
@@ -86,6 +87,50 @@ describe('PermissionController', () => {
       });
     },
   );
+
+  it('keeps the control context unescalated when the trust gate refuses a mode change', async () => {
+    const context = createContext();
+    const trustGateError = new Error(
+      'Cannot enable privileged approval modes in an untrusted folder.',
+    );
+    trustGateError.name = 'TrustGateError';
+    vi.mocked(context.config.setApprovalMode).mockImplementation(() => {
+      throw trustGateError;
+    });
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+
+    await expect(
+      controller.handleRequest(
+        { subtype: 'set_permission_mode', mode: 'yolo' },
+        'request-trust-gate',
+      ),
+    ).rejects.toThrow('Cannot enable privileged approval modes');
+
+    // The refused escalation must not leave the context certifying `allow`:
+    // core Config is still in DEFAULT and the host was told it failed.
+    expect(context.permissionMode).toBe('default');
+
+    await expect(
+      controller.handleRequest(
+        {
+          subtype: 'can_use_tool',
+          tool_name: 'read_file',
+          tool_use_id: 'tool-after-refused-escalation',
+          input: {},
+          permission_suggestions: null,
+          blocked_path: null,
+        },
+        'request-after-refused-escalation',
+      ),
+    ).resolves.toMatchObject({
+      subtype: 'can_use_tool',
+      behavior: 'deny',
+    });
+  });
 
   it('round-trips workflow approval through can_use_tool with updated input', async () => {
     const context = createContext(120_000);
@@ -408,6 +453,43 @@ describe('PermissionController', () => {
     });
   });
 
+  it('explains when ask_user_question has no interactive SDK', async () => {
+    const context = createContext();
+    vi.mocked(context.config.getInputFormat).mockReturnValue('text');
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const onConfirm = vi.fn();
+
+    controller.getToolCallUpdateCallback()([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-question-no-sdk',
+          name: 'ask_user_question',
+          args: { questions: [] },
+        },
+        invocation: {
+          requiresUserInteraction: () => true,
+        },
+        confirmationDetails: {
+          type: 'ask_user_question',
+          title: 'Please answer',
+          onConfirm,
+        },
+      } as never,
+    ]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage:
+          'The host could not present the required approval for "ask_user_question".',
+      });
+    });
+  });
+
   it('uses SDK canUseTool timeout for outgoing permission requests', async () => {
     const context = createContext(120_000);
     const controller = new PermissionController(
@@ -543,6 +625,7 @@ describe('PermissionController', () => {
       },
       invocation: {
         requiresUserInteraction: () => true,
+        canAutoApproveOnAllow: () => false,
       },
       confirmationDetails: {
         type: 'ask_user_question',
@@ -563,6 +646,52 @@ describe('PermissionController', () => {
     // The leader path overrides the tool's in-process args with the
     // host's sanitized updatedInput before confirming.
     expect(toolCall.request.args).toEqual({ questions: [], answers });
+  });
+
+  it('forwards host input for any interaction that opts out of bare auto-approval', async () => {
+    const context = createContext(120_000);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'request-interactive-form',
+      response: {
+        behavior: 'allow',
+        updatedInput: { choice: 'safe' },
+      },
+    });
+    const onConfirm = vi.fn();
+    const toolCall = {
+      status: 'awaiting_approval',
+      request: {
+        callId: 'tool-call-interactive-form',
+        name: 'interactive_form',
+        args: { choice: 'original' } as Record<string, unknown>,
+      },
+      invocation: {
+        requiresUserInteraction: () => true,
+        canAutoApproveOnAllow: () => false,
+      },
+      confirmationDetails: {
+        type: 'info',
+        title: 'Choose',
+        prompt: 'Choose a value',
+        onConfirm,
+      },
+    };
+
+    controller.getToolCallUpdateCallback()([toolCall as never]);
+
+    await vi.waitFor(() => {
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { updatedInput: { choice: 'safe' } },
+      );
+    });
+    expect(toolCall.request.args).toEqual({ choice: 'safe' });
   });
 
   it('omits answers from the payload when updatedInput has none', async () => {
@@ -831,6 +960,84 @@ describe('PermissionController', () => {
       ToolConfirmationOutcome.ProceedOnce,
       expect.objectContaining({ answers }),
     );
+  });
+
+  it('explains when a teammate approval is already aborted', async () => {
+    const context = {
+      ...createContext(),
+      abortSignal: AbortSignal.abort(),
+    };
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const send = vi.spyOn(controller, 'sendControlRequest');
+    const respond = vi.fn().mockResolvedValue(undefined);
+
+    await controller.handleTeammateApproval({
+      teammateName: 'worker',
+      toolName: 'ask_user_question',
+      toolInput: { questions: [] },
+      respond,
+      timestamp: 124,
+    });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+      cancelMessage: expect.stringContaining('was aborted'),
+    });
+  });
+
+  it('explains when the teammate host cannot answer the approval request', async () => {
+    const controller = new PermissionController(
+      createContext(),
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'error',
+      request_id: 'teammate-request-error',
+      error: 'Host unavailable',
+    } as never);
+    const respond = vi.fn().mockResolvedValue(undefined);
+
+    await controller.handleTeammateApproval({
+      teammateName: 'worker',
+      toolName: 'ask_user_question',
+      toolInput: { questions: [] },
+      respond,
+      timestamp: 125,
+    });
+
+    expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+      cancelMessage:
+        'The host could not present the required approval for "ask_user_question".',
+    });
+  });
+
+  it('surfaces teammate approval pipeline failures as cancellation reasons', async () => {
+    const controller = new PermissionController(
+      createContext(),
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockRejectedValue(
+      new Error('Host channel closed'),
+    );
+    const respond = vi.fn().mockResolvedValue(undefined);
+
+    await controller.handleTeammateApproval({
+      teammateName: 'worker',
+      toolName: 'ask_user_question',
+      toolInput: { questions: [] },
+      respond,
+      timestamp: 126,
+    });
+
+    expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+      cancelMessage: expect.stringContaining('Host channel closed'),
+    });
   });
 
   it('does not promote a same-named answers field for a non-ask_user_question teammate approval', async () => {

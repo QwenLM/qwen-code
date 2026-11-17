@@ -26,6 +26,48 @@ import type {
 } from '../../src/daemon/events.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
+it('accepts an explicitly cleared model after subscription logout', () => {
+  const event: DaemonEvent = {
+    v: 1,
+    type: 'model_switched',
+    data: { sessionId: 'session', modelId: '', subscriptionSignedOut: true },
+  };
+  expect(asKnownDaemonEvent(event)).toBe(event);
+  expect(
+    reduceDaemonSessionEvent(
+      createDaemonSessionViewState({ currentModelId: 'old' }),
+      event,
+    ).currentModelId,
+  ).toBeUndefined();
+  expect(
+    asKnownDaemonEvent({
+      ...event,
+      data: { sessionId: 'session', modelId: '' },
+    }),
+  ).toBeUndefined();
+});
+
+describe('session_messages_deleted', () => {
+  it('validates the identities published on the wire', () => {
+    const event: DaemonEvent = {
+      v: 1,
+      type: 'session_messages_deleted',
+      data: {
+        sessionId: 'session',
+        deletedGroupIds: ['g'],
+        deletedPromptIds: ['p'],
+      },
+    };
+    expect(asKnownDaemonEvent(event)).toBe(event);
+    expect(
+      asKnownDaemonEvent({
+        ...event,
+        data: { ...(event.data as object), deletedPromptIds: [42] },
+      }),
+    ).toBeUndefined();
+  });
+});
+
 describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
   it('is the wire literal and a registered known event type', () => {
     // The same const is imported by the daemon publisher (acp-bridge) and the
@@ -930,6 +972,33 @@ describe('daemon event schema', () => {
   });
 
   it('validates session_closed events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
+        data: {
+          sessionId: 's-1',
+          reason: 'client_close',
+          cause: 'workspace_runtime_stop',
+          persistenceUnconfirmed: true,
+        },
+      }),
+    ).toBeDefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
+        data: {
+          sessionId: 's-1',
+          reason: 'client_close',
+          cause: 'workspace_runtime_stop',
+          persistenceUnconfirmed: 'true',
+        },
+      }),
+    ).toBeUndefined();
+
     expect(
       asKnownDaemonEvent({
         id: 1,
@@ -2245,6 +2314,73 @@ describe('PR 21 — auth device-flow events', () => {
   // `unrecognizedKnownEventCount` rather than the event-specific
   // counter), and the envelope-level `originatorClientId` merge.
   describe('PR 17 mutation events', () => {
+    it('keeps Plan execution permission through events and reconnect, then clears it on exit', () => {
+      let state = createDaemonSessionViewState();
+      for (const [id, mode] of ['yolo', 'auto-edit'].entries()) {
+        state = reduceDaemonSessionEvent(state, {
+          id: id + 1,
+          v: 1,
+          type: 'approval_mode_changed',
+          data: {
+            sessionId: 'sess-1',
+            previous: 'plan',
+            next: 'plan',
+            planExecutionMode: mode,
+            persisted: false,
+          },
+        });
+        expect(state.approvalMode).toBe('plan');
+        expect(state.planExecutionMode).toBe(mode);
+      }
+      state = reduceDaemonSessionEvent(state, {
+        id: 3,
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 'sess-1',
+          currentModelId: null,
+          currentApprovalMode: 'plan',
+          planExecutionMode: 'default',
+        },
+      });
+      expect(state.planExecutionMode).toBe('default');
+      state = reduceDaemonSessionEvent(state, {
+        id: 4,
+        v: 1,
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 'sess-1',
+          previous: 'plan',
+          next: 'default',
+          persisted: false,
+        },
+      });
+      expect(state.approvalMode).toBe('default');
+      expect(state.planExecutionMode).toBeUndefined();
+    });
+
+    it.each(['approval_mode_changed', 'session_snapshot'])(
+      'rejects malformed Plan execution permission in %s',
+      (type) => {
+        expect(
+          asKnownDaemonEvent({
+            id: 1,
+            v: 1,
+            type,
+            data: {
+              sessionId: 'sess-1',
+              previous: 'default',
+              next: 'plan',
+              persisted: false,
+              currentModelId: null,
+              currentApprovalMode: 'plan',
+              planExecutionMode: true,
+            },
+          }),
+        ).toBeUndefined();
+      },
+    );
+
     it('approval_mode_changed: increments counter, copies envelope originator', () => {
       const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
         id: 5,

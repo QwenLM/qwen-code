@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, type ModelsConfig } from '@qwen-code/qwen-code-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -40,6 +40,28 @@ describe('loadDaemonVoiceContext', () => {
     }
     vi.resetModules();
     vi.resetAllMocks();
+  });
+
+  it('uses the resolved API auth type instead of the raw OpenAI selection', async () => {
+    mocks.loadSettings.mockReturnValue({
+      merged: { voiceModel: 'qwen3-asr-flash', modelProviders: {} },
+    });
+    mocks.getAuthTypeFromEnv.mockReturnValue(AuthType.USE_OPENAI);
+    mocks.resolveCliGenerationConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI_RESPONSES,
+      generationConfig: {},
+      sources: {},
+    });
+    const { loadDaemonVoiceContext } = await import(
+      './resolve-voice-config.js'
+    );
+    const context = loadDaemonVoiceContext('/work/voice', {
+      env: {},
+      workspaceTrusted: true,
+    });
+    expect((context.models as ModelsConfig).getCurrentAuthType()).toBe(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
   });
 
   it('uses the injected runtime env for voice auth and model config resolution', async () => {

@@ -29,8 +29,8 @@
 import type React from 'react';
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
-import { DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
-import { localizeToolDisplayName } from '../../../i18n/index.js';
+import { DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core/subagents/builtin-agents.js';
+import { localizeToolDisplayName, t } from '../../../i18n/index.js';
 import {
   useBackgroundTaskViewActions,
   useBackgroundTaskViewState,
@@ -133,14 +133,30 @@ function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
   }
 }
 
+function toolCallLabel(call: { name: string; description?: string }): string {
+  const display = localizeToolDisplayName(
+    TOOL_DISPLAY_BY_NAME[call.name] ?? call.name,
+  );
+  const desc = call.description?.replace(/\s*\n\s*/g, ' ').trim();
+  return desc ? `${display} ${desc}` : display;
+}
+
+/**
+ * The call an agent is waiting on for approval: the newest inline prompt
+ * of a foreground agent, or the oldest parked background approval, which
+ * the detail dialog presents first. The last activity is not necessarily
+ * that call — a parallel batch keeps starting calls after the one that asked.
+ */
+function awaitingApproval(
+  entry: AgentDialogEntry,
+): { name: string; description?: string } | undefined {
+  if (entry.status !== 'running') return undefined;
+  return entry.inlineApprovals?.at(-1) ?? entry.pendingApprovals?.[0];
+}
+
 function activityLabel(entry: AgentDialogEntry): string {
   const last = entry.recentActivities?.at(-1);
-  if (!last) return '';
-  const display = localizeToolDisplayName(
-    TOOL_DISPLAY_BY_NAME[last.name] ?? last.name,
-  );
-  const desc = last.description?.replace(/\s*\n\s*/g, ' ').trim();
-  return desc ? `${display} ${desc}` : display;
+  return last ? toolCallLabel(last) : '';
 }
 
 /**
@@ -477,7 +493,10 @@ const AgentRow: React.FC<{
   // activity description is LLM-generated and bare C0 controls (\r, BS,
   // BEL) pass through the ANSI-sequence escape — matches the hardened
   // dialog Progress rows and ToolMessage approval context.
-  const activity = sanitizeMultilineForDisplay(activityLabel(entry));
+  const waitingCall = awaitingApproval(entry);
+  const activity = sanitizeMultilineForDisplay(
+    waitingCall ? toolCallLabel(waitingCall) : activityLabel(entry),
+  );
   const elapsed = elapsedLabel(entry, now);
   const showType =
     entry.subagentType !== undefined &&
@@ -532,6 +551,11 @@ const AgentRow: React.FC<{
             <Text color={theme.text.secondary}>{treePrefix}</Text>
           )}
           <Text color={color}>{`${glyph} `}</Text>
+          {waitingCall && (
+            <Text color={theme.status.warning}>
+              {`⚠ ${t('needs approval')} · `}
+            </Text>
+          )}
           {showType && (
             <>
               <Text bold>{safeSubagentType}</Text>

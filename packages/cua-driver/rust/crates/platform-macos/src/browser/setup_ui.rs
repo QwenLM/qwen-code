@@ -1696,6 +1696,11 @@ mod tests {
             value: value.map(str::to_owned),
             description: None,
             identifier: None,
+            rich_text: None,
+            url: None,
+            title_ui_element: None,
+            selectable: false,
+            table_row: false,
             help: None,
             actions: actions.iter().map(|value| (*value).to_owned()).collect(),
             element_ptr: 7,
@@ -1710,6 +1715,8 @@ mod tests {
             enabled: None,
             selected: None,
             in_web_content: false,
+            focused: None,
+            focusable_or_selectable: false,
         }
     }
 
@@ -1726,6 +1733,7 @@ mod tests {
             tree_markdown: String::new(),
             nodes,
             complete: true,
+            read_complete: true,
             truncated: false,
             window_scope: Some(crate::ax::WindowScope::Matched),
         }
@@ -1856,6 +1864,7 @@ mod tests {
             tree_markdown: String::new(),
             nodes: Vec::new(),
             complete: false,
+            read_complete: true,
             truncated: true,
             window_scope: Some(crate::ax::WindowScope::Matched),
         };

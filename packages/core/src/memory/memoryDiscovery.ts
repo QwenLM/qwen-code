@@ -19,7 +19,11 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { findProjectRoot } from '../utils/projectRoot.js';
-import { loadRules, type RuleFile } from '../config/rulesDiscovery.js';
+import {
+  loadRules,
+  type ExtensionRuleSource,
+  type RuleFile,
+} from '../config/rulesDiscovery.js';
 import type {
   InstructionLoadReason,
   InstructionMemoryType,
@@ -166,9 +170,7 @@ async function getMemoryFilePathsInternalForEachDir(
 
       const upwardPaths: string[] = [];
       let currentDir = resolvedCwd;
-      const ultimateStopDir = projectRoot
-        ? path.dirname(projectRoot)
-        : path.dirname(resolvedHome);
+      const ultimateStopDir = projectRoot ?? path.dirname(resolvedHome);
 
       while (currentDir && currentDir !== path.dirname(currentDir)) {
         if (
@@ -225,9 +227,10 @@ async function getMemoryFilePathsInternalForEachDir(
  */
 async function dedupeByCanonicalIdentity(
   filePaths: string[],
-): Promise<string[]> {
+): Promise<{ filePaths: string[]; topLevelFiles: Set<string> }> {
   const seenIdentities = new Set<string>();
   const dedupedPaths: string[] = [];
+  const topLevelFiles = new Set<string>();
   for (const filePath of filePaths) {
     let identity = path.resolve(filePath);
     try {
@@ -239,13 +242,16 @@ async function dedupeByCanonicalIdentity(
     if (!seenIdentities.has(identity)) {
       seenIdentities.add(identity);
       dedupedPaths.push(filePath);
+      topLevelFiles.add(path.resolve(filePath));
+      topLevelFiles.add(identity);
     }
   }
-  return dedupedPaths;
+  return { filePaths: dedupedPaths, topLevelFiles };
 }
 
 async function readMemoryFiles(
   filePaths: string[],
+  topLevelFiles: ReadonlySet<string>,
   importFormat: 'flat' | 'tree' = 'tree',
   getMemoryType: (filePath: string) => InstructionMemoryType,
   onInstructionsLoaded?: (
@@ -282,6 +288,7 @@ async function readMemoryFiles(
             path.dirname(filePath),
             {
               processedFiles: new Set([path.resolve(filePath)]),
+              topLevelFiles,
               maxDepth: 5,
               currentDepth: 0,
               currentFile: path.resolve(filePath),
@@ -423,6 +430,16 @@ export interface LoadServerHierarchicalMemoryResponse {
   ruleCount: number;
   /** Conditional rules (with `paths:`) for turn-level lazy injection. */
   conditionalRules: RuleFile[];
+  /**
+   * Extension rules dropped for having no `paths:`, by display path.
+   *
+   * Present only when at least one was dropped. An empty list and an absent
+   * field mean the same thing to every consumer (Config reads it with `?? []`),
+   * and omitting it keeps this response's shape — asserted whole with `toEqual`
+   * in a dozen `memoryDiscovery` tests that have no opinion about extension
+   * rules — unchanged for every session that has none.
+   */
+  ignoredExtensionRules?: string[];
   /** Effective project root used for glob matching. */
   projectRoot: string;
 }
@@ -430,6 +447,12 @@ export interface LoadServerHierarchicalMemoryResponse {
 export interface LoadServerHierarchicalMemoryOptions {
   explicitOnly?: boolean;
   loadReason?: Exclude<InstructionLoadReason, 'include'>;
+  /**
+   * Active extensions' `rules/` directories. Arrives in the options object
+   * rather than as a ninth positional parameter. Only conditional rules are
+   * taken from them; see `loadRules`.
+   */
+  extensionRuleSources?: readonly ExtensionRuleSource[];
   onInstructionsLoaded?: (
     notification: InstructionsLoadedNotification,
   ) => void | Promise<void>;
@@ -559,7 +582,8 @@ export async function loadServerHierarchicalMemory(
   // (a workspace symlink aliasing an ancestor QWEN.md, an extension path
   // that duplicates a scanned path). Dedupe by canonical identity so the
   // file's content reaches the system prompt exactly once (#9597).
-  const dedupedFilePaths = await dedupeByCanonicalIdentity(filePaths);
+  const { filePaths: dedupedFilePaths, topLevelFiles } =
+    await dedupeByCanonicalIdentity(filePaths);
 
   let combinedInstructions = '';
   let fileCount = 0;
@@ -569,6 +593,7 @@ export async function loadServerHierarchicalMemory(
     const loadReason = options.loadReason ?? 'session_start';
     const contentsWithPaths = await readMemoryFiles(
       dedupedFilePaths,
+      topLevelFiles,
       importFormat,
       createMemoryTypeClassifier(
         userHomePath,
@@ -619,9 +644,20 @@ export async function loadServerHierarchicalMemory(
     content: rulesContent,
     ruleCount,
     conditionalRules,
+    ignoredExtensionRules,
   } = options.explicitOnly
-    ? { content: '', ruleCount: 0, conditionalRules: [] }
-    : await loadRules(effectiveRoot, folderTrust, contextRuleExcludes);
+    ? {
+        content: '',
+        ruleCount: 0,
+        conditionalRules: [],
+        ignoredExtensionRules: [],
+      }
+    : await loadRules(
+        effectiveRoot,
+        folderTrust,
+        contextRuleExcludes,
+        options.extensionRuleSources ?? [],
+      );
 
   // Baseline rules go into the system prompt
   let memoryContent = combinedInstructions;
@@ -641,6 +677,8 @@ export async function loadServerHierarchicalMemory(
     contextFilePaths,
     ruleCount,
     conditionalRules,
+    // See the field's doc comment: reported only when something was dropped.
+    ...(ignoredExtensionRules.length > 0 ? { ignoredExtensionRules } : {}),
     projectRoot: effectiveRoot,
   };
 }
