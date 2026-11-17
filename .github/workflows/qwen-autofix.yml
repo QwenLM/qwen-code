@@ -5096,6 +5096,8 @@ jobs:
           PNPM_STORE_DIR: '${{ steps.base_dependencies.outputs.store_dir }}'
           COREPACK_HOME_SOURCE: '${{ steps.base_dependencies.outputs.corepack_home }}'
           QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           INSTALL_RUNNER_SHA256: '${{ steps.stage.outputs.install_runner_sha256 }}'
           INSTALL_CONTAINER_NAME: 'qwen-autofix-install-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target.pr }}'
         run: |-
