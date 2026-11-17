@@ -420,6 +420,30 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(JSON.stringify(response.body)).not.toContain(dir);
   });
 
+  it('classifies a plain checkout directory-collision refusal as dirty_working_tree', async () => {
+    const dir = makeRepo();
+    const mainBranch = git(dir, 'branch', '--show-current').trim();
+    // The primary route: the popover turns this 409 into the stash/discard
+    // offer, so the plain path must keep surfacing git's raw text to the
+    // shared classifier — typing the refusal as GitCheckoutFailure would
+    // silently remove the offer.
+    git(dir, 'checkout', '-q', '-b', 'start');
+    fs.writeFileSync(path.join(dir, 'd'), 'tracked\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'track d as a file');
+    git(dir, 'checkout', '-q', mainBranch);
+    fs.mkdirSync(path.join(dir, 'd'));
+    fs.writeFileSync(path.join(dir, 'd', 'blocker.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'start' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+  });
+
   // The classifier is shared by every workspace git route, so the file that
   // owns it must be able to go red when the table changes — including the
   // remote-specific branches the remotes routes depend on.

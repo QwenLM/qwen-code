@@ -1,5 +1,7 @@
 # Git pull with a dirty working tree
 
+[English](git-pull-dirty-worktree.md) | [简体中文](git-pull-dirty-worktree.zh-CN.md)
+
 ## Goal
 
 Let the Web Shell "Update Project" action succeed when the workspace has
@@ -97,8 +99,12 @@ route classifier also matches `would lose untracked` (the
 directory-collision refusal; see the
 [checkout dirty-worktree design](2026-11-15-web-shell-git-checkout-dirty-worktree.md)),
 so that shape answers `409 dirty_working_tree` on plain pull too, where
-it previously fell through to an unclassified 500. The three options
-are mutually exclusive:
+it previously fell through to an unclassified 500 — when the refusal
+line lands inside the route's 512-character client-message bound: the
+loose keyword branches read the bounded slice, and a plain pull's fetch
+summary on a many-ref update can push the refusal past it (that corner
+stays an unclassified 500, as for the file-collision keywords). The
+three options are mutually exclusive:
 `stash`+`force` and `fetchOnly` combined with either are refused as 400s
 rather than silently dropping one of them.
 

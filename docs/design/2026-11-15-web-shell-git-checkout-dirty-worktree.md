@@ -129,17 +129,22 @@ They are the two things a user would do in a terminal, and nothing more:
   the residue clean is best-effort — its error is swallowed so the hook
   refusal stays the reported failure, and the residue may survive.
 
-Residue inside a blocking untracked directory that the current branch
-already ignores is not preserved: git itself discards ignored files in
-the way during the switch, under both resolutions (probed), exactly as
-in the file-collision shape. Whether residue is ignored is decided at
-stash time by the current branch's rules, not the target's: residue the
-current branch does not ignore is plain untracked, so the stash entry
-captures it and it survives the switch, recoverable from the entry the
-response names (the force resolution still discards it — untracked
-files in the way are overwritten by the forced checkout itself). "Your
-changes are kept" covers what the entry holds; only files ignored at
-stash time fall outside it.
+Residue inside a blocking untracked directory that a committed rule on
+the current branch ignores is not preserved: git itself discards
+ignored files in the way during the switch, under both resolutions
+(probed), exactly as in the file-collision shape. Whether residue is
+ignored is decided at stash time by the current branch's rules, not the
+target's: residue the current branch does not ignore is plain untracked,
+so the stash entry captures it and it survives the switch, recoverable
+from the entry the response names (the force resolution still discards
+it — untracked files in the way are overwritten by the forced checkout
+itself). When the ignore rule is itself an uncommitted `.gitignore`
+edit, the stash takes the rule away with it: the residue is plain
+untracked at checkout time, the switch is refused with the
+directory-collision message, and the entry is restored — nothing is
+discarded and nothing is lost (probed). On a completed switch, "your
+changes are kept" covers what the entry holds; files ignored by a rule
+that survives the stash are not in it.
 
 Both options are refused (`409 operation_in_progress`) while a merge,
 cherry-pick, revert, rebase or am is parked in the worktree: the
@@ -161,7 +166,8 @@ kept restore, or `operation_in_progress` when a merge parks after the
 push (see below) — and, for the directory-collision refusal, a
 `409 dirty_working_tree` where the shared classifier previously answered
 an unclassified 500, on plain checkout, branch creation, and plain pull
-alike.
+alike, when the refusal lands inside the client-message bound (see
+below).
 
 Failures are classified by what the core did, not by matching git's text:
 a new `GitCheckoutFailure` carries the stable codes
@@ -177,7 +183,11 @@ every workspace git route, so the alternation types that refusal shape
 wherever git's raw error reaches it — plain checkout, branch creation
 (`checkout -b`), and plain pull alike; the stash and force pull flows
 type their update failures before the classifier, so their responses
-are unchanged.
+are unchanged. The loose keyword branches read the bounded
+512-character client slice, so a refusal pushed past that bound stays
+an unclassified 500 — a plain pull's fetch summary can do that on a
+many-ref update, the same corner the file-collision keywords have
+always had.
 
 ## UI
 
@@ -424,7 +434,8 @@ omission:
   refusal's response changes from an unclassified 500 to
   `409 dirty_working_tree` on every route whose raw git error reaches
   the shared classifier — plain checkout, branch creation, and plain
-  pull.
+  pull — when the refusal lands inside the route's client-message
+  bound.
 - Every guard listed above has a test that fails without it.
 - The design exists in both languages; lint, typecheck, build and the
   focused unit suites pass.

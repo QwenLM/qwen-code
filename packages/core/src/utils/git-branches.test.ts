@@ -1006,6 +1006,67 @@ describe('gitCheckout with a dirty working tree', () => {
     },
   );
 
+  it('stash checkout captures a blocking untracked directory and completes the switch', async () => {
+    const dir = makeRepo();
+    git(dir, 'checkout', '-q', '-b', 'blocker');
+    commitFile(dir, 'd', 'tracked\n');
+    git(dir, 'checkout', '-q', 'master');
+    write(dir, { 'd/blocker.txt': 'local\n' });
+
+    const result = await gitCheckout(
+      dir,
+      'blocker',
+      { stash: true },
+      hermeticEnv(),
+    );
+
+    expect(result.branch).toBe('blocker');
+    expect(result.stashSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(read(dir, 'd')).toBe('tracked\n');
+    expect(
+      git(
+        dir,
+        'stash',
+        'show',
+        '--include-untracked',
+        '--name-only',
+        result.stashSha!,
+      ),
+    ).toContain('d/blocker.txt');
+  });
+
+  it('stash checkout restores the entry when the ignore rule itself is uncommitted', async () => {
+    const dir = makeRepo();
+    commitFile(dir, '.gitignore', '*.tmp\n');
+    git(dir, 'checkout', '-q', '-b', 'blocker');
+    commitFile(dir, 'd', 'tracked\n');
+    git(dir, 'checkout', '-q', 'master');
+    // The rule ignoring build.log is an uncommitted edit: the stash takes
+    // it away, so at checkout time the residue is plain untracked and the
+    // switch is refused — nothing is discarded.
+    write(dir, {
+      '.gitignore': '*.tmp\nd/build.log\n',
+      'd/blocker.txt': 'local\n',
+      'd/build.log': 'BUILDOUTPUT\n',
+    });
+
+    const failure = await checkoutFails(
+      dir,
+      'blocker',
+      { stash: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain('your local changes were restored');
+    expect(failure.message).toContain('would lose untracked');
+    expect(failure.stashSha).toBeUndefined();
+    expect(currentBranch(dir)).toBe('master');
+    expect(read(dir, 'd/build.log')).toBe('BUILDOUTPUT\n');
+    expect(read(dir, 'd/blocker.txt')).toBe('local\n');
+    expect(read(dir, '.gitignore')).toBe('*.tmp\nd/build.log\n');
+    expect(stashList(dir)).toHaveLength(0);
+  });
+
   it('stash checkout types the refusal when git cannot stash an intent-to-add entry', async () => {
     const dir = dirtyCheckoutFixture();
     write(dir, { 'new.txt': 'new\n' });
