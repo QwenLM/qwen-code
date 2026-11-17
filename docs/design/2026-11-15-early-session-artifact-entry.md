@@ -63,7 +63,8 @@ Relevant baseline behavior (before this change):
 - Session summaries already carry derived per-session data (`prs`), hydrated
   best-effort from a sidecar in
   `packages/cli/src/serve/routes/session.ts` — a precedent for metadata
-  enrichment, reserved for the follow-up (scope B).
+  enrichment that scope B later reused
+  ([session-list artifact summary](2026-11-17-session-list-artifact-summary.md)).
 - Chat header items are declared by `WebShellChatHeaderItem`
   (`packages/web-shell/client/customization.tsx`), defaulted in
   `DEFAULT_CHAT_HEADER_ITEMS` and consumed in `packages/web-shell/client/App.tsx`
@@ -87,7 +88,9 @@ Relevant baseline behavior (before this change):
   [session-list artifact summary](2026-11-17-session-list-artifact-summary.md).
 - The per-turn `TurnOutputs` chips are unchanged; they still wait for the replay.
 - No change to the artifact panel's live-update path (`artifactsVersion` events).
-- No new artifact storage format or sidecar.
+- No new artifact storage format or sidecar in scope A; scope B adds the
+  derived `.artifacts.json` summary sidecar described in
+  [session-list artifact summary](2026-11-17-session-list-artifact-summary.md).
 
 ## Proposed solution
 
@@ -150,7 +153,8 @@ Relevant baseline behavior (before this change):
 
 - **Embed the list, not just a count.** The list is small (a few KB) and already
   restored in memory; carrying it lets the artifact cache be seeded so the panel
-  opened from the button is populated immediately, and it sets up scope B.
+  opened from the button is populated immediately — a cache scope B later
+  reused for the click-time count.
 - **No workspace status refresh on the load path.** The cheap accessor avoids
   stat/hash work so `/load` is not slowed. Status accuracy is restored by the
   existing gated fetch shortly after.

@@ -49,7 +49,8 @@ replay。只要列表早到，入口就能早显示。
   artifact 字段。
 - 会话摘要已携带派生的每会话数据（`prs`），在
   `packages/cli/src/serve/routes/session.ts` 中从 sidecar 尽力读取回填——这是
-  元数据增强的先例，留作后续（范围 B）。
+  元数据增强的先例，范围 B 后来复用了它
+  （[会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)）。
 - 聊天头部项由 `WebShellChatHeaderItem`
   （`packages/web-shell/client/customization.tsx`）声明，在
   `DEFAULT_CHAT_HEADER_ITEMS` 给默认值、在 `packages/web-shell/client/App.tsx`
@@ -70,7 +71,9 @@ replay。只要列表早到，入口就能早显示。
   [会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)中单独实现。
 - 按轮 `TurnOutputs` 芯片不变，仍等 replay。
 - 不改变产物面板的 live 更新路径（`artifactsVersion` 事件）。
-- 不新增 artifact 存储格式或 sidecar。
+- 范围 A 不新增 artifact 存储格式或 sidecar；范围 B 新增派生的
+  `.artifacts.json` 摘要 sidecar，见
+  [会话列表产物摘要](2026-11-17-session-list-artifact-summary.zh-CN.md)。
 
 ## 提议方案
 
@@ -121,7 +124,7 @@ replay。只要列表早到，入口就能早显示。
 ## 关键设计决策与理由
 
 - **内嵌列表而非仅数量。** 列表很小（几 KB）且已在内存恢复；携带它可播种 artifact
-  缓存，使从按钮打开的面板立即有内容，也为范围 B 铺路。
+  缓存，使从按钮打开的面板立即有内容——范围 B 后来复用该缓存做点击即现计数。
 - **load 路径不做 workspace 状态刷新。** 廉价 accessor 避免 stat/hash，从而不拖慢
   `/load`。状态准确性由随后既有的门控拉取恢复。
 - **播种而非取代门控拉取。** 早到列表是快照；live 正确性仍来自既有刷新路径。这保持

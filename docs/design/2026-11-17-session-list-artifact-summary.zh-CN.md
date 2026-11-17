@@ -103,7 +103,10 @@
   会话（journal 记录早于 sidecar）与 fork 的首次打开，并在任何带外 journal
   编辑后重新播种。零数量会治愈已存在的陈旧 sidecar（一次失败的尽力零写入
   不能留下永久幻影计数），但不会为无产物会话新建；数量相等时跳过写入，
-  暖 load 不新增写盘；部分读取的 transcript 绝不播种。
+  暖 load 不新增写盘；部分读取的 transcript 绝不播种。播种还要求 journal
+  具备权威性：无历史链缺口（断链会把 artifact 事件孤儿化出活跃分支而少计），
+  且无记录级损坏警告——与库变更守卫同一判定
+  （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。
 - 产物库冷删除在其直接 journal 写入后，用剩余可恢复数量更新 sidecar。
 - `SessionService` 增加按归档状态的路径助手；archive/unarchive 与其他
   sidecar 一起移动它；会话删除移除它；冲突解决丢弃被丢弃一方的 sidecar
@@ -119,6 +122,10 @@
 - `toSessionSummary` 在非零时携带 `artifactCount`。live entry 对其数量是
   权威的，因此 live 摘要省略（数量为零）时，合并要丢弃 sidecar 派生的陈旧
   数量。
+- `listWorkspaceSessions` 跳过 artifact 恢复仍在进行的条目
+  （`pendingRestoreIds`）：`session/load` 在 await `artifacts.restore()`
+  之前就注册条目，该窗口内空 store 会省略数量、使合并丢弃 sidecar 增强的
+  数量。恢复落定前，该行交给持久化摘要。
 - `BridgeSessionSummary` 与 `DaemonSessionSummary` 增加可选
   `artifactCount?: number`（wire 镜像，保持同步）。
 - `session-list.ts` 增加 `enrichArtifactSummaries`，在三处增强点与
@@ -132,8 +139,8 @@
 
 - 侧栏把被点击会话的 `artifactCount` 经 `onLoadSession` →
   `loadSidebarSession` → `loadSession` 选项（`artifactCountHint`）传递。
-  其他打开路径（总览、host 交接、standalone、重试）不传 hint，保持范围 A
-  的时序。
+  其他打开路径（总览、host 交接、standalone、重试、容量恢复 resume）不传
+  hint，保持范围 A 的时序；`resumeSession` 根本不声明该选项。
 - `startSessionSwitch` 的乐观 connection 提交同时设置 `artifactCountHint`
   与 `artifactCountHintSessionId`（未传 hint 时两者都清空），沿用
   `restoredArtifacts` / `restoredArtifactsSessionId` 的键控模式。
@@ -175,12 +182,14 @@
 
 - `packages/core/src/services/session-artifact-summary-sidecar.ts`（新增）。
 - `packages/core/src/services/session-artifact-persistence.ts`（payload
-  字段、规范化、fork 剥离）。
+  字段、规范化、fork 剥离、共享的 journal 权威性警告判定）。
 - `packages/core/src/services/chatRecordingService.ts`（sidecar 写入）。
-- `packages/core/src/services/sessionService.ts`（路径助手、load 播种、
-  库删除更新、archive 移动、delete 移除、冲突丢弃）。
+- `packages/core/src/services/sessionService.ts`（路径助手、带 journal
+  权威性门的 load 播种、库删除更新、archive 移动、delete 移除、冲突丢弃）。
+- `packages/core/src/config/config.ts`（工作目录搬迁清单）。
 - `packages/acp-bridge/src/sessionArtifacts.ts`（payload 数量、`count()`）。
-- `packages/acp-bridge/src/session-control-plane.ts`（`toSessionSummary`）。
+- `packages/acp-bridge/src/session-control-plane.ts`（`toSessionSummary`、
+  `listWorkspaceSessions` 的恢复中排除）。
 - `packages/acp-bridge/src/bridgeTypes.ts`（`BridgeSessionSummary`）。
 - `packages/sdk-typescript/src/daemon/types.ts`（`DaemonSessionSummary`）。
 - `packages/cli/src/serve/server/session-list.ts`（增强、合并规则）。
@@ -198,7 +207,11 @@
 ## 约束与风险
 
 - sidecar 可能在一次失败写入到下一次成功持久化/load 之间滞后于 journal；
-  数量是尽力而为的元数据，权威 load 会纠正它。对数量入口可接受。
+  数量是尽力而为的元数据，权威 load 会纠正它。对数量入口可接受。同一包络
+  覆盖设计内的 live-only 降级路径：曾入 journal 的产物在 journal 中仍可恢复，
+  而 live map 持为 ephemeral，因此 durable 事件按 live 可恢复集盖章（不含它），
+  直到下一次快照使 journal 收敛或 load 播种治愈 sidecar；重新 journal 化该
+  产物即让盖章收敛。
 - legacy 会话在升级后首次打开之前不显示数量（load 播种）。从未打开的会话
   保持现状。
 - 列表路径每会话多读一个小文件；organized 全量扫描有缓存（2 s TTL），且
@@ -209,13 +222,16 @@
 
 ## 验证计划
 
-- 单测：sidecar 读写校验（同步与异步读取器）；event payload 数量保留与
-  fork 剥离；recording-service sidecar 写入（带/不带数量的 event、
-  snapshot）；load 播种；库删除更新（剩余数量算术，单个与批量）；
+- 单测：sidecar 读写校验（同步与异步读取器，含异步抛错契约：ENOENT →
+  undefined、其他 I/O 错误重抛、abort → AbortError）；event payload 数量
+  保留与 fork 剥离；recording-service sidecar 写入（带/不带数量的 event、
+  snapshot）；load 播种及其权威性门（历史链缺口、记录级损坏警告、被容忍的
+  单产物级跳过）；库删除更新（剩余数量算术，单个与批量）；
   archive/delete/冲突处理；工作目录搬迁；store `count()`；
-  `toSessionSummary` 携带/省略；全部列表路径的增强（含扫描中途 abort）；
-  合并丢弃陈旧数量；乐观 hint 键控与清空；hook hint 有效性（缓存/快照
-  退役、跨会话键控）；头部数量回退；侧栏传递。
+  `toSessionSummary` 携带/省略；`listWorkspaceSessions` 的恢复中排除；
+  全部列表路径的增强（含扫描中途 abort 的逐次检查与被中断扫描不进缓存、
+  单会话抛错读取被包容）；合并丢弃陈旧数量；乐观 hint 键控与清空；hook
+  hint 有效性（缓存/快照退役、跨会话键控）；头部数量回退；侧栏传递。
 - 变异见证：回退每个承重守卫（键控、退役、合并丢弃、fork 剥离、播种），
   展示配对测试变红。
 - E2E（真实 daemon + 无头 Chromium，网络时序为承重证据）：冷打开带

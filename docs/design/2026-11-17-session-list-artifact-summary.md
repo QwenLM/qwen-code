@@ -122,7 +122,12 @@ clicked, using the list data the sidebar already holds.
   journal edit. A zero count heals an existing stale sidecar (a failed
   best-effort zero write must not leave a phantom count forever) but never
   creates one for an artifact-free session; an equal count skips the write so
-  a warm load adds no disk write; a partial transcript read never seeds.
+  a warm load adds no disk write; a partial transcript read never seeds. The
+  seed also requires an authoritative journal: no history gap (a broken chain
+  can orphan artifact events off the active branch and undercount) and no
+  record-level damage warnings — the same predicate the library mutation
+  guard uses (`hasDisqualifyingArtifactJournalWarning`); per-artifact skips
+  stay tolerated.
 - The library cold removal updates the sidecar from the remaining restorable
   count after its direct journal write.
 - `SessionService` gains the archive-state path helper; archive/unarchive
@@ -142,6 +147,11 @@ clicked, using the list data the sidebar already holds.
 - `toSessionSummary` includes `artifactCount` when non-zero. Live entries are
   authoritative for their count, so the merge drops a stale sidecar-derived
   count when the live summary omits it (count zero).
+- `listWorkspaceSessions` skips entries whose artifact restore is still
+  pending (`pendingRestoreIds`): `session/load` registers the entry before it
+  awaits `artifacts.restore()`, and the empty store inside that window would
+  omit the count and make the merge drop the sidecar-enriched count. The row
+  is left to the persisted summary until the restore settles.
 - `BridgeSessionSummary` and `DaemonSessionSummary` gain optional
   `artifactCount?: number` (wire mirrors, kept synchronized).
 - `session-list.ts` gains `enrichArtifactSummaries`, called beside
@@ -158,7 +168,8 @@ clicked, using the list data the sidebar already holds.
 - The sidebar passes the clicked session's `artifactCount` through
   `onLoadSession` → `loadSidebarSession` → `loadSession` options
   (`artifactCountHint`). Other open paths (overview, host handoff, standalone,
-  retry) pass no hint and keep scope A timing.
+  retry, capacity-recovery resume) pass no hint and keep scope A timing;
+  `resumeSession` does not declare the option at all.
 - `startSessionSwitch`'s optimistic connection commit sets
   `artifactCountHint` and `artifactCountHintSessionId` together (both cleared
   when no hint was passed), following the `restoredArtifacts` /
@@ -212,12 +223,16 @@ clicked, using the list data the sidebar already holds.
 
 - `packages/core/src/services/session-artifact-summary-sidecar.ts` (new).
 - `packages/core/src/services/session-artifact-persistence.ts` (payload field,
-  normalization, fork strip).
+  normalization, fork strip, shared journal-authority warning predicate).
 - `packages/core/src/services/chatRecordingService.ts` (sidecar writes).
-- `packages/core/src/services/sessionService.ts` (path helper, load seed,
-  library removal update, archive move, delete removal, conflict discard).
+- `packages/core/src/services/sessionService.ts` (path helper, load seed with
+  the journal-authority gate, library removal update, archive move, delete
+  removal, conflict discard).
+- `packages/core/src/config/config.ts` (working-directory relocation move
+  list).
 - `packages/acp-bridge/src/sessionArtifacts.ts` (count in payload, `count()`).
-- `packages/acp-bridge/src/session-control-plane.ts` (`toSessionSummary`).
+- `packages/acp-bridge/src/session-control-plane.ts` (`toSessionSummary`,
+  pending-restore exclusion in `listWorkspaceSessions`).
 - `packages/acp-bridge/src/bridgeTypes.ts` (`BridgeSessionSummary`).
 - `packages/sdk-typescript/src/daemon/types.ts` (`DaemonSessionSummary`).
 - `packages/cli/src/serve/server/session-list.ts` (enrichment, merge rule).
@@ -237,7 +252,12 @@ clicked, using the list data the sidebar already holds.
 
 - The sidecar can lag the journal between a failed write and the next
   successful persist/load; the count is best-effort metadata and the
-  authoritative load corrects it. Acceptable for a count entry.
+  authoritative load corrects it. Acceptable for a count entry. The same
+  envelope covers the designed live-only downgrade path: a previously
+  journaled artifact stays restorable in the journal while the live map
+  holds it ephemeral, so durable events stamp the live restorable set
+  (without it) until the next snapshot converges the journal or the load
+  seed heals the sidecar; re-journaling the artifact converges the stamp.
 - Legacy sessions show no count until their first open after the upgrade
   (the load seed). Sessions never opened keep today's behavior.
 - The list path reads one additional small file per session; the organized
@@ -250,15 +270,20 @@ clicked, using the list data the sidebar already holds.
 
 ## Validation plan
 
-- Unit: sidecar read/write validation (sync and async readers); event payload
-  count preservation and fork strip; recording-service sidecar writes (event
-  with/without count, snapshot); load seed; library removal update
-  (remaining-count arithmetic, single and batch); archive/delete/conflict
-  handling; working-directory relocation; store `count()`;
-  `toSessionSummary` include/omit; enrichment on all list paths, including a
-  mid-scan abort; merge drops stale count; optimistic hint keying and clear;
-  hook hint validity (cache/snapshot retirement, cross-session keying);
-  header count fallback; sidebar threading.
+- Unit: sidecar read/write validation (sync and async readers, including the
+  async throw contract: ENOENT → undefined, other I/O errors rethrown, abort
+  → AbortError); event payload count preservation and fork strip;
+  recording-service sidecar writes (event with/without count, snapshot); load
+  seed and its authority gate (history gap, record-level damage warnings,
+  tolerated per-artifact skips); library removal update (remaining-count
+  arithmetic, single and batch); archive/delete/conflict handling;
+  working-directory relocation; store `count()`; `toSessionSummary`
+  include/omit; the pending-restore exclusion in `listWorkspaceSessions`;
+  enrichment on all list paths, including a mid-scan abort (per-iteration
+  checks, interrupted scan not cached) and a throwing read contained per
+  session; merge drops stale count; optimistic hint keying and clear; hook
+  hint validity (cache/snapshot retirement, cross-session keying); header
+  count fallback; sidebar threading.
 - Mutation witnesses: revert each load-bearing guard (keying, retirement,
   merge drop, fork strip, seed) and show the paired test reds.
 - E2E (real daemon + headless Chromium, network timing as load-bearing
