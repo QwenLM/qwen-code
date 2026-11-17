@@ -547,13 +547,14 @@ describe('managed DingTalk webhook per-chunk send budget (#17173 R10)', () => {
 
 describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () => {
   // A 48 KiB heading-dense segment splits into 24 chunks. At these latencies
-  // the batch runs 24s to 696s — the last two cross the control plane's 600s
-  // claim lease. Every one must still deliver all 24 chunks: a claim that
-  // outlives its lease is reconciled to unknown, but a late receipt moves
-  // unknown → partial → delivered, so the ledger converges while the tail
-  // keeps arriving. Refusing the tail strands the delivery at unknown forever
-  // (the reconciler only re-picks planned/sending/partial) and an explicit
-  // resend re-plans every unreceipted segment, duplicating what the user has.
+  // the batch runs 24s to 696s — the last two reach or cross the control
+  // plane's 600s claim lease. Every one must still deliver all 24 chunks: a
+  // claim that outlives its lease is reconciled to unknown, but a late receipt
+  // moves unknown → partial → delivered, so the ledger converges while the
+  // tail keeps arriving. Refusing the tail strands the delivery at unknown
+  // forever (the reconciler only re-picks planned/sending/partial, and an
+  // unknown outcome writes no segment receipt), and an explicit resend
+  // re-plans every unreceipted segment, duplicating what the user has.
   it.each([1_000, 15_000, 20_000, 24_500, 25_000, 29_000])(
     'a 24-chunk segment at %i ms per chunk delivers every chunk, even past the lease',
     async (latency) => {
