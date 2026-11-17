@@ -3088,8 +3088,9 @@ from the selected session's own MCP manager remain available.
 
 Saved view state for one Generated UI card, advertised by
 `generated_ui_state`. Both methods require a session-bound
-`X-Qwen-Client-Id` (403 otherwise) and a card id matching
-`^gc_[A-Za-z0-9_-]{16,64}$` (400 `invalid_card_id`).
+`X-Qwen-Client-Id` and a card id matching `^gc_[A-Za-z0-9_-]{16,64}$`
+(400 `invalid_card_id`). A missing client id returns 403; a malformed client
+id, or one bound to another session, returns 400 `invalid_client_id`.
 
 `GET` returns `{ "cardId", "revision", "value" }`; a card that was never saved
 has `revision: 0` and `value: null`. `PUT` takes

@@ -26,9 +26,20 @@ import {
 } from '../../generated-ui/GeneratedUiRuntimeProvider';
 import { Button } from '../ui/button';
 import type { GeneratedUiInstance } from '../../generated-ui/instance-store';
+import {
+  generatedUiCardId,
+  VIEW_STATE_CAPABILITY,
+  VIEW_STATE_LOAD,
+  VIEW_STATE_SAVE,
+  ViewStateCoordinator,
+  type ViewStateStatus,
+} from '../../generated-ui/view-state';
 
 type SandboxResource = Parameters<AppBridge['sendSandboxResourceReady']>[0];
 type AppToolResult = Parameters<AppBridge['sendToolResult']>[0];
+type HostRequestResult = Awaited<
+  ReturnType<NonNullable<AppBridge['fallbackRequestHandler']>>
+>;
 
 export interface McpAppDisplay {
   type: 'mcp_app';
@@ -328,6 +339,17 @@ export function McpAppRuntime({
       : messageHost?.requestMessage;
   const callTool =
     sessionId && tools?.sessionId === sessionId ? tools.callTool : undefined;
+  // Only the bundled card keeps state, under the id its server minted.
+  const cardId =
+    builtInGeneratedUi && import.meta.env.MODE !== 'transcript'
+      ? generatedUiCardId(display.toolResult)
+      : undefined;
+  const viewStateHost =
+    cardId && sessionId && tools?.sessionId === sessionId
+      ? tools.viewState
+      : undefined;
+  const viewStateRef = useRef<ViewStateCoordinator | undefined>(undefined);
+  const [viewStateStatus, setViewStateStatus] = useState<ViewStateStatus>();
   const theme = useTheme();
   const languageRef = useRef(language);
   languageRef.current = language;
@@ -362,6 +384,8 @@ export function McpAppRuntime({
   useEffect(() => {
     setError(undefined);
     setAppReady(false);
+    setViewStateStatus(undefined);
+    viewStateRef.current = undefined;
     const iframe = iframeRef.current;
     if (!iframe || !sandboxUrl) return;
     const generation = ++mountGenerationRef.current;
@@ -369,6 +393,20 @@ export function McpAppRuntime({
     let active = true;
     let ready = false;
     const current = displayRef.current;
+    const viewState =
+      import.meta.env.MODE !== 'transcript' &&
+      viewStateHost &&
+      cardId &&
+      sessionId
+        ? new ViewStateCoordinator(
+            { sessionId, ...viewStateHost },
+            cardId,
+            (status) => {
+              if (active) setViewStateStatus(status);
+            },
+          )
+        : undefined;
+    viewStateRef.current = viewState;
     const bridge = new AppBridge(
       null,
       { name: 'qwen-code-web-shell', version: '0.0.1' },
@@ -379,6 +417,7 @@ export function McpAppRuntime({
         ...(builtInGeneratedUi && requestMessage
           ? { updateModelContext: { text: {} } }
           : {}),
+        ...(viewState ? { experimental: { [VIEW_STATE_CAPABILITY]: {} } } : {}),
         sandbox: {
           ...(current.csp ? { csp: current.csp } : {}),
         },
@@ -463,6 +502,21 @@ export function McpAppRuntime({
         return {};
       };
     }
+    if (viewState) {
+      // The App names no card: the host answers for the one it mounted.
+      bridge.fallbackRequestHandler = async (request, extra) => {
+        if (!active) throw new Error('The card was unmounted.');
+        if (request.method === VIEW_STATE_LOAD)
+          return {
+            value: await viewState.load(extra?.signal),
+          } as HostRequestResult;
+        if (request.method === VIEW_STATE_SAVE) {
+          viewState.save((request.params as { value?: unknown })?.value);
+          return {} as HostRequestResult;
+        }
+        throw new Error(`Unsupported request: ${request.method}`);
+      };
+    }
     if (callTool) {
       bridge.oncalltool = async (params, extra) => {
         const signal = AbortSignal.any([
@@ -519,6 +573,7 @@ export function McpAppRuntime({
       clearTimeout(readyTimeout);
       bridge.oncalltool = undefined;
       bridge.onmessage = undefined;
+      bridge.fallbackRequestHandler = undefined;
       appAbort.abort();
       iframe.removeAttribute('src');
       bridgeRef.current = null;
@@ -591,6 +646,7 @@ export function McpAppRuntime({
       clearTimeout(readyTimeout);
       bridge.oncalltool = undefined;
       bridge.onmessage = undefined;
+      bridge.fallbackRequestHandler = undefined;
       appAbort.abort();
       bridgeRef.current = null;
       const unload = () => {
@@ -626,6 +682,8 @@ export function McpAppRuntime({
     toolResultKey,
     retained,
     maxHeight,
+    cardId,
+    viewStateHost,
   ]);
 
   useEffect(() => {
@@ -646,20 +704,44 @@ export function McpAppRuntime({
   return (
     <div ref={cardRef} className={styles.card} data-testid="mcp-app">
       {builtInGeneratedUi ? (
-        // No MCP framing: one quiet row, only for the host's reset action.
-        retained && (
+        // No MCP framing: one quiet row for the host's own reset action and
+        // save outcome, which the generated content cannot imitate.
+        import.meta.env.MODE !== 'transcript' &&
+        (retained || viewStateStatus) && (
           <div className={styles.builtInBar}>
             <span>
-              {retained.reopened ? t('mcpApp.generatedUi.reopenNotice') : ''}
+              {retained?.reopened ? t('mcpApp.generatedUi.reopenNotice') : ''}
             </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              title={t('mcpApp.generatedUi.reopenNotice')}
-              onClick={retained.reset}
-            >
-              {t('mcpApp.generatedUi.reset')}
-            </Button>
+            {viewStateStatus && (
+              <span
+                role="status"
+                className={styles.saveStatus}
+                data-generated-ui-save={viewStateStatus}
+              >
+                {t(`mcpApp.generatedUi.state.${viewStateStatus}`)}
+              </span>
+            )}
+            {retained && (
+              <Button
+                variant="ghost"
+                size="sm"
+                title={t(
+                  viewStateHost
+                    ? 'mcpApp.generatedUi.resetNotice'
+                    : 'mcpApp.generatedUi.reopenNotice',
+                )}
+                onClick={() => {
+                  const viewState = viewStateRef.current;
+                  // Reset also clears what the card saved; if that fails,
+                  // the card stays as it is and the bar says so.
+                  retained.reset(
+                    viewState ? () => viewState.clear() : undefined,
+                  );
+                }}
+              >
+                {t('mcpApp.generatedUi.reset')}
+              </Button>
+            )}
           </div>
         )
       ) : (
@@ -672,7 +754,7 @@ export function McpAppRuntime({
                 variant="ghost"
                 size="sm"
                 title={t('mcpApp.generatedUi.reopenNotice')}
-                onClick={retained.reset}
+                onClick={() => retained.reset()}
               >
                 {t('mcpApp.generatedUi.reset')}
               </Button>
