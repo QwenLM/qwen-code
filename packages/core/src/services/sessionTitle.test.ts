@@ -17,6 +17,10 @@ import {
 } from '../memory/request-context.js';
 import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
+  wrapAsyncHookContext,
+  ASYNC_HOOK_CONTEXT_OPEN,
+} from '../hooks/async-hook-context.js';
+import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
 } from '../core/environmentContext.js';
@@ -115,6 +119,54 @@ describe('tryGenerateSessionTitle', () => {
       expect(prompt).not.toContain('CATALOG_SENTINEL');
       expect(prompt).not.toContain('Current memory catalog');
       expect(chat.getHistoryShallow()).toEqual(original);
+    },
+  );
+
+  it.each([
+    { name: 'async trailing', coOccur: false },
+    { name: 'async ahead of a trailing sync receipt', coOccur: true },
+  ])(
+    'excludes the async hook block from fallback title input, $name',
+    async ({ coOccur }) => {
+      const parts: Array<{ text: string }> = [
+        { text: 'Diagnose parser failure' },
+        { text: wrapAsyncHookContext('ASYNC_TITLE_SENTINEL') },
+      ];
+      if (coOccur) {
+        parts.push({
+          text: wrapUserPromptSubmitContext('SYNC_TITLE_SENTINEL'),
+        });
+      }
+      const history: Content[] = [
+        content('user', ...parts),
+        modelText('The parser needs a fix.'),
+      ];
+      const chat = new LlmChat(
+        { getAutoMemoryContext: () => '' } as Config,
+        {},
+        history,
+      );
+      const { config, generateJson } = makeConfig({
+        chat,
+        fastModel: 'qwen-turbo',
+        generateJsonResult: { title: 'Repair parser regression' },
+      });
+      // No recorded display text: the title falls back to filterToDialog.
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+        [undefined],
+      );
+      expect(outcome.ok).toBe(true);
+      expect(generateJson).toHaveBeenCalledTimes(1);
+      const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+      expect(prompt).toContain('Diagnose parser failure');
+      expect(prompt).toContain('The parser needs a fix.');
+      expect(prompt).not.toContain('ASYNC_TITLE_SENTINEL');
+      expect(prompt).not.toContain(ASYNC_HOOK_CONTEXT_OPEN);
+      if (coOccur) {
+        expect(prompt).not.toContain('SYNC_TITLE_SENTINEL');
+      }
     },
   );
 

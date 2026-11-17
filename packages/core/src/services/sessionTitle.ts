@@ -8,6 +8,7 @@ import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { stripTrailingUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
+import { isAsyncHookContextPartText } from '../hooks/async-hook-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
@@ -376,7 +377,8 @@ function filterToDialog(
         typeof part?.text !== 'string' ||
         part.text.trim() === '' ||
         part.thought ||
-        part.thoughtSignature
+        part.thoughtSignature ||
+        isAsyncHookContextPartText(part.text)
       ) {
         continue;
       }

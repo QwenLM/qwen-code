@@ -1564,6 +1564,40 @@ describe('Gemini Client (client.ts)', () => {
       expect(asyncIndex).toBeGreaterThan(fnResponseIndex);
       expect((parts[asyncIndex] as Part).text).toContain('async tool result');
     });
+
+    it('keeps the async block out of the persisted user record (in-memory only)', async () => {
+      const recordUserMessage = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordUserMessage,
+        recordCronPrompt: vi.fn(),
+        recordAttributionSnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      installAsyncOutput('async not persisted');
+      await run([{ text: 'hello' }], 'prompt-async-record', {
+        type: SendMessageType.UserQuery,
+      });
+      const hasAsyncBlock = (parts: Array<string | Part>) =>
+        parts.some(
+          (part) =>
+            typeof part === 'object' &&
+            part !== null &&
+            'text' in part &&
+            typeof part.text === 'string' &&
+            part.text.includes(ASYNC_HOOK_CONTEXT_OPEN),
+        );
+      // The wire request carries the block...
+      const wireParts = mockTurnRunFn.mock.lastCall?.[1] as Array<
+        string | Part
+      >;
+      expect(hasAsyncBlock(wireParts)).toBe(true);
+      // ...but the persisted user record, built from the pre-append request,
+      // does not — so resume never re-delivers the hook output.
+      expect(recordUserMessage).toHaveBeenCalled();
+      const recorded = recordUserMessage.mock.calls[0][0] as Array<
+        string | Part
+      >;
+      expect(hasAsyncBlock(recorded)).toBe(false);
+    });
   });
 
   describe('DW04: explicit workflow mode eligibility', () => {

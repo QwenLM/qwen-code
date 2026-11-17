@@ -1648,8 +1648,10 @@ Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-runn
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 if [[ "$FILE_PATH" != *.ts && "$FILE_PATH" != *.js ]]; then exit 0; fi
-# Write the result to a file for a durable record. Anything the hook prints to
-# stdout is also delivered to the model on the next request (see above).
+# Write the result to a file for a durable record. Plain-text (non-JSON) stdout
+# is also delivered to the model on the next request; JSON stdout is delivered
+# only through its systemMessage or hookSpecificOutput.additionalContext fields
+# (see above).
 LOG=/tmp/qwen-async-tests.log
 if npm test >"$LOG" 2>&1; then
   echo "Tests passed after editing $FILE_PATH" >>"$LOG"
