@@ -34,3 +34,10 @@ npx vitest run src/permissions/shell-semantics.test.ts src/permissions/permissio
 ```
 
 Record the candidate revision, actual collected count, shell version, cwd/HOME isolation, build result and CLI approval events. Keep source tests, native shell observations, packaged CLI validation and ACP validation as separate evidence.
+
+## 2026-11-18 R15 addendum
+
+11. Ordinary read-only globs such as `grep -rn foo src/*.ts` must reach the AUTO classifier and remain allowed under broad rules. Variable expansion, undecodable bytes and unresolved write targets retain the deterministic human-approval floor. Spaced `>& 2`, `2>& 1` and `<& 0` duplicate descriptors without creating a numeric filename; plain `> 2` still writes the file named `2`.
+12. Extract real operations from multi-command `$()` and backtick payloads. Keep case and conditional bodies isolated from the enclosing cwd, including `time` and `!` prefixes. Parameter-expansion comments and earlier HOME/CDPATH assignments must not certify a path Bash does not use. A later absolute cd may clear dynamic-cd uncertainty but not structural uncertainty.
+
+The R15 candidate has 1,375 passing tests across the four directly affected permission files, and 2,137 passing tests when shell-utils and the real tool scheduler are included. Native Bash 3.2.57 observations used an isolated evidence fixture and confirmed the protected write/removal locations. Full build and packaged CLI verification remain pending because the current checkout has unrelated dependency type errors in external-context, diff, glob and zod consumers; the changed files themselves have no core TypeScript errors. ESLint passes. No packaged CLI or ACP result is claimed.
