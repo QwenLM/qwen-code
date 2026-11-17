@@ -269,6 +269,7 @@ type TranscriptHistoryAdmission =
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
+const GENERATED_UI_STATE_FEATURE = 'generated_ui_state';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
 const WORKSPACE_SKILLS_CONFIG_RUNTIME_FEATURE =
@@ -6229,6 +6230,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       return undefined;
     return { sessionId: appSession.sessionId, status: generatedUi };
   }, [appSession, connection.sessionId, connection.status, generatedUi]);
+  const viewStateSupported =
+    knownCapabilities?.features.includes(GENERATED_UI_STATE_FEATURE) === true;
   const mcpAppTools = useMemo(() => {
     const session = appSession;
     if (
@@ -6255,8 +6258,36 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           signal,
         );
       },
+      ...(viewStateSupported
+        ? {
+            viewState: {
+              get: (cardId: string) => {
+                if (sessionRef.current !== session || !session.clientId)
+                  return Promise.reject(new Error('MCP App session changed'));
+                return session.client.getGeneratedUiState(
+                  session.sessionId,
+                  cardId,
+                  session.clientId,
+                );
+              },
+              set: (
+                cardId: string,
+                write: { baseRevision: number; value: unknown },
+              ) => {
+                if (sessionRef.current !== session || !session.clientId)
+                  return Promise.reject(new Error('MCP App session changed'));
+                return session.client.setGeneratedUiState(
+                  session.sessionId,
+                  cardId,
+                  write,
+                  session.clientId,
+                );
+              },
+            },
+          }
+        : {}),
     };
-  }, [appSession, connection.sessionId]);
+  }, [appSession, connection.sessionId, viewStateSupported]);
 
   return (
     <GeneratedUiScopeContext.Provider value={generatedUiScopeContext}>

@@ -206,7 +206,7 @@ export async function checkDocument(
   }
   const runtime = new UiRuntime(module);
   try {
-    const patches = runtime.initialize(input.javascript, markup.inputs);
+    const { patches } = runtime.initialize(input.javascript, markup.inputs);
     return checkPatches(patches, markup);
   } catch (error) {
     return error instanceof Error ? error.message : String(error);

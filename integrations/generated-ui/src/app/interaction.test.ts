@@ -73,7 +73,11 @@ async function harness(
     if (request.type === 'init') {
       response = {
         sequence: request.sequence,
-        patches: runtime.initialize(request.javascript, request.inputs),
+        ...runtime.initialize(
+          request.javascript,
+          request.inputs,
+          request.state,
+        ),
         execution: 'initialized',
       };
     } else {

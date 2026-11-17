@@ -31,17 +31,21 @@ self.onmessage = async (message: MessageEvent<UiWorkerRequest>) => {
       runtime = new UiRuntime(module);
       respond({
         sequence,
-        patches: runtime.initialize(request.javascript, request.inputs),
+        ...runtime.initialize(
+          request.javascript,
+          request.inputs,
+          request.state,
+        ),
         execution: 'initialized',
       });
     } else if (request.type === 'event' && runtime) {
-      const { patches, handled } = runtime.dispatch(
+      const { handled, ...result } = runtime.dispatch(
         request.event,
         request.inputs,
       );
       respond({
         sequence,
-        patches,
+        ...result,
         execution: handled ? 'handled' : 'unhandled',
       });
     } else {

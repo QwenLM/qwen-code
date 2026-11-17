@@ -20,7 +20,7 @@ const EN = {
   'status.stopped': 'Stopped',
   'status.error': 'The view runtime failed. Use the summary.',
   'stopped.title': 'This view is stopped.',
-  'stopped.body': 'Reopen the view to start again from its initial values.',
+  'stopped.body': 'Reopen the view to start it again.',
   'notice.superseded':
     'An older update was skipped. Your newer inputs were kept.',
   'notice.outdated': 'The displayed update may still use earlier parameters.',
@@ -75,7 +75,7 @@ const ZH_CN: Record<MessageKey, string> = {
   'status.stopped': '已停止',
   'status.error': '视图运行失败，请参考摘要。',
   'stopped.title': '此视图已停止。',
-  'stopped.body': '重新打开视图即可从初始参数重新开始。',
+  'stopped.body': '重新打开视图即可重新开始。',
   'notice.superseded': '已跳过一次较早的更新，保留了你较新的输入。',
   'notice.outdated': '当前显示的结果可能仍基于之前的参数。',
   'notice.queue': '队列已满，部分操作未被处理。请等待更新完成后重新操作。',

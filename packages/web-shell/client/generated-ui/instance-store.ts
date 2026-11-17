@@ -91,7 +91,7 @@ export function instanceKey(
 export function resourceKey(
   display: McpAppDisplay,
   eventEpoch?: string,
-  capabilities?: { tools: boolean; messages: boolean },
+  capabilities?: { tools: boolean; messages: boolean; viewState?: boolean },
 ) {
   return JSON.stringify(
     [
@@ -305,6 +305,15 @@ export class GeneratedUiInstanceStore {
             throw new Error('Generated UI owner changed');
           return result;
         },
+        ...(slot.tools?.viewState
+          ? {
+              viewState: {
+                get: async (cardId) => this.viewState(instance).get(cardId),
+                set: async (cardId, write) =>
+                  this.viewState(instance).set(cardId, write),
+              },
+            }
+          : {}),
       };
       entry.messages = {
         sessionId: entry.sessionId,
@@ -355,6 +364,19 @@ export class GeneratedUiInstanceStore {
     this.grant(entry, slot);
     if (wasParked || !this.snapshot.includes(entry)) this.changed();
     return entry;
+  }
+
+  // State is read and written only while this card holds its owner's lease.
+  private viewState(instance: GeneratedUiInstance) {
+    const lease = instance.lease;
+    const viewState = lease?.host.tools?.viewState;
+    if (
+      !this.current(instance, lease) ||
+      !viewState ||
+      lease.host.tools?.sessionId !== instance.sessionId
+    )
+      throw new Error('Generated UI is inactive');
+    return viewState;
   }
 
   update(slot: InstanceSlot) {

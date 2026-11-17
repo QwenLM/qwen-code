@@ -69,6 +69,10 @@
   font-size: 12px;
 }
 
+.saveStatus {
+  margin-left: auto;
+}
+
 .loading {
   padding: 16px 12px;
   color: var(--muted-foreground);
