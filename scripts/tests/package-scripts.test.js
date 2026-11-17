@@ -3256,18 +3256,29 @@ describe('package scripts', () => {
       const job = getWorkflowJob(workflow, jobName);
       const installStep = getWorkflowStep(job, stepName);
 
-      expect(installStep).toContain(
+      const installRecipe =
+        stepName === 'Install branch dependencies'
+          ? readWorkflow(
+              '.github/scripts/install-autofix-branch-dependencies.sh',
+            )
+          : installStep;
+      if (stepName === 'Install branch dependencies') {
+        expect(installStep).toContain(
+          'bash --norc "${RUNNER_TEMP}/install-autofix-branch-dependencies.sh"',
+        );
+      }
+      expect(installRecipe).toContain(
         stepName === 'Install branch dependencies'
           ? 'QWEN_SKIP_PREPARE=1'
           : "QWEN_SKIP_PREPARE: '1'",
       );
-      expect(installStep).toContain(
+      expect(installRecipe.replace(/\\\r?\n[ \t]*/g, '')).toContain(
         'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
       );
       if (armsHooks) {
         expect(installStep).toContain('git config core.hooksPath .husky');
       }
-      expect(installStep).not.toContain('--ignore-scripts');
+      expect(installRecipe).not.toContain('--ignore-scripts');
     }
   });
 

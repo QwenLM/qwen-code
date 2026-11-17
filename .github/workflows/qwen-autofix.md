@@ -1370,6 +1370,34 @@ it imports translation metadata directly, and the CLI tsconfig maps
 its narrow core data import to source.
 
 The base install cannot provide dependencies introduced by the PR.
+Before the first agent turn, a trusted staged installer runs the branch's
+frozen install in the already-resolved Docker image. Unlike the agent
+sandbox, this container does not mount host /tmp, HOME, runner files, or
+the Docker socket. It receives only the workspace (with .git and root
+dist overlaid read-only), a private HOME, and copied Corepack/pnpm caches.
+The trusted base uses clone-or-copy imports; private cache copies also
+avoid hardlinks into the host store. The private store is mounted at its
+original absolute path and selected explicitly with --store-dir so the
+later host verification install can reuse the same node_modules metadata.
+Lifecycle scripts remain enabled, but no model/PAT credentials or runner
+file-command variables enter the container. Clearing environment variables
+or chmod on same-owner files alone would not provide this restriction.
+
+The installer must stop its container before checking HEAD/tree, retrying,
+or returning. EXIT/INT/TERM remove it and its scratch directory; the final
+workflow cleanup makes a bounded additional removal attempt. Raw output
+stays in branch-dependencies.log; only command-neutralized output reaches
+the Actions log. The three-attempt policy stays under the ten-minute step
+cap. The host CLI bootstrap uses a private trusted dist copy with its own
+ESM scope, outside branch-installed node_modules resolution. Both agent
+turns verify the staged runner, skill and shim digests before execution.
+Post-install secret-bearing steps pin their shell startup inputs and PATH;
+the verification gate keeps its original stage-time HOME pin. These changes
+do not alter the accepted agent-sandbox model-key boundary in af-126.
+The new installer becomes available when merged into the trusted default
+branch; a pre-deployment invocation against a base without it fails closed,
+never falling back to the PR's copy.
+
 After the PR checkout, the trusted verification gate synchronizes the
 branch's dependencies before core/schema checks, on both the first and
 repair passes. Baseline A/B also synchronizes after detaching and after
@@ -3762,12 +3790,14 @@ In `review-address` · `Report dry-run / failure`.
 ```text
 Cause-aware wording, most specific first — a model error and a
 gate crash each name the operator fix, while a bare no-output
-crash points at a human. (The API clause runs first as
+crash points at a human. Dependency preparation failure comes first:
+no agent ran, so the report points to the branch-install logs and re-arm.
+The API clause then precedes gate-crash classification as
 defense-in-depth: today run-agent writes failure.md on the
 API-death path and the gate converts that to an explicit
 outcome=failed, so GATE_CRASHED is false — but if the gate
 ever changes, a model blip must not be reported as a gate
-problem.) No Run log here — the report block below appends
+problem. No Run log here — the report block below appends
 it (avoid a duplicate).
 ```
 

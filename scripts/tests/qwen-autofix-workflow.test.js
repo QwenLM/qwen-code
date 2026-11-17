@@ -43,6 +43,9 @@ const subprocessTimeoutMs = Number(
 );
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+const branchInstallRunnerPath =
+  '.github/scripts/install-autofix-branch-dependencies.sh';
+const branchInstallRunner = readFileSync(branchInstallRunnerPath, 'utf8');
 // The review bot's fixed-ruling NOTE shape, defined ONCE at the workflow
 // level and handed to every jq site as `--arg frf` (#9940 review, rounds
 // 28-29); the runners below pass it exactly as the workflow does.
@@ -9453,13 +9456,15 @@ exit 1
     );
     // The full census of the workflow's sites: prepare's feedback echo, the
     // two dump loops, the repair merge-warning head, the issue-lane gate's
-    // two failure notes, the branch-install transcript, and the upsert
-    // re-emit loop. An exact count makes a dropped or weakened KNOWN site
+    // two failure notes and the upsert re-emit loop. The branch-install
+    // transcript moved into the trusted helper and is counted separately.
+    // An exact count makes a dropped or weakened KNOWN site
     // fail here instead of in a future round; a NEW echo site is NOT
     // auto-detected — it must be added to
     // this census deliberately, using the canonical two-expression sed
     // (both single-syntax spellings are banned below).
-    expect(workflow.match(bothSyntaxes) ?? []).toHaveLength(8);
+    expect(workflow.match(bothSyntaxes) ?? []).toHaveLength(7);
+    expect(branchInstallRunner.match(bothSyntaxes) ?? []).toHaveLength(1);
     // The issue lane's gate echoes the agent's failure notes.
     expect(issueAutofixJob).toMatch(
       /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/failure\.md"/,
@@ -9498,6 +9503,7 @@ exit 1
       reviewVerificationRunner,
       upsertDeferredScript,
       pushAndReportScript,
+      branchInstallRunner,
     ]) {
       const pairs = (src.match(bothSyntaxes) ?? []).length;
       expect((src.match(/s\/::\/;;\/g/g) ?? []).length).toBe(pairs);
@@ -12343,7 +12349,9 @@ exit 1
         'qwen_version="$(node -p "require(\'./package.json\').version")"',
       );
       expect(step).toContain(
-        'exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"',
+        step.includes("id: 'trusted_cli'")
+          ? 'exec node "${RUNNER_TEMP}/autofix-cli/dist/cli.js" "$@"'
+          : 'exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"',
       );
       expect(step).toContain('qwen-bin');
       expect(step).toContain('chmod +x "${qwen_bin}/qwen"');
@@ -12459,11 +12467,13 @@ exit 1
       'Install branch dependencies',
     ]) {
       const step = steps.find((candidate) => candidate.name === name);
-      expect(step.run).toContain('for attempt in 1 2 3; do');
-      expect(step.run).toContain(
+      const recipe =
+        name === 'Install branch dependencies' ? branchInstallRunner : step.run;
+      expect(recipe).toContain('for attempt in 1 2 3; do');
+      expect(recipe.replace(/\\\r?\n[ \t]*/g, '')).toContain(
         'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only',
       );
-      expect(step.run).toContain('sleep $((attempt * 15))');
+      expect(recipe).toMatch(/sleep "?\$\(\(attempt \* 15\)\)"?/);
       expect(step.run).not.toContain('npm run build');
       expect(step.run).not.toContain('npm run bundle');
       expect(step.run).not.toContain('--ignore-scripts');
@@ -12502,7 +12512,30 @@ exit 1
     expect(install.env.TRUSTED_PATH).toBe(
       '${{ steps.stage.outputs.trusted_path }}',
     );
-    expect(install.env.HOME).toBe('${{ steps.stage.outputs.trusted_home }}');
+    expect(install.env.HOME).toBeUndefined();
+    const baseInstall = steps.find(
+      (step) => step.name === 'Install dependencies',
+    );
+    expect(baseInstall.id).toBe('base_dependencies');
+    expect(baseInstall.run).toContain(
+      'echo "store_dir=$(corepack pnpm store path --silent)" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(baseInstall.run).toContain(
+      'echo "corepack_home=${COREPACK_HOME:-${XDG_CACHE_HOME:-${HOME}/.cache}/node/corepack}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(install.env.COREPACK_HOME_SOURCE).toBe(
+      '${{ steps.base_dependencies.outputs.corepack_home }}',
+    );
+    expect(install.env.WORKSPACE).toBe('${{ github.workspace }}');
+    expect(install.env.PNPM_STORE_DIR).toBe(
+      '${{ steps.base_dependencies.outputs.store_dir }}',
+    );
+    expect(install.env.QWEN_SANDBOX_IMAGE).toBe(
+      '${{ steps.sandbox_image.outputs.image }}',
+    );
+    expect(install.env.INSTALL_RUNNER_SHA256).toBe(
+      '${{ steps.stage.outputs.install_runner_sha256 }}',
+    );
     expect(install.env.RUNNER_TEMP).toBe('${{ runner.temp }}');
     expect(install.env.WORKDIR).toBe(
       '/tmp/autofix-review-${{ matrix.target.pr }}',
@@ -12513,7 +12546,227 @@ exit 1
     expect(JSON.stringify(install.env)).not.toContain('secrets.');
   });
 
-  it.each([
+  it.skipIf(!hasSha256sum)(
+    'keeps the review CLI bootstrap outside branch-writable module resolution',
+    () => {
+      const job = parse(workflow).jobs['review-address'];
+      const step = job.steps.find(
+        (candidate) => candidate.name === 'Prepare Qwen Code CLI',
+      );
+      expect(step.id).toBe('trusted_cli');
+      expect(job.steps.indexOf(step)).toBeLessThan(
+        job.steps.findIndex((candidate) => candidate.id === 'prepare'),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-private-cli-'));
+      const repo = join(dir, 'repo');
+      const runner = join(dir, 'runner');
+      const output = join(dir, 'output');
+      const githubPath = join(dir, 'path');
+      const env = {
+        ...process.env,
+        RUNNER_TEMP: runner,
+        GITHUB_WORKSPACE: repo,
+        GITHUB_OUTPUT: output,
+        GITHUB_PATH: githubPath,
+      };
+      try {
+        mkdirSync(join(repo, 'dist'), { recursive: true });
+        mkdirSync(join(repo, 'node_modules', 'picomatch'), { recursive: true });
+        mkdirSync(runner);
+        writeFileSync(
+          join(repo, 'package.json'),
+          '{"version":"1.0.0","type":"module"}',
+        );
+        writeFileSync(
+          join(repo, 'dist', 'chunk.js'),
+          'export const marker = "TRUSTED_CLI_CHUNK";',
+        );
+        writeFileSync(
+          join(repo, 'dist', 'cli.js'),
+          [
+            'import { createRequire } from "node:module";',
+            'import { marker } from "./chunk.js";',
+            'try { createRequire(import.meta.url)("picomatch"); } catch {}',
+            'console.log(marker);',
+          ].join('\n'),
+        );
+        writeFileSync(
+          join(repo, 'node_modules', 'picomatch', 'package.json'),
+          '{"main":"index.js"}',
+        );
+        writeFileSync(
+          join(repo, 'node_modules', 'picomatch', 'index.js'),
+          'console.log("WORKSPACE_DEPENDENCY_EXECUTED");',
+        );
+        const prepared = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', step.run],
+          { cwd: repo, env, encoding: 'utf8', timeout: subprocessTimeoutMs },
+        );
+        expect(prepared.status, prepared.stderr).toBe(0);
+        expect(prepared.stdout).toContain('TRUSTED_CLI_CHUNK');
+        expect(prepared.stdout).not.toContain('WORKSPACE_DEPENDENCY_EXECUTED');
+        expect(
+          JSON.parse(
+            readFileSync(join(runner, 'autofix-cli', 'package.json'), 'utf8'),
+          ),
+        ).toEqual({ type: 'module' });
+        expect(existsSync(join(runner, 'autofix-cli', 'node_modules'))).toBe(
+          false,
+        );
+        const shim = join(runner, 'qwen-bin', 'qwen');
+        expect(readFileSync(output, 'utf8')).toContain(
+          `qwen_sha256=${createHash('sha256').update(readFileSync(shim)).digest('hex')}`,
+        );
+        expect(readFileSync(githubPath, 'utf8').trim()).toBe(dirname(shim));
+        // Installation can change workspace dependencies and ignored artifacts.
+        // Neither the executable nor its sibling chunks may resolve back there.
+        writeFileSync(
+          join(repo, 'dist', 'chunk.js'),
+          'export const marker = "WORKSPACE_CHUNK_EXECUTED";',
+        );
+        const launched = spawnSync(shim, ['--version'], {
+          cwd: repo,
+          env,
+          encoding: 'utf8',
+          timeout: subprocessTimeoutMs,
+        });
+        expect(launched.status, launched.stderr).toBe(0);
+        expect(launched.stdout.trim()).toBe('TRUSTED_CLI_CHUNK');
+        for (const name of [
+          'Triage and address',
+          'Repair deterministic rejection',
+        ]) {
+          expect(
+            job.steps.find((candidate) => candidate.name === name).run,
+          ).toContain('--qwen-bin "${RUNNER_TEMP}/qwen-bin/qwen"');
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('pins every later secret-bearing step before its shell starts', () => {
+    const steps = parse(workflow).jobs['review-address'].steps;
+    const later = steps.slice(
+      steps.findIndex((step) => step.id === 'branch_dependencies') + 1,
+    );
+    const credentialSteps = later.filter((step) =>
+      JSON.stringify(step.env ?? {}).includes('secrets.'),
+    );
+    expect(credentialSteps.map((step) => step.name)).toEqual([
+      'Post autofix status comment',
+      'Triage and address',
+      'Repair deterministic rejection',
+      'Push and report',
+      'Report dry-run / failure',
+      'Finalize autofix status comment',
+    ]);
+    for (const step of credentialSteps) {
+      for (const key of [
+        'BASH_ENV',
+        'SHELLOPTS',
+        'LD_PRELOAD',
+        'LD_AUDIT',
+        'LD_LIBRARY_PATH',
+      ]) {
+        expect(step.env[key], `${step.name}: ${key}`).toBe('');
+      }
+      expect(step.env.TRUSTED_PATH, step.name).toBe(
+        '${{ steps.stage.outputs.trusted_path }}',
+      );
+      if (step.name === 'Finalize autofix status comment') {
+        expect(step.run).toContain('/usr/bin/env -i');
+        expect(step.run).toContain('PATH="${TRUSTED_PATH}"');
+      } else {
+        expect(step.run, step.name).toContain('export PATH="${TRUSTED_PATH}"');
+      }
+    }
+  });
+
+  // The workflow's absolute /usr/bin/sha256sum launcher is Linux-specific.
+  it
+    .skipIf(process.platform !== 'linux')
+    .each(['unchanged', 'runner', 'skill', 'shim'])(
+    'verifies staged agent inputs before launch: %s',
+    (changed) => {
+      const steps = parse(workflow).jobs['review-address'].steps;
+      const stage = steps.find((step) => step.id === 'stage');
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-agent-digests-'));
+      const output = join(dir, 'outputs');
+      try {
+        const staged = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', stage.run],
+          {
+            env: { ...process.env, RUNNER_TEMP: dir, GITHUB_OUTPUT: output },
+            encoding: 'utf8',
+            timeout: subprocessTimeoutMs,
+          },
+        );
+        expect(staged.status, staged.stderr).toBe(0);
+        const outputs = readFileSync(output, 'utf8');
+        const value = (name) =>
+          outputs.match(new RegExp(`^${name}=([^\\n]+)$`, 'm'))?.[1];
+        const files = {
+          runner: join(dir, 'autofix-skill', 'scripts', 'run-agent.mjs'),
+          skill: join(dir, 'autofix-skill', 'SKILL.md'),
+          shim: join(dir, 'qwen-bin', 'qwen'),
+        };
+        mkdirSync(dirname(files.shim));
+        writeFileSync(files.shim, '#!/usr/bin/env bash\nexit 0\n');
+        const digest = (path) =>
+          createHash('sha256').update(readFileSync(path)).digest('hex');
+        expect(value('install_runner_sha256')).toBe(
+          digest(join(dir, 'install-autofix-branch-dependencies.sh')),
+        );
+        expect(value('agent_runner_sha256')).toBe(digest(files.runner));
+        expect(value('agent_skill_sha256')).toBe(digest(files.skill));
+        const env = {
+          ...process.env,
+          TRUSTED_PATH: process.env.PATH,
+          RUNNER_TEMP: dir,
+          AGENT_RUNNER_SHA256: value('agent_runner_sha256'),
+          AGENT_SKILL_SHA256: value('agent_skill_sha256'),
+          QWEN_SHIM_SHA256: digest(files.shim),
+        };
+        if (changed !== 'unchanged')
+          writeFileSync(files[changed], 'changed after trusted staging\n');
+        for (const [name, stop] of [
+          ['Triage and address', '          rm -rf "${QWEN_HOME}"'],
+          ['Repair deterministic rejection', '          echo "attempted=true"'],
+        ]) {
+          const step = steps.find((candidate) => candidate.name === name);
+          expect(step.env.RUNNER_TEMP).toBe('${{ runner.temp }}');
+          expect(step.env.AGENT_RUNNER_SHA256).toBe(
+            '${{ steps.stage.outputs.agent_runner_sha256 }}',
+          );
+          expect(step.env.AGENT_SKILL_SHA256).toBe(
+            '${{ steps.stage.outputs.agent_skill_sha256 }}',
+          );
+          expect(step.env.QWEN_SHIM_SHA256).toBe(
+            '${{ steps.trusted_cli.outputs.qwen_sha256 }}',
+          );
+          const boundary = step.run.indexOf(stop.trimStart());
+          expect(boundary).toBeGreaterThan(0);
+          const result = spawnSync(
+            'bash',
+            ['-e', '-o', 'pipefail', '-c', step.run.slice(0, boundary)],
+            { env, encoding: 'utf8', timeout: subprocessTimeoutMs },
+          );
+          expect(result.status, `${name}: ${result.stderr}`).toBe(
+            changed === 'unchanged' ? 0 : 1,
+          );
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // This Linux workflow helper uses GNU cp and uid/gid Docker flags.
+  it.skipIf(process.platform !== 'linux').each([
     {
       name: 'immediate success',
       failures: 0,
@@ -12540,7 +12793,7 @@ exit 1
       failures: 3,
       attempts: 3,
       delays: ['15', '30'],
-      status: 1,
+      status: 7,
     },
     {
       name: 'successful install dirties tracked files',
@@ -12574,41 +12827,69 @@ exit 1
       delays: [],
       status: 1,
     },
-  ])('runs the branch install with a clean environment: $name', (scenario) => {
+    {
+      name: 'container teardown fails',
+      failures: 1,
+      cleanupFailure: true,
+      attempts: 1,
+      delays: [],
+      status: 1,
+    },
+    {
+      name: 'installer receives TERM',
+      failures: 0,
+      signal: true,
+      attempts: 1,
+      delays: [],
+      status: 143,
+    },
+    {
+      name: 'staged installer was replaced',
+      tamper: true,
+      attempts: 0,
+      delays: [],
+      status: 1,
+    },
+    {
+      name: 'dist overlay is a symlink',
+      invalidDist: true,
+      attempts: 0,
+      delays: [],
+      status: 1,
+    },
+  ])('orchestrates the branch-install container: $name', (scenario) => {
+    // This executes the real staged wrapper/helper with a recording Docker
+    // boundary. It verifies argv, cache copies, retries and cleanup; a stub
+    // cannot establish filesystem confinement inside an actual container.
     const step = parse(workflow).jobs['review-address'].steps.find(
       (candidate) => candidate.name === 'Install branch dependencies',
     );
     expect(step).toBeDefined();
-    const dir = mkdtempSync(join(tmpdir(), 'autofix-branch-install-'));
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-container-install-'));
     const repo = join(dir, 'repo');
     const bin = join(dir, 'bin');
     const runner = join(dir, 'runner');
     const workdir = join(dir, 'work');
-    const home = join(dir, 'home');
-    const commands = join(runner, '_runner_file_commands');
-    const records = join(dir, 'attempts.json');
+    const store = join(dir, 'trusted-store');
+    const corepack = join(dir, 'trusted-corepack');
+    const records = join(dir, 'docker.json');
+    const live = join(dir, 'container-live');
     const sleeps = join(dir, 'sleeps.txt');
-    const channels = [
+    const stripped = [
+      'HOME',
       'GITHUB_ENV',
       'GITHUB_OUTPUT',
       'GITHUB_PATH',
       'GITHUB_STEP_SUMMARY',
-    ];
-    const stripped = [
-      ...channels,
       'GITHUB_TOKEN',
       'GH_TOKEN',
       'OPENAI_API_KEY',
-      'RUNNER_TEMP',
-      'WORKDIR',
+      'DOCKER_HOST',
+      'DOCKER_CONTEXT',
       'UNEXPECTED_INSTALL_CANARY',
     ];
-    for (const path of [repo, bin, commands, workdir, home])
+    for (const path of [repo, bin, runner, workdir, store, corepack])
       mkdirSync(path, { recursive: true });
-    const channelEnv = Object.fromEntries(
-      channels.map((name) => [name, join(commands, name)]),
-    );
-    for (const path of Object.values(channelEnv)) writeFileSync(path, '');
     const git = (...args) =>
       execFileSync('git', args, {
         cwd: repo,
@@ -12621,34 +12902,55 @@ exit 1
       git('config', 'user.email', 'fixture@example.test');
       git('config', 'core.hooksPath', '/dev/null');
       writeFileSync(join(repo, 'tracked.txt'), 'before\n');
-      git('add', 'tracked.txt');
+      writeFileSync(join(repo, '.gitignore'), '/dist\n');
+      git('add', '.');
       git('commit', '-qm', 'before install');
       const head = git('rev-parse', 'HEAD');
+      if (scenario.invalidDist) symlinkSync(workdir, join(repo, 'dist'));
+      else mkdirSync(join(repo, 'dist'));
+      writeFileSync(join(store, 'seed'), 'trusted-store\n');
+      writeFileSync(join(corepack, 'seed'), 'trusted-corepack\n');
       writeFileSync(
-        join(bin, 'corepack'),
+        join(bin, 'docker'),
         [
           `#!${process.execPath}`,
           "const fs = require('node:fs');",
+          "const path = require('node:path');",
           "const { execFileSync } = require('node:child_process');",
-          `const recordsPath = ${JSON.stringify(records)};`,
-          'const attempts = fs.existsSync(recordsPath) ? JSON.parse(fs.readFileSync(recordsPath, "utf8")) : [];',
-          `const stripped = ${JSON.stringify(stripped)};`,
-          `const files = ${JSON.stringify(Object.values(channelEnv))};`,
-          'attempts.push({ args: process.argv.slice(2), skipPrepare: process.env.QWEN_SKIP_PREPARE, ci: process.env.CI, home: process.env.HOME, leaked: stripped.filter((key) => key in process.env), modes: files.map((path) => fs.statSync(path).mode & 0o222) });',
-          'fs.writeFileSync(recordsPath, JSON.stringify(attempts));',
+          `const recordsPath = ${JSON.stringify(records)}; const live = ${JSON.stringify(live)};`,
+          'const calls = fs.existsSync(recordsPath) ? JSON.parse(fs.readFileSync(recordsPath, "utf8")) : [];',
+          'const args = process.argv.slice(2); const command = args[4];',
+          `const call = { args, leaked: ${JSON.stringify(stripped)}.filter((key) => key in process.env) };`,
+          'if (command === "run") {',
+          '  const scratch = path.dirname(args[1]);',
+          `  call.cacheAliases = [${JSON.stringify(store)}, ${JSON.stringify(corepack)}].map((source, i) => {`,
+          '    const copied = path.join(scratch, i === 0 ? "store" : "corepack", "seed");',
+          '    const before = fs.statSync(path.join(source, "seed")); const after = fs.statSync(copied);',
+          '    fs.appendFileSync(copied, "private-write\\n");',
+          '    return before.dev === after.dev && before.ino === after.ino;',
+          '  });',
+          '  fs.writeFileSync(live, "running");',
+          '}',
+          'calls.push(call); fs.writeFileSync(recordsPath, JSON.stringify(calls));',
+          'if (command === "container") { if (fs.existsSync(live)) console.log("fixture-container"); process.exit(0); }',
+          `if (command === "rm") { if (${Boolean(scenario.cleanupFailure)}) process.exit(1); fs.rmSync(live, { force: true }); process.exit(0); }`,
+          'if (command !== "run") process.exit(91);',
           'console.log("::notice::branch lifecycle output");',
           'console.log("prefix ##[add-matcher]branch.json");',
           ...(scenario.mutation
             ? [
-                'fs.writeFileSync("tracked.txt", "changed by lifecycle\\n");',
+                `fs.writeFileSync(${JSON.stringify(join(repo, 'tracked.txt'))}, "changed by lifecycle\\n");`,
                 ...(scenario.mutation === 'commit'
                   ? [
-                      'execFileSync("git", ["commit", "-qam", "lifecycle mutation"]);',
+                      `execFileSync("git", ["-C", ${JSON.stringify(repo)}, "commit", "-qam", "lifecycle mutation"]);`,
                     ]
                   : []),
               ]
             : []),
-          `process.exit(attempts.length <= ${scenario.failures} ? 7 : 0);`,
+          ...(scenario.signal
+            ? ['process.kill(process.ppid, "SIGTERM"); process.exit(143);']
+            : []),
+          `process.exit(calls.filter((entry) => entry.args[4] === "run").length <= ${scenario.failures ?? 0} ? 7 : 0);`,
         ].join('\n'),
       );
       writeFileSync(
@@ -12658,8 +12960,19 @@ exit 1
           `require('node:fs').appendFileSync(${JSON.stringify(sleeps)}, process.argv[2] + '\\n');`,
         ].join('\n'),
       );
-      chmodSync(join(bin, 'corepack'), 0o755);
+      chmodSync(join(bin, 'docker'), 0o755);
       chmodSync(join(bin, 'sleep'), 0o755);
+      const stagedHelper = join(
+        runner,
+        'install-autofix-branch-dependencies.sh',
+      );
+      writeFileSync(stagedHelper, branchInstallRunner);
+      const helperSha = createHash('sha256')
+        .update(branchInstallRunner)
+        .digest('hex');
+      if (scenario.tamper) writeFileSync(stagedHelper, '#!/bin/bash\nexit 0\n');
+      const containerName = 'qwen-autofix-install-100-1-17403';
+      const image = `ghcr.io/qwenlm/qwen-code-sandbox@sha256:${'a'.repeat(64)}`;
       const result = spawnSync(
         'bash',
         ['--norc', '-e', '-o', 'pipefail', '-c', step.run],
@@ -12667,21 +12980,32 @@ exit 1
           cwd: repo,
           env: {
             ...process.env,
-            ...channelEnv,
             ...Object.fromEntries(
               Object.entries(step.env).filter(
                 ([, value]) => !value.includes('${{'),
               ),
             ),
             TRUSTED_PATH: `${bin}:${process.env.PATH}`,
-            HOME: home,
+            HOME: join(dir, 'host-home'),
             RUNNER_TEMP: runner,
+            WORKSPACE: repo,
             WORKDIR: workdir,
+            PNPM_STORE_DIR: store,
+            COREPACK_HOME_SOURCE: corepack,
             CHECKED_OUT_HEAD: head,
+            QWEN_SANDBOX_IMAGE: image,
+            INSTALL_CONTAINER_NAME: containerName,
+            INSTALL_RUNNER_SHA256: helperSha,
             GITHUB_TOKEN: 'fixture-github-secret',
             GH_TOKEN: 'fixture-gh-secret',
             OPENAI_API_KEY: 'fixture-model-secret',
-            UNEXPECTED_INSTALL_CANARY: 'must-not-reach-lifecycle',
+            GITHUB_ENV: join(runner, 'env'),
+            GITHUB_OUTPUT: join(runner, 'output'),
+            GITHUB_PATH: join(runner, 'path'),
+            GITHUB_STEP_SUMMARY: join(runner, 'summary'),
+            DOCKER_HOST: 'tcp://untrusted.invalid:2375',
+            DOCKER_CONTEXT: 'untrusted',
+            UNEXPECTED_INSTALL_CANARY: 'must-not-reach-docker',
           },
           encoding: 'utf8',
           timeout: subprocessTimeoutMs,
@@ -12691,44 +13015,110 @@ exit 1
       expect(result.status, result.stdout + result.stderr).toBe(
         scenario.status,
       );
-      const attempts = JSON.parse(readFileSync(records, 'utf8'));
+      const calls = existsSync(records)
+        ? JSON.parse(readFileSync(records, 'utf8'))
+        : [];
+      const attempts = calls.filter((call) => call.args[4] === 'run');
       expect(attempts).toHaveLength(scenario.attempts);
-      for (const attempt of attempts) {
-        expect(attempt).toEqual({
-          args: [
-            'pnpm',
-            'install',
-            '--frozen-lockfile',
-            '--prefer-offline',
-            '--reporter=append-only',
-          ],
-          skipPrepare: '1',
-          ci: 'true',
-          home,
-          leaked: [],
-          modes: channels.map(() => 0),
-        });
+      for (const call of calls) {
+        expect(call.leaked).toEqual([]);
+        expect(call.args.slice(0, 4)).toEqual([
+          '--config',
+          expect.stringContaining(`${runner}/autofix-install.`),
+          '--context',
+          'default',
+        ]);
       }
+      for (const call of attempts) {
+        const scratch = dirname(call.args[1]);
+        expect(call.cacheAliases).toEqual([false, false]);
+        const flags = call.args.slice(5, call.args.indexOf(image));
+        expect(flags).toEqual([
+          '--name',
+          containerName,
+          '--init',
+          '--rm',
+          '-i',
+          '--read-only',
+          '--cap-drop',
+          'ALL',
+          '--security-opt',
+          'no-new-privileges',
+          '--user',
+          `${process.getuid()}:${process.getgid()}`,
+          '--tmpfs',
+          '/tmp:rw,nosuid,nodev',
+          '--workdir',
+          repo,
+          '--mount',
+          `type=bind,src=${repo},dst=${repo}`,
+          '--mount',
+          `type=bind,src=${repo}/.git,dst=${repo}/.git,readonly`,
+          '--mount',
+          `type=bind,src=${repo}/dist,dst=${repo}/dist,readonly`,
+          '--mount',
+          `type=bind,src=${scratch}/home,dst=/tmp/autofix-install-home`,
+          '--mount',
+          `type=bind,src=${scratch}/corepack,dst=/tmp/autofix-install-corepack`,
+          '--mount',
+          `type=bind,src=${scratch}/store,dst=${store}`,
+          '--entrypoint',
+          '/usr/bin/env',
+        ]);
+        expect(call.args.slice(call.args.indexOf(image) + 1)).toEqual([
+          '-i',
+          'PATH=/usr/local/bin:/usr/bin:/bin',
+          'HOME=/tmp/autofix-install-home',
+          'COREPACK_HOME=/tmp/autofix-install-corepack',
+          'CI=true',
+          'QWEN_SKIP_PREPARE=1',
+          'npm_config_cache=/tmp/autofix-install-home/npm-cache',
+          'corepack',
+          'pnpm',
+          'install',
+          '--frozen-lockfile',
+          '--prefer-offline',
+          '--reporter=append-only',
+          '--package-import-method=clone-or-copy',
+          '--store-dir',
+          store,
+        ]);
+        expect(
+          calls
+            .slice(calls.indexOf(call) + 1)
+            .find((next) => ['run', 'rm'].includes(next.args[4]))
+            ?.args.slice(4),
+        ).toEqual(['rm', '-f', containerName]);
+      }
+      expect(existsSync(live)).toBe(Boolean(scenario.cleanupFailure));
+      expect(readFileSync(join(store, 'seed'), 'utf8')).toBe('trusted-store\n');
+      expect(readFileSync(join(corepack, 'seed'), 'utf8')).toBe(
+        'trusted-corepack\n',
+      );
+      expect(
+        readdirSync(runner).some((name) => name.startsWith('autofix-install.')),
+      ).toBe(Boolean(scenario.cleanupFailure));
       expect(
         existsSync(sleeps)
           ? readFileSync(sleeps, 'utf8').trim().split('\n')
           : [],
       ).toEqual(scenario.delays);
-      expect(result.stdout).toContain(';;notice;;branch lifecycle output');
-      expect(result.stdout).toContain('prefix ##［add-matcher]branch.json');
-      expect(result.stdout).not.toContain('::notice::');
-      expect(result.stdout).not.toContain('##[add-matcher]');
-      const log = readFileSync(
-        join(workdir, 'branch-dependencies.log'),
-        'utf8',
-      );
-      expect(log).toContain('::notice::branch lifecycle output');
-      expect(log).toContain('prefix ##[add-matcher]branch.json');
-      if (scenario.mutation) {
-        expect(log).toContain(
-          'dependency installation changed HEAD or left the branch tree dirty',
+      if (scenario.attempts > 0) {
+        expect(result.stdout).toContain(';;notice;;branch lifecycle output');
+        expect(result.stdout).toContain('prefix ##［add-matcher]branch.json');
+        expect(result.stdout).not.toContain('::notice::');
+        expect(result.stdout).not.toContain('##[add-matcher]');
+        const log = readFileSync(
+          join(workdir, 'branch-dependencies.log'),
+          'utf8',
         );
-      } else {
+        expect(log).toContain('::notice::branch lifecycle output');
+        if (scenario.mutation)
+          expect(log).toContain(
+            'dependency installation changed HEAD or left the branch tree dirty',
+          );
+      }
+      if (!scenario.mutation) {
         expect(git('rev-parse', 'HEAD')).toBe(head);
         expect(git('status', '--porcelain')).toBe('');
       }

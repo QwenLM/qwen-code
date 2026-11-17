@@ -3820,6 +3820,8 @@ jobs:
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
+          cp .github/scripts/install-autofix-branch-dependencies.sh "${RUNNER_TEMP}/install-autofix-branch-dependencies.sh"
+          echo "install_runner_sha256=$(sha256sum "${RUNNER_TEMP}/install-autofix-branch-dependencies.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           # A missing trusted-base heartbeat copy must leave no plantable staged file.
           # Full rationale → qwen-autofix.md#af-158
           rm -rf "${RUNNER_TEMP}/autofix-status-heartbeat.sh"
@@ -3881,6 +3883,8 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/autofix-skill/scripts"
           cp .qwen/skills/autofix/SKILL.md "${RUNNER_TEMP}/autofix-skill/SKILL.md"
           cp .qwen/skills/autofix/scripts/run-agent.mjs "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs"
+          echo "agent_runner_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+          echo "agent_skill_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-skill/SKILL.md" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Check runner environment'
         env:
@@ -3952,6 +3956,7 @@ jobs:
       # duplicated in issue-autofix and build-cli; the workflow contract
       # tests pin every copy in lockstep — edit them together.
       - name: 'Install dependencies'
+        id: 'base_dependencies'
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |-
@@ -3965,6 +3970,8 @@ jobs:
             sleep $((attempt * 15))
           done
           git config core.hooksPath .husky
+          echo "store_dir=$(corepack pnpm store path --silent)" >> "${GITHUB_OUTPUT}"
+          echo "corepack_home=${COREPACK_HOME:-${XDG_CACHE_HOME:-${HOME}/.cache}/node/corepack}" >> "${GITHUB_OUTPUT}"
 
       # The test-weakening gate's instrument, staged trusted and digested.
       # Full rationale → qwen-autofix.md#af-158
@@ -4005,16 +4012,23 @@ jobs:
           fi
 
       - name: 'Prepare Qwen Code CLI'
+        id: 'trusted_cli'
         run: |-
           qwen_version="$(node -p "require('./package.json').version")"
           echo "Using checked-out Qwen Code bundle ${qwen_version}"
+          # Host bootstrap must not resolve modules installed by the PR.
+          rm -rf "${RUNNER_TEMP}/autofix-cli"
+          mkdir -p "${RUNNER_TEMP}/autofix-cli"
+          cp -a dist "${RUNNER_TEMP}/autofix-cli/dist"
+          printf '%s\n' '{"type":"module"}' > "${RUNNER_TEMP}/autofix-cli/package.json"
           qwen_bin="${RUNNER_TEMP}/qwen-bin"
           mkdir -p "${qwen_bin}"
           cat > "${qwen_bin}/qwen" <<'EOF'
           #!/usr/bin/env bash
-          exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"
+          exec node "${RUNNER_TEMP}/autofix-cli/dist/cli.js" "$@"
           EOF
           chmod +x "${qwen_bin}/qwen"
+          echo "qwen_sha256=$(sha256sum "${qwen_bin}/qwen" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "${qwen_bin}" >> "${GITHUB_PATH}"
           PATH="${qwen_bin}:${PATH}"
           qwen --version
@@ -5075,53 +5089,25 @@ jobs:
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
-          HOME: '${{ steps.stage.outputs.trusted_home }}'
           RUNNER_TEMP: '${{ runner.temp }}'
+          WORKSPACE: '${{ github.workspace }}'
           WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
+          PNPM_STORE_DIR: '${{ steps.base_dependencies.outputs.store_dir }}'
+          COREPACK_HOME_SOURCE: '${{ steps.base_dependencies.outputs.corepack_home }}'
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          INSTALL_RUNNER_SHA256: '${{ steps.stage.outputs.install_runner_sha256 }}'
+          INSTALL_CONTAINER_NAME: 'qwen-autofix-install-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target.pr }}'
         run: |-
-          set -euo pipefail
-          export PATH="${TRUSTED_PATH}"
-          # The base install supplies the trusted tools; this install supplies
-          # the checked-out branch's workspace links before the agent builds.
-          # Run before the PAT-bearing status heartbeat starts, without runner
-          # file-command channels or credentials in the lifecycle environment.
-          for command_file in "${RUNNER_TEMP}/_runner_file_commands"/*; do
-            if [[ -f "${command_file}" ]]; then
-              chmod a-w "${command_file}" 2> /dev/null || true
-            fi
-          done
-          install_rc=0
+          /usr/bin/echo "${INSTALL_RUNNER_SHA256}  ${RUNNER_TEMP}/install-autofix-branch-dependencies.sh" | /usr/bin/sha256sum -c - > /dev/null
           /usr/bin/env -i \
-            PATH="${TRUSTED_PATH}" HOME="${HOME}" CI=true QWEN_SKIP_PREPARE=1 \
-            CHECKED_OUT_HEAD="${CHECKED_OUT_HEAD}" \
-            bash --norc <<'INSTALL' > "${WORKDIR}/branch-dependencies.log" 2>&1 || install_rc=$?
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            attempt_rc=0
-            corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only || attempt_rc=$?
-            actual_head="$(git rev-parse HEAD)"
-            dirty="$(git status --porcelain)"
-            # Failed lifecycle scripts can mutate the tree too. Do not retry
-            # until the checkout is verified, or hide a mutation with a retry.
-            if [[ "${actual_head}" != "${CHECKED_OUT_HEAD}" || -n "${dirty}" ]]; then
-              printf '%s\n' "${dirty}"
-              echo 'dependency installation changed HEAD or left the branch tree dirty'
-              exit 1
-            fi
-            if [[ "${attempt_rc}" -eq 0 ]]; then
-              exit 0
-            fi
-            if [[ "${attempt}" == '3' ]]; then
-              exit 1
-            fi
-            sleep $((attempt * 15))
-          done
-          INSTALL
-          # Keep the original transcript on disk, neutralizing workflow command
-          # syntax only when displaying branch-controlled lifecycle output.
-          sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/branch-dependencies.log"
-          exit "${install_rc}"
+            PATH="${TRUSTED_PATH}" \
+            RUNNER_TEMP="${RUNNER_TEMP}" WORKSPACE="${WORKSPACE}" WORKDIR="${WORKDIR}" \
+            CHECKED_OUT_HEAD="${CHECKED_OUT_HEAD}" PNPM_STORE_DIR="${PNPM_STORE_DIR}" \
+            COREPACK_HOME_SOURCE="${COREPACK_HOME_SOURCE}" \
+            QWEN_SANDBOX_IMAGE="${QWEN_SANDBOX_IMAGE}" \
+            INSTALL_CONTAINER_NAME="${INSTALL_CONTAINER_NAME}" \
+            bash --norc "${RUNNER_TEMP}/install-autofix-branch-dependencies.sh"
 
       # Announce the round so long agent work is distinguishable from a stall.
       # Full rationale → qwen-autofix.md#af-124
@@ -5274,6 +5260,16 @@ jobs:
         # Runner-split backstop: 250 self-hosted / 130 hosted (af-050/125).
         timeout-minutes: "${{ runner.environment == 'github-hosted' && 130 || 250 }}"
         env:
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          RUNNER_TEMP: '${{ runner.temp }}'
+          AGENT_RUNNER_SHA256: '${{ steps.stage.outputs.agent_runner_sha256 }}'
+          AGENT_SKILL_SHA256: '${{ steps.stage.outputs.agent_skill_sha256 }}'
+          QWEN_SHIM_SHA256: '${{ steps.trusted_cli.outputs.qwen_sha256 }}'
           # The arm prepare resolved (af-156); the clamp reads it.
           SELF_REVIEW_ARM: "${{ steps.prepare.outputs.self_review_arm || 'off' }}"
           QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
@@ -5322,6 +5318,10 @@ jobs:
               }
             }
         run: |-
+          export PATH="${TRUSTED_PATH}"
+          /usr/bin/echo "${AGENT_RUNNER_SHA256}  ${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" | /usr/bin/sha256sum -c - > /dev/null
+          /usr/bin/echo "${AGENT_SKILL_SHA256}  ${RUNNER_TEMP}/autofix-skill/SKILL.md" | /usr/bin/sha256sum -c - > /dev/null
+          /usr/bin/echo "${QWEN_SHIM_SHA256}  ${RUNNER_TEMP}/qwen-bin/qwen" | /usr/bin/sha256sum -c - > /dev/null
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
           if [[ -z "${OPENAI_API_KEY:-}" ]]; then
@@ -5370,6 +5370,7 @@ jobs:
           # not on PATH inside the sandbox.
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
+            --qwen-bin "${RUNNER_TEMP}/qwen-bin/qwen" \
             --pr "${PR}" \
             --issue "${ISSUE}" \
             --workdir "${WORKDIR}" \
@@ -5510,6 +5511,16 @@ jobs:
         # path still writes `agent-timeout` before the step cap fires.
         timeout-minutes: 70
         env:
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
+          TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          RUNNER_TEMP: '${{ runner.temp }}'
+          AGENT_RUNNER_SHA256: '${{ steps.stage.outputs.agent_runner_sha256 }}'
+          AGENT_SKILL_SHA256: '${{ steps.stage.outputs.agent_skill_sha256 }}'
+          QWEN_SHIM_SHA256: '${{ steps.trusted_cli.outputs.qwen_sha256 }}'
           QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           DOCKER_HOST: ''
           DOCKER_CONTEXT: 'default'
@@ -5565,6 +5576,10 @@ jobs:
               }
             }
         run: |-
+          export PATH="${TRUSTED_PATH}"
+          /usr/bin/echo "${AGENT_RUNNER_SHA256}  ${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" | /usr/bin/sha256sum -c - > /dev/null
+          /usr/bin/echo "${AGENT_SKILL_SHA256}  ${RUNNER_TEMP}/autofix-skill/SKILL.md" | /usr/bin/sha256sum -c - > /dev/null
+          /usr/bin/echo "${QWEN_SHIM_SHA256}  ${RUNNER_TEMP}/qwen-bin/qwen" | /usr/bin/sha256sum -c - > /dev/null
           echo "attempted=true" >> "${GITHUB_OUTPUT}"
           if [[ -z "${OPENAI_API_KEY:-}" ]]; then
             echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
@@ -5658,6 +5673,7 @@ jobs:
           git config core.hooksPath .husky
           node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
+            --qwen-bin "${RUNNER_TEMP}/qwen-bin/qwen" \
             --pr "${PR}" \
             --issue "${ISSUE}" \
             --workdir "${WORKDIR}" \
@@ -5881,6 +5897,11 @@ jobs:
         if: |-
           ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.final_verify.outputs.outcome == 'fixed' || steps.final_verify.outputs.outcome == 'noop') }}
         env:
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
           # CI_DEV_BOT_PAT (the qwen-code-dev-bot PAT) pushes the branch and
           # posts the report as qwen-code-dev-bot, the same identity that opened
           # the PR. The default GITHUB_TOKEN cannot do either on a bot-owned PR
@@ -5942,6 +5963,7 @@ jobs:
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
           PUSH_REPORT_SRC: '${{ steps.stage.outputs.push_report_src }}'
         run: |-
+          export PATH="${TRUSTED_PATH}"
           # The body travels as CONTENT, not as a file on disk: the stage step
           # captured it from the trusted-base checkout before any branch code
           # ran, and it arrives here through step output — expression context,
@@ -5967,6 +5989,11 @@ jobs:
         if: |-
           ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled() || steps.final_verify.outputs.outcome == 'handoff' || steps.final_verify.outputs.outcome == 'dirty_handoff' || steps.final_verify.outputs.outcome == 'committed_handoff') }}
         env:
+          BASH_ENV: ''
+          SHELLOPTS: ''
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
           OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           COMMITTED: '${{ steps.final_verify.outputs.committed }}'
           PREEXISTING: '${{ steps.final_verify.outputs.preexisting }}'
@@ -6004,6 +6031,7 @@ jobs:
           UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
+          export PATH="${TRUSTED_PATH}"
           # NOTE: the deferred-findings upsert below runs its PAT identity
           # check and the script itself in a sound /usr/bin/env -i child (see
           # Full rationale → qwen-autofix.md#af-060
@@ -6875,6 +6903,9 @@ jobs:
       - name: 'Clean up autofix workdir'
         if: 'always()'
         env:
+          INSTALL_CONTAINER_NAME: 'qwen-autofix-install-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target.pr }}'
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           # The heartbeat kill targets ride step env, the STATUS_ID
           # shape and the gate step's doctrine (R16-1): the runner
           # sets them as data, never as run-body shell syntax.
@@ -6896,4 +6927,5 @@ jobs:
             /usr/bin/kill "${HB_PID}" 2> /dev/null || true
             /usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true
           fi
+          /usr/bin/timeout 20s /usr/bin/docker --context default rm -f "${INSTALL_CONTAINER_NAME}" > /dev/null 2>&1 || true
           rm -rf "${WORKDIR}"
