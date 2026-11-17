@@ -23872,21 +23872,29 @@ describe('Session', () => {
       ).toHaveLength(0);
     });
 
-    it('sends the relay context live without duplicating it in recorded history', async () => {
+    it.each([
+      ['missing from history', false],
+      ['already in history', true],
+    ])('relays a send receipt %s', async (_scenario, receiptInHistory) => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
-      const historyModelText =
-        '<task-notification><result>Done</result></task-notification>';
       const modelText =
-        '<task-notification><result>Done</result><sent-message>Original request</sent-message></task-notification>';
+        '<task-notification><result>Done</result></task-notification>';
+      const sentMessageContext =
+        '<sent-message task-id="worker-reply">Original request</sent-message>';
       const fromSession = { sessionId: 'worker', workspaceCwd: '/work/target' };
+      if (receiptInHistory) {
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: sentMessageContext }] },
+        ]);
+      }
 
       await expect(
         session.enqueueBackgroundNotification({
           displayText: 'Worker replied.',
           modelText,
-          historyModelText,
+          sentMessageContext,
           taskId: 'worker-reply',
           status: 'completed',
           kind: 'agent',
@@ -23897,15 +23905,18 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.recordNotificationStrict,
       ).toHaveBeenCalledExactlyOnceWith(
-        [{ text: historyModelText }],
+        [{ text: modelText }],
         'Worker replied.',
         expect.objectContaining({ fromSession }),
       );
+      const expectedText = receiptInHistory
+        ? modelText
+        : `<task-notification><result>Done</result>${sentMessageContext}</task-notification>`;
       await vi.waitFor(() => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
           expect.any(String),
           expect.objectContaining({
-            message: expect.arrayContaining([{ text: modelText }]),
+            message: expect.arrayContaining([{ text: expectedText }]),
           }),
           expect.any(String),
           undefined,

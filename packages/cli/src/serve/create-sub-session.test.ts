@@ -82,6 +82,7 @@ function makeFakeBridge(opts?: {
   pendingPermissionIds?: readonly string[];
   sendPromptRejects?: string;
   modelApplied?: boolean;
+  permissionPolicy?: AcpSessionBridge['permissionPolicy'];
   /** Simulate a persisted parent that the idle reaper removed before the
    * sent-mode worker completes. `resumeSession` makes it live again. */
   reapedParentSessionId?: string;
@@ -190,6 +191,7 @@ function makeFakeBridge(opts?: {
   };
 
   const bridge = {
+    permissionPolicy: opts?.permissionPolicy ?? 'first-responder',
     publishWorkspaceEvent: (event: { type: string; data?: unknown }) => {
       workspaceEvents.push(event);
     },
@@ -1649,7 +1651,7 @@ describe('sub-session launcher', () => {
       prompt: 'research <it>',
     });
     await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
-    const target = `session="${launched.sessionId}" workspace="${WS}"`;
+    const target = `session="${launched.sessionId}" workspace="${WS}" task-id="${launched.sessionId}"`;
     expect(fake.externalRecords).toEqual([
       {
         sessionId: 'parent-1',
@@ -4244,9 +4246,62 @@ describe('following up a sub-session', () => {
     ]);
   });
 
+  it.each([
+    { targetWorkspace: undefined, sessionId: undefined },
+    { targetWorkspace: undefined, sessionId: 'kid' },
+    { targetWorkspace: WS_B, sessionId: undefined },
+    { targetWorkspace: WS_B, sessionId: 'kid' },
+  ])(
+    'refuses a person’s send to a consensus workspace ($targetWorkspace, $sessionId)',
+    async ({ targetWorkspace, sessionId }) => {
+      const target = makeFakeBridge({
+        permissionPolicy: 'consensus',
+        resumable: ['kid'],
+      });
+      const source =
+        targetWorkspace === undefined
+          ? target
+          : makeFakeBridge({ approvalModes: { caller: 'default' } });
+      const targetLauncher = createSubSessionLauncher({
+        getBridge: () => target.bridge,
+        boundWorkspace: WS_B,
+      });
+      const sourceLauncher = createSubSessionLauncher({
+        getBridge: () => source.bridge,
+        boundWorkspace: WS,
+        isTrusted: () => true,
+        resolveWorkspace: () => ({
+          kind: 'found',
+          launcher: targetLauncher,
+          workspaceId: 'ws-b',
+          workspaceCwd: WS_B,
+          workspaceGeneration: 'generation-b',
+          assertCurrent: () => {},
+        }),
+      });
+
+      await expect(
+        sourceLauncher.launchForPerson({
+          callerSessionId: 'caller',
+          prompt: 'work',
+          ...(targetWorkspace !== undefined
+            ? { workspace: targetWorkspace }
+            : {}),
+          ...(sessionId !== undefined ? { sessionId } : {}),
+        }),
+      ).rejects.toThrow('Open or start the destination session');
+      expect(target.spawns).toEqual([]);
+      expect(target.resumes).toEqual([]);
+      expect(target.prompts).toEqual([]);
+      expect(source.externalRecords).toEqual([]);
+      expect(sourceLauncher.listOutgoing('caller')).toEqual([]);
+    },
+  );
+
   it('follows up a sub-session in another workspace under the delegated mode', async () => {
     const a = makeFakeBridge({ approvalModes: { caller: 'default' } });
     const b = makeFakeBridge({
+      permissionPolicy: 'consensus',
       restoredCallerParents: { kid: 'caller' },
       // Someone loosened the child since it was created.
       approvalModes: { kid: 'yolo' },

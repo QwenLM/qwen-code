@@ -2116,8 +2116,8 @@ export interface BackgroundNotificationQueueItem {
   sourceTurnId?: string;
   displayText: string;
   modelText: string;
-  /** Persist without context already carried by the external send record. */
-  historyModelText?: string;
+  /** Full send receipt, also stored separately as an external record. */
+  sentMessageContext?: string;
   taskId: string;
   status: string;
   kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
@@ -14318,7 +14318,7 @@ export class Session implements SessionContext {
     if (!recording) return false;
     try {
       await recording.recordNotificationStrict(
-        [{ text: item.historyModelText ?? item.modelText }],
+        [{ text: item.modelText }],
         item.displayText,
         {
           taskId: item.taskId,
@@ -14778,10 +14778,26 @@ export class Session implements SessionContext {
           }
           await this.#emitBackgroundNotificationDisplay(item);
 
-          const notificationParts: Part[] = [{ text: item.modelText }];
-          if (item.structured?.fromSession) {
+          const sentMessageContext = item.sentMessageContext;
+          let modelText = item.modelText;
+          if (sentMessageContext !== undefined) {
+            // A normal prompt or restore may have already loaded this receipt.
+            const receiptInHistory =
+              this.#getCurrentChat().findLastHistoryEntry(
+                (entry) =>
+                  entry.role === 'user' &&
+                  (entry.parts?.some(
+                    (part) => part.text === sentMessageContext,
+                  ) ??
+                    false),
+              );
+            if (!receiptInHistory) {
+              const closingTag = '</task-notification>';
+              modelText = `${modelText.slice(0, -closingTag.length)}${sentMessageContext}${closingTag}`;
+            }
             this.pendingExternalAgentContext.delete(`send:${item.taskId}`);
           }
+          const notificationParts: Part[] = [{ text: modelText }];
           if (droppedSummary) {
             notificationParts.unshift({ text: droppedSummary.modelText });
           }

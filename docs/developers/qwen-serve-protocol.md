@@ -4174,6 +4174,8 @@ The response carries `sessionId`, `workspaceCwd` when the session runs in anothe
 
 While the target runs, the send is listed in `GET /session/:id/tasks?includeSubSessions=true`.
 
+A destination workspace using the `consensus` permission policy returns `409 sub_session_send_refused` before launching work. Send the message directly from the destination session to use its consensus approvals.
+
 The message is written to `:id`'s conversation as an `agent_mention` record whose `_meta.qwenAgentMessage.sentTo` is `{ sessionId, workspaceCwd, title? }` (the target), without starting a turn. When the target's turn settles, `:id` receives the completion notification and runs a turn in which its model tells the person what the target replied; the notification's label is `<workspace> · <title>`, and `backgroundTask.fromSession` identifies `{ sessionId, workspaceCwd }` for the target. The prompt the target receives carries `{ type: "source", sessionId, workspaceCwd, title? }` (the caller) among `_meta.inputAnnotations` on its `user_message_chunk`, live and on replay; the model's `create_sub_session` launches carry it too. The TypeScript SDK exposes the sender on normalized delta metadata as `sourceAnnotation` and keeps `inputAnnotations` for reference annotations.
 
 ### `DELETE /session/:id`

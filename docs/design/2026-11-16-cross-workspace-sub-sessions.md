@@ -227,7 +227,10 @@ target session and type the same message there.
 - No separate approval. Picking the workspace and pressing Send is the
   approval; the route resolves the target and launches it in one request.
 - The target keeps its own approval mode. The caller's mode is not compared
-  with the target's and no pair is refused.
+  with the target's. A destination workspace using the `consensus`
+  permission policy refuses `/send` before launch. Its approvals fix the
+  voter set before the side panel attaches. Open the destination session
+  and send the message there.
 - Any session can be the target, not only one this session created: a side
   task, another person's Web Shell session, a sub-session of another session.
   It keeps its own parent and source. Only the caller itself is refused. The
@@ -247,7 +250,8 @@ session a person created or sent to.
 **After sending.** The page does not move. While the target runs the turn,
 a "1 other session" chip shows above the composer, beside the chips for
 background agents and shells. Clicking it opens the target in a right-panel
-tab, live and read-only. The tab still shows the target's tool approvals and
+tab, live and read-only. MCP cards display their saved output or summary.
+The tab still shows the target's tool approvals and
 questions, and they can be answered there: the target keeps its own mode, and
 in an ask mode it may wait on one with nobody else watching. While it waits,
 the chip reads "1 session needs your answer" in the warning color, because
@@ -270,8 +274,8 @@ folds its steps, so the source of what the caller says stays visible.
 The message row is written through the daemon's external-record call
 (`appendExternalRecord`), which Agent Collaboration uses for a message from
 another party: it writes a durable record and shows it live. The automatic
-reply turn receives the record's bounded model text alongside the reply,
-so the model can see what the person asked. The `agent_mention` record has a
+reply turn adds the record's bounded model text when the receipt is
+missing from the model history. The `agent_mention` record has a
 `sentTo` field with the target's id, workspace and title. The completion's
 task id keys the record so a repeat writes nothing. It does not start a turn.
 

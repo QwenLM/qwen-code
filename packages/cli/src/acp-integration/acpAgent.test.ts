@@ -10702,9 +10702,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).toHaveBeenLastCalledWith(
       expect.objectContaining({
         modelText:
-          '<task-notification><result>Done</result><sent-message>Original text</sent-message></task-notification>',
-        historyModelText:
           '<task-notification><result>Done</result></task-notification>',
+        sentMessageContext: '<sent-message>Original text</sent-message>',
         structured: { fromSession },
       }),
     );

@@ -48,7 +48,10 @@ import { MonitorDetailsProvider } from '../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
 import { getWorkflowModeMessages } from './workflow-mode-messages';
-import { McpAppVisibilityContext } from '../mcpAppHostContext';
+import {
+  McpAppReadOnlyContext,
+  McpAppVisibilityContext,
+} from '../mcpAppHostContext';
 import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
 import {
@@ -1916,55 +1919,57 @@ export function ChatPane({
             <McpAppVisibilityContext.Provider
               value={parentSurfaceVisible && !hidden}
             >
-              <WorkflowDetailsProvider tasks={sessionTasks}>
-                <TranscriptViewport
-                  ref={transcriptViewportRef}
-                  messages={messages}
-                  sourceSessionId={connection.sessionId}
-                  pendingApproval={pendingToolApproval}
-                  loadingTranscript={connection.loadingTranscript}
-                  catchingUp={connection.catchingUp}
-                  hasOlderHistory={transcriptHistory.hasMore}
-                  loadingOlderHistory={transcriptHistory.loading}
-                  historyCapacityReached={transcriptHistory.capacityReached}
-                  historyPaginationError={transcriptHistory.paginationError}
-                  onLoadOlderHistory={transcriptHistory.loadMore}
-                  transcriptBlockCount={blocks.length}
-                  transcriptActivity={store}
-                  onReloadTranscript={
-                    transcriptReloadSupported ? reloadTranscript : undefined
-                  }
-                  isResponding={isResponding}
-                  workspaceCwd={connection.workspaceCwd || ''}
-                  hideSessionTimeline
-                  turnFileChanges={
-                    visibleTurnOutputKinds.has('file')
-                      ? fileChangesByTurn
-                      : undefined
-                  }
-                  turnArtifacts={
-                    visibleTurnOutputKinds.has('artifact')
-                      ? artifactsByTurn
-                      : undefined
-                  }
-                  turnScheduledTasks={
-                    visibleTurnOutputKinds.has('scheduled_task')
-                      ? scheduledTasksByTurn
-                      : undefined
-                  }
-                  onTurnOutputOpen={handleRightPanelOpen}
-                  onImagePreview={handleImagePreview}
-                  onAttachmentPreview={handleAttachmentPreview}
-                  onError={reportError}
-                  generateContent={
-                    connection.capabilities?.features.includes(
-                      'session_generation',
-                    )
-                      ? actions.generateSessionContent
-                      : undefined
-                  }
-                />
-              </WorkflowDetailsProvider>
+              <McpAppReadOnlyContext.Provider value={readOnly}>
+                <WorkflowDetailsProvider tasks={sessionTasks}>
+                  <TranscriptViewport
+                    ref={transcriptViewportRef}
+                    messages={messages}
+                    sourceSessionId={connection.sessionId}
+                    pendingApproval={pendingToolApproval}
+                    loadingTranscript={connection.loadingTranscript}
+                    catchingUp={connection.catchingUp}
+                    hasOlderHistory={transcriptHistory.hasMore}
+                    loadingOlderHistory={transcriptHistory.loading}
+                    historyCapacityReached={transcriptHistory.capacityReached}
+                    historyPaginationError={transcriptHistory.paginationError}
+                    onLoadOlderHistory={transcriptHistory.loadMore}
+                    transcriptBlockCount={blocks.length}
+                    transcriptActivity={store}
+                    onReloadTranscript={
+                      transcriptReloadSupported ? reloadTranscript : undefined
+                    }
+                    isResponding={isResponding}
+                    workspaceCwd={connection.workspaceCwd || ''}
+                    hideSessionTimeline
+                    turnFileChanges={
+                      visibleTurnOutputKinds.has('file')
+                        ? fileChangesByTurn
+                        : undefined
+                    }
+                    turnArtifacts={
+                      visibleTurnOutputKinds.has('artifact')
+                        ? artifactsByTurn
+                        : undefined
+                    }
+                    turnScheduledTasks={
+                      visibleTurnOutputKinds.has('scheduled_task')
+                        ? scheduledTasksByTurn
+                        : undefined
+                    }
+                    onTurnOutputOpen={handleRightPanelOpen}
+                    onImagePreview={handleImagePreview}
+                    onAttachmentPreview={handleAttachmentPreview}
+                    onError={reportError}
+                    generateContent={
+                      connection.capabilities?.features.includes(
+                        'session_generation',
+                      )
+                        ? actions.generateSessionContent
+                        : undefined
+                    }
+                  />
+                </WorkflowDetailsProvider>
+              </McpAppReadOnlyContext.Provider>
             </McpAppVisibilityContext.Provider>
           </SubagentDetailsProvider>
         </OptionalMonitorDetailsProvider>

@@ -255,7 +255,7 @@ function sentMessageRecord(
   message: string,
 ): BridgeSessionExternalRecordRequest {
   const open =
-    `<sent-message session="${escapeXml(target.sessionId)}" workspace="${escapeXml(target.workspaceCwd)}">` +
+    `<sent-message session="${escapeXml(target.sessionId)}" workspace="${escapeXml(target.workspaceCwd)}" task-id="${escapeXml(target.id)}">` +
     'The user sent this message to another session with /send. It is not a request to you: that session will answer it, and its reply will come to you to pass on to the user.\n';
   const close = '</sent-message>';
   const body = escapeXmlWithinBudget(
@@ -1413,6 +1413,14 @@ export function createSubSessionLauncher(
       if (info.sessionId !== undefined && (standalone || isolatedWorkspace)) {
         throw new Error('This session cannot follow up a sub-session.');
       }
+    }
+    if (byPerson && bridge.permissionPolicy === 'consensus') {
+      // The target starts before the side panel is attached, too late to
+      // join the approval's fixed voter set. A follow-up also registers a
+      // daemon-only client that can raise the quorum without casting a vote.
+      throw new Error(
+        'This workspace uses consensus approvals and does not support /send. Open or start the destination session and send the message there.',
+      );
     }
     const followUpSessionId =
       info.sessionId === undefined

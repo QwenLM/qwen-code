@@ -12964,12 +12964,9 @@ class QwenAgent implements Agent {
         const session = this.sessionOrThrow(sessionId);
         const result = await session.enqueueBackgroundNotification({
           displayText,
-          modelText:
-            typeof sentMessageContext === 'string'
-              ? `${modelText.slice(0, -closingTag.length)}${sentMessageContext}${closingTag}`
-              : modelText,
+          modelText,
           ...(typeof sentMessageContext === 'string'
-            ? { historyModelText: modelText }
+            ? { sentMessageContext }
             : {}),
           taskId,
           status,
