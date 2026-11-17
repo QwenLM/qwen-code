@@ -77,11 +77,16 @@ inconclusive 是唯一增加 head 重试计数的判定，而计数上限即终�
 编号（`<r+1>`）即为本轮编号，`--complete` 须重复该值（R3-2）。恢复有非瞬时终止
 分支：若 prepare 因 PR 已越过所投递 head 而拒绝（prepare 从实时 `gh pr view` 重取
 `headRefOid`，并拒绝 HEAD 不等于该 head 的树），所投递 head 永远无法 prepare——
-`--release` 它且**不要**重启。更新的 head 不会自己到来：watch prompt 中启动
-release 点名的最后一个 deferred head（其唯一投递在被判 in-flight 时已消耗）；
-手动路径没有触发，故自行重新解析更新 head（`gh pr view … --json headRefOid`）并
-`--start` 它。不要在旧标记下 `git checkout` 更新的 head，否则会把更新 head 的
-证据记到所投递 head 的判定名下（R1-1 第 3 轮、R4-1）。死标记条目的 `--round` 是
+`--release` 它（带标记的 `--round`）且**不要**重启。watch prompt 中更新 head 由
+下一次触发投递（gate 游标跟实时 head，`next.headSha = pr.headRefOid`），或已在
+release 打印的 deferred 列表中、由你启动；常规 moved-head 情形注册与 prepare
+之间没有触发运行，故更新 head 从未被 defer、由下一次触发投递（R4-1 第 5 轮恢复
+此两分支写法）。手动路径没有触发，故自行重新解析更新 head（`gh pr view … --json
+headRefOid`）并 `--start` 它。不要在旧标记下 `git checkout` 更新的 head，否则会
+把更新 head 的证据记到所投递 head 的判定名下（R1-1 第 3 轮、R4-1）——prepare 段
+的错 HEAD checkout 补救带同一例外（R5-1）。两个 moved-head release 形式都像兄弟
+恢复形式一样带 `[--round <r>]`。完成形式的 `--artifact-dir` 可选：重放完成省略它
+以继承该 head 已记录的目录，而非覆盖。死标记条目的 `--round` 是
 阻塞标记的轮次，从状态文件的在飞条目读出并传入（读状态允许，只有手写 JSON 被
 禁止）：省略 `--round` 会跳过比对，重试的 release 会删掉同 head 较新轮次的活
 标记；仅对不记录 round 的遗留标记才可省略（R2-1 第 4 轮）。契约显式说明此点。

@@ -268,8 +268,11 @@ command redirected to `prepare.log`, plus the `sed` that captures the snapshot
 digest into `pr.sha256` (step 7 binds the snapshot's bytes to it). It fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
 materialised checkout of the PR head (a wrong HEAD names the `git checkout`
-to run; uncommitted changes name the entries and a stash form that clears
-them; index flags that hide tracked state — a sparse checkout's
+to run — except when the tree sits at a head a watch round has registered:
+then release that marker and start the newer head, and do not check it out
+under the old marker, which would file the newer head's evidence under the
+registered head's verdict; uncommitted changes name the entries and a stash
+form that clears them; index flags that hide tracked state — a sparse checkout's
 skip-worktree, assume-unchanged — are refused too; the script never stashes
 for you),
 creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
@@ -753,11 +756,11 @@ with `--complete inconclusive` instead — only that verdict increments the retr
 counter whose cap is the terminal not-covered state, so two transient prepare
 failures would retire a head no round examined. If prepare refuses because the
 PR has moved past the delivered head (its message names a newer PR head), that
-head can never prepare: `--release --head <headSha> --repo <owner>/<repo>` it
-and do not restart it, then start the last deferred head the release names (the
-newer head), or that deferral is never delivered — its only delivery was already
-consumed when it was refused as in-flight. Do not `git checkout` the newer head
-under the old marker.
+head can never prepare: `--release --head <headSha> [--round <r>] --repo
+<owner>/<repo>` it and do not restart it — the newer head is delivered by the
+next fire (the gate cursor tracks the live head), or is already in the deferred
+list the release prints, which you then start. Do not `git checkout` the newer
+head under the old marker.
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container
@@ -793,9 +796,11 @@ Exit 3 has several shapes, each with its own reaction:
   it once the state records a repo.
 
 Record the finished round with the same script's completion form:
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo <owner>/<repo>`
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
 — `--artifact-dir <dir>` records the directory prepare printed (the `--start`
-registration ran before prepare and carried none); `--verdict` is one of
+registration ran before prepare and carried none); omit it on a replayed
+completion to inherit the directory already recorded for the head rather than
+overwriting it; `--verdict` is one of
 `merge-ready | findings | blocked | inconclusive`,
 verbatim; a completion without it exits 2 and leaves the head in flight
 forever. A completion whose `--round` differs from the in-flight marker, or
@@ -997,8 +1002,8 @@ ambiguous rather than verify a guessed PR. Then, in order:
 inconclusive` instead: it increments the retry counter whose cap is the
    terminal not-covered state. If prepare refuses because the PR has moved past
    the delivered head (its message names a newer PR head), that head can never
-   prepare: `--release --head <H> --repo <owner>/<repo>` it and do not restart
-   it. There is no watch fire here to deliver the newer head, so re-resolve it
+   prepare: `--release --head <H> [--round <r>] --repo <owner>/<repo>` it and do
+   not restart it. There is no watch fire here to deliver the newer head, so re-resolve it
    yourself (`gh pr view <n> --repo <owner>/<repo> --json headRefOid`), then
    `--start --head <newer> --round <next> --repo <owner>/<repo>` and run prepare
    for it. Do not `git checkout` the newer head under the old marker.
@@ -1028,8 +1033,9 @@ inconclusive` instead: it increments the retry counter whose cap is the
    **before** the round starts — the same write-before-start rule the watch
    prompt follows, so a watch fire during the manual round skips `H`. Once
    the round completes, record it with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo <owner>/<repo>`
-   (`<dir>` is the artifact directory prepare printed).
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
+   (`<dir>` is the artifact directory prepare printed; omit it on a replayed
+   completion to inherit the directory already recorded for `H`).
    A completion whose `--round` differs from the marker, or from a round
    that already answered for `H`, is refused (exit 3).
    Measured case: two consecutive rounds skipped the hand-written completion

@@ -96,13 +96,21 @@ so two transient prepare failures would retire a head no round ever examined
 terminal case: if prepare refuses because the PR has moved past the delivered
 head (prepare re-resolves `headRefOid` from a live `gh pr view` and refuses a
 tree whose HEAD is not that head), the delivered head can never prepare —
-`--release` it and do **not** restart it. The newer head does not arrive on its
-own: in the watch prompt, start the last deferred head the release names (its
-only delivery was consumed when it was refused as in-flight); in the manual
-path there is no fire, so re-resolve the newer head (`gh pr view … --json
-headRefOid`) and `--start` it. Do not `git checkout` the newer head under the
-old marker, which would file the newer head's evidence under the delivered
-head's verdict (R1-1 round 3, R4-1). The dead-marker bullet's `--round` is the
+`--release` it (with the marker's `--round`) and do **not** restart it. In the
+watch prompt the newer head is delivered by the next fire (the gate cursor
+tracks the live head, `next.headSha = pr.headRefOid`), or is already in the
+deferred list the release prints, which you then start; in the ordinary
+moved-head case no fire ran between registration and prepare, so the newer head
+was never deferred and the next fire delivers it (R4-1 round 5 restores this
+two-branch form). In the manual path there is no fire, so re-resolve the newer
+head (`gh pr view … --json headRefOid`) and `--start` it. Do not `git checkout`
+the newer head under the old marker, which would file the newer head's evidence
+under the delivered head's verdict (R1-1 round 3, R4-1) — the prepare
+paragraph's wrong-HEAD checkout remedy carries the same exception (R5-1). Both
+moved-head release forms carry `[--round <r>]` like the sibling recovery form.
+The completion form's `--artifact-dir` is optional: a replayed completion omits
+it to inherit the directory already recorded for the head rather than
+overwriting it. The dead-marker bullet's `--round` is the
 blocking marker's round, read from the state file's in-flight entry and passed
 (reading the state is allowed; only hand-writing the JSON is forbidden): an
 omitted `--round` skips the match, so a retried release would delete a newer

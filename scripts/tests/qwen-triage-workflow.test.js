@@ -6607,15 +6607,18 @@ describe('qwen-triage verify hardening round 2', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
     // R4-2: pin shared sentences on the manual section's own slice, so the
     // watch prompt's copy is not an alibi for a deleted manual sentence.
+    // R4-2 (round 5): resolve both sentinels and assert their order before
+    // slicing — slice(start, -1) returns the whole tail, so a renamed end
+    // sentinel would silently widen the slice past the manual section.
+    const manualStart = verifySkill.indexOf(
+      'When the maintainer says a previously verified PR has moved',
+    );
+    const manualEnd = verifySkill.indexOf('To make this trigger automatic');
+    expect(manualStart).toBeGreaterThan(-1);
+    expect(manualEnd).toBeGreaterThan(manualStart);
     const manualSlice = verifySkill
-      .slice(
-        verifySkill.indexOf(
-          'When the maintainer says a previously verified PR has moved',
-        ),
-        verifySkill.indexOf('To make this trigger automatic'),
-      )
+      .slice(manualStart, manualEnd)
       .replace(/\s+/g, ' ');
-    expect(manualSlice.length).toBeGreaterThan(0);
 
     // The phrase is a documented trigger, and an ambiguous PR is asked about.
     expect(flat).toContain('有更新了，重新验证');
@@ -6668,7 +6671,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // R1-1 (round 3) + R4-1: the manual moved-head terminal case (<H> variant)
     // re-resolves and starts the newer head itself — there is no watch fire.
     expect(manualSlice).toContain(
-      'If prepare refuses because the PR has moved past the delivered head (its message names a newer PR head), that head can never prepare: `--release --head <H> --repo <owner>/<repo>` it and do not restart it',
+      'If prepare refuses because the PR has moved past the delivered head (its message names a newer PR head), that head can never prepare: `--release --head <H> [--round <r>] --repo <owner>/<repo>` it and do not restart it',
     );
     expect(manualSlice).toContain(
       'There is no watch fire here to deliver the newer head, so re-resolve it yourself',
@@ -6704,7 +6707,7 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     // R17-2: the directory prepare printed is recorded at --complete.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
     );
     // Registration is a step of its own ahead of the round, not an
     // afterthought behind it.
@@ -6766,13 +6769,16 @@ describe('qwen-triage verify hardening round 2', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
     // R4-2: a sentence that also exists verbatim in the manual section must be
     // pinned on the prompt's own slice, or the manual copy is its alibi.
+    // R4-2 (round 5): resolve both sentinels and assert their order before
+    // slicing — slice(start, -1) returns the whole tail, so a renamed end
+    // sentinel would silently widen the slice into the manual section.
+    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
+    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
+    expect(promptStart).toBeGreaterThan(-1);
+    expect(promptEnd).toBeGreaterThan(promptStart);
     const promptSlice = verifySkill
-      .slice(
-        verifySkill.indexOf('The prompt consumes the gate'),
-        verifySkill.indexOf('On `action: "stop"`'),
-      )
+      .slice(promptStart, promptEnd)
       .replace(/\s+/g, ' ');
-    expect(promptSlice.length).toBeGreaterThan(0);
     // The full registration form, every required flag included.
     // R17-2: the watch prompt registers ahead of prepare, so --start carries
     // no --artifact-dir; the directory is recorded at --complete.
@@ -6795,6 +6801,13 @@ describe('qwen-triage verify hardening round 2', () => {
       'Run the full step-1 prepare block on the host before any work inside the boundary — the watch-state registration precedes it (R17-2)',
     );
     expect(flat).not.toContain('before anything else');
+    // R5-1: the prepare paragraph's wrong-HEAD checkout remedy is qualified so
+    // it does not contradict the "do not checkout the newer head under the old
+    // marker" prohibition — a registered head's marker must be released, not
+    // checked out under. Deleting the qualification reds this pin.
+    expect(flat).toContain(
+      'a wrong HEAD names the `git checkout` to run — except when the tree sits at a head a watch round has registered: then release that marker and start the newer head, and do not check it out under the old marker',
+    );
     // R1-1: the watch prompt's prepare-failure recovery carries the full
     // --release form with --repo (the <headSha> variant; the manual section
     // uses <H>). Removing --repo reds this whole-form pin.
@@ -6824,13 +6837,14 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(promptSlice).toContain(
       'Do not recover with `--complete inconclusive` instead — only that verdict increments the retry counter',
     );
-    // R1-1 (round 3) + R4-1: the moved-head terminal case — release without
-    // restart, then start the deferred newer head the release names.
+    // R1-1 (round 3) + R4-1 (round 5): the moved-head terminal case — release
+    // without restart; the newer head arrives by the next fire (the gate
+    // cursor tracks the live head) or is already deferred, which you start.
     expect(promptSlice).toContain(
-      'If prepare refuses because the PR has moved past the delivered head (its message names a newer PR head), that head can never prepare: `--release --head <headSha> --repo <owner>/<repo>` it and do not restart it',
+      'If prepare refuses because the PR has moved past the delivered head (its message names a newer PR head), that head can never prepare: `--release --head <headSha> [--round <r>] --repo <owner>/<repo>` it and do not restart it',
     );
     expect(promptSlice).toContain(
-      'then start the last deferred head the release names (the newer head), or that deferral is never delivered',
+      'the newer head is delivered by the next fire (the gate cursor tracks the live head), or is already in the deferred list the release prints, which you then start',
     );
     // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
     // --release form with --repo (anchored on the watch-only continuation, so
@@ -6854,7 +6868,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // The completion and release forms carry --repo too: the guard
     // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
     );
     // The duty, not just the command string: deleting the consequence
     // sentence while keeping the command must go red too.
@@ -6911,14 +6925,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('A corrupt state file is refused (exit 1)');
     // Section slices, not the whole flattened skill: a sentence that also
     // exists in the manual section stays green after the watch prompt's
-    // own copy is deleted unless the pin reads the prompt's slice.
-    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
-    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
-    expect(promptStart).toBeGreaterThan(-1);
-    expect(promptEnd).toBeGreaterThan(promptStart);
-    const prompt = verifySkill
-      .slice(promptStart, promptEnd)
-      .replace(/\s+/g, ' ');
+    // own copy is deleted unless the pin reads the prompt's slice. The
+    // sentinel-resolved promptSlice is defined at the top of this block.
+    const prompt = promptSlice;
     expect(prompt).toContain('repeat the same value in `--complete`');
     expect(prompt).toContain('recorded as deferred');
     expect(prompt).toContain('no second event will arrive');
