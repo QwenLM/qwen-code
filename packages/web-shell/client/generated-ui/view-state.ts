@@ -23,6 +23,8 @@ export interface ViewStateStore {
     cardId: string,
     write: { baseRevision: number; value: unknown },
   ): Promise<DaemonGeneratedUiStateWriteResult>;
+  /** Admits a save now and binds its eventual write to the current owner. */
+  captureWrite?(): ViewStateStore['set'];
 }
 
 export type ViewStateStatus =
@@ -47,8 +49,11 @@ export function generatedUiCardId(toolResult: unknown): string | undefined {
 // still landing, or its first save would be rejected as stale.
 const writes = new Map<string, Promise<void>>();
 
-async function waitForWrites(key: string): Promise<void> {
-  while (writes.has(key)) await writes.get(key);
+async function waitForWrites(key: string, signal?: AbortSignal): Promise<void> {
+  while (writes.has(key)) {
+    signal?.throwIfAborted();
+    await writes.get(key);
+  }
 }
 
 /**
@@ -58,7 +63,7 @@ async function waitForWrites(key: string): Promise<void> {
 export class ViewStateCoordinator {
   private revision?: number;
   private saved?: string;
-  private pending?: string;
+  private pending?: { json: string; set: ViewStateStore['set'] };
   // The value of the write in flight; `saved` changes only when it lands.
   private inFlight?: string;
   private stale = false;
@@ -75,21 +80,28 @@ export class ViewStateCoordinator {
     this.key = JSON.stringify([store.sessionId, cardId]);
   }
 
-  async load(): Promise<unknown> {
+  async load(signal?: AbortSignal): Promise<unknown> {
+    const reportUnavailable = () => this.report('unavailable');
+    signal?.addEventListener('abort', reportUnavailable, { once: true });
     try {
-      await waitForWrites(this.key);
+      await waitForWrites(this.key, signal);
+      signal?.throwIfAborted();
       const state = await this.store.get(this.cardId);
+      signal?.throwIfAborted();
       this.revision = state.revision;
       this.saved = JSON.stringify(state.value ?? null);
       return state.value ?? null;
     } catch (error) {
-      this.report('unavailable');
+      reportUnavailable();
       throw error;
+    } finally {
+      signal?.removeEventListener('abort', reportUnavailable);
     }
   }
 
   save(value: unknown): void {
     if (this.revision === undefined || this.stale) return;
+    const set = this.store.captureWrite?.() ?? this.store.set.bind(this.store);
     const json = JSON.stringify(value ?? null);
     this.tooLarge = new TextEncoder().encode(json).byteLength > MAX_STATE_BYTES;
     this.pending = undefined;
@@ -103,7 +115,7 @@ export class ViewStateCoordinator {
       if (this.inFlight === undefined && this.last) this.report('saved');
       return;
     }
-    this.pending = json;
+    this.pending = { json, set };
     this.pump();
   }
 
@@ -135,14 +147,14 @@ export class ViewStateCoordinator {
 
   private pump(): void {
     if (this.inFlight !== undefined || this.pending === undefined) return;
-    const json = this.pending;
+    const { json, set } = this.pending;
     this.pending = undefined;
     this.inFlight = json;
     this.report('saving');
     let status: ViewStateStatus = 'failed';
     let request: Promise<DaemonGeneratedUiStateWriteResult>;
     try {
-      request = this.store.set(this.cardId, {
+      request = set(this.cardId, {
         baseRevision: this.revision!,
         value: JSON.parse(json) as unknown,
       });

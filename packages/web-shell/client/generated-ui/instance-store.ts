@@ -324,6 +324,23 @@ export class GeneratedUiInstanceStore {
                 },
                 set: async (cardId, write) =>
                   this.viewState(instance).set(cardId, write),
+                captureWrite: () => {
+                  const lease = instance.lease;
+                  const viewState = this.viewState(instance);
+                  const { token, id } = instance;
+                  // Folding revokes the lease for new requests. A save the
+                  // host already accepted can finish against the same owner.
+                  return async (cardId, write) => {
+                    if (
+                      this.records.get(instance.key)?.entry !== instance ||
+                      instance.id !== id ||
+                      instance.token !== token ||
+                      !lease?.owner.isCurrent()
+                    )
+                      throw new Error('Generated UI owner changed');
+                    return viewState.set(cardId, write);
+                  };
+                },
               },
             }
           : {}),
@@ -379,7 +396,7 @@ export class GeneratedUiInstanceStore {
     return entry;
   }
 
-  // State is read and written only while this card holds its owner's lease.
+  // New state requests require the card's current owner lease.
   private viewState(instance: GeneratedUiInstance) {
     const lease = instance.lease;
     const viewState = lease?.host.tools?.viewState;

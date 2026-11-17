@@ -53,6 +53,8 @@ const CONTEXT_SYNC_DELAY = 800;
 const STATE_CAPABILITY = 'qwen-code/generated-ui-state';
 const STATE_LOAD = 'qwen-code/generated-ui-state/load';
 const STATE_SAVE = 'qwen-code/generated-ui-state/save';
+// Give the host's daemon read (30 seconds) time to return or report a failure.
+const STATE_LOAD_TIMEOUT_MS = 35_000;
 const stateLoadResult = z.object({ value: z.unknown() });
 const stateSaveResult = z.object({});
 
@@ -400,11 +402,12 @@ function hostRequest<T extends z.ZodType>(
   method: string,
   params: Record<string, unknown>,
   schema: T,
+  timeout = 15_000,
 ): Promise<z.output<T>> {
   return app.request(
     { method, params } as unknown as Parameters<App['request']>[0],
     schema,
-    { timeout: 15_000 },
+    { timeout },
   ) as Promise<z.output<T>>;
 }
 
@@ -415,7 +418,12 @@ const stateHost: ViewStateHost = {
       !app.getHostCapabilities()?.experimental?.[STATE_CAPABILITY]
     )
       return null;
-    const { value } = await hostRequest(STATE_LOAD, {}, stateLoadResult);
+    const { value } = await hostRequest(
+      STATE_LOAD,
+      {},
+      stateLoadResult,
+      STATE_LOAD_TIMEOUT_MS,
+    );
     const json = JSON.stringify(value ?? null);
     if (new TextEncoder().encode(json).byteLength > MAX_STATE_BYTES)
       throw new Error('Saved view state is too large.');

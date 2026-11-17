@@ -501,10 +501,12 @@ export function McpAppRuntime({
     }
     if (viewState) {
       // The App names no card: the host answers for the one it mounted.
-      bridge.fallbackRequestHandler = async (request) => {
+      bridge.fallbackRequestHandler = async (request, extra) => {
         if (!active) throw new Error('The card was unmounted.');
         if (request.method === VIEW_STATE_LOAD)
-          return { value: await viewState.load() } as HostRequestResult;
+          return {
+            value: await viewState.load(extra?.signal),
+          } as HostRequestResult;
         if (request.method === VIEW_STATE_SAVE) {
           viewState.save((request.params as { value?: unknown })?.value);
           return {} as HostRequestResult;

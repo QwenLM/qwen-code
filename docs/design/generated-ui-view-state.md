@@ -170,20 +170,22 @@ answers for the card it mounted, with the card id taken from the recorded
 result. Generated content therefore cannot read or write another card's state.
 Web Shell advertises the capability only for the bundled Generated UI server,
 only when the daemon advertises `generated_ui_state` and the session has a bound
-client, and never in the static transcript view. A card kept alive by in-page
-retention reaches the routes through its owner lease, as its tool calls do.
+client, and never in the static transcript view. A retained card needs its
+owner lease to start a read or submit a new save. If the card is folded, a save
+the host already accepted can finish while the same frame, slot and owner are
+still current.
 
 **Loading.** The App reads the state before `init`, while the view mounts. The
 read has its own time limit and does not count against the startup limit. If
-the read fails, the card starts without state and saves nothing, and the host
-shows that the saved state could not be loaded. It does not start empty and
-then overwrite what was saved.
+the read fails or the App cancels it at its deadline, the card starts without
+state and saves nothing. The host shows that the saved state could not be loaded
+and discards any late result.
 
 **Saving.** The host keeps the card's revision. It sends a change as soon as the
 previous write settles and coalesces only the changes made while a write is in
 flight. A debounce would lose the last change when the page reloads. An
 unchanged value is not sent. After a `stale` outcome, this mount stops saving
-and the host asks the user to reopen the card to load the latest state. A value
+and the host asks the user to refresh the page to load the latest state. A value
 over 16 KiB is not sent. A failed write is reported and the next change tries
 again. A card mounted again reads its state only after an earlier mount's write
 has landed.

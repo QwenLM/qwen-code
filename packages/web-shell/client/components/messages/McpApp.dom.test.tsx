@@ -41,10 +41,10 @@ const appBridgeMocks = vi.hoisted(() => ({
         sendNotification?: ReturnType<typeof vi.fn>;
       },
     ) => Promise<unknown>;
-    fallbackRequestHandler?: (request: {
-      method: string;
-      params?: Record<string, unknown>;
-    }) => Promise<unknown>;
+    fallbackRequestHandler?: (
+      request: { method: string; params?: Record<string, unknown> },
+      extra?: { signal: AbortSignal },
+    ) => Promise<unknown>;
   } | null,
   lastCapabilities: undefined as unknown,
   lastOptions: undefined as unknown,
@@ -1597,6 +1597,36 @@ describe('built-in Generated UI admission', () => {
       await expect(
         request({ method: 'qwen-code/other', params: {} }),
       ).rejects.toThrow();
+    });
+
+    it('reports a cancelled load and ignores a late successful read', async () => {
+      const viewState = store();
+      const read = Promise.withResolvers<{
+        cardId: string;
+        revision: number;
+        value: number[];
+      }>();
+      viewState.get.mockReturnValueOnce(read.promise);
+      const container = host(card, viewState);
+      const request = appBridgeMocks.last!.fallbackRequestHandler!;
+      const abort = new AbortController();
+      const loading = request(
+        { method: 'qwen-code/generated-ui-state/load' },
+        { signal: abort.signal },
+      );
+      await vi.waitFor(() => expect(viewState.get).toHaveBeenCalledWith(CARD));
+      await act(async () => abort.abort(new Error('Request timed out')));
+      const unavailable = container.querySelector(
+        '[data-generated-ui-save="unavailable"]',
+      );
+      read.resolve({ cardId: CARD, revision: 3, value: [1] });
+      await expect(loading).rejects.toThrow('Request timed out');
+      expect(unavailable).not.toBeNull();
+      await request({
+        method: 'qwen-code/generated-ui-state/save',
+        params: { value: [2] },
+      });
+      expect(viewState.set).not.toHaveBeenCalled();
     });
 
     it.each([

@@ -1171,6 +1171,70 @@ describe('GeneratedUiRuntimeProvider eligibility and authority', () => {
     },
   );
 
+  it.each(['same owner', 'owner changed'])(
+    'handles a queued save when the card folds with %s',
+    async (ownership) => {
+      const h = setup();
+      const cardId = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+      const card = {
+        surface: 'main',
+        toolId: 'call-a',
+        display: appDisplay({
+          toolResult: { _meta: { 'qwen/generated-ui': { cardId } } },
+        }),
+      };
+      const first = Promise.withResolvers<{
+        outcome: 'saved';
+        cardId: string;
+        revision: number;
+      }>();
+      const set = vi
+        .fn()
+        .mockReturnValueOnce(first.promise)
+        .mockResolvedValue({ outcome: 'saved', cardId, revision: 3 });
+      const tools = {
+        sessionId: h.source.sessionId,
+        callTool: vi.fn(),
+        viewState: {
+          get: vi.fn().mockResolvedValue({ cardId, revision: 1, value: 0 }),
+          set,
+        },
+      };
+      await h.render({ cards: [card], tools });
+      const bridge = activeBridges()[0];
+      await initialize(bridge);
+      const request = bridge.fallbackRequestHandler!;
+      const save = (value: number) =>
+        request({ method: VIEW_STATE_SAVE, params: { value } });
+      await act(async () => {
+        await request({ method: VIEW_STATE_LOAD });
+        await save(1);
+        await save(2);
+      });
+      expect(set).toHaveBeenCalledExactlyOnceWith(cardId, {
+        baseRevision: 1,
+        value: 1,
+      });
+
+      await h.render({ cards: [{ ...card, visible: false }], tools });
+      if (ownership === 'owner changed') h.recover();
+      await act(async () => {
+        const hiddenRequest = save(99);
+        first.resolve({ outcome: 'saved', cardId, revision: 2 });
+        await expect(hiddenRequest).rejects.toThrow('inactive');
+      });
+      if (ownership === 'same owner') {
+        expect(set).toHaveBeenCalledTimes(2);
+        expect(set).toHaveBeenLastCalledWith(cardId, {
+          baseRevision: 2,
+          value: 2,
+        });
+      } else {
+        expect(set).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
   it.each(['folded', 'hidden-surface'])(
     'revokes %s cards without remounting their runtime',
     async (visibility) => {

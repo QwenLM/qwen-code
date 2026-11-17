@@ -17,7 +17,7 @@ export const MCP_APP_MESSAGES_EN: Record<string, Message> = {
   'mcpApp.generatedUi.state.saving': 'Saving…',
   'mcpApp.generatedUi.state.saved': 'Saved in this conversation',
   'mcpApp.generatedUi.state.stale':
-    'Not saved: this view changed elsewhere. Reopen it to load the latest state.',
+    'Not saved: this view changed elsewhere. Refresh the page to load the latest state.',
   'mcpApp.generatedUi.state.too_large':
     'Not saved: the view state is larger than 16 KiB.',
   'mcpApp.generatedUi.state.failed':
@@ -69,7 +69,7 @@ export const MCP_APP_MESSAGES_ZH: Record<string, Message> = {
   'mcpApp.generatedUi.state.saving': '正在保存…',
   'mcpApp.generatedUi.state.saved': '已保存到此对话',
   'mcpApp.generatedUi.state.stale':
-    '未保存：此视图已在别处修改。重新打开即可载入最新状态。',
+    '未保存：此视图已在别处修改。刷新页面即可载入最新状态。',
   'mcpApp.generatedUi.state.too_large': '未保存：视图状态超过 16 KiB。',
   'mcpApp.generatedUi.state.failed': '未保存：会话无法保存视图状态。',
   'mcpApp.generatedUi.state.unavailable':
@@ -112,7 +112,7 @@ export const MCP_APP_MESSAGES_RU: Record<string, Message> = {
   'mcpApp.generatedUi.state.saving': 'Сохранение…',
   'mcpApp.generatedUi.state.saved': 'Сохранено в этом разговоре',
   'mcpApp.generatedUi.state.stale':
-    'Не сохранено: вид изменён в другом месте. Откройте его заново, чтобы загрузить последнее состояние.',
+    'Не сохранено: вид изменён в другом месте. Обновите страницу, чтобы загрузить последнее состояние.',
   'mcpApp.generatedUi.state.too_large':
     'Не сохранено: состояние вида больше 16 КиБ.',
   'mcpApp.generatedUi.state.failed':

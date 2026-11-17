@@ -815,6 +815,32 @@ describe('saved view state', () => {
   const shown = () => parseToolResult(createShowResult(input));
   const methods = () => bridge.request.mock.calls.map(([request]) => request);
 
+  it('restores state when the host responds after 15 seconds', async () => {
+    vi.useFakeTimers();
+    try {
+      bridge.getHostCapabilities.mockReturnValue(STATE);
+      bridge.request.mockImplementationOnce(
+        (_request, _schema, options: { timeout: number }) =>
+          new Promise((resolve, reject) => {
+            const timeout = setTimeout(
+              () => reject(new Error('Request timed out')),
+              options.timeout,
+            );
+            setTimeout(() => {
+              clearTimeout(timeout);
+              resolve({ value: [1] });
+            }, 16_000);
+          }),
+      );
+      await Promise.all([
+        expect(presentation.stateHost!.load(shown())).resolves.toBe('[1]'),
+        vi.advanceTimersByTimeAsync(16_000),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('loads through the host and then sends each state to it', async () => {
     bridge.getHostCapabilities.mockReturnValue(STATE);
     bridge.request.mockResolvedValueOnce({ value: { items: [1] } });
