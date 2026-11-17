@@ -44,6 +44,10 @@ const FREE_FORM_MAP_KEYS = new Set([
   'mcpServers',
   'channels',
   'modelProviders',
+  'providerProtocol',
+  'pluginConfigs',
+  'modelPricing',
+  'customThemes',
 ]);
 
 function isSensitiveKey(key: string): boolean {
@@ -204,14 +208,19 @@ function maskTree(
   parentKey = '',
   maskAll = false,
 ): unknown {
-  // Entries of env/header maps are named by the user, so mask every value.
-  const sensitive = CREDENTIAL_MAP_KEYS.has(key) || isSensitiveKey(key);
+  // Entries of env/header maps are named by the user, so mask every value;
+  // a user-chosen entry name must not make its own value sensitive.
+  const sensitive =
+    CREDENTIAL_MAP_KEYS.has(key) ||
+    (!FREE_FORM_MAP_KEYS.has(parentKey) && isSensitiveKey(key));
   if (value === null || typeof value !== 'object') {
-    return maskAll || sensitive ? maskValue(value) : value;
+    // Only strings hold secrets; null/number/boolean keep their type.
+    return (maskAll || sensitive) && typeof value === 'string'
+      ? maskValue(value)
+      : value;
   }
-  // A sensitive container masks every leaf, unless it is a free-form entry.
-  const maskLeaves =
-    maskAll || (sensitive && !FREE_FORM_MAP_KEYS.has(parentKey));
+  // A sensitive container masks every leaf.
+  const maskLeaves = maskAll || sensitive;
   const mask = (k: string, v: unknown) => maskTree(v, k, key, maskLeaves);
   return Array.isArray(value)
     ? value.map((v, i) => mask(String(i), v))

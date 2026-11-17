@@ -630,6 +630,62 @@ describe('configCommand', () => {
       });
     });
 
+    it('keeps null, number and boolean leaves under a masked key', async () => {
+      const { ctx } = createMockContext({
+        security: { auth: { selectedType: 'openai', apiKey: null } },
+        mcpServers: {
+          db: {
+            command: 'npx',
+            credentials: {
+              user: 'admin',
+              retries: 3,
+              enabled: true,
+              missing: null,
+            },
+          },
+        },
+      });
+
+      expect(await configCommand.action!(ctx, 'security')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'security = {"auth":{"selectedType":"openai","apiKey":null}}',
+      });
+      expect(await configCommand.action!(ctx, 'mcpServers')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'mcpServers = {"db":{"command":"npx","credentials":{"user":"admi****","retries":3,"enabled":true,"missing":null}}}',
+      });
+    });
+
+    it('keeps user-named entries of other free-form maps readable', async () => {
+      const { ctx } = createMockContext({
+        providerProtocol: { 'corp-proxy': 'openai' },
+        pluginConfigs: {
+          'secret-scan': { toolDialect: 'claude', options: { level: 'high' } },
+        },
+        ui: { customThemes: { 'Secret Garden': { background: '#000000' } } },
+      });
+
+      expect(await configCommand.action!(ctx, 'providerProtocol')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'providerProtocol = {"corp-proxy":"openai"}',
+      });
+      expect(await configCommand.action!(ctx, 'pluginConfigs')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'pluginConfigs = {"secret-scan":{"toolDialect":"claude","options":{"level":"high"}}}',
+      });
+      expect(await configCommand.action!(ctx, 'ui.customThemes')).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'ui.customThemes = {"Secret Garden":{"background":"#000000"}}',
+      });
+    });
+
     it('masks customHeaders, scalar and empty credential map values', async () => {
       const { ctx } = createMockContext({
         modelProviders: {
