@@ -530,6 +530,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import { deriveLedgerTurnKey } from './ledger-turn-key.js';
 import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
@@ -11427,10 +11428,7 @@ export class Session implements SessionContext {
     // the turn's base key so a continuation does not reset the turn's consumed
     // marks. Only the ledger key is normalized — promptId keeps its prompt
     // identity.
-    const ledgerTurnKey = promptId.replace(
-      /_(todo_stop_guard|stop_hook|background_result|mid_turn)_\d+$/,
-      '',
-    );
+    const ledgerTurnKey = deriveLedgerTurnKey(promptId);
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
       const historyPromptId = options.historyPromptId ?? options.promptId;

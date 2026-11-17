@@ -264,7 +264,15 @@ export interface SessionStatsState {
   sessionStartTime: Date;
   metrics: SessionMetrics;
   lastPromptTokenCount: number;
+  // Monotonic prompt-id mint counter. Advances for every top-level turn that
+  // mints a fresh id (user, cron, teammate, notification, goal, retry) so each
+  // minted id is unique; the model-availability ledger keys on it. Distinct
+  // from userPromptCount, the user-visible statistic (R8-F3 decouple).
   promptCount: number;
+  // User-visible "Prompts" statistic (/stats, feedback threshold, tip cadence).
+  // Advances only for user-initiated turns (user query, cron, teammate), not
+  // for background notification/goal/retry mints that still advance promptCount.
+  userPromptCount: number;
 }
 
 export interface ComputedSessionStats {
@@ -289,6 +297,7 @@ interface SessionStatsContextValue {
   stats: SessionStatsState;
   startNewSession: (sessionId: string) => void;
   startNewPrompt: () => void;
+  recordUserPrompt: () => void;
   getPromptCount: () => number;
   seedPromptCount: (count: number) => void;
 }
@@ -410,6 +419,7 @@ const createDefaultStats = (sessionId: string = ''): SessionStatsState => ({
   metrics: getMetricsForDisplay(sessionId),
   lastPromptTokenCount: 0,
   promptCount: 0,
+  userPromptCount: 0,
 });
 
 // --- Provider Component ---
@@ -474,6 +484,13 @@ export const SessionStatsProvider: React.FC<{
     }));
   }, []);
 
+  const recordUserPrompt = useCallback(() => {
+    setStats((prevState) => ({
+      ...prevState,
+      userPromptCount: prevState.userPromptCount + 1,
+    }));
+  }, []);
+
   const getPromptCount = useCallback(
     () => stats.promptCount,
     [stats.promptCount],
@@ -483,6 +500,7 @@ export const SessionStatsProvider: React.FC<{
     setStats((prevState) => ({
       ...prevState,
       promptCount: Math.max(prevState.promptCount, count),
+      userPromptCount: Math.max(prevState.userPromptCount, count),
     }));
   }, []);
 
@@ -491,10 +509,18 @@ export const SessionStatsProvider: React.FC<{
       stats,
       startNewSession,
       startNewPrompt,
+      recordUserPrompt,
       getPromptCount,
       seedPromptCount,
     }),
-    [stats, startNewSession, startNewPrompt, getPromptCount, seedPromptCount],
+    [
+      stats,
+      startNewSession,
+      startNewPrompt,
+      recordUserPrompt,
+      getPromptCount,
+      seedPromptCount,
+    ],
   );
 
   return (

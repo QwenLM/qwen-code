@@ -310,6 +310,9 @@ function hostContinuationOptions(
 /** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
 export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
 
+/** Upper bound on background-interaction prompt ids retained for ledger exclusion. */
+export const MAX_BACKGROUND_INTERACTION_PROMPT_IDS = 32;
+
 export type UserTurnRecord =
   | {
       kind: 'user';
@@ -753,8 +756,8 @@ export class LlmClient {
   // flag, so model-availability ledger membership must exclude the whole
   // interaction by prompt id, not just the first send's messageType. Entries are
   // inert once the interaction ends (the id is never reused by a foreground
-  // turn), so they persist for the session rather than risking a too-early clear
-  // while a continuation is still draining.
+  // turn); the set is bounded FIFO like stopHookChains, evicting only ids whose
+  // continuations have long drained (R8-F11).
   private readonly backgroundInteractionPromptIds = new Set<string>();
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
@@ -4392,6 +4395,16 @@ export class LlmClient {
         messageType === SendMessageType.Teammate
       ) {
         this.backgroundInteractionPromptIds.add(prompt_id);
+        while (
+          this.backgroundInteractionPromptIds.size >
+          MAX_BACKGROUND_INTERACTION_PROMPT_IDS
+        ) {
+          const oldest = this.backgroundInteractionPromptIds
+            .keys()
+            .next().value;
+          if (oldest === undefined) break;
+          this.backgroundInteractionPromptIds.delete(oldest);
+        }
       }
       if (!options?.isConcurrentSideQuery) {
         this.toolExplorationBudget.reset();

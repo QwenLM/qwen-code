@@ -70,7 +70,7 @@ const meetsMinimumSessionRequirements = (
   sessionStats: SessionStatsState,
 ): boolean => {
   const toolCallsCount = sessionStats.metrics.tools.totalCalls;
-  const userMessagesCount = sessionStats.promptCount;
+  const userMessagesCount = sessionStats.userPromptCount;
 
   return (
     toolCallsCount > MIN_TOOL_CALLS || userMessagesCount > MIN_USER_MESSAGES

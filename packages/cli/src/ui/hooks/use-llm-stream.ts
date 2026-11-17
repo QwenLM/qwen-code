@@ -1461,6 +1461,7 @@ export const useLlmStream = (
   const [isReceivingContent, setIsReceivingContent] = useState(false);
   const {
     startNewPrompt,
+    recordUserPrompt,
     getPromptCount,
     stats: sessionStates,
   } = useSessionStats();
@@ -4892,22 +4893,26 @@ export const useLlmStream = (
           lastPromptErroredRef.current = false;
         }
 
-        // Every top-level turn that mints a fresh prompt id advances the prompt
-        // counter so the next minted id is unique. Notification and Goal mint
-        // ids too; without the increment their id is reused by the next user
-        // prompt, and the model-availability ledger (keyed on the prompt id)
-        // would let one turn's marks bind the other (R6-1/R7-1). They advance
-        // the counter only when they mint (a continuation reusing an existing id
-        // must not skip one) and do not log a user prompt or reset the thought.
+        // Every top-level turn that mints a fresh prompt id advances the mint
+        // counter (promptCount) so the next minted id is unique. Notification,
+        // Goal and Retry mint ids too; without the increment their id is reused
+        // by the next user prompt, and the model-availability ledger (keyed on
+        // the prompt id) would let one turn's marks bind the other
+        // (R6-1/R7-1/R8-F1). They advance the counter only when they mint (a
+        // continuation reusing an existing id must not skip one). The mint
+        // counter is decoupled from the user-visible Prompts statistic
+        // (userPromptCount, advanced below only for user-initiated turns), so
+        // background mints do not inflate /stats, the feedback threshold or the
+        // tip cadence (R8-F3).
         if (
           submitType === SendMessageType.UserQuery ||
           submitType === SendMessageType.Cron ||
           submitType === SendMessageType.Teammate ||
           ((submitType === SendMessageType.Notification ||
-            submitType === SendMessageType.Goal) &&
+            submitType === SendMessageType.Goal ||
+            submitType === SendMessageType.Retry) &&
             promptIdWasMinted)
         ) {
-          // trigger new prompt event for session stats in CLI
           startNewPrompt();
         }
 
@@ -4916,6 +4921,8 @@ export const useLlmStream = (
           submitType === SendMessageType.Cron ||
           submitType === SendMessageType.Teammate
         ) {
+          // User-visible Prompts statistic: only user-initiated turns count.
+          recordUserPrompt();
           // log user prompt event for telemetry, only text prompts for now
           if (typeof queryToSend === 'string') {
             logUserPrompt(
@@ -5515,6 +5522,7 @@ export const useLlmStream = (
       onAuthError,
       config,
       startNewPrompt,
+      recordUserPrompt,
       getPromptCount,
       handleLoopDetectedEvent,
       clearRetryCountdown,

@@ -8645,6 +8645,72 @@ describe('LlmChat', async () => {
       expect(fallbackB).toHaveBeenCalledTimes(3);
     });
 
+    it('still attempts the primary each request even when the ledger marks it unavailable (R8-F9)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      // The ledger gates only fallback selection. The primary is still attempted
+      // each request (it may have recovered), even when the ledger marks it
+      // unavailable; a mutant gating the primary on the ledger would skip it.
+      service.markTerminal('test-model', 'quota');
+      streamMock().mockImplementation(async () => textStream('primary ok'));
+
+      const events = await sendSessionCollect(
+        'test',
+        'prompt-primary-unavailable',
+      );
+
+      expect(hasChunkText(events, 'primary ok')).toBe(true);
+      expectStreamCalls(1);
+      expect(fallbackEvents(events)).toHaveLength(0);
+    });
+
+    it('counts only attempted fallbacks in the MODEL_FALLBACK ordinal across a ledger skip (R8-F10)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: primary exhausts, fallback-a exhausts (ordinal 1), fallback-b
+      // serves (ordinal 2).
+      const events1 = await sendSessionCollect('test', 'prompt-ordinal');
+      expect(fallbackEvents(events1)).toEqual([
+        fallbackEvent('test-model', 'fallback-a', 1),
+        fallbackEvent('fallback-a', 'fallback-b', 2),
+      ]);
+
+      // Request 2, same turn: fallback-a is skipped by the ledger BEFORE the
+      // ordinal increments, so fallback-b's ordinal is 1, not 2. A mutant moving
+      // the skip below fallbackIndex++ would report 2 here.
+      const events2 = await sendSessionCollect('test', 'prompt-ordinal');
+      expect(fallbackEvents(events2)).toEqual([
+        fallbackEvent('test-model', 'fallback-b', 1),
+      ]);
+    });
+
     it('an explicit Retry re-probes fallbacks consumed earlier in the turn', async () => {
       const service = new ModelAvailabilityService();
       vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(

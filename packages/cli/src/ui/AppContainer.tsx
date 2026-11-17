@@ -2730,7 +2730,7 @@ export const AppContainer = (props: AppContainerProps) => {
   useContextualTips({
     streamingState,
     lastPromptTokenCount: sessionStats.lastPromptTokenCount,
-    sessionPromptCount: sessionStats.promptCount,
+    sessionPromptCount: sessionStats.userPromptCount,
     config,
     tipHistory,
     addItem: historyManager.addItem,

@@ -3033,6 +3033,13 @@ export async function runNonInteractive(
       };
 
       let currentPromptId = prompt_id;
+      // A teammate turn mints its own prompt id (registered as a background
+      // interaction so the ledger excludes it). Track whether the active turn
+      // is a teammate turn so its ToolResult continuations keep that id, while
+      // a later foreground turn restores the base id — otherwise the registered
+      // teammate id would drop every later foreground send from the ledger for
+      // the rest of the run (R8-F2).
+      let teammateTurnActive = false;
       while (true) {
         // Drain pending teammate messages into the conversation.
         // sendMessageStream only reads currentMessages[0].parts,
@@ -3097,6 +3104,11 @@ export async function runNonInteractive(
           selectActiveInteraction(currentPromptId);
           endActiveInteraction('ok');
           currentPromptId = `${prompt_id}/teammate/${turnCount}`;
+          teammateTurnActive = true;
+        } else if (!teammateTurnActive) {
+          // Foreground turn (or a continuation of one): restore the base id so
+          // a prior teammate turn's registered id does not exclude this send.
+          currentPromptId = prompt_id;
         }
         selectActiveInteraction(
           currentPromptId,
@@ -3264,6 +3276,7 @@ export async function runNonInteractive(
               endActiveInteraction('ok');
               const nextGoalTurn = queuedGoalTurns.shift();
               if (nextGoalTurn) {
+                teammateTurnActive = false;
                 activeGoalTurn = nextGoalTurn;
                 markGoalTurnDelivered(nextGoalTurn);
                 isFirstGoalSegment = true;
@@ -3439,6 +3452,7 @@ export async function runNonInteractive(
               endActiveInteraction('ok');
               const nextGoalTurn = queuedGoalTurns.shift();
               if (nextGoalTurn) {
+                teammateTurnActive = false;
                 activeGoalTurn = nextGoalTurn;
                 markGoalTurnDelivered(nextGoalTurn);
                 isFirstGoalSegment = true;
@@ -3463,6 +3477,9 @@ export async function runNonInteractive(
           }
         }
         if (shouldFinalizeTurn) {
+          // The turn ended; a subsequent foreground turn must not inherit a
+          // teammate turn's registered prompt id (R8-F2).
+          teammateTurnActive = false;
           await modTurn?.complete();
           if (activeGoalTurn) {
             const completedGoalTurn = activeGoalTurn;

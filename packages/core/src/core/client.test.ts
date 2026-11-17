@@ -33,6 +33,7 @@ import {
   LlmClient,
   SendMessageType,
   MAX_STOP_HOOK_CHAIN_PROMPT_IDS,
+  MAX_BACKGROUND_INTERACTION_PROMPT_IDS,
   recordUserTurn,
   type SendMessageOptions,
   type SteerInput,
@@ -12848,15 +12849,45 @@ Other open files:
           stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
         });
         mockTurnRunFn.mockImplementation(() => textTurn('response'));
+        // A Goal send admits through the goal runtime; an empty snapshot keeps
+        // admission permit-free so the membership slot is what the case pins.
+        mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue({
+          getSnapshot: () => emptyGoalSnapshot(),
+          permitForTurn: vi.fn(() => ({
+            goalId: 'membership-goal',
+            revision: 1,
+            turnId: 'membership-turn',
+          })),
+          beginTurn: vi.fn(() => undefined),
+          finishTurn: vi.fn().mockResolvedValue(undefined),
+          subscribe: vi.fn(() => vi.fn()),
+        } as unknown as GoalRuntime);
 
-        for (const [type, expectedMembership] of [
-          [SendMessageType.UserQuery, true],
-          [SendMessageType.Retry, true],
-          [SendMessageType.ToolResult, true],
-          [SendMessageType.Notification, false],
-          [SendMessageType.Teammate, false],
+        for (const [type, expectedMembership, extraOptions] of [
+          [SendMessageType.UserQuery, true, {}],
+          [SendMessageType.Retry, true, {}],
+          [SendMessageType.ToolResult, true, {}],
+          [SendMessageType.Cron, true, {}],
+          [
+            SendMessageType.Goal,
+            true,
+            {
+              goalPermit: {
+                goalId: 'membership-goal',
+                revision: 1,
+                turnId: 'membership-turn',
+              },
+            },
+          ],
+          [SendMessageType.Hook, true, {}],
+          [SendMessageType.Steer, true, {}],
+          [SendMessageType.Notification, false, {}],
+          [SendMessageType.Teammate, false, {}],
         ] as const) {
-          await run([{ text: 'my prompt' }], 'session########6', { type });
+          await run([{ text: 'my prompt' }], 'session########6', {
+            type,
+            ...extraOptions,
+          });
           expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(
             expectedMembership,
           );
@@ -12931,6 +12962,39 @@ Other open files:
           type: SendMessageType.Hook,
         });
         expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+      });
+
+      it('bounds the background-interaction registry FIFO (R8-F11)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // Register one more background id than the bound retains. The oldest
+        // id is evicted FIFO, mirroring stopHookChains; its continuations have
+        // long drained by the time MAX newer interactions have registered.
+        for (let i = 0; i <= MAX_BACKGROUND_INTERACTION_PROMPT_IDS; i++) {
+          await run([{ text: 'notify' }], `session########bg-${i}`, {
+            type: SendMessageType.Notification,
+          });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+        }
+
+        // The newest registered id still excludes its unflagged continuation.
+        await run(
+          [{ text: 'continue' }],
+          `session########bg-${MAX_BACKGROUND_INTERACTION_PROMPT_IDS}`,
+          {
+            type: SendMessageType.Hook,
+          },
+        );
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The evicted oldest id no longer excludes a continuation under it.
+        await run([{ text: 'continue' }], 'session########bg-0', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
       });
 
       it('restores stripped retry entries when only a concurrent send pushes', async () => {

@@ -90,13 +90,21 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     a registry of their prompt ids (`backgroundInteractionPromptIds`): the
     background flag/messageType is only on the first send, so their unflagged
     ToolResult/Hook/Steer continuations must be excluded by prompt id too, or
-    they would rotate the live turn's key. The CLI advances the prompt counter
-    whenever a `Notification` or `Goal` mints a fresh id, so these ids are unique
-    and a registered id is never reused by a foreground turn (R6-1/R7-1 root
-    fix); entries persist for the session, avoiding a too-early clear while a
-    continuation drains. A `Goal` turn is a ledger member (not registered), but
-    its minted id is likewise unique, so a fallback it exhausts cannot be skipped
-    by a later user turn that never tried it.
+    they would rotate the live turn's key. Every registered id is unique: the
+    CLI advances a monotonic prompt-id **mint counter** whenever a top-level turn
+    mints a fresh id — user query, cron, teammate, `Notification`, `Goal` and
+    `Retry` alike — so a registered id is never reused by a foreground turn
+    (R6-1/R7-1/R8-F1 root fix). The mint counter is decoupled from the
+    user-visible `Prompts` statistic (`userPromptCount`, advanced only for
+    user-initiated turns), so background mints do not inflate `/stats`, the
+    feedback threshold or the tip cadence (R8-F3). The registry is bounded FIFO
+    like `stopHookChains`, evicting only ids whose continuations have long
+    drained (R8-F11). In the headless CLI a teammate turn mints its own id and a
+    later foreground turn restores the base id once the teammate turn ends, so
+    the registered teammate id cannot drop later foreground sends (R8-F2). A
+    `Goal` turn is a ledger member (not registered), but its minted id is
+    likewise unique, so a fallback it exhausts cannot be skipped by a later user
+    turn that never tried it.
     `Turn` takes it as a constructor parameter (default unset) and
     forwards it to the send options only when set. `turnModelRound` builds its
     `Turn` without it because every production caller is a background round (the
@@ -206,6 +214,16 @@ reversible; a later PR can flip the default once nightly evidence is in.
 - Internal background sends neither wipe the live turn's consumed state nor
   fail on a skipped fallback; an explicit Retry the primary serves still
   re-probes consumed fallbacks (regression cases in `llm-chat.test.ts`).
+- The id-uniqueness premise every registry-based exclusion rests on is pinned:
+  each minting top-level turn (user query, cron, teammate, Notification, Goal,
+  Retry) advances the mint counter so the next minted id differs; the mint
+  counter is decoupled from the user-visible Prompts statistic; the registry is
+  bounded FIFO; and a headless foreground turn after a teammate turn restores
+  the base id (R8-F1/F2/F3/F11 cases in `use-llm-stream.test.tsx`,
+  `client.test.ts`, `nonInteractiveCli.test.ts`).
+- The primary is still attempted each request even when the ledger marks it
+  unavailable, and the MODEL_FALLBACK ordinal counts only attempted fallbacks
+  across a ledger skip (R8-F9/F10 cases in `llm-chat.test.ts`).
 - Config pins the false default, a stable lazy service instance, and that
   derived Configs (via `deriveConfig`) share the session ledger through the
   prototype chain once the session has created it.
