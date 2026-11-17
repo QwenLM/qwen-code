@@ -4423,7 +4423,8 @@ class QwenHostedHarnessConnectorTest {
         when(client.loadSession(any())).thenReturn(stale, fresh);
         var vanished = harnessRefusal(404, "hosted_session_not_found");
         when(client.submitTurn(any())).thenAnswer(call -> {
-            if (ReflectionTestUtils.getField(call.getArgument(0), "session") == stale) {
+            SubmitHarnessTurn turn = call.getArgument(0);
+            if (ReflectionTestUtils.getField(turn, "session") == stale) {
                 throw vanished;
             }
             return mock(PromptReceipt.class);
