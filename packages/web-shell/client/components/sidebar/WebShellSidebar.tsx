@@ -578,6 +578,7 @@ interface WebShellSidebarProps {
   onLoadSession: (
     sessionId: string,
     workspaceCwd?: string,
+    artifactCount?: number,
   ) => Promise<void> | void;
   /**
    * Opens a session listed by a fan-out host group (#13727): the caller
@@ -3777,7 +3778,7 @@ export function WebShellSidebar({
   );
 
   const handleLoadSession = useCallback(
-    (sessionId: string, workspaceCwd?: string) => {
+    (sessionId: string, workspaceCwd?: string, artifactCount?: number) => {
       const sessionIdentity = getSessionIdentity(
         sessionId,
         workspaceCwd || primaryWorkspaceCwd,
@@ -3796,7 +3797,7 @@ export function WebShellSidebar({
       setSessionBusy(sessionId, true, workspaceCwd);
       void (async () => {
         try {
-          await onLoadSession(sessionId, workspaceCwd);
+          await onLoadSession(sessionId, workspaceCwd, artifactCount);
         } catch (err) {
           if (!isAbortError(err)) {
             onError(err, t('sidebar.switchFailed'));
@@ -5709,7 +5710,12 @@ export function WebShellSidebar({
           onSelectCurrentSession?.();
         } else if (recent) recent.onOpen();
         else if (standalone) standalone.onOpen();
-        else handleLoadSession(session.sessionId, session.workspaceCwd);
+        else
+          handleLoadSession(
+            session.sessionId,
+            session.workspaceCwd,
+            session.artifactCount,
+          );
       };
       const sessionWorkActive =
         !session.hasActivePrompt && session.activeWorkState === 'active';
@@ -7346,7 +7352,11 @@ export function WebShellSidebar({
           }}
           onSelect={({ session, workspaceCwd }) => {
             if (workspaceCwd)
-              handleLoadSession(session.sessionId, workspaceCwd);
+              handleLoadSession(
+                session.sessionId,
+                workspaceCwd,
+                session.artifactCount,
+              );
             else
               void Promise.resolve(
                 onLoadStandaloneSession?.(
@@ -9059,6 +9069,7 @@ export function WebShellSidebar({
                               handleLoadSession(
                                 session.sessionId,
                                 entry.workspaceCwd,
+                                session.artifactCount,
                               );
                             else
                               void Promise.resolve(

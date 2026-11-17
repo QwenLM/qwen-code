@@ -894,6 +894,8 @@ describe('getConnectionAfterSessionClear', () => {
           },
         ],
         restoredArtifactsSessionId: 'session-a',
+        artifactCountHint: 3,
+        artifactCountHintSessionId: 'session-a',
         backgroundTurn: {
           turnId: 'background-a',
           taskId: 'task-a',
@@ -931,6 +933,8 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('goalState');
     expect(next).not.toHaveProperty('restoredArtifacts');
     expect(next).not.toHaveProperty('restoredArtifactsSessionId');
+    expect(next).not.toHaveProperty('artifactCountHint');
+    expect(next).not.toHaveProperty('artifactCountHintSessionId');
     expect(next).not.toHaveProperty('backgroundTurn');
     expect(next).not.toHaveProperty('finishedBackgroundTurnId');
     expect(next).not.toHaveProperty('supportedCommands');
@@ -3641,6 +3645,48 @@ describe('createDaemonSessionActions', () => {
       requestTimeoutMs: 70_000,
     });
     expect(getConnection().goalState).toBeUndefined();
+  });
+
+  it('commits the click-time artifact count hint keyed to the target session', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        artifactCountHint: 9,
+        artifactCountHintSessionId: 'session-a',
+      },
+      session: existingSession,
+    });
+
+    void actions
+      .loadSession('session-b', { artifactCountHint: 4 })
+      .catch(() => undefined);
+
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+  });
+
+  it('clears a stale artifact count hint when the target has none', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        artifactCountHint: 9,
+        artifactCountHintSessionId: 'session-a',
+      },
+      session: existingSession,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(getConnection().artifactCountHint).toBeUndefined();
+    expect(getConnection().artifactCountHintSessionId).toBeUndefined();
   });
 
   it('drops workspace previews when switching to a standalone target', () => {
