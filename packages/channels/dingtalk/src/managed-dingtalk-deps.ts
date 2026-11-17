@@ -21,6 +21,13 @@ import { isRetryableDingtalkStatus } from './interactive-card-client.js';
 import { ROBOT_MESSAGE_HOSTS } from './DingtalkAdapter.js';
 
 const WEBHOOK_TIMEOUT_MS = 30_000;
+// One aggregate ceiling for a whole ledger segment, layered on the per-chunk
+// budgets. Heading-dense markdown splits a 48 KiB segment into 24 chunks, so
+// per-chunk budgets alone let one send run 12 minutes — past the control
+// plane's 10-minute claim lease, which reconciles the claim to unknown while
+// the tail is still being delivered. Half the lease leaves room for the rest
+// of the claim; the in-flight chunk still gets its own full budget on top.
+const WEBHOOK_SEGMENT_TIMEOUT_MS = 300_000;
 const RECONNECT_RETRY_MS = 5_000;
 // The SDK's connect() resolves when the WebSocket is *constructed*, not when it
 // opens, and getEndpoint() has no timeout. Bound the whole attempt so a blocked
@@ -252,6 +259,13 @@ async function sendWebhook(
   ) {
     throw webhookFailure('DingTalk webhook URL rejected.', true);
   }
+  // A flag rather than a second abort: the ceiling ends the batch between
+  // chunks, never tears down an in-flight request that still has its own
+  // budget. Monotonic, so a wall-clock jump cannot expire a healthy send.
+  let segmentExpired = false;
+  const segmentTimer = setTimeout(() => {
+    segmentExpired = true;
+  }, WEBHOOK_SEGMENT_TIMEOUT_MS);
   // In a proxy-only egress the reply must still leave: route this send through
   // the resolved proxy with a per-send dispatcher (the Legacy sender's shape),
   // destroyed afterwards so it never leaks. Only the webhook send is proxied —
@@ -277,6 +291,14 @@ async function sendWebhook(
     // send mid-batch, settling the tail unknown (#17173 R10).
     let delivered = 0;
     for (const chunk of splitChunks(text)) {
+      if (segmentExpired) {
+        // The tail is unsent and the provider's state for it is unknown, so
+        // the segment settles unknown (re-drivable), never rejected.
+        throw webhookFailure(
+          'DingTalk webhook send exceeded the segment budget; the send outcome is unknown.',
+          false,
+        );
+      }
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), WEBHOOK_TIMEOUT_MS);
       try {
@@ -297,6 +319,7 @@ async function sendWebhook(
       }
     }
   } finally {
+    clearTimeout(segmentTimer);
     await dispatcher?.destroy().catch(() => undefined);
   }
 }
