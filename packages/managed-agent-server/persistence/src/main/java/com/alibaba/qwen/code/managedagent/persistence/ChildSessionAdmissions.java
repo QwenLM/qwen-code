@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -33,14 +32,12 @@ final class ChildSessionAdmissions {
     private final JdbcManagedExtensionRecordStore configRecords;
     private final ManagedSessionModelConfigs modelConfigs;
     private final JdbcManagedSessionSkills creationSkills;
-    private final ResidentWorkspaces residentWorkspaces;
     private final boolean workspaceFilesEnabled;
 
     ChildSessionAdmissions(JdbcTemplate jdbc, Clock clock, AgentStoreRows storeRows,
             AgentEventJournal eventJournal, AgentSessionCommands sessionCommands,
             JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
-            JdbcManagedSessionSkills creationSkills, ResidentWorkspaces residentWorkspaces,
-            boolean workspaceFilesEnabled) {
+            JdbcManagedSessionSkills creationSkills, boolean workspaceFilesEnabled) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.storeRows = storeRows;
@@ -49,7 +46,6 @@ final class ChildSessionAdmissions {
         this.configRecords = configRecords;
         this.modelConfigs = modelConfigs;
         this.creationSkills = creationSkills;
-        this.residentWorkspaces = residentWorkspaces;
         this.workspaceFilesEnabled = workspaceFilesEnabled;
     }
 
@@ -98,8 +94,8 @@ final class ChildSessionAdmissions {
         }
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
-        if (parent.workspace() == null || residentWorkspaces.find(parent.workspace()) != null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
+                || WorkspaceToolProfiles.EXTERNAL_FILES.equals(parent.toolProfile())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
