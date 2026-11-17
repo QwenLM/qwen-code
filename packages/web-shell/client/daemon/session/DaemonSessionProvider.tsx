@@ -4159,6 +4159,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
+              // A `/send` exchange is recorded here without a turn here, so
+              // it never says this session is working.
+              const turnEvents = uiEvents.filter(
+                (e) => !isSentExchangeEvent(e),
+              );
               if (
                 event.type === 'model_switched' &&
                 isRecord(event.data) &&
@@ -4182,8 +4187,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               if (
                 recoveryEventCurrent &&
                 (event.type === 'pending_prompt_started' ||
-                  hasActiveGenerationSignal(uiEvents) ||
-                  uiEvents.some((item) => item.type === 'user.text.delta'))
+                  hasActiveGenerationSignal(turnEvents) ||
+                  turnEvents.some((item) => item.type === 'user.text.delta'))
               ) {
                 advanceSessionRecoveryGeneration(
                   sessionRecoveryGenerationRef.current,
@@ -4320,8 +4325,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ? activeProductSessionContext.cwd
                   : undefined,
               );
-              if (uiEvents.length > 0) {
-                const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
+              if (turnEvents.length > 0) {
+                const hasGenerationSignal =
+                  hasActiveGenerationSignal(turnEvents);
                 setPromptStatus((current) =>
                   current === 'waiting' ||
                   (current === 'idle' && hasGenerationSignal)
@@ -4480,10 +4486,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 !activePromptSettled &&
                 !restoredPromptSettled &&
                 !hasSessionActivePrompt();
-              // A `/send` exchange is recorded here without a turn here.
-              const turnEvents = uiEvents.filter(
-                (e) => !isSentExchangeEvent(e),
-              );
               if (isObserver) {
                 const hasUserMsg = turnEvents.some(
                   (e) => e.type === 'user.text.delta',
