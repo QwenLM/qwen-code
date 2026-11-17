@@ -2499,6 +2499,9 @@ export interface SubSessionSpawnRequest {
    * absent means the caller's workspace. */
   workspace?: string;
   workspaceGeneration?: string;
+  /** A sub-session this caller created earlier, to send the prompt to
+   * instead of creating one. It lives in `workspace`. */
+  sessionId?: string;
 }
 
 export interface SubSessionWorkspaceBinding {
