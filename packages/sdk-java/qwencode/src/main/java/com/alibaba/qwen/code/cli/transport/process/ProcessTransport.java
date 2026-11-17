@@ -183,9 +183,11 @@ public class ProcessTransport implements Transport {
     @Override
     public void inputNoWaitResponse(String message) throws IOException {
         log.debug("input message to process: {}", message);
-        processInput.write(message);
-        processInput.newLine();
-        processInput.flush();
+        synchronized (processInput) {
+            processInput.write(message);
+            processInput.newLine();
+            processInput.flush();
+        }
     }
 
     private void startErrorReading() {
