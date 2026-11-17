@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -102,18 +102,39 @@ export function useShellHistory(
 ): UseShellHistoryReturn {
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
-  const [historyFilePath, setHistoryFilePath] = useState<string | null>(null);
+  const historyRef = useRef<string[]>([]);
+  const historyFilePath = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    historyRef.current = [];
+    historyFilePath.current = null;
+    setHistory([]);
+    setHistoryIndex(-1);
 
     async function loadHistory() {
       const filePath = await getHistoryFilePath(projectRoot, storage);
       if (cancelled) return;
-      setHistoryFilePath(filePath);
       const loadedHistory = await readHistoryFile(filePath);
       if (!cancelled) {
-        setHistory(loadedHistory.reverse()); // Newest first
+        const pendingHistory = historyRef.current;
+        const savedHistory = loadedHistory.reverse(); // Newest first
+        const mergedHistory = pendingHistory.length
+          ? [
+              ...pendingHistory,
+              ...savedHistory.filter(
+                (command) => !pendingHistory.includes(command),
+              ),
+            ]
+              .slice(0, MAX_HISTORY_LENGTH)
+              .filter(Boolean)
+          : savedHistory;
+        historyRef.current = mergedHistory;
+        historyFilePath.current = filePath;
+        setHistory(mergedHistory);
+        if (pendingHistory.length) {
+          writeHistoryFile(filePath, [...mergedHistory].reverse());
+        }
       }
     }
     loadHistory();
@@ -123,21 +144,24 @@ export function useShellHistory(
     };
   }, [projectRoot, storage]);
 
-  const addCommandToHistory = useCallback(
-    (command: string) => {
-      if (!command.trim() || !historyFilePath) {
-        return;
-      }
-      const newHistory = [command, ...history.filter((c) => c !== command)]
-        .slice(0, MAX_HISTORY_LENGTH)
-        .filter(Boolean);
-      setHistory(newHistory);
+  const addCommandToHistory = useCallback((command: string) => {
+    if (!command.trim()) {
+      return;
+    }
+    const newHistory = [
+      command,
+      ...historyRef.current.filter((c) => c !== command),
+    ]
+      .slice(0, MAX_HISTORY_LENGTH)
+      .filter(Boolean);
+    historyRef.current = newHistory;
+    setHistory(newHistory);
+    if (historyFilePath.current) {
       // Write to file in reverse order (oldest first)
-      writeHistoryFile(historyFilePath, [...newHistory].reverse());
-      setHistoryIndex(-1);
-    },
-    [history, historyFilePath],
-  );
+      writeHistoryFile(historyFilePath.current, [...newHistory].reverse());
+    }
+    setHistoryIndex(-1);
+  }, []);
 
   const getPreviousCommand = useCallback(() => {
     if (history.length === 0) {

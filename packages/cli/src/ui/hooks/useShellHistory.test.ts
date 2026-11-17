@@ -11,6 +11,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
+import type { Storage } from '@qwen-code/qwen-code-core';
 
 vi.mock('fs/promises', () => ({
   readFile: vi.fn(),
@@ -65,6 +66,16 @@ const MOCKED_HISTORY_DIR = path.join(
   MOCKED_PROJECT_HASH,
 );
 const MOCKED_HISTORY_FILE = path.join(MOCKED_HISTORY_DIR, 'shell_history');
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
 
 describe('useShellHistory', () => {
   const mockedFs = vi.mocked(fs);
@@ -149,6 +160,134 @@ describe('useShellHistory', () => {
       command = result.current.getPreviousCommand();
     });
     expect(command).toBe('new_command');
+  });
+
+  it('keeps commands entered before the history path is ready', async () => {
+    mockedFs.readFile.mockResolvedValue(JSON.stringify(['saved command']));
+    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+
+    act(() => {
+      result.current.addCommandToHistory('new command');
+    });
+
+    await waitFor(() => {
+      expect(result.current.history).toEqual(['new command', 'saved command']);
+      expect(mockedFs.writeFile).toHaveBeenCalledWith(
+        MOCKED_HISTORY_FILE,
+        JSON.stringify(['saved command', 'new command']),
+      );
+    });
+  });
+
+  it('merges commands entered during the initial read before writing', async () => {
+    const read = deferred<string>();
+    mockedFs.readFile.mockReturnValue(read.promise);
+    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+
+    await act(async () => {
+      result.current.addCommandToHistory('new command');
+    });
+    expect(result.current.history).toEqual(['new command']);
+    expect(mockedFs.writeFile).not.toHaveBeenCalled();
+
+    await act(async () => {
+      read.resolve(JSON.stringify(['saved command']));
+    });
+
+    expect(result.current.history).toEqual(['new command', 'saved command']);
+    expect(mockedFs.writeFile).toHaveBeenCalledExactlyOnceWith(
+      MOCKED_HISTORY_FILE,
+      JSON.stringify(['saved command', 'new command']),
+    );
+  });
+
+  it('deduplicates and caps commands merged with a pending initial read', async () => {
+    const read = deferred<string>();
+    mockedFs.readFile.mockReturnValue(read.promise);
+    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+
+    act(() => {
+      result.current.addCommandToHistory('new command');
+      result.current.addCommandToHistory('old_cmd_0');
+      result.current.addCommandToHistory('new command');
+    });
+    const saved = Array.from({ length: 120 }, (_, i) => `old_cmd_${i}`);
+    await act(async () => {
+      read.resolve(JSON.stringify(saved));
+    });
+
+    const expected = [
+      'new command',
+      'old_cmd_0',
+      ...saved.slice(1).reverse(),
+    ].slice(0, 100);
+    expect(result.current.history).toEqual(expected);
+    expect(mockedFs.writeFile).toHaveBeenCalledExactlyOnceWith(
+      MOCKED_HISTORY_FILE,
+      JSON.stringify([...expected].reverse()),
+    );
+  });
+
+  it('saves pending commands when no history file exists yet', async () => {
+    const read = deferred<string>();
+    mockedFs.readFile.mockReturnValue(read.promise);
+    const { result } = renderHook(() => useShellHistory(MOCKED_PROJECT_ROOT));
+    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalled());
+    act(() => {
+      result.current.addCommandToHistory('first command');
+    });
+
+    await act(async () => {
+      read.reject(
+        Object.assign(new Error('Missing history'), { code: 'ENOENT' }),
+      );
+    });
+
+    expect(result.current.history).toEqual(['first command']);
+    expect(mockedFs.writeFile).toHaveBeenCalledExactlyOnceWith(
+      MOCKED_HISTORY_FILE,
+      JSON.stringify(['first command']),
+    );
+  });
+
+  it('does not merge a cancelled initial read into a new workspace', async () => {
+    const firstRead = deferred<string>();
+    const secondRead = deferred<string>();
+    const secondPath = path.join('/other/project', 'shell_history');
+    mockedFs.readFile
+      .mockReturnValueOnce(firstRead.promise)
+      .mockReturnValueOnce(secondRead.promise);
+    const { result, rerender } = renderHook(
+      ({ root, storage }) => useShellHistory(root, storage),
+      {
+        initialProps: {
+          root: MOCKED_PROJECT_ROOT,
+          storage: undefined as Storage | undefined,
+        },
+      },
+    );
+    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalledTimes(1));
+    act(() => result.current.addCommandToHistory('first pending'));
+
+    rerender({
+      root: '/other/project',
+      storage: { getHistoryFilePath: () => secondPath } as Storage,
+    });
+    await waitFor(() => expect(mockedFs.readFile).toHaveBeenCalledTimes(2));
+    act(() => result.current.addCommandToHistory('second pending'));
+    await act(async () => firstRead.resolve(JSON.stringify(['first saved'])));
+
+    expect(result.current.history).toEqual(['second pending']);
+    expect(mockedFs.writeFile).not.toHaveBeenCalled();
+    await act(async () => secondRead.resolve(JSON.stringify(['second saved'])));
+
+    expect(result.current.history).toEqual(['second pending', 'second saved']);
+    expect(mockedFs.writeFile).toHaveBeenCalledExactlyOnceWith(
+      secondPath,
+      JSON.stringify(['second saved', 'second pending']),
+    );
   });
 
   it('should preserve multi-line commands after reloading history', async () => {
