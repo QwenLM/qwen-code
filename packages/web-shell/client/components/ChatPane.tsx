@@ -58,8 +58,10 @@ import {
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
+import { ReportedArtifactRegistration } from './ReportedArtifactRegistration';
 import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
+import { isNamedSubSessionApproval } from '../adapters/toolClassification';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type {
@@ -427,7 +429,7 @@ export function ChatPane({
     connection.sessionId,
     connectionGoalComplete,
   ]);
-  const { artifacts } = useSessionArtifacts();
+  const { artifacts, hydrated, refresh } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
     (tool: ACPToolCall, parentSessionId = connection.sessionId) => {
       if (
@@ -969,6 +971,7 @@ export function ChatPane({
           !enabled &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
+          !isNamedSubSessionApproval(approval) &&
           (modeId === 'yolo' ||
             (modeId === 'auto-edit' && approval.toolKind === 'edit'))
         ) {
@@ -1750,6 +1753,14 @@ export function ChatPane({
       aria-current={isActive ? 'location' : undefined}
       aria-label={headerLabel}
     >
+      {/* Each pane runs under its own DaemonSessionProvider, so App's
+          registration mount only covers the main session; register this
+          pane's reported artifacts here. */}
+      <ReportedArtifactRegistration
+        registered={artifacts}
+        hydrated={hydrated}
+        refresh={refresh}
+      />
       {goalEditOpen && connection.goalState?.goal && (
         <GoalEditDialog
           objective={connection.goalState.goal.objective}
@@ -2066,6 +2077,7 @@ export function ChatPane({
                   onPause={() => runGoalControl('pause')}
                   onResume={() => runGoalControl('resume')}
                   onClear={() => runGoalControl('clear')}
+                  onOpenGoals={onOpenGoals}
                 />
               )}
             </div>

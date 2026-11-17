@@ -180,7 +180,10 @@ import {
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
-import { registerGoalsRoutes } from './routes/goals.js';
+import {
+  registerGoalsRoutes,
+  registerWorkspaceQualifiedGoalsRoutes,
+} from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
 import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
 import {
@@ -3948,6 +3951,12 @@ export function createServeApp(
     bridge: primaryBridge,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  // The qualified listing lets a multi-workspace Web Shell aggregate every
+  // registered project's goals, not just the primary's.
+  registerWorkspaceQualifiedGoalsRoutes(app, {
+    workspaceRegistry,
+    conversationRuntimeActivity,
   });
 
   // The primary workspace's /autofix-pr watches, read from the clone's files

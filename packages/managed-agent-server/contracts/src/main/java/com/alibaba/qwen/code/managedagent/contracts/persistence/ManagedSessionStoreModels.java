@@ -10,6 +10,7 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 import java.util.List;
+import java.util.Set;
 
 public final class ManagedSessionStoreModels {
     public static final String WRITER_TOKEN_HEADER =
@@ -74,6 +75,51 @@ public final class ManagedSessionStoreModels {
             case "managed-agent-skills" -> MAX_AGENT_SKILLS_BYTES;
             case "hosted-model-request" -> MAX_MODEL_REQUEST_BYTES;
             default -> MAX_INLINE_RESOURCE_BYTES;
+        };
+    }
+
+    /** The extension-package kinds a package child inherits from its
+     * parent's active configuration. {@code publishInheritedExtensionResource}
+     * copies exactly these into the child Session, reusing the parent's
+     * resource ids. */
+    public static final Set<String> INHERITED_EXTENSION_KINDS = Set.of(
+            "managed-extension-config-bundle",
+            "managed-extension-contributions",
+            "managed-extension-contributions-part");
+
+    /**
+     * Whether a PUBLISHED row is already this Session's committed terminal
+     * resource, and the most bytes that verdict may cover for its kind.
+     *
+     * <p>Agent configuration and inherited extension packages are published
+     * once and stay PUBLISHED for the Session's whole life:
+     * {@code JournalResourceWrites.publishAgentResource} writes that state and
+     * no writer promotes these kinds to REFERENCED. Every reader of a
+     * committed resource therefore has to answer the same question the same
+     * way, under the same bounds — the transaction verifier, the record
+     * reader's SQL and the owner read all consult this one predicate rather
+     * than keeping their own copies of the whitelist.
+     *
+     * <p>Null for every other kind: those still have to reach REFERENCED, and
+     * the tool-result kinds keep their own separate bounds in
+     * {@code JournalStoreRows.toolResultLimit}.
+     */
+    public static Integer publishedConfigurationByteLimit(String kind) {
+        if (kind == null) {
+            return null;
+        }
+        // One copy of the inherited whitelist: restating the three names in
+        // the switch below let the two drift apart, which is the defect
+        // INHERITED_EXTENSION_KINDS exists to prevent.
+        if (INHERITED_EXTENSION_KINDS.contains(kind)) {
+            return MAX_INLINE_RESOURCE_BYTES;
+        }
+        return switch (kind) {
+            // Instructions may legitimately be empty; the publisher writes
+            // whatever the definition carries, including no bytes at all.
+            case "managed-agent-instructions" -> MAX_AGENT_INSTRUCTIONS_BYTES;
+            case "managed-agent-skills" -> MAX_AGENT_SKILLS_BYTES;
+            default -> null;
         };
     }
 

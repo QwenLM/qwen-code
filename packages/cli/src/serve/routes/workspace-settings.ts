@@ -100,6 +100,7 @@ const WEB_SHELL_SETTINGS = new Set([
   // this same route.
   'memory.enableManagedAutoMemory',
   'memory.enableManagedAutoDream',
+  'worktree.defaultForNewSessions',
 ]);
 
 const LIVE_WEB_SHELL_SETTINGS = [

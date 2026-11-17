@@ -153,6 +153,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed progressive workspace artifact query with session summaries',
   ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
+  generated_ui_state: NO_MANAGED_EQUIVALENT(
+    'no Managed Generated UI view state store',
+  ),
   slow_client_warning: LEGACY_ONLY(
     'SSE backpressure is a legacy transport knob',
   ),
@@ -400,6 +403,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed GitHub setup route',
   ),
   workspace_github_prs: NO_MANAGED_EQUIVALENT('no Managed GitHub PRs route'),
+  workspace_github_pr_files: NO_MANAGED_EQUIVALENT(
+    'no Managed GitHub PR files route',
+  ),
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
   ),
@@ -572,6 +578,8 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed worktrees',
   ),
   session_worktree_reset_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
+  session_worktree_branch_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
+  session_worktree_handoff_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
   workspace_qualified_acp: LEGACY_ONLY('no ACP in Managed'),
   client_mcp_over_ws: NO_MANAGED_EQUIVALENT(
     'no client-hosted MCP over the Managed transport',
@@ -640,6 +648,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'RUNTIME_NODE_LIST',
   // Loopback operator registration has no client capability.
   'EXTERNAL_STORAGE_REGISTER',
+  'EXTERNAL_WORKSPACE_MATERIALIZE',
   // Internal relay MCP leg the Hosted Harness connects back to, behind the
   // relay credential, never a client capability.
   'INTERNAL_CLIENT_FILES_MCP',

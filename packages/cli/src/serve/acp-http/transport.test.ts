@@ -6591,7 +6591,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ) as
         | {
             result?: {
-              prs?: Array<{ number: number; url: string; state?: string }>;
+              prs?: Array<{
+                number: number;
+                url: string;
+                state?: string;
+                source?: string;
+              }>;
             };
           }
         | undefined;
@@ -6603,6 +6608,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           number: 9101,
           url: 'https://github.com/o/r/pull/9101',
           state: 'merged',
+          source: 'create',
         },
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation

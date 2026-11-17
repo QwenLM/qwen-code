@@ -353,6 +353,59 @@ describe('sidebar session selection', () => {
     act(() => click(button('Select sessions')));
   }
 
+  async function selectWorkspaceFilter(label: string): Promise<void> {
+    await act(async () => click(button('Display options'), true));
+    const workspaceTrigger = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.startsWith('Workspace'));
+    expect(workspaceTrigger).toBeDefined();
+    await act(async () => {
+      workspaceTrigger!.focus();
+      workspaceTrigger!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+      );
+    });
+    const option = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ).find((item) => item.textContent === label);
+    expect(option).toBeDefined();
+    await act(async () => click(option!, true));
+    await flushSidebar();
+  }
+
+  it('clears the selection when the workspace filter changes', async () => {
+    await enterSelection();
+    act(() => click(selection('First session')));
+    const archive = action('Archive');
+    const workspaceCatalog = [
+      {
+        id: 'primary',
+        cwd: '/tmp/project',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary',
+        cwd: '/tmp/other',
+        primary: false,
+        trusted: true,
+      },
+    ];
+    connection.capabilities = {
+      ...connection.capabilities!,
+      workspaces: workspaceCatalog,
+    };
+    workspace.capabilities = connection.capabilities;
+    renderSidebar({ workspaces: workspaceCatalog });
+    await flushSidebar();
+    await selectWorkspaceFilter('other');
+    expect(button('Select sessions').getAttribute('aria-pressed')).toBe(
+      'false',
+    );
+    expect(archive.isConnected).toBe(false);
+    expect(archiveSelections).not.toHaveBeenCalled();
+  });
+
   it('counts selected sessions without navigating and clears them on exit', async () => {
     await enterSelection();
     expect(action('Pin').disabled).toBe(true);

@@ -36,7 +36,7 @@ export { getDaemonTelemetryInboundTraceId } from './telemetry-context.js';
 type LegacySessionTelemetryAttribution = 'handler_resolved' | 'pre_resolved';
 
 interface LegacySessionTelemetryRoute {
-  method: 'DELETE' | 'GET' | 'PATCH' | 'POST';
+  method: 'DELETE' | 'GET' | 'PATCH' | 'POST' | 'PUT';
   path: string;
   attribution: LegacySessionTelemetryAttribution;
   route: string;
@@ -78,6 +78,18 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/worktree-reset',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/worktree-reset',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/worktree-branch',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/worktree-branch',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/worktree-handoff',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/worktree-handoff',
   },
   {
     method: 'POST',
@@ -258,6 +270,18 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/sources/:sourceId',
     attribution: 'handler_resolved',
     route: 'DELETE /session/:id/sources/:sourceId',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/generated-ui/state/:cardId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/generated-ui/state/:cardId',
+  },
+  {
+    method: 'PUT',
+    path: '/session/:id/generated-ui/state/:cardId',
+    attribution: 'handler_resolved',
+    route: 'PUT /session/:id/generated-ui/state/:cardId',
   },
   {
     method: 'POST',

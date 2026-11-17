@@ -51,7 +51,7 @@ async function install(
     channelsFail?: boolean;
     contactsFail?: boolean;
     deferPrimaryContacts?: boolean;
-    configuredWebhook?: 'dingtalk-webhook' | 'feishu-webhook';
+    configuredWebhook?: 'dingtalk-webhook' | 'feishu-webhook' | 'wecom-webhook';
   } = {},
 ) {
   const scenario = createWebShellDaemonScenario({
@@ -98,9 +98,11 @@ async function install(
             {
               type: options.configuredWebhook,
               displayName:
-                options.configuredWebhook === 'feishu-webhook'
-                  ? 'Feishu Webhook'
-                  : 'DingTalk Webhook',
+                options.configuredWebhook === 'wecom-webhook'
+                  ? 'WeCom Webhook'
+                  : options.configuredWebhook === 'feishu-webhook'
+                    ? 'Feishu Webhook'
+                    : 'DingTalk Webhook',
               manageable: true,
               fields: [],
               outboundOnly: true,
@@ -274,7 +276,7 @@ async function useConfiguredDestination(
   page: Page,
   baseURL: string,
   info: TestInfo,
-  type: 'dingtalk-webhook' | 'feishu-webhook',
+  type: 'dingtalk-webhook' | 'feishu-webhook' | 'wecom-webhook',
 ) {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
@@ -355,7 +357,11 @@ async function useConfiguredDestination(
   expect(errors).toEqual([]);
 }
 
-for (const type of ['dingtalk-webhook', 'feishu-webhook'] as const) {
+for (const type of [
+  'dingtalk-webhook',
+  'feishu-webhook',
+  'wecom-webhook',
+] as const) {
   test(`uses a ${type} configured destination without contacts and switches back to manual delivery @smoke`, async ({
     page,
     baseURL,

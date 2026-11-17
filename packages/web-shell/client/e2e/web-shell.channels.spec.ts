@@ -1224,7 +1224,7 @@ test('lists a configured Email channel and hides its inert group controls @smoke
 async function configureWebhook(
   page: Page,
   testInfo: TestInfo,
-  platform: { type: 'dingtalk' | 'feishu'; displayName: string },
+  platform: { type: 'dingtalk' | 'feishu' | 'wecom'; displayName: string },
 ) {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
@@ -1234,6 +1234,7 @@ async function configureWebhook(
   const webhookType = `${platform.type}-webhook`;
   const webhookUrl = `$${platform.type.toUpperCase()}_WEBHOOK_URL`;
   const signingSecret = `$${platform.type.toUpperCase()}_SIGNING_SECRET`;
+  const signed = platform.type !== 'wecom';
   const primaryWorkspaceCwd = '/tmp/qwen-web-shell-e2e';
   const workspaceCwd = '/tmp/qwen-outbound-webhook-secondary';
   const scenario = createWebShellDaemonScenario({
@@ -1287,12 +1288,16 @@ async function configureWebhook(
             required: true,
             envResolvable: true,
           },
-          {
-            key: 'signingSecret',
-            label: 'Signing secret',
-            kind: 'secret',
-            envResolvable: true,
-          },
+          ...(signed
+            ? [
+                {
+                  key: 'signingSecret',
+                  label: 'Signing secret',
+                  kind: 'secret' as const,
+                  envResolvable: true,
+                },
+              ]
+            : []),
         ],
       },
     ],
@@ -1370,8 +1375,14 @@ async function configureWebhook(
     `Choose how this Channel connects to ${platform.displayName}.`,
   );
   await expect(
-    methodDialog.getByRole('button', { name: /^Application bot/ }),
+    methodDialog.getByRole('button', {
+      name: platform.type === 'wecom' ? /^Intelligent bot/ : /^Application bot/,
+    }),
   ).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-methods.png'),
+    animations: 'disabled',
+  });
   await methodDialog
     .getByRole('button', { name: /^Webhook \(send only\)/ })
     .click();
@@ -1395,9 +1406,19 @@ async function configureWebhook(
   );
   await editor.getByLabel('Instance name').fill('notices');
   await editor.getByLabel('Webhook URL', { exact: false }).fill(webhookUrl);
-  await editor
-    .getByLabel('Signing secret', { exact: false })
-    .fill(signingSecret);
+  if (signed) {
+    await editor
+      .getByLabel('Signing secret', { exact: false })
+      .fill(signingSecret);
+  } else {
+    await expect(
+      editor.getByLabel('Signing secret', { exact: false }),
+    ).toHaveCount(0);
+    await expect(editor.getByLabel('Bot ID', { exact: false })).toHaveCount(0);
+    await expect(editor.getByLabel('Bot Secret', { exact: false })).toHaveCount(
+      0,
+    );
+  }
   await page.screenshot({
     path: testInfo.outputPath('outbound-channel-editor.png'),
   });
@@ -1415,10 +1436,9 @@ async function configureWebhook(
     config: { type: webhookType },
     secrets: {
       webhookUrl: { operation: 'replace', value: webhookUrl },
-      signingSecret: {
-        operation: 'replace',
-        value: signingSecret,
-      },
+      ...(signed
+        ? { signingSecret: { operation: 'replace', value: signingSecret } }
+        : {}),
     },
   });
   const card = page
@@ -1438,11 +1458,12 @@ async function configureWebhook(
       (request) =>
         request.method === 'PUT' && request.path.endsWith('/channels/notices'),
     );
-  expect(updates().at(-1)?.body).toMatchObject({
+  expect(updates().at(-1)?.body).toEqual({
+    expectedRevision: expect.any(String),
     config: { type: webhookType },
     secrets: {
       webhookUrl: { operation: 'preserve' },
-      signingSecret: { operation: 'preserve' },
+      ...(signed ? { signingSecret: { operation: 'preserve' } } : {}),
     },
   });
   await card.getByRole('button', { name: 'Edit notices', exact: true }).click();
@@ -1453,14 +1474,21 @@ async function configureWebhook(
   await editor
     .getByLabel('Webhook URL', { exact: false })
     .fill(`${webhookUrl}_V2`);
-  await editor.getByRole('button', { name: 'Clear', exact: true }).click();
+  if (signed) {
+    await editor.getByRole('button', { name: 'Clear', exact: true }).click();
+  } else {
+    await expect(
+      editor.getByRole('button', { name: 'Clear', exact: true }),
+    ).toHaveCount(0);
+  }
   await editor.getByRole('button', { name: 'Save', exact: true }).click();
   await expect(editor).toHaveCount(0);
-  expect(updates().at(-1)?.body).toMatchObject({
+  expect(updates().at(-1)?.body).toEqual({
+    expectedRevision: expect.any(String),
     config: { type: webhookType },
     secrets: {
       webhookUrl: { operation: 'replace', value: `${webhookUrl}_V2` },
-      signingSecret: { operation: 'clear' },
+      ...(signed ? { signingSecret: { operation: 'clear' } } : {}),
     },
   });
   await card.getByRole('button', { name: 'Start', exact: true }).click();
@@ -1492,6 +1520,7 @@ async function configureWebhook(
 for (const platform of [
   { type: 'dingtalk', displayName: 'DingTalk' },
   { type: 'feishu', displayName: 'Feishu' },
+  { type: 'wecom', displayName: 'WeCom' },
 ] as const) {
   test(`configures and starts a ${platform.displayName} webhook method in the selected workspace`, async ({
     page,
