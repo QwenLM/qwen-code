@@ -2335,7 +2335,6 @@ class QwenHostedHarnessConnectorTest {
         QwenHostedHarnessConnector connector = connector(client);
         var added = new CountDownLatch(1);
         var release = new CountDownLatch(1);
-        var cleanup = new CountDownLatch(1);
         java.util.Set<Object> values = java.util.concurrent.ConcurrentHashMap.newKeySet();
         var markers = new java.util.AbstractSet<Object>() {
             @Override
@@ -2353,7 +2352,6 @@ class QwenHostedHarnessConnectorTest {
 
             @Override
             public java.util.Iterator<Object> iterator() {
-                cleanup.countDown();
                 return values.iterator();
             }
 
@@ -2370,7 +2368,6 @@ class QwenHostedHarnessConnectorTest {
             HostedHarnessGenerationException mismatch = mock(HostedHarnessGenerationException.class);
             when(mismatch.getActualBootId()).thenReturn(BOOT_ID);
             var adoption = workers.submit(() -> ReflectionTestUtils.invokeMethod(connector, "adoptGeneration", mismatch));
-            assertThat(cleanup.await(10, TimeUnit.SECONDS)).isTrue();
             adoption.get(10, TimeUnit.SECONDS);
             release.countDown();
             load.get(10, TimeUnit.SECONDS);
@@ -4415,29 +4412,45 @@ class QwenHostedHarnessConnectorTest {
     // process reopened the Session under a new client id) answers
     // hosted_session_not_found: the verb re-attaches once and runs again on
     // the fresh reference, which later verbs reuse.
-    @Test
-    void vanishedAttachmentReattachesOnceAndRetriesTheVerb() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void vanishedAdmissionPassivelyReattachesOnceAndRetriesTheVerb(boolean vanishesAgain) {
         var client = harnessClient();
         var stale = mock(HarnessSessionRef.class);
         var fresh = mock(HarnessSessionRef.class);
-        when(client.loadSession(any())).thenReturn(stale, fresh);
+        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
+        var loads = new java.util.concurrent.atomic.AtomicInteger();
+        when(client.loadSession(any())).thenAnswer(call -> {
+            LoadHarnessSession load = call.getArgument(0);
+            if (loads.getAndIncrement() == 0) {
+                return stale;
+            }
+            if (!Boolean.TRUE.equals(ReflectionTestUtils.getField(load, "passiveManagedRuntimeRecovery"))) {
+                throw harnessRefusal(409, "hosted_session_already_attached");
+            }
+            return fresh;
+        });
         var vanished = harnessRefusal(404, "hosted_session_not_found");
-        when(client.submitTurn(any())).thenAnswer(call -> {
-            SubmitHarnessTurn turn = call.getArgument(0);
-            if (ReflectionTestUtils.getField(turn, "session") == stale) {
+        var body = Map.<String, Object>of("kind", "submit_input");
+        when(client.runChannelOperation(stale, body)).thenThrow(vanished);
+        when(client.runChannelOperation(fresh, body)).thenAnswer(call -> {
+            if (vanishesAgain) {
                 throw vanished;
             }
-            return mock(PromptReceipt.class);
+            return Map.of("accepted", true);
         });
         var connector = connector(client);
+        connector.rename("tenant-a", SESSION_ID, "initial");
 
-        connector.submit("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID, SUBMIT_CONTENT, SUBMIT_DIGEST);
+        if (vanishesAgain) {
+            assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID, body)).isSameAs(vanished);
+        } else {
+            assertThat(connector.runChannelOperation("tenant-a", SESSION_ID, body)).containsEntry("accepted", true);
+        }
         connector.rename("tenant-a", SESSION_ID, "title");
 
-        var sent = ArgumentCaptor.forClass(SubmitHarnessTurn.class);
-        verify(client, times(2)).submitTurn(sent.capture());
-        assertThat(sent.getAllValues()).extracting(turn -> ReflectionTestUtils.getField(turn, "session"))
-                .containsExactly(stale, fresh);
+        verify(client).runChannelOperation(stale, body);
+        verify(client).runChannelOperation(fresh, body);
         verify(client, times(2)).loadSession(any());
         verify(client).updateSessionTitle(fresh, "title");
     }
@@ -4449,36 +4462,35 @@ class QwenHostedHarnessConnectorTest {
         var cached = mock(HarnessSessionRef.class);
         when(client.loadSession(any())).thenReturn(cached);
         var refusal = harnessRefusal(status, code);
-        doThrow(refusal).when(client).updateSessionTitle(cached, "title");
+        var body = Map.<String, Object>of("kind", "submit_input");
+        when(client.runChannelOperation(cached, body)).thenThrow(refusal);
         var connector = connector(client);
+        connector.rename("tenant-a", SESSION_ID, "initial");
 
-        assertThatThrownBy(() -> connector.rename("tenant-a", SESSION_ID, "title")).isSameAs(refusal);
+        assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID, body)).isSameAs(refusal);
         connector.rename("tenant-a", SESSION_ID, "next");
 
         verify(client, times(1)).loadSession(any());
         verify(client).updateSessionTitle(cached, "next");
     }
 
-    // The Harness refusing the re-attachment still does not hold the Session
-    // for this process, so the code callers classify (AutomationScanner)
-    // stays the original one; the stale entry is gone all the same.
-    @Test
-    void aRefusedReattachmentKeepsTheOriginalRefusalAndTheEviction() {
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted_session_closing", "hosted_session_open_busy", "managed_session_writer_conflict"})
+    void aRefusedReattachmentKeepsItsOwnClassification(String code) {
         var client = harnessClient();
         var stale = mock(HarnessSessionRef.class);
-        var fresh = mock(HarnessSessionRef.class);
-        var refusedLoad = harnessRefusal(409, "hosted_session_already_attached");
-        when(client.loadSession(any())).thenReturn(stale).thenThrow(refusedLoad).thenReturn(fresh);
+        var refusedLoad = harnessRefusal(409, code);
+        when(client.loadSession(any())).thenReturn(stale).thenThrow(refusedLoad);
         var vanished = harnessRefusal(404, "hosted_session_not_found");
-        doThrow(vanished).when(client).updateSessionTitle(stale, "title");
+        var body = Map.<String, Object>of("kind", "submit_input");
+        when(client.runChannelOperation(stale, body)).thenThrow(vanished);
         var connector = connector(client);
+        connector.rename("tenant-a", SESSION_ID, "initial");
 
-        assertThatThrownBy(() -> connector.rename("tenant-a", SESSION_ID, "title")).isSameAs(vanished);
-        connector.rename("tenant-a", SESSION_ID, "next");
+        assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID, body)).isSameAs(refusedLoad);
 
-        verify(client, times(3)).loadSession(any());
-        verify(client).updateSessionTitle(fresh, "next");
-        verify(client, never()).updateSessionTitle(stale, "next");
+        verify(client, times(2)).loadSession(any());
+        verify(client).runChannelOperation(stale, body);
     }
 
     @Test
@@ -4487,10 +4499,13 @@ class QwenHostedHarnessConnectorTest {
         var stale = mock(HarnessSessionRef.class);
         var unknown = mock(MutationOutcomeUnknownException.class);
         when(client.loadSession(any())).thenReturn(stale).thenThrow(unknown);
-        doThrow(harnessRefusal(404, "hosted_session_not_found")).when(client).updateSessionTitle(stale, "title");
+        var body = Map.<String, Object>of("kind", "submit_input");
+        var vanished = harnessRefusal(404, "hosted_session_not_found");
+        when(client.runChannelOperation(stale, body)).thenThrow(vanished);
         var connector = connector(client);
+        connector.rename("tenant-a", SESSION_ID, "initial");
 
-        assertThatThrownBy(() -> connector.rename("tenant-a", SESSION_ID, "title")).isSameAs(unknown);
+        assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID, body)).isSameAs(unknown);
     }
 
     private static HostedHarnessClient harnessClient() {
