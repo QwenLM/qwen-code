@@ -6,10 +6,13 @@ import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import {
   SessionSortMenu,
+  readSessionGroupBy,
   readSessionSort,
   readWorkspaceFilter,
+  writeSessionGroupBy,
   writeSessionSort,
   writeWorkspaceFilter,
+  type SessionGroupBy,
   type SessionSort,
   type WorkspaceFilter,
 } from './SessionSortMenu';
@@ -68,15 +71,21 @@ afterEach(async () => {
 async function renderMenu({
   value = 'updatedAt',
   workspaceValue = 'all',
+  groupValue = 'workspace',
   onChange = vi.fn(),
   onWorkspaceChange = vi.fn(),
+  onGroupChange = vi.fn(),
   sortEnabled = true,
+  groupEnabled = true,
 }: {
   value?: SessionSort;
   workspaceValue?: WorkspaceFilter;
+  groupValue?: SessionGroupBy;
   onChange?: (value: SessionSort) => void;
   onWorkspaceChange?: (value: WorkspaceFilter) => void;
+  onGroupChange?: (value: SessionGroupBy) => void;
   sortEnabled?: boolean;
+  groupEnabled?: boolean;
 } = {}) {
   await act(async () =>
     root.render(
@@ -86,6 +95,9 @@ async function renderMenu({
           onChange={onChange}
           workspaceValue={workspaceValue}
           onWorkspaceChange={onWorkspaceChange}
+          groupValue={groupValue}
+          onGroupChange={onGroupChange}
+          groupEnabled={groupEnabled}
           workspaces={workspaces}
           sortEnabled={sortEnabled}
         />
@@ -114,7 +126,7 @@ async function openMenu(): Promise<void> {
 function menuItem(label: string): HTMLElement | undefined {
   return Array.from(
     document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-  ).find((item) => item.textContent?.includes(label));
+  ).find((item) => item.textContent?.startsWith(label));
 }
 
 async function openSubmenu(label: string): Promise<void> {
@@ -161,6 +173,36 @@ describe('SessionSortMenu', () => {
     expect(items[0]!.getAttribute('aria-checked')).toBe('true');
     await act(async () => click(items[1]!));
     expect(onChange).toHaveBeenCalledWith('lastUserPromptAt');
+  });
+
+  it('persists activity-date grouping per host and ignores invalid values', () => {
+    expect(readSessionGroupBy('a')).toBe('workspace');
+    writeSessionGroupBy('a', 'activityDate');
+    expect(readSessionGroupBy('a')).toBe('activityDate');
+    expect(readSessionGroupBy('b')).toBe('workspace');
+    localStorage.setItem('web-shell:session-group-by:a', 'invalid');
+    expect(readSessionGroupBy('a')).toBe('workspace');
+  });
+
+  it('lists grouping choices with the current selection and label', async () => {
+    const onGroupChange = vi.fn();
+    await renderMenu({ onGroupChange });
+    await openMenu();
+    await openSubmenu('Group by');
+    const items = radioItems();
+    expect(items.map((item) => item.textContent)).toEqual([
+      'Workspace',
+      'Activity date',
+    ]);
+    expect(items[0]!.getAttribute('aria-checked')).toBe('true');
+    await act(async () => click(items[1]!));
+    expect(onGroupChange).toHaveBeenCalledWith('activityDate');
+
+    await renderMenu({ groupValue: 'activityDate', onGroupChange });
+    await openMenu();
+    expect(menuItem('Group by')?.textContent).toContain('Activity date');
+    await openSubmenu('Group by');
+    expect(radioItems()[1]!.getAttribute('aria-checked')).toBe('true');
   });
 
   it('lists workspace choices with the current selection and label', async () => {
@@ -211,29 +253,38 @@ describe('SessionSortMenu', () => {
     expect(readWorkspaceFilter('a')).toBe('all');
   });
 
-  it('restores the persisted sort when the sort submenu is unavailable', async () => {
+  it('restores defaults when optional submenus are unavailable', async () => {
     const onChange = vi.fn();
     const onWorkspaceChange = vi.fn();
+    const onGroupChange = vi.fn();
     await renderMenu({
       sortEnabled: false,
+      groupEnabled: false,
+      groupValue: 'activityDate',
       onChange,
       onWorkspaceChange,
+      onGroupChange,
     });
     await openMenu();
     expect(menuItem('Sort by')).toBeUndefined();
+    expect(menuItem('Group by')).toBeUndefined();
     await act(async () => click(menuItem('Restore defaults')!));
     expect(onWorkspaceChange).toHaveBeenCalledWith('all');
     expect(onChange).toHaveBeenCalledWith('updatedAt');
+    expect(onGroupChange).toHaveBeenCalledWith('workspace');
   });
 
-  it('restores the default workspace filter and session sort', async () => {
+  it('restores the default workspace filter, grouping, and session sort', async () => {
     const onChange = vi.fn();
     const onWorkspaceChange = vi.fn();
+    const onGroupChange = vi.fn();
     await renderMenu({
       value: 'lastUserPromptAt',
       workspaceValue: 'standalone',
+      groupValue: 'activityDate',
       onChange,
       onWorkspaceChange,
+      onGroupChange,
     });
     await openMenu();
     const restore = menuItem('Restore defaults');
@@ -241,5 +292,6 @@ describe('SessionSortMenu', () => {
     await act(async () => click(restore!));
     expect(onWorkspaceChange).toHaveBeenCalledWith('all');
     expect(onChange).toHaveBeenCalledWith('updatedAt');
+    expect(onGroupChange).toHaveBeenCalledWith('workspace');
   });
 });

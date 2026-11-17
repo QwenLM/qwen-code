@@ -26,7 +26,9 @@ export interface SessionGroupSectionProps {
   expanded: boolean;
   color?: DaemonSessionGroupColor;
   icon?: ReactNode;
-  children: ReactNode;
+  children?: ReactNode;
+  itemCount?: number;
+  renderChildren?: (visibleCount: number) => ReactNode;
   onToggle: () => void;
   onRename?: () => void;
   onDelete?: () => void;
@@ -43,6 +45,8 @@ export function SessionGroupSection({
   color,
   icon,
   children,
+  itemCount,
+  renderChildren,
   onToggle,
   onRename,
   onDelete,
@@ -56,10 +60,11 @@ export function SessionGroupSection({
     SIDEBAR_SESSION_PREVIEW_LIMIT,
   );
   const items = Children.toArray(children);
+  const total = itemCount ?? items.length;
   useEffect(() => {
     if (!expanded) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [expanded]);
-  const previewLimited = limitSessions && items.length > visibleCount;
+  const previewLimited = limitSessions && total > visibleCount;
   const colorClass = color?.startsWith('#')
     ? styles.groupColorCustom
     : color
@@ -127,7 +132,11 @@ export function SessionGroupSection({
       </div>
       {expanded && (
         <div className={styles.sessionGroupList}>
-          {previewLimited ? items.slice(0, visibleCount) : items}
+          {renderChildren
+            ? renderChildren(previewLimited ? visibleCount : total)
+            : previewLimited
+              ? items.slice(0, visibleCount)
+              : items}
           {previewLimited && (
             <button
               type="button"
@@ -139,7 +148,7 @@ export function SessionGroupSection({
               {t('sidebar.showMoreSessions', {
                 count: Math.min(
                   SIDEBAR_SESSION_EXPAND_STEP,
-                  items.length - visibleCount,
+                  total - visibleCount,
                 ),
               })}
             </button>

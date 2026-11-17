@@ -972,6 +972,101 @@ describe('gitCheckout with a dirty working tree', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'stash capture does not adopt a label-only foreign entry',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      const env = gitShim(hermeticEnv(), [
+        // A terminal or an older client stashes with the documented label
+        // but no nonce, immediately before our push (making ours a no-op).
+        // The capture's subject carries this request's nonce, so the
+        // label-only entry must not satisfy endsWith.
+        {
+          match: '"stash push"*',
+          before:
+            '"$REAL" stash push --include-untracked -m "qwen-code: auto-stash before checkout"',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'missing-branch',
+        { stash: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.stashSha).toBeUndefined();
+      expect(failure.message).not.toContain('restored');
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toContain('qwen-code: auto-stash before checkout');
+      expect(failure.message).toContain('missing-branch');
+      expect(read(dir, 'a.txt')).toBe('one\n');
+    },
+  );
+
+  it('stash checkout captures a blocking untracked directory and completes the switch', async () => {
+    const dir = makeRepo();
+    git(dir, 'checkout', '-q', '-b', 'blocker');
+    commitFile(dir, 'd', 'tracked\n');
+    git(dir, 'checkout', '-q', 'master');
+    write(dir, { 'd/blocker.txt': 'local\n' });
+
+    const result = await gitCheckout(
+      dir,
+      'blocker',
+      { stash: true },
+      hermeticEnv(),
+    );
+
+    expect(result.branch).toBe('blocker');
+    expect(result.stashSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(read(dir, 'd')).toBe('tracked\n');
+    expect(
+      git(
+        dir,
+        'stash',
+        'show',
+        '--include-untracked',
+        '--name-only',
+        result.stashSha!,
+      ),
+    ).toContain('d/blocker.txt');
+  });
+
+  it('stash checkout restores the entry when the ignore rule itself is uncommitted', async () => {
+    const dir = makeRepo();
+    commitFile(dir, '.gitignore', '*.tmp\n');
+    git(dir, 'checkout', '-q', '-b', 'blocker');
+    commitFile(dir, 'd', 'tracked\n');
+    git(dir, 'checkout', '-q', 'master');
+    // The rule ignoring build.log is an uncommitted edit: the stash takes
+    // it away, so at checkout time the residue is plain untracked and the
+    // switch is refused — nothing is discarded.
+    write(dir, {
+      '.gitignore': '*.tmp\nd/build.log\n',
+      'd/blocker.txt': 'local\n',
+      'd/build.log': 'BUILDOUTPUT\n',
+    });
+
+    const failure = await checkoutFails(
+      dir,
+      'blocker',
+      { stash: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain('your local changes were restored');
+    expect(failure.message).toContain('would lose untracked');
+    expect(failure.stashSha).toBeUndefined();
+    expect(currentBranch(dir)).toBe('master');
+    expect(read(dir, 'd/build.log')).toBe('BUILDOUTPUT\n');
+    expect(read(dir, 'd/blocker.txt')).toBe('local\n');
+    expect(read(dir, '.gitignore')).toBe('*.tmp\nd/build.log\n');
+    expect(stashList(dir)).toHaveLength(0);
+  });
+
   it('stash checkout types the refusal when git cannot stash an intent-to-add entry', async () => {
     const dir = dirtyCheckoutFixture();
     write(dir, { 'new.txt': 'new\n' });
@@ -2853,8 +2948,10 @@ describe('gitPull with a dirty working tree', () => {
 
     await bothRefused(dir, 'operation_in_progress');
 
-    // The parameterised refusal carries the PULL action word on this
-    // arm (the checkout flows say "cannot checkout").
+    // The refusal carries the PULL action word ("cannot update"; the
+    // checkout flows say "cannot checkout"). It comes from stashPull's
+    // own pre-push guard, which fires before pushAutoStash's
+    // parameterised guard is reached.
     const pullFailure = await pullFails(
       dir,
       { stash: true },

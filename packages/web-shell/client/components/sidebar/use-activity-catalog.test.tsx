@@ -17,6 +17,7 @@ import {
 const fixtures = vi.hoisted(() => ({
   snapshots: [] as SessionCatalogSnapshot[],
   queries: [] as readonly SessionCatalogQuery[],
+  pollIntervals: [] as Array<number | undefined>,
   byCursor: undefined as Map<string, SessionCatalogSnapshot> | undefined,
   patch: vi.fn(),
   invalidate: vi.fn(),
@@ -26,8 +27,17 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogQueries: (
     _client: unknown,
     queries: readonly SessionCatalogQuery[],
+    options?: {
+      pollIntervalMs?: number;
+      pollQueries?: (query: SessionCatalogQuery, index: number) => boolean;
+    },
   ) => {
     fixtures.queries = queries;
+    fixtures.pollIntervals = queries.map((query, index) =>
+      options?.pollQueries?.(query, index) === false
+        ? undefined
+        : options?.pollIntervalMs,
+    );
     return fixtures.byCursor
       ? queries.map(
           (query) => fixtures.byCursor!.get(query.options.cursor ?? '')!,
@@ -103,6 +113,7 @@ describe('activity controller', () => {
   const onArchivedCurrent = vi.fn();
   let currentKey: string | undefined;
   let open = true;
+  let liveStateEnabled = true;
   const client = {
     workspaceByCwd: vi.fn(() => ({
       updateSessionOrganization: organizationWrite,
@@ -117,7 +128,7 @@ describe('activity controller', () => {
       workspaceCwds: ['/work'],
       enabled: true,
       open,
-      liveStateEnabled: true,
+      liveStateEnabled,
       currentKey,
       onArchivedCurrent,
     });
@@ -145,7 +156,9 @@ describe('activity controller', () => {
     ];
     currentKey = activityKey('/work', 'one');
     open = true;
+    liveStateEnabled = true;
     fixtures.byCursor = undefined;
+    fixtures.pollIntervals = [];
     container = document.createElement('div');
     document.body.append(container);
     root = createRoot(container);
@@ -197,6 +210,75 @@ describe('activity controller', () => {
     await render();
     expect(fixtures.queries).toHaveLength(1);
   });
+  it('polls root queries without polling healthy historical pages', async () => {
+    liveStateEnabled = false;
+    fixtures.byCursor = new Map([
+      [
+        '',
+        {
+          loading: false,
+          stale: false,
+          page: { sessions: [], nextCursor: 'a' },
+        },
+      ],
+      ['a', { loading: false, stale: false, page: { sessions: [] } }],
+    ]);
+    await render();
+    expect(fixtures.pollIntervals).toEqual([30_000, undefined]);
+  });
+
+  it.each(['error', 'truncated', 'liveMergeFailed'] as const)(
+    'retries a failed extra cursor page immediately: %s',
+    async (failure) => {
+      const failedPage: SessionCatalogSnapshot =
+        failure === 'error'
+          ? {
+              loading: false,
+              stale: true,
+              error: new Error('offline'),
+            }
+          : {
+              loading: false,
+              stale: true,
+              page: {
+                sessions: [],
+                ...(failure === 'truncated'
+                  ? { truncated: true }
+                  : { liveMergeFailed: true }),
+              },
+            };
+      fixtures.byCursor = new Map([
+        [
+          '',
+          {
+            loading: false,
+            stale: false,
+            page: { sessions: [], nextCursor: 'a' },
+          },
+        ],
+        [
+          'a',
+          {
+            loading: false,
+            stale: false,
+            page: { sessions: [], nextCursor: 'b' },
+          },
+        ],
+        ['b', failedPage],
+      ]);
+      await render();
+      const failedQuery = fixtures.queries.find(
+        (query) => query.options.cursor === 'b',
+      );
+      expect(failedQuery).toBeDefined();
+      await act(async () => controller.retry());
+      expect(fixtures.reload).toHaveBeenCalledTimes(2);
+      expect(fixtures.reload).toHaveBeenCalledWith(failedQuery, {
+        interactive: true,
+      });
+    },
+  );
+
   it('retries unavailable catalogs without writing session organization', async () => {
     fixtures.snapshots[0] = {
       ...fixtures.snapshots[0]!,

@@ -15,15 +15,17 @@ The workspace git checkout path (branch picker popover → SDK
 `workspaceGitCheckout` → `POST /workspace(s)/git/checkout` → core
 `gitCheckout`) runs a plain `git checkout <ref> --`. When local
 modifications or untracked files would be overwritten by the switch, git
-refuses. The route already classifies the refusal shapes as
+refuses. The route classifies the file-collision refusal shapes as
 `409 dirty_working_tree` (the classifier matches
-`dirty|uncommitted|would be overwritten|would lose untracked`, which
-covers git's "Your local changes … would be overwritten by checkout",
-"The following untracked working tree files would be overwritten by
-checkout", and the directory-collision sibling "Updating the following
-directories would lose untracked files in them" — an untracked directory
-blocking a path the target tracks as a file), but the popover
-only renders the error string in its footer — nothing actionable surfaces.
+`dirty|uncommitted|would be overwritten`, covering git's "Your local
+changes … would be overwritten by checkout" and "The following untracked
+working tree files would be overwritten by checkout"), but the popover
+only renders the error string in its footer — nothing actionable
+surfaces. The directory-collision sibling — "Updating the following
+directories would lose untracked files in them", an untracked directory
+blocking a path the target tracks as a file — matches none of those
+keywords and falls through to an unclassified 500, a dead-end of the
+same kind.
 
 The typical cause is residue from earlier work: edits left by a previous
 session, or new files a build produced, block checking out a different
@@ -127,6 +129,28 @@ They are the two things a user would do in a terminal, and nothing more:
   the residue clean is best-effort — its error is swallowed so the hook
   refusal stays the reported failure, and the residue may survive.
 
+Residue inside a blocking untracked directory that a committed rule on
+the current branch ignores is not preserved: git itself discards
+ignored files in the way during the switch, under both resolutions
+(probed), exactly as in the file-collision shape. Whether residue is
+ignored is decided at stash time by the current branch's rules, not the
+target's: residue the current branch does not ignore is plain untracked,
+so the stash entry captures it and it survives the switch, recoverable
+from the entry the response names — though on this shape the entry
+cannot be applied onto the switched-to tree: `git stash apply` cannot
+recreate the captured path under what is now a regular file, so extract
+the path from the entry instead (`git show <sha>^3:d/blocker.txt`). The
+kept-entry notice's apply guidance stays correct for the file-collision
+shape. The force resolution still discards such residue — untracked
+files in the way are overwritten by the forced checkout itself. When
+the ignore rule is itself an uncommitted `.gitignore`
+edit, the stash takes the rule away with it: the residue is plain
+untracked at checkout time, the switch is refused with the
+directory-collision message, and the entry is restored — nothing is
+discarded and nothing is lost (probed). On a completed switch, "your
+changes are kept" covers what the entry holds; files ignored by a rule
+that survives the stash are not in it.
+
 Both options are refused (`409 operation_in_progress`) while a merge,
 cherry-pick, revert, rebase or am is parked in the worktree: the
 destructive commands would absorb or disturb that state — a
@@ -145,8 +169,10 @@ successful stash checkout, the same field on a failure response whose
 auto-stash entry survives with a known SHA — `checkout_failed` after a
 kept restore, or `operation_in_progress` when a merge parks after the
 push (see below) — and, for the directory-collision refusal, a
-`409 dirty_working_tree` where the route previously answered an
-unclassified 500.
+`409 dirty_working_tree` where the shared classifier previously answered
+an unclassified 500, on plain checkout, branch creation, and plain pull
+alike, when the refusal lands inside the client-message bound (see
+below).
 
 Failures are classified by what the core did, not by matching git's text:
 a new `GitCheckoutFailure` carries the stable codes
@@ -157,8 +183,16 @@ already does for `GitPullFailure`. The shared helpers
 parameter defaulting to the pull wording; `restoreStash` is reused
 unchanged because its notices are action-agnostic. The classifier gained
 the `would lose untracked` alternation for the directory-collision
-refusal; its other branches are unchanged and the plain checkout stays
-covered.
+refusal; its other branches are unchanged. The classifier is shared by
+every workspace git route, so the alternation types that refusal shape
+wherever git's raw error reaches it — plain checkout, branch creation
+(`checkout -b`), and plain pull alike; the stash and force pull flows
+type their update failures before the classifier, so their responses
+are unchanged. The loose keyword branches read the bounded
+512-character client slice, so a refusal pushed past that bound stays
+an unclassified 500 — a plain pull's fetch summary can do that on a
+many-ref update, the same corner the file-collision keywords have
+always had.
 
 ## UI
 
@@ -401,9 +435,12 @@ omission:
 
 - A checkout refused for local changes offers stash and discard
   resolutions, and both complete the switch end to end.
-- The plain checkout invocation is unchanged; its response for the
-  directory-collision refusal changes from an unclassified 500 to
-  `409 dirty_working_tree`.
+- The plain checkout invocation is unchanged; the directory-collision
+  refusal's response changes from an unclassified 500 to
+  `409 dirty_working_tree` on every route whose raw git error reaches
+  the shared classifier — plain checkout, branch creation, and plain
+  pull — when the refusal lands inside the route's client-message
+  bound.
 - Every guard listed above has a test that fails without it.
 - The design exists in both languages; lint, typecheck, build and the
   focused unit suites pass.

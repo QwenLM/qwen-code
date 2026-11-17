@@ -1778,6 +1778,48 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     expect(onCreate).toHaveBeenCalledTimes(1);
   });
 
+  it('forwards a follow-up session id and returns the completion task id', async () => {
+    const onCreate = vi.fn(async () => ({
+      sessionId: 'kid',
+      taskId: 'kid:prompt-1',
+    }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const res = await client.extMethod(METHOD, {
+      prompt: 'go',
+      completion: 'sent',
+      sessionId: 'kid',
+      callerSessionId: 'caller-1',
+    });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'sent',
+      sessionId: 'kid',
+      callerSessionId: 'caller-1',
+    });
+    expect(res).toEqual({ sessionId: 'kid', taskId: 'kid:prompt-1' });
+    for (const extra of [
+      { sessionId: '' },
+      { sessionId: 'a\u0000b' },
+      { sessionId: 'kid', model: 'm1' },
+      { sessionId: 'kid', name: 'n' },
+      {
+        sessionId: 'kid',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'go',
+          completion: 'sent',
+          callerSessionId: 'caller-1',
+          ...extra,
+        }),
+      ).rejects.toThrow(/sessionId/);
+    }
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
   it('omits result/stopReason when the handler does not return them (sent mode)', async () => {
     const client = makeClientWithCreateSubSession(async () => ({
       sessionId: 'sub-10',
