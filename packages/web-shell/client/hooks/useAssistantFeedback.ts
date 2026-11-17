@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import {
   readAssistantFeedbackStore,
   setAssistantFeedbackRating,
@@ -32,8 +32,13 @@ export function useAssistantFeedback(
   const [store, setStore] = useState<AssistantFeedbackStore>(
     readAssistantFeedbackStore,
   );
-  // Hydrating is not an edit, so the first render must not write back.
-  const hydratedStore = useRef(store);
+  const pendingChanges = useRef<
+    Array<{
+      sessionId: string;
+      turnId: string;
+      rating: AssistantFeedbackRating | null;
+    }>
+  >([]);
   const storeRef = useRef(store);
   storeRef.current = store;
 
@@ -43,6 +48,22 @@ export function useAssistantFeedback(
       setStore((current) =>
         setAssistantFeedbackRating(current, sessionId, turnId, rating),
       );
+      pendingChanges.current = pendingChanges.current.filter(
+        (change) => change.sessionId !== sessionId || change.turnId !== turnId,
+      );
+      pendingChanges.current.push({ sessionId, turnId, rating });
+      // Rebase only this pane's edits on the latest saved marks. A mounted
+      // pane's full snapshot may predate another pane's additions or removals.
+      let next = readAssistantFeedbackStore();
+      for (const change of pendingChanges.current) {
+        next = setAssistantFeedbackRating(
+          next,
+          change.sessionId,
+          change.turnId,
+          change.rating,
+        );
+      }
+      if (writeAssistantFeedbackStore(next)) pendingChanges.current = [];
     },
     [sessionId],
   );
@@ -52,11 +73,6 @@ export function useAssistantFeedback(
       sessionId && turnId ? storeRef.current[sessionId]?.[turnId] : undefined,
     [sessionId],
   );
-
-  useEffect(() => {
-    if (store === hydratedStore.current) return;
-    writeAssistantFeedbackStore(store);
-  }, [store]);
 
   return {
     ratings: (sessionId && store[sessionId]) || NO_RATINGS,

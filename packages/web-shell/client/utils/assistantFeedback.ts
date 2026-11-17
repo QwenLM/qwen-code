@@ -192,17 +192,19 @@ export function readAssistantFeedbackStore(): AssistantFeedbackStore {
 
 export function writeAssistantFeedbackStore(
   store: AssistantFeedbackStore,
-): void {
-  if (typeof window === 'undefined') return;
+): boolean {
+  if (typeof window === 'undefined') return false;
   try {
     window.localStorage.setItem(
       ASSISTANT_FEEDBACK_STORAGE_KEY,
       JSON.stringify({ v: STORAGE_VERSION, ...keepMostRecentSessions(store) }),
     );
+    return true;
   } catch (error) {
     // A full or disabled localStorage must not break the click that just
     // happened; the mark still shows for this page.
     console.warn('[web-shell] failed to persist assistant feedback:', error);
+    return false;
   }
 }
 

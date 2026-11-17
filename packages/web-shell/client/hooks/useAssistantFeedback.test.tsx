@@ -5,13 +5,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellAssistantFeedbackRating } from '../customization';
 import { AssistantMessage } from '../components/messages/AssistantMessage';
 import { I18nProvider } from '../i18n';
-import { ASSISTANT_FEEDBACK_STORAGE_KEY } from '../utils/assistantFeedback';
+import {
+  ASSISTANT_FEEDBACK_STORAGE_KEY,
+  readAssistantFeedbackStore,
+  writeAssistantFeedbackStore,
+} from '../utils/assistantFeedback';
 import { useAssistantFeedback } from './useAssistantFeedback';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -32,9 +36,11 @@ interface HostCall {
  */
 function Transcript({
   sessionId,
+  turnId = TURN_ID,
   onHostRate,
 }: {
   sessionId: string;
+  turnId?: string;
   onHostRate?: (call: HostCall) => void;
 }) {
   const { ratings, rate, ratingForTurn } = useAssistantFeedback(sessionId);
@@ -43,10 +49,10 @@ function Transcript({
       content="answer"
       showFooterActions
       showAssistantFeedback
-      assistantFeedbackRating={ratings[TURN_ID]}
+      assistantFeedbackRating={ratings[turnId]}
       onAssistantFeedbackRate={(rating) => {
-        const previousRating = ratingForTurn(TURN_ID);
-        rate(TURN_ID, rating);
+        const previousRating = ratingForTurn(turnId);
+        rate(turnId, rating);
         onHostRate?.({ rating, previousRating });
       }}
     />
@@ -74,6 +80,32 @@ function unmount(): void {
   container.remove();
 }
 
+function mountPair(firstSession: string, secondSession: string): void {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <section data-pane="first">
+          <Transcript sessionId={firstSession} turnId="turn-a" />
+        </section>
+        <section data-pane="second">
+          <Transcript sessionId={secondSession} turnId="turn-b" />
+        </section>
+      </I18nProvider>,
+    );
+  });
+}
+
+function rateInPane(pane: 'first' | 'second', label: string): void {
+  const control = container.querySelector<HTMLButtonElement>(
+    `[data-pane="${pane}"] button[aria-label="${label}"]`,
+  );
+  expect(control).not.toBeNull();
+  act(() => control!.click());
+}
+
 const button = (title: string) =>
   container.querySelector<HTMLButtonElement>(`button[aria-label="${title}"]`);
 const isLit = (title: string) =>
@@ -84,6 +116,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   window.localStorage.clear();
 });
 
@@ -141,5 +174,88 @@ describe('useAssistantFeedback through the answer footer', () => {
     mount('session-2');
     expect(isLit('Satisfied')).toBe(false);
     unmount();
+  });
+
+  it('preserves both sessions when two mounted transcripts save feedback', () => {
+    mountPair('session-a', 'session-b');
+    try {
+      rateInPane('first', 'Satisfied');
+      rateInPane('second', 'Not satisfied');
+
+      expect(readAssistantFeedbackStore()).toEqual({
+        'session-a': { 'turn-a': 'up' },
+        'session-b': { 'turn-b': 'down' },
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it('preserves distinct turns rated by two views of the same session', () => {
+    mountPair('shared-session', 'shared-session');
+    try {
+      rateInPane('first', 'Satisfied');
+      rateInPane('second', 'Not satisfied');
+
+      expect(readAssistantFeedbackStore()).toEqual({
+        'shared-session': { 'turn-a': 'up', 'turn-b': 'down' },
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it('does not restore a cleared rating when another mounted transcript saves', () => {
+    writeAssistantFeedbackStore({
+      'session-a': { 'turn-a': 'up' },
+      'session-b': { 'turn-b': 'down' },
+    });
+    mountPair('session-a', 'session-b');
+    try {
+      rateInPane('first', 'Satisfied');
+      rateInPane('second', 'Satisfied');
+
+      expect(readAssistantFeedbackStore()).toEqual({
+        'session-b': { 'turn-b': 'up' },
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it("retries local edits after storage becomes writable without losing another pane's changes", () => {
+    mountPair('session-a', 'session-b');
+    try {
+      const write = vi
+        .spyOn(Storage.prototype, 'setItem')
+        .mockImplementationOnce(() => {
+          throw new Error('quota exceeded');
+        });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      rateInPane('first', 'Satisfied');
+      expect(write).toHaveBeenCalledOnce();
+      rateInPane('second', 'Not satisfied');
+
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <section data-pane="first">
+              <Transcript sessionId="session-a" turnId="turn-c" />
+            </section>
+            <section data-pane="second">
+              <Transcript sessionId="session-b" turnId="turn-b" />
+            </section>
+          </I18nProvider>,
+        );
+      });
+      rateInPane('first', 'Not satisfied');
+
+      expect(readAssistantFeedbackStore()).toEqual({
+        'session-a': { 'turn-a': 'up', 'turn-c': 'down' },
+        'session-b': { 'turn-b': 'down' },
+      });
+    } finally {
+      unmount();
+    }
   });
 });
