@@ -13874,19 +13874,17 @@ export class Session implements SessionContext {
       status: 'message',
       modelText: `<peer-notification>\n${defangPeerNotificationTags(modelText)}\n</peer-notification>`,
       displayText,
-      ...(sender
-        ? {
-            agent: {
-              agentName: `${ROOT_AGENT_IDENTITY.agentName}/${sender}`,
-              depth: 1,
-              kind: 'teammate' as const,
-            },
-            // The turn-start row renders `label ?? kind`, so a teammate
-            // report without a label reads as the generic "peer" after
-            // reload; the sender names it.
-            label: sender,
-          }
-        : {}),
+      agent: {
+        agentName: sender
+          ? `${ROOT_AGENT_IDENTITY.agentName}/${sender}`
+          : `${ROOT_AGENT_IDENTITY.agentName}/team`,
+        depth: 1,
+        kind: 'teammate' as const,
+      },
+      // The turn-start row renders `label ?? kind`, so a teammate
+      // report without a label reads as the generic "peer" after
+      // reload; the sender names it.
+      ...(sender ? { label: sender } : {}),
       continuesTodoStopGuardWorkChain: false,
     });
   }
@@ -13916,6 +13914,14 @@ export class Session implements SessionContext {
       status: 'exited',
       modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
       displayText: `teammate ${names.join(', ')} ${tail}`,
+      agent: {
+        agentName:
+          names.length === 1
+            ? `${ROOT_AGENT_IDENTITY.agentName}/${names[0]}`
+            : `${ROOT_AGENT_IDENTITY.agentName}/team`,
+        depth: 1,
+        kind: 'teammate' as const,
+      },
       label: names.length === 1 ? names[0] : 'team',
       continuesTodoStopGuardWorkChain: false,
     });

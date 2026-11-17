@@ -5192,7 +5192,18 @@ class QwenAgent implements Agent {
           // Session multi-agent records deferred behind the turn that just
           // settled land now, while the recorder still accepts writes.
           await session.flushDeferredExternalRecords?.();
-          await session.flushPendingPeerNotifications?.();
+          try {
+            await session.flushPendingPeerNotifications?.();
+          } catch (error) {
+            // A failed peer flush must not abort the close: the recorder
+            // finalization and close below are what release the writer lock.
+            // The quiesce path already logs its own errors.
+            debugLogger.debug(
+              `Session ${sessionId} peer notification flush before close failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
           recorder?.finalize();
           let flushError: unknown;
           try {
