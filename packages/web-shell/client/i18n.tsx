@@ -1383,6 +1383,19 @@ const EN: Messages = {
     'This older session was cancelled, but the reason was not recorded. Confirm before continuing.',
   'session.recovery.confirmCancellation':
     'This turn may have been stopped intentionally. Do you want to continue it?',
+  'restartRecovery.title': (v) =>
+    `${v?.['count'] ?? 0} task${v?.['count'] === 1 ? '' : 's'} interrupted by a restart`,
+  'restartRecovery.review': 'Review',
+  'restartRecovery.hide': 'Hide',
+  'restartRecovery.continue': 'Continue',
+  'restartRecovery.continueAll': 'Continue all',
+  'restartRecovery.confirmToolTurn': 'Confirm and continue',
+  'restartRecovery.toolTurnHint':
+    'This task stopped during a tool call. Continuing closes the unfinished call as failed before the model resumes.',
+  'restartRecovery.inFlight': 'Process interrupted',
+  'restartRecovery.daemonShutdown': 'Daemon restarted',
+  'restartRecovery.failed': 'Could not continue',
+  'restartRecovery.loadFailed': 'Could not read interrupted tasks',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -6735,6 +6748,18 @@ const ZH: Messages = {
     '此旧会话已取消，但未记录来源。继续前需要你确认。',
   'session.recovery.confirmCancellation':
     '此轮任务可能已被主动停止，但未记录原因。确定要继续执行吗？',
+  'restartRecovery.title': (v) => `上次重启中断了 ${v?.['count'] ?? 0} 个任务`,
+  'restartRecovery.review': '查看',
+  'restartRecovery.hide': '收起',
+  'restartRecovery.continue': '继续',
+  'restartRecovery.continueAll': '全部继续',
+  'restartRecovery.confirmToolTurn': '确认并继续',
+  'restartRecovery.toolTurnHint':
+    '任务在工具调用中中断；继续会先把未完成的调用标记为失败，再由模型接续。',
+  'restartRecovery.inFlight': '进程中断',
+  'restartRecovery.daemonShutdown': 'Daemon 重启',
+  'restartRecovery.failed': '无法继续',
+  'restartRecovery.loadFailed': '无法读取中断任务',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',

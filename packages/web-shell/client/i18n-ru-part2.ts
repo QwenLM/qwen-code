@@ -322,6 +322,19 @@ export const RU_PART2: Record<
     'Эта старая сессия отменена, но причина не записана. Подтвердите, прежде чем продолжать.',
   'session.recovery.confirmCancellation':
     'Этот ход, возможно, остановили намеренно. Продолжить его?',
+  'restartRecovery.title': (v) =>
+    `После перезапуска прервано задач: ${v?.['count'] ?? 0}`,
+  'restartRecovery.review': 'Просмотреть',
+  'restartRecovery.hide': 'Скрыть',
+  'restartRecovery.continue': 'Продолжить',
+  'restartRecovery.continueAll': 'Продолжить все',
+  'restartRecovery.confirmToolTurn': 'Подтвердить и продолжить',
+  'restartRecovery.toolTurnHint':
+    'Задача прервана во время вызова инструмента. Продолжение сначала закроет незавершённый вызов как ошибку.',
+  'restartRecovery.inFlight': 'Процесс прерван',
+  'restartRecovery.daemonShutdown': 'Перезапуск daemon',
+  'restartRecovery.failed': 'Не удалось продолжить',
+  'restartRecovery.loadFailed': 'Не удалось прочитать прерванные задачи',
   'session.archived': 'Этот разговор в архиве',
   'session.archivedDescription':
     'Сначала разархивируйте его, чтобы открыть разговор.',
