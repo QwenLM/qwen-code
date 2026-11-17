@@ -19662,6 +19662,355 @@ describe('App session callbacks', () => {
     },
   );
 
+  it.each(['Enter', ' '])(
+    'dismisses a settled explanation with %s while a drawer is open',
+    async (key) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      const drawer = document.createElement('div');
+      drawer.setAttribute('data-slot', 'drawer-content');
+      drawer.setAttribute('data-state', 'open');
+      container.append(drawer);
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      // The drawer owns Escape only; Enter/Space on a non-activatable
+      // surface still dismiss the settled explanation the footer advertises.
+      const surface = document.createElement('div');
+      container.append(surface);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        surface.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    },
+  );
+
+  it('cancels a pending explanation with Ctrl+D in the composer editor under a drawer', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const drawer = document.createElement('div');
+    drawer.setAttribute('data-slot', 'drawer-content');
+    drawer.setAttribute('data-state', 'open');
+    const editor = document.createElement('textarea');
+    editor.setAttribute('data-web-shell-composer-editor', '');
+    drawer.append(editor);
+    container.append(drawer);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    // Ctrl+D has no copy role, even on a text surface under a drawer.
+    const event = new KeyboardEvent('keydown', {
+      key: 'd',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      editor.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it.each(['c', 'd'])(
+    'cancels a pending explanation with Ctrl+%s on a button inside a keyboard scope',
+    async (key) => {
+      const finish = deferred<void>();
+      mockSessionActions.btwSessionStream.mockImplementationOnce(
+        async function* () {
+          await finish.promise;
+          yield {
+            v: 1,
+            type: 'done',
+            requestId: 'btw-request',
+            answer: 'too late',
+          } as const;
+        },
+      );
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      const scope = document.createElement('div');
+      scope.setAttribute('data-keyboard-scope', '');
+      const button = document.createElement('button');
+      scope.append(button);
+      container.append(scope);
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+      // A keyboard scope is not a text surface; a button inside it cancels.
+      const event = new KeyboardEvent('keydown', {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        button.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+      const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+        ?.signal as AbortSignal | undefined;
+      expect(signal?.aborted).toBe(true);
+      await act(async () => {
+        finish.resolve();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    },
+  );
+
+  it('preserves Ctrl+C copy on a text surface under a drawer', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const drawer = document.createElement('div');
+    drawer.setAttribute('data-slot', 'drawer-content');
+    drawer.setAttribute('data-state', 'open');
+    const input = document.createElement('input');
+    drawer.append(input);
+    container.append(drawer);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    // Ctrl+C on a real text surface keeps its copy role — no dismiss/abort.
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      input.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(false);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+  });
+
+  it.each(['switch', 'tab', 'option', 'checkbox', 'radio'])(
+    'keeps a settled explanation when Enter activates a %s',
+    async (role) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      const widget = document.createElement('div');
+      widget.setAttribute('role', role);
+      widget.setAttribute('tabindex', '0');
+      container.append(widget);
+      const event = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        widget.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    },
+  );
+
+  it('keeps a settled explanation when Enter activates a summary', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    details.append(summary);
+    container.append(details);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      summary.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('keeps a settled explanation when Enter activates a contenteditable', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    const editable = document.createElement('div');
+    editable.setAttribute('contenteditable', 'true');
+    container.append(editable);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      editable.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
   it('dismisses a settled explanation with Escape from the composer editor', async () => {
     const shell: DaemonSessionShellTaskStatus = {
       kind: 'shell',
