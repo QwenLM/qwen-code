@@ -115,6 +115,7 @@ import {
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
@@ -17320,6 +17321,7 @@ describe('createAcpSessionBridge', () => {
             'qwen-code/private-parent-capability': 'forged-capability',
             [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
             [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: 'yolo',
+            [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: 'auto',
           },
         },
         undefined,
@@ -17328,6 +17330,7 @@ describe('createAcpSessionBridge', () => {
           promptId: 'server-prompt',
           modelPrompt: trustedModelPrompt,
           expectedApprovalMode: ApprovalMode.DEFAULT,
+          approvalModeBeforeStart: ApprovalMode.YOLO,
         },
       );
 
@@ -17341,6 +17344,7 @@ describe('createAcpSessionBridge', () => {
         },
         [DAEMON_MODEL_PROMPT_META_KEY]: trustedModelPrompt,
         [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: ApprovalMode.DEFAULT,
+        [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: ApprovalMode.YOLO,
       });
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen-code/invocation'],
@@ -17362,6 +17366,7 @@ describe('createAcpSessionBridge', () => {
           _meta: {
             [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
             [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: 'yolo',
+            [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: 'auto',
           },
         },
         undefined,
@@ -17373,6 +17378,11 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[1]?._meta?.[
           DAEMON_EXPECTED_APPROVAL_MODE_META_KEY
+        ],
+      ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[1]?._meta?.[
+          DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY
         ],
       ).toBeUndefined();
 
@@ -21723,6 +21733,150 @@ describe('createAcpSessionBridge', () => {
       await expect(third).rejects.toBeDefined();
       await bridge.shutdown();
     });
+
+    it('publishes a terminal and releases the Guard when queued dispatch expires', async () => {
+      let releaseFirst!: () => void;
+      const firstDone = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await firstDone;
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? { v: 1, sessionId: 'ignored', turnResult: null }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const first = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'first' }] },
+        undefined,
+        { promptId: 'running' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+      const dispatch = new AbortController();
+      const second = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'second' }] },
+        undefined,
+        { promptId: 'queued', dispatchSignal: dispatch.signal },
+      );
+      const claim = () =>
+        handle.agentConnection.extMethod(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+          { sessionId, promptId: 'running' },
+        );
+      await expect(claim()).resolves.toEqual({
+        claimed: false,
+        hasQueuedPrompt: true,
+      });
+
+      const timeout = new DOMException('Dispatch timed out', 'TimeoutError');
+      dispatch.abort(timeout);
+      expect(bridge.getPendingPrompts(sessionId)).toMatchObject([
+        { promptId: 'running', state: 'running' },
+      ]);
+      await expect(
+        bridge.getSessionTurnStatus(sessionId, undefined, 'queued'),
+      ).resolves.toMatchObject({
+        state: 'error',
+        error: { message: timeout.message },
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+          params: { sessionId, promptId: 'running' },
+        });
+      });
+      await expect(claim()).resolves.toEqual({
+        claimed: true,
+        hasQueuedPrompt: false,
+      });
+      releaseFirst();
+      await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(second).rejects.toBe(timeout);
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      await bridge.shutdown();
+    });
+
+    it.each(['dispatch guard', 'ACP rejection'] as const)(
+      'releases the Guard wait owner when a promoted prompt fails at %s',
+      async (failure) => {
+        let releaseFirst!: () => void;
+        const firstDone = new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        const refusal = 'Follow-up rejected';
+        const handle = makeChannel({
+          promptImpl: async (request) => {
+            if ((request.prompt[0] as { text?: string }).text === 'second') {
+              throw new RequestError(-32000, refusal, {
+                errorKind: 'approval_mode_changed',
+              });
+            }
+            await firstDone;
+            return { stopReason: 'end_turn' };
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const { sessionId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+        });
+        const first = bridge.sendPrompt(
+          sessionId,
+          { sessionId, prompt: [{ type: 'text', text: 'first' }] },
+          undefined,
+          { promptId: 'running' },
+        );
+        await vi.waitFor(() =>
+          expect(handle.agent.promptCalls).toHaveLength(1),
+        );
+        const second = bridge.sendPrompt(
+          sessionId,
+          { sessionId, prompt: [{ type: 'text', text: 'second' }] },
+          undefined,
+          {
+            promptId: 'queued',
+            ...(failure === 'dispatch guard'
+              ? {
+                  assertCanDispatch() {
+                    throw new Error(refusal);
+                  },
+                }
+              : {}),
+          },
+        );
+        void second.catch(() => {});
+        await expect(
+          handle.agentConnection.extMethod(
+            TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+            { sessionId, promptId: 'running' },
+          ),
+        ).resolves.toEqual({ claimed: false, hasQueuedPrompt: true });
+
+        releaseFirst();
+        await first;
+        await expect(second).rejects.toThrow(refusal);
+        await vi.waitFor(() => {
+          expect(handle.agent.extMethodCalls).toContainEqual({
+            method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+            params: { sessionId, promptId: 'running' },
+          });
+        });
+        expect(bridge.getPendingPrompts(sessionId)).toEqual([]);
+        expect(handle.agent.promptCalls).toHaveLength(
+          failure === 'dispatch guard' ? 1 : 2,
+        );
+        await bridge.shutdown();
+      },
+    );
 
     it('removePendingPrompt aborts a queued prompt and removes it from the list', async () => {
       let resolveFirst: (() => void) | undefined;

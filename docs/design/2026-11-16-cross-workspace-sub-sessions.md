@@ -2,7 +2,7 @@
 
 [English](2026-11-16-cross-workspace-sub-sessions.md) | [简体中文](2026-11-16-cross-workspace-sub-sessions.zh-CN.md)
 
-Status: step 1 implemented alongside this document; steps 2 and 3 proposed.
+Status: steps 1 and 2 implemented; step 3 proposed.
 
 ## Problem
 
@@ -131,24 +131,66 @@ depth gate refuses it if it tries to create sub-sessions of its own. The
 completion notification's task id is the new session's id, which is unique
 because every step 1 launch creates a session.
 
-## Step 2: follow-ups to a session the caller created (proposed)
+## Step 2: follow-ups to a session the caller created
 
-`create_sub_session` gains `sessionId`. The session must be one this caller
-created: its recorded parent is the caller. That lineage is persisted, so it
-holds across a daemon restart. The launcher resumes the session on its
-workspace's bridge, which attaches if it is live and restores it if it is
-not. It queues the prompt behind any running turn and waits on, or watches,
-the turn with its own prompt id. The approval rule from step 1 is applied
-again before the prompt. Each completion notification needs its own task id
-here, because a caller receives several from one session and the receiving
-session treats a repeated task id as a notification it already has.
+`create_sub_session` gains `sessionId`, combined with `workspace` when the
+session lives in another workspace. `model` and `name` apply only to a new
+session, so they cannot be combined with `sessionId`.
 
-Sessions the caller did not create stay out of reach. Prompting one would
-put another session's model text into it as a user turn, and
-`send_message`, which carries no user authority, remains the way to talk to
-them. Because a child cannot delegate, a caller and its children cannot form
-a cycle, so no daemon-wide delegation record is needed. Rollback never closes
-or deletes a reused session.
+**Which sessions.** The session must be one this caller created: its recorded
+parent is the caller, and it carries no source marker. Side tasks and
+scheduled-task runs also record the session they came from as their parent,
+but a person or a schedule started them, and they carry `side_task` or a
+`scheduled_task_run:` source. The launcher checks this before it touches the
+session, from the live entry or, for a session the idle reaper already
+closed, from the creation records at the head of its transcript. That lineage
+is persisted, so it holds across a daemon restart. The caller itself, an
+archived session, and a standalone session are refused. Sessions the caller
+did not create stay out of reach: prompting one would put another session's
+model text into it as a user turn, and `send_message`, which carries no user
+authority, remains the way to talk to them.
+
+**Approval.** A follow-up that names a workspace goes through everything step
+1 requires for that workspace: the one-time approval, which also names the
+session, the trust and generation checks, and the approval rule, applied to
+the target mode at admission. If the rule tightens the mode, the change
+takes effect when the follow-up starts its turn. A follow-up in the caller's
+own workspace uses the tool's usual permission flow and keeps the session's
+mode, as a new sub-session in that workspace does.
+
+**Running the turn.** The launcher resumes the session on its workspace's
+bridge, which attaches if it is live and restores it from its transcript if
+not. The archive coordinator covers lineage lookup, restore, and prompt
+admission. The prompt queues behind any running turn. While
+waiting it counts only output stamped with its own prompt id, so a turn that
+was already running, or a background turn, is never taken for this one. A
+follow-up keeps the session's name, and a failed follow-up never closes or
+deletes the session. Resuming attaches a client; the launcher releases it once
+it is done with the turn, so follow-ups do not pile up attachments, and a
+session restored only for the follow-up closes again once it has nothing left
+to run.
+
+**Reporting back.** Every follow-up sent with `sent` reports back, in either
+workspace, and needs chat recording in the caller to do so, as a `sent`
+launch into another workspace does. A `sent` launch that creates a session waits
+until its prompt is dispatched. A follow-up returns once the prompt is
+queued. The launcher waits up to 30 minutes for the result. Expiry before
+the ACP write prevents dispatch and publishes the failed turn status.
+Once the write starts, the timeout ends the result wait and later prompts
+still wait for that ACP request to settle. The guards still run when the
+turn comes, and a prompt they refuse is reported as a failed completion.
+If a failed follow-up leaves no eligible successor, the bridge releases
+the preceding turn's Todo Stop Guard wait. A follow-up's background task id is
+`<sessionId>:<promptId>`, not the session id: a caller receives several
+completions from one session, and the receiving session treats a repeated
+task id as a notification it already has. The launcher returns that id, and
+the caller's session records it, so the Todo Stop Guard links the completion
+to the work that asked for it. The tool description tells the caller's model
+that results come back on their own and that it should not ask the
+sub-session to report back, which would deliver the result twice.
+
+Because a child cannot delegate, a caller and its children cannot form a
+cycle, so no daemon-wide delegation record is needed.
 
 ## Step 3: Web Shell (proposed)
 
@@ -161,10 +203,11 @@ workspaces, so its reply streams there. When the turn finishes, the
 originating session receives the completion notification as well, so the
 result shows in both places.
 
-## Files (step 1)
+## Files
 
-- `packages/core/src/tools/create-sub-session.ts`: the parameter, its
-  validation, and the description.
+- `packages/core/src/tools/create-sub-session.ts`: the parameters, their
+  validation, the description and approval text, and how a follow-up's
+  result is worded.
 - The ACP session's spawner and the bridge's request validation
   (`packages/cli/src/acp-integration/session/Session.ts`,
   `packages/acp-bridge/src/bridgeOptions.ts`, `bridgeClient.ts`): carry the
@@ -173,7 +216,8 @@ result shows in both places.
   only "Internal error", which the tool used to print as `[object Object]`.
 - `packages/cli/src/serve/create-sub-session.ts`: caller-side checks,
   handing off to the target launcher, the approval rule, notification
-  routing.
+  routing, and the follow-up path (lineage check, resume, client release,
+  task id, prompt-id matching).
 - `packages/cli/src/serve/run-qwen-serve.ts`: register each launcher by
   workspace and give launchers the resolver.
 - User docs for the tool.
@@ -188,11 +232,16 @@ result shows in both places.
 
 ## Open questions
 
+- A `first-turn` follow-up waits at most five minutes, and a busy session can
+  hold it in the queue past that. This wait does not withdraw the prompt,
+  so it still runs later, and nothing reports its result. Use `sent` when
+  the queue delay is uncertain.
+
 - Should every `sent` sub-session notify its caller, not only one that names
   a workspace? That would make the tool consistent, but it would change
   existing fire-and-forget calls by adding an automatic turn.
 
-## Verification (step 1)
+## Verification
 
 - Unit: resolution by absolute path and id, refusal of unknown and untrusted
   targets and callers, the depth gate, target-bridge dispatch, caller-bridge
@@ -202,3 +251,16 @@ result shows in both places.
   `QWEN.md` in `first-turn` mode, and verify `sent` notification delivery in A.
   Open the child link from A and verify it loads B. Naming an untrusted target
   returns a refusal and the list of eligible workspaces.
+- Step 2, unit: a follow-up returns only output stamped with its prompt id;
+  a `sent` follow-up reports under `<sessionId>:<promptId>` and releases the
+  client it attached; a `sent` follow-up to a busy session returns once
+  queued, and one refused when its turn comes is reported as failed; a reaped child's lineage is read from its transcript;
+  another session, the caller itself, a side task, a scheduled-task run, a
+  Live caller, and a caller that cannot take a `sent` completion are refused
+  before the session is touched; a failed follow-up does not close the
+  session; a follow-up in another workspace runs on that workspace's bridge
+  under the delegated mode.
+- Step 2, end to end: follow up a child in B with `first-turn`, and again with
+  `sent` after a daemon restart, and see B answer with the context of its
+  earlier turns; follow up while the child runs a long turn and receive only
+  the new turn's text; a session the caller did not create is refused.
