@@ -4559,7 +4559,6 @@ describe('pane approval mode allowlist', () => {
   });
 });
 
-<<<<<<< HEAD
 describe('ChatPane pane title single-click rename', () => {
   // The same Popover the app renders (imported from the radix-ui package).
   // It starts open and, by Radix design, a button-0 pointerdown + click
