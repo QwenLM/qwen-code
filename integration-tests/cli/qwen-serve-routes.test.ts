@@ -396,6 +396,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_info',
       'session_source_metadata',
       'session_side_task',
+      'session_sub_session_send',
       'session_prompt',
       'session_turn_status',
       'session_attachments',
