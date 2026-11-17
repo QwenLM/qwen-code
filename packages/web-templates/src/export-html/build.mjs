@@ -105,6 +105,12 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_139_000;
 // deferred-change notice, across two locales) measures 2,136,115 bytes on
 // head 6286c8cb11 in CI, 115 above the previous 2,136,000 ceiling. The warning
 // sits 885 above that measurement and the ceiling 1,885 above it.
+// The composer task-explain side question (#17398: the explain display line,
+// the "?" aria label and tooltip, and the panel copy, across two locales, plus
+// the transcript-reachable explain wiring) adds 904 bytes: main d41eda5123
+// measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
+// d5f6a103a6 measures 2,138,797 in CI, 797 above it. The warning sits 203 above
+// that measurement and the ceiling 1,203 above it.
 // The sidebar goal markers (#17515: SessionGoalMarker, its three-locale labels,
 // and the catalog goal projection) measure 2,138,044 bytes on head 2ef7af8e69,
 // 44 above the previous 2,138,000 ceiling. This is the deliberately added

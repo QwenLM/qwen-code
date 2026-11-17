@@ -173,7 +173,11 @@ import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { createToolRevealStore, ToolRevealProvider } from './toolRevealContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import { isComposerTask } from './utils/composerTasks';
+import {
+  buildTaskExplainQuestion,
+  explainDisplayLabel,
+  isComposerTask,
+} from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -3627,6 +3631,9 @@ function isSameGitStatus(
     current.workspaceCwd === next.workspaceCwd &&
     current.branch === next.branch &&
     current.detached === next.detached &&
+    // ?? true: the field is optional on the wire; a one-sided absence is
+    // not a change, but the first-commit false → true transition must be.
+    (current.hasHead ?? true) === (next.hasHead ?? true) &&
     current.staged === next.staged &&
     current.unstaged === next.unstaged &&
     current.untracked === next.untracked &&
@@ -4776,6 +4783,14 @@ export function App({
   useEffect(() => {
     gitModeIntentRef.current = gitModeIntent;
   }, [gitModeIntent]);
+  // True once the user explicitly picked a git mode for the current draft;
+  // the worktree default must not overwrite an explicit choice. Cleared at
+  // draft boundaries (session created/opened, workspace switched).
+  const gitModeIntentTouchedRef = useRef(false);
+  // Bumped on every fresh draft so the worktree-default effect re-arms even
+  // when sessionId and workspace stay unchanged ("New chat" from an empty
+  // draft produces no rising edge on the eligibility deps alone).
+  const [gitDraftGeneration, setGitDraftGeneration] = useState(0);
 
   useEffect(() => {
     if (
@@ -13746,7 +13761,14 @@ export function App({
   const gitModeEligible = Boolean(
     !connection.sessionId &&
       activeWorkspaceTrusted &&
-      selectedWorkspaceGitStatus?.branch,
+      // A detached-HEAD workspace (tag/SHA checkout) reports branch:null
+      // with detached:true; it is exactly the shared-checkout shape the
+      // worktree default exists to isolate.
+      (selectedWorkspaceGitStatus?.branch ||
+        selectedWorkspaceGitStatus?.detached) &&
+      // An unborn HEAD (no commits yet) has no worktree base; the create
+      // path would refuse. Keep the composer on the current branch.
+      selectedWorkspaceGitStatus?.hasHead !== false,
   );
   const branchWorktreeEligible = Boolean(
     connection.sessionId &&
@@ -13822,6 +13844,32 @@ export function App({
       view: 'log',
     });
   }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
+  // "Create branch here": the daemon branches the detached checkout in
+  // place; only the local branch metadata changes.
+  const handleCreateWorktreeBranch = useCallback(
+    async (name: string) => {
+      const sessionIdAtCall = connection.sessionId;
+      const result = await sessionActions.createWorktreeBranch(name);
+      // The user may have switched sessions while the request was in
+      // flight; never apply the response to a different session's state.
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
+      setSessionWorktree((current) =>
+        current ? { ...current, branch: result.worktree.branch } : current,
+      );
+    },
+    [sessionActions, connection.sessionId],
+  );
+  // "Hand off": the daemon moves the session between checkouts; the local
+  // worktree association follows the response (null => back on local).
+  const handleHandoff = useCallback(
+    async (to: 'local' | 'worktree') => {
+      const sessionIdAtCall = connection.sessionId;
+      const result = await sessionActions.handoffWorktree(to);
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
+      setSessionWorktree(result.worktree ?? undefined);
+    },
+    [sessionActions, connection.sessionId],
+  );
   // Every modal the shell itself tracks, plus host-registered interaction
   // blocks. View navigation hotkeys gate on this rather than dialogOpen,
   // because dialogOpen also counts activePanel and the Session Overview is
@@ -14587,7 +14635,10 @@ export function App({
   ]);
 
   const runVisibleBtw = useCallback(
-    (rawQuestion: string) => {
+    // displayQuestion overrides what the panel echoes; the model still
+    // receives the full question. Typed /btw keeps echoing the user's words.
+    // taskId marks a task explanation so the detail panel can mirror it.
+    (rawQuestion: string, displayQuestion?: string, taskId?: string) => {
       if (sessionWriteBlocked) return;
       const question = rawQuestion.trim();
       if (!question) {
@@ -14596,6 +14647,7 @@ export function App({
       }
       if (!requireActiveSessionForLocalCommand()) return;
 
+      const display = displayQuestion ?? question;
       const messageId = `local-btw-${nextBtwMessageIdRef.current++}`;
       const sessionId = connection.sessionId;
       const workspaceCwd = connection.workspaceCwd;
@@ -14605,9 +14657,10 @@ export function App({
       setBtwMessage({
         id: messageId,
         role: 'btw',
-        question,
+        question: display,
         answer: '',
         isPending: true,
+        ...(taskId ? { taskId } : {}),
       });
 
       void (async () => {
@@ -14625,9 +14678,10 @@ export function App({
             setBtwMessage({
               id: messageId,
               role: 'btw',
-              question,
+              question: display,
               answer: event.answer || (done ? t('btw.emptyAnswer') : ''),
               isPending: !done,
+              ...(taskId ? { taskId } : {}),
             });
             if (done) btwAbortControllerRef.current = null;
           }
@@ -14696,6 +14750,66 @@ export function App({
         !e.shiftKey &&
         (key === 'c' || key === 'd');
 
+      // Surfaces that own the keyboard yield the keys they actually consume.
+      // Dialogs/drawers (including component-local confirms portaled into the
+      // shell root) own Escape only — Enter/Space on their body still dismiss
+      // a settled explanation, and on a control still activate it. The waiting
+      // minigame (Space pauses, Enter restarts) and keyboard-scoped status
+      // cards (Enter/Space open/close detail and server actions) consume
+      // Enter/Space as well as Escape, so yield those keys to them too. The
+      // cancel chords are never owned by these surfaces, except Ctrl+C's copy
+      // role on a real text surface under a guard: Ctrl+D never copies, and a
+      // keyboard scope is not itself a text surface (a button inside a status
+      // card still cancels).
+      const inKeyboardScope =
+        target instanceof Element &&
+        target.closest('[data-keyboard-scope]') !== null;
+      const guardApplies =
+        hasOpenModalSurface(portalRoot) ||
+        waitingMinigameOpen ||
+        inKeyboardScope;
+      const guardOwnsActivation =
+        (waitingMinigameOpen || inKeyboardScope) &&
+        (e.key === 'Enter' || e.key === ' ');
+      const textCopy =
+        guardApplies &&
+        isCtrlCancel &&
+        key === 'c' &&
+        target instanceof Element &&
+        target.closest(
+          'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .cm-editor',
+        ) !== null;
+      if (
+        textCopy ||
+        (guardApplies && e.key === 'Escape') ||
+        guardOwnsActivation
+      )
+        return;
+
+      // Enter/Space activate a control — button, link, field, menu item,
+      // tab, grid/tree row, and the like — and Escape inside the chip row or
+      // an open menu/listbox belongs to that widget. Every other key —
+      // Escape anywhere else, Ctrl+C/Ctrl+D — must reach the dismiss/cancel
+      // path below, which is what the panel's key hints advertise. The
+      // composer editor is never exempted: it is the dismiss shortcut's home
+      // surface. Grids and trees activate rows on Enter/Space but do not
+      // universally own Escape (the trajectory grid claims it only with a
+      // row selection), so they appear only in the activation list —
+      // exempting their Escape would leave the key unconsumed and let the
+      // app-level handler arm a surprise turn-cancel behind the panel.
+      if (
+        target instanceof Element &&
+        !target.closest('[data-web-shell-composer-editor]') &&
+        (((e.key === 'Enter' || e.key === ' ') &&
+          target.closest(
+            'button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="switch"], [role="checkbox"], [role="radio"], [role="grid"], [role="tree"], summary, [contenteditable], input, select, textarea',
+          )) ||
+          (e.key === 'Escape' &&
+            (target.closest('[data-web-shell-composer-task-chips]') ||
+              target.closest('[role="menu"], [role="listbox"]'))))
+      )
+        return;
+
       if (message.isPending) {
         if (!isPlainEscape && !isCtrlCancel) return;
       } else {
@@ -14717,7 +14831,14 @@ export function App({
 
     window.addEventListener('keydown', onBtwShortcut, true);
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
-  }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
+  }, [
+    interactionBlocked,
+    btwMessage,
+    dismissBtwMessage,
+    pendingApproval,
+    portalRoot,
+    waitingMinigameOpen,
+  ]);
 
   // Echo a local command into the transcript, or suppress it while a turn is
   // streaming so the injected user row can't split the active turn (see
@@ -14885,6 +15006,39 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
     )?.values.effective !== false;
+  const defaultWorktreeForNewSessions =
+    workspaceSettings.find(
+      (setting) => setting.key === 'worktree.defaultForNewSessions',
+    )?.values.effective === true;
+  const handleGitModeIntentChange = useCallback((intent: SessionGitIntent) => {
+    gitModeIntentTouchedRef.current = true;
+    gitModeIntentRef.current = intent;
+    setGitModeIntent(intent);
+  }, []);
+  // An explicit choice belongs to one draft: reset the touched flag at
+  // draft boundaries (session created/opened, workspace switched), not on
+  // transient eligibility drops — a git-status blip must not let the
+  // default overwrite an explicit current-branch choice.
+  useEffect(() => {
+    gitModeIntentTouchedRef.current = false;
+  }, [connection.sessionId, activeWorkspaceCwd]);
+  // Apply the worktree default on the rising edge of eligibility + setting
+  // (settings load asynchronously, so the default may land after the chip
+  // first renders). An explicit selection wins.
+  const gitModeDefaultConditionRef = useRef(false);
+  useEffect(() => {
+    const condition = gitModeEligible && defaultWorktreeForNewSessions;
+    if (
+      condition &&
+      !gitModeDefaultConditionRef.current &&
+      !gitModeIntentTouchedRef.current &&
+      gitModeIntentRef.current.mode === 'current'
+    ) {
+      gitModeIntentRef.current = { mode: 'worktree' };
+      setGitModeIntent({ mode: 'worktree' });
+    }
+    gitModeDefaultConditionRef.current = condition;
+  }, [gitModeEligible, defaultWorktreeForNewSessions, gitDraftGeneration]);
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -16808,6 +16962,14 @@ export function App({
           : { mode: 'current' };
       gitModeIntentRef.current = nextGitIntent;
       setGitModeIntent(nextGitIntent);
+      // A fresh draft is a new explicit-choice boundary: re-arm the
+      // worktree default. Without the generation bump the rising-edge
+      // effect never re-fires when "New chat" leaves sessionId and
+      // workspace unchanged, silently dropping the enabled default. A
+      // caller-supplied intent counts as an explicit choice and wins.
+      gitModeIntentTouchedRef.current = opts?.gitIntent !== undefined;
+      gitModeDefaultConditionRef.current = false;
+      setGitDraftGeneration((generation) => generation + 1);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -18811,6 +18973,52 @@ export function App({
       openSubagentPanelForSession,
     ],
   );
+
+  const explainComposerTask = useCallback(
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
+      runVisibleBtw(
+        buildTaskExplainQuestion(task, t),
+        t('tasks.explain.display', { label: explainDisplayLabel(task.label) }),
+        task.id,
+      );
+    },
+    [runVisibleBtw, t],
+  );
+
+  // The detail panel's "?" explains the task shown in the active tab. Shell
+  // and monitor tabs carry their snapshot; a subagent tab resolves through
+  // the registry by its spawning tool call. Workflow tabs name no run.
+  const activeExplainTask = useMemo(() => {
+    const tab = artifactPanelTabs.find(
+      (item) => item.id === activeArtifactPanelTabId,
+    );
+    if (!tab) return null;
+    if (tab.kind === 'shell' || tab.kind === 'monitor') return tab.task;
+    if (tab.kind === 'subagent') {
+      // The open path registers the tab under toolUseId ?? id
+      // (agentTaskAsToolCall), so accept both id domains here.
+      return (
+        sessionTasks.find(
+          (task) =>
+            task.kind === 'agent' &&
+            (task.toolUseId === tab.rootToolCallId ||
+              task.id === tab.rootToolCallId),
+        ) ?? null
+      );
+    }
+    return null;
+  }, [artifactPanelTabs, activeArtifactPanelTabId, sessionTasks]);
+
+  const taskExplanation =
+    btwMessage?.role === 'btw' && btwMessage.taskId
+      ? {
+          messageId: btwMessage.id,
+          taskId: btwMessage.taskId,
+          question: btwMessage.question,
+          answer: btwMessage.answer,
+          isPending: btwMessage.isPending,
+        }
+      : null;
 
   const refreshGoal = useCallback(async () => {
     const owner = sessionOwnerGuard.capture();
@@ -21646,6 +21854,18 @@ export function App({
       // behind it, or a second Escape would stop the turn by surprise.
       if (live.waitingMinigameOpen) return;
 
+      // A keyboard-scoped surface (Tasks/Mcp status cards) owns Escape too:
+      // its own delayed window listener collapses the card, and that listener
+      // bails on defaultPrevented. Arming the two-press stream cancel here
+      // would both swallow the card's Escape and stop the turn on a second
+      // press, so yield before deciding the escape intent.
+      const escScopeTarget = e.composedPath()[0] ?? e.target;
+      if (
+        escScopeTarget instanceof Element &&
+        escScopeTarget.closest('[data-keyboard-scope]')
+      )
+        return;
+
       // Streaming takes priority over clearing text (queued prompts stay intact
       // and drain after the turn settles); see decideEscapeIntent for the rules.
       const intent = decideEscapeIntent({
@@ -22764,7 +22984,11 @@ export function App({
     ? getDefaultChatWidthMode()
     : chatWidthMode;
   const activeGitBranch = sessionWorktree
-    ? (selectedWorkspaceGitStatus?.branch ?? sessionWorktree.branch)
+    ? // A detached managed worktree has no branch (live status reports
+      // null, creation metadata ''); show its slug instead.
+      selectedWorkspaceGitStatus?.branch ||
+      sessionWorktree.branch ||
+      sessionWorktree.slug
     : sessionBranch
       ? (selectedWorkspaceGitStatus?.branch ?? sessionBranch.name)
       : connection.sessionId
@@ -23373,6 +23597,9 @@ export function App({
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onOpenNestedSubagent: openSubagentPanelForSession,
     agentTasks: tracedEnvironmentAgentTasks,
+    explainTask: activeExplainTask,
+    onExplainTask: explainComposerTask,
+    taskExplanation,
     agentTraceLoading: agentTraceInitialLoading,
     agentTraceError: agentTraceFailed ? t('workflow.loadFailed') : undefined,
     onOpenWorkflowAgent: openEnvironmentAgent,
@@ -25830,6 +26057,7 @@ export function App({
                                     question={btwMessage.question}
                                     answer={btwMessage.answer}
                                     isPending={btwMessage.isPending}
+                                    hidePrefix={Boolean(btwMessage.taskId)}
                                   />
                                 </div>
                               ) : null;
@@ -26279,6 +26507,7 @@ export function App({
                             // their task surfaces.
                             includeAgents={environmentTasksReplacementEnabled}
                             onSelectTask={openComposerTask}
+                            onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
                           />
                         )}
@@ -26468,7 +26697,7 @@ export function App({
                               : undefined
                           }
                           gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
-                          onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
+                          onGitModeIntentChange={gitModeEligible ? handleGitModeIntentChange : undefined}
                           gitStatus={
                             workspaceContextActive
                               ? selectedWorkspaceGitStatus
@@ -26492,6 +26721,24 @@ export function App({
                           onOpenLog={
                             gitDiffWorkspaceCwd
                               ? handleOpenLog
+                              : undefined
+                          }
+                          onCreateWorktreeBranch={
+                            sessionWorktree &&
+                            !sessionWorktree.branch &&
+                            workspace.capabilities?.features?.includes(
+                              'session_worktree_branch_v1',
+                            )
+                              ? handleCreateWorktreeBranch
+                              : undefined
+                          }
+                          onHandoff={
+                            connection.sessionId &&
+                            workspaceContextActive &&
+                            workspace.capabilities?.features?.includes(
+                              'session_worktree_handoff_v1',
+                            )
+                              ? handleHandoff
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}

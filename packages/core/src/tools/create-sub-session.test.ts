@@ -128,6 +128,57 @@ describe('CreateSubSessionTool', () => {
     expect(spawner).not.toHaveBeenCalled();
   });
 
+  it('sends a follow-up to an earlier sub-session and words the result as one', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'kid', result: 'done' }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const invocation = tool.build({
+      prompt: 'and now?',
+      sessionId: 'kid',
+      workspace: '/repos/b',
+    });
+    const signal = new AbortController().signal;
+    const confirmation = await invocation.getConfirmationDetails(signal);
+    expect(invocation.getDescription()).toBe(
+      '[first-turn] to "kid" in "/canonical/other repo": and now?',
+    );
+    // The approver sees which session the prompt goes to.
+    expect(confirmation).toMatchObject({
+      approvalText: expect.stringContaining('Session: "kid"'),
+    });
+    await confirmation!.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    const res = await invocation.execute(signal);
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'and now?',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+      sessionId: 'kid',
+    });
+    expect(res.llmContent).toContain('result');
+    expect(res.llmContent).not.toContain('first-turn result');
+    const sent = await tool
+      .build({ prompt: 'p', sessionId: 'kid', completion: 'sent' })
+      .execute(new AbortController().signal);
+    expect(sent.llmContent).toContain('accepted the prompt into its queue');
+    expect(sent.returnDisplay).toMatch(/ queued$/);
+    expect(() => tool.build({ prompt: 'p', sessionId: 'a\nb' })).toThrow(
+      /sessionId/,
+    );
+    expect(() =>
+      tool.build({ prompt: 'p', sessionId: 'kid', model: 'm1' }),
+    ).toThrow(/cannot be combined/);
+    expect(() =>
+      tool.build({ prompt: 'p', sessionId: 'kid', name: 'n' }),
+    ).toThrow(/cannot be combined/);
+    spawner.mockRejectedValueOnce(new Error('not yours'));
+    const refused = await tool
+      .build({ prompt: 'p', sessionId: 'kid' })
+      .execute(new AbortController().signal);
+    expect(refused.llmContent).toBe(
+      'Error sending to sub-session kid: not yours',
+    );
+  });
+
   it('rejects an empty or unsafe workspace at validation', () => {
     const tool = new CreateSubSessionTool(makeConfig());
     expect(() => tool.build({ prompt: 'do X', workspace: ' ' })).toThrow(
@@ -319,6 +370,22 @@ describe('CreateSubSessionTool', () => {
     // Nothing was created, so the message must not hedge.
     expect(res.llmContent).toMatch(/no sub-session was created/i);
     expect(res.llmContent).not.toMatch(/may already have been created/i);
+  });
+
+  it('reports that a cancelled follow-up may already be queued', async () => {
+    const spawner: SubSessionSpawner = () => new Promise(() => {});
+    const ac = new AbortController();
+    const result = new CreateSubSessionTool(makeConfig(spawner))
+      .build({ prompt: 'x', sessionId: 'kid' })
+      .execute(ac.signal);
+    ac.abort();
+
+    await expect(result).resolves.toMatchObject({
+      llmContent: expect.stringContaining(
+        'follow-up prompt may already be queued',
+      ),
+      interruptedBeforeCompletion: true,
+    });
   });
 
   it('does not report cancellation when the spawn wins the race', async () => {

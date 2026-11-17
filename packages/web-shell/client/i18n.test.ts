@@ -711,6 +711,27 @@ describe('web-shell ru locale', () => {
     }
   });
 
+  it('localizes activity grouping options in Russian', () => {
+    const ru = getTranslator('ru');
+    const en = getTranslator('en');
+    for (const key of [
+      'sidebar.groupBy',
+      'sidebar.groupWorkspace',
+      'sidebar.groupActivityDate',
+      'sidebar.groupThisWeek',
+      'sidebar.groupLast30Days',
+      'sidebar.groupOlder',
+      'sidebar.recentConversations',
+    ]) {
+      expect(ru(key)).not.toBe(en(key));
+    }
+    expect(en('sidebar.recentConversations')).toBe('Recent conversations');
+    expect(getTranslator('zh-CN')('sidebar.recentConversations')).toBe(
+      '最近对话',
+    );
+    expect(ru('sidebar.recentConversations')).toBe('Недавние разговоры');
+  });
+
   it('pluralises turn counters the Russian way', () => {
     const t = getTranslator('ru');
     expect(t('goal.turns', { count: 1 })).toBe('1 ход');
