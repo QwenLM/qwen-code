@@ -723,6 +723,71 @@ describe('SettingsMessage user-scope editing', () => {
     );
   });
 
+  it.each(['number', 'text'] as const)(
+    'cancels a %s setting with Escape and permits a later Enter save',
+    async (type) => {
+      const setting: DaemonSettingDescriptor =
+        type === 'number'
+          ? integerSetting()
+          : {
+              key: 'general.testText',
+              type: 'string',
+              label: 'Text Setting',
+              category: 'General',
+              requiresRestart: false,
+              default: 'original',
+              values: { effective: 'original' },
+            };
+      const setValue = vi.fn(
+        (scope: 'workspace' | 'user', key: string, value: unknown) =>
+          Promise.resolve({
+            key,
+            scope,
+            value,
+            requiresRestart: false,
+          } as DaemonSettingUpdateResult),
+      );
+      const container = renderPanel(makeState([setting], setValue));
+      const input = container.querySelector<HTMLInputElement>(
+        `input[name="${setting.key}"]`,
+      )!;
+      const edit = (value: string) => {
+        act(() => {
+          input.focus();
+          Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            'value',
+          )!.set!.call(input, value);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+      };
+
+      edit(type === 'number' ? '5' : 'cancelled draft');
+      await act(async () => {
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+      });
+
+      expect(setValue).not.toHaveBeenCalled();
+      expect(input.value).toBe(String(setting.values.effective));
+      expect(document.activeElement).not.toBe(input);
+
+      edit(type === 'number' ? '10' : 'saved draft');
+      await act(async () => {
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+      });
+
+      expect(setValue).toHaveBeenCalledExactlyOnceWith(
+        'workspace',
+        setting.key,
+        type === 'number' ? 10 : 'saved draft',
+      );
+    },
+  );
+
   it('edits the model output language through the language callback, user scope only', async () => {
     const onOutputLanguageChange = vi.fn();
     const setValue = vi.fn();

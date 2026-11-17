@@ -641,10 +641,12 @@ function SettingInput({
 }) {
   const currentValue = String(value ?? '');
   const [draft, setDraft] = useState(currentValue);
+  const cancellingRef = useRef(false);
 
   useEffect(() => setDraft(currentValue), [currentValue]);
 
   const commit = () => {
+    if (cancellingRef.current) return;
     if (type === 'number') {
       const trimmed = draft.trim();
       const parsed = Number(trimmed);
@@ -678,8 +680,10 @@ function SettingInput({
       onKeyDown={(event) => {
         if (event.key === 'Enter') event.currentTarget.blur();
         if (event.key === 'Escape') {
+          cancellingRef.current = true;
           setDraft(currentValue);
           event.currentTarget.blur();
+          cancellingRef.current = false;
         }
       }}
     />
