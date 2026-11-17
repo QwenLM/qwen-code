@@ -562,7 +562,11 @@ describe('GrepTool', () => {
     const expectDashGuard = (bin: string) => async (pattern: string) => {
       await grepTool.build({ pattern }).execute(abortSignal);
 
-      const calls = argsFor(bin);
+      // git is also spawned for `ls-files` (fallback corpus); only grep
+      // subcommand invocations carry the search pattern.
+      const calls = argsFor(bin).filter(
+        (args) => bin !== 'git' || args[4] === 'grep',
+      );
       expect(calls).not.toHaveLength(0);
       for (const args of calls) {
         expect(hasAdjacent(args, '-e', pattern)).toBe(true);
@@ -593,7 +597,7 @@ describe('GrepTool', () => {
         .build({ pattern: 'world', glob: '*.ts' })
         .execute(abortSignal);
 
-      for (const args of argsFor('git')) {
+      for (const args of argsFor('git').filter((a) => a[4] === 'grep')) {
         // Git only reads `-c` before the subcommand, so the guard has to stay
         // ahead of it.
         expect(args.slice(0, 5)).toEqual([
@@ -616,6 +620,67 @@ describe('GrepTool', () => {
         expect(args).toContain('--include=*.ts');
         // The search path stays the final operand.
         expect(args[args.length - 1]).toBe('.');
+      }
+    });
+
+    it('scopes the system-grep fallback to the git-aware corpus', async () => {
+      const okChild = (out: string, code: number) =>
+        ({
+          on: (event: string, cb: (...a: unknown[]) => void) => {
+            if (event === 'close') setTimeout(() => cb(code), 0);
+          },
+          removeListener: () => {},
+          stdout: {
+            on: (event: string, cb: (c: Buffer) => void) => {
+              if (event === 'data') setTimeout(() => cb(Buffer.from(out)), 0);
+            },
+          },
+          stderr: { on: () => {} },
+          kill: () => {},
+          connected: false,
+          disconnect: () => {},
+        }) as unknown as ReturnType<typeof spawn>;
+      const previousSpawnImpl = vi.mocked(spawn).getMockImplementation();
+      vi.mocked(spawn).mockImplementation(
+        (cmd: string, args: readonly string[]) => {
+          if (cmd === 'git' && args[4] === 'ls-files') {
+            return okChild('src.ts' + '\0', 0);
+          }
+          // git grep errors out so the fallback strategies run
+          if (cmd === 'git') return okChild('', 2);
+          if (cmd === 'grep') return okChild('src.ts' + '\0' + '1:hello\n', 0);
+          return okChild('', 2);
+        },
+      );
+
+      try {
+        const result = await grepTool
+          .build({ pattern: 'hello' })
+          .execute(abortSignal);
+
+        const gitCalls = argsFor('git');
+        const lsFiles = gitCalls.find((a) => a[4] === 'ls-files');
+        expect(lsFiles).toEqual(
+          expect.arrayContaining([
+            '--cached',
+            '--others',
+            '--exclude-standard',
+          ]),
+        );
+        const grepCalls = argsFor('grep');
+        expect(grepCalls).not.toHaveLength(0);
+        for (const args of grepCalls) {
+          // explicit corpus, not a recursive walk over ignored build output
+          expect(args).not.toContain('-r');
+          expect(args).toContain('src.ts');
+          expect(hasAdjacent(args, '-e', 'hello')).toBe(true);
+        }
+        expect(result.llmContent).toContain('Found 1 match');
+      } finally {
+        // the override must not leak into later describes
+        if (previousSpawnImpl) {
+          vi.mocked(spawn).mockImplementation(previousSpawnImpl);
+        }
       }
     });
   });

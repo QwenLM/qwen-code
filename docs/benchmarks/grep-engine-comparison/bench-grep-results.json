@@ -1,0 +1,139 @@
+{
+  "repo": "qwen-code working tree (15,131 tracked files + 138MB gitignored dist/)",
+  "date": "2026-11-17",
+  "engines": {
+    "git": "2.50.1 (Apple Git-155)",
+    "grep": "BSD grep 2.6.0-FreeBSD",
+    "rg": "ripgrep 15.0.0"
+  },
+  "cpu": "Apple M4, 10 cores",
+  "provenance": "Medians transcribed from the complete run log bench-grep-unfixed-run.log (1 warmup + 5 measured runs for fast engines, 1 warmup + 1 measured for system grep). Per-sample arrays were not retained for this run; the fixed-strategy and JS-fallback runs retain full samples in their own JSON files. stdout_kb is the rounded value printed by the harness.",
+  "results": [
+    {
+      "pattern": "common word",
+      "strategy": "main:git-grep (content, -i default)",
+      "median_ms": 737,
+      "matches": 50567,
+      "stdout_kb": 5546
+    },
+    {
+      "pattern": "common word",
+      "strategy": "main:system-grep (content, -i default)",
+      "median_ms": 60130,
+      "matches": 1022948,
+      "stdout_kb": 1219378
+    },
+    {
+      "pattern": "common word",
+      "strategy": "preview:rg files_with_matches (default, case-sensitive)",
+      "median_ms": 244,
+      "matches": 7147,
+      "stdout_kb": 403
+    },
+    {
+      "pattern": "common word",
+      "strategy": "preview:rg content --json (case-sensitive)",
+      "median_ms": 148,
+      "matches": 47678,
+      "stdout_kb": 15854
+    },
+    {
+      "pattern": "common word",
+      "strategy": "preview:rg content --json -i (normalized to main default)",
+      "median_ms": 141,
+      "matches": 50567,
+      "stdout_kb": 16725
+    },
+    {
+      "pattern": "common word",
+      "strategy": "preview:rg files -i (normalized)",
+      "median_ms": 237,
+      "matches": 7228,
+      "stdout_kb": 409
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "main:git-grep (content, -i default)",
+      "median_ms": 2055,
+      "matches": 114,
+      "stdout_kb": 16
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "main:system-grep (content, -i default)",
+      "median_ms": 125848,
+      "matches": 1019,
+      "stdout_kb": 4032
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "preview:rg files_with_matches (default, case-sensitive)",
+      "median_ms": 155,
+      "matches": 32,
+      "stdout_kb": 2
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "preview:rg content --json (case-sensitive)",
+      "median_ms": 137,
+      "matches": 114,
+      "stdout_kb": 48
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "preview:rg content --json -i (normalized to main default)",
+      "median_ms": 140,
+      "matches": 114,
+      "stdout_kb": 48
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "preview:rg files -i (normalized)",
+      "median_ms": 139,
+      "matches": 32,
+      "stdout_kb": 2
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "main:git-grep (content, -i default)",
+      "median_ms": 379,
+      "matches": 0,
+      "stdout_kb": 0
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "main:system-grep (content, -i default)",
+      "median_ms": 54172,
+      "matches": 3,
+      "stdout_kb": 0
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "preview:rg files_with_matches (default, case-sensitive)",
+      "median_ms": 141,
+      "matches": 0,
+      "stdout_kb": 0
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "preview:rg content --json (case-sensitive)",
+      "median_ms": 138,
+      "matches": 0,
+      "stdout_kb": 0
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "preview:rg content --json -i (normalized to main default)",
+      "median_ms": 140,
+      "matches": 0,
+      "stdout_kb": 0
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "preview:rg files -i (normalized)",
+      "median_ms": 141,
+      "matches": 0,
+      "stdout_kb": 0
+    }
+  ]
+}

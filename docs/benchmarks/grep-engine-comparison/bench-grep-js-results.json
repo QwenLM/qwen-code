@@ -1,0 +1,37 @@
+{
+  "results": [
+    {
+      "pattern": "common word",
+      "strategy": "main:JS fallback (globStream+readFile)",
+      "median_ms": 49361.2,
+      "min_ms": 49361.2,
+      "max_ms": 49361.2,
+      "files_searched": 165575,
+      "matches": 1079867
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "main:JS fallback (globStream+readFile)",
+      "median_ms": 50642.1,
+      "min_ms": 50642.1,
+      "max_ms": 50642.1,
+      "files_searched": 165576,
+      "matches": 1020
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "main:JS fallback (globStream+readFile)",
+      "median_ms": 49731.5,
+      "min_ms": 49731.5,
+      "max_ms": 49731.5,
+      "files_searched": 165576,
+      "matches": 4
+    }
+  ],
+  "scope": {
+    "git_grep_files": 7237,
+    "rg_files_hidden_gitignore": 7147,
+    "system_grep_files": 78624
+  },
+  "date": "2026-11-17T05:14:27.985Z"
+}
