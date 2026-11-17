@@ -19,6 +19,7 @@ import com.alibaba.acp.sdk.protocol.agent.request.terminal.TerminalOutputRequest
 import com.alibaba.acp.sdk.protocol.agent.request.terminal.WaitForTerminalExitRequest;
 import com.alibaba.acp.sdk.protocol.agent.response.PromptResponse;
 import com.alibaba.acp.sdk.protocol.client.notification.CancelNotification;
+import com.alibaba.acp.sdk.protocol.client.notification.CancelNotification.CancelNotificationParams;
 import com.alibaba.acp.sdk.protocol.client.request.LoadSessionRequest.LoadSessionRequestParams;
 import com.alibaba.acp.sdk.protocol.client.request.PromptRequest;
 import com.alibaba.acp.sdk.protocol.client.request.PromptRequest.PromptRequestParams;
@@ -89,6 +90,7 @@ public class Session {
      */
     public void cancel() throws IOException {
         CancelNotification cancelNotification = new CancelNotification();
+        cancelNotification.setParams(new CancelNotificationParams(loadSessionRequestParams.getSessionId()));
         String message = cancelNotification.toString();
         logger.debug("send_cancelNotification to agent {}", message);
         transport.inputNoWaitResponse(message);
