@@ -34986,6 +34986,22 @@ describe('Session', () => {
         const sendMessageStream = mockChat.sendMessageStream as ReturnType<
           typeof vi.fn
         >;
+        // The Stop-hook continuation rewrites the prompt id with a suffix, but
+        // the ledger key stays the turn's base id (R7-3); the initial send has
+        // no suffix and therefore no ledgerTurnKey override.
+        expect(sendMessageStream.mock.calls[0][2]).toBe(
+          'test-session-id########1',
+        );
+        expect(sendMessageStream.mock.calls[0][4]).not.toHaveProperty(
+          'ledgerTurnKey',
+        );
+        expect(sendMessageStream.mock.calls[1][2]).toBe(
+          'test-session-id########1_stop_hook_1',
+        );
+        expect(sendMessageStream.mock.calls[1][4]).toMatchObject({
+          isSessionTurn: true,
+          ledgerTurnKey: 'test-session-id########1',
+        });
         expectCompressBeforeSend(
           mockLlmClient.tryCompressChat,
           sendMessageStream,

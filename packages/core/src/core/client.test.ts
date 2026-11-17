@@ -12913,6 +12913,26 @@ Other open files:
         expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
       });
 
+      it('excludes a Teammate interaction’s unflagged continuation', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // Teammate first send is excluded by messageType and registered.
+        await run([{ text: 'teammate' }], 'session########10', {
+          type: SendMessageType.Teammate,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // Its unflagged Hook continuation reuses the Teammate's id and must stay
+        // excluded by the registry (the Teammate arm of the allowlist).
+        await run([{ text: 'continue' }], 'session########10', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+      });
+
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = userText('retry me');
         const mockChat = retryChat({

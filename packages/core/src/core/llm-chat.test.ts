@@ -1441,6 +1441,57 @@ describe('LlmChat', async () => {
       });
     });
 
+    it('a prepared resume binds the ledger turn boundary (isSessionTurn)', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const service = new ModelAvailabilityService();
+      const beginTurn = vi.spyOn(service, 'beginTurn');
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: {},
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'recovered' }])),
+      );
+      await drain(
+        await chat.sendPreparedMessageStream(
+          saved,
+          'prepared-prompt',
+          new AbortController().signal,
+          vi.fn(),
+        ),
+      );
+      // The prepared resume hardcodes isSessionTurn, so it must bind the ledger
+      // turn boundary like the interactive path (R7-5).
+      expect(beginTurn).toHaveBeenCalledWith('prepared-prompt');
+    });
+
     it('refuses a saved request whose model no longer matches the route', async () => {
       const routeConfig = {
         model: 'test-model',

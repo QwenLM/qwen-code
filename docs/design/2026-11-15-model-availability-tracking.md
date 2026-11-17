@@ -84,7 +84,7 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     gate requires. Membership is decided by the **sender**, not inferred from
     "went through `Turn`": `LlmClient` constructs the live turn's `Turn` with
     `isSessionTurn` set per `messageType` — true for the turn's own sends
-    (user query, retry, tool result, continuations), false for
+    (user query, cron, goal, retry, tool result, and continuations), false for
     `Notification`/`Teammate` (which carry fresh prompt ids). A concurrent
     `/btw` side query, `Notification` and `Teammate` are additionally excluded by
     a registry of their prompt ids (`backgroundInteractionPromptIds`): the
@@ -121,8 +121,9 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     have served.
 - In the fallback chain itself, only fallback models are written to and read
   from the ledger; the primary is still attempted each request and is not
-  marked (marking it would be a dead write, since the chain's two same-model
-  guards exclude it from the skip):
+  marked (marking it would be a dead write: the primary is attempted before the
+  fallback chain and is never a fallback candidate, so the skip never reads its
+  mark):
   - Before attempting a fallback model, consult `snapshot(model)`; skip models
     reported unavailable (record them in the existing skip/debug path).
   - When a fallback exhausts retries on a fallback-eligible capacity error,
