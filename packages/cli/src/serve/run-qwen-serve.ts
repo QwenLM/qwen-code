@@ -9330,6 +9330,13 @@ async function runQwenServeImpl(
     (
       app.locals as { subSessionStoppers?: Array<() => void> }
     ).subSessionStoppers = subSessionStoppers;
+    // `POST /session/:id/sub-sessions` runs a person's send on the launcher of
+    // the caller's workspace.
+    (
+      app.locals as {
+        subSessionLauncherFor?: typeof subSessionWorkspaces.getLauncher;
+      }
+    ).subSessionLauncherFor = subSessionWorkspaces.getLauncher;
     subSessionStoppers.push(subSessionLauncher.stop);
     if (workspaceTrustHotReloadAvailable) {
       const [

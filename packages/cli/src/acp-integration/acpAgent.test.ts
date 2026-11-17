@@ -10710,6 +10710,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         label: 'research worker',
       },
     );
+    const fromSession = { sessionId: 'source-B', workspaceCwd: '/tmp/source' };
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification, {
+        sessionId,
+        displayText: 'Session replied.',
+        modelText:
+          '<task-notification><result>Done</result></task-notification>',
+        taskId: 'worker-reply',
+        status: 'completed',
+        kind: 'agent',
+        fromSession,
+        sentMessageContext: '<sent-message>Original text</sent-message>',
+      }),
+    ).resolves.toEqual({ sessionId, accepted: true });
+    expect(
+      lastSessionMock!.enqueueBackgroundNotification,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        modelText:
+          '<task-notification><result>Done</result></task-notification>',
+        sentMessageContext: '<sent-message>Original text</sent-message>',
+        structured: { fromSession },
+      }),
+    );
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification, {
         sessionId,
@@ -10723,7 +10747,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).rejects.toThrowError(/Invalid background notification label/);
     expect(
       lastSessionMock!.enqueueBackgroundNotification,
-    ).toHaveBeenCalledTimes(1);
+    ).toHaveBeenCalledTimes(2);
 
     mockConnectionState.resolve();
     await agentPromise;

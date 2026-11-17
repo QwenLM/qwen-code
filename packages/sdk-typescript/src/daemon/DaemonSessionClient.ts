@@ -1347,8 +1347,10 @@ export class DaemonSessionClient {
     return this.client.sessionSupportedCommands(this.sessionId, this.clientId);
   }
 
-  tasks(): Promise<DaemonSessionTasksStatus> {
-    return this.client.sessionTasks(this.sessionId, this.clientId);
+  tasks(
+    opts: { includeSubSessions?: boolean } = {},
+  ): Promise<DaemonSessionTasksStatus> {
+    return this.client.sessionTasks(this.sessionId, this.clientId, opts);
   }
 
   taskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus> {
