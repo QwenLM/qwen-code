@@ -180,6 +180,56 @@ beforeEach(() => {
 });
 
 describe('restoreSessionCore', () => {
+  it.each(['missing', 'legacy'] as const)(
+    'discards a cold restore when its strict worktree sidecar becomes %s',
+    async (state) => {
+      mocks.readWorktreeSessionStrict
+        .mockResolvedValueOnce({
+          state: 'valid',
+          session: {
+            workspaceCwd: WORKSPACE_CWD,
+            originalCwd: WORKSPACE_CWD,
+            worktreePath: `${WORKSPACE_CWD}/.qwen/worktrees/task`,
+            worktreeBranch: 'worktree-task',
+            slug: 'task',
+          },
+        })
+        .mockResolvedValue(
+          state === 'missing'
+            ? { state: 'missing' }
+            : {
+                state: 'valid',
+                session: {
+                  originalCwd: WORKSPACE_CWD,
+                  worktreePath: `${WORKSPACE_CWD}/.qwen/worktrees/task`,
+                  worktreeBranch: 'worktree-task',
+                  slug: 'task',
+                },
+              },
+        );
+      const bridge = fakeBridge({
+        fireDeferredRestoreAskUserQuestionPrompt: vi.fn(),
+        discardDeferredRestoreAskUserQuestionPrompt: vi.fn(),
+      });
+      const { options, release } = coreOptions(fakeRuntime(bridge));
+
+      await expect(restoreSessionCore(options)).rejects.toThrow(
+        /Worktree sidecar .* during restore/,
+      );
+      expect(bridge.loadSession).toHaveBeenCalledWith(
+        expect.objectContaining({ deferAutomaticWorkUntilCwdRestore: true }),
+      );
+      expect(bridge.killSession).toHaveBeenCalledWith(SESSION_ID, {
+        requireZeroAttaches: true,
+      });
+      expect(bridge.changeSessionCwd).not.toHaveBeenCalled();
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt,
+      ).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledOnce();
+    },
+  );
+
   it('returns the restored session and releases the reservation', async () => {
     const bridge = fakeBridge();
     const { options, release } = coreOptions(fakeRuntime(bridge));

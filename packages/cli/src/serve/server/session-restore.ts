@@ -131,7 +131,8 @@ interface ReconcileRestoredSessionWorktreeInput {
  * Any other sidecar must prove ownership: one that reads `invalid` always
  * fails, every failure releases the session and rethrows, and success
  * marks the session `persisted-v1` except in the one shape explained at
- * `hasUnlocatedRestoredPrompt`. Without a sidecar the session is untouched.
+ * `hasUnlocatedRestoredPrompt`. A strict pre-read must remain strict until
+ * reconciliation; it cannot become a missing or legacy sidecar.
  *
  * The caller owns three things, as `restoreSessionHandler` does:
  * - The worktree ownership lock (`acquireWorktreeOwnershipOp`), taken when
@@ -162,6 +163,14 @@ async function reconcileRestoredSessionWorktree({
     runtime,
   ).getWorktreeSessionPath(restoredStorageSessionId);
   const sidecarResult = await readWorktreeSessionStrict(sidecarPath);
+  if (
+    heldWorktreeOwnershipLockKey !== undefined &&
+    (sidecarResult.state !== 'valid' ||
+      sidecarResult.session.workspaceCwd === undefined)
+  ) {
+    await cleanupRestoredSession();
+    throw new Error('Worktree sidecar changed during restore');
+  }
   if (
     sidecarResult.state === 'valid' &&
     sidecarResult.session.workspaceCwd === undefined
@@ -528,6 +537,7 @@ export async function restoreSessionCore(options: {
   let restoredStorageSessionId = sessionId;
   let suppressWorktreeContextRestore = false;
   let deferRestoreAskUserQuestionPrompt = false;
+  let deferAutomaticWorkUntilCwdRestore = false;
   let releaseWorktreeRestore: (() => void) | undefined;
   let heldWorktreeOwnershipLockKey: string | undefined;
   try {
@@ -644,12 +654,16 @@ export async function restoreSessionCore(options: {
         } else {
           suppressWorktreeContextRestore = isChannelRestore;
         }
-        deferRestoreAskUserQuestionPrompt =
-          suppressWorktreeContextRestore &&
+        const canDeferRestoreQuestion =
           runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt !==
             undefined &&
           runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt !==
             undefined;
+        deferAutomaticWorkUntilCwdRestore =
+          isPart4AWorktreeRestore && canDeferRestoreQuestion;
+        suppressWorktreeContextRestore ||= deferAutomaticWorkUntilCwdRestore;
+        deferRestoreAskUserQuestionPrompt =
+          suppressWorktreeContextRestore && canDeferRestoreQuestion;
         if (isPart4AWorktreeRestore && part4AWorktreeKey !== undefined) {
           releaseWorktreeRestore =
             await acquireWorktreeOwnershipOp(part4AWorktreeKey);
@@ -724,6 +738,9 @@ export async function restoreSessionCore(options: {
                         : {}),
                     }
                   : {}),
+                ...(deferAutomaticWorkUntilCwdRestore
+                  ? { deferAutomaticWorkUntilCwdRestore: true }
+                  : {}),
                 historyReplay: 'response',
                 ...(historyPageSize !== undefined ? { historyPageSize } : {}),
                 ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
@@ -744,6 +761,9 @@ export async function restoreSessionCore(options: {
                         ? { deferRestoreAskUserQuestionPrompt: true }
                         : {}),
                     }
+                  : {}),
+                ...(deferAutomaticWorkUntilCwdRestore
+                  ? { deferAutomaticWorkUntilCwdRestore: true }
                   : {}),
                 ...(clientId !== undefined ? { clientId } : {}),
                 ...(approvalMode !== undefined ? { approvalMode } : {}),
