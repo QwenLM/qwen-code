@@ -230,6 +230,20 @@ describe('ComposerTaskChips', () => {
     ).toBeNull();
   });
 
+  it('lists several sessions by name alone, with no icon', () => {
+    render([sent('kid-1'), sent('kid-2')]);
+    act(() => chips()[0]!.click());
+    const list = container.querySelector(
+      '[data-testid="composer-task-list"]',
+    ) as HTMLElement;
+    const rows = Array.from(list.querySelectorAll('button'));
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining('look at kid-1'),
+      expect.stringContaining('look at kid-2'),
+    ]);
+    expect(list.querySelector('svg')).toBeNull();
+  });
+
   it('closes the list on a click outside the chips', () => {
     render([workflow('wf-1'), workflow('wf-2')]);
     act(() => chips()[0].click());

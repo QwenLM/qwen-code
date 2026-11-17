@@ -14,7 +14,6 @@ import {
   CircleAlertIcon,
   CirclePauseIcon,
   LoaderCircleIcon,
-  MessagesSquareIcon,
   SquareActivityIcon,
   SquareTerminalIcon,
   WorkflowIcon,
@@ -54,14 +53,14 @@ const LABEL_KEYS: Record<ComposerTaskChipKind, [string, string]> = {
   monitor: ['tasks.pill.monitor', 'tasks.pill.monitors'],
 };
 
-function kindIcon(kind: ComposerTaskChipKind): ReactNode {
+function kindIcon(kind: ComposerTaskChipKind): ReactNode | undefined {
   switch (kind) {
     case 'workflow':
       return <WorkflowIcon aria-hidden="true" />;
     case 'agent':
       return <BotIcon aria-hidden="true" />;
     case 'session':
-      return <MessagesSquareIcon aria-hidden="true" />;
+      return undefined;
     case 'shell':
       return <SquareTerminalIcon aria-hidden="true" />;
     case 'monitor':
@@ -298,7 +297,11 @@ export const ComposerTaskChips = forwardRef<
                 }
               }}
             >
-              <span className={styles.rowIcon}>{kindIcon(openGroup.kind)}</span>
+              {kindIcon(openGroup.kind) && (
+                <span className={styles.rowIcon}>
+                  {kindIcon(openGroup.kind)}
+                </span>
+              )}
               <span className={styles.rowLabel} title={taskLabel(task)}>
                 {taskLabel(task)}
               </span>
