@@ -134,6 +134,7 @@ export const McpAppGeneratedUiOwnerContext = createContext<
 >(undefined);
 
 export const McpAppVisibilityContext = createContext(true);
+export const McpAppReadOnlyContext = createContext(false);
 
 const BUNDLED_GENERATED_UI_RESOURCE =
   'ui://qwen-code-generated-ui/view-v1.html';

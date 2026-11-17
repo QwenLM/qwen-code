@@ -15,6 +15,7 @@ import {
   McpAppGeneratedUiOwnerContext,
   McpAppHostContext,
   McpAppMessagesContext,
+  McpAppReadOnlyContext,
   McpAppSessionContext,
   McpAppToolsContext,
   McpAppVisibilityContext,
@@ -125,6 +126,7 @@ interface Card {
   surface: string;
   toolId: string;
   display?: McpAppDisplay;
+  readOnly?: boolean;
   visible?: boolean;
   surfaceVisible?: boolean;
   portal?: boolean;
@@ -231,11 +233,15 @@ function setup(strict = false) {
                               }
                             >
                               <article data-surface={card.surface}>
-                                <McpApp
-                                  display={card.display ?? display}
-                                  toolId={card.toolId}
-                                  visible={card.visible ?? true}
-                                />
+                                <McpAppReadOnlyContext.Provider
+                                  value={card.readOnly ?? false}
+                                >
+                                  <McpApp
+                                    display={card.display ?? display}
+                                    toolId={card.toolId}
+                                    visible={card.visible ?? true}
+                                  />
+                                </McpAppReadOnlyContext.Provider>
                               </article>
                             </McpAppVisibilityContext.Provider>
                           );
@@ -701,6 +707,58 @@ describe('GeneratedUiRuntimeProvider lifecycle', () => {
 });
 
 describe('GeneratedUiRuntimeProvider eligibility and authority', () => {
+  it.each(['ordinary', 'generated'] as const)(
+    'shows the %s MCP result without running its card in a read-only pane',
+    async (kind) => {
+      const h = setup();
+      const display =
+        kind === 'ordinary'
+          ? appDisplay({
+              requiredFeature: undefined,
+              serverName: 'demo',
+              resourceUri: 'ui://demo/view.html',
+              fallbackText: 'Saved tool output',
+            })
+          : appDisplay({
+              toolResult: {
+                content: [],
+                structuredContent: {
+                  title: 'Generated card',
+                  summary: 'Saved card summary',
+                },
+              },
+            });
+      const callTool = vi.fn().mockResolvedValue({ content: [] });
+      const tools = { sessionId: h.source.sessionId, callTool };
+      const renderCard = (readOnly: boolean) =>
+        h.render({
+          cards: [{ surface: 'main', toolId: 'call-a', display, readOnly }],
+          tools,
+        });
+
+      await renderCard(true);
+      expect(h.surface().textContent).toContain(
+        kind === 'ordinary' ? 'Saved tool output' : 'Saved card summary',
+      );
+      expect(h.surface().querySelector('iframe')).toBeNull();
+      expect(bridges.instances).toHaveLength(0);
+      expect(h.store().getEntries()).toEqual([]);
+
+      await renderCard(false);
+      const bridge = activeBridges()[0];
+      await initialize(bridge);
+      const runTool = bridge.oncalltool!;
+      const params = { name: 'calculate', arguments: { workers: 8 } };
+      const extra = { signal: new AbortController().signal };
+      await expect(runTool(params, extra)).resolves.toEqual({ content: [] });
+
+      await renderCard(true);
+      expect(h.surface().querySelector('iframe')).toBeNull();
+      await expect(runTool(params, extra)).rejects.toBeDefined();
+      expect(callTool).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('keeps an ordinary MCP App outside retention and closes it on removal', async () => {
     const h = setup();
     await h.render({

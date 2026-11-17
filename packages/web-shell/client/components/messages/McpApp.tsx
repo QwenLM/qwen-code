@@ -10,6 +10,7 @@ import {
   isBuiltInGeneratedUi,
   isBundledGeneratedUi,
   McpAppMessagesContext,
+  McpAppReadOnlyContext,
   McpAppSessionContext,
   McpAppToolsContext,
   McpAppModelContextContext,
@@ -291,6 +292,18 @@ export function McpApp({
   const owner = useContext(McpAppGeneratedUiOwnerContext)?.source;
   const sessionId = useContext(McpAppSessionContext);
   const surfaceVisible = useContext(McpAppVisibilityContext);
+  const readOnly = useContext(McpAppReadOnlyContext);
+  if (readOnly) {
+    return (
+      <div className={styles.fallback}>
+        {isBundledGeneratedUi(display) ? (
+          <GeneratedUiSummary display={display} />
+        ) : (
+          display.fallbackText
+        )}
+      </div>
+    );
+  }
   if (
     import.meta.env.MODE !== 'transcript' &&
     allowed &&
