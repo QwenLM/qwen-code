@@ -7,6 +7,7 @@
 import {
   mkdirSync,
   mkdtempSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -460,6 +461,173 @@ describe('SessionService - artifact summary sidecar', () => {
 
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
       1,
+    );
+  });
+
+  it('counts restorable survivors on a cold library removal with legacy artifacts', async () => {
+    const link = persistedArtifact('https://example.com/removal-link');
+    const legacyUrl = 'file:///tmp/legacy-removal/index.html';
+    const legacy: PersistedSessionArtifact = {
+      id: stableSessionArtifactId(SESSION_ID, `url:${legacyUrl}`),
+      kind: 'html',
+      storage: 'published',
+      source: 'client',
+      status: 'available',
+      title: 'Legacy published page',
+      url: legacyUrl,
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-11-17T00:00:00.000Z',
+      updatedAt: '2026-11-17T00:00:00.000Z',
+    };
+    writeTranscript([userRecord(), artifactEventRecord([link, legacy])]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 1);
+
+    const removed = await service.removeSessionArtifactForLibrary(
+      SESSION_ID,
+      link.id,
+      {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      },
+    );
+
+    expect(removed).toBe(true);
+    // The legacy html is not restorable, so removing the link leaves zero
+    // restorable survivors — not raw rebuild (2) minus batch (1).
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      0,
+    );
+  });
+
+  it('does not seed from a journal with a discarded change entry', async () => {
+    // 'skipped malformed artifact change' is change-level damage (the
+    // artifact the change would create is missing from the rebuild), not
+    // a per-artifact skip — the seed must refuse the journal.
+    const a = persistedArtifact('https://example.com/change-a');
+    const damaged: ChatRecord = {
+      uuid: 'artifact-event-damaged-change',
+      parentUuid: 'user-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:02.000Z',
+      type: 'system',
+      subtype: 'session_artifact_event',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        v: 2,
+        sessionId: SESSION_ID,
+        sequence: 2,
+        recordedAt: '2026-11-17T00:00:02.000Z',
+        changes: [42],
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([userRecord(), artifactEventRecord([a]), damaged]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 5);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      5,
+    );
+  });
+
+  it('seeds the count a cold open restores, dropping legacy local-published html', async () => {
+    const link = persistedArtifact('https://example.com/restore-link');
+    const legacyUrl = 'file:///tmp/legacy-published/index.html';
+    const legacy: PersistedSessionArtifact = {
+      id: stableSessionArtifactId(SESSION_ID, `url:${legacyUrl}`),
+      kind: 'html',
+      storage: 'published',
+      source: 'client',
+      status: 'available',
+      title: 'Legacy published page',
+      url: legacyUrl,
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-11-17T00:00:00.000Z',
+      updatedAt: '2026-11-17T00:00:00.000Z',
+    };
+    const previewId = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+    const preview: PersistedSessionArtifact = {
+      id: stableSessionArtifactId(SESSION_ID, `managed:preview-${previewId}`),
+      kind: 'html',
+      storage: 'published',
+      source: 'tool',
+      toolName: 'artifact',
+      status: 'available',
+      title: 'Real preview snapshot',
+      managedId: `preview-${previewId}`,
+      url: `file:///tmp/project/artifacts/snapshots/${previewId}/index.html`,
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        'qwen.published.sha256': 'a'.repeat(64),
+      },
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-11-17T00:00:00.000Z',
+      updatedAt: '2026-11-17T00:00:00.000Z',
+    };
+    writeTranscript([
+      userRecord(),
+      artifactEventRecord([link, legacy, preview]),
+    ]);
+
+    await service.loadSession(SESSION_ID);
+
+    // The legacy local-published html is dropped on cold restore; the real
+    // preview snapshot and the link stay counted.
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  it('seeds the archived sidecar when an archived session is opened', async () => {
+    const a = persistedArtifact('https://example.com/archived-seed');
+    writeTranscript([userRecord(), artifactEventRecord([a])]);
+    const archiveDir = path.join(path.dirname(transcriptPath), 'archive');
+    mkdirSync(archiveDir, { recursive: true });
+    renameSync(transcriptPath, path.join(archiveDir, `${SESSION_ID}.jsonl`));
+
+    const loaded = await service.loadArchivedSession(SESSION_ID, {
+      maxBytes: 10_000_000,
+    });
+
+    expect(loaded).toBeDefined();
+    expect(
+      readSessionArtifactSummarySidecar(archivedSidecarPath)?.artifactCount,
+    ).toBe(1);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+  });
+
+  it('seeds from a session_artifact_snapshot record (the fork path)', async () => {
+    // A fork's count comes solely from the seed reading the copied snapshot
+    // record — no artifact event is involved.
+    const a = persistedArtifact('https://example.com/snapshot-a');
+    const b = persistedArtifact('https://example.com/snapshot-b');
+    const snapshotRecord: ChatRecord = {
+      uuid: 'artifact-snapshot-1',
+      parentUuid: 'user-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:01.000Z',
+      type: 'system',
+      subtype: 'session_artifact_snapshot',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        v: 2,
+        sessionId: SESSION_ID,
+        sequence: 1,
+        recordedAt: '2026-11-17T00:00:01.000Z',
+        artifacts: [a, b],
+      },
+    };
+    writeTranscript([userRecord(), snapshotRecord]);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
     );
   });
 });

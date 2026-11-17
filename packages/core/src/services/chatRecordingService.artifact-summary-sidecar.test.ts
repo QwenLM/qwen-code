@@ -19,6 +19,7 @@ import type {
 import {
   readSessionArtifactSummarySidecar,
   sessionArtifactSummarySidecarPath,
+  writeSessionArtifactSummarySidecar,
 } from './session-artifact-summary-sidecar.js';
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
@@ -115,9 +116,19 @@ describe('ChatRecordingService - artifact summary sidecar', () => {
     );
   });
 
-  it('leaves the sidecar untouched for legacy events without a count', async () => {
+  it('does not create a sidecar for legacy events without a count', async () => {
     await service.recordSessionArtifactEvent(eventPayload());
     expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+  });
+
+  it('preserves an existing sidecar across legacy events without a count', async () => {
+    // An older daemon (or a run of count-less events) continuing a session
+    // must not erase the count the list already shows.
+    writeSessionArtifactSummarySidecar(sidecarPath, 4);
+    await service.recordSessionArtifactEvent(eventPayload());
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      4,
+    );
   });
 
   it('refreshes the sidecar from the snapshot artifact list', async () => {
@@ -140,14 +151,16 @@ describe('ChatRecordingService - artifact summary sidecar', () => {
   });
 
   it('does not write the sidecar when the journal append fails', async () => {
-    // Block the chats dir so the strict append rejects; the derived sidecar
-    // must not land ahead of (or without) the authoritative record.
+    // Block the chats dir so the strict append rejects. No sidecar
+    // assertion here: with the directory blocked the derived write can
+    // never land under ANY order, so an absence check would be vacuous
+    // (the order-discriminating fixtures below keep the sidecar path
+    // writable).
     rmSync(chatsDir, { recursive: true, force: true });
     writeFileSync(chatsDir, 'not a directory');
     await expect(
       service.recordSessionArtifactEvent(eventPayload(3)),
     ).rejects.toThrow();
-    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
   });
 
   it('does not write the sidecar ahead of a failing journal append', async () => {
@@ -158,6 +171,17 @@ describe('ChatRecordingService - artifact summary sidecar', () => {
     mkdirSync(path.join(chatsDir, `${SESSION_ID}.jsonl`));
     await expect(
       service.recordSessionArtifactEvent(eventPayload(3)),
+    ).rejects.toThrow();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+  });
+
+  it('does not write the snapshot sidecar ahead of a failing journal append', async () => {
+    // Mirror of the event-path order witness for the snapshot write.
+    mkdirSync(path.join(chatsDir, `${SESSION_ID}.jsonl`));
+    await expect(
+      service.recordSessionArtifactSnapshot(
+        snapshotPayload([persistedArtifact('a'), persistedArtifact('b')]),
+      ),
     ).rejects.toThrow();
     expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
   });

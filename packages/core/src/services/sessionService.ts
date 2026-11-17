@@ -75,6 +75,7 @@ import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   getWebPreviewSnapshotId,
   hasDisqualifyingArtifactJournalWarning,
+  isRestorablePersistedArtifact,
   type PersistedSessionArtifact,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
@@ -3552,13 +3553,19 @@ export class SessionService {
     this.assertMaintainableSessionUnchanged(sessionId, state.physical);
     jsonl.writeLineSync(state.identity.filePath, record);
     // Keep the derived list cache in step with the journal edit (this path
-    // bypasses the recording service). Best-effort, like every sidecar write.
+    // bypasses the recording service). Best-effort, like every sidecar
+    // write. Count the restorable survivors — the same set the load seed
+    // counts — not the raw rebuild minus the removed batch.
     writeSessionArtifactSummarySidecar(
       sessionArtifactSummarySidecarPath(
         path.dirname(state.identity.filePath),
         sessionId,
       ),
-      (state.snapshot?.artifacts.length ?? 0) - artifacts.length,
+      (state.snapshot?.artifacts ?? []).filter(
+        (artifact) =>
+          !requestedIds.has(artifact.id) &&
+          isRestorablePersistedArtifact(sessionId, artifact),
+      ).length,
     );
     const retainedSnapshots = new Set(
       (state.snapshot?.artifacts ?? [])
@@ -3803,7 +3810,13 @@ export class SessionService {
       gaps.length === 0 &&
       !hasDisqualifyingArtifactJournalWarning(artifactSnapshot?.warnings ?? [])
     ) {
-      const count = artifactSnapshot?.artifacts.length ?? 0;
+      // Count the set a cold open restores, not the raw rebuild: legacy
+      // local-published html artifacts are dropped on restore and must
+      // not inflate the row's count.
+      const count =
+        artifactSnapshot?.artifacts.filter((artifact) =>
+          isRestorablePersistedArtifact(sessionId, artifact),
+        ).length ?? 0;
       const summaryPath = this.getArtifactSummaryPathForState(sessionId, state);
       const existing = readSessionArtifactSummarySidecar(summaryPath);
       if (

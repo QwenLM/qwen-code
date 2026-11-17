@@ -357,19 +357,61 @@ export function rebuildSessionArtifactSnapshot(
 }
 
 /**
+ * The set a cold open actually restores: the journal rebuild minus the
+ * legacy local-published html artifacts the bridge drops on restore
+ * (published `file:` URL, no preview snapshot, identity-matched). The
+ * derived sidecar count must describe this set, not the raw rebuild —
+ * otherwise a legacy journal over-counts the row for the session's life.
+ * Keyed off getWebPreviewSnapshotId: a real published web-preview
+ * snapshot stays counted.
+ */
+export function isRestorablePersistedArtifact(
+  sessionId: string,
+  artifact: PersistedSessionArtifact,
+): boolean {
+  if (artifact.retention === 'ephemeral') return false;
+  if (
+    artifact.storage === 'published' &&
+    artifact.kind === 'html' &&
+    getWebPreviewSnapshotId(artifact) === undefined
+  ) {
+    let isFileUrl = false;
+    try {
+      isFileUrl = new URL(artifact.url ?? '').protocol === 'file:';
+    } catch {
+      isFileUrl = false;
+    }
+    const identityKey = sessionArtifactIdentityKey(artifact);
+    if (
+      isFileUrl &&
+      identityKey !== undefined &&
+      artifact.id === stableSessionArtifactId(sessionId, identityKey)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Whether a rebuilt snapshot's warnings disqualify the journal as an
  * authority for derived writes. Per-artifact skips (malformed, oversized
  * metadata, missing id/title) leave the surviving sequence trustworthy;
- * record-level damage (stale sequences, malformed or truncated events)
- * does not. Shared by the library mutation guard and the load-time
- * sidecar seed so both refuse the same journals.
+ * record-level damage (stale sequences, malformed or truncated events,
+ * discarded change entries) does not. Shared by the library mutation
+ * guard and the load-time sidecar seed so both refuse the same journals.
  */
 export function hasDisqualifyingArtifactJournalWarning(
   warnings: readonly string[],
 ): boolean {
   return warnings.some(
     (warning) =>
-      !warning.startsWith('skipped malformed artifact ') &&
+      // The per-artifact prefix must not swallow the change-level drop
+      // 'skipped malformed artifact change': a discarded change entry is
+      // record-level damage (the artifact it would create is missing from
+      // the rebuild), unlike the id-interpolated per-artifact skips.
+      (!warning.startsWith('skipped malformed artifact ') ||
+        warning === 'skipped malformed artifact change') &&
       !warning.startsWith('skipped oversized metadata for artifact ') &&
       warning !== 'skipped artifact without id/title',
   );

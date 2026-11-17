@@ -8,6 +8,8 @@ import { describe, expect, it } from 'vitest';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   getWebPreviewSnapshotId,
+  hasDisqualifyingArtifactJournalWarning,
+  isRestorablePersistedArtifact,
   normalizeEventPayload,
   normalizeSnapshotPayload,
   rebuildSessionArtifactSnapshot,
@@ -808,5 +810,91 @@ describe('event payload artifact count (summary sidecar hint)', () => {
     expect(remapped.sessionId).toBe('forked-session');
     expect(remapped.changes).toHaveLength(1);
     expect(remapped.artifactCount).toBeUndefined();
+  });
+});
+
+describe('journal authority and restorable-set predicates', () => {
+  it('classifies change-level damage as disqualifying, per-artifact skips as tolerated', () => {
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped malformed artifact change',
+      ]),
+    ).toBe(true);
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped artifact change with invalid action',
+      ]),
+    ).toBe(true);
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped malformed artifact abc123',
+      ]),
+    ).toBe(false);
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped oversized metadata for artifact abc123',
+      ]),
+    ).toBe(false);
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped artifact without id/title',
+      ]),
+    ).toBe(false);
+    expect(hasDisqualifyingArtifactJournalWarning([])).toBe(false);
+  });
+
+  it('drops legacy local-published html but keeps real preview snapshots', () => {
+    const sessionId = 'predicate-session';
+    const base = {
+      retention: 'restorable',
+      status: 'available',
+      clientRetained: true,
+      createdAt: T0,
+      updatedAt: T0,
+    } as const;
+    const legacyUrl = 'file:///tmp/legacy/index.html';
+    const legacy: PersistedSessionArtifact = {
+      ...base,
+      id: stableSessionArtifactId(sessionId, `url:${legacyUrl}`),
+      kind: 'html',
+      storage: 'published',
+      source: 'client',
+      title: 'Legacy',
+      url: legacyUrl,
+    };
+    expect(isRestorablePersistedArtifact(sessionId, legacy)).toBe(false);
+    const previewId = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+    const preview: PersistedSessionArtifact = {
+      ...base,
+      id: stableSessionArtifactId(sessionId, `managed:preview-${previewId}`),
+      kind: 'html',
+      storage: 'published',
+      source: 'tool',
+      toolName: 'artifact',
+      title: 'Preview',
+      managedId: `preview-${previewId}`,
+      url: `file:///tmp/p/artifacts/snapshots/${previewId}/index.html`,
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        'qwen.published.sha256': 'a'.repeat(64),
+      },
+    };
+    expect(isRestorablePersistedArtifact(sessionId, preview)).toBe(true);
+    const link: PersistedSessionArtifact = {
+      ...base,
+      id: stableSessionArtifactId(sessionId, 'url:https://example.com/x'),
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      title: 'Link',
+      url: 'https://example.com/x',
+    };
+    expect(isRestorablePersistedArtifact(sessionId, link)).toBe(true);
+    expect(
+      isRestorablePersistedArtifact(sessionId, {
+        ...link,
+        retention: 'ephemeral',
+      }),
+    ).toBe(false);
   });
 });
