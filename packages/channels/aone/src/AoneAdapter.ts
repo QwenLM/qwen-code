@@ -166,6 +166,10 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
   private botAccount = '';
   private baselineMs = NaN;
   private viewCache = new Map<string, { title: string; url: string }>();
+  // Dedupes the cursor_aged_out journal record per aging episode: a chronically
+  // backlogged repo re-enters the aging branch every poll, but its stale
+  // lastPoll value is constant, so one record per distinct stale instant.
+  private agedOutJournal = new Map<string, string>();
 
   constructor(
     name: string,
@@ -500,13 +504,17 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
 
     // The cursor event itself aged out of the 3-day window. Fire only when
     // the walk missed the cursor, there is something to resume to, AND the
-    // previous successful poll predates the window start (agedOut): that is
-    // genuine loss — events since the last observation fell outside the
-    // window. A repo polled continuously within the window (fresh lastPoll)
-    // lost nothing even if its cursor event aged out (a quiet gap), and a
-    // recent empty-window baseline (cursor 0) fills normally — neither is
-    // aging. Keying on the last successful poll, not the cursor value or the
-    // channel baseline, also keeps a repo added to a mature channel (fresh
+    // previous fully-drained poll predates the window start (agedOut): that
+    // is genuine loss — events since the last complete observation fell
+    // outside the window. This covers both an outage (no successful poll) and
+    // a drain slower than arrival: a capped poll does not refresh lastPoll
+    // (see the success exit), so a chronically backlogged repo keeps its last
+    // fully-drained instant until it precedes the window and the loss is
+    // diagnosed. A repo polled continuously within the window (fresh
+    // lastPoll) lost nothing even if its cursor event aged out (a quiet gap),
+    // and a recent empty-window baseline (cursor 0) fills normally — neither
+    // is aging. Keying on the last fully-drained poll, not the cursor value or
+    // the channel baseline, also keeps a repo added to a mature channel (fresh
     // baseline) from false-positiving. A dormant repo (empty fresh) skips
     // nothing. The loss is permanent, so leave a durable journal record
     // beside the stderr line (the poll itself resolves ok).
@@ -516,12 +524,19 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
         (m, e) => Math.min(m, e.id),
         fresh[0]!.id,
       );
-      this.recordChannelEvent({
-        type: 'poll',
-        outcome: 'cursor_aged_out',
-        repository: repo,
-        detail: { cursor: cursorId, resumedFrom },
-      });
+      // A chronically backlogged repo (drain slower than arrival) re-enters
+      // this branch every poll with the same stale lastPoll; journal once per
+      // distinct stale instant, not once per poll.
+      const episode = prevPollIso ?? '';
+      if (this.agedOutJournal.get(repo) !== episode) {
+        this.recordChannelEvent({
+          type: 'poll',
+          outcome: 'cursor_aged_out',
+          repository: repo,
+          detail: { cursor: cursorId, resumedFrom },
+        });
+        this.agedOutJournal.set(repo, episode);
+      }
       process.stderr.write(
         `[Channel:${this.name}] cursor for ${repo} aged out of the events window; events older than the window were lost to aging; resuming from the oldest fetched event\n`,
       );
@@ -566,11 +581,16 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       this.cursor.repos[repo] = event.id;
       this.saveCursor();
     }
-    // Success exit: stamp the last-poll instant (even when no event
-    // dispatched — a dormant repo) so the aging discriminator stays current.
-    // A poll that threw above never reaches here, so a failed attempt does
-    // not count as an observation.
-    (this.cursor.lastPoll ??= {})[repo] = until.toISOString();
+    // Success exit: stamp the last-poll instant only when this poll DRAINED
+    // everything (fresh <= slice, including a dormant empty window). A capped
+    // poll (drain slower than arrival) is not a complete observation: stamping
+    // it would keep lastPoll fresh forever and silence the aging diagnostic
+    // while events below the window are lost. Keeping the last fully-drained
+    // instant lets prevPollMs eventually precede the window start so the
+    // diagnostic fires. A poll that threw above never reaches here either.
+    if (fresh.length <= slice.length) {
+      (this.cursor.lastPoll ??= {})[repo] = until.toISOString();
+    }
     this.saveCursor();
   }
 

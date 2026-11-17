@@ -214,18 +214,25 @@ Per repo:
    records a durable `cursor_aged_out` journal event (the loss is
    permanent; the poll itself resolves ok) when it resumes with events to
    dispatch. The diagnostic fires when the walk missed the cursor, there
-   is something to resume to, AND the previous SUCCESSFUL poll predates
+   is something to resume to, AND the previous fully-drained poll predates
    the window start (`cursor.lastPoll`): that is genuine loss — events
-   since the last observation fell outside the window. The last-poll
-   instant is stamped only at the success exits, so a failed poll (an a1
-   outage) does not count as an observation and cannot silence the
-   diagnostic on recovery. A repo polled continuously within the window
+   since the last complete observation fell outside the window. This
+   covers both an outage and a drain slower than arrival. The last-poll
+   instant is stamped only at the success exit of a fully-drained poll
+   (`fresh <= slice`, including a dormant empty window): a failed poll (an
+   a1 outage) never reaches it, and a capped poll (drain slower than
+   arrival) is not a complete observation, so a chronically backlogged
+   repo keeps its last fully-drained instant until it precedes the window
+   and the loss is diagnosed. A repo polled continuously within the window
    (fresh `lastPoll`) lost nothing even if its cursor event aged out (a
    quiet gap), and a recent empty-window baseline (cursor 0) fills
-   normally — neither is aging. Keying on the last successful poll, not
+   normally — neither is aging. Keying on the last fully-drained poll, not
    the cursor value or the channel baseline, also keeps a repo added to a
    mature channel (fresh baseline) from false-positiving. A dormant repo
-   with an empty window skips nothing and does not warn. Each repo's slice dispatches at most the
+   with an empty window skips nothing and does not warn. A chronically
+   backlogged repo re-enters the branch every poll, so the journal record
+   is deduped per distinct stale instant (one record, not one per poll).
+   Each repo's slice dispatches at most the
    oldest 100 events (`DISPATCH_BUDGET`, universal and monotonic — a
    500-event backlog caps at 100 just like a 1200-event one; a poll's
    worst case is repos.length × 100 dispatches); the remainder drains on
@@ -266,9 +273,11 @@ window baselines to id 0, and the next poll would dispatch the whole 3-day
 window as "new" — a historical backlog. The per-repo entry's presence is the
 "initialized" state; there is no separate flag. `lastPoll` (optional, for
 backward compat with cursors written before it existed) records each repo's
-last-poll instant (ISO); it discriminates the two cursor-0 aging states
-(recent empty baseline vs stale empty baseline older than the window) and
-is persisted every poll, including dormant ones. Drift-prone fields fail
+last fully-drained poll instant (ISO); it discriminates genuine aging (an
+outage, or a drain slower than arrival) from a quiet gap, and is stamped
+only at the success exit of a fully-drained poll (`fresh <= slice`,
+including a dormant empty window) — never on a failed or capped poll.
+Drift-prone fields fail
 LOUD: an event whose `createdAt` does not parse, whose author is missing,
 or whose note body is not a string is skipped fail-closed but LOGGED — a
 payload rename would otherwise mute the channel silently while the cursor
@@ -335,8 +344,10 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   skip, and the per-repo isolation keeps the other watched repos polling
   at the configured interval (only a TOTAL failure backs off).
 - **Event-window loss** — outages > 3 days lose older events (v1 limit);
-  when the cursor itself ages out, the resuming poll logs the jump and
-  records a durable `cursor_aged_out` journal event.
+  when the cursor ages out AND the last fully-drained poll predates the
+  window (an outage or a drain slower than arrival — not a quiet gap), the
+  resuming poll logs the jump and records a durable `cursor_aged_out`
+  journal event (deduped per stale instant).
 - **Flood bounded in the 100–10 000 band, PER REPO** — each repo's slice
   dispatches at most the oldest 100 events per poll (universal budget,
   monotonic), so a poll's worst case is repos.length × 100 dispatches; a
@@ -392,11 +403,13 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   author skip; durable repo_failed journal record on partial failure;
   all four stderr sinks sanitized and bounded (poll-failure, per-event
   dispatch, fetchView, unparseable-createdAt — no forged log line);
-  aged-out cursor jump diagnostic gated on the previous successful poll
+  aged-out cursor jump diagnostic gated on the previous fully-drained poll
   predating the window (a quiet repo or a recent empty baseline is silent;
-  a failed poll does not refresh lastPoll) with a durable cursor_aged_out
-  journal record (dormant repo silent); a cursor-reached poll reports no
-  aging; descriptor groupPolicy default; repo-path lowercasing.
+  a failed or capped poll does not refresh lastPoll, so a drain slower than
+  arrival is diagnosed) with a durable cursor_aged_out journal record
+  deduped per stale instant (dormant repo silent); a cursor-reached poll
+  reports no aging; a dormant empty-window poll advances lastPoll;
+  descriptor groupPolicy default; repo-path lowercasing.
   Mutation-witnessed: dedup,
   per-repo isolation, overflow walk, cursor-reached break, prune save,
   whitespace fallback, partial-failure cadence, universal budget, platform
@@ -411,7 +424,8 @@ connect where a rule exists (GitHub `validateRepoFilterConfig` pattern).
   note, stale-cursor0 aging, !reachedCursor clause, per-event stderr
   sanitization, fetchView stderr sanitization, failed-poll lastPoll,
   quiet-repo no aging, mature-channel fresh baseline, createdAt stderr
-  sanitization.
+  sanitization, drain-slower-than-arrival aging, cursor_aged_out journal
+  dedupe, dormant lastPoll stamp.
 - Live read-only smoke: real `a1 events repo middleware/tddl5` fetch+parse,
   no dispatch, no writes (env-gated).
 - Full-loop E2E with a stubbed `a1` on PATH (canned whoami/events; comment

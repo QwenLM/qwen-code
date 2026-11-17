@@ -1939,6 +1939,95 @@ describe('AoneChannel', () => {
       stderr.mockRestore();
     });
 
+    it('a drain slower than arrival reports aging, journaled once (R2-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 1;
+      // The last FULL drain was long before the window; the repo is now
+      // chronically backlogged (every poll capped at DISPATCH_BUDGET).
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      let currentAll: unknown[] = [];
+      const setWindow = (start: number) => {
+        currentAll = Array.from({ length: 150 }, (_, i) =>
+          makeEvent({
+            id: start + i,
+            note: {
+              id: start + i,
+              note: 'qwen: x',
+              noteable_type: 'MergeRequest',
+            },
+          }),
+        );
+      };
+      installFakeA1({
+        events: (repo, page) => pagedEvents(currentAll)(repo, page),
+      });
+      setWindow(200);
+      await ch.testPollOnce(); // poll 1: capped, aging fires, lastPoll kept stale
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      // A capped poll is not a complete observation: lastPoll must NOT advance.
+      expect(ch.cursor.lastPoll['test/repo']).toBe('2020-01-01T00:00:00.000Z');
+      stderr.mockClear();
+      setWindow(400);
+      await ch.testPollOnce(); // poll 2: still capped + stale → aging fires again
+      ch.disconnect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      // The journal record is deduped per stale instant: one across two polls.
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(
+        records.filter((r) => r.outcome === 'cursor_aged_out'),
+      ).toHaveLength(1);
+      stderr.mockRestore();
+    });
+
+    it('a successful empty-window poll advances lastPoll (R3-1)', async () => {
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 5000;
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      installFakeA1({ events: () => [] }); // dormant: empty window
+      await ch.testPollOnce();
+      ch.disconnect();
+      // A dormant poll (fresh 0 <= slice 0) is a complete observation and must
+      // stamp lastPoll forward; deleting the trailing stamp freezes it at 2020.
+      expect(Date.parse(ch.cursor.lastPoll['test/repo'])).toBeGreaterThan(
+        Date.parse('2024-01-01T00:00:00.000Z'),
+      );
+    });
+
     it('the dispatch budget is monotonic: a 500-event backlog caps at 100', async () => {
       const all = Array.from({ length: 500 }, (_, i) => {
         const id = 3000 - i;
