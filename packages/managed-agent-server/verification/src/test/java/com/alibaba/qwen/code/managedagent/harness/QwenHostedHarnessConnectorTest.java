@@ -4475,7 +4475,7 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted_session_closing", "hosted_session_open_busy", "managed_session_writer_conflict"})
+    @ValueSource(strings = {"hosted_session_closing", "workspace_busy", "managed_session_writer_conflict"})
     void aRefusedReattachmentKeepsItsOwnClassification(String code) {
         var client = harnessClient();
         var stale = mock(HarnessSessionRef.class);

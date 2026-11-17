@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.HostedHarnessPlacement;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
-import com.alibaba.qwen.code.daemon.PromptReceipt;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,8 +40,9 @@ import static org.mockito.Mockito.when;
 class QwenHostedVanishedAttachmentReproductionTest {
     private static final String SESSION = "33333333-3333-4333-8333-333333333333";
 
-    @Test
-    void promptRecoveryUsesALoadTheResidentHarnessAccepts() {
+    @ParameterizedTest
+    @ValueSource(strings = {"submit", "continue"})
+    void turnRecoveryUsesALoadTheResidentHarnessAccepts(String verb) {
         HostedHarnessClient client = fixture("harnessClient");
         var stale = mock(HarnessSessionRef.class);
         var fresh = mock(HarnessSessionRef.class);
@@ -63,21 +63,55 @@ class QwenHostedVanishedAttachmentReproductionTest {
             }
             return fresh;
         });
-        when(client.submitTurn(any())).thenAnswer(call -> {
-            SubmitHarnessTurn turn = call.getArgument(0);
-            if (ReflectionTestUtils.getField(turn, "session") == stale) {
-                throw refusal(404, "hosted_session_not_found");
-            }
-            return mock(PromptReceipt.class);
-        });
         QwenHostedHarnessConnector connector = fixture("connector", client);
         List<Map<String, Object>> content = List.of(Map.of("type", "text", "text", "hi"));
-        assertThatThrownBy(() -> connector.submit("tenant-a", SESSION,
-                "66666666-6666-4666-8666-666666666666", content,
-                SubmitHarnessTurn.computePayloadDigest(content))).isInstanceOf(HarnessAttachmentLostFailure.class);
+        String prompt = "66666666-6666-4666-8666-666666666666";
+        Runnable operation;
+        if ("submit".equals(verb)) {
+            when(client.submitTurn(any())).thenAnswer(call -> {
+                SubmitHarnessTurn turn = call.getArgument(0);
+                assertThat(ReflectionTestUtils.getField(turn, "session")).isSameAs(stale);
+                throw refusal(404, "hosted_session_not_found");
+            });
+            operation = () -> connector.submit("tenant-a", SESSION, prompt, content,
+                    SubmitHarnessTurn.computePayloadDigest(content));
+        } else {
+            when(client.continueManagedRuntime(stale, prompt, "checkpoint", "activation"))
+                    .thenThrow(refusal(404, "hosted_session_not_found"));
+            operation = () -> connector.continueManagedRuntime("tenant-a", SESSION, prompt,
+                    "checkpoint", "activation");
+        }
+        assertThatThrownBy(operation::run).isInstanceOf(HarnessAttachmentLostFailure.class);
         assertThat(loads).hasValue(1);
         assertThat(connector.recoverManagedRuntime("tenant-a", SESSION, false).runtimeRecovery()).isNotNull();
         assertThat(loads).hasValue(2);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"evict", "complete"})
+    void delayedCallbackPreservesANewerAttachmentAndItsRecoveryMarker(String callback) {
+        HostedHarnessClient client = fixture("harnessClient");
+        QwenHostedHarnessConnector connector = fixture("connector", client);
+        var stale = mock(HarnessSessionRef.class);
+        var fresh = mock(HarnessSessionRef.class);
+        String bootId = client.capabilities().getBootId();
+        when(fresh.getHarnessBootId()).thenReturn(bootId);
+        when(fresh.getRuntimeRecovery()).thenReturn(mock(HarnessRuntimeRecovery.class));
+        when(client.loadSession(any())).thenReturn(fresh);
+        connector.createOrLoad("tenant-a", SESSION, true, true);
+        Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION);
+
+        if ("evict".equals(callback)) {
+            ReflectionTestUtils.invokeMethod(connector, "evictVanished",
+                    "tenant-a", SESSION, stale, refusal(404, "hosted_session_not_found"));
+        } else {
+            ReflectionTestUtils.invokeMethod(connector, "completeRecovery", key, stale);
+        }
+
+        Map<?, ?> refs = (Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments");
+        assertThat(refs.get(key)).isSameAs(fresh);
+        assertThat(connector.recoverManagedRuntime("tenant-a", SESSION, false).runtimeRecovery()).isNotNull();
+        verify(client).loadSession(any());
     }
 
     @Test

@@ -547,7 +547,9 @@ public class HarnessCoordinator {
         TurnRecord current;
         boolean recoveredCancellation = false;
         boolean cancelledOnAttach = false;
-        if (runtimeRecovery != null) {
+        // Unbound submissions reconcile by prompt id, not by adopting a Session snapshot.
+        if (runtimeRecovery != null
+                && (recoveringCancellation || claimed.harnessEventEpoch() != null)) {
             // #14387: continuing a workflow Turn re-runs its deterministic
             // in-process script while the first run's outcome stays
             // unwitnessed — the parked snapshot proves nothing about the
