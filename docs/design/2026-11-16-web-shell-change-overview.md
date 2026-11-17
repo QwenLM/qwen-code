@@ -263,24 +263,22 @@ Degradation:
 
 ## Known limitations
 
-- **Commit-fallback with no bound PR and no recorded base branch.** The
-  shipped default walks HEAD's recent history (capped at
-  `COMMIT_FALLBACK_LIMIT`, labelled by scope). The original justification —
-  "worktree sessions start fresh" — is false: a worktree branch is created at
-  the base tip, so its HEAD carries the base branch's history, and a plain
-  session's git cwd is the user's own checkout. Consequence: such a session
-  may list up to `COMMIT_FALLBACK_LIMIT` pre-session commits as loose
-  `commit:` units with subjects and `+/-` totals. Every neighbouring state
-  refuses the unscoped walk; this one is retained as a maintainer-accepted
-  residual (display-only, read-only panel, no write path). The boundary fix —
-  persisting the session start commit and composing `<startCommit>..HEAD`,
-  suppressing the fallback when no start commit is known — is deferred.
-- **Binding recency is not commit-graph order.** With two bound PR heads that
-  are both ancestors of HEAD but not of each other, the last-bound head's
-  window re-lists the sibling PR's commits as loose units. Also a
-  maintainer-accepted residual (display duplication only); the fix needs
-  pairwise ancestry / batch reachability the client does not have, and is
-  deferred.
+Both display residuals accepted at merge are **resolved** by the follow-up
+[change overview boundary fix](./2026-11-17-change-overview-boundary-fix.md),
+which replaces the newest-ancestor-head heuristic with a single
+`<start>..HEAD --not <bound heads>` window:
+
+- **Commit-fallback with no bound PR and no recorded base branch** (was R7-1).
+  The shipped default walked HEAD's recent history because the "worktree
+  sessions start fresh" premise was false. The follow-up persists the session
+  start commit on branch and worktree sessions and composes
+  `<startCommit>..HEAD`, suppressing the fallback when no trustworthy start
+  exists — a range-less walk is never issued.
+- **Binding recency is not commit-graph order** (was R7-2). Two incomparable
+  ancestor heads made the last-bound head's window re-list a sibling PR's
+  commits. The follow-up excludes every commit reachable from _any_ bound PR
+  head via one native `git log <range> --not <heads>`, so merged, parallel,
+  and incomparable heads are handled uniformly.
 
 ## Open questions
 

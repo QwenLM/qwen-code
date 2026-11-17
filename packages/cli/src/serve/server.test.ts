@@ -27569,6 +27569,44 @@ describe('createServeApp', () => {
       }
     });
 
+    it('still serves the summary when the hydration sidecar is unreadable', async () => {
+      // readSessionPrs rethrows non-ENOENT I/O errors (a directory at the
+      // sidecar path is EISDIR); the status route's hydration catch must omit
+      // the bindings, not fail the summary read.
+      const sessionId = 's-pr-hydrate-unreadable';
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await fsp.mkdir(sidecarPath, { recursive: true });
+      const liveSummary: BridgeSessionSummary = {
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-05-17T12:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+      };
+      const bridge = fakeBridge({ summaryImpl: () => liveSummary });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      try {
+        const res = await request(app)
+          .get(`/session/${sessionId}/status`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+        expect(res.status).toBe(200);
+        expect(res.body.sessionId).toBe(sessionId);
+        expect(res.body.prs).toBeUndefined();
+        expect(bridge.seedSessionPrsCalls).toHaveLength(0);
+      } finally {
+        await fsp.rm(sidecarPath, { recursive: true, force: true });
+      }
+    });
+
     it('200 omits displayName when the live session has none', async () => {
       const summary: BridgeSessionSummary = {
         sessionId: 's-2',

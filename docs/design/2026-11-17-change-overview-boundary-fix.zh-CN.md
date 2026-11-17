@@ -89,20 +89,27 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
 - `commitFallbackRange` 由起点 commit 组合器取代，保留三值契约
   （字符串 / `null` 拒绝 / `undefined` 抑制）。
 
-### 层 4——加固清单（测试 + 小修，无行为变化）
+### 层 4——加固清单（测试 + 小修）
 
-清理廉价且带见证的延后项：
+清理廉价且带见证的延后项。其中数项已在 #17378 评审轮中钉住；本层补齐缺失项
+及唯一的行为变化（ARIA tab 契约）：
 
-- status 路由：测水合 `catch`（不可读 sidecar 仍提供摘要）；测 files 路由
-  `?cwd=` 正向解析。
-- core：断言 spawn 的 fallback gh binary；SDK 空 slug 抑制测试。
-- 面板：钉住控制字符净化、unavailable-cause 精度、空消息存在、不可用 PR 的
-  totals 省略、失败时 Refresh 可用、badge 抑制臂；为范围选择器实现 ARIA tab
-  契约（`role=tablist/tab`、`aria-selected`、Arrow/Home/End 键盘）（长期 D4-1）。
-- `changeOverviewAvailable` JSDoc 措辞；README 右面板枚举；bridge PR entry
-  `source` 类型。
+- status 路由：**新增**水合 `catch` 测试（sidecar 路径放一个目录使
+  `readSessionPrs` 重抛 EISDIR；摘要仍被提供）。`?cwd=` 正向解析已在解析器层
+  覆盖（`workspace-route-runtime.test.ts`，真实临时仓库/worktree）；files 路由
+  原样把解析出的 cwd 转发给 core helper。
+- core：spawn 的 fallback gh binary **已有**断言（`github-prs.test.ts`，
+  「spawns the fallback gh when PATH cannot resolve it」）。SDK：**新增**空
+  repo slug 抑制测试（空 `repo` 省略参数，使路由本地解析而非拒绝 `repo=`）。
+- 面板：**实现** ARIA tab 契约（长期 D4-1）——roving tabindex、Arrow/Home/End
+  移动焦点与选择并回绕、带标签的 `tabpanel`。**新增**控制字符净化、badge 抑制
+  的 commit 臂、外链 opener 路由的钉住。unavailable-cause 精度、totals 省略、
+  失败时 Refresh 可用、空消息存在此前已钉住。
+- `changeOverviewAvailable` JSDoc 措辞（按活跃工作区门控，而非 git 性）；
+  README 右面板枚举（`changeOverview` 是工作区级空态入口）；bridge
+  `SessionPrInfo.source` 类型（镜像 SDK 的 `'create' | 'worktree' | 'review'`）。
 
-每个行为守卫配击杀变异见证（字节级还原）。
+每个新增行为守卫配击杀变异见证（字节级还原）。
 
 ## 关键设计决策
 

@@ -1353,6 +1353,12 @@ export interface SessionPrInfo {
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
   /**
+   * Binding provenance: `create`/`worktree` are the session's own delivery
+   * units; `review` is a PR merely mentioned in a review/verify command and is
+   * not this session's work. Absent on bindings persisted before provenance.
+   */
+  source?: 'create' | 'worktree' | 'review';
+  /**
    * The job this session does for the PR (role-aware bound delivery);
    * assigned by the command-position backfill or the metadata route.
    * Absent means untyped.

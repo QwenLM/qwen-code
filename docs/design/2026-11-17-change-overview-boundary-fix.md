@@ -107,22 +107,33 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
 - `commitFallbackRange` is replaced by a start-commit composer with the same
   three-valued contract (string / `null` refuse / `undefined` suppress).
 
-### Layer 4 — hardening ledger (tests + small fixes, no behavior change)
+### Layer 4 — hardening ledger (tests + small fixes)
 
-Clear the deferred items that are cheap and witness-bearing:
+Clear the deferred items that are cheap and witness-bearing. Several were
+already pinned during #17378's review rounds; this layer adds the missing ones
+and the single behavior change (the ARIA tab contract):
 
-- Status route: test the hydration `catch` (unreadable sidecar still serves the
-  summary); test positive `?cwd=` resolution on the files route.
-- Core: assert the spawned fallback gh binary; SDK empty-slug suppression test.
-- Panel: pin control-character sanitization, unavailable-cause precision,
-  empty-message presence, totals omission on unavailable PRs, Refresh enabled
-  on failure, badge suppression arms; implement the ARIA tab contract
-  (`role=tablist/tab`, `aria-selected`, Arrow/Home/End keyboard) for the scope
-  selector (standing D4-1).
-- `changeOverviewAvailable` JSDoc wording; README right-panel enumeration;
-  bridge PR entry `source` typing.
+- Status route: **added** a hydration `catch` test (a directory at the sidecar
+  path makes `readSessionPrs` rethrow EISDIR; the summary is still served).
+  Positive `?cwd=` resolution is already covered at the resolver layer
+  (`workspace-route-runtime.test.ts`, real temp repos/worktrees); the files
+  route forwards the resolved cwd to the core helper unchanged.
+- Core: the spawned fallback gh binary is **already** asserted
+  (`github-prs.test.ts`, "spawns the fallback gh when PATH cannot resolve it").
+  SDK: **added** an empty-repo-slug suppression test (empty `repo` omits the
+  param so the route resolves locally rather than rejecting `repo=`).
+- Panel: **implemented** the ARIA tab contract (standing D4-1) — roving
+  tabindex, Arrow/Home/End moving focus and selection with wrap, and a labelled
+  `tabpanel`. **Added** pins for control-character sanitization, the
+  badge-suppression commit arm, and external-link opener routing.
+  Unavailable-cause precision, totals omission, Refresh-enabled-on-failure and
+  empty-message presence were already pinned.
+- `changeOverviewAvailable` JSDoc wording (gated on an active workspace, not
+  git-ness); README right-panel enumeration (`changeOverview` is a
+  workspace-level empty-state entry); bridge `SessionPrInfo.source` typing
+  (mirrors the SDK `'create' | 'worktree' | 'review'`).
 
-Each behavioral guard gets a killing mutation witness (byte-level restore).
+Each new behavioral guard gets a killing mutation witness (byte-level restore).
 
 ## Key design decisions
 
