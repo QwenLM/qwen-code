@@ -1013,6 +1013,79 @@ describe('ProcessTransport', () => {
       );
     });
 
+    it('waits for termination after a signal has been sent', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+      const transport = new ProcessTransport({ pathToQwenExecutable: 'qwen' });
+      Object.defineProperty(mockChildProcess, 'killed', { value: true });
+
+      const onSettled = vi.fn();
+      const waiting = transport.waitForExit().then(onSettled, onSettled);
+      await Promise.resolve();
+      const settledBeforeClose = onSettled.mock.calls.length;
+      mockChildProcess.emit('close', null, 'SIGTERM');
+      await waiting;
+
+      expect(settledBeforeClose).toBe(0);
+      expect(onSettled).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'CLI process terminated by signal SIGTERM',
+        }),
+      );
+    });
+
+    it('rejects immediately when a signalled process has already closed', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+      const transport = new ProcessTransport({ pathToQwenExecutable: 'qwen' });
+      mockChildProcess.signalCode = 'SIGTERM';
+      mockChildProcess.emit('close', null, 'SIGTERM');
+
+      const onSettled = vi.fn();
+      const waiting = transport.waitForExit().then(onSettled, onSettled);
+      await Promise.resolve();
+      const settledAfterClose = onSettled.mock.calls.length;
+      // Release a broken waiter so the regression leaves no pending listener.
+      if (settledAfterClose === 0) {
+        mockChildProcess.emit('close', null, 'SIGTERM');
+      }
+      await waiting;
+
+      expect(settledAfterClose).toBe(1);
+      expect(onSettled).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'CLI process terminated by signal SIGTERM',
+        }),
+      );
+    });
+
+    it('preserves an exit failure before the close event is delivered', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+      const transport = new ProcessTransport({ pathToQwenExecutable: 'qwen' });
+      mockChildProcess.exitCode = 1;
+
+      await expect(transport.waitForExit()).rejects.toThrow(
+        'CLI process exited with code 1',
+      );
+      mockChildProcess.emit('close', 1, null);
+    });
+
     it('should reject waitForExit() on signal termination', async () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

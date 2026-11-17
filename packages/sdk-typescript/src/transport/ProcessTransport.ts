@@ -478,9 +478,18 @@ export class ProcessTransport implements Transport {
       return;
     }
 
-    if (this.childProcess.exitCode !== null || this.childProcess.killed) {
-      if (this._exitError) {
-        throw this._exitError;
+    if (
+      this.childProcess.exitCode !== null ||
+      this.childProcess.signalCode !== null
+    ) {
+      const error =
+        this._exitError ??
+        this.getProcessExitError(
+          this.childProcess.exitCode,
+          this.childProcess.signalCode,
+        );
+      if (error) {
+        throw error;
       }
       return;
     }
