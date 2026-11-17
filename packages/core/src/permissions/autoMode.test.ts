@@ -892,7 +892,12 @@ describe('evaluateAutoMode — fast-path gating', () => {
       command: String.raw`printf x > $'\xff'`,
       cwd,
     });
-    expect(decision).toEqual({ via: 'fallback', reason: 'safety_check' });
+    expect(decision).toEqual({
+      via: 'fallback',
+      reason: 'safety_check',
+      requiresHumanDecision: true,
+      message: expect.stringMatching(/manual approval/),
+    });
     expect(classifyAction).not.toHaveBeenCalled();
   });
 
@@ -905,7 +910,12 @@ describe('evaluateAutoMode — fast-path gating', () => {
         command: String.raw`sh -c 'printf {} > "$OUTPUT"'`,
         cwd,
       });
-      expect(decision).toEqual({ via: 'fallback', reason: 'safety_check' });
+      expect(decision).toEqual({
+        via: 'fallback',
+        reason: 'safety_check',
+        requiresHumanDecision: true,
+        message: expect.stringMatching(/manual approval/),
+      });
       expect(classifyAction).not.toHaveBeenCalled();
     },
   );
@@ -920,6 +930,8 @@ describe('evaluateAutoMode — fast-path gating', () => {
     'mv --target-directory=out/{a,b} f',
     'cp -t out/$D/.. file',
     'cp -t .qwe? settings.json',
+    'cd $D; printf x > out.txt',
+    'printf x | cd .qwen; printf x > out.txt',
   ])('routes an expanded write to manual fallback: %s', async (command) => {
     vi.mocked(classifyAction).mockClear();
     const decision = await evaluate({
@@ -927,7 +939,12 @@ describe('evaluateAutoMode — fast-path gating', () => {
       command,
       cwd,
     });
-    expect(decision).toEqual({ via: 'fallback', reason: 'safety_check' });
+    expect(decision).toEqual({
+      via: 'fallback',
+      reason: 'safety_check',
+      requiresHumanDecision: true,
+      message: expect.stringMatching(/manual approval/),
+    });
     expect(classifyAction).not.toHaveBeenCalled();
   });
 
@@ -938,8 +955,60 @@ describe('evaluateAutoMode — fast-path gating', () => {
       command: String.raw`sh -c "cat > \\$TARGET"`,
       cwd,
     });
-    expect(decision).toEqual({ via: 'fallback', reason: 'safety_check' });
+    expect(decision).toEqual({
+      via: 'fallback',
+      reason: 'safety_check',
+      requiresHumanDecision: true,
+      message: expect.stringMatching(/manual approval/),
+    });
     expect(classifyAction).not.toHaveBeenCalled();
+  });
+
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'keeps an outer %s path expansion at the human approval floor',
+    async (toolName) => {
+      vi.mocked(classifyAction).mockClear();
+      const decision = await evaluate({
+        toolName,
+        command: String.raw`bash -c "printf x > '$HOME/.bashrc'"' '`,
+        cwd,
+      });
+      expect(decision).toEqual({
+        via: 'fallback',
+        reason: 'safety_check',
+        requiresHumanDecision: true,
+        message: expect.stringMatching(/manual approval/),
+      });
+      expect(classifyAction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the unresolved-path floor when a permission rule also forces ask', async () => {
+    const decision = await evaluate(
+      {
+        toolName: ToolNames.SHELL,
+        command: String.raw`printf x > "$OUT"`,
+        cwd,
+      },
+      { pmForcedAsk: true },
+    );
+    expect(decision).toEqual({
+      via: 'fallback',
+      reason: 'safety_check',
+      requiresHumanDecision: true,
+      message: expect.stringMatching(/manual approval/),
+    });
+  });
+
+  it('does not force a cwd floor for an absolute-only write', async () => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: 'cd $D; printf x > /tmp/out.txt',
+      cwd,
+    });
+    expect(decision.via).toBe('classifier');
+    expect(classifyAction).toHaveBeenCalledOnce();
   });
 
   it('does not treat a literal dollar in a redirect as unresolved', async () => {

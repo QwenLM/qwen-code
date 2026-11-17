@@ -925,11 +925,6 @@ export async function evaluateAutoMode(
     }
   }
 
-  // User `ask` rules require manual confirmation.
-  if (input.pmForcedAsk) {
-    return { via: 'fallback', reason: 'ask_rule' };
-  }
-
   // L5.2.6: unresolved expansion or undecodable bytes prevent lossless path
   // matching. Keep the manual-approval floor deterministic instead of letting
   // an LLM approve the raw spelling.
@@ -941,11 +936,21 @@ export async function evaluateAutoMode(
     const cwd = input.ctx.cwd ?? input.config.getTargetDir?.() ?? process.cwd();
     if (
       extractShellOperationsAcrossCommand(command, cwd).some(
-        (op) => op.pathUnknown,
+        (op) => op.pathUnknown || (op.cwdUnknown && op.pathMayDependOnCwd),
       )
     ) {
-      return { via: 'fallback', reason: 'safety_check' };
+      return {
+        via: 'fallback',
+        reason: 'safety_check',
+        requiresHumanDecision: true,
+        message: 'Unresolved shell paths require manual approval in AUTO mode.',
+      };
     }
+  }
+
+  // User `ask` rules require manual confirmation.
+  if (input.pmForcedAsk) {
+    return { via: 'fallback', reason: 'ask_rule' };
   }
 
   // L5.2.7: External writes must never be auto-approved by the classifier.

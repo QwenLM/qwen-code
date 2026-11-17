@@ -3513,11 +3513,35 @@ describe('PermissionManager — compound shell write attribution', () => {
     },
   );
 
-  it('asks for an uncertain find starting point despite broad allow rules', async () => {
+  it.each(['./$D', '$D', '"$D"', 'src $D', '-L "$D"'])(
+    'asks for an uncertain find starting point despite broad allow rules: %s',
+    async (target) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)', 'ListFilesTool(*)'],
+      });
+      expect(await pm.evaluate(sh(`find ${target} -name x`, '/repo'))).toBe(
+        'ask',
+      );
+    },
+  );
+
+  it.each([
+    "'time' cd .qwen",
+    '"time" cd .qwen',
+    '(command cd .qwen)',
+    'A=1 cd .qwen | cat',
+    '{ cd .qwen; printf x > log; } | cat',
+    '{ cd .qwen; } & wait',
+  ])('keeps a later parent cd after %s', async (prefix) => {
     const pm = repoPm({
-      permissionsAllow: ['Bash(*)', 'ListFilesTool(*)'],
+      permissionsAllow: ['Bash(*)', 'WriteFileTool(*)'],
+      permissionsDeny: ['WriteFileTool(//repo/child/private.txt)'],
     });
-    expect(await pm.evaluate(sh('find ./$D -name x', '/repo'))).toBe('ask');
+    expect(
+      await pm.evaluate(
+        sh(`${prefix}; cd child; printf x > private.txt`, '/repo'),
+      ),
+    ).toBe('deny');
   });
 
   it.each([
@@ -3609,6 +3633,47 @@ describe('PermissionManager — compound shell write attribution', () => {
       expect(await broadPm.evaluate(sh(command, '/repo'))).toBe('ask');
     },
   );
+
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'does not certify an outer expansion as a literal path for %s',
+    async (toolName) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+        permissionsDeny: ['WriteFileTool(~/.bashrc)'],
+      });
+      const ctx = sh(
+        String.raw`bash -c "printf x > '$HOME/.bashrc'"' '`,
+        '/repo',
+      );
+      expect(await pm.evaluate({ ...ctx, toolName })).toBe('ask');
+    },
+  );
+
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'keeps a protected write visible after a backslash expansion for %s',
+    async (toolName) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+        permissionsDeny: ['WriteFileTool(~/.bashrc)'],
+      });
+      const ctx = sh(String.raw`bash -c "cat \\$HOME"'; > ~/.bashrc'`, '/repo');
+      expect(await pm.evaluate({ ...ctx, toolName })).toBe('deny');
+    },
+  );
+
+  it('retains outer expansion marks in an alternative monitor payload', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+      permissionsDeny: ['WriteFileTool(~/.bashrc)'],
+    });
+    const ctx = sh(
+      String.raw`sh -c $TERM "printf x > '$HOME/.bashrc'"' '`,
+      '/repo',
+    );
+    expect(await pm.evaluate({ ...ctx, toolName: ToolNames.MONITOR })).toBe(
+      'ask',
+    );
+  });
 
   it('keeps a known deny beside an unresolved redirect', async () => {
     const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });

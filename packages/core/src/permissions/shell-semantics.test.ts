@@ -1409,6 +1409,22 @@ describe('prefixed directory changes', () => {
     },
   );
 
+  it.each([
+    "'time'",
+    '"time"',
+    String.raw`\time`,
+    "$'time'",
+    "ti''me",
+    'time time',
+  ])(
+    'does not treat a non-reserved time spelling as a directory change: %s',
+    (prefix) => {
+      expect(across(`${prefix} cd .qwen; printf '{}' > settings.json`)).toEqual(
+        [write('/repo/settings.json')],
+      );
+    },
+  );
+
   it.each(['time -- cd .qwen', 'time -p -- cd .qwen'])(
     'does not certify a version-dependent time terminator cwd: %s',
     (command) => {
@@ -1423,7 +1439,114 @@ describe('prefixed directory changes', () => {
   );
 });
 
+describe('compound process cwd scopes', () => {
+  it.each<Row>([
+    [
+      'subshell',
+      '(command cd .qwen); printf x > outer',
+      [write('/repo/outer')],
+    ],
+    [
+      'subshell body',
+      '(command cd .qwen; printf x > inner); printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+    [
+      'nested subshells',
+      '(cd .qwen; (cd nested; printf x > inner); printf x > middle); printf x > outer',
+      [
+        write('/repo/.qwen/nested/inner'),
+        write('/repo/.qwen/middle'),
+        write('/repo/outer'),
+      ],
+    ],
+    [
+      'pipeline left',
+      'A=1 cd .qwen | cat; printf x > outer',
+      [write('/repo/outer')],
+    ],
+    [
+      'pipeline right',
+      'printf x | command cd .qwen; printf x > outer',
+      [uncertainWrite('/repo/outer')],
+    ],
+    [
+      'pipeline brace body',
+      '{ cd .qwen; printf x > inner; } | cat; printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+    [
+      'foreground brace body',
+      '{ command cd .qwen; printf x > inner; }; printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/.qwen/outer')],
+    ],
+    [
+      'background brace body',
+      '{ command cd .qwen; printf x > inner; } & wait; printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+    [
+      'background conditional list',
+      'cd .qwen && printf x > inner & wait; printf x > outer',
+      [write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+    [
+      'brace group redirect',
+      '{ cd .qwen; printf x > inner; } > before; printf x > outer',
+      [
+        write('/repo/before'),
+        write('/repo/.qwen/inner'),
+        write('/repo/.qwen/outer'),
+      ],
+    ],
+    [
+      'subshell group redirect',
+      '(cd .qwen; printf x > inner) > before; printf x > outer',
+      [write('/repo/before'), write('/repo/.qwen/inner'), write('/repo/outer')],
+    ],
+  ])('keeps %s cwd ownership', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+
+  it('keeps over-budget group paths uncertain', () => {
+    const command = '( '.repeat(101) + 'printf x > marker' + ' )'.repeat(101);
+    expect(across(command)).toEqual([
+      { ...uncertainWrite('/repo/marker'), pathUnknown: true },
+    ]);
+  });
+});
+
 describe('wrapper payload expansion', () => {
+  it('keeps an outer expansion uncertain inside a quote-removed literal path', () => {
+    const command = String.raw`bash -c "printf x > '$HOME/.bashrc'"' '`;
+    expect(across(command)).toEqual([
+      { ...write('/repo/$HOME/.bashrc'), pathUnknown: true },
+    ]);
+  });
+
+  it('keeps operators visible after an expansion beside a produced backslash', () => {
+    const command = String.raw`bash -c "cat \\$HOME"'; > ~/.bashrc'`;
+    expect(across(command)).toContainEqual(
+      write(`${os.homedir().replace(/\\/g, '/')}/.bashrc`),
+    );
+  });
+
+  it('does not mark a literal dollar path when only a different value expands', () => {
+    const command = String.raw`bash -c "printf $VALUE > '\$OUT'"`;
+    expect(across(command)).toEqual([write('/repo/$OUT')]);
+  });
+  it('does not match only a prefix of a literal variable name', () => {
+    const command = String.raw`bash -c "printf $HOME > '\$HOMELESS'"`;
+    expect(across(command)).toEqual([write('/repo/$HOMELESS')]);
+  });
+
+  it('does not leak wrapper expansion state into a later analysis', () => {
+    across(String.raw`bash -c "printf x > '$HOME/.bashrc'"' '`);
+    expect(across(String.raw`printf x > '$HOME/.bashrc'`)).toEqual([
+      write('/repo/$HOME/.bashrc'),
+    ]);
+  });
+
   it('keeps an escaped expansion uncertain through coalesced quote removal', () => {
     const writes = across(String.raw`sh -c "cat > \\$TARGET"`).filter(
       (op) => op.virtualTool === 'write_file',
@@ -1465,9 +1588,27 @@ describe('find starting-point uncertainty', () => {
     },
   );
 
-  it('retains the default and literal starting-point behavior', () => {
-    expect(across('find $D -name x')).toEqual([dir('/repo')]);
+  it.each(['$D', '"$D"', '-H $D', '-L "$D"', '-P $D'])(
+    'keeps a variable-only starting point: %s',
+    (target) => {
+      expect(across(`find ${target} -name x`)).toEqual([
+        { ...dir('/repo/$D'), pathUnknown: true },
+      ]);
+    },
+  );
+
+  it('does not drop an unresolved starting point beside a literal one', () => {
+    expect(across('find src $D -name x')).toEqual([
+      dir('/repo/src'),
+      { ...dir('/repo/$D'), pathUnknown: true },
+    ]);
+  });
+
+  it('retains default and literal starting points', () => {
+    expect(across('find -name x')).toEqual([dir('/repo')]);
     expect(across('find src -name x')).toEqual([dir('/repo/src')]);
+    expect(across("find '$D' -name x")).toEqual([dir('/repo/$D')]);
+    expect(across('find 123 -name x')).toEqual([dir('/repo/123')]);
   });
 });
 

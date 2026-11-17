@@ -1011,7 +1011,8 @@ export interface CompoundCommandSegment {
  * the operator that terminated each one.
  *
  * See {@link splitCompoundCommand} for the string-only form and for examples;
- * this is the same split, and that function is a projection of this one.
+ * the default split is also used by command-rule matching. `includeGroups`
+ * retains group delimiters and empty structural segments for cwd ownership.
  *
  * Scanned twice and split wherever either scan finds an operator: comments,
  * backtick bodies and heredocs are not modelled, and quotes inside them can
@@ -1019,14 +1020,15 @@ export interface CompoundCommandSegment {
  */
 export function splitCompoundCommandSegments(
   command: string,
+  includeGroups = false,
 ): CompoundCommandSegment[] {
   // The two readings differ only at a backslash, so one scan is enough without.
   const boundaries = command.includes('\\')
     ? [
-        ...findOperatorBoundaries(command, 'bash'),
-        ...findOperatorBoundaries(command, 'escape-everywhere'),
+        ...findOperatorBoundaries(command, 'bash', includeGroups),
+        ...findOperatorBoundaries(command, 'escape-everywhere', includeGroups),
       ].sort((a, b) => a.start - b.start)
-    : findOperatorBoundaries(command, 'bash');
+    : findOperatorBoundaries(command, 'bash', includeGroups);
 
   const segments: CompoundCommandSegment[] = [];
   let lastSplit = 0;
@@ -1043,7 +1045,7 @@ export function splitCompoundCommandSegments(
     const segment = trimBashWordSeparators(
       dropsLineEndingCR ? raw.replace(/\r$/, '') : raw,
     );
-    if (segment) {
+    if (segment || includeGroups) {
       segments.push({ command: segment, terminator: operator });
     }
     lastSplit = end;
@@ -1069,6 +1071,7 @@ type BackslashReading = 'bash' | 'escape-everywhere';
 function findOperatorBoundaries(
   command: string,
   reading: BackslashReading,
+  includeGroups: boolean,
 ): OperatorBoundary[] {
   const boundaries: OperatorBoundary[] = [];
   let inSingle = false;
@@ -1079,6 +1082,7 @@ function findOperatorBoundaries(
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
+  let patternDepth = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -1122,6 +1126,15 @@ function findOperatorBoundaries(
       continue;
     }
 
+    if (
+      includeGroups &&
+      (patternDepth > 0 || (ch === '(' && /[?*+@!]/.test(command[i - 1] ?? '')))
+    ) {
+      if (ch === '(') patternDepth++;
+      else if (ch === ')') patternDepth--;
+      continue;
+    }
+
     if (ch === '(' && command[i + 1] === '(') {
       arithmeticDepth++;
       i++;
@@ -1130,6 +1143,19 @@ function findOperatorBoundaries(
     if (arithmeticDepth > 0 && ch === ')' && command[i + 1] === ')') {
       arithmeticDepth--;
       i++;
+      continue;
+    }
+
+    if (
+      includeGroups &&
+      arithmeticDepth === 0 &&
+      (ch === '(' ||
+        ch === ')' ||
+        ((ch === '{' || ch === '}') &&
+          (i === 0 || /[ \t\n;&|()]/.test(command[i - 1]!)) &&
+          (i + 1 === command.length || /[ \t\n;&|()]/.test(command[i + 1]!))))
+    ) {
+      boundaries.push({ start: i, end: i + 1, operator: ch });
       continue;
     }
 

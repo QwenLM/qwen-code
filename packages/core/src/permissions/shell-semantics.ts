@@ -250,7 +250,9 @@ function tokenize(
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
       if (wordStarted) {
-        if (prefixQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
+        if (prefixQuoted && (current.startsWith('~') || current === 'time')) {
+          bare = '0' + bare.slice(1);
+        }
         if (current) {
           pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
         } else {
@@ -278,7 +280,9 @@ function tokenize(
     i += literal.length - 1;
   }
   flushAnsiC();
-  if (prefixQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
+  if (prefixQuoted && (current.startsWith('~') || current === 'time')) {
+    bare = '0' + bare.slice(1);
+  }
   if (current) pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
   else if (wordStarted) {
     tokens.push('');
@@ -417,6 +421,21 @@ function isShellAbsolutePath(p: string): boolean {
  */
 function isUncertainPath(word: string, bare?: string): boolean {
   if (bare?.includes('2') || hasUnpairedSurrogate(word)) return true;
+  // Outer expansion happens before the payload's own quotes are parsed.
+  for (const expansion of wrapperExpansions) {
+    for (
+      let at = word.indexOf(expansion);
+      at >= 0;
+      at = word.indexOf(expansion, at + 1)
+    ) {
+      if (
+        !/^\$[A-Za-z_]/.test(expansion) ||
+        !/[A-Za-z0-9_]/.test(word[at + expansion.length] ?? '')
+      ) {
+        return true;
+      }
+    }
+  }
   if (bare === undefined) return false;
   for (let i = 0; i < word.length && i < bare.length; i++) {
     if (bare[i] !== '1') continue;
@@ -438,6 +457,7 @@ interface ArgumentWord {
 }
 
 let argumentContext: readonly ArgumentWord[] = [];
+let wrapperExpansions: ReadonlySet<string> = new Set();
 
 /**
  * The marking of the argument characters `fragment` was taken from.
@@ -530,7 +550,7 @@ function stripCommandPrefixes(words: string[], bares: string[]): string[] {
   // `time` is a reserved word only before the pipeline's assignments and
   // command. After an assignment or `command`, the external executable runs
   // instead and cannot change this shell's cwd.
-  if (words[start] === 'time') {
+  if (words[start] === 'time' && bares[start] === '1111') {
     let next = start + 1;
     if (words[next] === '-p') next++;
     if (words[next] === '--') {
@@ -1667,6 +1687,8 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ]);
     const startingPoints: string[] = [];
     for (const arg of args) {
+      if (startingPoints.length === 0 && ['-H', '-L', '-P'].includes(arg))
+        continue;
       if (
         arg.startsWith('-') ||
         arg === '(' ||
@@ -1674,7 +1696,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         expressionKeywords.has(arg)
       )
         break;
-      if (looksLikePath(arg)) startingPoints.push(arg);
+      startingPoints.push(arg);
     }
     if (startingPoints.length === 0) {
       return [
@@ -2773,68 +2795,142 @@ function walkCompoundCommand(
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
-
+  const subCommands = splitCompoundCommandSegments(
+    stripHeredocBodies(command),
+    true,
+  );
   const ops: ShellOperation[] = [];
-  let effectiveCwd = cwd;
-  let cwdUnknown = initialCwdUnknown;
-
-  for (const { command: sub, terminator } of subCommands) {
-    // `cd x & …` runs the `cd` in a background subshell, so it does not move
-    // the cwd the following segments run in. Treating it as a foreground `cd`
-    // would attribute their relative writes to the wrong directory — for
-    // `cd /tmp & echo {} > settings.json` the write lands in the *original*
-    // cwd, which is exactly where a protected settings file would be.
-    const backgrounded = terminator === '&';
-
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
-    if (cdTarget.kind !== 'not-cd') {
-      const redirectOps = toRedirectOperations(cdTarget.redirects);
-      ops.push(
-        ...(cwdUnknown
-          ? markCwdUnknownOps(redirectOps, sub, effectiveCwd)
-          : redirectOps),
-      );
-      if (!backgrounded) {
-        if (cdTarget.kind === 'static') {
-          effectiveCwd = cdTarget.cwd;
-          cwdUnknown = cdTarget.cwdUnknown;
-        } else {
-          cwdUnknown = true;
-        }
-      }
-      continue;
+  type CwdScope = { cwd: string; unknown: boolean };
+  const groupEnds = new Map<number, number>();
+  const groups: number[] = [];
+  for (let i = 0; i < subCommands.length; i++) {
+    const terminator = subCommands[i]!.terminator;
+    if (terminator === '(' || terminator === '{') {
+      groups.push(i);
+    } else if (terminator === ')' || terminator === '}') {
+      const start = groups.pop();
+      if (start !== undefined) groupEnds.set(start, i);
     }
+  }
 
-    // Unwrap per segment, after the outer split, so wrapper suffixes like
-    // `bash -lc 'safe' && echo > file` are not discarded.
-    if (depth < MAX_SHELL_UNWRAP_DEPTH) {
-      const subUnwrapped = stripShellWrapper(sub);
-      if (subUnwrapped !== sub) {
+  const visitSimple = (sub: string, scope: CwdScope) => {
+    if (!sub) return;
+    const cdTarget = resolveCdTargetCwd(sub, scope.cwd, scope.unknown);
+    if (cdTarget.kind !== 'not-cd') {
+      const redirects = toRedirectOperations(cdTarget.redirects);
+      ops.push(
+        ...(scope.unknown
+          ? markCwdUnknownOps(redirects, sub, scope.cwd)
+          : redirects),
+      );
+      if (cdTarget.kind === 'static') {
+        scope.cwd = cdTarget.cwd;
+        scope.unknown = cdTarget.cwdUnknown;
+      } else {
+        scope.unknown = true;
+      }
+      return;
+    }
+    const expansions = new Set(wrapperExpansions);
+    const unwrapped = stripShellWrapper(sub, expansions);
+    if (depth < MAX_SHELL_UNWRAP_DEPTH && unwrapped !== sub) {
+      const outer = wrapperExpansions;
+      wrapperExpansions = expansions;
+      try {
         ops.push(
           ...walkCompoundCommand(
-            subUnwrapped,
-            effectiveCwd,
+            unwrapped,
+            scope.cwd,
             depth + 1,
-            cwdUnknown,
+            scope.unknown,
           ),
         );
-        continue;
+      } finally {
+        wrapperExpansions = outer;
       }
-    } else if (stripShellWrapper(sub) !== sub) {
+      return;
+    }
+    if (unwrapped !== sub) {
       shellSemanticsDebugLogger.warn(
         `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
       );
     }
+    const subOps = extractShellOperations(sub, scope.cwd);
+    ops.push(
+      ...(scope.unknown ? markCwdUnknownOps(subOps, sub, scope.cwd) : subOps),
+    );
+  };
 
-    const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown) {
-      ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
-    } else {
-      ops.push(...subOps);
+  const unitEnd = (index: number, limit: number) => {
+    const close = groupEnds.get(index);
+    if (close === undefined) return index;
+    const next = subCommands[close + 1];
+    return close + 1 < limit &&
+      next &&
+      !['(', ')', '{', '}'].includes(next.terminator)
+      ? close + 1
+      : close;
+  };
+
+  const visit = (
+    start: number,
+    end: number,
+    scope: CwdScope,
+    level: number,
+  ) => {
+    if (level >= 100) {
+      const before = ops.length;
+      for (let i = start; i < end; i++) {
+        visitSimple(subCommands[i]!.command, { ...scope, unknown: true });
+      }
+      for (let i = before; i < ops.length; i++) {
+        if (ops[i]!.filePath) ops[i] = { ...ops[i]!, pathUnknown: true };
+      }
+      return;
     }
-  }
-
+    let listEnd = start - 1;
+    let listScope = scope;
+    let pipedIn = false;
+    for (let i = start; i < end; i++) {
+      if (i > listEnd) {
+        listEnd = unitEnd(i, end);
+        while (
+          listEnd + 1 < end &&
+          ['&&', '||', '|', '|&'].includes(subCommands[listEnd]!.terminator)
+        ) {
+          listEnd = unitEnd(listEnd + 1, end);
+        }
+        listScope =
+          subCommands[listEnd]!.terminator === '&' ? { ...scope } : scope;
+      }
+      const last = unitEnd(i, end);
+      const segment = subCommands[i]!;
+      const terminator = subCommands[last]!.terminator;
+      const pipedOut = terminator === '|' || terminator === '|&';
+      const isolated =
+        segment.terminator === '(' || pipedIn || pipedOut || terminator === '&';
+      const current = isolated ? { ...listScope } : listScope;
+      visitSimple(segment.command, current);
+      const close = groupEnds.get(i);
+      if (close !== undefined) {
+        // Group redirects open before its body changes directory.
+        if (last > close) visitSimple(subCommands[last]!.command, current);
+        visit(i + 1, close + 1, current, level + 1);
+      }
+      // Some shells (and bash with lastpipe) run the final pipeline element
+      // in the parent. Neither resulting cwd is certain without that setting.
+      if (
+        pipedIn &&
+        !pipedOut &&
+        (current.cwd !== listScope.cwd || current.unknown !== listScope.unknown)
+      ) {
+        listScope.unknown = true;
+      }
+      pipedIn = pipedOut;
+      i = last;
+    }
+  };
+  visit(0, subCommands.length, { cwd, unknown: initialCwdUnknown }, 0);
   return ops;
 }
 

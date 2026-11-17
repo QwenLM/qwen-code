@@ -5998,6 +5998,61 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it.each([
+    String.raw`printf x > $'\xff'`,
+    String.raw`printf x > "$OUTPUT"`,
+    'cd $D; printf x > out.txt',
+  ])(
+    'does not let a PermissionRequest hook allow waive an unresolved-path approval: %s',
+    async (command) => {
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const harness = autoScheduler(
+        askingTool({
+          kind: Kind.Execute,
+          getConfirmationDetails: vi
+            .fn()
+            .mockResolvedValue(
+              execDetails(
+                'Run command',
+                command,
+                command.split(' ')[0]!,
+                onConfirmSpy,
+              ),
+            ),
+          execute,
+        }),
+        {
+          messageBus: permissionRequestHookBus({ behavior: 'allow' }),
+          disableHooks: false,
+        },
+      );
+
+      await harness.scheduler.schedule(
+        shellRequest('unresolved-path-hook-waiver', command),
+        new AbortController().signal,
+      );
+
+      await vi.waitFor(() =>
+        expect(reportedCalls(harness.onToolCallsUpdate).at(-1)?.status).toBe(
+          'awaiting_approval',
+        ),
+      );
+      const waiting = reportedCalls(harness.onToolCallsUpdate).find(
+        (call) => call.status === 'awaiting_approval',
+      ) as WaitingToolCall;
+      expect(waiting.confirmationDetails).toMatchObject({
+        hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason: 'safety_check',
+          message: expect.stringMatching(/manual approval/),
+        },
+      });
+      expect(onConfirmSpy).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+    },
+  );
+
   it('does not let a PermissionRequest hook allow waive an amend approval', async () => {
     // The amend floor rides the plain fallback arm, so `requiresHumanDecision`
     // is the only thing stopping this hook from rewriting a commit unattended.

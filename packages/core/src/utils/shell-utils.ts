@@ -809,9 +809,18 @@ function decodeAnsiCWord(body: string): string {
  */
 function shellWordQuoteRemoval(
   token: string,
+  expandedWords?: Set<string>,
 ): { text: string; hasExpansion: boolean } | null {
   let out = '';
   let hasExpansion = false;
+  const recordExpansion = (at: number) => {
+    hasExpansion = true;
+    const expansion =
+      /^(?:\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-]|\{|\()|`)/.exec(
+        token.slice(at),
+      )?.[0];
+    if (expansion) expandedWords?.add(expansion);
+  };
   let i = 0;
   const n = token.length;
   while (i < n) {
@@ -880,7 +889,7 @@ function shellWordQuoteRemoval(
           i++;
           continue;
         }
-        if (c === '$' || c === '`') hasExpansion = true;
+        if (c === '$' || c === '`') recordExpansion(i);
         const literal = String.fromCodePoint(token.codePointAt(i)!);
         out = concatAnsiCText(out, literal);
         i += literal.length;
@@ -893,13 +902,13 @@ function shellWordQuoteRemoval(
         i = dollarAt;
         continue;
       }
-      hasExpansion = true;
+      recordExpansion(i);
       out = concatAnsiCText(out, ch);
       i++;
       continue;
     }
     if (ch === '`') {
-      hasExpansion = true;
+      recordExpansion(i);
       out = concatAnsiCText(out, ch);
       i++;
       continue;
@@ -912,15 +921,11 @@ function shellWordQuoteRemoval(
 }
 
 /** Quote removal applies around expansions too; their syntax stays literal. */
-function resolveShellWord(token: string): string {
-  const removed = shellWordQuoteRemoval(token);
-  const escapedExpansion =
-    removed !== null && /(?:^|[^\\])(?:\\\\)*\\[$`]/.test(removed.text);
-  // A backslash produced by quote removal can escape the expansion marker on
-  // the next parse. Keep the original spelling only for that lossy case.
-  return removed !== null && !(removed.hasExpansion && escapedExpansion)
-    ? removed.text
-    : stripSymmetricQuotes(token).value;
+function resolveShellWord(token: string, expandedWords?: Set<string>): string {
+  return (
+    shellWordQuoteRemoval(token, expandedWords)?.text ??
+    stripSymmetricQuotes(token).value
+  );
 }
 
 /**
@@ -1008,7 +1013,10 @@ function restAfterOptionTerminator(rest: string): string | null {
   return takeLeadingToken(terminator.rest) ? terminator.rest : null;
 }
 
-export function stripShellWrapper(command: string): string {
+export function stripShellWrapper(
+  command: string,
+  expandedWords?: Set<string>,
+): string {
   const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
 
@@ -1053,7 +1061,7 @@ export function stripShellWrapper(command: string): string {
       // operators and paths inside it stay visible to the callers.
       const innerCommand = shellWrapperCommandConsumesRest(wrapperToken.token)
         ? value
-        : resolveShellWord(commandToken.token);
+        : resolveShellWord(commandToken.token, expandedWords);
       if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
         return markerRest.trimStart() || trimmed;
       }
@@ -1108,7 +1116,9 @@ function unresolvedWrapperAlternatePayload(command: string): string | null {
       if (removed === null || !removed.hasExpansion) return null;
       const next = takeLeadingToken(payload.rest);
       if (!next) return null;
-      return resolveShellWord(next.token) || null;
+      const expandedWords = new Set<string>();
+      const resolved = resolveShellWord(next.token, expandedWords);
+      return expandedWords.size > 0 ? `sh -c ${next.token}` : resolved || null;
     }
     const normalized = getNormalizedShellToken(token.token);
     if (!isShellWrapperFlagToken(normalized)) return null;
@@ -2138,14 +2148,20 @@ export function normalizeMonitorCommand(
     analysisCommand,
     ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
   ];
+  const expandedWords = new Set<string>();
+  stripShellWrapper(command, expandedWords);
   const safetyCommand =
-    wrapperTokens && !payloadUnresolved && safetyParts.length > 0
-      ? safetyParts.join(' ').trim()
-      : payloadUnresolved
-        ? [safetyParts.join(' ').trim(), alternatePayload ?? '']
-            .filter(Boolean)
-            .join(' ')
-        : analysisCommand;
+    expandedWords.size > 0
+      ? [safetyParts.join(' ').trim(), command.trim(), alternatePayload ?? '']
+          .filter(Boolean)
+          .join('\n')
+      : wrapperTokens && !payloadUnresolved && safetyParts.length > 0
+        ? safetyParts.join(' ').trim()
+        : payloadUnresolved
+          ? [safetyParts.join(' ').trim(), alternatePayload ?? '']
+              .filter(Boolean)
+              .join('\n')
+          : analysisCommand;
   const strippedTrailingAmp =
     analysisCommand !== innerCommand ||
     normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
