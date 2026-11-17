@@ -1003,6 +1003,45 @@ describe('Query', () => {
       await query.close();
     });
 
+    it.each(['throw', 'reject'])(
+      'clears the permission deadline when the callback fails (%s)',
+      async (failure) => {
+        const query = new Query(transport, {
+          cwd: '/test',
+          canUseTool: () => {
+            const error = new Error('Callback error');
+            if (failure === 'throw') throw error;
+            return Promise.reject(error);
+          },
+        });
+        await respondToInitialize(transport, query);
+        vi.useFakeTimers();
+        try {
+          transport.simulateMessage(
+            createControlRequest('can_use_tool', 'failed-permission'),
+          );
+          await vi.waitFor(() => {
+            const response = findControlResponse(
+              transport.getAllWrittenMessages(),
+              'failed-permission',
+            );
+            expect(response?.response).toMatchObject({
+              subtype: 'success',
+              response: {
+                behavior: 'deny',
+                message: 'Permission check failed: Callback error',
+              },
+            });
+          });
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          await query.close();
+          vi.clearAllTimers();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('should handle PermissionResult format with updatedInput', async () => {
       const canUseTool = vi.fn().mockResolvedValue({
         behavior: 'allow',
