@@ -259,7 +259,17 @@ export class AcpHttpTransport implements DaemonTransport {
         httpMethod,
         parsedUrl.searchParams,
       );
-      await this.sendNotification(mapping.method, params, init.headers);
+      const response = await this.sendNotification(
+        mapping.method,
+        params,
+        init.headers,
+      );
+      if (!response.ok) return response;
+      try {
+        await response.body?.cancel();
+      } catch {
+        /* body already consumed or no body */
+      }
       return synthesizeResponse(204, null);
     }
 
@@ -959,7 +969,7 @@ export class AcpHttpTransport implements DaemonTransport {
     method: string,
     params: Record<string, unknown>,
     callerHeaders?: HeadersInit,
-  ): Promise<void> {
+  ): Promise<Response> {
     const notification: JsonRpcNotification = {
       jsonrpc: '2.0',
       method,
@@ -979,7 +989,7 @@ export class AcpHttpTransport implements DaemonTransport {
     // Merge caller headers (from init.headers) with transport headers.
     const headers = mergeHeaders(transportHeaders, callerHeaders);
 
-    await this._fetch(`${this.baseUrl}/acp`, {
+    return this._fetch(`${this.baseUrl}/acp`, {
       method: 'POST',
       headers,
       body: JSON.stringify(notification),
