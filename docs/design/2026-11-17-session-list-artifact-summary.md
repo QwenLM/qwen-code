@@ -127,7 +127,9 @@ clicked, using the list data the sidebar already holds.
   can orphan artifact events off the active branch and undercount) and no
   record-level damage warnings — the same predicate the library mutation
   guard uses (`hasDisqualifyingArtifactJournalWarning`); per-artifact skips
-  stay tolerated.
+  stay tolerated. Both gates read the warnings threaded out of the rebuild,
+  not the snapshot's: an all-refused journal yields no snapshot but is
+  damaged, not artifact-free.
 - The library cold removal updates the sidecar from the remaining restorable
   count after its direct journal write.
 - `SessionService` gains the archive-state path helper; archive/unarchive
@@ -237,16 +239,17 @@ clicked, using the list data the sidebar already holds.
 - `packages/core/src/services/session-artifact-summary-sidecar.ts` (new).
 - `packages/core/src/index.ts` (barrel export of the sidecar module).
 - `packages/core/src/services/session-artifact-persistence.ts` (payload field,
-  normalization, fork strip, shared journal-authority warning predicate).
+  normalization, fork strip, shared journal-authority warning predicate,
+  rebuild warning threading).
 - `packages/core/src/services/chatRecordingService.ts` (sidecar writes).
-- `packages/core/src/services/sessionService.ts` (path helper, load seed with
-  the journal-authority gate, library removal update, archive move, delete
-  removal, conflict discard).
+- `packages/core/src/services/sessionService.ts` (path helper, load seed and
+  library guard sharing the journal-authority gate, library removal update,
+  archive move, delete removal, conflict discard).
 - `packages/core/src/config/config.ts` (working-directory relocation move
   list).
 - `packages/acp-bridge/src/sessionArtifacts.ts` (count in payload, `count()`).
-- `packages/acp-bridge/src/session-control-plane.ts` (`toSessionSummary`,
-  pending-restore exclusion in `listWorkspaceSessions`).
+- `packages/acp-bridge/src/session-control-plane.ts` (`toSessionSummary`
+  pending-restore marker, rewind restore registration in `pendingRestoreIds`).
 - `packages/acp-bridge/src/bridgeTypes.ts` (`BridgeSessionSummary`).
 - `packages/sdk-typescript/src/daemon/types.ts` (`DaemonSessionSummary`).
 - `packages/cli/src/serve/server/session-list.ts` (enrichment, merge rule).
@@ -291,15 +294,18 @@ clicked, using the list data the sidebar already holds.
   write-after-append order on both paths, legacy count-less events preserve
   an existing sidecar); load seed and its authority gate (history gap,
   record-level damage warnings including change-level drops, tolerated
-  per-artifact skips), in both active and archived states, from event and
+  per-artifact skips, all-refused journals refused by the seed and the
+  library guard alike), in both active and archived states, from event and
   snapshot (fork) records, counting the cold-restorable set (legacy
   local-published html excluded, real preview snapshots kept); library
-  removal update (restorable-survivor arithmetic, single and batch);
+  removal update (restorable-survivor arithmetic, single and batch, stale
+  ids in the requested batch);
   archive/delete/conflict handling; working-directory relocation; store
   `count()` including the decrement after a removal; `toSessionSummary`
   include/omit and the pending-restore marker (`artifactCountPending` keeps
   the row visible and the merge keeps the sidecar count); the ACP boundary
-  carries the stamped count to the recorder; enrichment on all list paths,
+  carries the stamped count to the recorder and the ACP session/list
+  projection carries the count and the marker; enrichment on all list paths,
   including a mid-scan abort (per-iteration checks, interrupted scan not
   cached) and a throwing read contained per session; merge drops stale
   count; optimistic hint keying, clear, and retirement on a failed load;

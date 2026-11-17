@@ -106,7 +106,9 @@
   暖 load 不新增写盘；部分读取的 transcript 绝不播种。播种还要求 journal
   具备权威性：无历史链缺口（断链会把 artifact 事件孤儿化出活跃分支而少计），
   且无记录级损坏警告——与库变更守卫同一判定
-  （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。
+  （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。两处
+  门控都读重建过程导出的告警而非快照上的：全拒绝日志没有快照，但属于损坏
+  而非无产物。
 - 产物库冷删除在其直接 journal 写入后，用剩余可恢复数量更新 sidecar。
 - `SessionService` 增加按归档状态的路径助手；archive/unarchive 与其他
   sidecar 一起移动它；会话删除移除它；冲突解决丢弃被丢弃一方的 sidecar
@@ -192,14 +194,15 @@
 - `packages/core/src/services/session-artifact-summary-sidecar.ts`（新增）。
 - `packages/core/src/index.ts`（sidecar 模块的 barrel 导出）。
 - `packages/core/src/services/session-artifact-persistence.ts`（payload
-  字段、规范化、fork 剥离、共享的 journal 权威性警告判定）。
+  字段、规范化、fork 剥离、共享的 journal 权威性警告判定、重建告警导出）。
 - `packages/core/src/services/chatRecordingService.ts`（sidecar 写入）。
-- `packages/core/src/services/sessionService.ts`（路径助手、带 journal
-  权威性门的 load 播种、库删除更新、archive 移动、delete 移除、冲突丢弃）。
+- `packages/core/src/services/sessionService.ts`（路径助手、共用 journal
+  权威性门的 load 播种与库守卫、库删除更新、archive 移动、delete 移除、
+  冲突丢弃）。
 - `packages/core/src/config/config.ts`（工作目录搬迁清单）。
 - `packages/acp-bridge/src/sessionArtifacts.ts`（payload 数量、`count()`）。
-- `packages/acp-bridge/src/session-control-plane.ts`（`toSessionSummary`、
-  `listWorkspaceSessions` 的恢复中排除）。
+- `packages/acp-bridge/src/session-control-plane.ts`（`toSessionSummary`
+  的恢复中标记、rewind 恢复在 `pendingRestoreIds` 的登记）。
 - `packages/acp-bridge/src/bridgeTypes.ts`（`BridgeSessionSummary`）。
 - `packages/sdk-typescript/src/daemon/types.ts`（`DaemonSessionSummary`）。
 - `packages/cli/src/serve/server/session-list.ts`（增强、合并规则）。
@@ -237,12 +240,14 @@
   保留与 fork 剥离；recording-service sidecar 写入（带/不带数量的 event、
   snapshot，两条路径的先 journal 后 sidecar 顺序，无计数旧事件保留已有
   sidecar）；load 播种及其权威性门（历史链缺口、含变更级丢弃的记录级损坏
-  警告、被容忍的单产物级跳过），active 与 archived 两态、event 与 snapshot
-  （fork）记录、按冷启动可恢复集合计数（旧本地 published html 排除、真正
-  预览快照保留）；库删除更新（可恢复幸存者算术，单个与批量）；
+  警告、被容忍的单产物级跳过、全拒绝日志被播种与库守卫同样拒绝），active
+  与 archived 两态、event 与 snapshot（fork）记录、按冷启动可恢复集合计数
+  （旧本地 published html 排除、真正预览快照保留）；库删除更新（可恢复
+  幸存者算术，单个与批量、请求批次含陈旧 id）；
   archive/delete/冲突处理；工作目录搬迁；store `count()` 含删除后递减；
   `toSessionSummary` 携带/省略与恢复中标记（`artifactCountPending` 保持行
-  可见、合并保留 sidecar 计数）；ACP 边界把盖章数量带到 recorder；全部
+  可见、合并保留 sidecar 计数）；ACP 边界把盖章数量带到 recorder、ACP
+  session/list 投影携带数量与标记；全部
   列表路径的增强（含扫描中途 abort 的逐次检查与被中断扫描不进缓存、单会话
   抛错读取被包容）；合并丢弃陈旧数量；乐观 hint 键控、清空与加载失败退役；
   hook hint 有效性（缓存/快照退役、跨会话键控）；头部数量回退；侧栏传递。
