@@ -1873,11 +1873,20 @@ export interface DaemonSessionSummary {
    * Session artifact count, present when non-zero. Live sessions carry the
    * live public count; there, absent means ZERO — the in-memory store is
    * authoritative, and the list merge drops a stale sidecar-derived count
-   * when the live entry omits the field. Cold sessions carry the restorable
-   * count hydrated best-effort from the artifact summary sidecar; there,
-   * absent means unknown (older daemon or no sidecar yet), not zero.
+   * when the live entry omits the field — EXCEPT while
+   * `artifactCountPending` is true (see there). Cold sessions carry the
+   * restorable count hydrated best-effort from the artifact summary
+   * sidecar; there, absent means unknown (older daemon or no sidecar yet),
+   * not zero.
    */
   artifactCount?: number;
+  /**
+   * True while the session's artifact restore is still in flight: the
+   * session is live, but its store is not hydrated yet, so `artifactCount`
+   * is omitted and MUST NOT be read as zero. The list merge keeps the
+   * sidecar-enriched count for such rows. Absent once the restore settles.
+   */
+  artifactCountPending?: boolean;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
