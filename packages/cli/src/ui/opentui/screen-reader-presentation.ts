@@ -71,8 +71,14 @@ function inputCaret(node: Renderable): RegExpExecArray | null {
 
 /** Reads public semantic values, never the painted cell buffer or colors. */
 function controlRows(node: Renderable): ControlRow[] {
-  if (!node.visible || node.isDestroyed || node.id === 'screen-reader-history')
-    return [];
+  if (!node.visible || node.isDestroyed) return [];
+  if (node.id === 'screen-reader-history') {
+    // Items and the range are published from the model on every change; only
+    // the invariant navigation help rides the per-owner dedupe, so it is
+    // spoken once instead of once per window change.
+    const help = node.findDescendantById('screen-reader-history-help');
+    return help ? controlRows(help) : [];
+  }
   if (node.id === 'screen-reader-protected-input')
     return [{ owner: node, text: t('Protected input') }];
   if (node.id === 'screen-reader-input-line') {
@@ -249,13 +255,18 @@ export class ScreenReaderPresentation {
     };
     collect(historyRoot);
     for (const item of this.items) {
+      const key = historyKey(item);
       if (
         (item.kind === 'assistant' && item.streaming === true) ||
         ((item.kind === 'thinking' || item.kind === 'tool') &&
-          item.done === false)
+          item.done === false) ||
+        // `task` and `retry` cards are spliced out of the model when they
+        // finish, so they have no settled form: speak them once and hold every
+        // later progress tick or countdown redraw.
+        ((item.kind === 'task' || item.kind === 'retry') &&
+          this.history.has(key))
       )
         continue;
-      const key = historyKey(item);
       const node = nodes.get(`screen-reader-item-${key}`);
       if (!node) continue;
       const body = readScreenReaderControls(node);
@@ -298,16 +309,28 @@ export class ScreenReaderPresentation {
       }
       this.dialogOpen = dialogOpen;
       const current = new Map<Renderable, string>();
+      const live: string[] = [];
       for (const row of root ? controlRows(root) : []) {
+        current.set(row.owner, row.text);
+        // An editable value is ink's dynamic block: it replaces its own lines
+        // in place, so a keystroke never appends another copy of the whole
+        // field to the permanent scrollback.
+        if (
+          row.owner instanceof EditBufferRenderable ||
+          row.owner.id === 'screen-reader-input-line'
+        ) {
+          live.push(row.text);
+          continue;
+        }
         const previous = this.controls.get(row.owner);
         if (
           row.text !== previous &&
           previous !== t('Selected {{value}}', { value: row.text })
         )
           this.writer.appendStatic(row.text);
-        current.set(row.owner, row.text);
       }
       this.controls = current;
+      this.writer.updateDynamic(live.join('\n'));
     };
     renderer.on('frame', onFrame);
     return () => {

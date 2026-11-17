@@ -84,7 +84,7 @@ import {
   readScreenReaderControls,
 } from './screen-reader-presentation.js';
 import { ScreenReaderOutputWriter } from './a11y-screen-reader.js';
-import type { LiveAssistantItem } from './live-session-model.js';
+import { foldLiveEvent, type LiveAssistantItem } from './live-session-model.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 
 function text(value: string) {
@@ -742,5 +742,146 @@ describe('screen-reader semantic presentation', () => {
     expect(output).toContain('result');
     expect(output).not.toContain('secret');
     expect(output).not.toContain('\u001b');
+  });
+
+  it('speaks a subagent task card once across its real progress ticks', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const row = box([text('researcher bench frames')]);
+    const history = box([row]);
+    history.id = 'screen-reader-history';
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    const owner = {};
+    let items = foldLiveEvent([], {
+      type: 'task-start',
+      id: 's1',
+      name: 'researcher',
+      description: 'bench frames',
+    });
+    row.id = `screen-reader-item-task:${items[0]!.id}`;
+    presentation.setHistory(owner, items);
+    presentation.observeFrames(events, () => box([history]));
+    events.emit('frame');
+    expect(output).toBe('task: researcher bench frames\n');
+    for (const line of ['↳ grep', '↳ read', '↳ write']) {
+      items = foldLiveEvent(items, { type: 'task-progress', id: 's1', line });
+      Object.defineProperty(row.getChildren()[0], 'plainText', {
+        value: `researcher bench frames ${line}`,
+        configurable: true,
+      });
+      presentation.setHistory(owner, items);
+      events.emit('frame');
+    }
+    expect(output).toBe('task: researcher bench frames\n');
+  });
+
+  it('speaks a retry countdown once instead of once per redrawn second', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const row = box([text('rate limited ↻ 5s')]);
+    const history = box([row]);
+    history.id = 'screen-reader-history';
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    const owner = {};
+    const items = foldLiveEvent([], {
+      type: 'retry-countdown',
+      attempt: 1,
+      maxRetries: 3,
+      delayMs: 5000,
+      message: 'rate limited',
+    });
+    row.id = `screen-reader-item-retry:${items[0]!.id}`;
+    presentation.setHistory(owner, items);
+    presentation.observeFrames(events, () => box([history]));
+    events.emit('frame');
+    const spoken = output;
+    expect(spoken).toContain('rate limited');
+    for (const remaining of ['4s', '3s', '2s']) {
+      Object.defineProperty(row.getChildren()[0], 'plainText', {
+        value: `rate limited ↻ ${remaining}`,
+        configurable: true,
+      });
+      presentation.setHistory(owner, items);
+      events.emit('frame');
+    }
+    expect(output).toBe(spoken);
+  });
+
+  it('keeps the edited composer out of the append-only record', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const prompt = Object.assign(Object.create(TextareaRenderable.prototype), {
+      plainText: '',
+      placeholder: '',
+      cursorOffset: 0,
+      focused: true,
+      visible: true,
+      isDestroyed: false,
+      id: 'screen-reader-prompt',
+      children: [],
+    }) as TextareaRenderable;
+    const writer = new ScreenReaderOutputWriter((chunk) => {
+      output += chunk;
+    });
+    const appendStatic = vi.spyOn(writer, 'appendStatic');
+    const presentation = new ScreenReaderPresentation(writer);
+    presentation.observeFrames(events, () => box([prompt]));
+    for (const char of 'abcdefghij') {
+      Object.assign(prompt, {
+        plainText: prompt.plainText + char,
+        cursorOffset: prompt.cursorOffset + 1,
+      });
+      events.emit('frame');
+    }
+    for (const offset of [4, 7, 0]) {
+      Object.assign(prompt, { cursorOffset: offset });
+      events.emit('frame');
+    }
+    expect(
+      appendStatic.mock.calls.filter(([text]) => text.includes('Prompt:')),
+    ).toHaveLength(0);
+    expect(output).toContain('Focused Prompt: abcdefghij');
+    expect(output).toContain('Cursor: 0');
+  });
+
+  it('speaks the navigation help once while the announced range changes', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const range = text('History items 1-1 of 2');
+    range.id = 'screen-reader-history-window';
+    const help = text(
+      'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
+    );
+    help.id = 'screen-reader-history-help';
+    const item = text('first actual row');
+    item.id = 'screen-reader-item-user:first';
+    const history = box([range, help, item]);
+    history.id = 'screen-reader-history';
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    const owner = {};
+    presentation.setHistory(owner, [
+      { kind: 'user', id: 'first' },
+      { kind: 'user', id: 'last' },
+    ]);
+    presentation.observeFrames(events, () => box([history]));
+    events.emit('frame');
+    Object.assign(range, { plainText: 'History items 2-2 of 2' });
+    events.emit('frame');
+    Object.assign(range, { plainText: 'History items 1-2 of 2' });
+    events.emit('frame');
+    expect(output.match(/Shift\+Up\/Down/g)).toHaveLength(1);
+    expect(output.match(/History items/g)).toHaveLength(3);
   });
 });

@@ -46,8 +46,10 @@ export default {
   'Dialog closed.': 'Diàleg tancat.',
   'Waiting for confirmation': 'Esperant confirmació',
   'Working. Escape to cancel.': 'En curs. Escape per cancel·lar.',
-  'History items {{start}}-{{end}} of {{total}}. Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
-    'Historial {{start}}-{{end}} de {{total}}. Maj+Amunt/Avall o PageUp/PageDown per llegir; Ctrl+Home/End per al primer/més recent.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Historial {{start}}-{{end}} de {{total}}.',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Maj+Amunt/Avall o PageUp/PageDown per llegir; Ctrl+Home/End per al primer/més recent.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Activa el Generated UI integrat a les sessions locals compatibles. Reinicieu la sessió corresponent per aplicar els canvis.',

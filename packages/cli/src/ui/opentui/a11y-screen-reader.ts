@@ -185,7 +185,7 @@ export class ScreenReaderOutputWriter {
    * dynamic block before appending static content and resets its height.
    */
   appendStatic(text: string): void {
-    const clean = this.sanitize(text);
+    const clean = hardWrap(this.sanitize(text), this.columns());
     // ink's hasStaticOutput guard skips the write entirely when the
     // sanitized content is empty or exactly '\n': the latter would erase
     // the dynamic block and emit a spurious blank line.

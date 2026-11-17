@@ -738,16 +738,20 @@ export function OpenTuiTranscriptView({
       })}
       <box height={win.bottomPad} flexShrink={0} />
       {screenReader && visibleItems.length > 0 && (
-        <text id="screen-reader-history-window">
-          {t(
-            'History items {{start}}-{{end}} of {{total}}. Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
-            {
+        <>
+          <text id="screen-reader-history-window">
+            {t('History items {{start}}-{{end}} of {{total}}', {
               start: String(win.start + 1),
               end: String(win.end),
               total: String(visibleItems.length),
-            },
-          )}
-        </text>
+            })}
+          </text>
+          <text id="screen-reader-history-help">
+            {t(
+              'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
+            )}
+          </text>
+        </>
       )}
     </box>
   );

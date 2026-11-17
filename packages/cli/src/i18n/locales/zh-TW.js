@@ -47,8 +47,10 @@ export default {
   'Dialog closed.': '對話框已關閉。',
   'Waiting for confirmation': '等待確認',
   'Working. Escape to cancel.': '處理中。按 Escape 取消。',
-  'History items {{start}}-{{end}} of {{total}}. Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
-    '歷史記錄 {{start}}-{{end}}，共 {{total}} 筆。按 Shift+上/下或 PageUp/PageDown 閱讀歷史；按 Ctrl+Home/End 跳至最早/最新。',
+  'History items {{start}}-{{end}} of {{total}}':
+    '歷史記錄 {{start}}-{{end}}，共 {{total}} 筆。',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    '按 Shift+上/下或 PageUp/PageDown 閱讀歷史；按 Ctrl+Home/End 跳至最早/最新。',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     '週額度已用完{{reset}}。您可以等待額度恢復，或執行 /upgrade 升級方案以取得更多額度。',
   "You've used up your weekly credits.{{reset}} Please try again after the reset.":

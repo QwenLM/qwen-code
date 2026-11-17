@@ -46,8 +46,10 @@ export default {
   'Dialog closed.': 'Dialog closed.',
   'Waiting for confirmation': 'Waiting for confirmation',
   'Working. Escape to cancel.': 'Working. Escape to cancel.',
-  'History items {{start}}-{{end}} of {{total}}. Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
-    'History items {{start}}-{{end}} of {{total}}. Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'History items {{start}}-{{end}} of {{total}}',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.",
   "You've used up your weekly credits.{{reset}} Please try again after the reset.":

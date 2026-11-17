@@ -1504,7 +1504,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         key.preventDefault();
         bufferRef.current.newline();
         setTextVersion((v) => v + 1);
-      } else if (handleEditorKey(el, bufferRef.current, key, true)) {
+      } else if (
+        handleEditorKey(el, bufferRef.current, key, true, props.screenReader)
+      ) {
         setTextVersion((v) => v + 1);
       } else if (isPrintableKeyInput(key)) {
         insertText(key.sequence);
@@ -1716,7 +1718,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
     }
-    if (handleEditorKey(el, bufferRef.current, key)) {
+    if (
+      handleEditorKey(el, bufferRef.current, key, false, props.screenReader)
+    ) {
       setTextVersion((v) => v + 1);
       return;
     }
@@ -2115,7 +2119,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
       return;
     }
-    if (handleEditorKey(el, bufferRef.current, key, true)) {
+    if (handleEditorKey(el, bufferRef.current, key, true, props.screenReader)) {
       setTextVersion((v) => v + 1);
     } else if (
       !key.ctrl &&

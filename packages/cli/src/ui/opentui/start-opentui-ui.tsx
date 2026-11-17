@@ -688,9 +688,12 @@ export async function startOpenTuiUI(
   let runtime: OpenTuiRuntime | null = null;
   const presentation = screenReader
     ? new ScreenReaderPresentation(
-        new ScreenReaderOutputWriter((text) => {
-          process.stdout.write(text);
-        }),
+        new ScreenReaderOutputWriter(
+          (text) => {
+            process.stdout.write(text);
+          },
+          () => process.stdout.columns ?? 80,
+        ),
       )
     : undefined;
   const detachScreenReader = presentation?.observeFrames(

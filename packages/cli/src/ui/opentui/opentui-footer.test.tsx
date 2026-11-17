@@ -839,6 +839,43 @@ describe('OpenTuiFooter', () => {
     expect(container.textContent).not.toContain('context used');
   });
 
+  it('announces every logical status line in screen-reader mode at a narrow width', () => {
+    mocks.state.dimensions = { width: 40, height: 40 };
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        screenReader
+        statusLine={{
+          lines: ['x'.repeat(120), 'git:(main)'],
+          useThemeColors: false,
+          respectUserColors: false,
+          hideContextIndicator: true,
+        }}
+      />,
+    );
+    const rows = renderedSpans(container).map((row) => row.textContent);
+    expect(rows).toContain('x'.repeat(120));
+    expect(rows).toContain('git:(main)');
+  });
+
+  it('speaks the approval mode and queue count without decorative glyphs', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        screenReader
+        approvalMode={ApprovalMode.DEFAULT}
+        queueLength={2}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('Ask permissions');
+    expect(text).toContain('2 queued');
+    expect(text).not.toContain('⏸');
+    expect(text).not.toContain('⏳');
+  });
+
   it('keeps the queue beside a screen-reader exit hint while hiding normal status', () => {
     mocks.state.promptTokens = 50_000;
     const { container } = render(
@@ -853,7 +890,7 @@ describe('OpenTuiFooter', () => {
     );
     expect(renderedSpans(container).map((row) => row.textContent)).toEqual([
       'Press Ctrl+C again to exit.',
-      '⏳ 2 queued',
+      '2 queued',
     ]);
     expect(container.textContent).not.toContain('qwen3-coder-plus');
     expect(container.textContent).not.toContain('context used');
@@ -885,7 +922,7 @@ describe('OpenTuiFooter', () => {
       (row) => row.textContent === 'model-x',
     );
     const queueRow = renderedSpans(container).find(
-      (row) => row.textContent === '⏳ 2 queued',
+      (row) => row.textContent === '2 queued',
     );
     expect(modelRow).toBeDefined();
     expect(queueRow).toBeDefined();

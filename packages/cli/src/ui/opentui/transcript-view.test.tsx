@@ -88,7 +88,7 @@ const mocks = vi.hoisted(() => {
         }
         if (
           typeof source['id'] === 'string' &&
-          source['id'].startsWith('screen-reader-item-')
+          source['id'].startsWith('screen-reader-')
         )
           dom['data-id'] = source['id'];
         if (source['flexDirection'] !== undefined) {
@@ -2771,6 +2771,31 @@ it('localizes the screen-reader history range without translating user content',
   } finally {
     view.unmount();
     await setLanguageAsync('en');
+  }
+});
+
+it('keeps the invariant navigation help out of the changing range node', () => {
+  const items: LiveHistoryItem[] = [
+    { kind: 'user', id: 'range-help', text: 'Untranslated user body' },
+  ];
+  const view = render(
+    <OpenTuiTranscriptView
+      screenReader
+      items={items}
+      availableTerminalHeight={18}
+    />,
+  );
+  try {
+    const range = view.container.querySelector(
+      '[data-id="screen-reader-history-window"]',
+    );
+    const help = view.container.querySelector(
+      '[data-id="screen-reader-history-help"]',
+    );
+    expect(range?.textContent).toBe('History items 1-1 of 1');
+    expect(help?.textContent).toContain('Shift+Up/Down');
+  } finally {
+    view.unmount();
   }
 });
 

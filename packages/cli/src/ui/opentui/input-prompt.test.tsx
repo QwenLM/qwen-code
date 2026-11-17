@@ -5452,3 +5452,65 @@ describe('clipboard model framing and raw source through the actual composer', (
     },
   );
 });
+
+describe('OpenTuiInputPrompt screen-reader history scrolling', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.editors.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    mocks.state.slashCommands = [];
+  });
+
+  it.each([
+    { name: 'up', sequence: '\x1b[1;2A' },
+    { name: 'down', sequence: '\x1b[1;2B' },
+  ])(
+    'leaves Shift+$name to the history scroll handler without selecting the draft',
+    async ({ name, sequence }) => {
+      renderPrompt({ screenReader: true });
+      await typeText('abc');
+      const editor = currentEditor();
+      const native = editor as unknown as {
+        getSelection: () => { start: number; end: number } | null;
+      };
+      // The real native editor answers Shift+Up/Down by selecting the draft.
+      vi.mocked(editor.handleKeyPress).mockImplementation(() => {
+        native.getSelection = () => ({ start: 0, end: 3 });
+        return true;
+      });
+      const preventDefault = vi.fn();
+      await act(async () =>
+        lastKeyboardHandler()(
+          baseKeyEvent({ name, sequence, shift: true, preventDefault }),
+        ),
+      );
+      expect(preventDefault).not.toHaveBeenCalled();
+      await typeText('X');
+      expect(currentBuffer().text).toBe('abcX');
+    },
+  );
+
+  it('keeps Shift+Left native selection in screen-reader mode', async () => {
+    renderPrompt({ screenReader: true });
+    await typeText('abcd');
+    const editor = currentEditor();
+    vi.mocked(editor.handleKeyPress).mockImplementationOnce(() => {
+      editor.cursorOffset = 2;
+      return true;
+    });
+    const preventDefault = vi.fn();
+    await act(async () =>
+      lastKeyboardHandler()(
+        baseKeyEvent({
+          name: 'left',
+          sequence: '\x1b[1;2D',
+          shift: true,
+          preventDefault,
+        }),
+      ),
+    );
+    expect(preventDefault).toHaveBeenCalledTimes(1);
+    expect(currentBuffer().cursor).toEqual([0, 2]);
+  });
+});

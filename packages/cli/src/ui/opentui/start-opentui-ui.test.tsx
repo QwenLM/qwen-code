@@ -877,6 +877,71 @@ describe('startOpenTuiUI fallback contract', () => {
     }
   });
 
+  it('wraps screen-reader announcements at the terminal width', async () => {
+    const config = buildConfig();
+    config.getScreenReader = () => true;
+    const long = 'w'.repeat(120);
+    mocks.state.items = [{ kind: 'user', id: 'wide', text: long }];
+    const root = Object.create(Renderable.prototype) as Renderable;
+    const history = Object.assign(Object.create(Renderable.prototype), {
+      id: 'screen-reader-history',
+      visible: true,
+      isDestroyed: false,
+      getChildren: () =>
+        mocks.state.items.map(
+          (item) =>
+            Object.assign(Object.create(TextBufferRenderable.prototype), {
+              id: `screen-reader-item-${item.kind}:${item.id}`,
+              visible: true,
+              isDestroyed: false,
+              children: [],
+              plainText: 'text' in item ? item.text : '',
+            }) as Renderable,
+        ),
+    }) as Renderable;
+    Object.assign(root, {
+      id: 'root',
+      visible: true,
+      isDestroyed: false,
+      children: [history],
+    });
+    mocks.state.renderer.root = root;
+    const columnsDescriptor = Object.getOwnPropertyDescriptor(
+      process.stdout,
+      'columns',
+    );
+    Object.defineProperty(process.stdout, 'columns', {
+      value: 40,
+      configurable: true,
+    });
+    vi.useFakeTimers();
+    try {
+      await withEntryApp(() => {
+        const frame = mocks.state.renderer.on.mock.calls.find(
+          ([name]) => name === 'frame',
+        )![1] as () => void;
+        frame();
+        const written = stripAnsi(
+          vi
+            .mocked(process.stdout.write)
+            .mock.calls.map(([chunk]) => String(chunk))
+            .join(''),
+        );
+        const announcement = /user:[^\n]*(?:\nw+)+/.exec(written);
+        expect(announcement).not.toBeNull();
+        const rows = announcement![0].split('\n');
+        expect(rows.length).toBeGreaterThan(1);
+        for (const row of rows) expect(row.length).toBeLessThanOrEqual(40);
+        expect(rows.join('')).toBe(`user: ${long}`);
+      }, config);
+    } finally {
+      vi.useRealTimers();
+      if (columnsDescriptor)
+        Object.defineProperty(process.stdout, 'columns', columnsDescriptor);
+      else Reflect.deleteProperty(process.stdout, 'columns');
+    }
+  });
+
   it.each(['/quit', '/exit'])(
     'keeps the actual synchronous %s echo identity when quit arrives before a render',
     async (typed) => {

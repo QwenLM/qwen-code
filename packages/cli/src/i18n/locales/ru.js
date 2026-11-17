@@ -48,8 +48,10 @@ export default {
   'Dialog closed.': 'Диалог закрыт.',
   'Waiting for confirmation': 'Ожидание подтверждения',
   'Working. Escape to cancel.': 'Выполняется. Escape для отмены.',
-  'History items {{start}}-{{end}} of {{total}}. Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
-    'История {{start}}-{{end}} из {{total}}. Shift+Вверх/Вниз или PageUp/PageDown для чтения; Ctrl+Home/End для первого/последнего.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'История {{start}}-{{end}} из {{total}}.',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+Вверх/Вниз или PageUp/PageDown для чтения; Ctrl+Home/End для первого/последнего.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Включает встроенный Generated UI в поддерживаемых локальных сеансах. Перезапустите соответствующий сеанс, чтобы применить изменения.',

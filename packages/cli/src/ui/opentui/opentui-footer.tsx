@@ -278,10 +278,11 @@ export function OpenTuiFooter({
               ]
             : []),
         ];
-  const queuedHint =
+  const queuedLabel =
     queueLength > 0
-      ? `⏳ ${t('{{count}} queued', { count: String(queueLength) })}`
+      ? t('{{count}} queued', { count: String(queueLength) })
       : null;
+  const queuedHint = queuedLabel ? `⏳ ${queuedLabel}` : null;
   // ink renders the badge as a sibling text node beginning with a literal
   // space, so it joins the hint with one space.
   const hintParts: HintPart[] = [
@@ -331,11 +332,14 @@ export function OpenTuiFooter({
     const segments: Array<[string, string | null]> = exitHint
       ? [
           ['exit', exitHint],
-          ['queue', queuedHint],
+          ['queue', queuedLabel],
         ]
       : [
           ['sandbox', sandboxLabel ?? ''],
-          ...statusLines.map((line, index): [string, string] => [
+          // The visual two-row clip keeps the footer from growing mid-turn.
+          // Speech has no such budget and the writer hard-wraps, so it takes
+          // the logical lines whole instead of the clipped display buffer.
+          ...statusLine.lines.map((line, index): [string, string] => [
             `status-${index}`,
             line,
           ]),
@@ -354,8 +358,15 @@ export function OpenTuiFooter({
                 : 'Workflow mode: on (unavailable)'
               : '',
           ],
-          ['mode', modeHint.map((part) => part.text).join('')],
-          ['queue', queuedHint],
+          // The pause glyph is a visual marker; speech takes the mode label.
+          [
+            'mode',
+            modeHint
+              .map((part) => part.text)
+              .join('')
+              .replace(pausePrefix, ''),
+          ],
+          ['queue', queuedLabel],
         ];
     return (
       <box flexDirection="column">

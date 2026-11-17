@@ -268,14 +268,25 @@ describe('ScreenReaderOutputWriter (ink append-only parity)', () => {
     expect(writes).toEqual(['abcd\ne']);
   });
 
-  it('keeps TAB — it separates words in tool/model output (R3-6)', () => {
+  it('hard-wraps static output at the writer column width', () => {
+    const writes: string[] = [];
+    const writer = new ScreenReaderOutputWriter(
+      (chunk) => writes.push(chunk),
+      () => 4,
+    );
+    writer.appendStatic('abcdefgh');
+    expect(writes).toEqual(['abcd\nefgh\n']);
+  });
+
+  it('keeps TAB word separation in tool/model output (R3-6)', () => {
     const writes: string[] = [];
     const writer = new ScreenReaderOutputWriter((chunk) => writes.push(chunk));
     writer.appendStatic('NAME\tSIZE\nfoo\t10');
-    expect(writes).toEqual(['NAME\tSIZE\nfoo\t10\n']);
-    // The dynamic path hard-wraps via wrap-ansi, which expands tabs to the
-    // next tab stop — word separation survives either way, which is the
-    // point: deleting TAB outright fuses adjacent tokens.
+    // Both lanes hard-wrap via wrap-ansi (ink wraps its whole screen-reader
+    // output), which expands tabs to the next tab stop. Word separation is
+    // the point: deleting TAB outright fuses adjacent tokens.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toMatch(/^NAME {2,}SIZE\nfoo {2,}10\n$/);
     const dynamicWrites: string[] = [];
     const dynamicWriter = new ScreenReaderOutputWriter((chunk) =>
       dynamicWrites.push(chunk),

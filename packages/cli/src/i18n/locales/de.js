@@ -48,8 +48,10 @@ export default {
   'Dialog closed.': 'Dialog geschlossen.',
   'Waiting for confirmation': 'Warte auf Bestätigung',
   'Working. Escape to cancel.': 'Wird ausgeführt. Escape zum Abbrechen.',
-  'History items {{start}}-{{end}} of {{total}}. Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
-    'Verlaufseinträge {{start}}-{{end}} von {{total}}. Umschalt+Auf/Ab oder BildAuf/BildAb zum Lesen; Strg+Pos1/Ende für ersten/neuesten Eintrag.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Verlaufseinträge {{start}}-{{end}} von {{total}}.',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Umschalt+Auf/Ab oder BildAuf/BildAb zum Lesen; Strg+Pos1/Ende für ersten/neuesten Eintrag.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Aktiviert die integrierte Generated UI in unterstützten lokalen Sitzungen. Starten Sie die zugehörige Sitzung neu, um Änderungen anzuwenden.',

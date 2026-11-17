@@ -47,8 +47,10 @@ export default {
   'Dialog closed.': 'ダイアログを閉じました。',
   'Waiting for confirmation': '確認待ち',
   'Working. Escape to cancel.': '処理中。Escape でキャンセル。',
-  'History items {{start}}-{{end}} of {{total}}. Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
-    '履歴 {{start}}-{{end}} / {{total}} 件。Shift+上下または PageUp/PageDown で履歴を読み、Ctrl+Home/End で最初/最新へ移動。',
+  'History items {{start}}-{{end}} of {{total}}':
+    '履歴 {{start}}-{{end}} / {{total}} 件。',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+上下または PageUp/PageDown で履歴を読み、Ctrl+Home/End で最初/最新へ移動。',
   'Generated UI': 'Generated UI（生成 UI）',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     '対応するローカルセッションで内蔵 Generated UI を有効にします。変更を適用するには対象のセッションを再起動してください。',
