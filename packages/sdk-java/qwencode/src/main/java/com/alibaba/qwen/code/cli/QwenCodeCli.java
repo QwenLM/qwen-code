@@ -135,6 +135,13 @@ public class QwenCodeCli {
         try {
             session = new Session(transport);
         } catch (Exception e) {
+            try {
+                transport.close();
+            } catch (Exception cleanupFailure) {
+                if (cleanupFailure != e) {
+                    e.addSuppressed(cleanupFailure);
+                }
+            }
             throw new RuntimeException("initialized Session error!", e);
         }
         return session;

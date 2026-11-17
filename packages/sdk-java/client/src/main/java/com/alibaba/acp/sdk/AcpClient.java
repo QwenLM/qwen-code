@@ -61,30 +61,41 @@ public class AcpClient {
      */
     public AcpClient(Transport transport, InitializeRequestParams initializeRequestParams) throws AgentInitializeException {
         Validate.notNull(transport, "transport can't be null");
+        Validate.notNull(initializeRequestParams, "initializeRequestParams can't be null");
         this.transport = transport;
 
         try {
-            transport.start();
-        } catch (IOException e) {
-            throw new AgentInitializeException("transport start error", e)
-                    .addContextValue("initializeRequestParams", initializeRequestParams);
-        }
-        Validate.notNull(initializeRequestParams, "initializeRequestParams can't be null");
+            try {
+                transport.start();
+            } catch (IOException e) {
+                throw new AgentInitializeException("transport start error", e)
+                        .addContextValue("initializeRequestParams", initializeRequestParams);
+            }
 
-        InitializeResponse initializeResponse;
-        try {
-            InitializeRequest initializeRequest = new InitializeRequest(initializeRequestParams);
-            logger.debug("start to initialize agent {}", initializeRequest);
-            initializeResponse = TransportUtils.inputWaitForOneLine(transport, initializeRequest, InitializeResponse.class);
-            logger.debug("initialize response: {}", initializeResponse);
-        } catch (IOException | ExecutionException | InterruptedException | TimeoutException e) {
-            throw new AgentInitializeException("agent transport error", e)
-                    .addContextValue("initializeRequestParams", initializeRequestParams);
-        }
-        if (initializeResponse.getError() != null) {
-            throw new AgentInitializeException("agent initialize error")
-                    .addContextValue("initializeRequestParams", initializeRequestParams)
-                    .addContextValue("initializeResponse", initializeResponse);
+            InitializeResponse initializeResponse;
+            try {
+                InitializeRequest initializeRequest = new InitializeRequest(initializeRequestParams);
+                logger.debug("start to initialize agent {}", initializeRequest);
+                initializeResponse = TransportUtils.inputWaitForOneLine(transport, initializeRequest, InitializeResponse.class);
+                logger.debug("initialize response: {}", initializeResponse);
+            } catch (IOException | ExecutionException | InterruptedException | TimeoutException e) {
+                throw new AgentInitializeException("agent transport error", e)
+                        .addContextValue("initializeRequestParams", initializeRequestParams);
+            }
+            if (initializeResponse.getError() != null) {
+                throw new AgentInitializeException("agent initialize error")
+                        .addContextValue("initializeRequestParams", initializeRequestParams)
+                        .addContextValue("initializeResponse", initializeResponse);
+            }
+        } catch (AgentInitializeException | RuntimeException e) {
+            try {
+                transport.close();
+            } catch (Exception cleanupFailure) {
+                if (cleanupFailure != e) {
+                    e.addSuppressed(cleanupFailure);
+                }
+            }
+            throw e;
         }
     }
 
