@@ -53,7 +53,10 @@ const keys = {
   editor: '\x18',
 };
 
-const until = createUntil(12_000);
+// The shared pool has stalled this CLI past 90s (#13552, #14191), so a
+// mid-turn repaint gets the boot's stall tier: createUntil triples this in
+// CI, and the old 12s capped it at 36s (#17544).
+const until = createUntil(30_000);
 
 function lastUser(server: FakeOpenAIServer): string {
   const messages = server.requests.at(-1)?.body['messages'];
