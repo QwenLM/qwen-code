@@ -105,6 +105,10 @@ import type {
   DaemonSessionCatalogResult,
   DaemonSessionLiveStateBatchRequest,
   DaemonSessionLiveStateBatchResult,
+  DaemonRestartRecoveryBatchRequest,
+  DaemonRestartRecoveryBatchResult,
+  DaemonRestartRecoveryContinueRequest,
+  DaemonRestartRecoveryContinueBatchResult,
   DaemonSessionSearchOptions,
   DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
@@ -3795,6 +3799,51 @@ export class DaemonClient {
     return this.jsonRequest<DaemonSessionLiveStateBatchResult>(
       '/sessions/live-state',
       'POST /sessions/live-state',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      },
+    );
+  }
+
+  /**
+   * List sessions whose newest prompt did not settle, via
+   * `POST /sessions/recovery`. Read-only: no session is loaded and the
+   * response carries no prompt content. Requires a daemon new enough to
+   * serve the route.
+   */
+  getRestartRecoveries(
+    request: DaemonRestartRecoveryBatchRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonRestartRecoveryBatchResult> {
+    return this.jsonRequest<DaemonRestartRecoveryBatchResult>(
+      '/sessions/recovery',
+      'POST /sessions/recovery',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      },
+    );
+  }
+
+  /**
+   * Continue selected restart-interrupted sessions via
+   * `POST /sessions/recovery/continue`. The daemon serializes the batch,
+   * loads each session when needed, and returns one result per session.
+   */
+  continueRestartRecoveries(
+    request: DaemonRestartRecoveryContinueRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonRestartRecoveryContinueBatchResult> {
+    return this.jsonRequest<DaemonRestartRecoveryContinueBatchResult>(
+      '/sessions/recovery/continue',
+      'POST /sessions/recovery/continue',
       {
         method: 'POST',
         body: request,

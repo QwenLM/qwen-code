@@ -2179,6 +2179,84 @@ export interface DaemonSessionLiveStateBatchResult {
   >;
 }
 
+/** One session whose newest prompt did not settle. */
+export interface DaemonRestartRecoveryItem {
+  sessionId: string;
+  /** ISO timestamp of the newest prompt-ledger record. */
+  lastActivityAt: string;
+  /** `in_flight`, a terminal code such as `daemon_shutdown`, or `interrupted`. */
+  interruption: string;
+}
+
+export interface DaemonRestartRecoveryBatchRequest {
+  workspaces: string[];
+  /**
+   * Scan window in milliseconds. The daemon defaults to 24 hours and caps at
+   * 30 days.
+   */
+  sinceMs?: number;
+}
+
+export interface DaemonWorkspaceRestartRecoverySnapshot {
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+  v: 1;
+  items: DaemonRestartRecoveryItem[];
+  truncated: boolean;
+}
+
+export interface DaemonWorkspaceRestartRecoveryError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonRestartRecoveryBatchResult {
+  workspaces: Array<
+    DaemonWorkspaceRestartRecoverySnapshot | DaemonWorkspaceRestartRecoveryError
+  >;
+}
+
+export interface DaemonRestartRecoverySessionRef {
+  workspace: string;
+  sessionId: string;
+}
+
+export interface DaemonRestartRecoveryContinueRequest {
+  sessions: DaemonRestartRecoverySessionRef[];
+  /** Required to continue an `interrupted_turn` in a batch. */
+  confirmToolTurn?: boolean;
+}
+
+export type DaemonRestartRecoveryContinueStatus =
+  | 'accepted'
+  | 'not_continuable'
+  | 'confirmation_required'
+  | 'rejected'
+  | 'error';
+
+export interface DaemonRestartRecoveryContinueResult {
+  workspace: string;
+  sessionId: string;
+  status: DaemonRestartRecoveryContinueStatus;
+  kind?:
+    | 'clean'
+    | 'interrupted_prompt'
+    | 'interrupted_turn'
+    | 'degraded_history';
+  interruption?: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  code?: string;
+  promptId?: string;
+  lastEventId?: number;
+  eventEpoch?: string;
+}
+
+export interface DaemonRestartRecoveryContinueBatchResult {
+  results: DaemonRestartRecoveryContinueResult[];
+}
+
 export interface DaemonWorkspaceSessionInfo {
   active: number;
   archived: number;

@@ -267,6 +267,12 @@ import {
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
 import {
+  DEFAULT_RESTART_RECOVERY_WINDOW_MS,
+  MAX_RESTART_RECOVERY_WINDOW_MS,
+  readRestartRecoveryState,
+  scanRestartRecoveries,
+} from '../restart-recovery-scan.js';
+import {
   clearBranchWorktreeJournalDurable,
   createBranchWorktreeJournal,
   getBranchWorktreeJournalPath,
@@ -874,6 +880,18 @@ export type ResolveSubagentSessionRuntime = (
   route: string,
   parentSessionId: string,
 ) => Promise<WorkspaceRuntime | undefined>;
+
+/**
+ * Bridge errors can cross module or process boundaries, where `instanceof`
+ * alone is not reliable; the typed name and code survive that boundary.
+ */
+function isSessionNotFoundError(error: unknown): boolean {
+  if (error instanceof SessionNotFoundError) return true;
+  if (!(error instanceof Error)) return false;
+  if (error.name === 'SessionNotFoundError') return true;
+  const code = (error as Error & { code?: unknown }).code;
+  return code === 'session_not_found' || code === 'session_closing';
+}
 
 export function registerSessionRoutes(
   app: Application,
@@ -11098,6 +11116,381 @@ export function registerSessionRoutes(
       );
       res.setHeader('Cache-Control', 'no-store');
       res.status(200).json({ workspaces });
+    } finally {
+      req.off('aborted', abort);
+      res.off('close', onClose);
+    }
+  });
+
+  const restartRecoveryBatchRequest = z
+    .object({
+      workspaces: z
+        .array(z.string().min(1).max(MAX_SELECTOR_CHARS))
+        .min(1)
+        .max(MAX_BATCH_WORKSPACES),
+      sinceMs: z.number().int().positive().optional(),
+    })
+    .strict();
+
+  app.post('/sessions/recovery', async (req, res) => {
+    const route = 'POST /sessions/recovery';
+    const parsed = restartRecoveryBatchRequest.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        code: 'invalid_restart_recovery_batch_request',
+        error: 'Invalid restart recovery batch request.',
+      });
+      return;
+    }
+
+    const now = Date.now();
+    const windowMs = Math.min(
+      parsed.data.sinceMs ?? DEFAULT_RESTART_RECOVERY_WINDOW_MS,
+      MAX_RESTART_RECOVERY_WINDOW_MS,
+    );
+    const sinceMs = now - windowMs;
+
+    const readMember = async (workspace: string) => {
+      const entry = resolveWorkspaceEntryBySelector(
+        workspaceRegistry,
+        workspace,
+      );
+      if (!entry) {
+        return failedBatchMember(
+          workspace,
+          undefined,
+          404,
+          'workspace_not_found',
+          'Workspace is not registered with this daemon.',
+        );
+      }
+      const unavailable = () =>
+        failedBatchMember(
+          workspace,
+          entry,
+          503,
+          'workspace_runtime_unavailable',
+          'Workspace runtime is not active.',
+        );
+      const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+        workspaceRegistry,
+        entry,
+      );
+      if (!generation || !isCurrent()) return unavailable();
+      const runtime = generation.runtime;
+      if (!runtime.trusted) {
+        logSessionRoutingFailure(route, 'untrusted_workspace', {
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: runtime.workspaceCwd,
+        });
+        return failedBatchMember(
+          workspace,
+          entry,
+          403,
+          'untrusted_workspace',
+          'Workspace is not trusted.',
+        );
+      }
+      try {
+        const sessionService = createWorkspaceRuntimeSessionService(runtime);
+        const sessionIds =
+          await sessionService.listAllProjectSessionIds('active');
+        const result = scanRestartRecoveries({
+          sessionService,
+          sessionIds,
+          sinceMs,
+        });
+        if (!isCurrent()) return unavailable();
+        return {
+          workspace,
+          workspaceId: runtime.workspaceId,
+          cwd: runtime.workspaceCwd,
+          v: 1 as const,
+          items: result.items,
+          truncated: result.truncated,
+        };
+      } catch (error) {
+        if (isGenerationClosedError(error) || !isCurrent()) {
+          return unavailable();
+        }
+        daemonLog?.error(
+          error instanceof Error ? error.message : String(error),
+          error instanceof Error ? error : undefined,
+          {
+            route,
+            workspaceId: entry.workspaceId,
+          },
+        );
+        return failedBatchMember(
+          workspace,
+          entry,
+          500,
+          'restart_recovery_failed',
+          'Failed to read restart recovery state.',
+        );
+      }
+    };
+
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => {
+      if (!res.writableEnded) abort();
+    };
+    req.once('aborted', abort);
+    res.once('close', onClose);
+    if (req.aborted || res.destroyed) abort();
+
+    const workspaces = [];
+    try {
+      for (const workspace of parsed.data.workspaces) {
+        if (controller.signal.aborted) return;
+        workspaces.push(await readMember(workspace));
+        // The member read is synchronous disk work; yield so a client
+        // disconnect is observed between members.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (controller.signal.aborted) return;
+      addDaemonRequestAttribute(
+        'qwen-code.daemon.restart_recovery_batch.members',
+        workspaces.length,
+      );
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({ workspaces });
+    } finally {
+      req.off('aborted', abort);
+      res.off('close', onClose);
+    }
+  });
+
+  const restartRecoveryContinueRequest = z
+    .object({
+      sessions: z
+        .array(
+          z
+            .object({
+              workspace: z.string().min(1).max(MAX_SELECTOR_CHARS),
+              sessionId: z.string().min(1).max(256),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(10),
+      confirmToolTurn: z.boolean().optional(),
+    })
+    .strict();
+
+  app.post('/sessions/recovery/continue', async (req, res) => {
+    const route = 'POST /sessions/recovery/continue';
+    const parsed = restartRecoveryContinueRequest.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        code: 'invalid_restart_recovery_continue_request',
+        error: 'Invalid restart recovery continue request.',
+      });
+      return;
+    }
+
+    const confirmToolTurn = parsed.data.confirmToolTurn === true;
+
+    const continueOne = async (requested: {
+      workspace: string;
+      sessionId: string;
+    }): Promise<Record<string, unknown>> => {
+      const base = {
+        workspace: requested.workspace,
+        sessionId: requested.sessionId,
+      };
+      const entry = resolveWorkspaceEntryBySelector(
+        workspaceRegistry,
+        requested.workspace,
+      );
+      if (!entry) {
+        return { ...base, status: 'error', code: 'workspace_not_found' };
+      }
+      const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+        workspaceRegistry,
+        entry,
+      );
+      if (!generation || !isCurrent()) {
+        return {
+          ...base,
+          status: 'error',
+          code: 'workspace_runtime_unavailable',
+        };
+      }
+      const runtime = generation.runtime;
+      if (!runtime.trusted) {
+        logSessionRoutingFailure(route, 'untrusted_workspace', {
+          workspaceId: runtime.workspaceId,
+          workspaceCwd: runtime.workspaceCwd,
+        });
+        return { ...base, status: 'error', code: 'untrusted_workspace' };
+      }
+      if (parseVirtualSubagentSessionId(requested.sessionId)) {
+        return {
+          ...base,
+          status: 'not_continuable',
+          code: 'virtual_subagent',
+        };
+      }
+
+      try {
+        const sessionService = createWorkspaceRuntimeSessionService(runtime);
+        const state = readRestartRecoveryState(
+          sessionService.getPromptLedgerPath(requested.sessionId),
+        );
+        if (state.kind !== 'interrupted') {
+          return {
+            ...base,
+            status: 'not_continuable',
+            code: state.kind === 'settled' ? 'already_moved' : 'no_evidence',
+          };
+        }
+
+        let loaded = false;
+        try {
+          runtime.bridge.getSessionSummary(requested.sessionId);
+          loaded = true;
+        } catch (error) {
+          if (!isSessionNotFoundError(error)) throw error;
+        }
+
+        if (!loaded) {
+          const outcome = await restoreSessionCore({
+            action: 'load',
+            runtime,
+            workspaceCwd: runtime.workspaceCwd,
+            sessionId: requested.sessionId,
+            archiveCoordinator,
+            requestedSessionIdAdmission,
+            assertRuntimeGenerationOpen:
+              captureRuntimeGenerationAssertion(runtime),
+            daemonLog,
+            materializeLiveConversationDirectory:
+              deps.materializeLiveConversationDirectory,
+            historyPageSize: undefined,
+            liveReplayMode: undefined,
+            compactedReplayMode: undefined,
+            clientId: undefined,
+            approvalMode: undefined,
+            restoreSource: {},
+            isCancelled: () => false,
+          });
+          if (outcome.kind === 'cancelled') {
+            return { ...base, status: 'error', code: 'cancelled' };
+          }
+        }
+
+        if (!isCurrent()) {
+          return {
+            ...base,
+            status: 'error',
+            code: 'workspace_runtime_unavailable',
+          };
+        }
+
+        const context = await runtime.bridge.getSessionContextStatus(
+          requested.sessionId,
+        );
+        const recovery = context.recovery;
+        if (!recovery || !recovery.canContinue) {
+          return {
+            ...base,
+            status: 'not_continuable',
+            ...(recovery ? { kind: recovery.kind } : {}),
+          };
+        }
+        if (recovery.cancellationConfirmationId) {
+          return {
+            ...base,
+            status: 'confirmation_required',
+            kind: recovery.kind,
+            code: 'cancellation_confirmation',
+          };
+        }
+        if (recovery.kind === 'interrupted_turn' && !confirmToolTurn) {
+          return {
+            ...base,
+            status: 'confirmation_required',
+            kind: recovery.kind,
+            code: 'tool_turn',
+          };
+        }
+
+        const promptId = crypto.randomUUID();
+        const result = await runtime.bridge.continueSession(
+          requested.sessionId,
+          { promptId },
+        );
+        if (!result.accepted) {
+          return {
+            ...base,
+            status: 'rejected',
+            kind: recovery.kind,
+            interruption: result.interruption,
+          };
+        }
+        return {
+          ...base,
+          status: 'accepted',
+          kind: recovery.kind,
+          promptId: result.promptId ?? promptId,
+          ...(result.lastEventId !== undefined
+            ? { lastEventId: result.lastEventId }
+            : {}),
+          ...(result.eventEpoch !== undefined
+            ? { eventEpoch: result.eventEpoch }
+            : {}),
+        };
+      } catch (error) {
+        if (isSessionNotFoundError(error)) {
+          return { ...base, status: 'error', code: 'session_not_found' };
+        }
+        if (isGenerationClosedError(error) || !isCurrent()) {
+          return {
+            ...base,
+            status: 'error',
+            code: 'workspace_runtime_unavailable',
+          };
+        }
+        daemonLog?.error(
+          error instanceof Error ? error.message : String(error),
+          error instanceof Error ? error : undefined,
+          {
+            route,
+            workspaceId: entry.workspaceId,
+            sessionId: requested.sessionId,
+          },
+        );
+        return { ...base, status: 'error', code: 'continue_failed' };
+      }
+    };
+
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => {
+      if (!res.writableEnded) abort();
+    };
+    req.once('aborted', abort);
+    res.once('close', onClose);
+    if (req.aborted || res.destroyed) abort();
+
+    const results: Array<Record<string, unknown>> = [];
+    try {
+      for (const requested of parsed.data.sessions) {
+        if (controller.signal.aborted) return;
+        results.push(await continueOne(requested));
+        // Loading and continuing are serial disk/bridge work; yield so a
+        // client disconnect is observed between sessions.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (controller.signal.aborted) return;
+      addDaemonRequestAttribute(
+        'qwen-code.daemon.restart_recovery_continue_batch.members',
+        results.length,
+      );
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({ results });
     } finally {
       req.off('aborted', abort);
       res.off('close', onClose);
