@@ -1565,11 +1565,15 @@ function isSafeLogRange(range: string): boolean {
 
 /**
  * A single ref (no range): the log-range whitelist minus any `..`, so an
- * excluded ref can never smuggle a second revision or a flag into argv.
+ * excluded ref can never smuggle a second revision or a flag into argv. A
+ * leading `^` is also refused: it is git's negation operator, and `--not ^ref`
+ * XORs the two negations into an inclusion, widening the window instead of
+ * narrowing it (a trailing `^`/`~` revision suffix stays allowed).
  */
 function isSafeSingleRef(ref: string): boolean {
   return (
     !ref.startsWith('-') &&
+    !ref.startsWith('^') &&
     !ref.includes('..') &&
     /^[A-Za-z0-9_./~^-]+$/.test(ref)
   );
@@ -1666,6 +1670,11 @@ async function searchGitLog(
   skip: number,
 ): Promise<GitLogResult> {
   const window = String(skip + limit + 1);
+  // The hash-prefix arm below shows a single named commit with --no-walk, so
+  // it cannot take the positive revisions (a range would re-walk); it still
+  // must honour the exclusion, so carry just the `--not <refs>` tail.
+  const notAt = revisions.indexOf('--not');
+  const negation = notAt === -1 ? [] : revisions.slice(notAt);
   const walk = (filter: string) =>
     runGit(
       [
@@ -1706,6 +1715,7 @@ async function searchGitLog(
                 `--format=${LOG_FORMAT}`,
                 '--no-walk',
                 sha.trim(),
+                ...negation,
                 '--',
               ],
               gitRoot,

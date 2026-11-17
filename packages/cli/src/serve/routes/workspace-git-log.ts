@@ -122,13 +122,24 @@ async function handleLogList(
         ? rawSearch.trim().slice(0, MAX_SEARCH_CHARS)
         : undefined;
     const rawExclude = req.query['exclude'];
-    const excludeRefs =
-      typeof rawExclude === 'string' && rawExclude.trim()
-        ? rawExclude
-            .split(',')
-            .map((ref) => ref.trim())
-            .filter((ref) => ref.length > 0)
-        : undefined;
+    let excludeRefs: string[] | undefined;
+    if (rawExclude !== undefined) {
+      // Fail closed: a repeated key (an array) or an empty value must not
+      // silently drop the exclusion and run the walk unfiltered, re-listing
+      // the very commits the exclusion exists to remove. Absent stays unset.
+      if (typeof rawExclude !== 'string' || !rawExclude.trim()) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: 'exclude must be a non-empty comma-separated ref list',
+          status: 400,
+        });
+        return;
+      }
+      excludeRefs = rawExclude
+        .split(',')
+        .map((ref) => ref.trim())
+        .filter((ref) => ref.length > 0);
+    }
     const result = await fetchGitLog(workspaceCwd, {
       limit,
       skip,

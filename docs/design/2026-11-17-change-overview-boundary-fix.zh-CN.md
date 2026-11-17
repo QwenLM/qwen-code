@@ -56,11 +56,17 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
 ### 层 1——持久化会话起点 commit（cli + SDK）
 
 - `DaemonBranchInfo` 增 `baseCommit?: string`；`DaemonWorktreeInfo` 增
-  `baseCommit?: string`。
+  `baseCommit?: string`；`DaemonSessionSummary` 增顶层 `baseCommit?: string`
+  供普通会话使用。
 - 分支会话：把已解析的 `baseCommit` 随 `branchMeta` 持久化并投影到摘要。
 - worktree 会话：在 `createUserWorktree` 前解析 `getHeadCommit(workspaceCwd)`
-  （worktree 创建所自的基线顶端）并持久化到 `worktreeMeta`。
-- 普通会话：不记录起点 commit（本不存在）。
+  （worktree 创建所自的基线顶端），持久化到 `worktreeMeta` **并 durable** 写入
+  worktree sidecar 的 `originalHeadCommit`；`session-restore.ts` 两处重建与
+  `enrichWorktreeSidecars` 都读回，日志式 branch-worktree 与 worktree-reset
+  流程也携带，故 daemon 重启后仍能定界窗口。
+- 普通会话：创建时捕获 `getHeadCommit(workspaceCwd)`（会话起始的 HEAD），投影
+  为摘要顶层 `baseCommit`；读取失败保持 `undefined`（无边界）。hook 优先
+  `branch.baseCommit ?? worktree.baseCommit ?? summary.baseCommit`。
 - status 路由水合与摘要投影转发新字段；无此字段的 legacy 会话保持 `undefined`。
 
 ### 层 2——log 路由的可达性排除（core + cli + SDK）
@@ -78,11 +84,15 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
 
 ### 层 3——hook 重写（web-shell）
 
-- 边界优先级：`branch.baseCommit ?? worktree.baseCommit` → `<start>..HEAD`；
-  否则 `baseBranch`（非 `'HEAD'`、白名单安全）→ `<base>..HEAD`；否则**抑制**
-  （永不再无范围遍历）。
+- 边界优先级：`branch.baseCommit ?? worktree.baseCommit ?? summary.baseCommit`
+  （普通会话）→ `<start>..HEAD`；否则 `baseBranch`（非 `'HEAD'`、白名单安全）→
+  `<base>..HEAD`；否则**抑制**（永不再无范围遍历）。
 - exclude 能力存在且 PR head 已解析时，把每个绑定 PR `headSha` 作为
   `excludeRefs` 传入。可达性排除统一处理已合并、并行、不可比 head。
+- 基线分支（白名单安全的单 ref、非 `'HEAD'`）加入排除集。在会话树中整合上游
+  （`git pull`、rebase、合并基线）使 HEAD 到达起点 commit 不可达的提交；若不
+  排除会被重复列为松散工作。它们从基线分支可达而被减去，会话自身的提交（其
+  子代）存活。这只收窄窗口；记录的起点 commit 仍定界它。
 - 保留守卫：任一产出 PR 单元未解析出 head 则抑制兜底（其提交无法被排除，
   故不得重新列出）。
 - capability 偏差：有绑定 PR 单元但**无** exclude 能力（新客户端对旧 daemon）

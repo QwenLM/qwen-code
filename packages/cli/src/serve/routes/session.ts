@@ -3417,6 +3417,15 @@ export function registerSessionRoutes(
         sessionScope = 'thread';
       }
 
+      // A plain session (no branch/worktree) still has a start commit: the
+      // HEAD it was created from. Capture it so the change overview's commit
+      // fallback can scope to <baseCommit>..HEAD instead of suppressing for
+      // lack of a boundary. A failed read stays undefined (no boundary).
+      const plainBaseCommit =
+        !branchMeta && !worktreeMeta
+          ? await getHeadCommit(workspaceCwd).catch(() => undefined)
+          : undefined;
+
       assertRuntimeGenerationOpen?.();
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
@@ -3431,6 +3440,7 @@ export function registerSessionRoutes(
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
         ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
         ...(branchMeta ? { branch: branchMeta } : {}),
+        ...(plainBaseCommit ? { baseCommit: plainBaseCommit } : {}),
         ...(requestedSessionId !== undefined
           ? { sessionId: requestedSessionId }
           : {}),

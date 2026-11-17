@@ -59,6 +59,10 @@ export function ChangeOverviewPanel({
   const selectedUnavailable =
     selected?.kind === 'pr' && selected.state === 'unavailable';
 
+  // The tablist only renders with units; the body must not advertise an orphan
+  // tabpanel in the loading/error/empty/non-git states (no tab to label it).
+  const hasTabs = gitAvailable && units.length > 0;
+
   // Roving tabindex: only the selected tab is in the tab order; Arrow/Home/End
   // move focus and selection together (automatic activation), wrapping at the
   // ends, so the scope selector is a keyboard-operable tab widget (D4-1).
@@ -67,6 +71,10 @@ export function ChangeOverviewPanel({
     event: KeyboardEvent<HTMLButtonElement>,
     index: number,
   ) => {
+    // Leave modified keys to the browser: Alt+Left/Right is Back/Forward and
+    // Ctrl+Home/End scrolls the document; swallowing them here would turn
+    // navigation into a scope change.
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
     let next: number;
     switch (event.key) {
       case 'ArrowRight':
@@ -87,7 +95,11 @@ export function ChangeOverviewPanel({
     event.preventDefault();
     const unit = units[next];
     setSelectedId(unit.id);
-    tabRefs.current.get(unit.id)?.focus({ preventScroll: true });
+    const tab = tabRefs.current.get(unit.id);
+    tab?.focus({ preventScroll: true });
+    // The chip row scrolls horizontally; bring the newly selected chip into
+    // view so keyboard navigation past the visible strip is not clipped.
+    tab?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   };
 
   // The toolbar (with Refresh) stays mounted in every state so a transient or
@@ -108,7 +120,7 @@ export function ChangeOverviewPanel({
         </button>
       </div>
 
-      {gitAvailable && units.length > 0 && (
+      {hasTabs && (
         <div className={styles.scopeRow} role="tablist">
           {units.map((unit, index) => {
             const badgeHidden =
@@ -162,11 +174,12 @@ export function ChangeOverviewPanel({
       <div
         className={styles.body}
         key={selected?.id ?? 'none'}
-        role="tabpanel"
-        id="change-overview-tabpanel"
+        role={hasTabs ? 'tabpanel' : undefined}
+        id={hasTabs ? 'change-overview-tabpanel' : undefined}
         aria-labelledby={
-          selected ? `change-overview-tab-${selected.id}` : undefined
+          hasTabs && selected ? `change-overview-tab-${selected.id}` : undefined
         }
+        tabIndex={hasTabs ? 0 : undefined}
       >
         {!gitAvailable ? (
           <div className={styles.message}>{t('changeOverview.notGit')}</div>

@@ -2,6 +2,15 @@
 
 语言：[English](./2026-11-16-web-shell-change-overview.md) | 中文
 
+> **已被取代的边界机制。** 本文描述 #17378 交付时的设计。其 commit 兜底边界——
+> files 路由的 `git merge-base --is-ancestor` 探针（`headIsAncestor`）与 hook 的
+> 「最新祖先 head」窗口——已由跟进设计
+> [变更总览边界修复](./2026-11-17-change-overview-boundary-fix.zh-CN.md)**退役**：
+> 跟进设计把窗口定界到会话不可变起点 commit，并用单次原生
+> `git log <range> --not <refs>` 排除从任一绑定 PR head（及基线分支）可达的所有
+> 提交。下文「Files 路由」「UI 组装」「降级」「涉及文件」各节以现在时描述原祖先
+> 探针机制，仅为保留历史准确；应读作已被跟进设计取代，而非当前行为。
+
 ## 问题
 
 会话进行中，agent 会编辑大量文件，用户逐渐不清楚改动规模到底有多大。目前 Web

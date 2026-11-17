@@ -137,7 +137,7 @@ describe('useChangeOverview', () => {
       0,
       '/work/wt',
       'origin/main..HEAD',
-      { sessionId: 's1' },
+      { sessionId: 's1', excludeRefs: ['origin/main'] },
     );
   });
 
@@ -154,7 +154,7 @@ describe('useChangeOverview', () => {
       0,
       '/work/wt',
       'base0..HEAD',
-      { sessionId: 's1' },
+      { sessionId: 's1', excludeRefs: ['origin/main'] },
     );
   });
 
@@ -174,6 +174,24 @@ describe('useChangeOverview', () => {
     );
   });
 
+  it('uses a plain session top-level base commit as the fallback boundary', async () => {
+    // A plain session has no branch/worktree meta; its start commit is the
+    // HEAD captured at creation, projected top-level on the summary.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      baseCommit: 'plainbase',
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work',
+      'plainbase..HEAD',
+      { sessionId: 's1' },
+    );
+  });
+
   it('excludes commits reachable from every bound PR head when supported', async () => {
     // Reachability exclusion (not a single-head boundary) drops each PR's own
     // commits, including for merged or incomparable heads.
@@ -188,7 +206,7 @@ describe('useChangeOverview', () => {
       0,
       '/work/wt',
       'origin/main..HEAD',
-      { sessionId: 's1', excludeRefs: ['head1', 'head2'] },
+      { sessionId: 's1', excludeRefs: ['head1', 'head2', 'origin/main'] },
     );
   });
 
@@ -727,7 +745,7 @@ describe('useChangeOverview', () => {
       0,
       '/work/wt',
       'origin/main..HEAD',
-      { sessionId: 's1', excludeRefs: ['head1', 'head2'] },
+      { sessionId: 's1', excludeRefs: ['head1', 'head2', 'origin/main'] },
     );
     expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
       2,

@@ -756,6 +756,8 @@ interface SessionEntry {
   };
   /** Branch metadata, when created with branch param. */
   branch?: { name: string; baseBranch: string; baseCommit?: string };
+  /** Start commit captured at creation for a plain session (no branch/worktree). */
+  baseCommit?: string;
   /** GitHub PRs bound via updateSessionMetadata, in binding order. */
   prs?: SessionPrInfo[];
   channel: AcpChannel;
@@ -4580,6 +4582,7 @@ export function createSessionControlPlane(
       pendingInteractions: [...entry.pendingInteractions.values()],
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
       ...(entry.branch ? { branch: entry.branch } : {}),
+      ...(entry.baseCommit ? { baseCommit: entry.baseCommit } : {}),
       ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
     };
   };
@@ -5607,6 +5610,7 @@ export function createSessionControlPlane(
       baseCommit?: string;
     },
     branch?: { name: string; baseBranch: string; baseCommit?: string },
+    baseCommit?: string,
     requestedSessionId?: string,
     daemonOwnedStandaloneCreation = false,
     onNewSessionDispatch?: () => void,
@@ -5909,7 +5913,7 @@ export function createSessionControlPlane(
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId, sourceType, sourceId, worktree, branch },
+        { parentSessionId, sourceType, sourceId, worktree, branch, baseCommit },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -6108,6 +6112,7 @@ export function createSessionControlPlane(
         ...(startupConfigApplied ? { startupConfigApplied } : {}),
         ...(entry.worktree ? { worktree: entry.worktree } : {}),
         ...(entry.branch ? { branch: entry.branch } : {}),
+        ...(entry.baseCommit ? { baseCommit: entry.baseCommit } : {}),
       };
     } finally {
       if (requestedSessionId !== undefined) {
@@ -7581,6 +7586,7 @@ export function createSessionControlPlane(
         baseCommit?: string;
       };
       branch?: { name: string; baseBranch: string; baseCommit?: string };
+      baseCommit?: string;
     } = {},
   ): SessionEntry => {
     const childSnapshot = ci.harness.activeWork?.snapshot;
@@ -7597,6 +7603,7 @@ export function createSessionControlPlane(
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
       ...(options.branch ? { branch: options.branch } : {}),
+      ...(options.baseCommit ? { baseCommit: options.baseCommit } : {}),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -11438,6 +11445,7 @@ export function createSessionControlPlane(
         source.sourceId,
         req.worktree,
         req.branch,
+        req.baseCommit,
         req.sessionId,
         daemonOwnedStandaloneCreation,
         trustedStandaloneSpawn

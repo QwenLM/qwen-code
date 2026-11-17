@@ -2041,11 +2041,28 @@ describe('fetchGitLog excludeRefs', () => {
       '-n1', // leading '-' clause: git's short --max-count option
       'HEAD..HEAD~1', // '..' clause: a valid revision range
       'feat@2026', // charset clause: '@' is legal in a git branch name
+      '^HEAD', // leading '^' clause: git negation, --not XORs it to inclusion
     ]) {
       expect(
         await fetchGitLog(repo, { range: 'HEAD', excludeRefs: [bad] }),
       ).toBeNull();
     }
+  });
+
+  it('honours excludeRefs in the hash-prefix search arm', async () => {
+    const base = await headSha(repo);
+    await git(repo, 'checkout', '-q', '-b', 'pr', base);
+    await commit(repo, { 'pr.txt': 'p' }, 'PR work');
+    const prHead = await headSha(repo);
+    await git(repo, 'checkout', '-q', 'main');
+    // Searching by the PR head's hash prefix hits the --no-walk arm, which
+    // must subtract the excluded ref like the walking arms do; the commit is
+    // reachable from itself, so it must not be returned.
+    const result = await fetchGitLog(repo, {
+      search: prHead.slice(0, 8),
+      excludeRefs: [prHead],
+    });
+    expect(result?.entries.map((e) => e.sha)).not.toContain(prHead);
   });
 
   it('excludes from HEAD when no range is given', async () => {

@@ -66,13 +66,20 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
 ### Layer 1 — persist the session start commit (cli + SDK)
 
 - `DaemonBranchInfo` gains `baseCommit?: string`; `DaemonWorktreeInfo` gains
-  `baseCommit?: string`.
+  `baseCommit?: string`; `DaemonSessionSummary` gains a top-level
+  `baseCommit?: string` for plain sessions.
 - Branch sessions: persist the already-resolved `baseCommit` alongside
   `branchMeta` and project it on the summary.
 - Worktree sessions: resolve `getHeadCommit(workspaceCwd)` before
-  `createUserWorktree` (the base tip the worktree is created from) and persist
-  it on `worktreeMeta`.
-- Plain sessions: no start commit recorded (none exists).
+  `createUserWorktree` (the base tip the worktree is created from), persist it
+  on `worktreeMeta` **and durably** in the worktree sidecar's
+  `originalHeadCommit`; both `session-restore.ts` rebuild sites and
+  `enrichWorktreeSidecars` read it back, and the journaled branch-worktree and
+  worktree-reset flows carry it, so a daemon restart still scopes the window.
+- Plain sessions: capture `getHeadCommit(workspaceCwd)` at creation (the HEAD
+  the session starts from) and project it as the summary's top-level
+  `baseCommit`; a failed read stays `undefined` (no boundary). The hook prefers
+  `branch.baseCommit ?? worktree.baseCommit ?? summary.baseCommit`.
 - The status-route hydration and summary projection forward the new fields;
   legacy sessions without them stay `undefined`.
 
@@ -95,12 +102,19 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
 
 ### Layer 3 — hook rewrite (web-shell)
 
-- Boundary priority: `branch.baseCommit ?? worktree.baseCommit` →
-  `<start>..HEAD`; else `baseBranch` (non-`'HEAD'`, whitelist-safe) →
-  `<base>..HEAD`; else **suppress** (no range-less walk ever).
+- Boundary priority: `branch.baseCommit ?? worktree.baseCommit ??
+summary.baseCommit` (plain session) → `<start>..HEAD`; else `baseBranch`
+  (non-`'HEAD'`, whitelist-safe) → `<base>..HEAD`; else **suppress** (no
+  range-less walk ever).
 - When the exclude capability is present and PR heads resolved, pass every
   bound PR `headSha` as `excludeRefs`. Reachability exclusion handles merged,
   parallel, and incomparable heads uniformly.
+- The base branch (when a whitelist-safe single ref, non-`'HEAD'`) joins the
+  exclusion set. Integrating upstream in the session tree (`git pull`, rebase,
+  merge of the base) advances HEAD to commits the start commit does not reach;
+  without this they would re-list as loose work. They are reachable from the
+  base branch and subtracted, while the session's own commits (children of it)
+  survive. This narrows the window; the recorded start commit still bounds it.
 - Keep the guard: if any produced PR unit failed to resolve a head, suppress
   the fallback (its commits cannot be excluded, so they must not be re-listed).
 - Capability skew: with bound PR units but **no** exclude capability (a new

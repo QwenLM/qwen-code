@@ -548,4 +548,34 @@ describe('ChangeOverviewPanel', () => {
       'https://github.com/o/r/pull/7',
     );
   });
+
+  it('leaves modified arrow keys to the browser (Alt+Left/Right is navigation)', () => {
+    renderPanel();
+    const chips = container.querySelectorAll('[role="tab"]');
+    act(() => {
+      chips[0].dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowRight',
+          altKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(chips[0].getAttribute('aria-selected')).toBe('true');
+    expect(chips[1].getAttribute('aria-selected')).toBe('false');
+  });
+
+  it('gives the tabpanel a tab stop so its body is keyboard-scrollable', () => {
+    renderPanel();
+    const panel = container.querySelector('[role="tabpanel"]');
+    expect(panel?.getAttribute('tabindex')).toBe('0');
+  });
+
+  it('does not advertise an orphan tabpanel when no tablist renders', () => {
+    mock.state = { gitAvailable: false, loading: false, units: [] };
+    renderPanel();
+    expect(container.querySelector('[role="tablist"]')).toBeNull();
+    expect(container.querySelector('[role="tabpanel"]')).toBeNull();
+  });
 });

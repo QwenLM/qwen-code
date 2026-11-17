@@ -108,6 +108,22 @@ function isSafeRangeRef(ref: string): boolean {
 }
 
 /**
+ * Mirror of the daemon's `isSafeSingleRef` predicate (no range): a ref used as
+ * an exclusion must not smuggle a flag, a second revision (`..`), or a leading
+ * `^` (git's negation, which `--not` XORs into an inclusion). Used to gate the
+ * base branch added to the exclusion set so an unsafe branch name narrows nothing
+ * rather than refusing the whole fetch.
+ */
+export function isSafeSingleRef(ref: string): boolean {
+  return (
+    !ref.startsWith('-') &&
+    !ref.startsWith('^') &&
+    !ref.includes('..') &&
+    /^[A-Za-z0-9_./~^-]+$/.test(ref)
+  );
+}
+
+/**
  * The git log range that yields the commit-fallback window: the session's
  * commits since its start, before reachability exclusion drops the ones a
  * bound PR covers. The boundary is the session's immutable start commit

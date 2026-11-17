@@ -2,6 +2,18 @@
 
 Language: English | [中文](./2026-11-16-web-shell-change-overview.zh-CN.md)
 
+> **Superseded boundary mechanism.** This document describes the design as
+> shipped in #17378. Its commit-fallback boundary — the files route's
+> `git merge-base --is-ancestor` probe (`headIsAncestor`) and the hook's
+> newest-ancestor-head window — was **retired** by the follow-up
+> [change overview boundary fix](./2026-11-17-change-overview-boundary-fix.md),
+> which scopes the window to the session's immutable start commit and excludes
+> every commit reachable from any bound PR head (and the base branch) in one
+> native `git log <range> --not <refs>`. The Files route, UI assembly,
+> Degradation, and Files affected sections below describe the original
+> ancestry-probe mechanism in the present tense for historical accuracy; read
+> them as superseded by the follow-up, not as the current behavior.
+
 ## Problem
 
 As a session runs, the agent edits many files. The user loses track of how large

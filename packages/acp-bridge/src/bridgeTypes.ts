@@ -405,6 +405,12 @@ export interface BridgeSpawnRequest {
   /** Branch metadata, set by the daemon route before spawn. */
   branch?: { name: string; baseBranch: string; baseCommit?: string };
   /**
+   * Start commit captured at creation for a plain session (no branch/worktree
+   * meta), set by the daemon route before spawn. The change overview's commit
+   * fallback scopes its window to `<baseCommit>..HEAD`.
+   */
+  baseCommit?: string;
+  /**
    * Optional caller-supplied session id. When provided, the agent uses this
    * id instead of generating a random UUID. Must be validated at the route
    * boundary since the core Config constructor uses it verbatim. Passed
@@ -1306,6 +1312,12 @@ export interface BridgeSessionSummary {
   };
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string; baseCommit?: string };
+  /**
+   * The HEAD captured at creation for a plain session (no branch/worktree
+   * meta) — its immutable start commit for the change overview's commit
+   * fallback. Branch/worktree sessions carry it on their meta instead.
+   */
+  baseCommit?: string;
   /**
    * GitHub PRs bound to the session, in binding order (last = latest). A
    * session can produce several PRs (stacked or follow-up work).

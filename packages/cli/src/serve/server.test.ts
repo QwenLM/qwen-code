@@ -16975,6 +16975,31 @@ describe('createServeApp', () => {
       }
     });
 
+    it('200 records a plain session start commit from HEAD at creation', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockBranchOps.getHeadCommit = () => Promise.resolve('plainhead');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toHaveLength(1);
+        expect(bridge.calls[0].baseCommit).toBe('plainhead');
+        expect(bridge.calls[0].branch).toBeUndefined();
+        expect(bridge.calls[0].worktree).toBeUndefined();
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
     it('rolls back the branch when spawn fails', async () => {
       const rollbackCalls: string[] = [];
       const bridge = fakeBridge({

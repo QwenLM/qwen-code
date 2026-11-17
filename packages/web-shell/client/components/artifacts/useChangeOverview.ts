@@ -9,6 +9,7 @@ import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   buildCommitFallbackUnits,
   commitFallbackRange,
+  isSafeSingleRef,
   prRepoFromUrl,
   prUnavailableCauseFromError,
   type ChangeOverviewUnit,
@@ -98,7 +99,9 @@ export function useChangeOverview(
         // worktree base tip). Preferred fallback boundary; absent on legacy
         // sessions, which fall back to the base branch or suppress.
         startCommit =
-          summary?.branch?.baseCommit ?? summary?.worktree?.baseCommit;
+          summary?.branch?.baseCommit ??
+          summary?.worktree?.baseCommit ??
+          summary?.baseCommit;
         gitCwd = summary?.worktree?.path ?? workspaceCwd;
       }
 
@@ -226,10 +229,22 @@ export function useChangeOverview(
       // heads uniformly — no single-head boundary heuristic. Only passed when
       // the daemon advertises the exclude capability; showFallback above
       // suppresses the window entirely when bound PR heads cannot be excluded.
+      // The base branch joins the exclusion set so integrating upstream (pull,
+      // rebase, merge of the base) does not re-list pre-session commits as loose
+      // work: they are reachable from the base branch and subtracted, while the
+      // session's own commits (children of it) survive. The recorded start
+      // commit still bounds the window — this only narrows it, never replaces it.
       const excludeRefs = excludeRefsSupported
-        ? prResults
-            .map((result) => result.headSha)
-            .filter((sha): sha is string => sha !== undefined)
+        ? [
+            ...prResults
+              .map((result) => result.headSha)
+              .filter((sha): sha is string => sha !== undefined),
+            ...(baseBranch &&
+            baseBranch !== 'HEAD' &&
+            isSafeSingleRef(baseBranch)
+              ? [baseBranch]
+              : []),
+          ]
         : [];
       let commitsTruncated = false;
       if (showFallback) {

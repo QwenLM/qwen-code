@@ -499,6 +499,7 @@ async function enrichWorktreeSidecars(
           slug: sidecar.slug,
           path: sidecar.worktreePath,
           branch: sidecar.worktreeBranch,
+          baseCommit: sidecar.originalHeadCommit || undefined,
         },
       });
     }

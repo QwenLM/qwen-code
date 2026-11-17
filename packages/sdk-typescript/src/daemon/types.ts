@@ -1853,6 +1853,14 @@ export interface DaemonSessionSummary {
   worktree?: DaemonWorktreeInfo;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
+  /**
+   * The HEAD captured when the session was created — its immutable start
+   * commit. Present for plain sessions (which have no branch/worktree meta);
+   * branch/worktree sessions carry it on their respective meta instead. The
+   * commit fallback scopes its window to `<baseCommit>..HEAD`. Absent on
+   * sessions persisted before this field or whose creation read failed.
+   */
+  baseCommit?: string;
   /** Present when GitHub PRs have been bound to the session (last = latest). */
   prs?: DaemonSessionPrInfo[];
 }

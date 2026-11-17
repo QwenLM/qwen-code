@@ -232,6 +232,36 @@ describe('workspace Git log routes', () => {
     });
   });
 
+  it('rejects a repeated exclude key with 400 instead of dropping the exclusion', async () => {
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get(
+      '/workspace/git/log?exclude=abc123&exclude=def456',
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.errorKind).toBe('parse_error');
+    expect(fetchGitLogMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty exclude value with 400 instead of running unfiltered', async () => {
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspace/git/log?exclude=');
+
+    expect(response.status).toBe(400);
+    expect(response.body.errorKind).toBe('parse_error');
+    expect(fetchGitLogMock).not.toHaveBeenCalled();
+  });
+
   it('omits range when the query parameter is absent or blank', async () => {
     fetchGitLogMock.mockResolvedValue({ entries: [], hasMore: false });
     const app = express();
