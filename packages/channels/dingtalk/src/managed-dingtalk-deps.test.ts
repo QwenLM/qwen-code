@@ -562,8 +562,8 @@ describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () 
   // rows are built at the observed bound rather than at a derived ceiling.
   //
   // Each chunk must answer inside its own 30s budget or that budget aborts it,
-  // so the slowest reachable send here is 25 × 29999ms = 749975ms with its last
-  // chunk starting at 719976ms. Every row must deliver all of its chunks: a
+  // so the slowest row here is 25 × 29999ms = 749975ms with its last chunk
+  // starting at 719976ms. Every row must deliver all of its chunks: a
   // send that outlives the claim lease is reconciled to unknown, but a late
   // receipt moves unknown → partial → delivered, so the ledger converges while
   // the tail keeps arriving; refusing the tail strands it instead (#17529 has
