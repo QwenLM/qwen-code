@@ -41,7 +41,9 @@ public interface ManagedUserMessageStore {
      * The dispatch entry: a bound Session's queued actor was admitted under
      * the filter's code-point bound, so the dispatcher passes it raw with a
      * null principal (R7-1); an unbound dispatch carries the exact durable
-     * principal, whose user id equals the raw actor.
+     * principal, whose user id equals the raw actor. The raw actor rides
+     * beside the principal rather than being re-encoded into one, so a
+     * byte-long non-ASCII actor never meets the principal's byte bound here.
      */
     @FunctionalInterface
     public interface QueuedDispatchSubmitter {

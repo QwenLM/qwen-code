@@ -250,7 +250,7 @@ class SubjectActorRouteOwnershipTest {
                                 session), 200),
                 new Surface("mcp-management",
                         () -> get("/v1/agents/sessions/{id}/mcp-management",
-                                session), 200),
+                                session), 404),
                 new Surface("extensions",
                         () -> get("/v1/agents/sessions/{id}/extensions",
                                 session), 200),

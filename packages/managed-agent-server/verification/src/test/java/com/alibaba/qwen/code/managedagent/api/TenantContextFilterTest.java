@@ -28,8 +28,11 @@ class TenantContextFilterTest {
         TenantContext context = (TenantContext) request.getAttribute(
                 TenantContextFilter.ATTRIBUTE);
         assertThat(context.requireActorId()).isEqualTo("actor-a");
-        assertThat(context.actorSubjectId()).isEqualTo("subject-a");
-        assertThat(context.principal().actorSubjectId()).isEqualTo("subject-a");
+        // The subject axis is inert: the filter no longer forwards an
+        // adapter's claim into the TenantContext until a signed adapter
+        // supplies it (R1-16/R1-17).
+        assertThat(context.actorSubjectId()).isNull();
+        assertThat(context.principal().actorSubjectId()).isNull();
         assertThat(context.tenantId()).isEqualTo("tenant-a");
         assertThat(chain.getRequest()).isSameAs(request);
     }
@@ -85,7 +88,6 @@ class TenantContextFilterTest {
                 actor("tenant-a", "𝄞".repeat(513)),
                 actor("tenant-a", "a".repeat(513)),
                 actor("tenant-a", " "),
-                actor("tenant-a", "actor-a", "subject\nsplit"),
                 actor("tenant-a", null, "subject-a")
         }) {
             MockHttpServletRequest request = request("tenant-a");

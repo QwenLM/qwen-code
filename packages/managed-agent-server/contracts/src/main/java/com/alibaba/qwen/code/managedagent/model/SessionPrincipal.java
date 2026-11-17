@@ -10,6 +10,14 @@ import java.nio.charset.StandardCharsets;
  * a trusted boundary from the verified request context and never from a
  * client body. A null {@code actorSubjectId} means the caller provably
  * carries no business actor; an empty one is rejected.
+ *
+ * <p><b>Inert until a signed adapter supplies it.</b> No production
+ * {@code AuthenticatedTenantActor} implementation overrides
+ * {@code actorSubjectId()} today, so every live request builds a subjectless
+ * principal and the subject member exists only for the schema and the test
+ * harness. The receipt encoding below deliberately drops the subject so a
+ * receipt stamped by a subjectless caller answers its recorder; the subject
+ * joins no derived key until an adapter signs it.
  */
 public record SessionPrincipal(String tenantId, String userId,
         String actorSubjectId) {
@@ -55,6 +63,8 @@ public record SessionPrincipal(String tenantId, String userId,
      * actor-present flag and the subject, NUL-separated. The replay
      * comparison must use this same encoding, never the raw Workspace actor
      * key, or a principal-encoded receipt could not answer its recorder.
+     * The subject member stays in the stamp so receipts recorded before the
+     * subject axis went inert still replay for their recorder.
      */
     public byte[] receiptActorKey() {
         String joined = userId

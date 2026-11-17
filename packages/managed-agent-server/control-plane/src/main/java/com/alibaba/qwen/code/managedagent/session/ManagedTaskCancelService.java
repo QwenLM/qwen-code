@@ -68,7 +68,8 @@ public class ManagedTaskCancelService {
             String idempotencyKey, String sessionId, String taskId) {
         OperationAdmission admission = admit(
                 principal == null ? null : principal.tenantId(),
-                principal, idempotencyKey, sessionId, taskId);
+                principal,
+                idempotencyKey, sessionId, taskId);
         return operations.publicOperation(admission.operation(),
                 admission.replayed());
     }
@@ -78,7 +79,8 @@ public class ManagedTaskCancelService {
             String sessionId, String taskId) {
         OperationAdmission admission = admit(
                 principal == null ? null : principal.tenantId(),
-                principal, idempotencyKey, sessionId, taskId);
+                principal,
+                idempotencyKey, sessionId, taskId);
         return operations.webShellOperation(admission.operation(),
                 admission.replayed());
     }
@@ -113,8 +115,8 @@ public class ManagedTaskCancelService {
     // after the bound-arm gates passed, so a byte-long non-ASCII actor
     // keeps cancelling a Workspace task.
     private OperationAdmission admit(String tenantId,
-            SessionPrincipal principal, String idempotencyKey,
-            String sessionId, String taskId) {
+            SessionPrincipal principal,
+            String idempotencyKey, String sessionId, String taskId) {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         SessionRecord session = sessions.requireReadableSession(tenantId,
                 principal, sessionId);

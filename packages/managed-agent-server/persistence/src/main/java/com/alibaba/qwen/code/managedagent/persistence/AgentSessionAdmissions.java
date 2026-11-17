@@ -18,7 +18,6 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
-
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
@@ -72,7 +71,8 @@ final class AgentSessionAdmissions {
             boolean workspaceChildAgentsEnabled,
             boolean managedExtensionExecutionEnabled,
             List<? extends ManagedAgentSettings.RuntimeBroker.WorkspaceMount> workspaceMounts,
-            WorkspaceCreationRoots createdRoots, ManagedSessionModelConfigs modelConfigs) {
+            WorkspaceCreationRoots createdRoots,
+            ManagedSessionModelConfigs modelConfigs) {
         this.eventJournal = eventJournal;
         this.sessionCommands = sessionCommands;
         this.sessionPolicies = sessionPolicies;
@@ -95,9 +95,7 @@ final class AgentSessionAdmissions {
         this.managedExtensionExecutionEnabled = managedExtensionExecutionEnabled;
         this.workspaceMounts = workspaceMounts;
         this.createdRoots = createdRoots;
-        this.childSessionAdmissions = new ChildSessionAdmissions(jdbc, clock,
-                storeRows, eventJournal, sessionCommands, configRecords,
-                modelConfigs, creationSkills, workspaceFilesEnabled);
+        this.childSessionAdmissions = new ChildSessionAdmissions(jdbc, clock, storeRows, eventJournal, sessionCommands, configRecords, modelConfigs, creationSkills, workspaceFilesEnabled);
     }
 
     ChildSessionAdmissions childSessionAdmissions() {
@@ -148,7 +146,10 @@ final class AgentSessionAdmissions {
      * Ownership-enforcing creation of an unbound Session, with or without a
      * model configuration. The ownership row lands in the same transaction
      * as the Session, receipt and creation event. A null principal is the
-     * legacy actorless arm and yields a row-less tenant-wide Session.
+     * legacy actorless arm: the Session is created without an ownership row
+     * and stays tenant-wide, exactly as pre-ownership rows do. The fail-closed
+     * enforcement lives one layer up, at the controllers'
+     * {@code requirePrincipal} and the tenant-only creation overload.
      */
     Admission insertSessionCommand(String tenantId,
             SessionPrincipal principal, String operation,
@@ -250,10 +251,12 @@ final class AgentSessionAdmissions {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         // InnoDB's first consistent read must follow the creation's first lock.
-        // Creations lock the selected Workspace before reading receipts, as
-        // resolveForCreation does below. Explicit selections lock one
-        // Workspace; default selections retain the tenant scan to preserve
-        // the lock order with default switches (see design
+        // A selection that may resolve to a Resident Workspace keeps the tenant
+        // guard first: its single-Session range lock can deadlock adjacent
+        // Workspaces' inserts. Other creations lock the selected Workspace
+        // before reading receipts, as resolveForCreation does below. Explicit
+        // selections lock one Workspace; default selections retain the tenant
+        // scan to preserve the lock order with default switches (see design
         // 2026-11-04-managed-session-admission-tenant-guard).
         workspaces.lockSelectionForCreation(tenantId, selection);
         List<ChildSessionAdmissions.WorkspaceCommand> existing = childSessionAdmissions.findWorkspaceCommand(tenantId,
@@ -314,16 +317,20 @@ final class AgentSessionAdmissions {
                         || !sshWorkspace && !external && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        List<Map<String, Object>> merged = new ArrayList<>(pin.skills());
-        var injectedCatalog = ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported());
-        var effectiveSkills = injectedCatalog != null ? injectedCatalog : AgentDefinitionExtensions.sessionSkills(merged);
+        List<Map<String, Object>> merged = new ArrayList<>();
+        if (!skills.isEmpty() && pin.digest() != null) {
+            merged.addAll(AgentDefinitionExtensions.skills(storeRows.readMap(definitions.find(tenantId, agentId,
+                    Long.parseLong(pin.revision())).orElseThrow().definitionJson()).get("skills"), true));
+        }
+        merged.addAll(skills);
+        var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
         }
         ResolvedBinding target = worktree == null ? workspace : worktree.target(workspace);
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                target, actorId, pin, planMode, modelId);
+                target, actorId, pin, planMode, modelId, null);
         ManagedMemoryStore.bind(jdbc, tenantId, actorId, admission.sessionId(), command.memoryStoreId());
         if (modelConfig != null) {
             modelConfigs.save(tenantId, admission.sessionId(), modelConfig);
@@ -337,8 +344,8 @@ final class AgentSessionAdmissions {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
-        if (!effectiveSkills.isEmpty() && (!skills.isEmpty() || injectedCatalog != null)) {
-            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills, injectedCatalog != null);
+        if (!skills.isEmpty()) {
+            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
         }
         if (extensionPins != null) {
             creationSkills.saveInitialSelection(tenantId, admission.sessionId(), extensionPins);
@@ -505,30 +512,16 @@ final class AgentSessionAdmissions {
             String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved,
             String actorId, AgentSessionPolicies.AgentPin pin) {
-        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId, title,
-                input, payloadDigest, resolved, actorId, pin, false);
+        return insertSession(tenantId, operation, idempotencyKey, requestDigest,
+                agentId, title, input, payloadDigest, resolved, actorId, pin,
+                false, null, null);
     }
 
     Admission insertSession(String tenantId, String operation, String idempotencyKey,
             String requestDigest, String agentId, String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved, String actorId, AgentSessionPolicies.AgentPin pin,
-            boolean planMode) {
-        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId, title,
-                input, payloadDigest, resolved, actorId, pin, planMode, null);
-    }
-
-    Admission insertSession(String tenantId, String operation, String idempotencyKey,
-            String requestDigest, String agentId, String title, List<Map<String, Object>> input,
-            String payloadDigest, ResolvedBinding resolved, String actorId, AgentSessionPolicies.AgentPin pin,
-            boolean planMode, String modelId) {
-        return insertSession(tenantId, operation, idempotencyKey, requestDigest, agentId, title,
-                input, payloadDigest, resolved, actorId, pin, planMode, modelId, null);
-    }
-
-    Admission insertSession(String tenantId, String operation, String idempotencyKey,
-            String requestDigest, String agentId, String title, List<Map<String, Object>> input,
-            String payloadDigest, ResolvedBinding resolved, String actorId, AgentSessionPolicies.AgentPin pin,
-            boolean planMode, String modelId, SessionPrincipal principal) {
+            boolean planMode, String modelId,
+            SessionPrincipal principal) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();

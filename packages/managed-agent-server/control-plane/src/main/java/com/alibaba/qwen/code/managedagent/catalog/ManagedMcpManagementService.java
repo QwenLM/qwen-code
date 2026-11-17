@@ -52,12 +52,9 @@ public class ManagedMcpManagementService {
 
     private JsonNode get(String tenantId, String actorId,
             SessionPrincipal principal, String sessionId) {
-        SessionRecord readable = principal == null
-                ? sessions.requireReadableSession(tenantId, actorId, sessionId)
-                : sessions.requireReadableSession(principal, sessionId);
-        if (readable.workspace() == null) {
-            return unsupported(sessionId);
-        }
+        // A legacy (non-Workspace) Session must keep the store's 404
+        // session_not_found; only a Workspace Session the harness cannot
+        // serve degrades to supported:false.
         SessionRecord session;
         try {
             session = store.requireMcpManagement(tenantId,
@@ -90,12 +87,6 @@ public class ManagedMcpManagementService {
     private JsonNode submit(String tenantId, String actorId,
             SessionPrincipal principal, String sessionId,
             String idempotencyKey, ManagedMcpManagementCommand command) {
-        SessionRecord readable = principal == null
-                ? sessions.requireReadableSession(tenantId, actorId, sessionId)
-                : sessions.requireReadableSession(principal, sessionId);
-        if (readable.workspace() == null) {
-            throw unsupportedOperation();
-        }
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         if (!ACTIONS.contains(command.action()) || !command.serverId().matches("[A-Za-z0-9._:-]{1,128}")
                 || command.expectedRevision() == null || command.expectedRevision() < 0
@@ -150,12 +141,6 @@ public class ManagedMcpManagementService {
 
     private JsonNode operation(String tenantId, String actorId,
             SessionPrincipal principal, String sessionId, String operationId) {
-        SessionRecord readable = principal == null
-                ? sessions.requireReadableSession(tenantId, actorId, sessionId)
-                : sessions.requireReadableSession(principal, sessionId);
-        if (readable.workspace() == null) {
-            throw unsupportedOperation();
-        }
         if (operationId == null || !operationId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
             throw new ManagedAgentException(400, "invalid_request", "Invalid MCP operation identity.");
         }
@@ -173,11 +158,6 @@ public class ManagedMcpManagementService {
         result.putArray("servers");
         result.putArray("availableServers");
         return result;
-    }
-
-    private static ManagedAgentException unsupportedOperation() {
-        return new ManagedAgentException(409, "unsupported_feature",
-                "MCP management is unavailable.");
     }
 
     private JsonNode invoke(Supplier<Map<String, Object>> request) {

@@ -236,8 +236,7 @@ class SessionPrincipalOwnershipTest {
             denied(() -> messages.queryMessages(
                     SessionPrincipal.of("tenant", "user", "actor-B"), id));
 
-            messages.startNext("tenant", id, (actorTenant, principal, actorId, key, target, input) ->
-                    f.service.submitTurn(principal, key, target, input));
+            messages.startNext("tenant", id, f.service::submitQueuedTurn);
 
             assertThat(f.jdbc.queryForObject(
                     "SELECT state FROM ma_user_message WHERE tenant_id = ?"
@@ -363,8 +362,7 @@ class SessionPrincipalOwnershipTest {
             assertThat(extensions.query(OWNER, id, null).path("supported")
                     .asBoolean()).isFalse();
             assertThat(actions.listPublic(OWNER, id, null, 10).data()).isEmpty();
-            assertThat(mcpManagement.get(OWNER, id).path("supported")
-                    .asBoolean()).isFalse();
+            denied(() -> mcpManagement.get(OWNER, id));
 
             denied(() -> hook.get(sibling, id));
             denied(() -> mcp.get(sibling, id));

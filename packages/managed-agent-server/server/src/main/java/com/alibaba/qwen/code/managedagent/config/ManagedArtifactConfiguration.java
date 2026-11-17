@@ -16,11 +16,6 @@ import java.util.concurrent.ScheduledFuture;
 
 @Configuration
 public class ManagedArtifactConfiguration {
-    private static ThreadPoolTaskScheduler singleThreadScheduler(
-            ThreadPoolTaskSchedulerBuilder builder, String threadNamePrefix) {
-        return builder.poolSize(1).threadNamePrefix(threadNamePrefix).build();
-    }
-
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler managedAgentScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.threadNamePrefix("managed-agent-").build();
@@ -28,7 +23,7 @@ public class ManagedArtifactConfiguration {
 
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler managedArtifactScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "managed-artifact-");
+        return builder.poolSize(1).threadNamePrefix("managed-artifact-").build();
     }
 
     /**
@@ -39,7 +34,7 @@ public class ManagedArtifactConfiguration {
      */
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler managedAutomationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "managed-automation-");
+        return builder.poolSize(1).threadNamePrefix("managed-automation-").build();
     }
 
     /**
@@ -80,7 +75,7 @@ public class ManagedArtifactConfiguration {
      */
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler replayFloorScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "replay-floor-");
+        return builder.poolSize(1).threadNamePrefix("replay-floor-").build();
     }
 
     /**
@@ -92,7 +87,7 @@ public class ManagedArtifactConfiguration {
      */
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler childRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "child-relay-");
+        return builder.poolSize(1).threadNamePrefix("child-relay-").build();
     }
 
     /**
@@ -102,7 +97,7 @@ public class ManagedArtifactConfiguration {
      */
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler messageRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "message-relay-");
+        return builder.poolSize(1).threadNamePrefix("message-relay-").build();
     }
 
     /**
@@ -115,12 +110,12 @@ public class ManagedArtifactConfiguration {
      */
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler journalCompactionScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "journal-compaction-");
+        return builder.poolSize(1).threadNamePrefix("journal-compaction-").build();
     }
 
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler wakeRecoveryScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "wake-recovery-");
+        return builder.poolSize(1).threadNamePrefix("wake-recovery-").build();
     }
 
     /**
@@ -130,12 +125,12 @@ public class ManagedArtifactConfiguration {
      */
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler childWorkspaceScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "child-workspace-");
+        return builder.poolSize(1).threadNamePrefix("child-workspace-").build();
     }
 
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler sessionWorktreeScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "session-worktree-");
+        return builder.poolSize(1).threadNamePrefix("session-worktree-").build();
     }
 
     /**
@@ -145,7 +140,7 @@ public class ManagedArtifactConfiguration {
      */
     @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler messageMaterializerScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "message-materialize-");
+        return builder.poolSize(1).threadNamePrefix("message-materialize-").build();
     }
 
     // The cadence is the typed Events.materializeInterval field, bound from
@@ -173,7 +168,7 @@ public class ManagedArtifactConfiguration {
     @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
             name = "enabled", havingValue = "true")
     public ThreadPoolTaskScheduler runtimeRecoveryScheduler(ThreadPoolTaskSchedulerBuilder builder) {
-        return singleThreadScheduler(builder, "runtime-recovery-");
+        return builder.poolSize(1).threadNamePrefix("runtime-recovery-").build();
     }
 
     @Bean

@@ -90,17 +90,6 @@ test('reports cache-prune failure instead of a successful service exit', () => {
   assert.match(result.calls, /^image prune --all --force/m);
 });
 
-test('reaps the qwen-review- containers the review sandbox creates', () => {
-  // The CLI names its reviewed-command containers `qwen-review-*`
-  // (packages/cli/src/commands/review/lib/sandboxed-exec.ts, containerName),
-  // and they carry no sandbox label because the published image has none. The
-  // `qwen-code-` filter alone therefore misses every one of them, and a
-  // container leaked by a killed job outlives the 24h gate for good.
-  const result = run();
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.calls, /^ps --all --quiet --filter name=qwen-review-$/m);
-});
-
 test('installs a one-day /tmp retention policy', () => {
   // Measured 2026-10-31: CI hosts generate ~120-260k temp files/day, and a
   // 7d steady state exceeds the ~1M-inode tmpfs ceiling — that is the hz

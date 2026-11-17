@@ -8,8 +8,8 @@ replace it.
 
 - Runs `qwen-docker-cleanup` once a day at 02:30 UTC, with up to 30 minutes of
   randomized delay.
-- Removes Qwen CI containers — sandbox-labelled or named `qwen-code-*` or
-  `qwen-review-*` — created more than 24 hours ago.
+- Removes Qwen CI containers — sandbox-labelled or named `qwen-code-*` —
+  created more than 24 hours ago.
 - Prunes sandbox-labelled Qwen CI images and dangling images older than 24
   hours.
 - Reclaims unused Docker build cache last used more than 24 hours ago, with
@@ -22,9 +22,9 @@ replace it.
   `systemd-tmpfiles` (measured 2026-10-31: CI hosts generate ~120-260k
   temp files/day and a 7d steady state exceeds the tmpfs inode ceiling).
 
-Use this only on dedicated CI hosts. A sandbox-labelled or
-`qwen-code-*`/`qwen-review-*`-named container older than 24 hours is considered
-leaked and may be removed even if it is still running.
+Use this only on dedicated CI hosts. A sandbox-labelled or `qwen-code-*`-named
+container older than 24 hours is considered leaked and may be removed even if
+it is still running.
 
 ## Prerequisites
 

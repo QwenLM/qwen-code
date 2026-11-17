@@ -17,7 +17,14 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.time.Clock;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
 public class ActionResponseCoordinator {
@@ -28,12 +35,18 @@ public class ActionResponseCoordinator {
     private final ExecutorService executor;
     private final Clock clock;
     private final ManagedAgentSettings.Dispatch dispatch;
-    private final LeaseRenewalRunner runner =
-            new LeaseRenewalRunner("action-response-renewal");
+    private final String owner = UUID.randomUUID().toString();
+    private final Set<String> active = ConcurrentHashMap.newKeySet();
+    private final ScheduledExecutorService renewals =
+            Executors.newSingleThreadScheduledExecutor(task -> {
+                Thread thread = new Thread(task, "action-response-renewal");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     @jakarta.annotation.PreDestroy
     void stopRenewals() {
-        runner.close();
+        renewals.shutdownNow();
     }
 
     public ActionResponseCoordinator(
@@ -56,7 +69,17 @@ public class ActionResponseCoordinator {
             LOG.debug("Action response delivery paused: Harness is disabled operation={}", operation);
             return;
         }
-        runner.dispatchOnce(executor, operation, () -> deliver(tenant, session, operation));
+        if (!active.add(operation)) {
+            return;
+        }
+        executor.execute(
+                () -> {
+                    try {
+                        deliver(tenant, session, operation);
+                    } finally {
+                        active.remove(operation);
+                    }
+                });
     }
 
     @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString = "${qwen.managed-agent.dispatch.scan-delay:1s}")
@@ -70,7 +93,6 @@ public class ActionResponseCoordinator {
     }
 
     private void deliver(String tenant, String session, String operation) {
-        String owner = runner.owner();
         OperationRecord op =
                 sessions.claimOperation(
                                 tenant, session, operation, owner, dispatch.getLeaseDuration())
@@ -78,13 +100,20 @@ public class ActionResponseCoordinator {
         if (op == null) {
             return;
         }
-        long period = LeaseRenewalRunner.renewalPeriodMillis(
-                dispatch.getLeaseRenewInterval(), dispatch.getLeaseDuration());
-        var renewal = runner.startFixedDelay(
-                period,
-                () -> sessions.renewLifecycleOperation(tenant, session, operation, owner,
-                        op.claimGeneration(), dispatch.getLeaseDuration()),
-                error -> LOG.warn("Action response lease renewal failed operation={}", operation, error));
+        AtomicBoolean leaseLost = new AtomicBoolean();
+        long period = Math.max(1, Math.min(dispatch.getLeaseRenewInterval().toMillis(),
+                dispatch.getLeaseDuration().toMillis() / 3));
+        var renewal = renewals.scheduleWithFixedDelay(() -> {
+            try {
+                if (!sessions.renewLifecycleOperation(tenant, session, operation, owner,
+                        op.claimGeneration(), dispatch.getLeaseDuration())) {
+                    leaseLost.set(true);
+                }
+            } catch (RuntimeException error) {
+                leaseLost.set(true);
+                LOG.warn("Action response lease renewal failed operation={}", operation, error);
+            }
+        }, period, period, TimeUnit.MILLISECONDS);
         // The budget terminal records "the Harness never answered", so only
         // a genuinely undelivered answer may reach it. Track the answer
         // itself rather than the exception type: a 200 from resolveAction
@@ -94,12 +123,12 @@ public class ActionResponseCoordinator {
         // is not a delivery failure; the attempt keeps retrying until the
         // projection heals or the Action's own end state settles it.
         boolean harnessAnswered = false;
-        try (renewal) {
+        try {
             Response response = actions.response(tenant, session, operation);
             if (settled(op, response)) {
                 return;
             }
-            if (!renewal.isLive()) {
+            if (leaseLost.get()) {
                 return;
             }
             try {
@@ -251,6 +280,8 @@ public class ActionResponseCoordinator {
                     "Action response will retry operation={} failure={}",
                     operation,
                     error.toString());
+        } finally {
+            renewal.cancel(false);
         }
     }
 
@@ -282,7 +313,7 @@ public class ActionResponseCoordinator {
                                 .equals(action.decisionDigest());
         actions.complete(
                 op,
-                runner.owner(),
+                owner,
                 matched ? null : ManagedActionStore.endedCode(action.state()),
                 matched ? action.decisionReceiptId() : null,
                 true,

@@ -35,13 +35,9 @@ reap_stale() {
 }
 # e2e/release containers carry the sandbox label (set at image build time);
 # autofix/review containers come from the published image, which does not, and
-# the CLI names them qwen-review-* (packages/cli/src/commands/review/lib/
-# sandboxed-exec.ts, containerName). The qwen-code-* filter predates that and
-# matches the label's other producers; both prefixes are swept so a container
-# leaked by a killed job cannot outlive the 24h gate.
+# are named qwen-code-*.
 reap_stale 'label=org.qwen-code.ci.sandbox=true' "$now"
 reap_stale 'name=qwen-code-' "$now"
-reap_stale 'name=qwen-review-' "$now"
 
 # Dangling images are untagged and unreferenced, so this prune needs no daemon
 # lock and runs even on hosts that never create it.

@@ -44,7 +44,7 @@ public class ContextCompressionCoordinator {
     }
 
     public void dispatch(String tenantId, String sessionId, String operationId) {
-        String key = LeaseRenewalRunner.scopedKey(tenantId, sessionId, operationId);
+        String key = tenantId + "\n" + sessionId + "\n" + operationId;
         if (!active.add(key)) {
             return;
         }

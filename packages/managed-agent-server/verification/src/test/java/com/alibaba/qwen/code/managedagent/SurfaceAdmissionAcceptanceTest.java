@@ -874,11 +874,12 @@ public class SurfaceAdmissionAcceptanceTest {
                                 + "\",\"idempotencyKey\":\"" + nextKey()
                                 + "\"}"))
                 .andExpect(status().isAccepted());
-        // The legacy arm of respond: a genuine no-row Session keeps its raw
-        // creator key on ma_session, so the unbound Action gate is owner-only
-        // and refuses a foreign actor with 403. The carrying Session is fresh:
-        // an accepted response parks an ACTION_RESPONSE operation that must not
-        // shadow later probes.
+        // The legacy arm of respond: this no-row Session still carries the
+        // raw creator key, so its unbound Action gate is owner-only and a
+        // stranger is refused 403 (pinned by
+        // actionRespondOnLegacyRefusesTheNonOwnerWithTheFamilyCode). The
+        // carrying Session is fresh: an accepted response parks an
+        // ACTION_RESPONSE operation that must not shadow later probes.
         String answered = createLegacySession(tenant);
         String action = insertAction(tenant, answered);
         String body = "{\"sessionId\":\"" + answered + "\",\"actionId\":\""

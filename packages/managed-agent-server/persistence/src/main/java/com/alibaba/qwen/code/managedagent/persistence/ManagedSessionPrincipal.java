@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.List;
@@ -180,17 +179,21 @@ public final class ManagedSessionPrincipal {
         // One statement for the whole authority question (R6-6): the row
         // left-joined with the legacy-creation mark. A present row is the
         // sole authority; only a row-less Session consults the mark, so the
-        // hot unbound read no longer pays a second round trip. The receipt
-        // subquery binds the hashed tenant key so idx_ma_receipt_session
-        // (namespace, tenant_key, session_id) is usable (R1-15).
-        String tenantKey = ManagedSchemaKeys.key(tenantId);
+        // hot unbound read no longer pays a second round trip.
+        // The receipt predicate binds the hashed tenant_key so the lookup
+        // seeks idx_ma_receipt_session (namespace, tenant_key, session_id)
+        // instead of range-scanning the SESSION_COMMAND partition, and reads
+        // the Session columns from the outer row rather than re-joining
+        // ma_session.
         List<AuthorityRow> rows = jdbc.query(
                 "SELECT p.version, p.user_id, p.actor_present,"
                         + " p.actor_subject_id, (SELECT COUNT(*) FROM"
-                        + " ma_request_receipt r WHERE r.namespace ="
-                        + " 'SESSION_COMMAND' AND r.tenant_key = ? AND"
+                        + " ma_request_receipt r WHERE"
+                        + " r.namespace = 'SESSION_COMMAND' AND"
+                        + " r.tenant_key = ? AND r.tenant_id = ? AND"
                         + " r.session_id = ? AND r.operation ="
-                        + " 'CREATE_SESSION' AND r.actor_id IS NOT NULL AND"
+                        + " 'CREATE_SESSION' AND ms.workspace_id IS NULL"
+                        + " AND r.actor_id IS NOT NULL AND"
                         + " LENGTH(r.actor_id) > 0 AND"
                         + " (ms.creator_actor_key IS NULL OR"
                         + " r.actor_id <> ms.creator_actor_key))"
@@ -205,7 +208,8 @@ public final class ManagedSessionPrincipal {
                                         result.getBoolean(3),
                                         result.getString(4)),
                         result.getInt(5)),
-                tenantKey, sessionId, tenantId, sessionId);
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenantId),
+                tenantId, sessionId, tenantId, sessionId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 

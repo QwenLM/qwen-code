@@ -37,7 +37,8 @@ final class ChildSessionAdmissions {
     ChildSessionAdmissions(JdbcTemplate jdbc, Clock clock, AgentStoreRows storeRows,
             AgentEventJournal eventJournal, AgentSessionCommands sessionCommands,
             JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
-            JdbcManagedSessionSkills creationSkills, boolean workspaceFilesEnabled) {
+            JdbcManagedSessionSkills creationSkills,
+            boolean workspaceFilesEnabled) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.storeRows = storeRows;

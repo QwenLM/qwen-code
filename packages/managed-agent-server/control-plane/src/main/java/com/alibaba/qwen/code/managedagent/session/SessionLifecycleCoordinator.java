@@ -38,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -154,13 +155,17 @@ public class SessionLifecycleCoordinator {
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
     private final int maxOperationRetries;
-    private final LeaseRenewalRunner runner =
-            new LeaseRenewalRunner("session-lifecycle-renewal");
-    private final String owner = runner.owner();
+    private final String owner = UUID.randomUUID().toString();
+    private final java.util.concurrent.ScheduledExecutorService renewals =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
+                Thread thread = new Thread(task, "session-lifecycle-renewal");
+                thread.setDaemon(true);
+                return thread;
+            });
 
     @jakarta.annotation.PreDestroy
     void stopRenewals() {
-        runner.close();
+        renewals.shutdownNow();
     }
 
     // The harness-local client-files catalog is gone once the harness detaches
@@ -182,6 +187,7 @@ public class SessionLifecycleCoordinator {
         }
     }
 
+    private final Set<String> active = ConcurrentHashMap.newKeySet();
     static final Set<String> SETTLED_SESSION_STATES =
             Set.of("CLOSED", "ARCHIVED", "DELETED");
 
@@ -232,10 +238,17 @@ public class SessionLifecycleCoordinator {
 
     public void dispatch(String tenantId, String sessionId,
             String operationId) {
-        runner.dispatchOnce(
-                executor,
-                LeaseRenewalRunner.scopedKey(tenantId, sessionId, operationId),
-                () -> deliver(tenantId, sessionId, operationId));
+        String key = tenantId + "\n" + sessionId + "\n" + operationId;
+        if (!active.add(key)) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                deliver(tenantId, sessionId, operationId);
+            } finally {
+                active.remove(key);
+            }
+        });
     }
 
     @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
@@ -255,15 +268,20 @@ public class SessionLifecycleCoordinator {
         if (claimed == null) {
             return;
         }
-        long period = LeaseRenewalRunner.renewalPeriodMillis(leaseDuration);
-        LeaseRenewalRunner.RenewalHandle renewal;
+        var valid = new java.util.concurrent.atomic.AtomicBoolean(true);
+        long period = Math.max(1, leaseDuration.toMillis() / 3);
+        java.util.concurrent.ScheduledFuture<?> renewal;
         try {
-            renewal = runner.startFixedDelay(
-                    period,
-                    () -> store.renewLifecycleOperation(tenantId, sessionId,
-                            operationId, owner, claimed.claimGeneration(),
-                            leaseDuration),
-                    ignored -> {});
+            renewal = renewals.scheduleWithFixedDelay(() -> {
+                try {
+                    if (!store.renewLifecycleOperation(tenantId, sessionId, operationId, owner,
+                            claimed.claimGeneration(), leaseDuration)) {
+                        valid.set(false);
+                    }
+                } catch (RuntimeException error) {
+                    valid.set(false);
+                }
+            }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.RejectedExecutionException stopped) {
             // The coordinator is shutting down; the claim's lease lets the
             // recovery scan re-drive this operation after restart, once a
@@ -288,7 +306,7 @@ public class SessionLifecycleCoordinator {
                 return;
             }
             harnessConfirmed = settle(claimed, harnessSettled);
-            if (!renewal.isLive()) {
+            if (!valid.get()) {
                 return;
             }
             if (!store.completeOperation(tenantId, sessionId, operationId,
@@ -412,7 +430,7 @@ public class SessionLifecycleCoordinator {
                     ? adjustedAttempts >= (long) maxOperationRetries
                             * SETTLED_COMPLETION_BUDGET_FACTOR
                     : adjustedAttempts >= maxOperationRetries;
-            if (!cwdChange && budgetSpent && renewal.isLive() && !exemptWait
+            if (!cwdChange && budgetSpent && valid.get() && !exemptWait
                     && !staleBoot && daemonWaitCode == null) {
                 String terminalCode = settleReachedHarness
                         ? "session_close_completion_unsettled" : failureCode;
@@ -504,7 +522,7 @@ public class SessionLifecycleCoordinator {
                                     + " session={} operation={} failure={}",
                             tenantId, sessionId, operationId,
                             writeError.getMessage());
-                    if (renewal.isLive()) {
+                    if (valid.get()) {
                         if (blocked != null) {
                             store.blockLifecycleOperation(tenantId, sessionId,
                                     operationId, owner,
@@ -520,11 +538,11 @@ public class SessionLifecycleCoordinator {
                 }
                 return;
             }
-            if (renewal.isLive() && blocked != null) {
+            if (valid.get() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay),
                         exemptWait || staleBoot);
-            } else if (renewal.isLive() && exemptWait && !staleBoot
+            } else if (valid.get() && exemptWait && !staleBoot
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // Past the budget the writer wait is published: the row reads
                 // recovery_blocked with its code rather than a healthy
@@ -539,7 +557,7 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         "session_close_writer_live",
                         Math.addExact(clock.millis(), delay), true);
-            } else if (renewal.isLive() && !cwdChange && staleBoot
+            } else if (valid.get() && !cwdChange && staleBoot
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // The stale-view wait outlasts the budget only while the
                 // Harness keeps restarting between attempts — each
@@ -552,7 +570,7 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         "hosted_harness_generation_mismatch",
                         Math.addExact(clock.millis(), delay), true);
-            } else if (renewal.isLive() && daemonWaitCode != null
+            } else if (valid.get() && daemonWaitCode != null
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // The daemon's wait is published the same way: the row
                 // reads recovery_blocked with the refusal's own code and
@@ -562,11 +580,11 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         daemonWaitCode,
                         Math.addExact(clock.millis(), delay), true);
-            } else if (renewal.isLive() && (exemptWait || staleBoot || daemonWaitCode != null)) {
+            } else if (valid.get() && (exemptWait || staleBoot || daemonWaitCode != null)) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(),
                         Math.addExact(clock.millis(), delay), true);
-            } else if (renewal.isLive()) {
+            } else if (valid.get()) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), Math.addExact(clock.millis(), delay));
             }
@@ -578,7 +596,7 @@ public class SessionLifecycleCoordinator {
                     error.getClass().getSimpleName(), error.getMessage(),
                     error);
         } finally {
-            renewal.close();
+            renewal.cancel(false);
         }
     }
 

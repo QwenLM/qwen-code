@@ -39,6 +39,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -75,7 +76,7 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
             ManagedAgentSettings properties, HarnessRules harnessRules) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 null, new JdbcManagedSessionSkills(jdbc, objectMapper, new RequestDigests(), null), null,
-                null, null, null, null);
+                null, null, null, null, null);
     }
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,

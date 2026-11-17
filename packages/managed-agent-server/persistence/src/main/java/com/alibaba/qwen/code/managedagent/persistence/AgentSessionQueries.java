@@ -306,8 +306,8 @@ final class AgentSessionQueries {
             // row-present Session is its owner's alone.
             ownershipClause = " OR" + legacyUnbound;
         }
-        // The owner-only privacy fence is unconditional on the completion base:
-        // a memory-bound Session lists only for the actor that owns it.
+        // The owner-only privacy fence is unconditional: a memory-bound
+        // Session lists only for the actor that owns it.
         arguments.add(actorId == null ? null
                 : com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(
                         tenantId, actorId));

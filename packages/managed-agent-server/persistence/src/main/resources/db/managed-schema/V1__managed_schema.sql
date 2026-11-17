@@ -3,6 +3,7 @@
 -- Do not add V2+ migrations or increment the database schema version before that release.
 -- Development catalogs must be recreated when the baseline changes; no upgrade path is maintained.
 -- No old-schema upgrade or compatibility objects are provided.
+-- Generated-column comments stay on a continuation line because validation reads the expression line.
 
 CREATE TABLE ma_session (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
