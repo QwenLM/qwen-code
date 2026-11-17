@@ -4,7 +4,7 @@ import { StrictMode, act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { I18nProvider, type WebShellLanguage } from '../../i18n';
+import { getTranslator, I18nProvider, type WebShellLanguage } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import { InteractionBlockContext } from '../../interactionBlockContext';
 import { immediateClipboardWrite } from '../../test/reactHarness';
@@ -2312,6 +2312,60 @@ describe('EnhancedMarkdownTable', () => {
       );
     });
     expect(scroller.scrollTop).toBe(stoppedAt);
+  });
+
+  // jsdom applies no `direction`, so the RTL column order is supplied as
+  // geometry: the DOM-first cell is the rightmost one. Reading the bounds off
+  // DOM order there inverts them, and the drag stops extending as soon as it
+  // auto-scrolls.
+  it('keeps extending a selection while auto-scrolling an RTL table', async () => {
+    const container = renderTable('ar');
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    vi.spyOn(scroller, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 0, 200, 100),
+    );
+    const firstCell = container.querySelector<HTMLTableCellElement>(
+      'tbody [data-row-index][data-column-index]',
+    )!;
+    const rowCells = firstCell.parentElement!.querySelectorAll<HTMLElement>(
+      '[data-column-index]',
+    );
+    const columnWidth = 160 / rowCells.length;
+    rowCells.forEach((cell, index) => {
+      vi.spyOn(cell, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(200 - (index + 1) * columnWidth, 0, columnWidth, 48),
+      );
+    });
+    const lastCell = dataCell(container, 2, 0);
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: () => lastCell,
+    });
+
+    act(() => {
+      dataCell(container, 0, 0).dispatchEvent(
+        new MouseEvent('mousedown', {
+          bubbles: true,
+          button: 0,
+          clientX: 100,
+          clientY: 96,
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      );
+    });
+
+    expect(scroller.scrollTop).toBeGreaterThan(0);
+    expect(container.textContent).toContain(
+      `${getTranslator('ar')('markdownTable.selection.selected')} 3`,
+    );
+
+    act(() => {
+      window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
   });
 
   it('does not poll layout while a selection stays away from the edges', async () => {

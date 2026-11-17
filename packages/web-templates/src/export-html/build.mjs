@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_184_500;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_188_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -111,9 +111,12 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_184_500;
 // d5f6a103a6 measures 2,138,797 in CI, 797 above it.
 // Adding Arabic transcript strings (ar-transcript.ts, with interactive-only
 // Arabic copy stubbed via ar-interactive.transcript-stub.ts) and RTL direction
-// wiring across exported transcript views measures 2,183,235 bytes on the
-// pre-merge head (+47,120 over the 2,136,115 it was measured against).
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_186_000;
+// wiring across exported transcript views measured 2,183,235 bytes on the
+// pre-merge head (+47,120 over the 2,136,115 it was measured against). Merged
+// with main's composer task-explain copy the tree measures 2,187,632 bytes, so
+// both increases are budgeted here. The warning sits 368 above that
+// measurement and the ceiling 1,368 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_189_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

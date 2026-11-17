@@ -287,7 +287,7 @@
      resting, and the node's background paints under it (background-clip is
      border-box), so a resting node reads as 3px of extra left padding with
      no width difference between states. */
-  border-inline-start: 3px solid var(--node-rule);
+  border-left: 3px solid var(--node-rule);
   border-radius: 8px;
   background: var(--background);
   transition:
@@ -295,6 +295,10 @@
     box-shadow 160ms ease;
 }
 
+/* Text only: the canvas stays LTR, so edges still arrive on the physical
+   left and the output port still sits on the physical right. The status
+   rule is a physical border-left for the same reason: an inline start
+   would move it under the port in Arabic. */
 :global([dir='rtl']) .dagCanvas .node {
   direction: rtl;
 }
@@ -365,10 +369,10 @@
    strength and the ring echoes it, rather than introducing a second colour. */
 .node[data-selected='true'] {
   border-color: var(--node-ring);
-  /* The shorthand above expands to border-inline-start-color too: on blocked/ready,
+  /* The shorthand above expands to border-left-color too: on blocked/ready,
      whose --node-rule stays transparent, it would repaint the 3px status
      rule in the ring tone and selection would read as a status change. */
-  border-inline-start-color: var(--node-rule);
+  border-left-color: var(--node-rule);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--node-ring) 32%, transparent);
 }
 

@@ -25226,6 +25226,7 @@ export function App({
                           strokeLinecap="round"
                           strokeLinejoin="round"
                           aria-hidden="true"
+                          className="rtl:-scale-x-100"
                         >
                           <path d="M15 18l-6-6 6-6" />
                         </svg>
@@ -25341,6 +25342,7 @@ export function App({
                         strokeLinecap="round"
                         strokeLinejoin="round"
                         aria-hidden="true"
+                        className="rtl:-scale-x-100"
                       >
                         <path d="M15 18l-6-6 6-6" />
                       </svg>
@@ -25401,6 +25403,7 @@ export function App({
                             strokeLinecap="round"
                             strokeLinejoin="round"
                             aria-hidden="true"
+                            className="rtl:-scale-x-100"
                           >
                             <path d="M15 18l-6-6 6-6" />
                           </svg>
@@ -25455,6 +25458,7 @@ export function App({
                           strokeLinecap="round"
                           strokeLinejoin="round"
                           aria-hidden="true"
+                          className="rtl:-scale-x-100"
                         >
                           <path d="M15 18l-6-6 6-6" />
                         </svg>

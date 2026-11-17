@@ -47,7 +47,7 @@ describe('PlanExecutionView stylesheet', () => {
     const node = planCss.match(/(^|\n)\.node\s*\{[^}]*\}/)?.[0];
     expect(node).toBeTruthy();
     expect(node).not.toMatch(/overflow:\s*hidden/);
-    expect(node).toMatch(/border-inline-start:\s*3px solid var\(--node-rule\)/);
+    expect(node).toMatch(/border-left:\s*3px solid var\(--node-rule\)/);
     expect(planCss).not.toMatch(/\.node::before\s*\{/);
     expect(planCss).toMatch(
       /\.dagCanvas\s+\.node\[data-plan-output='true'\]::after\s*\{[^}]*right:\s*-4px/,
@@ -94,7 +94,7 @@ describe('PlanExecutionView stylesheet', () => {
       /(^|\n)\.node\[data-selected='true'\]\s*\{[^}]*\}/,
     )?.[0];
     expect(selected).toBeTruthy();
-    expect(selected).toMatch(/border-inline-start-color:\s*var\(--node-rule\)/);
+    expect(selected).toMatch(/border-left-color:\s*var\(--node-rule\)/);
   });
 
   // `text-overflow` applies to a block container's own inline content, so

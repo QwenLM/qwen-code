@@ -452,6 +452,10 @@ describe('web-shell i18n catalog', () => {
       'ru',
       'Недельный лимит кредитов исчерпан. Ожидается сброс через 2 дня и 1 час. Повторите попытку после сброса.',
     ],
+    [
+      'ar',
+      'لقد استنفدت رصيدك الأسبوعي ومن المتوقع إعادة تعيين رصيدك خلال يومين وساعة واحدة. يُرجى المحاولة مرة أخرى بعد إعادة التعيين.',
+    ],
   ] as const)(
     'formats quota data through the %s catalog',
     (language, expected) => {
@@ -729,7 +733,8 @@ describe('web-shell ru locale', () => {
     const t = getTranslator('ar');
     expect(t('{{count}} days', { count: 0 })).toBe('0 أيام');
     expect(t('{{count}} days', { count: 1 })).toBe('يوم واحد');
-    expect(t('{{count}} days', { count: 2 })).toBe('يومان');
+    expect(t('{{count}} days', { count: 2 })).toBe('يومين');
+    expect(t('{{count}} hours', { count: 2 })).toBe('ساعتين');
     expect(t('{{count}} days', { count: 3 })).toBe('3 أيام');
     expect(t('{{count}} days', { count: 11 })).toBe('11 يوماً');
     expect(t('{{count}} days', { count: 100 })).toBe('100 يوم');

@@ -1827,16 +1827,21 @@ export function EnhancedTable({
         firstCell.parentElement!.querySelectorAll<HTMLTableCellElement>(
           '[data-column-index]',
         );
+      // RTL lays the columns out right-to-left, so the DOM-first cell is the
+      // rightmost one and the DOM-last cell the leftmost: take the edges by
+      // position, or the bounds invert and every hit test is skipped.
+      const firstCellRect = firstCell.getBoundingClientRect();
+      const lastCellRect = cells[cells.length - 1]!.getBoundingClientRect();
       const left = Math.max(
         0,
         rect.left + 1,
-        firstCell.getBoundingClientRect().left + 1,
+        Math.min(firstCellRect.left, lastCellRect.left) + 1,
       );
       const right = Math.min(
         window.innerWidth - 1,
         rect.right - 1,
         rect.left + (scroller.clientWidth || rect.width) - 1,
-        cells[cells.length - 1]!.getBoundingClientRect().right - 1,
+        Math.max(firstCellRect.right, lastCellRect.right) - 1,
       );
       const bottom = Math.min(
         window.innerHeight - 1,

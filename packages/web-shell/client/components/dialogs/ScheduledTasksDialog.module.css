@@ -541,7 +541,7 @@
 .toggleKnob {
   position: absolute;
   top: 2px;
-  left: 2px;
+  inset-inline-start: 2px;
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -551,6 +551,10 @@
 
 .toggleOn .toggleKnob {
   transform: translateX(16px);
+}
+
+:global([dir='rtl']) .toggleOn .toggleKnob {
+  transform: translateX(-16px);
 }
 
 .cardPrompt {

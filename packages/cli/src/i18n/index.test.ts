@@ -168,6 +168,17 @@ describe('supported language resolution', () => {
     expect(resolveSupportedLanguage('zh-CN')).toBe('zh');
     expect(resolveSupportedLanguage('zh-HK')).toBe('zh');
   });
+
+  // Without the registration check-i18n only warns about a missing or extra
+  // Arabic key, so the shipped catalog could drift with a green checker.
+  it('holds the in-tree Arabic catalog to exact en.js key parity', async () => {
+    const { SUPPORTED_LANGUAGES } = await import('./languages.js');
+
+    expect(
+      SUPPORTED_LANGUAGES.find((language) => language.code === 'ar')
+        ?.strictParity,
+    ).toBe(true);
+  });
 });
 
 describe('localizeToolDisplayName', () => {

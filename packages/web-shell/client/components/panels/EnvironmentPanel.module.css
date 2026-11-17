@@ -166,11 +166,6 @@ button.row:disabled {
   color: var(--muted-foreground);
 }
 
-:global([dir='rtl']) .row > .rowActionIcon,
-:global([dir='rtl']) .sectionHeader[aria-expanded='false'] > svg:first-child {
-  transform: scaleX(-1);
-}
-
 .label {
   flex: 0 0 auto;
   white-space: nowrap;

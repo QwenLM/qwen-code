@@ -56756,6 +56756,66 @@ describe('Arabic RTL layout', () => {
       }
     }
   });
+
+  // The five full-page headers share one back control; four of them paint an
+  // inline SVG rather than the shared icon, so each needs its own mirror.
+  it('mirrors the back arrow on every full page in Arabic', async () => {
+    const originalInnerWidth = Object.getOwnPropertyDescriptor(
+      window,
+      'innerWidth',
+    );
+    // Below the rail breakpoint, where the back button is the way out.
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 700,
+    });
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['autofix_pr_watches'],
+    };
+    try {
+      const { container } = renderApp({ language: 'ar' });
+      await flush();
+
+      const expectMirroredBack = (page: string) => {
+        const arrow = container.querySelector(
+          `[data-testid="${page}"] [class*="fullPageBack"] svg`,
+        );
+        expect(arrow).not.toBeNull();
+        expect(arrow!.getAttribute('class') ?? '').toContain(
+          'rtl:-scale-x-100',
+        );
+      };
+      const submit = async (command: string) => {
+        testState.prompt = command;
+        await clickSubmit(container);
+        await flush();
+      };
+
+      await submit('/schedule');
+      expectMirroredBack('scheduled-tasks-page');
+
+      await submit('/workflows');
+      expectMirroredBack('workflow-runs-page');
+
+      await submit('/goal');
+      expectMirroredBack('goals-page');
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="open-pr-watches"]')
+          ?.click();
+        await Promise.resolve();
+      });
+      await flush();
+      expectMirroredBack('pr-watches-page');
+    } finally {
+      if (originalInnerWidth) {
+        Object.defineProperty(window, 'innerWidth', originalInnerWidth);
+      }
+    }
+  });
 });
 
 describe('Standalone writer-blocked navigation', () => {
