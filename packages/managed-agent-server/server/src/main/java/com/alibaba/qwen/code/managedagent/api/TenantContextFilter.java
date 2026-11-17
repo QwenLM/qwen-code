@@ -43,6 +43,11 @@ public class TenantContextFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = PublicSurface.pathWithinApplication(request);
+        // The terminal upgrade carries its identity in the single-use ticket,
+        // not the tenant header a browser WebSocket cannot set.
+        if (PublicSurface.terminalUpgrade(request)) {
+            return true;
+        }
         // The client-files MCP leg carries no tenant context: the binding is
         // resolved by Session and the relay credential is the only admission.
         if (path.startsWith(MANAGED_CLIENT_FILES_PREFIX)) {

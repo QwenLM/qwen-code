@@ -77,7 +77,7 @@ describe('managed host build lane', () => {
     }
   });
 
-  it('builds untrusted PR code with a read-only token and no secrets', () => {
+  it('builds PR code with a read-only token and no secrets on either arm', () => {
     // A job-level `permissions:` block replaces the workflow default, so the
     // job's effective scope is the one the untrusted build actually runs with.
     expect(job.permissions ?? workflow.permissions).toEqual({
@@ -91,8 +91,13 @@ describe('managed host build lane', () => {
     const secretRef = /\$\{\{[^}]*\bsecrets\b/;
     expect(workflowSource).not.toMatch(secretRef);
     expect(workflowSource).toMatch(/\$\{\{\s*github\./);
+    // Both self-hosted arms keep this credential-free boundary. The split is
+    // capacity, not trust: the disposable pool is sized for untrusted forks,
+    // so trusted PRs take the persistent x64 fleet their other CI uses. The
+    // per-event routing matrix lives in
+    // .github/scripts/ci-runner-routing.test.mjs; pin the shape here.
     expect(job['runs-on']).toBe(
-      "${{ (github.event_name == 'pull_request' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"ecs-qwen-ephemeral\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+      '${{ (github.event_name == \'pull_request\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && ((github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association)) && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["self-hosted", "ecs-qwen-ephemeral"]\')) || fromJSON(\'["ubuntu-latest"]\') }}',
     );
     expect(job.if).toContain("github.repository == 'QwenLM/qwen-code'");
     const checkout = job.steps.find((step) =>
@@ -102,8 +107,11 @@ describe('managed host build lane', () => {
   });
 
   it('bounds the job and never cancels a post-merge witness', () => {
+    // The ceiling follows the arm the selector picks: 90 prices the
+    // disposable pool's cold install, and the warm persistent fleet keeps the
+    // hosted 20. The trust terms are spelled exactly as runs-on spells them.
     expect(job['timeout-minutes']).toBe(
-      "${{ (github.event_name == 'pull_request' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && 90 || 20 }}",
+      '${{ (github.event_name == \'pull_request\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\' && !(github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association))) && 90 || 20 }}',
     );
     expect(workflow.concurrency['cancel-in-progress']).toBe(
       "${{ github.event_name == 'pull_request' }}",

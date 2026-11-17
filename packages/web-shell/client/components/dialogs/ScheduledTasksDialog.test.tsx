@@ -2956,7 +2956,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     });
   }
 
-  it.each(['dingtalk-webhook', 'feishu-webhook'])(
+  it.each(['dingtalk-webhook', 'feishu-webhook', 'wecom-webhook'])(
     'creates a task with the %s configured destination without contacts or a manual ID',
     async (type) => {
       useConfiguredWebhook(type);
@@ -2983,7 +2983,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     },
   );
 
-  it.each(['dingtalk-webhook', 'feishu-webhook'])(
+  it.each(['dingtalk-webhook', 'feishu-webhook', 'wecom-webhook'])(
     'preserves an unsupported %s saved destination when editing another task field',
     async (type) => {
       useConfiguredWebhook(type);

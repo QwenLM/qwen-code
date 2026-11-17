@@ -2,16 +2,11 @@
 
 [English](2026-11-12-managed-agent-preproduction-convergence.md) | [简体中文](2026-11-12-managed-agent-preproduction-convergence.zh-CN.md)
 
-- Status: **Proposed** — pending maintainer review. Rebased onto current main
-  after the tier-1 convergence merged: #17058 (OSS read-path probe removal,
-  object-storage decoupling, K1 deletion, the slice-1 `defaultCandidate` fix, and
-  uniform pool strict mode), #17064 (single executable jar — supersedes the
-  earlier "retain the classifier jars" framing below; the operator tools survive
-  as admin subcommands), #17047 (pack-aware readers) and #17044 (ratchet trim).
-  Slice 1's fix landed via #17058; its embedding regression assertion is retained
-  here. Slice 2 (dead-tag release repair removal) is implemented in this PR
-  (pending review). Slice 3
-  is dropped (see below). Slices 4–8 remain.
+- Status: **Proposed** — Slices 1 and 2 merged (#17058, #17064, #17139), plus
+  `verification/pom.xml` Failsafe profile deduplication and #17139 review
+  follow-ups. Slice 3 and Slice 8 are dropped as framed (see below). Slices 4–7
+  remain. Note: #17415 subsequently cold-archived the Kubernetes runtime and
+  resident CSI backend into `packages/sdk-java/managed-kubernetes-archive/`.
 - Date: 2026-11-12
 - Scope: `packages/managed-agent-server/**`, its packaging/release scripts, the
   web-shell generated client, and the Java SDK surface.
@@ -46,10 +41,11 @@ are removable, and the single-V1 schema baseline is at its cheapest editing
 window. This document records what may be removed, what must survive, and a
 sliced plan that keeps each step independently verifiable.
 
-## Current state (verified against current main)
+## Current state (verified at #17139 merge `d3d28bd449`, before #17415)
 
-Counts below are whole-repository scans; figures affected by the tier-1 merges
-(#17058 / #17064 / #17075) are re-measured against the merging tree.
+Counts below are whole-repository scans re-measured against `d3d28bd449` (after
+the tier-1 merges #17044 / #17047 / #17058 / #17064 / #17075, before #17415
+cold-archived the Kubernetes / resident CSI backend).
 
 - **Interfaces.** 136 production interface names (97 top-level files); only 9
   have more than one production implementation. All 41 `*Store`/`*Repository`
@@ -57,9 +53,9 @@ Counts below are whole-repository scans; figures affected by the tier-1 merges
   the `ManagedSessionStore` role-interface inheritance). There is no production
   `InMemory*Repository`. `ToolPublicationObjectStore` is a genuine SPI (8 test
   fakes, reused by 5 subsystems).
-- **Settings mirrors.** `ManagedAgentSettings` (20 interfaces, 252 lines) plus
+- **Settings mirrors.** `ManagedAgentSettings` (20 interfaces, 261 lines) plus
   `SshSettings` (3) = 23 read-only mirrors of `ManagedAgentProperties`
-  (1,076 lines, 21 nested classes). 62 production files import
+  (1,136 lines, 21 nested classes). 62 production files import
   `ManagedAgentSettings`. `configuration-descriptions.json` generates the
   configuration reference doc; `release-managed-agent-reference.yml` runs
   `generate-managed-agent-configuration-reference.mjs --check` as a drift gate
@@ -92,14 +88,15 @@ Counts below are whole-repository scans; figures affected by the tier-1 merges
   `ServiceAccount` (194, user-space `namei`).
 - **Packaging.** A single `exec` repackage remains (#17064 removed the six
   classifier fat-JAR executions; the operator tools survive as admin
-  subcommands). The maintenance family is 13 classes / 1,402 lines, referenced
-  by `scripts/package-managed-agent-reference.mjs`, e2e tests, and the README.
-- **Ratchets.** `verification/pom.xml` is 831 lines with 17 profiles and
-  ~435 lines of near-duplicate Failsafe XML. The v0.26.5 pom pin
-  (`scripts/patches/managed-runtime-v0.26.5-verification.patch` and its
-  meta-test) was removed by the dead-tag release-repair cleanup, so profile
-  dedup is no longer blocked by a pin. `ManagedSchemaCatalog` (630 lines;
-  1,198 across the `managedschema` package) re-parses the canonical DDL with
+  subcommands). The maintenance family is 14 classes / 1,553 lines (subsequently
+  reduced to 6 classes / 647 lines by #17415), referenced by
+  `scripts/package-managed-agent-reference.mjs`, e2e tests, and the README.
+- **Ratchets.** `verification/pom.xml` was 831 lines with 17 profiles and
+  ~435 lines of near-duplicate Failsafe XML; after moving the shared Failsafe
+  version and `integration-test`/`verify` execution binding into
+  `pluginManagement`, it is 700 lines across the same 17 profiles.
+  `ManagedSchemaCatalog` (630 lines; 1,185 across the 5-file `managedschema`
+  package, 1,177 after #17415) re-parses the canonical DDL with
   indentation-sensitive regexes at startup.
 - **Registered providers, not dead code.** All five `runtime-*` modules register
   a `RuntimeProviderFactory` via `META-INF/services`, so they are
@@ -230,26 +227,27 @@ series) with its own focused verification; CI owns the full gates.
 - **Done — old-tag release repair removed.** Deleted all three repair patches
   (`v0.26.3-tests`, `v0.26.5-javadoc`, `v0.26.5-verification`), the two
   conditional workflow repair steps (`RELEASE_TAG == v0.26.3 / v0.26.5`), and
-  their meta-tests in `managed-runtime-release.test.js` (−396 lines). These only
-  ran when re-releasing dead tags, so removal does not affect future releases.
-  This abandons the v0.26.3 managed-runtime backfill (locked decision D3); the
+  their meta-tests in `managed-runtime-release.test.js` (−396 lines across the
+  workflow, patches, and meta-test). These only ran when re-releasing dead tags,
+  so removal does not affect future releases. This abandons the v0.26.3 and
+  v0.26.5 managed-runtime backfills (locked decision D3); the
   `managed-runtime-0263-test-repair` runbook is retired accordingly. The
-  workflow-wide guard forbidding disabling the Javadoc gate is retained as its
-  own test. Verified: release meta-tests 48/49 (the one failure is a pre-existing
-  environmental `semver` resolution issue in a temp fixture, unrelated),
-  Prettier + ESLint green.
-- **Deferred — profile deduplication.** Removing the pom-pinning meta-test
-  unblocks deduplicating the 17 verification profiles' shared Failsafe XML, but
-  that touches CI lane definitions and is left as a separate careful change.
-- **Reclassified — maintenance tools are not dead code.** The 12 offline
-  operator entry points (recovery, migration, CSI operations, lease recovery)
-  are catalogued by `package-managed-agent-reference.mjs`, exercised by
+  workflow-wide guard forbidding disabling the Javadoc gate (including
+  `failOnError`/`failOnWarnings` and `continue-on-error`) is retained as its own
+  test.
+- **Done — Failsafe profile deduplication.** Moving the shared Failsafe plugin
+  version and `integration-test`/`verify` execution binding into
+  `pluginManagement` removes ~131 lines of duplicated profile XML across the 15
+  Failsafe profiles while keeping each profile's selection, timeout, and
+  Surefire behavior identical.
+- **Reclassified — maintenance tools are not dead code.** The offline operator
+  entry points (recovery, migration, storage registration) are catalogued by
+  `package-managed-agent-reference.mjs`, exercised by
   `managed-agent-server-e2e.test.js` and
   `integration-tests/helpers/hosted-operator-recovery-driver.ts`, and documented
-  in the README. The classifier fat JARs are distinct operator tools, not
-  redundant duplicates. They are retained; consolidating them into a single
-  subcommand entry point would be a separate product/refactor decision, not
-  dead-code cleanup.
+  in the README. The tools themselves are retained; #17064 consolidated their
+  packaging into the single `exec` jar dispatched via `admin` subcommands
+  (removing the six redundant classifier fat JARs).
 
 ### Slice 3 — HTTP unification: not feasible as framed (dropped)
 

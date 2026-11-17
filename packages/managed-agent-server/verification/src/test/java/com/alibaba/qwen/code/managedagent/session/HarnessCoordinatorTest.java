@@ -29,6 +29,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.host.MacOsIdentityProbeTimeoutException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -37,6 +38,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -45,6 +47,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -265,6 +268,48 @@ class HarnessCoordinatorTest {
         verify(store).cancelBeforeAdmission(eq("tenant"), eq("session"), eq("turn"), anyString());
         verify(runtime, never()).warm(anyString());
         verify(harness, never()).createOrLoad(anyString(), anyString(), anyBoolean());
+    }
+
+    @Test
+    void identityProbeTimeoutDoesNotFailTheEnvironment() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                mock(HarnessConnector.class), new HarnessEventProjector(),
+                mock(RuntimeWarmer.class), directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        Throwable timeout = new CompletionException(
+                new MacOsIdentityProbeTimeoutException(
+                        "macOS native identity probe timed out"));
+        try {
+            coordinator.runtimeWarmResult(boundSessionRecord(),
+                    turn("tenant", "session", "turn",
+                            "11111111-1111-4111-8111-111111111111", null, 0),
+                    timeout);
+        } finally {
+            coordinator.close();
+        }
+        verify(store, never()).appendPublicEventIfAbsent(anyString(), anyString(),
+                anyString(), eq("environment.failed"), any(), anyBoolean(), anyString());
+    }
+
+    @Test
+    void identityMismatchFailsTheEnvironment() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                mock(HarnessConnector.class), new HarnessEventProjector(),
+                mock(RuntimeWarmer.class), directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.runtimeWarmResult(boundSessionRecord(),
+                    turn("tenant", "session", "turn",
+                            "11111111-1111-4111-8111-111111111111", null, 0),
+                    new IOException("macOS storage identity changed or is unavailable"));
+        } finally {
+            coordinator.close();
+        }
+        verify(store).appendPublicEventIfAbsent(eq("tenant"), eq("session"), eq("turn"),
+                eq("environment.failed"), eq(Map.of("code", "runtime_warm_failed")),
+                eq(false), eq("runtime:failed:turn"));
     }
 
     private static JdbcSessionWorktreeStore.Descriptor worktree(String state) {

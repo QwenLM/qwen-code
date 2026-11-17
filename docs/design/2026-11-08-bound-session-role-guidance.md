@@ -2,7 +2,7 @@
 
 [English](2026-11-08-bound-session-role-guidance.md) | [简体中文](2026-11-08-bound-session-role-guidance.zh-CN.md)
 
-Status: proposed (2026-11-08). Direction confirmed by the maintainer: surface the
+Status: implemented as #16576 (proposed 2026-11-08). Direction confirmed by the maintainer: surface the
 binding role, make machine-authored watch summaries factual, and ship built-in
 per-role guidance — while keeping the single-winner routing of the base design.
 Builds on [GitHub Channel Events to PR-Bound Sessions](2026-11-02-github-channel-bound-session-events.md)
@@ -304,9 +304,10 @@ workflow. The event body stops competing with it.
 
 ## Open questions
 
-- Whether the daemon watch producer should reuse these strings verbatim or
-  supply platform-neutral variants. Deferred until that producer is implemented;
-  the table lives in the shared module so either choice stays cheap.
+- Resolved: the daemon watch producer reuses this table verbatim through
+  `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE` and authors platform-neutral
+  transition summaries of its own. See
+  [Daemon PR watch: prompt language](2026-11-15-daemon-pr-watch-drain-language.md).
 - Whether `fix` guidance should name the push-confirmation expectation. Left to
   the session's own workflow for now, since that expectation is a user
   preference rather than a product rule.

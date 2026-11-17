@@ -72,7 +72,10 @@ describe('managed-channel-record/1 shared contract', () => {
     expect(
       MANAGED_EXTENSION_RECORD_BODIES.channel_delivery!.taskKindOf({}),
     ).toBe('channel_delivery');
-    expect(MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS).toEqual(['email']);
+    expect(MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS).toEqual([
+      'email',
+      'dingtalk',
+    ]);
   });
 
   it.each(fixtures.cases)('$id', (fixture) => {

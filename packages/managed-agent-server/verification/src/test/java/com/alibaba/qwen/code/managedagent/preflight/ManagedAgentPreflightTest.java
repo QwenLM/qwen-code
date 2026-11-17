@@ -2032,7 +2032,7 @@ class ManagedAgentPreflightTest {
     @Test
     void warnsWhenTheToolPathUsesAnotherProvisioner() {
         ManagedAgentProperties properties = toolProperties();
-        properties.getRuntimeBroker().setProvisioner("kubernetes-workspace");
+        properties.getRuntimeBroker().setProvisioner("fixture-http");
         assertEquals(ManagedAgentPreflight.Status.WARN,
                 ManagedAgentPreflight.toolPathCheck(properties).status());
     }

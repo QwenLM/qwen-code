@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -624,7 +625,7 @@ class HostedHarnessClientTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"effects", "prepare_resources", "settle_resources"})
     void lifecycleV2RequiresExactCapabilityAndReceiptIdentity(String phase) {
         capabilitiesBody.set(capabilitiesJson(DIGEST, BOOT_ID).replace("\"hostedHarness\":{",
-                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\",\"hosted-workspace-shell/3\"],"));
+                "\"hostedHarness\":{\"lifecycleProtocolVersion\":1,\"lifecycleV2Profiles\":[\"hosted-workspace-shell/1\",\"hosted-workspace-shell/3\",\"hosted-workspace-shell/4\"],"));
         createSessionRoute();
         AtomicInteger calls = new AtomicInteger();
         AtomicBoolean wrongPhase = new AtomicBoolean();
@@ -648,6 +649,11 @@ class HostedHarnessClientTest {
             var shell3 = new java.util.LinkedHashMap<>(request);
             shell3.put("toolProfile", "hosted-workspace-shell/3");
             assertEquals("close-2", client.settleLifecycle(session, shell3).get("operationId"));
+            // The fixed-interval revision shell/4 settles on the same arm; a
+            // dropped allowlist entry would refuse it before the mutation sends.
+            var shell4 = new java.util.LinkedHashMap<>(request);
+            shell4.put("toolProfile", "hosted-workspace-shell/4");
+            assertEquals("close-2", client.settleLifecycle(session, shell4).get("operationId"));
             wrongPhase.set(true);
             // The Harness answered 200 with a mismatched receipt: a
             // post-answer failure, not a pre-send protocol refusal.
@@ -657,7 +663,7 @@ class HostedHarnessClientTest {
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
             unsupported.put("protocolVersion", 3);
             assertThrows(DaemonProtocolException.class, () -> client.settleLifecycle(session, unsupported));
-            assertEquals(3, calls.get());
+            assertEquals(4, calls.get());
         }
     }
 
@@ -1304,6 +1310,41 @@ class HostedHarnessClientTest {
             assertThrows(DaemonHttpException.class, () -> client.cancelTurn(session, PROMPT_ID));
         }
         assertEquals(1, requests.get());
+    }
+
+    @Test
+    void sharesOneDeeplyImmutableTranscriptSnapshot() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/transcript",
+                exchange -> sendSessionJson(exchange, 200,
+                        "{\"v\":1,\"sessionId\":\"" + SESSION_ID
+                                + "\",\"events\":[{\"type\":\"user\","
+                                + "\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],"
+                                + "\"nextCursor\":\"next\",\"hasMore\":true}"));
+
+        try (HostedHarnessClient client = newClient()) {
+            HarnessTranscriptPage page = client.getTranscript(
+                    GetHarnessTranscript.builder().session(createSession(client)).build());
+            List<?> rawEvents = (List<?>) page.getRaw().get("events");
+            Map<?, ?> event = (Map<?, ?>) page.getEvents().get(0);
+            List<?> content = (List<?>) event.get("content");
+            Map<?, ?> part = (Map<?, ?>) content.get(0);
+
+            assertSame(page.getEvents(), rawEvents,
+                    "A transcript page must not retain two copies of its event graph");
+            assertSame(event, rawEvents.get(0));
+            assertEquals("hello", part.get("text"));
+            assertEquals(SESSION_ID, page.getHarnessSessionId());
+            assertEquals("next", page.getNextCursor());
+            assertTrue(page.hasMore());
+
+            assertThrows(UnsupportedOperationException.class, () -> page.getRaw().put("hasMore", false));
+            assertThrows(UnsupportedOperationException.class, () -> page.getEvents().add(Map.of()));
+            assertThrows(UnsupportedOperationException.class, rawEvents::clear);
+            assertThrows(UnsupportedOperationException.class, event::clear);
+            assertThrows(UnsupportedOperationException.class, content::clear);
+            assertThrows(UnsupportedOperationException.class, part::clear);
+        }
     }
 
     @Test

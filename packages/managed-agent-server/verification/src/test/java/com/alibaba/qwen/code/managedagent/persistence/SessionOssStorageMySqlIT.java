@@ -19,7 +19,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Real MySQL evidence for S1a/S1b SQL: allocation idempotency, finalize verification, pack
  * publish watermark CAS, range resolution and grace deletion. Requires
- * -Dqwen.o4.mysql.url pointing at a disposable dedicated MySQL 8.4 instance.
+ * -Dmysql.url and -Dmysql.user pointing at a disposable MySQL 8.4 instance.
  */
 @Timeout(120)
 class SessionOssStorageMySqlIT {
@@ -27,14 +27,14 @@ class SessionOssStorageMySqlIT {
     private static final String WORKSPACE = "workspace-oss-it";
     private static final String SESSION = "session-oss-it";
 
-    private O4MySqlDatabase database;
+    private IsolatedManagedSchemaMySqlTestDatabase database;
     private JdbcTemplate jdbc;
     private JdbcSessionResourceObjects resources;
     private JdbcJournalPacks packs;
 
     @BeforeEach
     void setUp() {
-        database = new O4MySqlDatabase();
+        database = new IsolatedManagedSchemaMySqlTestDatabase();
         Flyway.configure().dataSource(database.source())
                 .locations("classpath:db/managed-schema").load().migrate();
         jdbc = new JdbcTemplate(database.source());

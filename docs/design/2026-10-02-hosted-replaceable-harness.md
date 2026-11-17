@@ -236,6 +236,42 @@ because a Turn written turn_settled completed and must never be stamped
 a terminal failure — the daemon's own projection writes the terminal
 record once the plain attach is admitted).
 
+An eighth reason, `public_child_recovery_unsupported` (#17260), names a
+Session whose own durable shape the Harness cannot open at all: a
+public-child Session persisted under the shell topology now served by a
+Harness without public child agents, or a saved approval continuation
+whose public-child profile no longer matches the active topology.
+Unlike the journal-state declines no settlement route can pay on this
+Harness, so the coordinator abandons the recovery on the first drive —
+cancellation included — settling the Turn FAILED as
+`managed_runtime_recovery_blocked` without the reconcile/park detour,
+which removes it from both recovery sweeps permanently. The recorded
+message follows what was established: a Session with a bound harness boot
+reports the abandoned park, while a boot-less Session — driven through
+`createOrLoad`, where nothing was parked and nothing was replayed — reports
+the Turn settled without dispatch.
+
+The verdict reaches the coordinator by two routes. The connector raises it
+locally from its capability probe, and the daemon answers the same typed
+decline on the wire when the saved continuation's own profile is what
+mismatches — a shape the probe never sees. Every connector entry point that
+drives a load therefore maps the `hosted_turn_recovery_declined` body code
+onto the typed exception, the plain open/load route included. The mapping
+keys on the code, never the 409 status alone: a bare 409 still means "the
+Harness already holds the Session" for the attachment fallbacks.
+
+Like `checkpoint_blocked`, this reason fires only on positive durable
+evidence: the connector's admission-shaped capability probe folds an
+unreachable daemon (and a pooled placement) into "unsupported", which is
+safe for refusing new launches but would terminally fail Turns on a
+transient outage. The decline therefore requires a completed capabilities
+read that proves the feature absent; an unreadable capability surface
+keeps the ordinary transient refusal. After the fenced terminal write,
+the cached-attachment discard is best-effort: its failure is logged and
+never holds the terminal back, because the terminal row already keeps
+every sweep from re-offering the Turn and the next process drops the
+cache anyway.
+
 `checkpoint_blocked` fires only on durable verdicts (`opaque_state`,
 `invalid_state`, `identity_mismatch`). A transient Managed Session Store
 failure erased into `missing_state` / `missing_checkpoint` by the
