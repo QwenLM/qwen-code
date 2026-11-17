@@ -73,7 +73,8 @@ function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
     if (
       match &&
       match[1].startsWith(activeFence[0]) &&
-      match[1].length >= activeFence.length
+      match[1].length >= activeFence.length &&
+      /^[ \t]*$/.test(match[2] ?? '')
     ) {
       blocks.push({
         lang: activeLang,
@@ -110,7 +111,8 @@ function parseInlineLatexExpressions(
       if (
         codeFenceMatch &&
         codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
-        codeFenceMatch[1].length >= activeCodeFence.length
+        codeFenceMatch[1].length >= activeCodeFence.length &&
+        /^[ \t]*$/.test(codeFenceMatch[2] ?? '')
       ) {
         activeCodeFence = null;
       }
@@ -187,7 +189,8 @@ function parseLatexBlocks(markdown: string): LatexBlock[] {
       if (
         codeFenceMatch &&
         codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
-        codeFenceMatch[1].length >= activeCodeFence.length
+        codeFenceMatch[1].length >= activeCodeFence.length &&
+        /^[ \t]*$/.test(codeFenceMatch[2] ?? '')
       ) {
         activeCodeFence = null;
       }
