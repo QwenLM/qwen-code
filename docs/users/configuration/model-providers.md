@@ -1064,6 +1064,43 @@ The optional `reasoning` field under `generationConfig` controls how aggressivel
 | **Anthropic** (`api.deepseek.com/anthropic`)  | Same `output_config: { effort }` + beta header                                           | `'low'`, `'high'` and `'max'` pass through unchanged; `'medium'`/`'xhigh'` are mapped to `'high'`, matching DeepSeek's server-side mapping.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Gemini** (`@google/genai`)                  | `thinkingConfig: { includeThoughts: true, thinkingLevel }`                               | `'low'` → `LOW`, `'high'`/`'max'` → `HIGH`, others → `THINKING_LEVEL_UNSPECIFIED` (Gemini has no `MAX` tier).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
+### qwen4-max specifics
+
+`qwen4-max` (ModelStudio Standard, Token Plan, QwenCloud Standard, and Qwen
+Subscription) speaks the tiered `reasoning_effort` contract with its own native
+ladder and defaults. These behaviors are scoped to `qwen4-max` (and its dated /
+`-latest` aliases); other `qwen4*` routes and the invitation-only
+`qwen-latest-series-invite-*` previews keep the qwen3.8-max ladder and their
+shipped output limits.
+
+- **Effort ladder:** `low` / `high` / `xhigh`, **default `high`** (qwen3.8-max
+  defaults to `xhigh`). A configured `medium` is raised to `high` and `max` is
+  clamped to `xhigh` (matching the server's own mapping); `none` disables
+  thinking.
+- **Output budget:** `max_tokens` equals `max_completion_tokens` and caps
+  **thinking + answer together** (262,144 in thinking mode, 131,072 without).
+  The automatic output request is sized for that total rather than the flat 64K
+  ceiling, still bounded by the context window; with thinking disabled it is
+  clamped to the 131,072 non-thinking cap on both the DashScope channels and
+  Qwen Subscription.
+- **Media:** image and video input are accepted. On the DashScope-based
+  channels (ModelStudio Standard, Token Plan, QwenCloud Standard),
+  `generationConfig.imageDetail` (`low` / `high` / `auto`) stamps the OpenAI
+  `detail` field on each image part; unset leaves the server default (`high`,
+  ~16K image tokens). Set `low` to trade resolution for tokens (~2.5K). The
+  Qwen Subscription channel does not forward this setting.
+- **Cache TTL:** on the DashScope-based channels,
+  `generationConfig.cacheRetention: '1h'` stamps `ttl: '1h'` on the qwen4
+  cache breakpoints (2x input write cost); the default omits `ttl` (the
+  5-minute spec default). The Qwen Subscription provider injects no
+  `cache_control` breakpoints, so this setting has no effect there.
+- **Subscription wire shape:** the Qwen Subscription gateway maps the selected
+  effort to `thinking_budget` (`low → 4096`, `high → 131072`, `xhigh → 262144`)
+  plus `enable_thinking`, instead of a top-level `reasoning_effort`.
+
+CoT summary (`thinking_display`) and programmatic tool calling (ptc) are not yet
+wired up.
+
 ### `reasoning: false`
 
 Setting `reasoning: false` (the literal boolean) explicitly disables thinking on models that support disabling — useful for cheap side queries that don't benefit from reasoning. This is honored at the request level too via `request.config.thinkingConfig.includeThoughts: false` for one-off calls (e.g. suggestion generation).

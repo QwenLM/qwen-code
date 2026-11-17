@@ -34,12 +34,18 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
-import { reconcileMaxTokens } from '../tokenLimits.js';
+import {
+  QWEN4_NON_THINKING_OUTPUT_CAP,
+  reconcileMaxTokens,
+} from '../tokenLimits.js';
 import { outputBudgetWireKey } from './output-budget-key.js';
 import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
+  clampReasoningEffort,
   getGptReasoningCapabilities,
   isReasoningEffortPlaceholder,
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
 } from '../reasoning-effort.js';
 import {
   isQwenFamilyWireModel,
@@ -166,9 +172,27 @@ function applyConfiguredReasoningEffort(
   const reasoning = asObject(loose['reasoning']);
   if (!reasoning || !('effort' in reasoning)) return request;
 
-  const effort = capabilities.efforts.find(
-    (candidate) => candidate === reasoning['effort'],
+  const requested = reasoning['effort'];
+  let effort = capabilities.efforts.find(
+    (candidate) => candidate === requested,
   );
+  // qwen4-max's documented contract clamps legacy tiers onto the declared
+  // ladder (medium -> high, max -> xhigh) instead of dropping them to the
+  // server default. Other profile-less declarations (including other qwen4*
+  // routes) keep their shipped drop semantics (the legacy no-re-tier contract).
+  if (
+    !effort &&
+    typeof requested === 'string' &&
+    REASONING_EFFORT_TIERS.includes(requested as ReasoningEffort) &&
+    String(loose['model'] ?? '')
+      .toLowerCase()
+      .startsWith('qwen4-max')
+  ) {
+    effort = clampReasoningEffort(
+      requested as ReasoningEffort,
+      capabilities.efforts,
+    );
+  }
   // GPT flattens after raw overrides merge in the provider.
   if (effort && getGptReasoningCapabilities(loose['model'] as string))
     return request;
@@ -1662,14 +1686,54 @@ export class ContentGenerationPipeline {
         effectiveReasoning.effort &&
         typed['thinking_budget'] === undefined
       ) {
-        typed['thinking_budget'] = {
-          low: 4096,
-          medium: 16384,
-          high: 32768,
-          xhigh: 32768,
-          max: 32768,
-        }[effectiveReasoning.effort];
+        // qwen4-max's thinking_budget ladder differs from qwen3.8: the server
+        // maps 1-4096->low, 4097-131072->high, 131073-262144->xhigh. Scoped to
+        // qwen4-max so other qwen4* and qwen3.8 subscription models keep their
+        // shipped budget table.
+        typed['thinking_budget'] = model.startsWith('qwen4-max')
+          ? {
+              low: 4096,
+              medium: 131072,
+              high: 131072,
+              xhigh: 262144,
+              max: 262144,
+            }[effectiveReasoning.effort]
+          : {
+              low: 4096,
+              medium: 16384,
+              high: 32768,
+              xhigh: 32768,
+              max: 32768,
+            }[effectiveReasoning.effort];
       }
+    }
+
+    // qwen4-max caps non-thinking output at 131,072 tokens (thinking mode
+    // allows 262,144). The auto budget is sized for thinking mode and exempt
+    // from the flat output ceiling, so once thinking is disabled a short-prompt
+    // request would otherwise ship max_tokens=262,144 and exceed the
+    // non-thinking range (400). Clamp it here, where the disable shape is final
+    // (the provider's own cap runs before this reasoning shaping). Gate on the
+    // final wire shape, not the endpoint: the subscription gateway is not
+    // DashScope-detected yet ships enable_thinking:false through this same
+    // path, and generic hosts disable via chat_template_kwargs instead, so
+    // the clamp stays off there.
+    if (
+      model.startsWith('qwen4-max') &&
+      (typed['reasoning_effort'] === 'none' ||
+        typed['enable_thinking'] === false)
+    ) {
+      const maxTokens = providerRequest.max_tokens;
+      if (
+        typeof maxTokens === 'number' &&
+        maxTokens > QWEN4_NON_THINKING_OUTPUT_CAP
+      ) {
+        providerRequest.max_tokens = QWEN4_NON_THINKING_OUTPUT_CAP;
+      }
+      // The budget may travel under a provider key instead of max_tokens
+      // (e.g. a samplingParams.max_completion_tokens escape hatch); clamp
+      // those to the same non-thinking cap so that path is not exempt.
+      clampProviderOutputBudgetKeys(typed, QWEN4_NON_THINKING_OUTPUT_CAP);
     }
 
     const requestLimit = request.config?.maxOutputTokens;
@@ -2119,6 +2183,7 @@ export class ContentGenerationPipeline {
     return {
       model: effectiveModel,
       modalities: this.contentGeneratorConfig.modalities ?? {},
+      imageDetail: this.contentGeneratorConfig.imageDetail,
       startTime: Date.now(),
       splitToolMedia:
         providerOverrides.splitToolMedia ??

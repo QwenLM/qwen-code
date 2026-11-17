@@ -6,6 +6,7 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import type { WebShellRightPanelItem } from '../../customization';
@@ -24,10 +25,12 @@ import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   ChevronRightIcon,
+  CircleHelpIcon,
   CirclePlusIcon,
   Code2Icon,
   EyeIcon,
   ExpandIcon,
+  FileDiffIcon,
   GaugeIcon,
   GlobeIcon,
   FolderIcon as FilesIcon,
@@ -70,6 +73,8 @@ import { normalizeTextMediaType } from '../../utils/imageIngestion';
 import { DialogShell } from '../dialogs/DialogShell';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { isSafeHref, Markdown } from '../messages/Markdown';
+import { BtwMessage } from '../messages/BtwMessage';
+import { explainDisplayLabel } from '../../utils/composerTasks';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -138,6 +143,7 @@ import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
 import { TokenUsagePanel } from './TokenUsagePanel';
+import { ChangeOverviewPanel } from './ChangeOverviewPanel';
 import { TrajectoryPanel } from './TrajectoryPanel';
 import type { TrajectoryPageLoader } from '../../trajectory/useTrajectoryWindow';
 import type { ContextUsageControls } from '../../hooks/useContextUsageControls';
@@ -379,6 +385,14 @@ export type ArtifactPanelTab =
     }
   | {
       id: string;
+      kind: 'change_overview';
+      title: string;
+      workspaceCwd: string;
+      workspaceId?: string;
+      sessionId?: string;
+    }
+  | {
+      id: string;
       kind: 'workflow';
       title: string;
       sessionId?: string;
@@ -397,7 +411,9 @@ export type ArtifactPanelTab =
 
 type WorkspaceScopedArtifactPanelTab = Extract<
   ArtifactPanelTab,
-  { kind: 'review' | 'file' | 'artifact' | 'scheduled_task' }
+  {
+    kind: 'review' | 'file' | 'artifact' | 'scheduled_task' | 'change_overview';
+  }
 >;
 
 function isWorkspaceScopedTab(
@@ -407,7 +423,8 @@ function isWorkspaceScopedTab(
     tab.kind === 'review' ||
     tab.kind === 'file' ||
     tab.kind === 'artifact' ||
-    tab.kind === 'scheduled_task'
+    tab.kind === 'scheduled_task' ||
+    tab.kind === 'change_overview'
   );
 }
 
@@ -434,6 +451,7 @@ export interface SideTaskListItem {
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
+  'changeOverview',
 ];
 
 interface ArtifactPanelProps {
@@ -468,6 +486,9 @@ interface ArtifactPanelProps {
   ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
+  /** Open the delivery-unit change overview tab (git workspaces only). */
+  changeOverviewAvailable?: boolean;
+  onOpenChangeOverview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
   onOpenTerminal?: () => void;
   /** Open this session's trajectory tab (shown as an empty-state action). */
@@ -520,6 +541,17 @@ interface ArtifactPanelProps {
     workspaceCwd?: string,
   ) => void;
   agentTasks?: readonly EnvironmentAgentTask[];
+  /** The background task shown in the active tab, when it can be explained. */
+  explainTask?: DaemonSessionTaskWithWorkflowStatus | null;
+  onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+  /** A pending/settled task explanation to mirror in place (taskId-matched). */
+  taskExplanation?: {
+    messageId: string;
+    taskId: string;
+    question: string;
+    answer: string;
+    isPending: boolean;
+  } | null;
   agentTraceLoading?: boolean;
   agentTraceError?: string;
   onOpenWorkflowAgent?: (task: EnvironmentAgentTask) => void;
@@ -680,6 +712,8 @@ export function ArtifactPanel({
   onOpenMemoryFile,
   latestReviewAvailable = false,
   onOpenLatestReview,
+  changeOverviewAvailable = false,
+  onOpenChangeOverview,
   onOpenTerminal,
   onOpenTrajectory,
   trajectoryTabId,
@@ -705,6 +739,9 @@ export function ArtifactPanel({
   onNestedArtifactsChange,
   onOpenNestedSubagent,
   agentTasks = [],
+  explainTask,
+  onExplainTask,
+  taskExplanation,
   agentTraceLoading = false,
   agentTraceError,
   onOpenWorkflowAgent,
@@ -807,6 +844,11 @@ export function ArtifactPanel({
         tab.workspaceCwd === workspaceCwd &&
         tab.workspaceId === filesOwner?.id,
     );
+  const showChangeOverviewMenuItem =
+    items.includes('changeOverview') &&
+    changeOverviewAvailable &&
+    Boolean(onOpenChangeOverview) &&
+    !tabs.some((tab) => tab.id === 'change_overview');
   const showAddMenu =
     Boolean(activeTab) &&
     (showFilesMenuItem ||
@@ -814,7 +856,8 @@ export function ArtifactPanel({
       showSideTaskMenuItems ||
       showTerminalMenuItem ||
       showWebPreviewMenuItem ||
-      showTrajectoryMenuItem);
+      showTrajectoryMenuItem ||
+      showChangeOverviewMenuItem);
   const activeWorkspaceIdentity =
     activeTab && isWorkspaceScopedTab(activeTab)
       ? {
@@ -950,6 +993,11 @@ export function ArtifactPanel({
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
+                    ) : tab.kind === 'change_overview' ? (
+                      <FileDiffIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
                     ) : (
                       <TabScheduledTaskIcon />
                     )}
@@ -979,6 +1027,20 @@ export function ArtifactPanel({
           </div>
         )}
         <div className={styles.headerActions}>
+          {explainTask && onExplainTask && (
+            <button
+              type="button"
+              className={styles.iconButton}
+              aria-label={t('tasks.explain.aria', {
+                label: explainDisplayLabel(explainTask.label),
+              })}
+              title={t('tasks.explain.tooltip')}
+              data-testid="artifact-panel-explain"
+              onClick={() => onExplainTask(explainTask)}
+            >
+              <CircleHelpIcon className={styles.toolbarIcon} aria-hidden />
+            </button>
+          )}
           {showAddMenu && (
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
@@ -1011,9 +1073,20 @@ export function ArtifactPanel({
                     </span>
                   </DropdownMenuItem>
                 )}
-                {showReviewMenuItem && showSideTaskMenuItems && (
-                  <DropdownMenuSeparator />
+                {showChangeOverviewMenuItem && (
+                  <DropdownMenuItem onSelect={onOpenChangeOverview}>
+                    <FileDiffIcon
+                      className={styles.sideTaskNewIcon}
+                      strokeWidth={1.6}
+                      aria-hidden="true"
+                    />
+                    <span className={styles.sideTaskListTitle}>
+                      {t('changeOverview.title')}
+                    </span>
+                  </DropdownMenuItem>
                 )}
+                {(showReviewMenuItem || showChangeOverviewMenuItem) &&
+                  showSideTaskMenuItems && <DropdownMenuSeparator />}
                 {showSideTaskMenuItems && (
                   <DropdownMenuItem
                     disabled={sideTasksLoading}
@@ -1101,6 +1174,23 @@ export function ArtifactPanel({
         </div>
       </div>
       {(fullscreen || variant === 'drawer') && <DaemonConnectionBanner />}
+      {taskExplanation &&
+        explainTask &&
+        taskExplanation.taskId === explainTask.id && (
+          <div
+            className={styles.explainBlock}
+            data-testid="artifact-panel-explanation"
+          >
+            <BtwMessage
+              key={taskExplanation.messageId}
+              question={taskExplanation.question}
+              answer={taskExplanation.answer}
+              isPending={taskExplanation.isPending}
+              hidePrefix
+              hideShortcuts
+            />
+          </div>
+        )}
       <div
         className={`${styles.body} ${
           activeTab?.kind === 'side_task' || activeTab?.kind === 'files'
@@ -1242,6 +1332,28 @@ export function ArtifactPanel({
                 </span>
                 <span className={styles.emptyActionHint}>
                   {t('turnOutputs.reviewLatest')}
+                </span>
+                <ChevronRightIcon
+                  className={styles.emptyActionChevron}
+                  strokeWidth={1.6}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+            {showChangeOverviewMenuItem && (
+              <button
+                type="button"
+                className={styles.emptyAction}
+                onClick={onOpenChangeOverview}
+              >
+                <span className={styles.emptyActionIcon} aria-hidden="true">
+                  <FileDiffIcon strokeWidth={1.6} />
+                </span>
+                <span className={styles.emptyActionTitle}>
+                  {t('changeOverview.title')}
+                </span>
+                <span className={styles.emptyActionHint}>
+                  {t('changeOverview.description')}
                 </span>
                 <ChevronRightIcon
                   className={styles.emptyActionChevron}
@@ -1736,6 +1848,12 @@ export function ArtifactPanel({
           <TokenUsagePanel
             key={activeTab.id}
             sessionActions={activeTab.sessionActions}
+            sessionId={activeTab.sessionId}
+          />
+        ) : activeTab.kind === 'change_overview' ? (
+          <ChangeOverviewPanel
+            key={activeTab.id}
+            workspaceCwd={activeTab.workspaceCwd}
             sessionId={activeTab.sessionId}
           />
         ) : activeTab.kind === 'turn_calls' ? (
