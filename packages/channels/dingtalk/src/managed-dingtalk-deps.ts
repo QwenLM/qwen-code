@@ -21,25 +21,6 @@ import { isRetryableDingtalkStatus } from './interactive-card-client.js';
 import { ROBOT_MESSAGE_HOSTS } from './DingtalkAdapter.js';
 
 const WEBHOOK_TIMEOUT_MS = 30_000;
-// The control plane's claim lease, which this adapter cannot read: it is
-// operator-configurable (`claim-lease`, default 10m — application.yml and
-// ManagedAgentProperties under packages/managed-agent-server). A claim that
-// outlives it settles unknown and is never resent. Naming it records the
-// assumption the ceiling below derives from; a deployment that shortens the
-// lease reopens the race, and following the configured value needs control
-// plane plumbing (#17173).
-const CLAIM_LEASE_ASSUMED_MS = 600_000;
-// One aggregate ceiling for a whole ledger segment, layered on the per-chunk
-// budgets. Heading-dense markdown splits a 48 KiB segment into 24 chunks, so
-// per-chunk budgets alone let one send run 12 minutes — past the lease, which
-// reconciles the claim to unknown while the tail is still being delivered.
-// Subtracting one chunk budget refuses a chunk exactly when its worst-case
-// finish — start plus one full budget — lands at or after the lease; a chunk
-// whose worst case still finishes in time is always allowed. The bound is
-// worst-case because a chunk's real duration is unknown until it answers. An
-// unknown segment is never resent, so truncating one that would have finished
-// in time loses its tail for good.
-const WEBHOOK_SEGMENT_TIMEOUT_MS = CLAIM_LEASE_ASSUMED_MS - WEBHOOK_TIMEOUT_MS;
 const RECONNECT_RETRY_MS = 5_000;
 // The SDK's connect() resolves when the WebSocket is *constructed*, not when it
 // opens, and getEndpoint() has no timeout. Bound the whole attempt so a blocked
@@ -271,13 +252,6 @@ async function sendWebhook(
   ) {
     throw webhookFailure('DingTalk webhook URL rejected.', true);
   }
-  // A flag rather than a second abort: the ceiling ends the batch between
-  // chunks, never tears down an in-flight request that still has its own
-  // budget. Monotonic, so a wall-clock jump cannot expire a healthy send.
-  let segmentExpired = false;
-  const segmentTimer = setTimeout(() => {
-    segmentExpired = true;
-  }, WEBHOOK_SEGMENT_TIMEOUT_MS);
   // In a proxy-only egress the reply must still leave: route this send through
   // the resolved proxy with a per-send dispatcher (the Legacy sender's shape),
   // destroyed afterwards so it never leaks. Only the webhook send is proxied —
@@ -303,16 +277,14 @@ async function sendWebhook(
     // send mid-batch, settling the tail unknown (#17173 R10).
     let delivered = 0;
     for (const chunk of splitChunks(text)) {
-      if (segmentExpired) {
-        // The tail is unsent, so the outcome is unknown rather than a
-        // definitive refusal. Unknown is terminal for the send — only the
-        // receipt replays, never the message — which is why the ceiling sits
-        // at the lease instead of below it.
-        throw webhookFailure(
-          'DingTalk webhook send exceeded the segment budget; the send outcome is unknown.',
-          false,
-        );
-      }
+      // No aggregate ceiling on purpose. A send that outlives the control
+      // plane's claim lease is reconciled to unknown, but a late receipt still
+      // moves unknown → partial → delivered, so the ledger converges on its
+      // own while the tail keeps arriving. Refusing the tail instead strands
+      // the delivery at unknown forever — the reconciler only re-picks
+      // planned/sending/partial — and an explicit resend re-plans every
+      // unreceipted segment, duplicating what the user already has. Any finite
+      // ceiling trades a transient unknown window for permanent truncation.
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), WEBHOOK_TIMEOUT_MS);
       try {
@@ -333,7 +305,6 @@ async function sendWebhook(
       }
     }
   } finally {
-    clearTimeout(segmentTimer);
     await dispatcher?.destroy().catch(() => undefined);
   }
 }

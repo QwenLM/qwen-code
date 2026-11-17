@@ -545,101 +545,17 @@ describe('managed DingTalk webhook per-chunk send budget (#17173 R10)', () => {
   });
 });
 
-describe('managed DingTalk webhook segment ceiling (#17504 R1-1)', () => {
-  it('a heading-dense segment progressing just under each chunk budget ends at the ceiling, not at chunk count × 30s', async () => {
-    vi.useFakeTimers();
-    try {
-      // Heading-dense markdown packs ~2000 units per chunk, so a 48 KiB
-      // segment becomes 24 chunks — 12 minutes at one 30s budget each, past
-      // the control plane's 10-minute claim lease.
-      let text = '';
-      while (text.length < 48 * 1024 - 200) {
-        text += `#### h${text.length}\n`;
-      }
-      const chunks = splitChunks(text);
-      expect(chunks.length).toBe(24);
-      // Each chunk answers at 29s: no per-chunk timer ever fires, so only an
-      // aggregate ceiling can end this batch. 24 × 29s = 696s, past the 600s
-      // lease the ceiling is derived from.
-      const fetchMock = vi.fn(
-        (_url: string, init: { signal: AbortSignal }) =>
-          new Promise<Response>((resolve, reject) => {
-            const timer = setTimeout(
-              () => resolve(jsonResponse({ errcode: 0 })),
-              29_000,
-            );
-            init.signal.addEventListener('abort', () => {
-              clearTimeout(timer);
-              reject(new Error('aborted'));
-            });
-          }),
-      );
-      vi.stubGlobal('fetch', fetchMock);
-      const { sendWebhook } = createManagedDingtalkDeps();
-      let settled = false;
-      const sending = sendWebhook(WEBHOOK, text).then(
-        () => {
-          settled = true;
-        },
-        (error) => {
-          settled = true;
-          throw error;
-        },
-      );
-      const assertion = expect(sending).rejects.toMatchObject({
-        definitive: false,
-        message: expect.stringContaining('segment budget'),
-      });
-      await vi.advanceTimersByTimeAsync(570_000);
-      // The ceiling is spent, but chunk 20 is still in flight and keeps its
-      // own budget: the ceiling ends the batch between chunks, not mid-request.
-      expect(settled).toBe(false);
-      await vi.advanceTimersByTimeAsync(10_000); // 580s: chunk 20 lands, chunk 21 refused
-      await assertion;
-      expect(fetchMock).toHaveBeenCalledTimes(20);
-      expect(fetchMock.mock.calls.length).toBeLessThan(chunks.length);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('the ceiling is a time bound, not a chunk count: a fast heading-dense segment delivers every chunk', async () => {
-    vi.useFakeTimers();
-    try {
-      let text = '';
-      while (text.length < 48 * 1024 - 200) {
-        text += `#### h${text.length}\n`;
-      }
-      const chunks = splitChunks(text);
-      expect(chunks.length).toBeGreaterThan(11);
-      const fetchMock = vi.fn(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 1_000));
-        return jsonResponse({ errcode: 0 });
-      });
-      vi.stubGlobal('fetch', fetchMock);
-      const { sendWebhook } = createManagedDingtalkDeps();
-      let failure: unknown;
-      const sending = sendWebhook(WEBHOOK, text).then(
-        () => undefined,
-        (error) => {
-          failure = error;
-        },
-      );
-      // 24 chunks at 1s each is 24s — far inside the ceiling. A chunk-count
-      // cap masquerading as a time bound would truncate this healthy reply.
-      await vi.advanceTimersByTimeAsync(chunks.length * 1_000);
-      await sending;
-      expect(failure).toBeUndefined();
-      expect(fetchMock).toHaveBeenCalledTimes(chunks.length);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it.each([15_000, 20_000])(
-    'a 24-chunk segment at %i ms per chunk finishes inside the lease and delivers every chunk',
+describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () => {
+  // A 48 KiB heading-dense segment splits into 24 chunks. At these latencies
+  // the batch runs 24s to 696s — the last two cross the control plane's 600s
+  // claim lease. Every one must still deliver all 24 chunks: a claim that
+  // outlives its lease is reconciled to unknown, but a late receipt moves
+  // unknown → partial → delivered, so the ledger converges while the tail
+  // keeps arriving. Refusing the tail strands the delivery at unknown forever
+  // (the reconciler only re-picks planned/sending/partial) and an explicit
+  // resend re-plans every unreceipted segment, duplicating what the user has.
+  it.each([1_000, 15_000, 20_000, 24_500, 25_000, 29_000])(
+    'a 24-chunk segment at %i ms per chunk delivers every chunk, even past the lease',
     async (latency) => {
       vi.useFakeTimers();
       try {
@@ -649,6 +565,9 @@ describe('managed DingTalk webhook segment ceiling (#17504 R1-1)', () => {
         }
         const chunks = splitChunks(text);
         expect(chunks.length).toBe(24);
+        // Each chunk answers inside its own 30s budget, so no per-chunk timer
+        // fires either: only an aggregate ceiling could cut this batch.
+        expect(latency).toBeLessThan(30_000);
         const fetchMock = vi.fn(async () => {
           await new Promise((resolve) => setTimeout(resolve, latency));
           return jsonResponse({ errcode: 0 });
@@ -662,11 +581,6 @@ describe('managed DingTalk webhook segment ceiling (#17504 R1-1)', () => {
             failure = error;
           },
         );
-        // 360s and 480s: both inside the 600s lease, so the whole segment
-        // would have been delivered and accepted without any ceiling. An
-        // unknown segment is never resent, so a ceiling that cuts here loses
-        // the tail for good — the bound must sit at the lease, not below it.
-        expect(chunks.length * latency).toBeLessThan(600_000);
         await vi.advanceTimersByTimeAsync(chunks.length * latency);
         await sending;
         expect(failure).toBeUndefined();
