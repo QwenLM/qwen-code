@@ -15,11 +15,14 @@ The workspace git checkout path (branch picker popover → SDK
 `workspaceGitCheckout` → `POST /workspace(s)/git/checkout` → core
 `gitCheckout`) runs a plain `git checkout <ref> --`. When local
 modifications or untracked files would be overwritten by the switch, git
-refuses. The route already classifies both refusal shapes as
+refuses. The route already classifies the refusal shapes as
 `409 dirty_working_tree` (the classifier matches
-`dirty|uncommitted|would be overwritten`, which covers git's "Your local
-changes … would be overwritten by checkout" and "The following untracked
-working tree files would be overwritten by checkout"), but the popover
+`dirty|uncommitted|would be overwritten|would lose untracked`, which
+covers git's "Your local changes … would be overwritten by checkout",
+"The following untracked working tree files would be overwritten by
+checkout", and the directory-collision sibling "Updating the following
+directories would lose untracked files in them" — an untracked directory
+blocking a path the target tracks as a file), but the popover
 only renders the error string in its footer — nothing actionable surfaces.
 
 The typical cause is residue from earlier work: edits left by a previous
@@ -138,10 +141,12 @@ guard stashes nothing.
 
 A plain checkout — no option — runs the exact git invocation it always
 has. The response-level changes are the optional `stashSha` field on a
-successful stash checkout, and the same field on a failure response
-whose auto-stash entry survives with a known SHA — `checkout_failed`
-after a kept restore, or `operation_in_progress` when a merge parks
-after the push (see below).
+successful stash checkout, the same field on a failure response whose
+auto-stash entry survives with a known SHA — `checkout_failed` after a
+kept restore, or `operation_in_progress` when a merge parks after the
+push (see below) — and, for the directory-collision refusal, a
+`409 dirty_working_tree` where the route previously answered an
+unclassified 500.
 
 Failures are classified by what the core did, not by matching git's text:
 a new `GitCheckoutFailure` carries the stable codes
@@ -150,8 +155,10 @@ the route maps it to a 409 with a path-redacted message, exactly as it
 already does for `GitPullFailure`. The shared helpers
 (`refuseOperationInProgress`, `pushAutoStash`) gain an action-word
 parameter defaulting to the pull wording; `restoreStash` is reused
-unchanged because its notices are action-agnostic. The pre-existing regex
-classification is unchanged and still covers the plain checkout.
+unchanged because its notices are action-agnostic. The classifier gained
+the `would lose untracked` alternation for the directory-collision
+refusal; its other branches are unchanged and the plain checkout stays
+covered.
 
 ## UI
 
@@ -249,8 +256,12 @@ omission:
   design guards only its destructive option for the same reason; adding
   a stash refusal here would also leave the panel offering an option
   that always fails in subdirectory workspaces.
-- **No cross-request serialization.** Concurrent git operations fail
-  loudly on git's own `index.lock`. The stash capture carries a
+- **No cross-request serialization.** Concurrent git operations —
+  checkout and stash on git's own `index.lock`, branch creation on its
+  ref and config locks — fail loudly; the residue `clean -fd` takes
+  neither lock (probed), so a concurrent clean races on the files
+  themselves — the same confirmed-discard exposure the concurrent-session
+  risk covers. The stash capture carries a
   per-request nonce in the entry subject (the documented label stays as
   its prefix), so a request whose own push was a no-op — because a
   concurrent request stashed the tree first — adopts nothing and reports
@@ -390,7 +401,9 @@ omission:
 
 - A checkout refused for local changes offers stash and discard
   resolutions, and both complete the switch end to end.
-- The plain checkout invocation and response are unchanged.
+- The plain checkout invocation is unchanged; its response for the
+  directory-collision refusal changes from an unclassified 500 to
+  `409 dirty_working_tree`.
 - Every guard listed above has a test that fails without it.
 - The design exists in both languages; lint, typecheck, build and the
   focused unit suites pass.

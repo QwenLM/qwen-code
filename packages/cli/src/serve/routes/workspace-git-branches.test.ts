@@ -524,6 +524,11 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
         409,
         'dirty_working_tree',
       ],
+      [
+        'error: Updating the following directories would lose untracked files in them:\n\td\n\nAborting',
+        409,
+        'dirty_working_tree',
+      ],
       ['fatal: a branch named x already exists', 409, 'branch_already_exists'],
       ['remote still configured after removal', 409, 'remote_still_configured'],
       [
@@ -1487,6 +1492,30 @@ describe('checkout resolutions against a real repo', () => {
     // The entry was not applied onto the new branch.
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('feature\n');
     expect(fs.existsSync(path.join(dir, 'b.txt'))).toBe(false);
+  });
+
+  it('keeps the entry naming ahead of the message bound on a long hook detail', async () => {
+    const dir = dirtyCheckoutRepo();
+    git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
+    // A hook detail far past the client-visible bound: the entry naming
+    // must sit ahead of it so the bound cannot truncate the only record
+    // of where the changes went.
+    const hook = path.join(dir, '.git', 'hooks', 'post-checkout');
+    fs.writeFileSync(
+      hook,
+      `#!/bin/sh\necho "${'x'.repeat(600)}" >&2\nexit 1\n`,
+    );
+    fs.chmodSync(hook, 0o755);
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'feature', stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.stashSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(response.body.message).toContain('kept in stash entry');
+    expect(response.body.message).toContain(response.body.stashSha);
+    expect(response.body.message.length).toBeLessThanOrEqual(512);
   });
 
   it('maps the subdirectory force refusal to 409 force_unsupported without discarding', async () => {

@@ -746,6 +746,13 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(read(dir, 'a.txt')).toBe('feature\n');
     expect(has(dir, 'new.txt')).toBe(false);
     expectSoleStash(dir, 'qwen-code: auto-stash before checkout');
+    // The subject carries the documented label plus a per-request nonce
+    // (git prepends "On <branch>: "); the nonce is what keeps a
+    // concurrent request's entry from being adopted.
+    const subject1 = git(dir, 'stash', 'list', '--format=%s').trim();
+    expect(subject1).toMatch(
+      /qwen-code: auto-stash before checkout [0-9a-f]{8}$/,
+    );
     // The entry holds both the tracked edit and the untracked file.
     expect(git(dir, 'stash', 'show', '-p', result.stashSha!)).toContain(
       'local edit',
@@ -753,6 +760,28 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(git(dir, 'show', `${result.stashSha!}^3:new.txt`)).toBe(
       'untracked\n',
     );
+    // A second request's nonce must DIFFER from the first's. Compare the
+    // SUFFIX, not the full subject — git's "On <branch>:" prefix differs
+    // across branches and would mask a constant nonce. Entry 1 sits in
+    // the second capture's pre-push SHA snapshot, so the snapshot — not
+    // the nonce — excludes it here; the nonce guards the concurrent
+    // window pinned by the adoption case below.
+    write(dir, { 'a.txt': 'local edit 2\n' });
+    const second = await gitCheckout(
+      dir,
+      'master',
+      { stash: true },
+      hermeticEnv(),
+    );
+    const subject2 = git(dir, 'stash', 'list', '--format=%s')
+      .split('\n')[0]!
+      .trim();
+    expect(subject2).toMatch(
+      /qwen-code: auto-stash before checkout [0-9a-f]{8}$/,
+    );
+    expect(subject2.slice(-8)).not.toBe(subject1.slice(-8));
+    // Identity, not just distinctness: not.toBe also passes on undefined.
+    expect(second.stashSha).toBe(git(dir, 'rev-parse', 'refs/stash').trim());
   });
 
   it('stash checkout on a clean tree keeps no entry', async () => {
@@ -909,12 +938,14 @@ describe('gitCheckout with a dirty working tree', () => {
     async () => {
       const dir = dirtyCheckoutFixture();
       const env = gitShim(hermeticEnv(), [
-        // A concurrent request stashes the tree (base label, no nonce)
-        // immediately before our push, making our own push a no-op.
+        // A concurrent request stashes the tree immediately before our
+        // push, making our own push a no-op. Its subject carries the
+        // production shape (label + a nonce), so the capture must reject
+        // it by nonce mismatch, not by a shape production never emits.
         {
           match: '"stash push"*',
           before:
-            '"$REAL" stash push --include-untracked -m "qwen-code: auto-stash before checkout"',
+            '"$REAL" stash push --include-untracked -m "qwen-code: auto-stash before checkout 0123abcd"',
         },
       ]);
 
@@ -1549,6 +1580,42 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(headSha(dir)).toBe(git(dir, 'rev-parse', 'v1.0^{commit}').trim());
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'force checkout of a tag does not certify a detached HEAD at a different commit',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      git(dir, 'tag', 'v1.0');
+      // A second commit the tag does NOT point at: an actor detaches HEAD
+      // there while our forced tag checkout fails. The detached arm's
+      // commit EQUALITY must refuse the attribution.
+      const other = commitFile(dir, 'a.txt', 'other-commit\n');
+      write(dir, { 'new.txt': 'untracked\n' });
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"checkout -f v1.0"*',
+          script: `"$REAL" checkout ${other} --; exit 1`,
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'v1.0',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      // Premise: HEAD really is detached at the other commit. The SHA
+      // alone would also hold on a drifted HEAD still on master (which
+      // advanced to that commit), and the case would pass on the
+      // fall-through path without reaching the equality arm.
+      expect(git(dir, 'rev-parse', 'HEAD').trim()).toBe(other);
+      expect(() => currentBranch(dir)).toThrow();
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(read(dir, 'new.txt')).toBe('untracked\n');
+    },
+  );
+
   it('force checkout of HEAD reports the completed discard when a hook refuses', async () => {
     const dir = dirtyCheckoutFixture();
     installHook(dir, 'post-checkout', 'exit 1');
@@ -2163,14 +2230,18 @@ describe('gitCheckout with a dirty working tree', () => {
       const dir = dirtyCheckoutFixture();
       write(dir, { 'new.txt': 'untracked\n' });
       installHook(dir, 'post-checkout', 'echo hook-edit > a.txt\nexit 1');
-      const counter = path.join(tmpDir('qwen-diff-hang-'), 'n');
+      const scratch = tmpDir('qwen-diff-hang-');
+      const counter = path.join(scratch, 'n');
+      const pidfile = path.join(scratch, 'hung.pid');
       const env = gitShim(hermeticEnv(), [
         // The BEFORE diff probe hangs forever; the 30s timeout must turn
         // it into a null the witness refuses to trust. The after-probe
-        // answers normally.
+        // answers normally. The hung child records its pid so the case
+        // can pin that the timeout kills the whole process group, not
+        // just the wrapper (which would orphan the sleep for 999s).
         {
           match: '"diff HEAD"*',
-          script: `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"; if [ "$n" = 1 ]; then sleep 999; fi; exec "$REAL" "$@"`,
+          script: `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"; if [ "$n" = 1 ]; then sleep 999 & echo $! > "${pidfile}"; wait; fi; exec "$REAL" "$@"`,
         },
       ]);
 
@@ -2185,6 +2256,21 @@ describe('gitCheckout with a dirty working tree', () => {
       expect(failure.message).toContain('cannot discard and switch');
       expect(read(dir, 'a.txt')).toBe('hook-edit\n');
       expect(read(dir, 'new.txt')).toBe('untracked\n');
+      // The shim's hung child must be dead, not orphaned: poll briefly
+      // for reaping (the kill lands at settle, before the call resolves).
+      const hungPid = Number(fs.readFileSync(pidfile, 'utf8').trim());
+      const pidGone = (pid: number) => {
+        try {
+          process.kill(pid, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      };
+      for (let i = 0; i < 40 && !pidGone(hungPid); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(pidGone(hungPid)).toBe(true);
     },
     45_000,
   );
@@ -2767,6 +2853,14 @@ describe('gitPull with a dirty working tree', () => {
 
     await bothRefused(dir, 'operation_in_progress');
 
+    // The parameterised refusal carries the PULL action word on this
+    // arm (the checkout flows say "cannot checkout").
+    const pullFailure = await pullFails(
+      dir,
+      { stash: true },
+      'operation_in_progress',
+    );
+    expect(pullFailure.message).toContain('cannot update');
     expect(git(dir, 'rev-parse', 'MERGE_HEAD').trim()).toBe(mergeHead);
     expect(read(dir, 'a.txt')).toBe('resolved\n');
     expect(stashList(dir)).toEqual([]);
