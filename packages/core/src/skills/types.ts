@@ -321,6 +321,22 @@ export function parseAllowedToolsField(
  * parser converts this into a `parseErrors` entry and skips the skill,
  * matching the existing "missing field" / "wrong type" error behavior.
  */
+/**
+ * Parses the optional `mcp` frontmatter field: MCP server names this skill
+ * depends on. Accepts a single string or a list of strings; anything else
+ * is ignored so malformed entries never break skill loading (#17317).
+ */
+export function parseMcpServersField(
+  frontmatter: Record<string, unknown>,
+): string[] | undefined {
+  const raw = frontmatter['mcp'];
+  return Array.isArray(raw)
+    ? raw.filter((v): v is string => typeof v === 'string' && v.length > 0)
+    : typeof raw === 'string' && raw.length > 0
+      ? [raw]
+      : undefined;
+}
+
 export function validateSkillName(name: string): void {
   if (!SKILL_NAME_PATTERN.test(name)) {
     throw new Error(

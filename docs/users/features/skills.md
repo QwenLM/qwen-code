@@ -487,4 +487,26 @@ description: Analyze Excel spreadsheets, create pivot tables, and generate chart
 
 ### MCP dependencies
 
-See the `mcp:` field in SKILL.md YAML frontmatter to declare MCP server dependencies for a skill.
+A skill that relies on MCP servers can declare them via the optional `mcp:` frontmatter field. At activation, the skill tool checks each declared name against your MCP configuration and warns about any that are unavailable:
+
+```yaml
+---
+name: my-jira-skill
+description: Reads JIRA tickets via MCP
+mcp:
+  - jira
+  - confluence
+---
+```
+
+Accepted shapes:
+
+- A single server name: `mcp: jira`
+- A list of server names: `mcp: [jira, confluence]`
+
+The check distinguishes two cases:
+
+- **Not configured**: the server name does not appear in any `mcpServers` block — the warning says to add it to `settings.json` and restart.
+- **Configured but unusable**: the server is in your configuration but has been excluded (`mcp.excluded`) or is blocked by an allow-list (`mcp.allowed`) — the warning says to remove the exclusion or add to the allow-list, not to re-add the server.
+
+This is a presence check only: installing or enabling servers remains a manual configuration step.

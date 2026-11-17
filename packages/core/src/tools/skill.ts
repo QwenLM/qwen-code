@@ -761,21 +761,33 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
    * Names from the skill's `mcp` frontmatter missing from the registered
    * MCP config; undefined when the skill declares none or all are present.
    */
-  private findMissingMcpServers(skill: SkillConfig): string[] | undefined {
+  private findMissingMcpServers(
+    skill: SkillConfig,
+  ): { missing: string[]; excluded: string[] } | undefined {
     if (!skill.mcpServers || skill.mcpServers.length === 0) return undefined;
-    // getMcpServers() is the admission-filtered view — a server that is
-    // configured but excluded (mcp.excluded) is absent from it, so a
-    // skill depending on an excluded server would never warn. The
-    // unfiltered settings map catches that case (#17323 F1).
-    const configured = new Set(
-      Object.keys(this.config.getMcpServers?.() ?? {}),
-    );
-    const excluded = new Set(this.config.getExcludedMcpServers?.() ?? []);
-    const missing = skill.mcpServers.filter((name) => {
-      if (!configured.has(name)) return true; // not in config at all
-      return excluded.has(name); // configured but excluded — still unusable
-    });
-    return missing.length > 0 ? missing : undefined;
+    // getMcpServers() is the admission-filtered view (mcp.allowed /
+    // mcp.excluded already applied), so an excluded server is absent from
+    // it — checking membership there answers "usable?", not "configured?".
+    // Split the report: servers absent from BOTH views are truly
+    // unconfigured; servers present in the unfiltered settings map but
+    // absent from the filtered view are excluded/blocked (#17323 R3-1).
+    const usable = new Set(Object.keys(this.config.getMcpServers?.() ?? {}));
+    const excludedList = this.config.getExcludedMcpServers?.() ?? [];
+    const missing: string[] = [];
+    const excluded: string[] = [];
+    for (const name of skill.mcpServers) {
+      if (usable.has(name)) continue; // usable — no report
+      if (excludedList.includes(name)) {
+        // Configured but excluded/blocked — the user should NOT be told
+        // to add it to settings.json because it's already there
+        // (#17323 R3-2).
+        excluded.push(name);
+      } else {
+        missing.push(name); // genuinely not configured
+      }
+    }
+    if (missing.length === 0 && excluded.length === 0) return undefined;
+    return { missing, excluded };
   }
 
   async execute(
@@ -952,13 +964,23 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       // first tool call fails with an opaque "tool not found") with how to
       // add them. Presence check only — installing servers stays a user
       // action.
-      const missingMcpServers = this.findMissingMcpServers(skill);
-      if (missingMcpServers) {
-        activationWarning +=
-          ` Warning: this skill declares MCP dependencies that are not configured: ` +
-          `${missingMcpServers.join(', ')}. Add them to settings.json ` +
-          `"mcpServers" (or the equivalent managed config) and restart, or ` +
-          `skill tool calls that need them will fail.`;
+      const mcpDependencyReport = this.findMissingMcpServers(skill);
+      if (mcpDependencyReport) {
+        if (mcpDependencyReport.missing.length > 0) {
+          activationWarning +=
+            ` Warning: this skill declares MCP dependencies that are not configured: ` +
+            `${mcpDependencyReport.missing.join(', ')}. Add them to settings.json ` +
+            `"mcpServers" (or the equivalent managed config) and restart, or ` +
+            `skill tool calls that need them will fail.`;
+        }
+        if (mcpDependencyReport.excluded.length > 0) {
+          activationWarning +=
+            ` Warning: this skill declares MCP dependencies that are configured ` +
+            `but currently unusable (excluded or blocked): ` +
+            `${mcpDependencyReport.excluded.join(', ')}. They are already in ` +
+            `your MCP configuration — remove them from mcp.excluded / add ` +
+            `them to mcp.allowed, or skill tool calls that need them will fail.`;
+        }
       }
 
       // Prevent re-invoking an already-loaded skill from appending

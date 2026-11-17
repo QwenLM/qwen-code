@@ -2,6 +2,7 @@ import {
   type SkillConfig,
   type SkillValidationResult,
   parseAllowedToolsField,
+  parseMcpServersField,
   parseModelField,
   parsePathsField,
   parseUserInvocableField,
@@ -186,15 +187,7 @@ export function parseSkillContent(
       : undefined;
   const userInvocable = parseUserInvocableField(frontmatter);
 
-  // Optional `mcp` frontmatter: MCP server names the skill depends on.
-  // Accept a single string or a list of strings; anything else is ignored
-  // (malformed entries must not break skill loading).
-  const mcpRaw = frontmatter['mcp'];
-  const mcpServers = Array.isArray(mcpRaw)
-    ? mcpRaw.filter((v): v is string => typeof v === 'string' && v.length > 0)
-    : typeof mcpRaw === 'string' && mcpRaw.length > 0
-      ? [mcpRaw]
-      : undefined;
+  const mcpServers = parseMcpServersField(frontmatter);
 
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).

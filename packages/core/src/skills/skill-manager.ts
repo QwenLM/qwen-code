@@ -23,6 +23,7 @@ import {
   SkillError,
   SkillErrorCode,
   parseAllowedToolsField,
+  parseMcpServersField,
   parseModelField,
   parsePathsField,
   parseUserInvocableField,
@@ -813,14 +814,7 @@ export class SkillManager {
       // (#17317). Same shape as skill-load.ts's parser — accept a string or
       // a list; anything else is ignored so malformed entries never break
       // skill loading. Both SKILL.md parsers must agree on the field.
-      const mcpRaw = frontmatter['mcp'];
-      const mcpServers = Array.isArray(mcpRaw)
-        ? mcpRaw.filter(
-            (v): v is string => typeof v === 'string' && v.length > 0,
-          )
-        : typeof mcpRaw === 'string' && mcpRaw.length > 0
-          ? [mcpRaw]
-          : undefined;
+      const mcpServers = parseMcpServersField(frontmatter);
 
       // Optional `paths` frontmatter: glob patterns that gate when this skill
       // is offered to the model (conditional skill).
