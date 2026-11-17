@@ -9693,7 +9693,7 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_turn_active');
     if (action !== 'register')
       return error(res, 400, 'invalid_client_files_action');
-    // A foregroundOnly, memory-only (no toolProfile), or external-files Session
+    // A foregroundOnly, memory-only (no toolProfile), or external Session
     // never declares a client-files catalog — the Turn drops the lane or the
     // external branch never calls clientFilesDeclarations — so registering a
     // relay client would hold a connection for tools no Turn hands out while
@@ -9702,7 +9702,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       session.foregroundOnly ||
       !session.toolProfile ||
-      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+      isHostedWorkspaceExternalProfile(session.toolProfile)
     )
       return error(res, 409, 'hosted_client_files_profile_unsupported');
     const serverId = body?.['serverId'];

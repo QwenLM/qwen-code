@@ -684,6 +684,74 @@ describe.skipIf(process.platform === 'win32')(
       strayGroups.delete(pgid);
     });
 
+    it('retires a drain-proof lane on its settled capture without a committed ACK', async () => {
+      // The external worker holds no control-plane credential: the Broker is
+      // its publication's producer and acknowledges the worker's sequences
+      // out of band, so no ACK ever reaches this journal. stopDrained calls
+      // retireSsh only after every stream's EOF is acknowledged, so requiring
+      // a committed ACK here would refuse every external close. Removing the
+      // retiresOnDrainProof check in retireSsh turns this red.
+      const tools = createManagedToolSet(workspace, 'session-b');
+      const identity = { ...csiAckFixture.response.captureIdentity };
+      const manifest = { ...csiAckFixture.request.acknowledgement.manifest };
+      const sink = {
+        identity,
+        write: async () => {},
+        finish: async () => {},
+        setStarted: () => {},
+        setProcessResult: () => {},
+        finalize: async (): Promise<ToolResultEnvelope> => ({
+          executionStatus: 'success',
+          responseParts: [],
+          capture: {
+            captureStatus: 'complete',
+            captureReason: null,
+            manifest,
+            deliveryStatus: 'pending',
+            previewTruncated: false,
+          },
+        }),
+      } as unknown as ManagedShellCaptureSink;
+      const exec = new ManagedToolExecutor(
+        async () => tools,
+        {
+          retiresOnDrainProof: true,
+          prepare: async () => ({ identity, sink }),
+        },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { ledger },
+      );
+      const input = {
+        command: 'sleep 0.2',
+        description: 'captured foreground command',
+      };
+      const ref = reference('ssh-drain-proof', input);
+      const capture = {
+        ...csiAckFixture.capture,
+        sessionId: ref.sessionId,
+        turnId: ref.promptId,
+      };
+      const running = exec.executeV3({
+        reference: ref,
+        toolName: 'run_shell_command',
+        input,
+        capture,
+      });
+      const pgid = await recordedGroup();
+      strayGroups.add(pgid);
+      expect((await running).state).toBe('settled');
+      await expect(
+        exec.retireSsh('550e8400-e29b-41d4-a716-446655440000'),
+      ).resolves.toBeUndefined();
+      expect(processGroupLiveness(pgid)).toBe('gone');
+      strayGroups.delete(pgid);
+    });
+
     it.each(['denied', 'throw', 'integrity'] as const)(
       'keeps SSH Shell outcome unknown when its group proof fails: %s',
       async (failure) => {
@@ -1986,7 +2054,6 @@ async function originalCsiExecutor(
     | 'not_started' = 'complete',
   beforeExecute?: () => Promise<void>,
   accept?: ManagedShellCapturePublisher['accept'],
-  retiresOnDrainProof = false,
 ) {
   const identity = { ...fixture.response.captureIdentity };
   const manifest = { ...fixture.request.acknowledgement.manifest };
@@ -2030,7 +2097,6 @@ async function originalCsiExecutor(
     prepare,
     hasInstalledPublication: true,
     ...(accept ? { accept } : {}),
-    ...(retiresOnDrainProof ? { retiresOnDrainProof } : {}),
   });
   const resultPromise = executor.executeV3({
     reference: fixture.request.reference,
@@ -2052,45 +2118,6 @@ async function originalCsiExecutor(
     resultPromise,
   };
 }
-
-describe('a capture lane that retires on its own drain proof', () => {
-  it('drops the acknowledgement blocker but keeps every other lifecycle gate', async () => {
-    const { executor, fixture } = await originalCsiExecutor(
-      undefined,
-      'complete',
-      undefined,
-      undefined,
-      true,
-    );
-    executor.sealAdmission(fixture.request.retirementId);
-    const observed = executor.getDrainObservation(fixture.request.retirementId);
-    // The external worker holds no control-plane credential, so no ACK ever
-    // reaches its journal: requiring one would refuse every close.
-    expect(observed.blockers).not.toContain('capture_uncommitted');
-    expect(observed.workState).toBe('BLOCKED');
-    for (const blocker of [
-      'shell_lifecycle_unqualified',
-      'capture_preparation_unqualified',
-      'publication_lifecycle_unqualified',
-    ])
-      expect(observed.blockers).toContain(blocker);
-  });
-
-  it('still refuses an incomplete capture, which no drain could publish', async () => {
-    const { executor, fixture } = await originalCsiExecutor(
-      undefined,
-      'partial',
-      undefined,
-      undefined,
-      true,
-    );
-    executor.sealAdmission(fixture.request.retirementId);
-    const observed = executor.getDrainObservation(fixture.request.retirementId);
-    expect(observed.blockers).toContain('capture_incomplete');
-    expect(observed.blockers).not.toContain('capture_uncommitted');
-    expect(observed.workState).toBe('BLOCKED');
-  });
-});
 
 describe('original CSI worker synchronous ACK confirmation', () => {
   it('confirms the actual sink identity, preserves lifecycle blockers and never starts new work', async () => {

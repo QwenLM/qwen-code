@@ -472,9 +472,8 @@ export class ManagedToolExecutor {
           if (result.capture?.captureStatus !== 'complete')
             blockers.add('capture_incomplete');
           if (
-            !entry.capturePublisher?.retiresOnDrainProof &&
-            (result.capture?.deliveryStatus !== 'committed' ||
-              entry.acknowledgement?.deliveryStatus !== 'committed')
+            result.capture?.deliveryStatus !== 'committed' ||
+            entry.acknowledgement?.deliveryStatus !== 'committed'
           )
             blockers.add('capture_uncommitted');
         }
