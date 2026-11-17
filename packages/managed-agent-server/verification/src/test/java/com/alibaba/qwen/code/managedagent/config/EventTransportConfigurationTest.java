@@ -8,7 +8,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.event.EventTransportConsumer;
 import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator;
-import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
@@ -125,7 +125,7 @@ class EventTransportConfigurationTest {
                 assertThat(started).doesNotHaveBean(
                         JournalEventTransport.class);
                 assertThat(started).doesNotHaveBean(
-                        TransportConsumerStore.class);
+                        JdbcTransportConsumerStore.class);
                 assertThat(started).doesNotHaveBean(
                         EventTransportConfiguration.class);
             });

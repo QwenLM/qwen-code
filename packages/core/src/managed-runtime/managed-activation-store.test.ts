@@ -16,12 +16,19 @@ import {
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
   FileManagedActivationStore,
   ManagedActivationStaleLeaseError,
   type ManagedActivationDescriptor,
 } from './managed-activation-store.js';
 import { MANAGED_JOURNAL_COMPACT_BYTES } from './managed-journal-snapshot.js';
+
+// The compaction test's 1024 serial renewals each await a journal write:
+// under fleet contention they outlasted the flat 60s budget (#15574). Slow
+// hosts get double the ceiling; fast hosts keep the original budget, so a
+// genuine hang still fails promptly.
+const compactionTimeoutMs = isSlowTestHost() ? 120_000 : 60_000;
 
 // Journal fault injection for the persist tail-repair: a failed append whose
 // repair succeeds is transient; one whose repair fails is fatal.
@@ -389,30 +396,34 @@ describe('FileManagedActivationStore', () => {
     ).rejects.toThrow('reused with different data');
   });
 
-  it('compacts repeated renewals and restores the latest lease without replaying old renewals', async () => {
-    const store = await openStore();
-    const input = activation('long-lived');
-    await store.enqueue(input, limits);
-    let current = (await store.claim(input, 'worker-a', 1000))!;
-    for (let index = 0; index < 1024; index++) {
-      now += 100;
-      current = await store.renew(current, 1000);
-    }
-    const contents = await readFile(filePath, 'utf8');
-    const lines = contents.trimEnd().split('\n');
-    expect(JSON.parse(lines[0])).toMatchObject({
-      v: 2,
-      type: 'activation.snapshot',
-    });
-    expect(Buffer.byteLength(contents)).toBeLessThan(
-      MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
-    );
-    const reopened = await openStore();
-    expect(reopened.get(input)).toEqual(store.get(input));
-    expect(reopened.get(input)?.lease).toEqual(current);
-    await reopened.release(current, 'completed');
-    expect((await openStore()).get(input)?.status).toBe('released');
-  }, 60_000);
+  it(
+    'compacts repeated renewals and restores the latest lease without replaying old renewals',
+    async () => {
+      const store = await openStore();
+      const input = activation('long-lived');
+      await store.enqueue(input, limits);
+      let current = (await store.claim(input, 'worker-a', 1000))!;
+      for (let index = 0; index < 1024; index++) {
+        now += 100;
+        current = await store.renew(current, 1000);
+      }
+      const contents = await readFile(filePath, 'utf8');
+      const lines = contents.trimEnd().split('\n');
+      expect(JSON.parse(lines[0])).toMatchObject({
+        v: 2,
+        type: 'activation.snapshot',
+      });
+      expect(Buffer.byteLength(contents)).toBeLessThan(
+        MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
+      );
+      const reopened = await openStore();
+      expect(reopened.get(input)).toEqual(store.get(input));
+      expect(reopened.get(input)?.lease).toEqual(current);
+      await reopened.release(current, 'completed');
+      expect((await openStore()).get(input)?.status).toBe('released');
+    },
+    compactionTimeoutMs,
+  );
 
   it('preserves all identities, FIFO, and per-Session epochs across snapshots', async () => {
     const store = await openStore();

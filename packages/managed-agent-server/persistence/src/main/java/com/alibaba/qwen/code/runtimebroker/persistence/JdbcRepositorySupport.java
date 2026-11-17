@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 
 import javax.sql.DataSource;
 
@@ -51,6 +52,13 @@ final class JdbcRepositorySupport {
                     "leaseDuration must be at least one microsecond");
         }
         return normalized;
+    }
+
+    /** Prepares a statement bounded by the default 10 second query timeout. */
+    static PreparedStatement statement(Connection connection, String sql) throws SQLException {
+        PreparedStatement statement = connection.prepareStatement(sql);
+        statement.setQueryTimeout(10);
+        return statement;
     }
 
     static Instant databaseNow(Connection connection) throws SQLException {
@@ -178,6 +186,14 @@ final class JdbcRepositorySupport {
             }
         }
         statement.setString(index, value);
+    }
+
+    static RuntimeBrokerException unverifiedWorkspaceHolder() {
+        return new RuntimeBrokerException(
+                409,
+                "workspace_close_identity_unverified",
+                "Original Workspace holder differs",
+                false);
     }
 
     static StoreFailureException failure(SQLException exception) {

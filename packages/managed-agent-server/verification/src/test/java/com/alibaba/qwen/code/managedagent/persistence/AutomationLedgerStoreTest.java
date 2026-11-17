@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -154,7 +155,7 @@ class AutomationLedgerStoreTest {
     @Test
     void anActiveCountReadsOnlyTheRowsItNames() {
         seedOccurrence("fired", "arun_budget", 1000L);
-        AutomationLedgerStore store = new AutomationLedgerStore(jdbc);
+        JdbcAutomationLedgerStore store = new JdbcAutomationLedgerStore(jdbc);
         assertThat(store.countActive(TENANT, SCHEDULE)).isEqualTo(1);
         assertThat(extensionRecordReads()).isZero();
         extensionRecordRows.clear();
@@ -169,7 +170,7 @@ class AutomationLedgerStoreTest {
         jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, tenant_id, workspace_id, session_id, domain, record_id, record_key, revision, task_state, record_resource_id, gmt_create) VALUES (?, ?, 'w', ?, 'automation_run',"
                         + " 'arun_budget', ?, 1, 'completed', 'res', 42)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, SESSION), TENANT,
+                ManagedSessionStore.sessionScopeKey(TENANT, SESSION), TENANT,
                 SESSION, ManagedExtensionProjection.recordKey(SESSION,
                         "automation_run", "arun_budget"));
         assertThat(store.countActive(TENANT, SCHEDULE)).isZero();
@@ -182,7 +183,7 @@ class AutomationLedgerStoreTest {
         jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, tenant_id, workspace_id, session_id, domain, record_id, record_key, revision, task_state, record_resource_id, gmt_create) VALUES (?, ?, 'w', ?, 'automation_run',"
                         + " 'arun_older', ?, 1, 'completed', 'res', 42)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, SESSION), TENANT,
+                ManagedSessionStore.sessionScopeKey(TENANT, SESSION), TENANT,
                 SESSION, ManagedExtensionProjection.recordKey(SESSION,
                         "automation_run", "arun_older"));
         jdbc.update("INSERT INTO ma_schedule_occurrence (tenant_id,schedule_id,occurrence_key,run_id,session_id,slot,trigger_kind,outcome,reason,definition_revision,fence,attempts,next_retry_at,last_error,gmt_create,gmt_modified) VALUES"
@@ -191,7 +192,7 @@ class AutomationLedgerStoreTest {
                 TENANT, SCHEDULE, "schedule:2026-06-01T10:01:00Z",
                 "arun_newer", SESSION, 2000L, 2000L);
         seedForeignRecords(2_000);
-        AutomationLedgerStore store = new AutomationLedgerStore(jdbc);
+        JdbcAutomationLedgerStore store = new JdbcAutomationLedgerStore(jdbc);
         // The terminal-committed run drops out of the blocking list, and
         // the record side answered exactly one named row — the older run's
         // own — not the whole mirror table.

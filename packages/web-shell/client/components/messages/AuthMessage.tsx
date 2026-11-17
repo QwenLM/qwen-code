@@ -61,9 +61,17 @@ type AuthStep =
 
 interface AuthMessageProps {
   dialog?: boolean;
+  standalone?: boolean;
   allowAdd?: boolean;
   onMessage: (text: string, type?: 'status' | 'error') => void;
   onModelActivated?: (modelId: string) => void;
+  onChatProviderConfigured?: () => void;
+  getWorkspaceCwd?: () => string | undefined;
+  activateSessionSubscriptionModel: (
+    workspaceCwd: string | undefined,
+    sessionId: string,
+    modelId: string,
+  ) => Promise<void>;
   onClose: () => void;
 }
 
@@ -155,9 +163,13 @@ function normalizeModelIds(value: string): string[] {
 export function AuthMessage({
   onMessage,
   onModelActivated,
+  onChatProviderConfigured,
+  getWorkspaceCwd,
+  activateSessionSubscriptionModel,
   onClose,
   allowAdd = true,
   dialog = false,
+  standalone = false,
 }: AuthMessageProps) {
   const allowAddRef = useRef(allowAdd);
   allowAddRef.current = allowAdd;
@@ -168,11 +180,55 @@ export function AuthMessage({
   const sessionActions = useActions();
   const connection = useConnection();
   const sessionOwnerGuard = useDaemonSessionOwnerGuard();
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
   const ownerRef = useRef(sessionOwnerGuard.capture());
   const ownerChanged = !ownerRef.current.isCurrent();
   if (ownerChanged) ownerRef.current = sessionOwnerGuard.capture();
   const saveOperationRef = useRef(0);
-  const [subscriptionReal, setSubscriptionReal] = useState(false);
+  const [catalog, setCatalog] = useState<DaemonAuthProviderCatalog>();
+  const [subscriptionTarget, setSubscriptionTarget] = useState<{
+    workspaceCwd: string | undefined;
+    sessionId: string | undefined;
+    sessionWorkspaceCwd: string | undefined;
+    standalone: boolean;
+  }>();
+  const getSubscriptionContext = useCallback(() => {
+    const current = connectionRef.current;
+    const workspaceCwd = standalone
+      ? undefined
+      : getWorkspaceCwd
+        ? getWorkspaceCwd()
+        : current.workspaceCwd;
+    const sessionId =
+      (standalone && current.sessionContext?.kind === 'standalone') ||
+      (!standalone && workspaceCwd === current.workspaceCwd)
+        ? current.sessionId
+        : undefined;
+    return {
+      workspaceCwd,
+      sessionId,
+      sessionWorkspaceCwd: sessionId ? current.workspaceCwd : undefined,
+      standalone,
+    };
+  }, [getWorkspaceCwd, standalone]);
+  const {
+    workspaceCwd: subscriptionWorkspace,
+    sessionId: subscriptionSession,
+    sessionWorkspaceCwd: subscriptionSessionWorkspace,
+  } = getSubscriptionContext();
+  const subscriptionTargetChanged =
+    subscriptionTarget !== undefined &&
+    (subscriptionTarget.workspaceCwd !== subscriptionWorkspace ||
+      subscriptionTarget.sessionId !== subscriptionSession ||
+      subscriptionTarget.sessionWorkspaceCwd !== subscriptionSessionWorkspace ||
+      subscriptionTarget.standalone !== standalone);
+  useEffect(() => {
+    if (subscriptionTargetChanged) setSubscriptionTarget(undefined);
+  }, [subscriptionTargetChanged]);
+  const startSubscription = useCallback(() => {
+    setSubscriptionTarget(getSubscriptionContext());
+  }, [getSubscriptionContext]);
   const [subscriptionEnabled, setSubscriptionEnabled] = useState(false);
   useEffect(() => {
     const abort = new AbortController();
@@ -192,7 +248,6 @@ export function AuthMessage({
   const [providerIndex, setProviderIndex] = useState(0);
   const [setupBackView, setSetupBackView] = useState<AuthView>('providers');
   const [stepIndex, setStepIndex] = useState(0);
-  const [catalog, setCatalog] = useState<DaemonAuthProviderCatalog>();
   const [groupId, setGroupId] = useState<AuthGroupId>('qwencloud');
   const [provider, setProvider] = useState<DaemonAuthProviderDescriptor | null>(
     null,
@@ -296,7 +351,7 @@ export function AuthMessage({
     currentStep,
     loading,
     hasSubscriptionEntry,
-    subscriptionReal,
+    subscriptionTarget,
   ]);
 
   useEffect(() => {
@@ -308,7 +363,6 @@ export function AuthMessage({
   useEffect(() => {
     if (!ownerChanged) return;
     saveOperationRef.current += 1;
-    setSubscriptionReal(false);
     setSaving(false);
     setError(null);
   }, [ownerChanged]);
@@ -517,6 +571,7 @@ export function AuthMessage({
           }
         }
         if (!isCurrent()) return;
+        if (!syncFailed && purpose === 'chat') onChatProviderConfigured?.();
         onMessage(
           syncFailed
             ? `${result.message}\n\n${t('settings.models.runtimeSyncFailed')}`
@@ -540,10 +595,12 @@ export function AuthMessage({
     advancedConfig,
     validateAdvanced,
     models,
+    onChatProviderConfigured,
     onClose,
     onMessage,
     protocol,
     provider,
+    purpose,
     saving,
     sessionActions,
     t,
@@ -604,7 +661,7 @@ export function AuthMessage({
   const activate = useCallback(() => {
     if (view === 'groups') {
       if (hasSubscriptionEntry && groupIndex === 0) {
-        setSubscriptionReal(true);
+        startSubscription();
         return;
       }
       const group = groups[groupIndex - groupOffset];
@@ -679,6 +736,7 @@ export function AuthMessage({
     catalog,
     goNext,
     hasSubscriptionEntry,
+    startSubscription,
     groupOffset,
     groupIndex,
     groups,
@@ -1212,7 +1270,7 @@ export function AuthMessage({
               onFocus={() => setGroupIndex(0)}
               onClick={() => {
                 setGroupIndex(0);
-                setSubscriptionReal(true);
+                startSubscription();
               }}
             />
           )}
@@ -1287,54 +1345,91 @@ export function AuthMessage({
     activate();
   };
 
-  if (subscriptionReal)
+  if (subscriptionTarget && !subscriptionTargetChanged)
     return (
       <QwenSubscriptionFlow
         dialog={dialog}
         desktopSuccess={dialog && isDesktopShell()}
         transport={workspaceActions}
-        onActivate={async (signal) => {
-          const owner = sessionOwnerGuard.capture();
-          const result = await workspaceActions
-            .activateSubscription({
-              signal,
-            })
-            .finally(() => {
-              signal.throwIfAborted();
-              if (!owner.isCurrent()) throw new Error('Session changed.');
-            });
+        onActivate={async (signal, onSettingsSaved) => {
+          const { workspaceCwd, sessionId, sessionWorkspaceCwd, standalone } =
+            subscriptionTarget;
+          const assertTarget = () => {
+            signal.throwIfAborted();
+            const current = getSubscriptionContext();
+            if (
+              current.workspaceCwd !== workspaceCwd ||
+              current.sessionId !== sessionId ||
+              current.sessionWorkspaceCwd !== sessionWorkspaceCwd ||
+              current.standalone !== standalone
+            )
+              throw new DOMException(
+                'Subscription target changed.',
+                'AbortError',
+              );
+          };
+          assertTarget();
+          const desktop = isDesktopShell();
+          if (standalone) {
+            const { modelId, runtimeSync } =
+              await workspaceActions.getSubscriptionDefaultModel({
+                signal,
+                ...(desktop ? { settingsScope: 'provider' } : {}),
+              });
+            assertTarget();
+            if (desktop) {
+              onSettingsSaved();
+              if (runtimeSync?.status === 'failed')
+                throw new Error('Subscription runtime activation failed.');
+            }
+            const selector = `${modelId}(qwen-subscription)`;
+            if (sessionId) {
+              await activateSessionSubscriptionModel(
+                sessionWorkspaceCwd,
+                sessionId,
+                selector,
+              );
+              assertTarget();
+            } else {
+              onModelActivated?.(selector);
+            }
+            return modelId;
+          }
+          if (!workspaceCwd)
+            throw new Error('Subscription activation requires a workspace.');
+          const result = await workspaceActions.activateSubscription({
+            workspaceCwd,
+            signal,
+            ...(desktop ? { settingsScope: 'provider' } : {}),
+          });
+          assertTarget();
+          onSettingsSaved();
           if (result.runtimeSync.status === 'failed')
             throw new Error('Subscription runtime activation failed.');
-          if (connection.sessionId) {
-            await sessionActions.setModel(
-              `${result.modelId}(qwen-subscription)`,
+          const modelId = `${result.modelId}(qwen-subscription)`;
+          if (sessionId) {
+            await activateSessionSubscriptionModel(
+              sessionWorkspaceCwd,
+              sessionId,
+              modelId,
             );
-            signal.throwIfAborted();
-            if (!owner.isCurrent()) throw new Error('Session changed.');
-            await sessionActions.refreshModels(undefined, {
-              reloadProviders: false,
-            });
-            signal.throwIfAborted();
-            if (!owner.isCurrent()) throw new Error('Session changed.');
-          } else {
-            await sessionActions.refreshModels();
-            signal.throwIfAborted();
-            if (!owner.isCurrent()) throw new Error('Session changed.');
-            const providers = await workspaceActions.loadProviders();
-            signal.throwIfAborted();
-            if (!owner.isCurrent()) throw new Error('Session changed.');
-            if (
-              !providers.initialized ||
-              providers.current?.authType !== 'qwen-subscription' ||
-              ![
-                result.modelId,
-                `${result.modelId}(qwen-subscription)`,
-              ].includes(providers.current.modelId ?? '')
-            ) {
-              throw new Error(t('subscription.connectFailed'));
-            }
-            onModelActivated?.(`${result.modelId}(qwen-subscription)`);
+            assertTarget();
+            return result.modelId;
           }
+          if (
+            connectionRef.current.status === 'connected' &&
+            connectionRef.current.workspaceCwd === workspaceCwd
+          ) {
+            await sessionActions.refreshModels(
+              (target) => {
+                if (target.sessionId || target.workspaceCwd !== workspaceCwd)
+                  throw new Error('Workspace changed.');
+              },
+              { reloadProviders: false },
+            );
+            assertTarget();
+          }
+          onModelActivated?.(modelId);
           return result.modelId;
         }}
         onActivated={(message) => {
@@ -1342,9 +1437,9 @@ export function AuthMessage({
           onClose();
         }}
         onModelsUnavailable={onClose}
-        onClose={() => setSubscriptionReal(false)}
+        onClose={() => setSubscriptionTarget(undefined)}
         onOtherProviders={() => {
-          setSubscriptionReal(false);
+          setSubscriptionTarget(undefined);
           setView('groups');
         }}
         onOpenExternal={(url) => {

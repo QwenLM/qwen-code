@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
 import type {
@@ -82,13 +82,27 @@ export function ManagedArchivedSessions({
     () => onSessionsChange(page.sessions),
     [onSessionsChange, page.sessions],
   );
+  // Hold the host callback in a ref: it is commonly an inline arrow whose
+  // identity changes on every host render, and re-running on that identity
+  // would emit a fresh status object forever (render → emit → render).
+  const statusChange = useRef(onStatusChange);
   useEffect(() => {
-    onStatusChange?.({
-      count: page.sessions.length,
-      loading: page.loading,
-      error: Boolean(page.error),
+    statusChange.current = onStatusChange;
+  }, [onStatusChange]);
+  const statusCount = page.sessions.length;
+  const statusLoading = page.loading;
+  const statusError = Boolean(page.error);
+  // Presence, not identity: a host may supply the callback only after the
+  // list has settled (a props update or `shell.update`), and the ref alone
+  // would never deliver the current status to it.
+  const hasStatusChange = onStatusChange !== undefined;
+  useEffect(() => {
+    statusChange.current?.({
+      count: statusCount,
+      loading: statusLoading,
+      error: statusError,
     });
-  }, [onStatusChange, page.sessions.length, page.loading, page.error]);
+  }, [statusCount, statusLoading, statusError, hasStatusChange]);
 
   return (
     <div data-managed-archived-sessions>

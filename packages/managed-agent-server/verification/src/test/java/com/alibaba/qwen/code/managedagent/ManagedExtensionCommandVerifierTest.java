@@ -4,9 +4,10 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtension
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionCommandVerifier;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -73,7 +74,7 @@ class ManagedExtensionCommandVerifierTest {
         when(sessions.requireSession("tenant", "harness")).thenReturn(new SessionRecord("tenant", "harness", "agent", null, "Session",
                 "READY", null, null, 0, 0, 0, 0, 0, null, 0,
                 new ContextBinding("tenant", "workspace", 1, "storage", ".", "config", 1), "default", WorkspaceToolProfiles.SHELL));
-        verifier = new ManagedExtensionCommandVerifier(jdbc, new ManagedExtensionRecordStore(jdbc), sessions, JSON);
+        verifier = new ManagedExtensionCommandVerifier(jdbc, new JdbcManagedExtensionRecordStore(jdbc), sessions, JSON);
         ObjectNode input = JSON.createObjectNode().put("command", "pwd").put("description", "cwd");
         ObjectNode inputRef = resource("managed-extension-command-input", input);
         ObjectNode permission = JSON.createObjectNode().put("allowed", true).put("toolName", "shell").put("approvalMode", "yolo")
@@ -175,7 +176,7 @@ class ManagedExtensionCommandVerifierTest {
     private ObjectNode resource(String kind, JsonNode body) throws IOException {
         byte[] bytes = JSON.writeValueAsBytes(body);
         String id = UUID.randomUUID().toString();
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "harness");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "harness");
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind,"
                         + " schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
                         + " VALUES (?, ?, 'tenant', 'workspace', 'harness', ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 0)",
@@ -187,7 +188,7 @@ class ManagedExtensionCommandVerifierTest {
     private void project(String domain, String id, String opening, JsonNode ref) {
         jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id, gmt_create) VALUES (?, ?, 'tenant', 'workspace', 'harness', ?, ?, ?, 1, ?, 0)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "harness"), ManagedExtensionProjection.recordKey("harness", domain, id),
+                ManagedSessionStore.sessionScopeKey("tenant", "harness"), ManagedExtensionProjection.recordKey("harness", domain, id),
                 domain, id, DigestUtils.sha256Hex(opening), ref.get("resourceId").textValue());
     }
 

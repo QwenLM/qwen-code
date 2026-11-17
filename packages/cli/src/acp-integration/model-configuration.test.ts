@@ -20,6 +20,7 @@ import {
   resolveReasoningCapabilities,
   resolveReasoningForModel,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -945,12 +946,25 @@ describe('model configuration manifest', () => {
     },
   );
 
-  it.each(['qwen3.8-max', 'qwen3.8-flash'])(
-    'wraps the stable %s default option for workspace preview',
+  it.each([
+    'qwen3.8-max',
+    'qwen3.8-flash',
+    'qwen3.7-plus',
+    'future-served-model',
+  ])(
+    'shows the subscription default for %s in the workspace preview',
     (modelId) => {
-      expect(buildModelReasoningConfigPreview(modelId)).toEqual([
-        buildModelReasoningConfigOption(modelId),
-      ]);
+      const generation = {
+        model: modelId,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      };
+      const reasoning = resolveReasoningForModel(undefined, generation);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, undefined, true),
+      ).toMatchObject([{ currentValue: 'medium' }]);
+      expect(
+        buildModelReasoningRoutePreview(generation, reasoning, 'xhigh', true),
+      ).toMatchObject([{ currentValue: 'xhigh' }]);
     },
   );
 
@@ -1254,12 +1268,12 @@ describe('GPT raw reasoning reporting', () => {
 // `/effort` and a workflow agent's per-call effort share one tier rule (core's
 // reasoningEffortsForCapability); these pin it at the `/effort` read site.
 describe('getReasoningEffortsForConfig', () => {
-  const configWith = (reasoning: unknown) =>
+  const configWith = (reasoning: unknown, modelId = 'custom-model') =>
     ({
-      getModel: () => 'custom-model',
+      getModel: () => modelId,
       getAuthType: () => 'openai',
       getContentGeneratorConfig: () => ({
-        model: 'custom-model',
+        model: modelId,
         authType: 'openai',
         baseUrl: 'https://example.com',
       }),
@@ -1294,6 +1308,29 @@ describe('getReasoningEffortsForConfig', () => {
     expect(getReasoningEffortsForConfig(configWith(undefined))).toEqual(
       REASONING_EFFORT_TIERS,
     );
+  });
+
+  // The built-in tables are the only tier source for these models, so skipping
+  // them offered the whole ladder and let `/effort` persist a tier the wire
+  // then re-tiered (#17411).
+  it.each([
+    { modelId: 'gpt-5-pro', tiers: ['high'] },
+    { modelId: 'gpt-5.1', tiers: ['low', 'medium', 'high'] },
+    { modelId: 'qwen3.8-max', tiers: ['low', 'medium', 'xhigh'] },
+    { modelId: 'qwen4-max', tiers: ['low', 'medium', 'xhigh'] },
+  ])(
+    'offers the built-in tiers for $modelId with no declaration',
+    ({ modelId, tiers }) => {
+      expect(
+        getReasoningEffortsForConfig(configWith(undefined, modelId)),
+      ).toEqual(tiers);
+    },
+  );
+
+  it('offers nothing for a toggle-only manifest model with no declaration', () => {
+    expect(
+      getReasoningEffortsForConfig(configWith(undefined, 'qwen3.7-max')),
+    ).toEqual([]);
   });
 });
 

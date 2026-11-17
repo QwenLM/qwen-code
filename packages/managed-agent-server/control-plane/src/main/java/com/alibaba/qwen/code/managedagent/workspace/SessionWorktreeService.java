@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Row;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.session.LeaseRenewalRunner;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.annotation.PreDestroy;
@@ -21,10 +22,6 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 @Service
 public class SessionWorktreeService {
@@ -34,12 +31,9 @@ public class SessionWorktreeService {
     private final ManagedAgentSettings properties;
     private final TurnExecutionStore sessions;
     private final HarnessCoordinator coordinator;
-    private final String owner = "session-worktree-" + UUID.randomUUID();
-    private final ScheduledExecutorService renewals = Executors.newSingleThreadScheduledExecutor(task -> {
-        Thread thread = new Thread(task, "session-worktree-renewal");
-        thread.setDaemon(true);
-        return thread;
-    });
+    private final LeaseRenewalRunner runner =
+            new LeaseRenewalRunner("session-worktree-" + UUID.randomUUID(), "session-worktree-renewal");
+    private final String owner = runner.owner();
     private SessionWorktreeOperations git;
     private SessionWorktreeOperations.Factory gitFactory;
     private WorktreeFiles worktreeFiles;
@@ -166,18 +160,9 @@ public class SessionWorktreeService {
         if (row == null) {
             return;
         }
-        AtomicBoolean live = new AtomicBoolean(true);
-        var renewal = renewals.scheduleWithFixedDelay(() -> {
-            try {
-                if (!store.renew(row, owner, LEASE_MS)) {
-                    live.set(false);
-                }
-            } catch (RuntimeException exception) {
-                live.set(false);
-            }
-        }, LEASE_MS / 3, LEASE_MS / 3, TimeUnit.MILLISECONDS);
+        var renewal = runner.startFixedDelay(LEASE_MS / 3, () -> store.renew(row, owner, LEASE_MS), ignored -> {});
         boolean preparing = "PREPARING".equals(row.state());
-        try {
+        try (renewal) {
             if (preparing && !store.active(row) && row.identityJson() == null) {
                 if (java.nio.file.Files.exists(java.nio.file.Path.of(row.plan().root()).resolve(row.plan().worktreeRoot()),
                         java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
@@ -192,12 +177,12 @@ public class SessionWorktreeService {
                 store.complete(row, owner, "READY", null, storedBlocker);
                 return;
             }
-            var binding = com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.storageBinding(row.plan());
+            var binding = SessionWorktreeStore.storageBinding(row.plan());
             String step = execution.holdForMaintenance(binding, row.operationId(), row.generation());
             String identity = null;
             boolean stopped = true;
             try {
-                identity = git().runWhileLive(live::get, () -> {
+                identity = git().runWhileLive(renewal::isLive, () -> {
                     if (preparing) {
                         return git().prepare(row.plan());
                     }
@@ -239,8 +224,6 @@ public class SessionWorktreeService {
                     sessions.failWorktreeInitialTurns(row.tenantId(), row.sessionId(), code);
                 }
             }
-        } finally {
-            renewal.cancel(false);
         }
     }
 
@@ -272,7 +255,7 @@ public class SessionWorktreeService {
 
     @PreDestroy
     void stop() {
-        renewals.shutdownNow();
+        runner.close();
         if (git != null) {
             git.close();
         }

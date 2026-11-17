@@ -122,6 +122,22 @@ export class GroupGate {
   isGroupApproved(groupId: string): boolean {
     return this.pairingStore?.isGroupApproved(groupId) ?? false;
   }
+
+  /**
+   * Whether the group passes the policy, allowlist and pairing steps of
+   * `check`, mention gating aside. Has no side effects: it never creates a
+   * pairing request.
+   */
+  admits(groupId: string): boolean {
+    if (this.policy === 'disabled') return false;
+    if (this.policy === 'allowlist' && !this.groupConfigFor(groupId)) {
+      return false;
+    }
+    if (this.policy === 'pairing' && !this.isGroupApproved(groupId)) {
+      return false;
+    }
+    return true;
+  }
 }
 
 /**

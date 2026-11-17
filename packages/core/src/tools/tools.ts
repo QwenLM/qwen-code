@@ -630,6 +630,13 @@ export interface ToolResult {
   outputBudgetApplied?: boolean;
 
   /**
+   * Set by a producer that knows its own work was cut short but reports that
+   * outcome as an ordinary result instead of throwing. The scheduler uses it to
+   * tell the model the call was interrupted rather than completed.
+   */
+  interruptedBeforeCompletion?: boolean;
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
@@ -1195,6 +1202,8 @@ export interface ToolExecuteConfirmationDetails {
   hideAlwaysAllow?: boolean;
   command: string;
   rootCommand: string;
+  /** Plain-text approval details for clients that render tool call content. */
+  approvalText?: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
   /**
@@ -1248,7 +1257,9 @@ export interface AutoModeFallbackConfirmation {
     | 'consecutive_unavailable'
     | 'total_denial'
     | 'external_write'
-    | 'external_directory';
+    | 'external_directory'
+    // A human-only safety floor, currently the `git commit --amend` guard.
+    | 'safety_check';
   message: string;
 }
 

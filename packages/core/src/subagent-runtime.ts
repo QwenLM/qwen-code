@@ -33,6 +33,7 @@ export {
 } from './agents/runtime/agent-events.js';
 export type {
   AgentApprovalRequestEvent,
+  AgentApprovalResolvedEvent,
   AgentConfirmationDetails,
   AgentErrorEvent,
   AgentEvent,

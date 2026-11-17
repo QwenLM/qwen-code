@@ -27,6 +27,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { Command, keyMatchers } from '../keyMatchers.js';
 import {
   useKeyboard,
   usePaste,
@@ -368,9 +369,11 @@ function FieldText({
     );
   }
   const spans = caretSpans({ text: value, cursor: caret });
+  const before = sanitizeTerminalText(spans.before);
+  const after = sanitizeTerminalText(spans.after);
   return (
     <>
-      <text fg={C.text}>{sanitizeTerminalText(spans.before)}</text>
+      {before ? <text fg={C.text}>{before}</text> : null}
       {/* The character belongs to the value whatever owns the focus; only the
           highlight says which field the caret is in. Dropping it while inactive
           would print a value one character shorter than the one held. */}
@@ -379,7 +382,7 @@ function FieldText({
       ) : (
         <text fg={C.text}>{sanitizeTerminalText(spans.at)}</text>
       )}
-      <text fg={C.text}>{sanitizeTerminalText(spans.after)}</text>
+      {after ? <text fg={C.text}>{after}</text> : null}
     </>
   );
 }
@@ -430,6 +433,10 @@ function useLineInputKeys(
     const o = toOriginalKey(key);
     if (o.name === 'return' || o.name === 'enter') {
       if (onSubmit(line.text)) line.settle();
+      return;
+    }
+    if (keyMatchers[Command.CLEAR_INPUT](o)) {
+      line.clear();
       return;
     }
     if (!line.handleKey(o) && isPrintableKeyInput(key)) {
@@ -893,6 +900,8 @@ function ModelsStep({
         if (isPainted(0)) setFocus(0);
       } else if (o.name === 'return' || o.name === 'enter') {
         submit();
+      } else if (keyMatchers[Command.CLEAR_INPUT](o)) {
+        search.clear();
       } else if (!search.handleKey(o) && isPrintableKeyInput(key)) {
         search.insert(key.sequence);
       }
@@ -905,6 +914,10 @@ function ModelsStep({
     }
     if (o.name === 'return' || o.name === 'enter') {
       submit();
+      return;
+    }
+    if (keyMatchers[Command.CLEAR_INPUT](o)) {
+      custom.clear();
       return;
     }
     if (!custom.handleKey(o) && isPrintableKeyInput(key)) {
@@ -1044,6 +1057,11 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
   } = flow.state;
   const ctxIdx = modalityEnabled ? 6 : 2;
   const onCtxRow = focusedConfigIndex === ctxIdx;
+  // One stdin read dispatches every key to the render that armed the handler,
+  // so a ↓ followed by Ctrl+C would clear a row the ↓ already left. Mirror the
+  // flow's index and advance it with the flow's own wraparound count.
+  const focusRef = useRef(focusedConfigIndex);
+  focusRef.current = focusedConfigIndex;
   const ctxField = useLineEdit(contextWindowSize, flow.changeContextWindowSize);
   useKeyboard((key) => {
     if (ctxField.settled) return;
@@ -1051,18 +1069,24 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     // Focus-row navigation restricted to unambiguous shortcuts (ink parity:
     // a letter typed into the context-window field must not move the row).
     if (o.name === 'up' || (o.ctrl && o.name === 'p')) {
+      focusRef.current =
+        focusRef.current <= 0
+          ? flow.advancedOptionCount - 1
+          : focusRef.current - 1;
       flow.moveAdvancedFocusUp();
       return;
     }
     if (o.name === 'down' || (o.ctrl && o.name === 'n')) {
+      focusRef.current =
+        focusRef.current >= flow.advancedOptionCount - 1
+          ? 0
+          : focusRef.current + 1;
       flow.moveAdvancedFocusDown();
       return;
     }
     if (o.name === 'space') {
-      // On the context row Space inserts a space into the field; the flow's
-      // toggleFocusedAdvancedOption has no case for ctxIdx (ink parity).
-      if (onCtxRow) ctxField.insert(' ');
-      else flow.toggleFocusedAdvancedOption();
+      // Space belongs to this row but is not a numeric edit.
+      if (!onCtxRow) flow.toggleFocusedAdvancedOption();
       return;
     }
     if (o.name === 'return') {
@@ -1070,8 +1094,16 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
       ctxField.settle();
       return;
     }
-    if (onCtxRow && !ctxField.handleKey(o) && isPrintableKeyInput(key)) {
-      ctxField.insert(key.sequence);
+    if (focusRef.current === ctxIdx && keyMatchers[Command.CLEAR_INPUT](o)) {
+      ctxField.clear();
+      return;
+    }
+    if (
+      focusRef.current === ctxIdx &&
+      !ctxField.handleKey(o) &&
+      isPrintableKeyInput(key)
+    ) {
+      ctxField.insert(key.sequence.replace(/[^0-9]/g, ''));
     }
   });
   // Only the context-window field accepts text; a paste while another row is
@@ -1081,7 +1113,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    ctxField.insert(text);
+    ctxField.insert(text.replace(/[^0-9]/g, ''));
   });
   const checkmark = (v: boolean) => (v ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY);
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
@@ -1323,7 +1355,7 @@ function SubscriptionView({
   const { cursor, cursorRef, setCursor } = useBatchSafeCursor();
   const actions = [
     ...(state.status === 'ready' &&
-    flow.connectionError &&
+    flow.connectionError !== undefined &&
     !flow.modelSelectionRequired
       ? [
           {

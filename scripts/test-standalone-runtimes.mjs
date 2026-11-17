@@ -11,6 +11,7 @@ import https from 'node:https';
 import { createHash } from 'node:crypto';
 import childProcess, { spawnSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   fetchVerifiedArchive,
@@ -351,7 +352,12 @@ async function worker(root, node, bun, expectedHost) {
           path.dirname(payload),
           'qwen-code',
         ]);
-        run('gzip', ['-1', '-f', uncompressedArchive]);
+        // Avoid repeated compression work for the real interpreter fixtures.
+        fs.writeFileSync(
+          archive,
+          gzipSync(fs.readFileSync(uncompressedArchive), { level: 0 }),
+        );
+        fs.rmSync(uncompressedArchive);
         sums = `${sha(archive)}  ${filename}\n`;
       };
       const writePayload = (source, version = '1.2.3') => {

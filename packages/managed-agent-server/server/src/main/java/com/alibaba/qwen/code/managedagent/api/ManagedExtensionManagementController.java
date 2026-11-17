@@ -39,6 +39,14 @@ public class ManagedExtensionManagementController {
         return noStore(service.query(tenant.tenantId(), tenant.requireActorId(), sessionId, operationId));
     }
 
+    public record Lookup(@NotBlank String idempotencyKey) { }
+
+    @PostMapping(BASE + "/operations/lookup")
+    public ResponseEntity<JsonNode> lookup(TenantContext tenant, @PathVariable String sessionId,
+            @Valid @RequestBody Lookup request) {
+        return noStore(service.lookup(tenant.tenantId(), tenant.requireActorId(), sessionId, request.idempotencyKey()));
+    }
+
     @PostMapping(BASE + "/operations/{operationId}/continue")
     public ResponseEntity<JsonNode> resume(TenantContext tenant, @PathVariable String sessionId, @PathVariable String operationId) {
         return noStore(service.resume(tenant.tenantId(), tenant.requireActorId(), sessionId, operationId, false));
@@ -51,6 +59,12 @@ public class ManagedExtensionManagementController {
 
     public record WebQuery(@NotBlank String sessionId, String operationId) { }
     public record WebSubmit(@NotBlank String sessionId, @NotBlank String idempotencyKey, @NotNull JsonNode command) { }
+    public record WebLookup(@NotBlank String sessionId, @NotBlank String idempotencyKey) { }
+
+    @PostMapping(WEB + "/operations/lookup")
+    public ResponseEntity<JsonNode> webLookup(TenantContext tenant, @Valid @RequestBody WebLookup request) {
+        return noStore(service.lookup(tenant.tenantId(), tenant.requireActorId(), request.sessionId(), request.idempotencyKey()));
+    }
 
     @PostMapping(WEB + "/query")
     public ResponseEntity<JsonNode> webQuery(TenantContext tenant, @Valid @RequestBody WebQuery request) {

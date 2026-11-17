@@ -47,6 +47,7 @@ The daemon additionally requires:
 - The turn ended cleanly, meaning its stop reason is `end_turn` — a cancelled, refused, or truncated turn gets no suggestion
 - Automatic turns are not being held by the todo stop guard, and no queued prompt is waiting to run
 - The most recent entry in the conversation history is a model response
+- A channel did not send the turn: a channel's turn, including one it delivers to a session bound to a pull request, gets none
 
 Because daemon-side generation happens for every client attached to the session, it also happens for clients that cannot render the result. Such a client — a headless or SDK consumer of a daemon session, which is not the CLI's own non-interactive mode above — should set `ui.enableFollowupSuggestions` to `false` to avoid paying the per-turn LLM cost for output it discards.
 
@@ -115,11 +116,11 @@ The fast model is also shown in `/about` output under "Fast Model".
 
 Suggestions go through quality filters to ensure they are useful:
 
-- Must be 2-12 words (CJK: 2-30 characters), under 100 characters total
+- Must be 2-12 words (CJK: 2-30 characters), under 100 characters total. Thai, Lao, Khmer and Myanmar text written without spaces is counted by dictionary word segmentation instead (up to 12 words, or up to 60 characters on Node builds without full ICU)
 - Cannot be evaluative ("looks good", "thanks")
 - Cannot use AI voice ("Let me...", "I'll...")
 - Cannot be multiple sentences or contain formatting (markdown, newlines)
 - Cannot be meta-commentary ("nothing to suggest", "silence")
 - Cannot be error messages or prefixed labels ("Suggestion: ...")
-- Single-word suggestions are only allowed for common commands (yes, commit, push, etc.)
+- In space-delimited scripts, single-word suggestions are only allowed for common commands (yes, commit, push, etc.). A single word in Thai, Lao, Khmer or Myanmar is allowed
 - Slash commands (e.g., `/commit`) are always allowed as single-word suggestions

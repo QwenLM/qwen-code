@@ -116,7 +116,7 @@ export function readCsiPreparationEvidence(
   ]);
   ensure(
     body['schemaVersion'] === 2 &&
-      body['profile'] === 'csi-files-retirement/1' &&
+      body['profile'] === response.identity['profile'] &&
       body['runtimeSessionId'] === owner,
   );
   const preparation = closed(body['preparation'], [

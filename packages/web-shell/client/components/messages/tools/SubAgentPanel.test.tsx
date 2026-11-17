@@ -261,7 +261,7 @@ describe('SubAgentPanel sub-tool timestamps', () => {
     expect(stepWindow?.className).toContain('tools');
   });
 
-  it('hides non-standard sub-tool summaries until the row is expanded', () => {
+  it('hides non-standard sub-tool details until the row is expanded', () => {
     const container = renderPanel(
       makeAgentWithSubTool({
         callId: 'sub-1',
@@ -275,9 +275,10 @@ describe('SubAgentPanel sub-tool timestamps', () => {
     ) as HTMLElement | undefined;
 
     expect(row).toBeDefined();
-    expect(container.textContent).not.toContain('2 item(s)');
+    expect(container.textContent).not.toContain('package.json');
     act(() => row!.click());
-    expect(container.textContent).toContain('2 item(s)');
+    expect(container.textContent).toContain('Result');
+    expect(container.textContent).toContain('package.json');
   });
 });
 

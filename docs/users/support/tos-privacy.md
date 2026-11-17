@@ -6,25 +6,25 @@ Qwen Code is an open-source AI coding assistant tool maintained by the Qwen Code
 
 Qwen Code supports four authentication methods to access AI models. Your authentication method determines which terms of service and privacy policies apply to your usage:
 
-1. [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code) **(Qwen OAuth)** — Log in with your Qwen account and an active **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code)
+1. [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) **(Qwen OAuth)** — Log in with your Qwen account and an active **Plus or Pro subscription** from [**chat.qwen.ai**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli)
 2. **Alibaba Cloud Coding Plan** — Use an API key from Alibaba Cloud
 3. **API Key** — Bring your own API key
 4. **Vertex AI** — Use Google Cloud Vertex AI
 
 For each authentication method, different Terms of Service and Privacy Notices may apply depending on the underlying service provider.
 
-[Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code) is separate from the legacy free Qwen OAuth allowance, which was discontinued on 2026-04-15.
+[Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) is separate from the legacy free Qwen OAuth allowance, which was discontinued on 2026-04-15.
 
-| Authentication Method                                                        | Provider          | Terms of Service                                                   | Privacy Notice                                                     |
-| :--------------------------------------------------------------------------- | :---------------- | :----------------------------------------------------------------- | :----------------------------------------------------------------- |
-| [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code) | Qwen AI           | [Qwen Terms of Service](https://qwen.ai/termsservice)              | [Qwen Privacy Policy](https://qwen.ai/privacypolicy)               |
-| Alibaba Cloud Coding Plan                                                    | Alibaba Cloud     | See [details below](#2-if-you-are-using-alibaba-cloud-coding-plan) | See [details below](#2-if-you-are-using-alibaba-cloud-coding-plan) |
-| API Key                                                                      | Various Providers | Depends on your chosen API provider (OpenAI, Anthropic, etc.)      | Depends on your chosen API provider                                |
-| Vertex AI                                                                    | Google Cloud      | [Google Cloud Terms](https://cloud.google.com/terms)               | [Google Cloud Privacy](https://cloud.google.com/privacy)           |
+| Authentication Method                                                                                         | Provider          | Terms of Service                                                   | Privacy Notice                                                     |
+| :------------------------------------------------------------------------------------------------------------ | :---------------- | :----------------------------------------------------------------- | :----------------------------------------------------------------- |
+| [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) | Qwen AI           | [Qwen Terms of Service](https://qwen.ai/termsservice)              | [Qwen Privacy Policy](https://qwen.ai/privacypolicy)               |
+| Alibaba Cloud Coding Plan                                                                                     | Alibaba Cloud     | See [details below](#2-if-you-are-using-alibaba-cloud-coding-plan) | See [details below](#2-if-you-are-using-alibaba-cloud-coding-plan) |
+| API Key                                                                                                       | Various Providers | Depends on your chosen API provider (OpenAI, Anthropic, etc.)      | Depends on your chosen API provider                                |
+| Vertex AI                                                                                                     | Google Cloud      | [Google Cloud Terms](https://cloud.google.com/terms)               | [Google Cloud Privacy](https://cloud.google.com/privacy)           |
 
-## 1. If you are using [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code)
+## 1. If you are using [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli)
 
-When you authenticate using your Qwen account through [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code), these Terms of Service and Privacy Notice documents apply:
+When you authenticate using your Qwen account through [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli), these Terms of Service and Privacy Notice documents apply:
 
 - **Terms of Service:** Your use is governed by the [Qwen Terms of Service](https://qwen.ai/termsservice).
 - **Privacy Notice:** The collection and use of your data is described in the [Qwen Privacy Policy](https://qwen.ai/privacypolicy).
@@ -104,7 +104,7 @@ When enabled, Qwen Code may collect:
 
 ### Data Collection by Authentication Method
 
-Qwen Code's usage statistics setting applies to all authentication methods: [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code), Alibaba Cloud Coding Plan, your own API key, and Vertex AI. When enabled, these events are sent to an Alibaba Cloud RUM collection endpoint, independently of the data your chosen AI provider collects under its own privacy policy.
+Qwen Code's usage statistics setting applies to all authentication methods: [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli), Alibaba Cloud Coding Plan, your own API key, and Vertex AI. When enabled, these events are sent to an Alibaba Cloud RUM collection endpoint, independently of the data your chosen AI provider collects under its own privacy policy.
 
 To opt out, set the following in your Qwen Code settings:
 
@@ -124,7 +124,7 @@ You can also set the `QWEN_USAGE_STATISTICS_ENABLED` environment variable to `fa
 
 Whether your code, including prompts and answers, is used to train AI models depends on your authentication method and the specific AI service provider you use:
 
-- [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code): Data usage is governed by [Qwen's Privacy Policy](https://qwen.ai/privacypolicy). Please refer to their policy for specific details about data collection and model training practices.
+- [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli): Data usage is governed by [Qwen's Privacy Policy](https://qwen.ai/privacypolicy). Please refer to their policy for specific details about data collection and model training practices.
 
 - **Alibaba Cloud Coding Plan**: Data usage is governed by Alibaba Cloud's privacy policy. Please refer to their policy for specific details about data collection and model training practices.
 
@@ -155,7 +155,7 @@ The Usage Statistics setting only controls data collection by Qwen Code itself. 
 
 ### 3. How do I switch between authentication methods?
 
-You can switch between [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code), Alibaba Cloud Coding Plan, your own API key, and Vertex AI at any time:
+You can switch between [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli), Alibaba Cloud Coding Plan, your own API key, and Vertex AI at any time:
 
 1. **During startup**: Choose your preferred authentication method when prompted
 2. **Within the CLI**: Use the `/auth` command to reconfigure your authentication method

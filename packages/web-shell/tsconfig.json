@@ -4,7 +4,6 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "baseUrl": ".",
     "paths": {
       "@qwen-code/web-shell/daemon-react-sdk": ["./client/daemon-react-sdk.ts"],
       "@qwen-code/web-shell/transcript": ["./client/transcript.ts"],
