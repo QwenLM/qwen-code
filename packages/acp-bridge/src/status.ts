@@ -305,6 +305,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
     'qwen/control/session/managed-conversation-binding/commit',
   sessionManagedConversationBindingRelease:
     'qwen/control/session/managed-conversation-binding/release',
+  resolveSubSessionWorkspace: 'qwen/control/resolve-sub-session-workspace',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
    * `create_sub_session` tool, running inside a child's agent turn, asks the
@@ -675,6 +676,8 @@ export interface ServeSessionContextStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /** Whether the session can durably accept a daemon completion notification. */
+  canAcceptBackgroundNotifications?: boolean;
   recovery?: {
     kind:
       | 'clean'
@@ -1430,10 +1433,10 @@ export interface ServeWorkspaceMemoryFile {
    */
   content?: string;
   /**
-   * True when the served text is not the file's full content: either
-   * `content` stops at the daemon's read cap, or the read raced a
-   * concurrent write (byte count differed from `bytes`, in which case
-   * `content` is omitted entirely).
+   * Present and true when `content` stops at the daemon's read cap, the
+   * read raced a concurrent write, or the on-disk bytes are not BOM-free
+   * UTF-8. `content` is omitted for the latter two cases; retrying
+   * unchanged bytes cannot repair an encoding issue.
    */
   truncated?: boolean;
 }

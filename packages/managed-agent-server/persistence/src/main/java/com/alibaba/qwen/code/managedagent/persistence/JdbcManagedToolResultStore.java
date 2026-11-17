@@ -121,12 +121,7 @@ public class JdbcManagedToolResultStore
                                                         + epoch
                                                         + " AS due_at FROM ma_operation WHERE"
                                                         + " operation_kind ="
-                                                        + " 'TOOL_RESULT_PROJECTION' AND NOT EXISTS"
-                                                        + " (SELECT 1 FROM ma_session s WHERE"
-                                                        + " s.tenant_id = ma_operation.tenant_id"
-                                                        + " AND s.session_id ="
-                                                        + " ma_operation.session_id AND s.is_csi_guard"
-                                                        + " = TRUE) AND state = ? AND "
+                                                        + " 'TOOL_RESULT_PROJECTION' AND state = ? AND "
                                                         + due
                                                         + " <= "
                                                         + bound
@@ -152,13 +147,9 @@ public class JdbcManagedToolResultStore
                             for (var candidate : rows) {
                                 String tenant = (String) candidate.get("tenant_id");
                                 String session = (String) candidate.get("session_id");
-                                // No tenant publication guard: a pinned Session is
-                                // skipped, and an ordinary one orders on its root and
-                                // head before the operation row, as collection does
-                                // (design 2026-11-04-managed-publication-tenant-guards, C2).
-                                if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
-                                    continue;
-                                }
+                                // No tenant publication guard: an ordinary Session
+                                // orders on its root and head before the operation row,
+                                // as collection does (design 2026-11-04-managed-publication-tenant-guards, C2).
                                 ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
                                 var current =
                                         jdbc.queryForList(
@@ -250,9 +241,6 @@ public class JdbcManagedToolResultStore
                             String tenant = (String) rows.getFirst().get("tenant_id");
                             String session = (String) rows.getFirst().get("session_id");
                             // As in claim: no tenant publication guard.
-                            if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
-                                return false;
-                            }
                             ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
                             var row =
                                     jdbc.queryForMap(
@@ -329,8 +317,6 @@ public class JdbcManagedToolResultStore
                             if (!admitsLegacyProjection(claim)) {
                                 return false;
                             }
-                            ManagedLegacySessionGuard.requireLegacyMutation(
-                                    jdbc, source.tenantId(), source.sessionId());
                             var retired =
                                     jdbc.query(
                                             "SELECT retirement_generation FROM ma_session WHERE"
