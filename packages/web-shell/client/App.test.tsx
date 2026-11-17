@@ -7125,6 +7125,182 @@ describe('task activity key', () => {
     ).not.toHaveBeenCalled();
   });
 
+  it('drops a restored change overview tab when the host stopped listing it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'change_overview',
+          tabs: [
+            {
+              id: 'change_overview',
+              kind: 'change_overview',
+              title: 'Change overview',
+              workspaceCwd: '/tmp/project',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    // A stored tab must not be a second way in for a host that turned the
+    // feature off: it would render the panel and keep fetching git state.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).toBeNull();
+  });
+
+  it('round-trips a persisted change overview tab when the host lists it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'change_overview',
+          tabs: [
+            {
+              id: 'change_overview',
+              kind: 'change_overview',
+              title: 'Change overview',
+              workspaceCwd: '/tmp/project',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp({
+      rightPanel: { items: ['review', 'changeOverview'] },
+    });
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).not.toBeNull();
+  });
+
+  it('stamps the live session onto a change overview tab opened on the new-task page', async () => {
+    // A tab opened before the first prompt has no session; the reconciliation
+    // effect is the only writer that adopts the materialized session id.
+    // Without it the tab runs useChangeOverview(cwd, undefined) forever: no
+    // bound PRs, no base branch, no worktree scoping.
+    // Align the session-less workspace cwd with the session fixture's and
+    // arm the real first-prompt path (createSession materializes the session)
+    // so the draft panel state carries over to the session key.
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-1';
+      return { sessionId: 'session-1' };
+    });
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const actions = container.querySelector(
+      '[data-testid="right-panel-empty-actions"]',
+    );
+    expect(actions).not.toBeNull();
+    const openButton = Array.from(actions!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Change overview'),
+    );
+    expect(openButton).toBeDefined();
+    await act(async () => {
+      openButton!.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).not.toBeNull();
+    expect(mockWorkspace.client.sessionStatus).not.toHaveBeenCalled();
+
+    // Materialize the session through the real first-prompt submission, the
+    // way the new-task panel regression harness does: createSession arms the
+    // draft carry-over and reports the session live.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        editorCommit,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    // The draft carry-over persists panel state in a layout effect before the
+    // passive reconciliation effect stamps the session id, so settle through
+    // re-renders rather than asserting on the first flush. Assert on the
+    // persisted tab itself: sessionStatus is a shared mock that sibling
+    // consumers also call once a session is live, so it cannot discriminate
+    // whether THIS tab adopted the session.
+    await vi.waitFor(async () => {
+      await flush();
+      const raw = window.localStorage.getItem(
+        'qwen-code-web-shell-right-panel-state',
+      );
+      const state = JSON.parse(raw ?? '{}') as Record<
+        string,
+        { tabs?: Array<{ kind?: string; sessionId?: string }> }
+      >;
+      const entry = state['/tmp/project\0session-1'];
+      expect(
+        entry?.tabs?.some(
+          (tab) =>
+            tab.kind === 'change_overview' && tab.sessionId === 'session-1',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('does not duplicate the change overview tab when opened twice', async () => {
+    mockConnection.sessionId = undefined;
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const actions = container.querySelector(
+      '[data-testid="right-panel-empty-actions"]',
+    );
+    const openButton = Array.from(actions!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Change overview'),
+    );
+    expect(openButton).toBeDefined();
+    await act(async () => {
+      openButton!.click();
+      openButton!.click();
+    });
+    await flush();
+    expect(
+      container.querySelectorAll('button[title="Change overview"]'),
+    ).toHaveLength(1);
+  });
+
   it('opens one trajectory tab from the panel and reuses it', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
@@ -12770,6 +12946,7 @@ function makePendingPermissionBlock(
       raw: Record<string, unknown>;
     }>;
     content?: unknown[];
+    rawInput?: Record<string, unknown>;
   } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
@@ -12788,6 +12965,7 @@ function makePendingPermissionBlock(
         ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
       },
       ...(overrides.content ? { content: overrides.content } : {}),
+      ...(overrides.rawInput ? { rawInput: overrides.rawInput } : {}),
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -18593,7 +18771,11 @@ describe('App session callbacks', () => {
   it('hands workspace context from the welcome composer to the session header', async () => {
     mockConnection.sessionId = undefined;
     testState.messages = [];
-    const { container, rerender } = renderApp();
+    // Session-scoped entries only: the workspace-scoped changeOverview default
+    // would otherwise surface the header on the session-less welcome page.
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['review', 'sideTask'] },
+    });
     await flush();
     expect(testState.latestChatEditorProps?.contextChipPlacement).toBe('below');
     expect(
@@ -20085,7 +20267,11 @@ describe('App session callbacks', () => {
   it('hides the new-task header when nothing workspace-scoped is available', async () => {
     mockConnection.sessionId = undefined;
     testState.messages = [];
-    const { container } = renderApp();
+    // Session-scoped entries only, so nothing workspace-scoped is available on
+    // the new-task page (changeOverview is workspace-scoped and in the default).
+    const { container } = renderApp({
+      rightPanel: { items: ['review', 'sideTask'] },
+    });
     await flush();
 
     expect(
@@ -20364,7 +20550,9 @@ describe('App session callbacks', () => {
   });
 
   it('keeps the right-panel action visible and opens a review-only empty state', () => {
-    const { container } = renderApp();
+    // Scope to review only: the default list also offers the workspace-scoped
+    // changeOverview action, which this review-only assertion does not cover.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
     const rightPanelButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Toggle right panel"]',
     );
@@ -29244,6 +29432,41 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('only opens qualified transcript links within the workspace lock', async () => {
+    renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'other-session',
+            workspaceCwd: '/other',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'locked-session',
+            workspaceCwd: '/locked',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'locked-session',
+      {
+        workspaceCwd: '/locked',
+        sessionContext: { kind: 'workspace', cwd: '/locked' },
+      },
+    );
+  });
+
   it('keeps legacy window session links available with a workspace lock', async () => {
     renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
     await flush();
@@ -37754,6 +37977,33 @@ describe('App session callbacks', () => {
     await flush();
     expect(firstHandler).not.toHaveBeenCalled();
     expect(secondHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'create_sub_session',
+        kind: 'other',
+        rawInput: { workspace: '/repos/b' },
+        options: [
+          {
+            optionId: 'proceed_once',
+            label: 'Allow',
+            raw: { kind: 'allow_once' },
+          },
+        ],
+      }),
+    ];
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+    });
+
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: false,
+    });
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
   });
 
   it.each(['default', 'auto-edit', 'auto', 'yolo'])(

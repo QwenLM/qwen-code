@@ -599,6 +599,8 @@ export type {
   DaemonGitHubPullRequestChecks,
   DaemonGitHubPullRequest,
   DaemonGitHubPullRequestList,
+  DaemonGitHubPullRequestFile,
+  DaemonGitHubPullRequestFiles,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceRemovalActivity,
   DaemonWorkspaceRemovalResult,

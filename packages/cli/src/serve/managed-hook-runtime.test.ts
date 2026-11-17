@@ -360,6 +360,63 @@ describe('ManagedHookRuntime', () => {
     },
   );
 
+  it('accepts description and statusMessage metadata across all hook types', () => {
+    const hooks: ManagedHookDefinition[] = [
+      {
+        ...definition(),
+        hookId: 'cmd',
+        config: {
+          type: HookType.Command,
+          command: 'echo test',
+          description: 'A command hook description',
+          statusMessage: 'Executing command hook...',
+          timeout: 5000,
+        },
+      },
+      {
+        ...definition(),
+        hookId: 'http',
+        config: {
+          type: HookType.Http,
+          url: 'http://127.0.0.1:8080/hook',
+          description: 'An HTTP hook description',
+          statusMessage: 'Calling HTTP endpoint...',
+          timeout: 5000,
+        },
+      },
+      {
+        ...definition(),
+        hookId: 'prompt',
+        config: {
+          type: HookType.Prompt,
+          prompt: 'review this',
+          description: 'A prompt hook description',
+          statusMessage: 'Prompting model...',
+          timeout: 5000,
+        },
+      },
+      {
+        ...definition(),
+        hookId: 'fn',
+        config: {
+          type: HookType.Function,
+          name: 'handlerFunc',
+          description: 'A function hook description',
+          statusMessage: 'Running function handler...',
+          timeout: 5000,
+        },
+        handler: {
+          handlerId: 'h1',
+          handlerRevision: 1,
+          modulePath: path.join(directory, 'handler.js'),
+          exportName: 'handle',
+        },
+      },
+    ];
+
+    expect(() => runtime(hooks)).not.toThrow();
+  });
+
   it.each([
     {
       name: 'allowed',
