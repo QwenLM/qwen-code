@@ -441,10 +441,17 @@ export class AcpWsTransport implements DaemonTransport {
       }
       this.ws = ws;
 
+      let initId: number | undefined;
+      const failInitialization = (error: Error) => {
+        clearTimeout(initTimeout);
+        if (initId !== undefined) this.pending.delete(initId);
+        rejectConnect(error);
+        ws.close(1002, 'Initialize failed');
+      };
+
       // Timeout for the initialize handshake.
       const initTimeout = setTimeout(() => {
-        ws.close(1002, 'Initialize timeout');
-        rejectConnect(
+        failInitialization(
           new DaemonTransportClosedError(
             `WebSocket initialize timed out after ${INIT_TIMEOUT_MS}ms`,
           ),
@@ -452,9 +459,8 @@ export class AcpWsTransport implements DaemonTransport {
       }, INIT_TIMEOUT_MS);
 
       ws.onopen = () => {
-        this._connected = true;
         // Send initialize request.
-        const initId = this.nextId++;
+        initId = this.nextId++;
         const initReq: JsonRpcRequest = {
           jsonrpc: '2.0',
           id: initId,
@@ -466,13 +472,21 @@ export class AcpWsTransport implements DaemonTransport {
         this.pending.set(initId, {
           resolve: (response) => {
             clearTimeout(initTimeout);
+            if (response.error) {
+              failInitialization(
+                new Error(`ACP initialize error: ${response.error.message}`),
+              );
+              return;
+            }
+            if (this._disposed || this.ws !== ws) {
+              failInitialization(new DaemonTransportClosedError());
+              return;
+            }
+            this._connected = true;
             this.initResult = response.result;
             resolveConnect();
           },
-          reject: (err) => {
-            clearTimeout(initTimeout);
-            rejectConnect(err);
-          },
+          reject: failInitialization,
         });
         ws.send(JSON.stringify(initReq));
       };
@@ -522,8 +536,7 @@ export class AcpWsTransport implements DaemonTransport {
         // connection refused / unreachable. Reject the connect
         // promise so the caller doesn't hang forever.
         if (!this._connected) {
-          clearTimeout(initTimeout);
-          rejectConnect(
+          failInitialization(
             new DaemonTransportClosedError('WebSocket connection failed'),
           );
         }
@@ -531,13 +544,16 @@ export class AcpWsTransport implements DaemonTransport {
 
       ws.onclose = (event) => {
         clearTimeout(initTimeout);
-        this._connected = false;
-        this.ws = null;
-        this.initPromise = undefined;
-
+        if (initId !== undefined) this.pending.delete(initId);
         const closeError = new DaemonTransportClosedError(
           `WebSocket closed: ${event.code} ${event.reason}`,
         );
+        rejectConnect(closeError);
+        if (this.ws !== ws) return;
+
+        this._connected = false;
+        this.ws = null;
+        this.initPromise = undefined;
 
         // Reject all pending requests.
         for (const [, pending] of this.pending) {
@@ -548,11 +564,6 @@ export class AcpWsTransport implements DaemonTransport {
         // Abort all active generators so they throw instead of parking.
         for (const ac of this._activeGenerators) {
           ac.abort();
-        }
-
-        // If we never connected, reject the connect promise.
-        if (!this._disposed) {
-          rejectConnect(closeError);
         }
       };
     });
