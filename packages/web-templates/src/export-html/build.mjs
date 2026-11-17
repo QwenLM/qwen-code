@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_143_100;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_145_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -121,7 +121,12 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_143_100;
 // turn another session's reply starts (its card label, keeping the card in a
 // folded turn, and opening that session from it) brings it to 2,142,326. The
 // warning sits 774 above that measurement and the ceiling 1,774 above it.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_144_100;
+// The turn-collapse deliverable (#14001) re-measures against main b9da38c7bd
+// (the `/send` line above plus the #17532 follow-up suggestion bound) at
+// 2,144,866 bytes locally on Node 22.23.1; the deliverable adds 2,540 bytes
+// over the `/send` branch's 2,142,326. The warning sits 134 above the merged
+// measurement and the ceiling 1,134 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_146_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
