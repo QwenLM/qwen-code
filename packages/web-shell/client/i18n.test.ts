@@ -211,6 +211,24 @@ describe('web-shell i18n catalog', () => {
     }
   });
 
+  it('localizes the Goals-page affordance and budget-row labels in every catalog', () => {
+    // The budget rows render these labels in all three locales; a missing
+    // zh/ru entry would silently fall back to EN mid-surface. Full-string
+    // pins, not just != EN, so a wrong translation reds too.
+    expect(getTranslator('en')('goals.viewAll')).toBe('View all goals');
+    expect(getTranslator('zh-CN')('goals.viewAll')).toBe('查看全部目标');
+    expect(getTranslator('ru')('goals.viewAll')).toBe('Все цели');
+    expect(getTranslator('en')('goals.budget.turns')).toBe('Turns');
+    expect(getTranslator('zh-CN')('goals.budget.turns')).toBe('轮数');
+    expect(getTranslator('ru')('goals.budget.turns')).toBe('Ходы');
+    expect(getTranslator('en')('goals.budget.tokens')).toBe('Tokens');
+    expect(getTranslator('zh-CN')('goals.budget.tokens')).toBe('Tokens');
+    expect(getTranslator('ru')('goals.budget.tokens')).toBe('Токены');
+    expect(getTranslator('en')('goals.budget.time')).toBe('Active time');
+    expect(getTranslator('zh-CN')('goals.budget.time')).toBe('活跃时长');
+    expect(getTranslator('ru')('goals.budget.time')).toBe('Активное время');
+  });
+
   it('keeps every scheduled-task delivery translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
@@ -232,6 +250,47 @@ describe('web-shell i18n catalog', () => {
       expect(zh(key)).not.toBe(key);
       expect(zh(key)).not.toBe(en(key));
     }
+  });
+
+  it('keeps every change-overview translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    const keys = [
+      'changeOverview.title',
+      'changeOverview.uncommitted',
+      'changeOverview.loading',
+      'changeOverview.notGit',
+      'changeOverview.loadFailed',
+      'changeOverview.empty',
+      'changeOverview.files',
+      'changeOverview.prUnavailable',
+      'changeOverview.prUnavailableCli',
+      'changeOverview.prUnavailableRoute',
+      'changeOverview.refresh',
+      'changeOverview.openPr',
+      'changeOverview.description',
+      'changeOverview.hiddenFiles',
+      'changeOverview.hiddenCommits',
+    ];
+    for (const key of keys) {
+      // zh against en, not against the key: the translator falls back to EN
+      // per key, so a deleted zh entry would otherwise pass silently.
+      expect(en(key, { count: 2 })).not.toBe(key);
+      expect(zh(key, { count: 2 })).not.toBe(key);
+      expect(zh(key, { count: 2 })).not.toBe(en(key, { count: 2 }));
+    }
+  });
+
+  it('pluralises the change-overview count strings at count 1', () => {
+    const en = getTranslator('en');
+    expect(en('changeOverview.files', { count: 1 })).toBe('1 file');
+    expect(en('changeOverview.files', { count: 2 })).toBe('2 files');
+    expect(en('changeOverview.hiddenFiles', { count: 1 })).toBe(
+      '…and 1 more file',
+    );
+    expect(en('changeOverview.hiddenFiles', { count: 3 })).toBe(
+      '…and 3 more files',
+    );
   });
 
   it.each(WEB_SHELL_LANGUAGES)(
@@ -632,6 +691,27 @@ describe('web-shell ru locale', () => {
       expect(t('language.usage')).toContain('en|zh-CN|ru');
       expect(t('language.usage')).toContain('[--project|--global]');
     }
+  });
+
+  it('localizes activity grouping options in Russian', () => {
+    const ru = getTranslator('ru');
+    const en = getTranslator('en');
+    for (const key of [
+      'sidebar.groupBy',
+      'sidebar.groupWorkspace',
+      'sidebar.groupActivityDate',
+      'sidebar.groupThisWeek',
+      'sidebar.groupLast30Days',
+      'sidebar.groupOlder',
+      'sidebar.recentConversations',
+    ]) {
+      expect(ru(key)).not.toBe(en(key));
+    }
+    expect(en('sidebar.recentConversations')).toBe('Recent conversations');
+    expect(getTranslator('zh-CN')('sidebar.recentConversations')).toBe(
+      '最近对话',
+    );
+    expect(ru('sidebar.recentConversations')).toBe('Недавние разговоры');
   });
 
   it('pluralises turn counters the Russian way', () => {

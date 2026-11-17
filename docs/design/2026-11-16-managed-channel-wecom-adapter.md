@@ -1,11 +1,13 @@
-# Managed channel third adapter: WeCom
+# Managed channel fourth adapter: WeCom
 
 [English](2026-11-16-managed-channel-wecom-adapter.md) | [简体中文](2026-11-16-managed-channel-wecom-adapter.zh-CN.md)
 
-Status: proposed. This is the third-adapter slice of the managed channel path
+Status: proposed. This is the fourth-adapter slice of the managed channel path
 ([#12827](https://github.com/QwenLM/qwen-code/issues/12827)), following the
 DingTalk second adapter
-([2026-11-13-managed-channel-dingtalk-adapter](2026-11-13-managed-channel-dingtalk-adapter.md)).
+([2026-11-13-managed-channel-dingtalk-adapter](2026-11-13-managed-channel-dingtalk-adapter.md))
+and the GitHub third adapter
+([2026-11-16-managed-channel-github-adapter](2026-11-16-managed-channel-github-adapter.md)).
 The provider is the existing WeCom intelligent bot (`wecom` channel type,
 botId + secret over the `@wecom/aibot-node-sdk` WebSocket), chosen by product
 priority and confirmed by the maintainer. The send-only group webhook and the
@@ -21,7 +23,7 @@ messages into bound Managed Agent Sessions or deliver receipted replies
 through the control plane's outbox. The shared adapter contract
 (`ManagedChannelAdapter`, `ManagedChannelPolicy`, `ManagedChannelControlPlane`,
 `ManagedInboundEvent`, `ManagedClaimedDelivery`, `ManagedReceipt`) already
-lives in `channel-base`; the enablement list is `['email', 'dingtalk']`.
+lives in `channel-base`; the enablement list is `['email', 'dingtalk', 'github']`.
 
 ## Current state (what is already generic)
 
@@ -235,7 +237,7 @@ webhooks.
 ## Files affected
 
 - `packages/channels/base/src/managed-channel.ts` — the adapter union widens to
-  three providers; exported shape otherwise unchanged.
+  four providers; exported shape otherwise unchanged.
 - `packages/core/src/managed-runtime/managed-session-records.ts` — enablement
   list gains `'wecom'`; `managed-channel-record.test.ts` updates its pin.
 - `packages/channels/wecom/src/managed-wecom-adapter.ts`,

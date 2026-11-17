@@ -14,7 +14,7 @@
 // docs/design/2026-11-16-managed-channel-wecom-adapter.md.
 
 /** The adapters the managed path enables. */
-export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'wecom';
+export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'github' | 'wecom';
 
 /** The route policy pinned with the first binding of each route. */
 export interface ManagedChannelPolicy {

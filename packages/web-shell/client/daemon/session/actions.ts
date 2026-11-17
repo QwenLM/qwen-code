@@ -402,6 +402,8 @@ export function getConnectionAfterSessionClear(
     delete next.tokenUsage;
     delete next.tokenCount;
     delete next.goalState;
+    delete next.restoredArtifacts;
+    delete next.restoredArtifactsSessionId;
     delete next.backgroundTurn;
     delete next.finishedBackgroundTurnId;
     delete next.backgroundTurnObservedAt;
@@ -4146,6 +4148,54 @@ export function createDaemonSessionActions({
         );
       } finally {
         branchInFlight = false;
+      }
+    },
+
+    async createWorktreeBranch(name: string) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Create worktree branch failed',
+        'create_worktree_branch',
+      );
+      try {
+        return await withActionTimeout(
+          session.client.createWorktreeBranch(session.sessionId, name, {
+            workspaceCwd: session.workspaceCwd,
+          }),
+          'Create worktree branch timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Create worktree branch failed',
+          error,
+          'create_worktree_branch',
+        );
+      }
+    },
+
+    async handoffWorktree(to: 'local' | 'worktree') {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Worktree handoff failed',
+        'handoff_worktree',
+      );
+      try {
+        return await withActionTimeout(
+          session.client.handoffWorktreeSession(session.sessionId, to, {
+            workspaceCwd: session.workspaceCwd,
+          }),
+          'Worktree handoff timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Worktree handoff failed',
+          error,
+          'handoff_worktree',
+        );
       }
     },
 

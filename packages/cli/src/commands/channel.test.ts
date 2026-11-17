@@ -47,6 +47,12 @@ describe('channel command registration (#17173 R2-10)', () => {
     );
   });
 
+  it('registers managed-github with its required-flag contract', async () => {
+    expect(await registrationFailure('managed-github')).toContain(
+      'control-plane',
+    );
+  });
+
   it('registers managed-wecom with its required-flag contract', async () => {
     expect(await registrationFailure('managed-wecom')).toContain(
       'control-plane',

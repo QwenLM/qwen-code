@@ -102,9 +102,10 @@ The semantics under gate, with their load-bearing lines at `main` =
   produced by member board tools and the control plane's relay"
   (`packages/core/src/managed-runtime/managed-session-records.ts:141-146`).
   `MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS` is
-  `Object.freeze(['email', 'dingtalk', 'wecom'])` (the second provider arrived
-  in H5d and the third, WeCom, in the third-adapter slice; this fault-gate
-  design still assumes a single provider), and
+  `Object.freeze(['email', 'dingtalk', 'github', 'wecom'])` (the second provider
+  arrived in H5d, the third, GitHub, in H5f, and the fourth, WeCom, in the
+  fourth-adapter slice; this fault-gate design still assumes a single
+  provider), and
   `MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED` is
   `true` (`:241`), so a continuation is a legal shape for a relayed run.
 - The domain-level fault coverage that exists today is channel-only

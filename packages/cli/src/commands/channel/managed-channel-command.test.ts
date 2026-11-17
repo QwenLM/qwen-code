@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import yargs, { type CommandModule } from 'yargs';
 import { managedDingtalkCommand } from './managed-dingtalk.js';
 import { managedEmailCommand } from './managed-email.js';
+import { managedGithubCommand } from './managed-github.js';
 import { managedWecomCommand } from './managed-wecom.js';
 import type { ManagedChannelArgs } from './managed-channel-command.js';
 
@@ -21,6 +22,7 @@ type ManagedCommand = CommandModule<unknown, ManagedChannelArgs>;
 const cases: Array<[string, ManagedCommand]> = [
   ['managed-dingtalk', managedDingtalkCommand],
   ['managed-email', managedEmailCommand],
+  ['managed-github', managedGithubCommand],
   ['managed-wecom', managedWecomCommand],
 ];
 

@@ -1,11 +1,13 @@
-# 托管渠道第三适配器：企业微信（WeCom）
+# 托管渠道第四适配器：企业微信（WeCom）
 
 [English](2026-11-16-managed-channel-wecom-adapter.md) | [简体中文](2026-11-16-managed-channel-wecom-adapter.zh-CN.md)
 
 状态：提议中。本切片是托管渠道路径
-（[#12827](https://github.com/QwenLM/qwen-code/issues/12827)）的第三适配器，
+（[#12827](https://github.com/QwenLM/qwen-code/issues/12827)）的第四适配器，
 承接 DingTalk 第二适配器
-（[2026-11-13-managed-channel-dingtalk-adapter](2026-11-13-managed-channel-dingtalk-adapter.zh-CN.md)）。
+（[2026-11-13-managed-channel-dingtalk-adapter](2026-11-13-managed-channel-dingtalk-adapter.zh-CN.md)）
+与 GitHub 第三适配器
+（[2026-11-16-managed-channel-github-adapter](2026-11-16-managed-channel-github-adapter.zh-CN.md)）。
 提供方选用现有 WeCom 智能机器人（`wecom` 渠道类型，botId + secret，走
 `@wecom/aibot-node-sdk` WebSocket），由产品优先级确定并经维护者确认。只发不收的
 群 webhook 与自建应用 callback 是 WeCom 的另外两种连接方式，均不在本切片内
@@ -19,7 +21,7 @@
 发件箱投递带回执的回复。共享适配器契约（`ManagedChannelAdapter`、
 `ManagedChannelPolicy`、`ManagedChannelControlPlane`、`ManagedInboundEvent`、
 `ManagedClaimedDelivery`、`ManagedReceipt`）已在 `channel-base`；启用列表为
-`['email', 'dingtalk']`。
+`['email', 'dingtalk', 'github']`。
 
 ## 现状（已经通用的部分）
 
@@ -172,7 +174,7 @@ name+account key 形状；`0700` 目录内 `0600` 状态文件，原子写 + fsy
 
 ## 涉及文件
 
-- `packages/channels/base/src/managed-channel.ts` —— 适配器联合放宽为三个提供方；
+- `packages/channels/base/src/managed-channel.ts` —— 适配器联合放宽为四个提供方；
   导出形状其余不变。
 - `packages/core/src/managed-runtime/managed-session-records.ts` —— 启用列表增加
   `'wecom'`；`managed-channel-record.test.ts` 更新其钉死断言。
