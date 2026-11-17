@@ -564,6 +564,10 @@ function SessionOverviewPanelInner({
       ),
     [mergedSessions],
   );
+  // Catalog refreshes must not replace the column renderers and remount
+  // focused cells. Stable callbacks below still need the latest summaries.
+  const sessionByIdentityRef = useRef(sessionByIdentity);
+  sessionByIdentityRef.current = sessionByIdentity;
   const multiWorkspace =
     !workspaceCwd &&
     includeOtherWorkspaces &&
@@ -736,7 +740,7 @@ function SessionOverviewPanelInner({
                 : current,
           ),
         session: {
-          ...sessionByIdentity.get(getSessionIdentity(card)),
+          ...sessionByIdentityRef.current.get(getSessionIdentity(card)),
           sessionId: card.sessionId,
           workspaceCwd: card.workspaceCwd,
           hasActivePrompt: card.status === 'running',
@@ -754,7 +758,7 @@ function SessionOverviewPanelInner({
         completedUnread: false,
       };
     },
-    [sessionByIdentity, sessionDetailsOwner, t],
+    [sessionDetailsOwner, t],
   );
 
   const isPrimaryCard = useCallback(
@@ -794,19 +798,19 @@ function SessionOverviewPanelInner({
   const canArchiveCard = useCallback(
     (card: SessionCard) =>
       sessionArchiveEnabled &&
-      sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
+      sessionByIdentityRef.current.get(getSessionIdentity(card))?.sourceType !==
         'qwen-live' &&
       card.status === 'idle' &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionArchiveEnabled, sessionByIdentity],
+    [canUseSessionMutation, sessionArchiveEnabled],
   );
   const canDeleteCard = useCallback(
     (card: SessionCard) =>
-      sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
+      sessionByIdentityRef.current.get(getSessionIdentity(card))?.sourceType !==
         'qwen-live' &&
       card.status === 'idle' &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionByIdentity],
+    [canUseSessionMutation],
   );
   const canRenameCard = useCallback(
     (card: SessionCard) =>

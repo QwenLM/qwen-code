@@ -1277,6 +1277,76 @@ describe('SessionOverviewPanel', () => {
     );
   });
 
+  it('keeps the focused title mounted during a background refresh', async () => {
+    sessionsState.sessions = [
+      session('s-run', { displayName: 'Alpha', hasActivePrompt: false }),
+    ];
+    render();
+    await flushAsync();
+    const title = titleTrigger(rows()[0]!);
+    act(() => title.focus());
+    expect(document.activeElement).toBe(title);
+
+    sessionsState.sessions = sessionsState.sessions.map((item) => ({
+      ...item,
+      hasActivePrompt: true,
+    }));
+    rerender();
+    await flushAsync();
+
+    expect(titleTrigger(rows()[0]!)).toBe(title);
+    expect(document.activeElement).toBe(title);
+    expect(
+      rows()[0]!.querySelector('[data-web-shell-session-status]')?.textContent,
+    ).toBe('Running');
+    expect(rowActionButton(rows()[0]!, 'Archive').disabled).toBe(true);
+  });
+
+  it('preserves the rename input and selection during a background refresh', async () => {
+    sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
+    render();
+    act(() => click(rowActionButton(rows()[0]!, 'Rename')));
+    const input = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Rename: Alpha"]',
+    )!;
+    act(() => setInputValue(input, 'Edited name'));
+    input.setSelectionRange(2, 5);
+    expect(document.activeElement).toBe(input);
+
+    sessionsState.sessions = sessionsState.sessions.map((item) => ({
+      ...item,
+      updatedAt: '2026-07-06T11:00:00.000Z',
+    }));
+    rerender();
+    await flushAsync();
+
+    expect(container!.querySelector('input[aria-label="Rename: Alpha"]')).toBe(
+      input,
+    );
+    expect(document.activeElement).toBe(input);
+    expect(input.value).toBe('Edited name');
+    expect([input.selectionStart, input.selectionEnd]).toEqual([2, 5]);
+    expect(workspaceActions.renameSession).not.toHaveBeenCalled();
+  });
+
+  it('uses fresh session metadata for mutation gates after a background refresh', async () => {
+    sessionsState.sessions = [
+      session('s-run', { displayName: 'Alpha', sourceType: 'qwen-live' }),
+    ];
+    render();
+    expect(rowActionButton(rows()[0]!, 'Archive').disabled).toBe(true);
+    expect(rowActionButton(rows()[0]!, 'Delete').disabled).toBe(true);
+
+    sessionsState.sessions = [
+      session('s-run', { displayName: 'Alpha', sourceType: 'default' }),
+    ];
+    rerender();
+    await flushAsync();
+
+    expect(rowActionButton(rows()[0]!, 'Archive').disabled).toBe(false);
+    expect(rowActionButton(rows()[0]!, 'Delete').disabled).toBe(false);
+  });
+
   it('shows full session details on title hover including compatibility approval state', async () => {
     sessionsState.sessions = [
       session('session-details', {
