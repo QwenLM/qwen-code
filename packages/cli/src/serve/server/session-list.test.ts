@@ -22,6 +22,7 @@ import type {
 import {
   InvalidCursorError,
   listWorkspaceSessionsForResponse,
+  searchWorkspaceSessionsForResponse,
 } from './session-list.js';
 
 describe('merged session catalog pagination', () => {
@@ -810,5 +811,152 @@ describe('merged session catalog pagination', () => {
         expect(result.sessions[0]?.prs).toBeUndefined();
       },
     );
+  });
+
+  describe('artifact summary sidecar enrichment', () => {
+    async function writeArtifactSummarySidecar(
+      session: BridgeSessionSummary,
+      content: string,
+      archived = false,
+    ): Promise<void> {
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+        ...(archived ? ['archive'] : []),
+      );
+      await fs.mkdir(chats, { recursive: true });
+      await fs.writeFile(
+        path.join(chats, `${session.sessionId}.artifacts.json`),
+        content,
+      );
+    }
+
+    const sidecarBody = (artifactCount: number) =>
+      JSON.stringify({
+        version: 1,
+        artifactCount,
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      });
+
+    it('enriches a cold session with the restorable count from the sidecar', async () => {
+      const cold = summary(0);
+      await persist(cold);
+      await writeArtifactSummarySidecar(cold, sidecarBody(3));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(3);
+    });
+
+    it.each(['missing', '{not json', '{"version":1,"artifactCount":-1}'])(
+      'leaves artifactCount unset for a missing or corrupt sidecar: %s',
+      async (content) => {
+        const cold = summary(0);
+        await persist(cold);
+        if (content !== 'missing') {
+          await writeArtifactSummarySidecar(cold, content);
+        }
+        const { bridge } = bridgeFor([]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {},
+          { runtimeBaseDir },
+        );
+
+        expect(result.sessions[0]?.artifactCount).toBeUndefined();
+      },
+    );
+
+    it('lets the live count supersede a stale sidecar count', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeArtifactSummarySidecar(session, sidecarBody(99));
+      const { bridge } = bridgeFor([{ ...session, artifactCount: 3 }]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(3);
+    });
+
+    it('drops the stale sidecar count when the live entry reports none', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeArtifactSummarySidecar(session, sidecarBody(99));
+      // A live entry without artifactCount has zero artifacts; the sidecar's
+      // 99 must not survive the merge.
+      const { bridge } = bridgeFor([session]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBeUndefined();
+    });
+
+    it('enriches the organized view from the same sidecar', async () => {
+      const cold = summary(0);
+      await persist(cold);
+      await writeArtifactSummarySidecar(cold, sidecarBody(2));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { view: 'organized' },
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(2);
+    });
+
+    it('enriches archived sessions from the archive chats dir', async () => {
+      const archived = summary(0);
+      await persist(archived, archived.createdAt, true);
+      await writeArtifactSummarySidecar(archived, sidecarBody(5), true);
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { archiveState: 'archived' },
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(5);
+    });
+
+    it('enriches search hits with the sidecar count', async () => {
+      const cold = summary(0);
+      await persist(cold);
+      await writeArtifactSummarySidecar(cold, sidecarBody(3));
+
+      const result = await searchWorkspaceSessionsForResponse(
+        workspaceCwd,
+        'stored prompt',
+        {},
+        { runtimeBaseDir },
+      );
+
+      const hit = result.results.find(
+        (r) => r.session.sessionId === cold.sessionId,
+      );
+      expect(hit?.session.artifactCount).toBe(3);
+    });
   });
 });
