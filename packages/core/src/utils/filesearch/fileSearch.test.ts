@@ -58,6 +58,30 @@ describe('FileSearch', () => {
     options?: Partial<FileSearchOptions>,
   ) => (await init(files, options)).search(pattern);
 
+  it.each([
+    [1, 400],
+    [400, 1],
+    [400, 400],
+  ])(
+    'honors a changed fuzzy result limit (%s -> %s)',
+    async (firstLimit, nextLimit) => {
+      const files = Object.fromEntries(
+        Array.from({ length: 450 }, (_, i) => [`sample-${i}.ts`, '']),
+      );
+      const fileSearch = await init(files);
+      try {
+        expect(
+          await fileSearch.search('sample', { maxResults: firstLimit }),
+        ).toHaveLength(firstLimit);
+        expect(
+          await fileSearch.search('sample', { maxResults: nextLimit }),
+        ).toHaveLength(nextLimit);
+      } finally {
+        await fileSearch.dispose?.();
+      }
+    },
+  );
+
   it('should use .qwenignore rules', async () => {
     const results = await search(
       { '.qwenignore': 'dist/', dist: ['ignored.js'], src: ['not-ignored.js'] },

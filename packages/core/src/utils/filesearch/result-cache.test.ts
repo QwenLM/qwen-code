@@ -59,6 +59,29 @@ test('ResultCache best base query', async () => {
   expect(isExactMatch).toBe(false);
 });
 
+test('ResultCache only reuses a truncated batch when it satisfies the requested size', async () => {
+  const files = ['foo.txt', 'foobar.js', 'foobaz.md'];
+  const cache = new ResultCache(files);
+  cache.set('foo', files.slice(0, 2), false);
+
+  expect(await cache.get('foo', 2)).toEqual({
+    files: files.slice(0, 2),
+    isExactMatch: true,
+  });
+  expect(await cache.get('foo', 3)).toEqual({ files, isExactMatch: false });
+  expect(await cache.get('foo')).toEqual({ files, isExactMatch: false });
+  expect(await cache.get('foobaz')).toEqual({ files, isExactMatch: false });
+});
+
+test('ResultCache reuses complete results even when fewer matches exist than requested', async () => {
+  const cache = new ResultCache(['foo.txt', 'bar.js']);
+  cache.set('foo', ['foo.txt']);
+  expect(await cache.get('foo', 400)).toEqual({
+    files: ['foo.txt'],
+    isExactMatch: true,
+  });
+});
+
 test('ResultCache does not use glob prefix matches as base queries', async () => {
   const files = ['app.js', 'component.jsx'];
   const cache = new ResultCache(files);

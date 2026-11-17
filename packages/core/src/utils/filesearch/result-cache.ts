@@ -11,7 +11,7 @@ import picomatch from 'picomatch';
  * This cache optimizes subsequent searches by leveraging previously computed results.
  */
 export class ResultCache {
-  private readonly cache: Map<string, string[]>;
+  private readonly cache: Map<string, { files: string[]; complete: boolean }>;
   private hits = 0;
   private misses = 0;
 
@@ -23,17 +23,19 @@ export class ResultCache {
    * Retrieves cached search results for a given query, or provides a base set
    * of files to search from.
    * @param query The search query pattern.
+   * @param minimumResults Required batch size before a truncated entry is reusable.
    * @returns An object containing the files to search and a boolean indicating
    *          if the result is an exact cache hit.
    */
   async get(
     query: string,
+    minimumResults = Infinity,
   ): Promise<{ files: string[]; isExactMatch: boolean }> {
-    const isCacheHit = this.cache.has(query);
+    const cached = this.cache.get(query);
 
-    if (isCacheHit) {
+    if (cached && (cached.complete || cached.files.length >= minimumResults)) {
       this.hits++;
-      return { files: this.cache.get(query)!, isExactMatch: true };
+      return { files: cached.files, isExactMatch: true };
     }
 
     this.misses++;
@@ -46,8 +48,9 @@ export class ResultCache {
     // of the current query.
     let bestBaseQuery = '';
     if (!hasGlobSyntax(query)) {
-      for (const key of this.cache?.keys?.() ?? []) {
+      for (const [key, entry] of this.cache) {
         if (
+          entry.complete &&
           !hasGlobSyntax(key) &&
           query.startsWith(key) &&
           key.length > bestBaseQuery.length
@@ -58,7 +61,7 @@ export class ResultCache {
     }
 
     const filesToSearch = bestBaseQuery
-      ? this.cache.get(bestBaseQuery)!
+      ? this.cache.get(bestBaseQuery)!.files
       : this.allFiles;
 
     return { files: filesToSearch, isExactMatch: false };
@@ -68,9 +71,10 @@ export class ResultCache {
    * Stores search results in the cache.
    * @param query The search query pattern.
    * @param results The matching file paths to cache.
+   * @param complete Whether the results contain every match, rather than a capped batch.
    */
-  set(query: string, results: string[]): void {
-    this.cache.set(query, results);
+  set(query: string, results: string[], complete = true): void {
+    this.cache.set(query, { files: results, complete });
   }
 }
 

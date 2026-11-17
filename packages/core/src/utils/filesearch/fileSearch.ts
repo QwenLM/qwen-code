@@ -152,9 +152,13 @@ class RecursiveFileSearch implements FileSearch {
 
     pattern = unescapePath(pattern) || '*';
 
+    const useFuzzy = !pattern.includes('*') && this.fzf !== undefined;
+    const fzfLimit = Math.max(200, (options.maxResults ?? 200) * 3);
     let filteredCandidates;
-    const { files: candidates, isExactMatch } =
-      await this.resultCache!.get(pattern);
+    const { files: candidates, isExactMatch } = await this.resultCache!.get(
+      pattern,
+      useFuzzy ? fzfLimit : undefined,
+    );
 
     if (isExactMatch) {
       // Use the cached result.
@@ -168,7 +172,6 @@ class RecursiveFileSearch implements FileSearch {
         // IPC serialization — avoids sending 50k+ entries across postMessage
         // when only ~72 are displayed. The 200 cap leaves headroom for
         // downstream ignore-filter to drop entries without starving results.
-        const fzfLimit = Math.max(200, (options.maxResults ?? 200) * 3);
         filteredCandidates = await this.fzf
           .find(pattern, fzfLimit)
           .then((results: Array<FzfResultItem<string>>) =>
@@ -181,7 +184,11 @@ class RecursiveFileSearch implements FileSearch {
       }
 
       if (shouldCache) {
-        this.resultCache!.set(pattern, filteredCandidates);
+        this.resultCache!.set(
+          pattern,
+          filteredCandidates,
+          !useFuzzy || filteredCandidates.length < fzfLimit,
+        );
       }
     }
 
