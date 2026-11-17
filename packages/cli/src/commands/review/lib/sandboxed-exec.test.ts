@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import type { spawnSync } from 'node:child_process';
 import { isolateOperatorReviewSettings } from './test-utils.js';
 import * as environment from '../../../config/environment.js';
+import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from '../../../config/shared-env-keys.js';
 import {
   containerCommand,
   containerCommandEnv,
@@ -330,6 +331,15 @@ describe('the decisions this module exists to make', () => {
         () => true,
       ),
     ).toBe('off');
+  });
+
+  it('keeps the policy key out of repository-sourced environment entirely', () => {
+    // The read-time predicate above protects this process. A child inheriting
+    // the value sees an empty provenance registry, so the loader must refuse
+    // the key before it can ever be written — the same closure
+    // QWEN_REVIEW_PREBUILD relies on, pinned here with the real symbol so
+    // neither side can drift.
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_REVIEW_SANDBOX');
   });
 
   it('reads either side the way an operator would write it', () => {
