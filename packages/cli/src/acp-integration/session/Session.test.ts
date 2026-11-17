@@ -1709,14 +1709,13 @@ describe('Session', () => {
             timestamp: i,
           });
         }
+        // Peer items do not consume overflow admission slots (#17436), so
+        // every report and roster exit stays in the queue as a hold.
         expect(
           session
             .collectActiveWorkHolds()
             .filter((hold) => hold.category === 'notification'),
-        ).toHaveLength(MAX_BACKGROUND_NOTIFICATION_QUEUE);
-        expect(
-          mockChatRecordingService.recordNotification,
-        ).toHaveBeenCalledTimes(reportCount - 10);
+        ).toHaveLength(reportCount + 10);
         await session.flushPendingPeerNotifications();
         session.dispose();
         const landed = vi.mocked(mockChatRecordingService.recordNotification)
