@@ -4,14 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   AskUserQuestionDialog,
   computeHeaderCap,
 } from './AskUserQuestionDialog.js';
 import type { ToolAskUserQuestionConfirmationDetails } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../../test-utils/render.js';
+import {
+  renderWithProviders,
+  withProviders,
+} from '../../../test-utils/render.js';
 import stripAnsi from 'strip-ansi';
 
 const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -45,6 +48,57 @@ const waitForFrame = async (
     throw lastError;
   }
   throw new Error('waitForFrame timed out');
+};
+
+// Holds the dialog's 150 ms question swap until `release()`, so a test can act
+// inside the pause for as long as it needs instead of racing a short sleep
+// against it. Every other timer (input parsing, `wait`) runs as usual.
+const ADVANCE_PAUSE_MS = 150;
+const heldTimerRestores: Array<() => void> = [];
+afterEach(() => {
+  for (const restore of heldTimerRestores.splice(0)) restore();
+});
+const holdAdvance = () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  const held = new Map<object, () => void>();
+  const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    fn: () => void,
+    ms?: number,
+    ...args: unknown[]
+  ) => {
+    if (ms === ADVANCE_PAUSE_MS) {
+      const handle = {};
+      held.set(handle, fn);
+      return handle;
+    }
+    return realSetTimeout(fn, ms, ...args);
+  }) as typeof setTimeout);
+  const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((
+    handle: Parameters<typeof clearTimeout>[0],
+  ) => {
+    if (!held.delete(handle as object)) realClearTimeout(handle);
+  }) as typeof clearTimeout);
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    setSpy.mockRestore();
+    clearSpy.mockRestore();
+  };
+  heldTimerRestores.push(restore);
+  return {
+    /** Swaps armed and not yet run or cancelled. */
+    pending: () => held.size,
+    /** Runs the held swap, and lets every later one run on its own timer. */
+    release: () => {
+      restore();
+      for (const [handle, fn] of [...held]) {
+        held.delete(handle);
+        fn();
+      }
+    },
+  };
 };
 
 const createSingleQuestion = (
@@ -677,6 +731,61 @@ describe('<AskUserQuestionDialog />', () => {
       expect(onConfirm).toHaveBeenCalledTimes(1);
       unmount();
     }, 10000);
+
+    it('answers the next confirmation handed to the same dialog', async () => {
+      const onConfirm = vi.fn();
+      const dialog = (details: ToolAskUserQuestionConfirmationDetails) => (
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          availableWidth={80}
+          onConfirm={onConfirm}
+        />
+      );
+      const first = createConfirmationDetails();
+      const { stdin, lastFrame, rerender, unmount } = renderWithProviders(
+        dialog(first),
+      );
+      await wait();
+      stdin.write('1');
+      await wait();
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+
+      // A parent re-render rebuilds the details object around the same
+      // questions: still the same confirmation, still answered.
+      rerender(withProviders(dialog({ ...first })));
+      await wait();
+      stdin.write('2');
+      await wait();
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+
+      // The background-task approval slot hands this instance the next
+      // parked question in place.
+      rerender(
+        withProviders(
+          dialog(
+            createConfirmationDetails({
+              questions: [
+                createSingleQuestion({
+                  question: 'Which size?',
+                  header: 'Size',
+                }),
+              ],
+            }),
+          ),
+        ),
+      );
+      await waitForFrame(() => {
+        expect(clean(lastFrame())).toContain('Which size?');
+      });
+      stdin.write('2');
+      await wait();
+      expect(onConfirm).toHaveBeenCalledTimes(2);
+      expect(onConfirm).toHaveBeenLastCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: 'Blue' } },
+      );
+      unmount();
+    }, 10000);
   });
 
   describe('multi-select interaction', () => {
@@ -1008,11 +1117,15 @@ describe('<AskUserQuestionDialog />', () => {
         expect(clean(lastFrame())).toContain('Teal');
       });
 
-      // The second Enter lands inside the 150 ms pause before the tab swap.
+      const pause = holdAdvance();
       stdin.write('\r');
-      await wait(20);
-      stdin.write('\r');
-      await wait(400);
+      await wait();
+      expect(pause.pending()).toBe(1);
+      stdin.write('\r'); // a second Enter inside the pause
+      await wait();
+      expect(pause.pending()).toBe(1);
+      pause.release();
+      await wait();
 
       expect(clean(lastFrame())).toContain('Second question?');
       expect(clean(lastFrame())).not.toContain('Third question?');
@@ -1039,10 +1152,15 @@ describe('<AskUserQuestionDialog />', () => {
       await wait();
 
       // Answer Q1 with its first option, then move right before the swap.
+      const pause = holdAdvance();
       stdin.write('\r');
-      await wait(20);
+      await wait();
+      expect(pause.pending()).toBe(1);
       stdin.write('\u001B[C'); // Right
-      await wait(400);
+      await wait();
+      expect(pause.pending()).toBe(0);
+      pause.release();
+      await wait();
 
       expect(clean(lastFrame())).toContain('Second question?');
       expect(clean(lastFrame())).not.toContain('Third question?');
@@ -1073,10 +1191,15 @@ describe('<AskUserQuestionDialog />', () => {
         expect(clean(lastFrame())).toContain('Second question?');
       });
       // Answer Q2 with its first option, then move left before the swap.
+      const pause = holdAdvance();
       stdin.write('\r');
-      await wait(20);
+      await wait();
+      expect(pause.pending()).toBe(1);
       stdin.write('\u001B[D'); // Left
-      await wait(400);
+      await wait();
+      expect(pause.pending()).toBe(0);
+      pause.release();
+      await wait();
 
       expect(clean(lastFrame())).toContain('First question?');
       expect(clean(lastFrame())).not.toContain('Second question?');
@@ -1192,9 +1315,14 @@ describe('<AskUserQuestionDialog />', () => {
 
       stdin.write(' '); // tick Red
       await wait();
+      const pause = holdAdvance();
       stdin.write('\r'); // commit Q1, arms the advance
-      await wait(20);
+      await wait();
+      expect(pause.pending()).toBe(1);
       stdin.write('\u001B[C'); // Right: cancels the advance, moves to Q2
+      await wait();
+      expect(pause.pending()).toBe(0);
+      pause.release();
       await waitForFrame(() => {
         expect(clean(lastFrame())).toContain('Second question?');
       });
@@ -1245,9 +1373,14 @@ describe('<AskUserQuestionDialog />', () => {
       await waitForFrame(() => {
         expect(clean(lastFrame())).toContain('[✓] 1. Red');
       });
+      const pause = holdAdvance();
       stdin.write('\r'); // commit Q1 = Red
-      await wait(20);
+      await wait();
+      expect(pause.pending()).toBe(1);
       stdin.write(' '); // inside the pause: must not untick Red
+      await wait();
+      expect(clean(lastFrame())).toContain('[✓] 1. Red');
+      pause.release();
       await waitForFrame(() => {
         expect(clean(lastFrame())).toContain('Second question?');
       });
@@ -1303,9 +1436,22 @@ describe('<AskUserQuestionDialog />', () => {
       await waitForFrame(() => {
         expect(clean(lastFrame())).toContain('Teal');
       });
+      const pause = holdAdvance();
       stdin.write('\r'); // commit Q1 = Teal
-      await wait(20);
+      await wait();
+      expect(pause.pending()).toBe(1);
       stdin.write('X'); // inside the pause: must not widen the answer
+      await wait();
+      // The field shows the answer it holds, not a key it is about to lose.
+      expect(clean(lastFrame())).toContain('First question?');
+      expect(clean(lastFrame())).toContain('Teal');
+      expect(clean(lastFrame())).not.toContain('TealX');
+      stdin.write('\u0015'); // Ctrl+U: empty the field
+      await wait();
+      stdin.write('\r'); // and Enter again, still inside the pause
+      await wait();
+      expect(clean(lastFrame())).toContain('Teal');
+      pause.release();
       await waitForFrame(() => {
         expect(clean(lastFrame())).toContain('Second question?');
       });
@@ -1385,7 +1531,49 @@ describe('<AskUserQuestionDialog />', () => {
         await waitForFrame(() => {
           expect(clean(lastFrame())).toContain('Teal');
         });
+        const pause = holdAdvance();
         stdin.write('\rX'); // one read: commit, then a trailing letter
+        await wait();
+        expect(pause.pending()).toBe(1);
+        // The letter was in the field's own buffer before the freeze; the field
+        // is redrawn from the answer, not left showing a key it then loses.
+        expect(clean(lastFrame())).toContain('First question?');
+        expect(clean(lastFrame())).toContain('Teal');
+        expect(clean(lastFrame())).not.toContain('TealX');
+        pause.release();
+        await waitForFrame(() => {
+          expect(clean(lastFrame())).toContain('Second question?');
+        });
+        await finishMultiTwo(stdin);
+
+        expect(onConfirm).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+          { answers: expect.objectContaining({ 0: 'Teal' }) },
+        );
+        unmount();
+      }, 10000);
+
+      it('keeps a typed multi-select answer when the field is emptied and submitted in the same read', async () => {
+        const onConfirm = vi.fn();
+        const { stdin, lastFrame, unmount } = renderWithProviders(
+          <AskUserQuestionDialog
+            confirmationDetails={multiTwo()}
+            availableWidth={80}
+            onConfirm={onConfirm}
+          />,
+        );
+        await wait();
+        stdin.write('4');
+        await waitForFrame(() => {
+          expect(clean(lastFrame())).toContain('❯ [ ] 4.');
+        });
+        await wait();
+        await writeText(stdin, 'Teal');
+        await waitForFrame(() => {
+          expect(clean(lastFrame())).toContain('Teal');
+        });
+        // One read: commit, Ctrl+U empties the field's buffer, Enter submits it.
+        stdin.write('\r\u0015\r');
         await waitForFrame(() => {
           expect(clean(lastFrame())).toContain('Second question?');
         });
@@ -1439,11 +1627,16 @@ describe('<AskUserQuestionDialog />', () => {
         await waitForFrame(() => {
           expect(clean(lastFrame())).toContain('[✓] 1. Red');
         });
+        const pause = holdAdvance();
         stdin.write('\r'); // commit Q1 = Red
-        await wait(20);
+        await wait();
+        expect(pause.pending()).toBe(1);
         stdin.write('4'); // onto the free-text row, inside the pause
-        await wait(20);
+        await wait();
         stdin.write('\u001B[200~xyz\u001B[201~');
+        await wait();
+        expect(clean(lastFrame())).not.toContain('xyz');
+        pause.release();
         await waitForFrame(() => {
           expect(clean(lastFrame())).toContain('Second question?');
         });
@@ -1466,9 +1659,14 @@ describe('<AskUserQuestionDialog />', () => {
           />,
         );
         await wait();
+        const pause = holdAdvance();
         stdin.write('\r'); // answer Q1 with its first option, Red
-        await wait(20);
+        await wait();
+        expect(pause.pending()).toBe(1);
         stdin.write('2'); // inside the pause: would answer Q1 again with Blue
+        await wait();
+        expect(pause.pending()).toBe(1);
+        pause.release();
         await waitForFrame(() => {
           expect(clean(lastFrame())).toContain('Second question?');
         });
@@ -1506,12 +1704,27 @@ describe('<AskUserQuestionDialog />', () => {
         await waitForFrame(() => {
           expect(clean(lastFrame())).toContain('Teal');
         });
+        const pause = holdAdvance();
         stdin.write('\r'); // answer Q1, arms the advance
-        await wait(20);
-        stdin.write('\u001B[C'); // Right on the text row
-        await wait(20);
-        stdin.write('\u001B[D'); // Left on the text row
-        await wait(400);
+        await wait();
+        expect(pause.pending()).toBe(1);
+        // Left, Left, Right move the caret inside the text, so the letter lands
+        // mid-string only if every arrow reached the field. A Right taken as a
+        // tab move would cancel the swap instead.
+        stdin.write('\u001B[D');
+        await wait();
+        stdin.write('\u001B[D');
+        await wait();
+        stdin.write('\u001B[C');
+        await wait();
+        stdin.write('X');
+        await wait();
+        expect(clean(lastFrame())).toContain('TeaXl');
+        expect(pause.pending()).toBe(1);
+        pause.release();
+        await waitForFrame(() => {
+          expect(clean(lastFrame())).toContain('Second question?');
+        });
 
         const frame = clean(lastFrame());
         expect(frame).toContain('Second question?');
@@ -1539,9 +1752,14 @@ describe('<AskUserQuestionDialog />', () => {
         await waitForFrame(() => {
           expect(clean(lastFrame())).toContain('Teal');
         });
+        const pause = holdAdvance();
         stdin.write('\r'); // answer Q1, arms the advance
-        await wait(20);
+        await wait();
+        expect(pause.pending()).toBe(1);
         stdin.write('X'); // still taken by a single-select field
+        await wait();
+        expect(clean(lastFrame())).toContain('TealX');
+        pause.release();
         await waitForFrame(() => {
           expect(clean(lastFrame())).toContain('Second question?');
         });
