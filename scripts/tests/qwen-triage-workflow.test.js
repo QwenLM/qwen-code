@@ -6639,6 +6639,18 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
     );
+    // R3-2: the restarted round's number becomes this round's number.
+    expect(flat).toContain(
+      "The restarted round's number (`<r+1>`) becomes this round's number — repeat that value in `--complete`",
+    );
+    // R3-1: the manual inconclusive-recovery prohibition (colon variant).
+    expect(flat).toContain(
+      'Do not recover with `--complete inconclusive` instead: it increments the retry counter whose cap is the terminal not-covered state',
+    );
+    // R1-1 (round 3): the manual moved-head terminal case (<H> variant).
+    expect(flat).toContain(
+      'If prepare refuses because the PR has moved past the delivered head (its message names a newer PR head), that head can never prepare: `--release --head <H> --repo <owner>/<repo>` it and do not restart it',
+    );
     // R1-2: a positional pin — registration precedes prepare in this section
     // (an order-insensitive toContain would stay green if --start moved back
     // below prepare).
@@ -6752,11 +6764,32 @@ describe('qwen-triage verify hardening round 2', () => {
       'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
     );
     expect(flat).toContain('a release alone leaves the head unregistered');
+    // R3-2: the restarted round's number becomes this round's number; the
+    // completion must repeat <r+1>, not the original <r>.
+    expect(flat).toContain(
+      "The restarted round's number (`<r+1>`) becomes this round's number — repeat that value in `--complete`",
+    );
+    // R3-1: the inconclusive-recovery prohibition is pinned like its siblings.
+    expect(flat).toContain(
+      'Do not recover with `--complete inconclusive` instead — only that verdict increments the retry counter',
+    );
+    // R1-1 (round 3): the moved-head terminal case — release without restart.
+    expect(flat).toContain(
+      'If prepare refuses because the PR has moved past the delivered head (its message names a newer PR head), that head can never prepare: `--release --head <headSha> --repo <owner>/<repo>` it and do not restart it',
+    );
+    expect(flat).toContain(
+      'Do not `git checkout` the newer head under the old marker',
+    );
     // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
     // --release form with --repo (anchored on the watch-only continuation, so
     // the manual twin cannot satisfy it). Removing --repo reds it.
     expect(flat).toContain(
       'recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>` and then start the last deferred head, or the deferral is never delivered',
+    );
+    // R2-1 (round 3): the bullet glosses <r> as the dead round's number, so a
+    // release with this round's number is not mistaken for the marker's.
+    expect(flat).toContain(
+      "Here `<r>` is the dead round's number (the blocking marker's), not this round's; omit it when you do not know it",
     );
     // R1-2: positional pin — registration precedes prepare in the watch prompt.
     expect(

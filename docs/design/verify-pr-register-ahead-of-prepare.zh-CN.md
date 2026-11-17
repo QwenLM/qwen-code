@@ -73,9 +73,14 @@ deferral，且无任何动词打印它——故 head 失去记录，而探针游
 成对写出。`--start` 记录 repo 后两者 `--repo` 必填；每个动词都对已记录 repo 拒绝
 省略 `--repo`）。用 `--release` + 重启，**而非** `--complete inconclusive`：
 inconclusive 是唯一增加 head 重试计数的判定，而计数上限即终态（not-covered），
-故两次瞬时 prepare 失败会让一个从未跑过轮次的 head 被退役（R1-5）。契约显式说明
-此点。既有死轮恢复（`--start` 后死掉的轮用 `--release`）现在也覆盖 prepare 期间
-死掉的轮。
+故两次瞬时 prepare 失败会让一个从未跑过轮次的 head 被退役（R1-5）。重启后的轮次
+编号（`<r+1>`）即为本轮编号，`--complete` 须重复该值（R3-2）。恢复有非瞬时终止
+分支：若 prepare 因 PR 已越过所投递 head 而拒绝（prepare 从实时 `gh pr view` 重取
+`headRefOid`，并拒绝 HEAD 不等于该 head 的树），所投递 head 永远无法 prepare——
+`--release` 它且**不要**重启；更新的 head 由下一次触发投递，或已在 release 打印的
+deferred 列表中。不要在旧标记下 `git checkout` 更新的 head，否则会把更新 head 的
+证据记到所投递 head 的判定名下（R1-1 第 3 轮）。契约显式说明此点。既有死轮恢复
+（`--start` 后死掉的轮用 `--release`）现在也覆盖 prepare 期间死掉的轮。
 
 ### 钉与见证
 
@@ -133,4 +138,6 @@ inconclusive 是唯一增加 head 重试计数的判定，而计数上限即终�
   闭合（闭合需把标记写在闸门侧，那里本就握着 headSha）；(2) watch prompt 是任务上
   的持久快照，故本改动前安装的 watch 仍按 prepare→register 旧顺序，直到任务重建
   ——而 `--start --artifact-dir` 仍被接受，无机制强制重建。watch 只在 head move 时
-  醒来，故*最后一个* head 上被杀的轮仍等待新 move 或手动 `--release`。
+  醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动
+  `--release --head <H> --repo <owner>/<repo>` **后再重启**（`--start … --round
+<r+1>`）——单独 release 会让 head 失去记录。

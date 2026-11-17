@@ -3310,17 +3310,29 @@ describe('R17-2 register ahead of prepare', () => {
   // code this PR changes); restoring the --artifact-dir requirement reds it.
   it('a prepare-window kill leaves a recoverable marker, not a dropped head', () => {
     const root = makeRoot();
-    // Register first through the CLI (no dir), then the round dies during
-    // prepare: no --complete runs. The marker stays in flight.
-    expect(run(root, START).status).toBe(0);
+    // Register first through the CLI (no dir, with --repo as the contract
+    // documents), then the round dies during prepare: no --complete runs.
+    expect(run(root, [...START, '--repo', 'o/r']).status).toBe(0);
     expect(
       readState(root, 16866).inFlightHeads[0].artifactDir ?? null,
     ).toBeNull();
-    // Recovery releases the dead round's marker through the CLI...
-    expect(run(root, ['16866', '--release', '--head', HEAD]).status).toBe(0);
+    // Recovery releases the dead round's marker with the documented --repo
+    // form (a repo-less release is refused against the recorded repo)...
+    expect(
+      run(root, ['16866', '--release', '--head', HEAD, '--repo', 'o/r']).status,
+    ).toBe(0);
     // ...and the head is startable again, not silently deduped away.
     expect(
-      run(root, ['16866', '--start', '--head', HEAD, '--round', '12']).status,
+      run(root, [
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '12',
+        '--repo',
+        'o/r',
+      ]).status,
     ).toBe(0);
     expect(readState(root, 16866).inFlightHeads[0].round).toBe(12);
   });

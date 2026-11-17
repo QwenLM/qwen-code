@@ -743,10 +743,16 @@ then start the head again
 and retry prepare — a release alone leaves the head unregistered (it files only
 a push-order hint, not a deferral) and no probe fire will deliver it again.
 `--repo` is required on both: `--start` recorded it, and every verb refuses an
-omitted `--repo` once a repo is recorded. Do not recover with `--complete
-inconclusive` instead — only that verdict increments the retry counter whose
-cap is the terminal not-covered state, so two transient prepare failures would
-retire a head no round examined.
+omitted `--repo` once a repo is recorded. The restarted round's number (`<r+1>`)
+becomes this round's number — repeat that value in `--complete`. Do not recover
+with `--complete inconclusive` instead — only that verdict increments the retry
+counter whose cap is the terminal not-covered state, so two transient prepare
+failures would retire a head no round examined. If prepare refuses because the
+PR has moved past the delivered head (its message names a newer PR head), that
+head can never prepare: `--release --head <headSha> --repo <owner>/<repo>` it
+and do not restart it — the newer head is delivered by the next fire, or is
+already in the deferred list the release prints. Do not `git checkout` the newer
+head under the old marker.
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container
@@ -765,6 +771,9 @@ Exit 3 has several shapes, each with its own reaction:
   if it is no longer running, recover with
   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>`
   and then start the last deferred head, or the deferral is never delivered.
+  Here `<r>` is the dead round's number (the blocking marker's), not this
+  round's; omit it when you do not know it — the release matches by head, and a
+  supplied `--round` that differs from the marker's is refused.
 - The state lock is held by another invocation: retry shortly; if a killed
   invocation left the `.lock` file beside the state file, remove that lock
   file (never the state file) and retry. This applies to `--complete` too —
@@ -974,8 +983,15 @@ ambiguous rather than verify a guessed PR. Then, in order:
    (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`)
    and retry prepare — a release alone leaves the head unregistered and no
    probe fire will deliver it again (`--repo` is required once `--start`
-   recorded it). Do not recover with `--complete inconclusive` instead: it
-   increments the retry counter whose cap is the terminal not-covered state.
+   recorded it). The restarted round's number (`<r+1>`) becomes this round's
+   number — repeat that value in `--complete`. Do not recover with `--complete
+inconclusive` instead: it increments the retry counter whose cap is the
+   terminal not-covered state. If prepare refuses because the PR has moved past
+   the delivered head (its message names a newer PR head), that head can never
+   prepare: `--release --head <H> --repo <owner>/<repo>` it and do not restart
+   it — the newer head is delivered by the next fire, or is already in the
+   deferred list the release prints. Do not `git checkout` the newer head under
+   the old marker.
    Exit 3 means the file already records `H` as verified or in flight, or
    another head's round is in flight (one round per PR): let that round
    answer instead of starting a duplicate. A cross-head refusal records `H`

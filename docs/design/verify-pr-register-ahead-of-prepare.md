@@ -91,9 +91,18 @@ omitted `--repo` against a recorded repo. Use `--release` + restart, **not**
 `--complete inconclusive`: inconclusive is the only verdict that increments the
 head's retry counter, and the counter's cap is the terminal not-covered state,
 so two transient prepare failures would retire a head no round ever examined
-(R1-5). The contract states this explicitly. The existing dead-round recovery
-(`--release` for a round that died after `--start`) now also covers a round that
-died during prepare.
+(R1-5). The restarted round's number (`<r+1>`) becomes this round's number, and
+`--complete` must repeat that value (R3-2). The recovery has a non-transient
+terminal case: if prepare refuses because the PR has moved past the delivered
+head (prepare re-resolves `headRefOid` from a live `gh pr view` and refuses a
+tree whose HEAD is not that head), the delivered head can never prepare —
+`--release` it and do **not** restart it; the newer head is delivered by the
+next fire or is already in the deferred list the release prints. Do not
+`git checkout` the newer head under the old marker, which would file the newer
+head's evidence under the delivered head's verdict (R1-1 round 3). The contract
+states this explicitly. The existing dead-round recovery (`--release` for a
+round that died after `--start`) now also covers a round that died during
+prepare.
 
 ### Pins and witnesses
 
@@ -170,4 +179,6 @@ died during prepare.
   installed before this change keeps the prepare-then-register order until its
   task is re-created — and `--start --artifact-dir` remains accepted, so nothing
   forces re-creation. A watch only wakes on head moves, so a killed round on the
-  _last_ head still awaits a new move or a manual `--release`.
+  _last_ head still awaits a new move, or a manual
+  `--release --head <H> --repo <owner>/<repo>` **followed by a restart**
+  (`--start … --round <r+1>`) — a release alone leaves the head unregistered.
