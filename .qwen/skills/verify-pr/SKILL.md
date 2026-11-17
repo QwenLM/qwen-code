@@ -23,8 +23,9 @@ Two entry paths share the contract below.
   before running the checker, and the checker treats an absent declaration
   as a warning while `$QWEN_VERIFY_CONTEXT` is set — so the round's own
   pre-finish self-check never fails on a file only the later job writes.
-- **Maintainer round on a workstation** — `/verify-pr <n>`, starting with the
-  full step-1 prepare block (the trusted copy
+- **Maintainer round on a workstation** — `/verify-pr <n>`, registering the
+  round in the watch state ahead of prepare (R17-2), then running the full
+  step-1 prepare block (the trusted copy
   `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
   redirected to `prepare.log`, plus the `sed` that captures the snapshot digest
   into `pr.sha256`; the PR clone only as its cwd — see the container recipe
@@ -258,7 +259,10 @@ toolchain install succeeded. The alternative is a JDK-equipped
 credential-free boundary you build yourself; the recorded waiver is the
 last resort, never a silent host fallback.
 
-Run the full step-1 prepare block on the host before anything else — the
+Run the full step-1 prepare block on the host before any work inside the
+boundary — the watch-state registration precedes it (R17-2), but prepare itself
+stays on the host because resolving metadata needs `gh`, which the boundary
+excludes. It is the
 `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
 command redirected to `prepare.log`, plus the `sed` that captures the snapshot
 digest into `pr.sha256` (step 7 binds the snapshot's bytes to it). It fetches the metadata snapshot, resolves and verifies
@@ -750,9 +754,10 @@ counter whose cap is the terminal not-covered state, so two transient prepare
 failures would retire a head no round examined. If prepare refuses because the
 PR has moved past the delivered head (its message names a newer PR head), that
 head can never prepare: `--release --head <headSha> --repo <owner>/<repo>` it
-and do not restart it — the newer head is delivered by the next fire, or is
-already in the deferred list the release prints. Do not `git checkout` the newer
-head under the old marker.
+and do not restart it, then start the last deferred head the release names (the
+newer head), or that deferral is never delivered — its only delivery was already
+consumed when it was refused as in-flight. Do not `git checkout` the newer head
+under the old marker.
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container
@@ -772,8 +777,12 @@ Exit 3 has several shapes, each with its own reaction:
   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>`
   and then start the last deferred head, or the deferral is never delivered.
   Here `<r>` is the dead round's number (the blocking marker's), not this
-  round's; omit it when you do not know it — the release matches by head, and a
-  supplied `--round` that differs from the marker's is refused.
+  round's. Read it from the state file's in-flight entry and pass it (reading
+  the state is allowed; only hand-writing the JSON is forbidden): an omitted
+  `--round` skips the round match, so a retried release would delete a newer
+  round's live marker for the same head. Omit `--round` only for a legacy
+  marker whose entry records no round; a supplied `--round` that differs from
+  the marker's is refused.
 - The state lock is held by another invocation: retry shortly; if a killed
   invocation left the `.lock` file beside the state file, remove that lock
   file (never the state file) and retry. This applies to `--complete` too —
@@ -989,9 +998,10 @@ inconclusive` instead: it increments the retry counter whose cap is the
    terminal not-covered state. If prepare refuses because the PR has moved past
    the delivered head (its message names a newer PR head), that head can never
    prepare: `--release --head <H> --repo <owner>/<repo>` it and do not restart
-   it — the newer head is delivered by the next fire, or is already in the
-   deferred list the release prints. Do not `git checkout` the newer head under
-   the old marker.
+   it. There is no watch fire here to deliver the newer head, so re-resolve it
+   yourself (`gh pr view <n> --repo <owner>/<repo> --json headRefOid`), then
+   `--start --head <newer> --round <next> --repo <owner>/<repo>` and run prepare
+   for it. Do not `git checkout` the newer head under the old marker.
    Exit 3 means the file already records `H` as verified or in flight, or
    another head's round is in flight (one round per PR): let that round
    answer instead of starting a duplicate. A cross-head refusal records `H`
