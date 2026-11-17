@@ -577,7 +577,7 @@ describe('enrolling', () => {
     routes: (
       url: string,
       input: Record<string, unknown>,
-    ) => Response | undefined = () => undefined,
+    ) => Response | Promise<Response> | undefined = () => undefined,
   ) {
     const qwenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'host-enroll-'));
     const sent: string[] = [];
@@ -588,7 +588,7 @@ describe('enrolling', () => {
         const input = init?.body
           ? (JSON.parse(init.body as string) as Record<string, unknown>)
           : {};
-        const answer = routes(url, input);
+        const answer = await routes(url, input);
         if (answer) return answer;
         if (url.endsWith('/enroll')) {
           sent.push(input['secret'] as string);
@@ -1201,6 +1201,422 @@ describe('enrolling', () => {
     );
   });
 
+  it('goes on, run again, with the credential its enrollment saved before the connection failed', async () => {
+    let busy = true;
+    await withCoordinator(
+      (secret) => Response.json({ host: { id: 'host-1' }, secret }),
+      async (files, sent) => {
+        await expect(connect()).rejects.toThrow(
+          'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential, then join again with the same token.',
+        );
+        await expect(readJson(files.credential)).resolves.toMatchObject({
+          hostId: 'host-1',
+          secret: sent[0],
+          enrollmentTokenHash: tokenHash('join-token'),
+        });
+
+        // The same command: its token is spent, by this enrollment.
+        await connect();
+
+        expect(sent).toHaveLength(1);
+      },
+      (url, input) => {
+        if (!url.includes('/host-1/heartbeat')) return undefined;
+        if (input['enrollmentToken']) {
+          return Response.json({ error: 'refused' }, { status: 401 });
+        }
+        if (!busy) return undefined;
+        // The first heartbeat meets a busy store.
+        busy = false;
+        return Response.json({ error: 'busy' }, { status: 503 });
+      },
+    );
+  });
+
+  it.each([
+    ['an older version saved', 'v2', undefined],
+    ['another command recorded', 'v2', tokenHash('an-earlier-join')],
+    ['an older version saved under the older name', 'legacy', undefined],
+  ])(
+    'goes on, run again, after a re-join whose first heartbeat failed, with a credential %s',
+    async (_label, where, recorded) => {
+      let spent = false;
+      let busy = true;
+      await withCoordinator(
+        () => Response.json({ error: 'unexpected' }, { status: 500 }),
+        async (files, sent) => {
+          const saved =
+            where === 'legacy'
+              ? files.credential.replace(/\.v2\.json$/, '.json')
+              : files.credential;
+          await fs.mkdir(path.dirname(saved), { recursive: true });
+          await fs.writeFile(
+            saved,
+            JSON.stringify({
+              schemaVersion: 1,
+              serverUrl,
+              workspaceId,
+              hostId: 'x',
+              secret: 'x'.repeat(43),
+              ...(recorded ? { enrollmentTokenHash: recorded } : {}),
+            }),
+          );
+
+          await expect(connect()).rejects.toThrow(
+            'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential, then join again with the same token.',
+          );
+          await expect(readJson(files.credential)).resolves.toMatchObject({
+            hostId: 'x',
+            enrollmentTokenHash: tokenHash('join-token'),
+          });
+
+          await expect(connect()).resolves.toEqual({ recorded: true });
+
+          expect(sent).toEqual([]);
+        },
+        (url, input) => {
+          if (!url.includes('/x/heartbeat')) return undefined;
+          if (input['enrollmentToken']) {
+            // The first re-join spends the token.
+            if (!spent) {
+              spent = true;
+              return undefined;
+            }
+            return Response.json({ error: 'refused' }, { status: 401 });
+          }
+          if (!busy) return undefined;
+          busy = false;
+          return Response.json({ error: 'busy' }, { status: 503 });
+        },
+      );
+    },
+  );
+
+  it('starts on a re-join even when its credential cannot record the token', async () => {
+    const saved = {
+      schemaVersion: 1,
+      serverUrl,
+      workspaceId,
+      hostId: 'x',
+      secret: 'x'.repeat(43),
+    };
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await withCoordinator(
+        () => Response.json({ error: 'unexpected' }, { status: 500 }),
+        async (files) => {
+          await fs.mkdir(path.dirname(files.credential), { recursive: true });
+          await fs.writeFile(files.credential, JSON.stringify(saved));
+
+          // Starts, but a rerun of this join would be refused.
+          await expect(connect()).resolves.toEqual({ recorded: false });
+
+          expect(stderr.mock.calls.map(([line]) => String(line))).toContain(
+            'Agent Host credential could not record its enrollment: ENOSPC: no space left on device\n',
+          );
+          // Only a rerun of this command would have needed it.
+          await expect(readJson(files.credential)).resolves.toEqual(saved);
+        },
+        (url, input) => {
+          if (url.includes('/x/heartbeat') && input['enrollmentToken']) {
+            // The next rename is the credential's save, after this answer.
+            vi.mocked(fs.rename).mockRejectedValueOnce(
+              Object.assign(new Error('ENOSPC: no space left on device'), {
+                code: 'ENOSPC',
+              }),
+            );
+          }
+          return undefined;
+        },
+      );
+    } finally {
+      stderr.mockRestore();
+      // Back to the real rename, should the rejection above not be used.
+      vi.mocked(fs.rename).mockReset();
+    }
+  });
+
+  it('does not point a re-join at a rerun when its credential could not record the token', async () => {
+    const saved = {
+      schemaVersion: 1,
+      serverUrl,
+      workspaceId,
+      hostId: 'x',
+      secret: 'x'.repeat(43),
+    };
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await withCoordinator(
+        () => Response.json({ error: 'unexpected' }, { status: 500 }),
+        async (files) => {
+          await fs.mkdir(path.dirname(files.credential), { recursive: true });
+          await fs.writeFile(files.credential, JSON.stringify(saved));
+
+          // The record did not land, so the rerun would be refused: the
+          // advice must not send the operator into it.
+          await expect(connect()).rejects.toThrow(
+            'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential.',
+          );
+          expect(stderr.mock.calls.map(([line]) => String(line))).toContain(
+            'Agent Host credential could not record its enrollment: ENOSPC: no space left on device\n',
+          );
+          await expect(readJson(files.credential)).resolves.toEqual(saved);
+        },
+        (url, input) => {
+          if (!url.includes('/x/heartbeat')) return undefined;
+          if (input['enrollmentToken']) {
+            // The next rename is the credential's save, after this answer.
+            vi.mocked(fs.rename).mockRejectedValueOnce(
+              Object.assign(new Error('ENOSPC: no space left on device'), {
+                code: 'ENOSPC',
+              }),
+            );
+            return undefined;
+          }
+          // The confirmation heartbeat meets a busy store.
+          return Response.json({ error: 'busy' }, { status: 503 });
+        },
+      );
+    } finally {
+      stderr.mockRestore();
+      // Back to the real rename, should the rejection above not be used.
+      vi.mocked(fs.rename).mockReset();
+    }
+  });
+
+  it('still points a rerun at itself when the credential already records the token', async () => {
+    let busy = true;
+    await withCoordinator(
+      () => Response.json({ error: 'unexpected' }, { status: 500 }),
+      async (files) => {
+        await fs.mkdir(path.dirname(files.credential), { recursive: true });
+        await fs.writeFile(
+          files.credential,
+          JSON.stringify({
+            schemaVersion: 1,
+            serverUrl,
+            workspaceId,
+            hostId: 'x',
+            secret: 'x'.repeat(43),
+            enrollmentTokenHash: tokenHash('join-token'),
+          }),
+        );
+
+        await expect(connect()).rejects.toThrow(
+          'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential, then join again with the same token.',
+        );
+      },
+      (url, input) => {
+        if (!url.includes('/x/heartbeat')) return undefined;
+        // Answered as a repeat of the enrollment it records: token unspent.
+        if (input['enrollmentToken']) return undefined;
+        if (!busy) return undefined;
+        busy = false;
+        return Response.json({ error: 'busy' }, { status: 503 });
+      },
+    );
+  });
+
+  it('does not save a re-join’s token over a credential removed meanwhile', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await withCoordinator(
+        () => Response.json({ error: 'unexpected' }, { status: 500 }),
+        async (files) => {
+          await fs.mkdir(path.dirname(files.credential), { recursive: true });
+          await fs.writeFile(
+            files.credential,
+            JSON.stringify({
+              schemaVersion: 1,
+              serverUrl,
+              workspaceId,
+              hostId: 'x',
+              secret: 'x'.repeat(43),
+            }),
+          );
+
+          await connect();
+
+          // Removed (revoked, say) by another process: not written back.
+          expect(stderr.mock.calls.map(([line]) => String(line))).toContain(
+            'Agent Host credential could not record its enrollment: Saved Agent Host credential was removed.\n',
+          );
+          await expect(fs.access(files.credential)).rejects.toThrow();
+        },
+        (url, input) => {
+          if (url.includes('/x/heartbeat') && input['enrollmentToken']) {
+            const files = hostFiles(
+              process.env['QWEN_HOME']!,
+              serverUrl,
+              workspaceId,
+              workspaceCwd,
+            );
+            return fs
+              .rm(files.credential)
+              .then(() =>
+                Response.json({ host: { id: 'x' }, leases: [], decisions: [] }),
+              );
+          }
+          return undefined;
+        },
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('goes on, run again, even with a secret its enrollment left behind', async () => {
+    // An older coordinator minted its own secret, and the proposed one's
+    // file could not be dropped: it still names this command's token.
+    await withCoordinator(
+      () => Response.json({ error: 'unexpected' }, { status: 500 }),
+      async (files, sent) => {
+        await fs.mkdir(path.dirname(files.credential), { recursive: true });
+        await fs.writeFile(
+          files.credential,
+          JSON.stringify({
+            schemaVersion: 1,
+            serverUrl,
+            workspaceId,
+            hostId: 'x',
+            secret: 'x'.repeat(43),
+            enrollmentTokenHash: tokenHash('join-token'),
+          }),
+        );
+        await fs.writeFile(
+          files.enrolling,
+          JSON.stringify({
+            schemaVersion: 1,
+            secret: 'q'.repeat(43),
+            tokenHashes: [tokenHash('join-token')],
+          }),
+        );
+
+        await connect();
+
+        // Not sent again with the spent token.
+        expect(sent).toEqual([]);
+      },
+      (url, input) =>
+        url.includes('/x/heartbeat') && input['enrollmentToken']
+          ? Response.json({ error: 'refused' }, { status: 401 })
+          : undefined,
+    );
+  });
+
+  it('waits for the same join sent again while it runs, rather than cutting it off', async () => {
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    const tokenHeartbeats: unknown[] = [];
+    await withCoordinator(
+      async (secret) => {
+        // Its answer is on the way when the same join is sent again.
+        await answered;
+        return Response.json({ host: { id: 'host-1' }, secret });
+      },
+      async (_files, sent) => {
+        // One daemon: its connect route passes the same bridge each time.
+        const bridge = {} as AcpSessionBridge;
+        const join = (enrollmentToken = 'join-token') =>
+          startAgentHostConnection({ ...target, bridge, enrollmentToken });
+        const first = join();
+        await vi.waitFor(() => expect(sent).toHaveLength(1));
+        const again = join();
+        answer();
+
+        // Both get what the one join did, record included.
+        await expect(Promise.all([first, again])).resolves.toEqual([
+          { recorded: true },
+          { recorded: true },
+        ]);
+        expect(sent).toHaveLength(1);
+        // Joined, the same join sent again keeps the connection it made,
+        // rather than starting it over.
+        await expect(join()).resolves.toEqual({ recorded: true });
+        expect(sent).toHaveLength(1);
+        expect(tokenHeartbeats).toEqual([]);
+
+        // Another token is another join: it replaces the connection.
+        await join('newer-token');
+        expect(tokenHeartbeats).toEqual(['newer-token']);
+      },
+      (url, input) => {
+        if (url.endsWith('/heartbeat') && input['enrollmentToken']) {
+          tokenHeartbeats.push(input['enrollmentToken']);
+        }
+        return undefined;
+      },
+    );
+  });
+
+  it('does not ask for the same token when a start without one cannot confirm', async () => {
+    await withCoordinator(
+      () => Response.json({ error: 'unexpected' }, { status: 500 }),
+      async (files) => {
+        await fs.mkdir(path.dirname(files.credential), { recursive: true });
+        await fs.writeFile(
+          files.credential,
+          JSON.stringify({
+            schemaVersion: 1,
+            serverUrl,
+            workspaceId,
+            hostId: 'x',
+            secret: 'x'.repeat(43),
+          }),
+        );
+
+        await expect(
+          startAgentHostConnection({
+            ...target,
+            bridge: {} as AcpSessionBridge,
+          }),
+        ).rejects.toThrow(
+          /^Agent Host could not confirm its connection to the coordinator\. Check the callback URL and saved credential\.$/,
+        );
+      },
+      (url) =>
+        url.includes('/x/heartbeat')
+          ? Response.json({ error: 'busy' }, { status: 503 })
+          : undefined,
+    );
+  });
+
+  it('still says the token is spent when another command spent it', async () => {
+    await withCoordinator(
+      (secret) => Response.json({ host: { id: 'h2' }, secret }),
+      async (files, sent) => {
+        await fs.mkdir(path.dirname(files.credential), { recursive: true });
+        await fs.writeFile(
+          files.credential,
+          JSON.stringify({
+            schemaVersion: 1,
+            serverUrl,
+            workspaceId,
+            hostId: 'x',
+            secret: 'x'.repeat(43),
+            enrollmentTokenHash: tokenHash('an-earlier-join'),
+          }),
+        );
+
+        // A Replace refused outright, say: it did nothing.
+        await expect(connect()).rejects.toThrow(
+          'Invalid or expired Agent Host enrollment token.',
+        );
+        expect(sent).toEqual([]);
+      },
+      (url, input) =>
+        url.includes('/x/heartbeat') && input['enrollmentToken']
+          ? Response.json({ error: 'refused' }, { status: 401 })
+          : undefined,
+    );
+  });
+
   it('still says the token is spent when nothing of a Replace is saved', async () => {
     await withCoordinator(
       (secret) => Response.json({ host: { id: 'h2' }, secret }),
@@ -1318,9 +1734,22 @@ describe('enrolling', () => {
           files.enrolling,
           JSON.stringify({ schemaVersion: 1, secret: stranded }),
         );
-        const first = connect();
+        // One daemon, so one bridge: only another token replaces the join.
+        const bridge = {} as AcpSessionBridge;
+        const first = startAgentHostConnection({
+          ...target,
+          bridge,
+          enrollmentToken: 'join-token',
+        });
         await vi.waitFor(() => expect(sent).toHaveLength(1));
-        await expect(connect()).rejects.toThrow('fetch failed');
+        // A newer join: the same one sent again would wait for the first.
+        await expect(
+          startAgentHostConnection({
+            ...target,
+            bridge,
+            enrollmentToken: 'newer-token',
+          }),
+        ).rejects.toThrow('fetch failed');
         const own = sent[2];
         expect(own).not.toBe(stranded);
 
@@ -1332,7 +1761,7 @@ describe('enrolling', () => {
         await expect(readJson(files.enrolling)).resolves.toEqual({
           schemaVersion: 1,
           secret: own,
-          tokenHashes: [tokenHash('join-token')],
+          tokenHashes: [tokenHash('newer-token')],
         });
       },
     );

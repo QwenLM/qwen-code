@@ -2407,15 +2407,14 @@ it.each(['landed', 'absent'] as const)(
     );
     const command = managementCommand('add', 'demo', 0, pin);
     try {
-      await expect(manager.submit(command)).rejects.toThrow(
-        ManagedSessionAppendUnsettledError,
-      );
-      expect(requests).toEqual([]);
+      await manager.submit(command);
+      expect((await manager.snapshot(false)).revision).toBe(1);
+      expect(manager.status(command.operationId)?.state).toBe('settled');
+      expect(
+        requests.filter((entry) => entry.kind === 'mcp-configure'),
+      ).toHaveLength(1);
       await manager.open();
-      expect((await manager.snapshot(false)).revision).toBe(
-        outcome === 'landed' ? 1 : 0,
-      );
-      expect(requests).toEqual([]);
+      expect((await manager.snapshot(false)).revision).toBe(1);
       await manager.submit(command);
       await manager.submit(command);
       expect(await readHostedMcpSettings(session)).toHaveLength(1);

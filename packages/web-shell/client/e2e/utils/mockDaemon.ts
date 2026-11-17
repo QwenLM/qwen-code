@@ -149,6 +149,13 @@ export interface WebShellDaemonScenario {
   /** Response for `GET /workspaces/:cwd/git/branches`. */
   gitBranches?: unknown;
   /**
+   * When true, a plain `POST .../git/checkout` (no stash/force in the body)
+   * answers 409 dirty_working_tree; the stash resolution answers 200 with a
+   * kept stash entry, the force resolution answers 200. Exercises the
+   * branch picker's checkout resolution panel.
+   */
+  gitCheckoutDirty?: boolean;
+  /**
    * Remotes served by `GET /workspaces/:cwd/git/remotes`. The add/remove
    * routes mutate this array in place so later reads see earlier writes.
    */
@@ -160,6 +167,36 @@ export interface WebShellDaemonScenario {
   /** Response for `POST /session/:id/btw`. */
   btwAnswer?: string;
   goalSnapshot: GoalSnapshotV2;
+  /**
+   * Per-workspace goal listings for `GET /workspaces/:id/goals`, keyed by
+   * workspace id. Each entry projects exactly like the primary `/goals`
+   * branch. The route gates on `capabilities.workspaces` registration (400
+   * `workspace_mismatch`) and trust (403 `untrusted_workspace`), not on map
+   * membership: an advertised workspace absent from the map lists empty.
+   * An entry keyed by the PRIMARY workspace id is ignored — the primary
+   * always derives from `goalSnapshot` on both surfaces.
+   */
+  goalsByWorkspace?: Record<
+    string,
+    {
+      sessionId: string;
+      displayName?: string | null;
+      snapshot: GoalSnapshotV2;
+    }
+  >;
+  /**
+   * Sessions allocated by `POST /session` with a non-primary cwd. The real
+   * daemon creates a fresh session in the requested workspace; the mock
+   * mirrors that so picker-targeted creation and stranded-retry flows can
+   * prove WHERE a goal landed (a fixed primary session id would reduce every
+   * goal into the primary snapshot). Each entry owns its goal snapshot.
+   */
+  allocatedSessions: Array<{
+    sessionId: string;
+    workspaceCwd: string;
+    displayName: string | null;
+    snapshot: GoalSnapshotV2;
+  }>;
   midTurnMessages: Array<{ messageId: string; text: string }>;
   /** Stateful response and replay used by historical branch E2E flows. */
   branch?: {
@@ -487,6 +524,7 @@ export function createWebShellDaemonScenario(
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
+    gitCheckoutDirty: overrides.gitCheckoutDirty,
     gitRemotes: overrides.gitRemotes,
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
@@ -496,6 +534,10 @@ export function createWebShellDaemonScenario(
       goal: null,
       activity: 'idle',
     },
+    goalsByWorkspace: overrides.goalsByWorkspace
+      ? structuredClone(overrides.goalsByWorkspace)
+      : undefined,
+    allocatedSessions: [],
     midTurnMessages: overrides.midTurnMessages ?? [],
     branch: overrides.branch,
   };
@@ -887,6 +929,7 @@ function isDaemonPath(path: string): boolean {
       path,
     ) ||
     path === '/goals' ||
+    /^\/workspaces\/[^/]+\/goals\/?$/.test(path) ||
     /^\/file\/?$/.test(path) ||
     /^\/session\/[^/]+\/metadata\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path) ||
@@ -1112,6 +1155,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && path === '/goals') return true;
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/goals\/?$/.test(path)) {
+    return true;
+  }
   if (
     (method === 'GET' || method === 'POST') &&
     /^\/session\/[^/]+\/goal\/?$/.test(path)
@@ -2018,7 +2064,32 @@ async function handleDaemonRoute(
     const action = path.replace(/\/$/, '').split('/').pop();
     if (action === 'commit') {
       await json(route, { sha: 'abc1234', subject: 'test commit' });
-    } else if (action === 'checkout' || action === 'branch') {
+    } else if (action === 'checkout') {
+      const checkoutBody = (body ?? {}) as Record<string, unknown>;
+      if (
+        scenario.gitCheckoutDirty &&
+        checkoutBody['stash'] !== true &&
+        checkoutBody['force'] !== true
+      ) {
+        await json(
+          route,
+          {
+            error: 'dirty_working_tree',
+            message:
+              'error: Your local changes to the following files would be overwritten by checkout:\n\ta.txt\nPlease commit your changes or stash them before you switch branches.\nAborting',
+          },
+          409,
+        );
+        return;
+      }
+      await json(route, {
+        branch: 'feat/demo',
+        detached: false,
+        ...(checkoutBody['stash'] === true
+          ? { stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0' }
+          : {}),
+      });
+    } else if (action === 'branch') {
       await json(route, { branch: 'feat/demo', detached: false });
     } else {
       await json(route, { success: true, output: '' });
@@ -2366,7 +2437,134 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'POST' && path === '/session') {
-    await json(route, sessionEnvelope(scenario, { attached: false }));
+    const cwd = readStringField(body, 'cwd');
+    // The primary keeps ONE snapshot (scenario.goalSnapshot) on both listing
+    // surfaces, so a primary-targeted allocation returns the primary session
+    // rather than a second copy that could disagree with it.
+    const primaryCwd =
+      (scenario.capabilities.workspaces ?? []).find((w) => w.primary)?.cwd ??
+      scenario.workspaceCwd;
+    if (
+      cwd === undefined ||
+      cwd === scenario.workspaceCwd ||
+      cwd === primaryCwd
+    ) {
+      await json(route, sessionEnvelope(scenario, { attached: false }));
+      return;
+    }
+    // Mirror the real daemon: a session is allocated IN the requested
+    // workspace, with its own id and goal snapshot — not the primary's.
+    const ws = (scenario.capabilities.workspaces ?? []).find(
+      (w) => w.cwd === cwd,
+    );
+    if (!ws) {
+      await json(
+        route,
+        {
+          error:
+            'Workspace mismatch: daemon is bound to the registered workspaces; none matched the requested workspace.',
+          code: 'workspace_mismatch',
+        },
+        400,
+      );
+      return;
+    }
+    if (!ws.trusted) {
+      await json(
+        route,
+        { error: 'Workspace is not trusted.', code: 'untrusted_workspace' },
+        403,
+      );
+      return;
+    }
+    const sessionId = `sess-alloc-${scenario.allocatedSessions.length + 1}`;
+    scenario.allocatedSessions.push({
+      sessionId,
+      workspaceCwd: cwd,
+      displayName: null,
+      snapshot: { v: 2, goal: null, activity: 'idle' },
+    });
+    await json(route, {
+      sessionId,
+      workspaceCwd: cwd,
+      attached: false,
+      clientId: scenario.clientId,
+      createdAt: now,
+      hasActivePrompt: false,
+    });
+    return;
+  }
+  const workspaceGoalsMatch = path.match(/^\/workspaces\/([^/]+)\/goals\/?$/);
+  if (method === 'GET' && workspaceGoalsMatch) {
+    const selector = decodeURIComponent(workspaceGoalsMatch[1]!);
+    // Gate on registration and trust like the real route, not on map
+    // membership: an advertised workspace with no goals lists empty, and an
+    // untrusted one is rejected even if the fixture gave it goals.
+    const ws = (scenario.capabilities.workspaces ?? []).find(
+      (w) => w.id === selector || w.cwd === selector,
+    );
+    if (!ws) {
+      await json(
+        route,
+        {
+          error:
+            'Workspace mismatch: the requested workspace is not registered with this daemon.',
+          code: 'workspace_mismatch',
+        },
+        400,
+      );
+      return;
+    }
+    if (!ws.trusted) {
+      await json(
+        route,
+        { error: 'Workspace is not trusted.', code: 'untrusted_workspace' },
+        403,
+      );
+      return;
+    }
+    // The primary workspace derives from scenario.goalSnapshot on BOTH
+    // surfaces (the real daemon reads one runtime); a map entry keyed by the
+    // primary id is ignored so the two listings can never disagree.
+    const entry = ws.primary ? undefined : scenario.goalsByWorkspace?.[ws.id];
+    const fixtureSnapshot = ws.primary
+      ? scenario.goalSnapshot
+      : entry?.snapshot;
+    const fixtureSessionId = ws.primary ? scenario.sessionId : entry?.sessionId;
+    const fixtureDisplayName = ws.primary
+      ? scenario.displayName
+      : (entry?.displayName ?? null);
+    const project = (
+      sessionId: string | undefined,
+      displayName: string | null,
+      snapshot: GoalSnapshotV2 | undefined,
+    ) => {
+      const goal = snapshot?.goal;
+      return snapshot && goal && goal.status !== 'complete'
+        ? [
+            {
+              sessionId,
+              displayName,
+              condition: goal.objective,
+              iterations: goal.turnCount,
+              setAt: goal.createdAt,
+              hasActivePrompt: snapshot.activity !== 'idle',
+              snapshot,
+            },
+          ]
+        : [];
+    };
+    // Sessions allocated into this workspace by POST /session carry their
+    // own goals, exactly like the real route enumerating live sessions.
+    const goals = [
+      ...project(fixtureSessionId, fixtureDisplayName, fixtureSnapshot),
+      ...scenario.allocatedSessions
+        .filter((session) => session.workspaceCwd === ws.cwd)
+        .flatMap((session) =>
+          project(session.sessionId, session.displayName, session.snapshot),
+        ),
+    ].sort((a, b) => b.setAt - a.setAt);
+    await json(route, { v: 1, goals, droppedCount: 0 });
     return;
   }
   if (method === 'GET' && path === '/goals') {
@@ -2394,26 +2592,56 @@ async function handleDaemonRoute(
 
   const goalMatch = path.match(/^\/session\/([^/]+)\/goal\/?$/);
   if (goalMatch) {
+    // Resolve the target snapshot by session id so controlling a secondary
+    // goal does not mutate the primary's card (the real routes address the
+    // owning runtime). The primary session always derives from
+    // scenario.goalSnapshot — the map must not hold a second primary copy.
+    const sessionId = decodeURIComponent(goalMatch[1]!);
+    const wsEntry =
+      sessionId === scenario.sessionId
+        ? undefined
+        : Object.values(scenario.goalsByWorkspace ?? {}).find(
+            (entry) => entry.sessionId === sessionId,
+          );
+    const alloc = scenario.allocatedSessions.find(
+      (session) => session.sessionId === sessionId,
+    );
+    const snapshot = wsEntry
+      ? wsEntry.snapshot
+      : alloc
+        ? alloc.snapshot
+        : scenario.goalSnapshot;
     if (method === 'GET') {
-      await json(route, { snapshot: scenario.goalSnapshot });
+      await json(route, { snapshot });
       return;
     }
-    scenario.goalSnapshot = reduceMockGoal(
-      scenario.goalSnapshot,
-      body as GoalControlRequest,
-    );
-    await json(route, { snapshot: scenario.goalSnapshot });
+    const reduced = reduceMockGoal(snapshot, body as GoalControlRequest);
+    if (wsEntry) {
+      wsEntry.snapshot = reduced;
+    } else if (alloc) {
+      alloc.snapshot = reduced;
+    } else {
+      scenario.goalSnapshot = reduced;
+    }
+    await json(route, { snapshot: reduced });
     return;
   }
-  if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
+  const statusMatch = path.match(/^\/session\/([^/]+)\/status\/?$/);
+  if (method === 'GET' && statusMatch) {
     // The real route answers with a flat `DaemonSessionSummary`; a `{v, state}`
     // envelope leaves every field the client reads (workspaceCwd, displayName,
     // worktree, branch) undefined, so session metadata restoration silently
     // does nothing in every scenario.
+    const statusSessionId = decodeURIComponent(statusMatch[1]!);
+    const statusAlloc = scenario.allocatedSessions.find(
+      (session) => session.sessionId === statusSessionId,
+    );
     await json(route, {
-      sessionId: scenario.sessionId,
-      workspaceCwd: scenario.workspaceCwd,
-      displayName: scenario.displayName,
+      sessionId: statusAlloc ? statusAlloc.sessionId : scenario.sessionId,
+      workspaceCwd: statusAlloc
+        ? statusAlloc.workspaceCwd
+        : scenario.workspaceCwd,
+      displayName: statusAlloc ? statusAlloc.displayName : scenario.displayName,
     });
     return;
   }

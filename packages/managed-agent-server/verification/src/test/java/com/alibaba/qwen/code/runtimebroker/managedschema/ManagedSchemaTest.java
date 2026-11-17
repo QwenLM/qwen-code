@@ -70,6 +70,8 @@ class ManagedSchemaTest {
             Map.entry("ma_schedule", List.of("tenant_id", "schedule_id")),
             Map.entry("ma_schedule_occurrence", List.of("tenant_id", "schedule_id", "occurrence_key")),
             Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")),
+            Map.entry("ma_client_files_binding", List.of("session_scope_key")),
+            Map.entry("ma_client_files_request", List.of("request_key")),
             Map.entry("ma_journal_pack", List.of("session_scope_key", "from_revision")));
 
     @Test

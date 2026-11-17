@@ -16,6 +16,7 @@ import {
   hashDaemonWorkspace,
   withDaemonSpan,
 } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
+import { GENERATED_UI_CARD_ID_PATTERN } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
 import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
@@ -319,6 +320,17 @@ interface RegisterSessionRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   archiveCoordinator: SessionArchiveCoordinator;
   requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+  /**
+   * Fired after a load/resume makes a session live, so the PR watch can deliver
+   * its pending transitions now instead of at the next tick (design §2). Never
+   * awaited: the watch's per-PR lock is not re-entrant, and a restore the drain
+   * itself dispatched must not wait on a drain.
+   */
+  onSessionRestored?: (input: {
+    runtime: WorkspaceRuntime;
+    workspaceCwd: string;
+    sessionId: string;
+  }) => void;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
@@ -4075,6 +4087,17 @@ export function registerSessionRoutes(
         res
           .status(200)
           .json(redactSdkSurfaceReplay(outcome.session, runtime.trusted));
+        // The core's finally has already released the reservation and the
+        // worktree lock by the time it returns. Never awaited: the watch's
+        // per-PR lock is not re-entrant, and a restore the drain dispatched
+        // must not wait on a drain.
+        try {
+          deps.onSessionRestored?.({ runtime, workspaceCwd, sessionId });
+        } catch (err) {
+          daemonLog?.warn(
+            `session restored hook failed for ${sessionId}: ${String(err)}`,
+          );
+        }
       } catch (err) {
         if (err instanceof RequestedSessionIdAdmissionError) {
           sendRequestedSessionIdAdmissionError(res, err, route);
@@ -5551,8 +5574,22 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/status',
       async (_req, res, sessionId, runtime) => {
-        const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
         const service = createWorkspaceRuntimeSessionService(runtime);
+        // Bridge entries are re-created without prs on daemon restart/reload,
+        // so hydrate the persisted binding history before reading the summary;
+        // seedSessionPrs no-ops when bindings already exist, so live state is
+        // never clobbered. Best-effort: an unreadable sidecar omits bindings.
+        try {
+          const hydratedPrs = await readSessionPrs(
+            service.getPrSessionPathForArchiveState(sessionId, 'active'),
+          );
+          if (hydratedPrs && hydratedPrs.length > 0) {
+            runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+          }
+        } catch {
+          // An unreadable sidecar omits the bindings, not the summary.
+        }
+        const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
         try {
           summary.lastUserPromptAt =
             await service.getLastUserPromptAt(sessionId);
@@ -6095,6 +6132,140 @@ export function registerSessionRoutes(
     }
   });
 
+  for (const route of [
+    '/session/:id/turns/:promptId/hooks',
+    '/workspaces/:workspace/session/:id/turns/:promptId/hooks',
+  ]) {
+    app.get(route, async (req, res) => {
+      const routeName = `GET ${route}`;
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      const promptId = req.params['promptId'];
+      if (typeof promptId !== 'string' || !promptId.trim()) {
+        res.status(400).json({
+          code: 'invalid_prompt_id',
+          error: 'A history prompt ID is required',
+        });
+        return;
+      }
+      const qualified = route.startsWith('/workspaces/');
+      const target = qualified
+        ? resolveQualifiedSessionTarget(req, res, {
+            allowUntrustedSecondary: true,
+          })
+        : undefined;
+      if (qualified && !target) return;
+      const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+      if (limit === null) return;
+      const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+      if (snapshot === null) return;
+      const start = parseTranscriptStartQuery(req.query['start'], res);
+      if (start === null) return;
+      if (
+        (start !== undefined && snapshot === undefined) ||
+        (snapshot !== undefined &&
+          workspaceTranscriptCursorExceedsLimit(snapshot))
+      ) {
+        res.status(400).json({
+          code: 'invalid_transcript_cursor',
+          error: 'Invalid hook page snapshot or start',
+        });
+        return;
+      }
+      try {
+        const result = await runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime = qualified
+              ? target?.kind === 'ordinary'
+                ? target.runtime
+                : await resolveQualifiedSessionRuntime(
+                    req,
+                    res,
+                    routeName,
+                    [sessionId],
+                    'active',
+                  )
+              : await resolveTranscriptSessionRuntime(
+                  res,
+                  routeName,
+                  sessionId,
+                  snapshot !== undefined,
+                );
+            if (!runtime) return undefined;
+            const assertOpen = captureRuntimeGenerationAssertion(runtime);
+            assertOpen?.();
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              if (snapshot === undefined) {
+                await assertSessionLoadable(
+                  runtime.workspaceCwd,
+                  sessionId,
+                  runtime.sessionRuntimeBaseDir,
+                  { allowActiveConflict: true },
+                );
+                try {
+                  runtime.bridge.getSessionSummary(sessionId);
+                  if (runtime.bridge.flushSessionTranscript)
+                    await runtime.bridge.flushSessionTranscript(sessionId);
+                  else
+                    await runtime.bridge.getSessionTranscriptPage({
+                      sessionId,
+                      direction: 'backward',
+                      limit: 1,
+                    });
+                } catch (error) {
+                  if (!(error instanceof SessionNotFoundError)) throw error;
+                }
+                assertOpen?.();
+              }
+              try {
+                const page = await new SessionTranscriptReader(
+                  runtime.workspaceCwd,
+                  getTranscriptCursorCodec(runtime),
+                ).readTurnHooksPage(sessionId, promptId, {
+                  ...(snapshot !== undefined ? { snapshot } : {}),
+                  ...(start !== undefined ? { start } : {}),
+                  ...(limit !== undefined ? { limit } : {}),
+                });
+                assertOpen?.();
+                if (!page)
+                  res.status(404).json({
+                    code: 'turn_not_found',
+                    error: 'History turn not found',
+                    sessionId,
+                  });
+                return page;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                  throw error;
+                if (snapshot !== undefined)
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                const location =
+                  await createWorkspaceRuntimeSessionService(
+                    runtime,
+                  ).getSessionLocation(sessionId);
+                if (location === 'archived')
+                  throw new SessionArchivedError(sessionId);
+                if (location === 'conflict')
+                  throw new SessionConflictError(sessionId);
+                throw new SessionNotFoundError(sessionId);
+              }
+            });
+          }),
+        );
+        if (result === undefined) return;
+        res
+          .status(200)
+          .set('Cache-Control', 'no-store')
+          .type('application/json')
+          .send(serializeWorkspaceTranscriptResponse(result, sessionId));
+      } catch (error) {
+        sendBridgeError(res, error, { route: routeName, sessionId });
+      }
+    });
+  }
+
   app.get('/session/:id/turn-index', async (req, res) => {
     const route = 'GET /session/:id/turn-index';
     const sessionId = requireSessionId(req, res);
@@ -6556,6 +6727,105 @@ export function registerSessionRoutes(
           );
         } finally {
           res.off('close', onClose);
+        }
+      },
+      { cwdBound: 'always' },
+    ),
+  );
+
+  // Generated UI view state. Reads and writes go to the session's live owner
+  // and never fall back to another runtime; a card id outside the minted
+  // grammar is rejected before it reaches the agent.
+  const generatedUiStateRequest = (
+    req: Request,
+    res: Response,
+  ): { clientId: string; cardId: string } | undefined => {
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return undefined;
+    if (!clientId) {
+      res
+        .status(403)
+        .json({ error: 'View state requires a session-bound client id' });
+      return undefined;
+    }
+    const cardId = req.params['cardId'];
+    if (!cardId || !GENERATED_UI_CARD_ID_PATTERN.test(cardId)) {
+      res
+        .status(400)
+        .json({ error: 'Invalid card id', code: 'invalid_card_id' });
+      return undefined;
+    }
+    return { clientId, cardId };
+  };
+
+  app.get(
+    '/session/:id/generated-ui/state/:cardId',
+    withOwnerReadSession(
+      'GET /session/:id/generated-ui/state/:cardId',
+      async (req, res, sessionId, runtime) => {
+        const request = generatedUiStateRequest(req, res);
+        if (!request) return;
+        try {
+          res
+            .status(200)
+            .json(
+              await runtime.bridge.getGeneratedUiState(
+                sessionId,
+                request.cardId,
+                { clientId: request.clientId },
+              ),
+            );
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'GET /session/:id/generated-ui/state/:cardId',
+            sessionId,
+          });
+        }
+      },
+      { cwdBound: true },
+    ),
+  );
+
+  app.put(
+    '/session/:id/generated-ui/state/:cardId',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'PUT /session/:id/generated-ui/state/:cardId',
+      async (req, res, sessionId, runtime) => {
+        const request = generatedUiStateRequest(req, res);
+        if (!request) return;
+        const body = safeBody(req);
+        const baseRevision = body['baseRevision'];
+        if (
+          !Number.isSafeInteger(baseRevision) ||
+          (baseRevision as number) < 0 ||
+          !Object.hasOwn(body, 'value')
+        ) {
+          res.status(400).json({
+            error: 'Expected a non-negative baseRevision and a value',
+            code: 'invalid_state',
+          });
+          return;
+        }
+        try {
+          const result = await runtime.bridge.setGeneratedUiState(
+            sessionId,
+            request.cardId,
+            { baseRevision: baseRevision as number, value: body['value'] },
+            { clientId: request.clientId },
+          );
+          const status =
+            result.outcome === 'saved'
+              ? 200
+              : result.outcome === 'stale'
+                ? 409
+                : 413;
+          res.status(status).json(result);
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'PUT /session/:id/generated-ui/state/:cardId',
+            sessionId,
+          });
         }
       },
       { cwdBound: 'always' },
