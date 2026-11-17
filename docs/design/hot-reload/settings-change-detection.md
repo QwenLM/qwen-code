@@ -28,7 +28,7 @@ The `writeWithBackupSync` write flow stages complete bytes and copies the old se
 To still detect a `settings.json` added later in the session without creating the directory and without recursing the project tree, the watcher uses a two-stage, per-scope strategy keyed on **directory** existence:
 
 - **`.qwen` exists at startup** → watch it directly (`watchTargetDir`, the strategy above).
-- **`.qwen` missing** → **bootstrap-watch the parent** (`watchParentForDir`): `chokidar.watch(parentDir, { depth: 0, ignoreInitial: true, ignored })` where the `ignored` predicate `(p) => p !== parentDir && basename(p) !== '.qwen'` allows **only** the `.qwen` entry through. This suppresses all unrelated top-level churn and never recurses. Once `.qwen` appears, the watcher **promotes**: it closes the bootstrap watcher and starts a target watcher on `.qwen`, then schedules a refresh to pick up a `settings.json` that may already be inside.
+- **`.qwen` missing** → **bootstrap-watch the parent** (`watchParentForDir`): `chokidar.watch(parentDir, { depth: 0, ignoreInitial: true, ignored })` where the `ignored` predicate `bootstrapWatchFilter(parentDir, '.qwen')` allows **only** the root and the `.qwen` entry through. It compares the root after `path.resolve`, because chokidar hands the root back in its own spelling (forward slashes on Windows); a plain string compare ignored the root itself and the watcher never fired. The extensions bootstrap watcher uses the same helper. This suppresses all unrelated top-level churn and never recurses. Once `.qwen` appears, the watcher **promotes**: it closes the bootstrap watcher and starts a target watcher on `.qwen`, then schedules a refresh to pick up a `settings.json` that may already be inside.
 
 Robustness details:
 
@@ -127,8 +127,8 @@ private watchParentForDir(scope: SettingScope, settingsPath: string): void {
   const watcher = watchFs(parentDir, {
     ignoreInitial: true,
     depth: 0,
-    ignored: (filePath: string) =>
-      filePath !== parentDir && path.basename(filePath) !== dirBasename,
+    // only the root and `.qwen`; the root is compared after path.resolve
+    ignored: bootstrapWatchFilter(parentDir, dirBasename),
   })
     .on('all', (_event: string, changedPath: string) => {
       if (this.watchGeneration.get(scope) !== gen) return; // stale callback

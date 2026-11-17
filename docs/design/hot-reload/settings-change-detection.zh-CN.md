@@ -28,7 +28,7 @@
 为了在不创建目录、不递归项目树的前提下，检测会话期间新增的 `settings.json`，watcher 按每个 scope 的**目录**是否存在采用两阶段策略：
 
 - **启动时 `.qwen` 已存在** → 直接监听该目录（`watchTargetDir`，即上述策略）。
-- **`.qwen` 缺失** → **先监听父目录以引导建立监听**（`watchParentForDir`）：`chokidar.watch(parentDir, { depth: 0, ignoreInitial: true, ignored })`，其中 `ignored` 谓词 `(p) => p !== parentDir && basename(p) !== '.qwen'` 只允许 `.qwen` 条目通过，抑制其他顶层变动且从不递归。`.qwen` 出现后 watcher **提升**：关闭引导 watcher，在 `.qwen` 上创建目标 watcher，并安排一次刷新以读取其中可能已存在的 `settings.json`。
+- **`.qwen` 缺失** → **先监听父目录以引导建立监听**（`watchParentForDir`）：`chokidar.watch(parentDir, { depth: 0, ignoreInitial: true, ignored })`，其中 `ignored` 谓词 `bootstrapWatchFilter(parentDir, '.qwen')` 只允许根目录和 `.qwen` 条目通过。它比较 `path.resolve` 之后的根目录，因为 chokidar 传回根目录时用自己的写法（Windows 上是正斜杠），直接比较字符串会把根目录本身忽略，监听器永远不触发。extensions 的引导 watcher 也用同一个函数。它抑制其他顶层变动且从不递归。`.qwen` 出现后 watcher **提升**：关闭引导 watcher，在 `.qwen` 上创建目标 watcher，并安排一次刷新以读取其中可能已存在的 `settings.json`。
 
 健壮性细节：
 
@@ -127,8 +127,8 @@ private watchParentForDir(scope: SettingScope, settingsPath: string): void {
   const watcher = watchFs(parentDir, {
     ignoreInitial: true,
     depth: 0,
-    ignored: (filePath: string) =>
-      filePath !== parentDir && path.basename(filePath) !== dirBasename,
+    // only the root and `.qwen`; the root is compared after path.resolve
+    ignored: bootstrapWatchFilter(parentDir, dirBasename),
   })
     .on('all', (_event: string, changedPath: string) => {
       if (this.watchGeneration.get(scope) !== gen) return; // stale callback
