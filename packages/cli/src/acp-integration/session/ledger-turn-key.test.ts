@@ -39,6 +39,18 @@ describe('deriveLedgerTurnKey', () => {
 describe('continuation suffix vocabulary (R9-11)', () => {
   const base = 'test-session-id########1';
 
+  // Pin the vocabulary content at runtime, not only via the compile-time
+  // literal-union type: dropping a suffix must fail here even though the
+  // it.each below would simply generate fewer cases (S7).
+  it('contains exactly the four continuation suffixes', () => {
+    expect([...LEDGER_CONTINUATION_SUFFIXES]).toEqual([
+      'todo_stop_guard',
+      'stop_hook',
+      'background_result',
+      'mid_turn',
+    ]);
+  });
+
   // The generation side (buildContinuationPromptId, used by Session.ts) and the
   // stripping side (deriveLedgerTurnKey) share one vocabulary; every id the
   // builders produce must normalize back to its base, so the two cannot drift.

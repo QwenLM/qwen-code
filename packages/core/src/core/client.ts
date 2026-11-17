@@ -756,8 +756,10 @@ export class LlmClient {
   // flag, so model-availability ledger membership must exclude the whole
   // interaction by prompt id, not just the first send's messageType. Entries are
   // inert once the interaction ends (the id is never reused by a foreground
-  // turn); the set is bounded FIFO like stopHookChains, evicting only ids whose
-  // continuations have long drained (R8-F11).
+  // turn). The set is bounded FIFO like stopHookChains, evicting by insertion
+  // order (R8-F11); this is safe because a background interaction's
+  // continuations drain within its turn, long before 32 newer interactions
+  // would evict its id — the bound is not a drain check.
   private readonly backgroundInteractionPromptIds = new Set<string>();
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;

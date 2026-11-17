@@ -12965,6 +12965,8 @@ Other open files:
       });
 
       it('bounds the background-interaction registry FIFO (R8-F11)', async () => {
+        // Pin the bound value itself: raising it must not silently pass (S2).
+        expect(MAX_BACKGROUND_INTERACTION_PROMPT_IDS).toBe(32);
         retryChat({
           stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
         });

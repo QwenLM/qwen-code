@@ -9099,10 +9099,23 @@ describe('LlmChat', async () => {
       expect(fallbackA).toHaveBeenCalledTimes(1);
 
       // Request 2, same turn: fallback-a was not recorded, so it is attempted
-      // again rather than skipped.
+      // again rather than skipped. Capture the stream to pin that the fresh
+      // generator genuinely replays the post-output chunk — a shared,
+      // already-drained stream (mockResolvedValue) would emit nothing here.
+      const stream2 = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-output-auth',
+        undefined,
+        { isSessionTurn: true },
+      );
+      const events2: StreamEvent[] = [];
       await expect(
-        sendSessionCollect('test', 'prompt-output-auth'),
+        (async () => {
+          for await (const event of stream2) events2.push(event);
+        })(),
       ).rejects.toThrow();
+      expect(hasChunkText(events2, 'fallback-a partial')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(2);
       expect(fallbackB).not.toHaveBeenCalled();
     });

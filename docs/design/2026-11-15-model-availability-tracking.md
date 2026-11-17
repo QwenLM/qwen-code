@@ -98,8 +98,10 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     user-visible `Prompts` statistic (`userPromptCount`, advanced only for
     user-initiated turns), so background mints do not inflate `/stats`, the
     feedback threshold or the tip cadence (R8-F3). The registry is bounded FIFO
-    like `stopHookChains`, evicting only ids whose continuations have long
-    drained (R8-F11). In the headless CLI a teammate turn mints its own id and a
+    like `stopHookChains`, evicting by insertion order (R8-F11); this is safe
+    because a background interaction's continuations drain within its turn, long
+    before 32 newer interactions would evict its id — the bound is not a drain
+    check. In the headless CLI a teammate turn mints its own id and a
     later foreground turn restores the base id once the teammate turn ends, so
     the registered teammate id cannot drop later foreground sends (R8-F2). A
     `Goal` turn is a ledger member (not registered), but its minted id is
