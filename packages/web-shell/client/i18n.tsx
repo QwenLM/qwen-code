@@ -4572,6 +4572,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'tasks.pill.shells': (v) => `${v?.count ?? 0} shells`,
   'tasks.pill.workflow': (v) => `${v?.count ?? 0} workflow`,
   'tasks.pill.workflows': (v) => `${v?.count ?? 0} workflows`,
+  'tasks.explain.tooltip': 'Explain what this task is doing',
+  'tasks.explain.aria': (v) => `Explain task: ${v?.label ?? ''}`,
+  'tasks.explain.display': (v) =>
+    `Explain what this task is doing: ${v?.label ?? ''}`,
+  'tasks.explain.question': (v) =>
+    `This session has a background task. Using the conversation context and the task facts below, explain what this task is doing and why it was started. Answer concisely in 2-4 sentences.\n\nTask facts:\n${v?.facts ?? ''}`,
   'tasks.confirmStop': 'x again to confirm stop · ends the blocking turn',
   'tasks.shortcut.select': '↑/↓ select',
   'tasks.shortcut.view': 'Enter view',
@@ -9664,6 +9670,11 @@ const ZH: Messages = {
   'tasks.pill.shells': (v) => `${v?.count ?? 0} 个 shell`,
   'tasks.pill.workflow': (v) => `${v?.count ?? 0} 个工作流`,
   'tasks.pill.workflows': (v) => `${v?.count ?? 0} 个工作流`,
+  'tasks.explain.tooltip': '解释这个任务在做什么',
+  'tasks.explain.aria': (v) => `解释任务：${v?.label ?? ''}`,
+  'tasks.explain.display': (v) => `解释这个任务在做什么：${v?.label ?? ''}`,
+  'tasks.explain.question': (v) =>
+    `这个会话有一个后台任务。请结合对话上下文和下面的任务信息，解释这个任务在做什么、为什么启动它。用 2-4 句话简要回答。\n\n任务信息：\n${v?.facts ?? ''}`,
   'tasks.confirmStop': '再按 x 确认停止 · 会终结当前阻塞轮次',
   'tasks.shortcut.select': '↑/↓ 选择',
   'tasks.shortcut.view': 'Enter 查看',

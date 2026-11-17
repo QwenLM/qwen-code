@@ -12,15 +12,18 @@ import {
 import {
   BotIcon,
   CircleAlertIcon,
+  CircleHelpIcon,
   CirclePauseIcon,
   LoaderCircleIcon,
   SquareActivityIcon,
   SquareTerminalIcon,
   WorkflowIcon,
 } from 'lucide-react';
+import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
 import { useSharedNow } from '../hooks/useSharedNow';
 import {
+  explainDisplayLabel,
   getComposerTaskChipGroups,
   type ComposerChipTask,
   type ComposerTaskChipGroup,
@@ -41,6 +44,8 @@ export interface ComposerTaskChipsProps {
   includeAgents: boolean;
   /** Open the task: locate a workflow in the transcript, open a shell's output, … */
   onSelectTask: (task: ComposerChipTask) => void;
+  /** Ask the model to explain the task as a side question, without opening it. */
+  onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
   /** Hand focus back to the composer, optionally with a typed character. */
   onReturnToInput?: (text?: string) => void;
 }
@@ -81,6 +86,16 @@ function taskLabel(task: ComposerChipTask): string {
   }
 }
 
+/**
+ * The session's own background task, which the model can explain; a message
+ * sent to another session is not one of them.
+ */
+function isChildTask(
+  task: ComposerChipTask,
+): task is DaemonSessionTaskWithWorkflowStatus {
+  return task.kind !== 'session';
+}
+
 /** A session the message went to is waiting on a permission or a question. */
 function isWaiting(task: ComposerChipTask): boolean {
   return task.kind === 'session' && task.waitingForInput === true;
@@ -108,7 +123,7 @@ export const ComposerTaskChips = forwardRef<
   ComposerTaskChipsHandle,
   ComposerTaskChipsProps
 >(function ComposerTaskChips(
-  { tasks, includeAgents, onSelectTask, onReturnToInput },
+  { tasks, includeAgents, onSelectTask, onExplainTask, onReturnToInput },
   ref,
 ) {
   const { t } = useI18n();
@@ -159,7 +174,16 @@ export const ComposerTaskChips = forwardRef<
     if (!focused || focused.element.isConnected) return;
     focusedElementRef.current = null;
     if (!isFocusUnclaimed(focused.root)) return;
+    // A chip "?" unmounts when its group grows; reclaim focus to the owning
+    // group's chip, not to whichever group happens to sort first — and not
+    // to a different group whose list happens to be open. Row "?" buttons
+    // carry no kind attribute, so openKind stays as their fallback.
+    const focusedKind =
+      focused.element.getAttribute('data-explain-kind') ??
+      focused.element.getAttribute('data-kind');
     const chip =
+      (focusedKind &&
+        chipRefs.current.get(focusedKind as ComposerTaskChipKind)) ||
       (openKind && chipRefs.current.get(openKind)) ||
       chipRefs.current.get(groups[0]?.kind);
     if (chip) chip.focus({ preventScroll: true });
@@ -188,6 +212,38 @@ export const ComposerTaskChips = forwardRef<
     setOpenKind(null);
     onSelectTask(task);
   };
+
+  const handleListKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    setOpenKind(null);
+    if (openGroup) {
+      chipRefs.current.get(openGroup.kind)?.focus({ preventScroll: true });
+    }
+  };
+
+  const explainButton = (
+    task: DaemonSessionTaskWithWorkflowStatus,
+    className: string,
+    onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void,
+    explainKind?: ComposerTaskChipKind,
+  ) => (
+    <button
+      type="button"
+      className={className}
+      aria-label={t('tasks.explain.aria', {
+        label: explainDisplayLabel(taskLabel(task)),
+      })}
+      title={t('tasks.explain.tooltip')}
+      data-testid="composer-task-explain"
+      data-explain-kind={explainKind}
+      onClick={() => onExplainTask?.(task)}
+      onKeyDown={onKeyDown}
+    >
+      <CircleHelpIcon aria-hidden="true" />
+    </button>
+  );
 
   const activateChip = (group: ComposerTaskChipGroup) => {
     if (group.tasks.length === 1) {
@@ -239,6 +295,21 @@ export const ComposerTaskChips = forwardRef<
     }
   };
 
+  // The chip "?" sits after its chip, so the chip's index arithmetic would
+  // step ArrowLeft past the owning chip; left goes back to that chip instead.
+  const handleChipExplainKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    kind: ComposerTaskChipKind,
+    index: number,
+  ) => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      chipRefs.current.get(kind)?.focus({ preventScroll: true });
+      return;
+    }
+    handleChipKeyDown(event, index);
+  };
+
   const groupLabel = (group: ComposerTaskChipGroup) => {
     const waiting = group.tasks.filter(isWaiting).length;
     if (waiting > 0) return t('tasks.pill.sessionWaiting', { count: waiting });
@@ -281,38 +352,42 @@ export const ComposerTaskChips = forwardRef<
         >
           <div className={styles.listTitle}>{groupLabel(openGroup)}</div>
           {openGroup.tasks.map((task) => (
-            <button
+            <div
               key={task.id}
-              type="button"
               className={styles.listRow}
-              onClick={() => selectTask(task)}
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setOpenKind(null);
-                  chipRefs.current
-                    .get(openGroup.kind)
-                    ?.focus({ preventScroll: true });
-                }
-              }}
+              data-testid="composer-task-row"
             >
-              {kindIcon(openGroup.kind) && (
-                <span className={styles.rowIcon}>
-                  {kindIcon(openGroup.kind)}
+              <button
+                type="button"
+                className={styles.listRowMain}
+                data-testid="composer-task-open"
+                onClick={() => selectTask(task)}
+                onKeyDown={handleListKeyDown}
+              >
+                {kindIcon(openGroup.kind) && (
+                  <span className={styles.rowIcon}>
+                    {kindIcon(openGroup.kind)}
+                  </span>
+                )}
+                <span className={styles.rowLabel} title={taskLabel(task)}>
+                  {taskLabel(task)}
                 </span>
-              )}
-              <span className={styles.rowLabel} title={taskLabel(task)}>
-                {taskLabel(task)}
-              </span>
-              {isWaiting(task) ? (
-                <span className={styles.waitingTag}>
-                  {t('tasks.waitingForInput')}
-                </span>
-              ) : (
-                <TaskElapsed task={task} now={now} />
-              )}
-            </button>
+                {isWaiting(task) ? (
+                  <span className={styles.waitingTag}>
+                    {t('tasks.waitingForInput')}
+                  </span>
+                ) : (
+                  <TaskElapsed task={task} now={now} />
+                )}
+              </button>
+              {onExplainTask &&
+                isChildTask(task) &&
+                explainButton(
+                  task,
+                  `${styles.explainButton} ${styles.rowExplain}`,
+                  handleListKeyDown,
+                )}
+            </div>
           ))}
         </div>
       )}
@@ -325,9 +400,8 @@ export const ComposerTaskChips = forwardRef<
           const moving = group.tasks.some(isMoving);
           const waiting = group.tasks.some(isWaiting);
           const multiple = group.tasks.length > 1;
-          return (
+          const chip = (
             <button
-              key={group.kind}
               ref={(node) => {
                 if (node) chipRefs.current.set(group.kind, node);
                 else chipRefs.current.delete(group.kind);
@@ -355,6 +429,23 @@ export const ComposerTaskChips = forwardRef<
               </span>
               <span className={styles.chipLabel}>{groupLabel(group)}</span>
             </button>
+          );
+          // The wrapper is unconditional so the chip node keeps its identity
+          // when a group crosses the 1↔2 task boundary; remounting it would
+          // drop keyboard focus onto another chip.
+          return (
+            <span key={group.kind} className={styles.chipWrap}>
+              {chip}
+              {!multiple &&
+                onExplainTask &&
+                isChildTask(group.tasks[0]) &&
+                explainButton(
+                  group.tasks[0],
+                  `${styles.explainButton} ${styles.chipExplain}`,
+                  (event) => handleChipExplainKeyDown(event, group.kind, index),
+                  group.kind,
+                )}
+            </span>
           );
         })}
       </div>
