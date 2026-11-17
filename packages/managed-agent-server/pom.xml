@@ -56,7 +56,6 @@
         <module>runtime-host</module>
         <module>runtime-local</module>
         <module>runtime-external</module>
-        <module>runtime-kubernetes</module>
         <module>runtime-ssh</module>
         <module>runtime-static</module>
         <module>adapters</module>
@@ -83,11 +82,6 @@
             <dependency>
                 <groupId>com.alibaba</groupId>
                 <artifactId>qwen-managed-agent-runtime-external</artifactId>
-                <version>${project.version}</version>
-            </dependency>
-            <dependency>
-                <groupId>com.alibaba</groupId>
-                <artifactId>qwen-managed-agent-runtime-kubernetes</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
