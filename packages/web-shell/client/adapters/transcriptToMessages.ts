@@ -14,7 +14,6 @@ import {
   QWEN_AGENT_MESSAGE_META_KEY,
 } from '@qwen-code/sdk/daemon';
 import type {
-  DaemonInputAnnotation,
   DaemonLoopStop,
   QwenAgentMessageMeta,
   DaemonTranscriptBlock,
@@ -58,7 +57,6 @@ type DaemonPermissionTranscriptBlock = Extract<
 type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
-    inputAnnotations?: unknown;
   };
 };
 
@@ -151,10 +149,21 @@ function collectBackgroundTaskUpdates(
     if (
       !turn ||
       completed ||
-      ('parentToolCallId' in block && block.parentToolCallId) ||
-      tasksByExecution.has(turn.turnId)
+      ('parentToolCallId' in block && block.parentToolCallId)
     )
       continue;
+    if (tasksByExecution.has(turn.turnId)) {
+      // A paginated transcript can keep the turn and its notification after
+      // the earlier completion block has scrolled out of the window.
+      if (
+        source === 'background_notification' &&
+        taskId === turn.taskId &&
+        task?.['fromSession']
+      ) {
+        tasksByExecution.set(turn.turnId, task);
+      }
+      continue;
+    }
     lastConsumedTaskIndex.set(turn.taskId, index);
     automaticTaskIds.add(turn.taskId);
     const result = latestTasks.get(turn.taskId);
@@ -708,9 +717,8 @@ export function transcriptBlocksToDaemonMessages(
           (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
         );
         const source = getString(meta, 'source');
-        const inputAnnotations = Array.isArray(meta?.inputAnnotations)
-          ? (meta.inputAnnotations as DaemonInputAnnotation[])
-          : undefined;
+        const sentFrom = textBlock.meta?.sourceAnnotation;
+        const inputAnnotations = textBlock.meta?.inputAnnotations;
         const images = textBlock.images?.map((img) => ({
           data: img.data,
           mimeType: img.mimeType || 'image/*',
@@ -747,7 +755,8 @@ export function transcriptBlocksToDaemonMessages(
           timestamp: blockTime,
           sourceBlockIds: [block.id],
           ...(source ? { source } : {}),
-          ...(inputAnnotations ? { inputAnnotations } : {}),
+          ...(inputAnnotations?.length ? { inputAnnotations } : {}),
+          ...(sentFrom ? { sentFrom } : {}),
           ...(agentMessage ? { agentMessage } : {}),
           ...(agentMessage?.author
             ? {

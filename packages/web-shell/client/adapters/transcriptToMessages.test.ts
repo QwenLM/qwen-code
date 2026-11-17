@@ -661,6 +661,37 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('shows the normalized sending session beside reference annotations', () => {
+    const reference = {
+      type: 'reference' as const,
+      start: 0,
+      end: 5,
+      text: '@file',
+      reference: { id: 'file', serialized: '@file' },
+    };
+    const source = {
+      type: 'source' as const,
+      sessionId: 'caller',
+      workspaceCwd: '/work/a',
+      title: 'Caller',
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('user-1', 'user', '@file look', 1, false, {
+        meta: { sourceAnnotation: source, inputAnnotations: [reference] },
+      }),
+      textBlock('user-2', 'user', 'plain', 2, false, {
+        meta: { sourceAnnotation: source },
+      }),
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      sentFrom: source,
+      inputAnnotations: [reference],
+    });
+    expect(messages[1]).toMatchObject({ sentFrom: source });
+    expect(messages[1]).not.toHaveProperty('inputAnnotations');
+  });
+
   it('renders live background task notifications as system messages', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
@@ -5932,6 +5963,67 @@ describe('background execution identity', () => {
       expect(messages[2]).toMatchObject({
         content: 'Main agent summary',
       });
+    },
+  );
+  it.each(['completion', 'notification', 'none'])(
+    'reads the replying session from %s metadata',
+    (source) => {
+      const fromSession = { sessionId: 'kid', workspaceCwd: '/w/b' };
+      const task = {
+        taskId: 'task-1',
+        kind: source === 'none' ? 'shell' : 'agent',
+        status: 'completed',
+        ...(source === 'none' ? {} : { fromSession }),
+      };
+      const turn = { ...backgroundTurn, toolUseId: undefined };
+      const messages = transcriptBlocksToDaemonMessages([
+        ...(source !== 'notification'
+          ? [
+              textBlock(
+                'completed',
+                'assistant',
+                'Task mentioned [a session](qwen-session://other%id).',
+                5,
+                false,
+                {
+                  meta: {
+                    source: 'background_task_completed',
+                    qwenDiscreteMessage: true,
+                    backgroundTask: task,
+                  },
+                },
+              ),
+            ]
+          : []),
+        textBlock('start', 'assistant', 'Continue', 10, false, {
+          meta: {
+            source: 'background_notification_turn_started',
+            backgroundTurn: turn,
+          },
+        }),
+        ...(source === 'notification'
+          ? [
+              textBlock('notice', 'assistant', 'Task notified', 11, false, {
+                meta: {
+                  source: 'background_notification',
+                  qwenDiscreteMessage: true,
+                  backgroundTurn: turn,
+                  backgroundTask: task,
+                },
+              }),
+            ]
+          : []),
+        textBlock('answer', 'assistant', 'It said MARIGOLD.', 12, false, {
+          backgroundTurn: turn,
+        }),
+      ]);
+      const marker = messages.find(
+        (message) => message.source === 'background_notification_turn_started',
+      );
+      expect(
+        (marker?.data as { backgroundTask?: { fromSession?: unknown } })
+          ?.backgroundTask?.fromSession,
+      ).toEqual(source === 'none' ? undefined : fromSession);
     },
   );
   it.each([false, true])(
