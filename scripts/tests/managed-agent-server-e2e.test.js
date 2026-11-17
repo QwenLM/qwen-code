@@ -22,11 +22,15 @@ import {
   createSourceFile,
   forEachChild,
   isArrayLiteralExpression,
+  isArrowFunction,
   isBinaryExpression,
   isCallExpression,
   isFunctionDeclaration,
+  isFunctionExpression,
   isIdentifier,
   isIfStatement,
+  isObjectLiteralExpression,
+  isPropertyAssignment,
   isStringLiteral,
   isVariableDeclaration,
   isVariableStatement,
@@ -100,22 +104,39 @@ const fencedShellBlocks = (text) =>
     ...text.matchAll(/```[ \t]*(?:bash|sh|shell|console|zsh)\n([\s\S]*?)```/g),
   ].map((match) => match[1]);
 
-// AST inventory of the loop fakes' classifier answer wiring: the `blockAnswer`
-// bindings initialised from classifierBlockAnswer, the `!== undefined` gates on
-// them, the answer expression of every respond_in_schema fakeToolCall (any call
-// id, so a sibling cannot hide behind a new one), and the count of
-// `respond_in_schema` string literals (so a hand-built tool call bypassing
-// fakeToolCall is visible too). Structure, not token counts: the parser cannot
-// see comments, so prose naming a binding does not redden the inventory, and a
-// post-gate sibling that answers through a second binding shows up as an extra
-// answer site whose answer is not the gated binding — the shape a source-text
-// count misses.
+// AST inventory of the loop fakes' classifier answer wiring: the provenance of
+// each `blockProperties` binding, the `blockAnswer` bindings initialised from
+// classifierBlockAnswer, the `!== undefined` gates on them, the answer
+// expression of every respond_in_schema fakeToolCall (any call id, so a sibling
+// cannot hide behind a new one), the count of `respond_in_schema` string
+// literals (so a hand-built tool call bypassing fakeToolCall is visible too),
+// every construction site of a `{ shouldBlock: false }` allow with its
+// enclosing function, and any reassignment of the decision or its input (every
+// assignment operator, so `??=` counts too). Structure, not token counts: the
+// parser cannot see comments, so prose naming a binding does not redden the
+// inventory, while a post-gate sibling, a fabricated schema, an inline allow
+// and a `let` reassignment each move one of these inventories — the shapes a
+// source-text count misses.
 const loopClassifierWiring = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
+  const definitions = [];
   const declarations = [];
   const gates = [];
   const answers = [];
+  const allowSites = [];
+  const reassignments = [];
   let schemaNameLiterals = 0;
+  const enclosingFunction = (node) => {
+    for (let current = node.parent; current; current = current.parent) {
+      if (isFunctionDeclaration(current)) {
+        return current.name?.text ?? '(anonymous)';
+      }
+      if (isFunctionExpression(current) || isArrowFunction(current)) {
+        return '(anonymous)';
+      }
+    }
+    return '(top-level)';
+  };
   const visit = (node) => {
     if (isStringLiteral(node) && node.text === 'respond_in_schema') {
       schemaNameLiterals += 1;
@@ -123,13 +144,44 @@ const loopClassifierWiring = (text) => {
     if (
       isVariableDeclaration(node) &&
       isIdentifier(node.name) &&
-      node.name.text === 'blockAnswer' &&
-      node.initializer !== undefined &&
-      isCallExpression(node.initializer) &&
-      isIdentifier(node.initializer.expression) &&
-      node.initializer.expression.text === 'classifierBlockAnswer'
+      node.initializer !== undefined
     ) {
-      declarations.push(node.initializer.arguments[0]?.getText(file));
+      if (node.name.text === 'blockProperties') {
+        definitions.push(node.initializer.getText(file));
+      }
+      if (
+        node.name.text === 'blockAnswer' &&
+        isCallExpression(node.initializer) &&
+        isIdentifier(node.initializer.expression) &&
+        node.initializer.expression.text === 'classifierBlockAnswer'
+      ) {
+        declarations.push(node.initializer.arguments[0]?.getText(file));
+      }
+    }
+    // Any assignment operator, not just `=`: `??=` and `||=` reassign exactly
+    // when the decision is undefined, which is the non-block case. Both the
+    // decision and its input are covered, so neither can be rewritten after
+    // the lookup to smuggle an allow past the gate.
+    if (
+      isBinaryExpression(node) &&
+      node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= SyntaxKind.LastAssignment &&
+      isIdentifier(node.left) &&
+      (node.left.text === 'blockAnswer' || node.left.text === 'blockProperties')
+    ) {
+      reassignments.push(node.getText(file));
+    }
+    if (isObjectLiteralExpression(node)) {
+      for (const property of node.properties) {
+        if (
+          isPropertyAssignment(property) &&
+          isIdentifier(property.name) &&
+          property.name.text === 'shouldBlock' &&
+          property.initializer.kind === SyntaxKind.FalseKeyword
+        ) {
+          allowSites.push(enclosingFunction(node));
+        }
+      }
     }
     if (
       isIfStatement(node) &&
@@ -162,7 +214,15 @@ const loopClassifierWiring = (text) => {
     forEachChild(node, visit);
   };
   visit(file);
-  return { declarations, gates, answers, schemaNameLiterals };
+  return {
+    definitions,
+    declarations,
+    gates,
+    answers,
+    allowSites,
+    reassignments,
+    schemaNameLiterals,
+  };
 };
 
 describe('managed-agent-server e2e runner', () => {
@@ -3589,6 +3649,20 @@ describe('managed-agent-server e2e runner', () => {
     // fakeToolCall answers, so a hand-built respond_in_schema tool call that
     // bypasses fakeToolCall adds a literal and reddens here.
     expect(wiring.schemaNameLiterals).toBe(4);
+    // The provenance the comment above claims: each arm's schema properties
+    // come from the respond_in_schema tool lookup, never a fabricated object
+    // that would make every side query look like the block schema.
+    expect(wiring.definitions).toEqual([
+      'schemaTool?.function?.parameters?.properties',
+      'schemaTool?.function?.parameters?.properties',
+    ]);
+    // The allow is constructed exactly once, inside the helper; an inline
+    // `{ shouldBlock: false }` on either answer path reddens here.
+    expect(wiring.allowSites).toEqual(['classifierBlockAnswer']);
+    // Neither the decision nor its input is ever reassigned, so a `let` binding
+    // rewritten after the gate — with any assignment operator, `??=` included —
+    // cannot smuggle an allow past the gate and the answer pins.
+    expect(wiring.reassignments).toEqual([]);
     // The create -> list lifecycle claim: cron_list must echo the created
     // prompt; a mere tool result must not pass.
     expect(source).toMatch(/includes\('\/loop check the deploy'\)/);
@@ -3670,13 +3744,17 @@ describe('managed-agent-server e2e runner', () => {
   });
 
   // The wiring scanner is executed against a hostile fake so it cannot be
-  // vacuous: a post-gate sibling that re-derives the allow through the helper
-  // under a second binding must surface as an answer site that is not the
-  // gated binding, and prose naming the binding must not inflate any count.
-  it('executes the classifier wiring scanner against a post-gate sibling', () => {
+  // vacuous: a fabricated schema, a `let` decision reassigned to an inline
+  // allow after the gate, and a post-gate sibling answering through a second
+  // binding must each move an inventory, while prose naming the binding and
+  // spelling the allow must move none.
+  it('executes the classifier wiring scanner against hostile rewiring', () => {
     const hostile = [
       '// blockAnswer blockAnswer blockAnswer — shouldBlock: false, respond_in_schema in prose',
-      'const blockAnswer = classifierBlockAnswer(blockProperties);',
+      "const blockProperties = schemaTool ? { shouldBlock: { type: 'boolean' } } : undefined;",
+      'let blockAnswer = classifierBlockAnswer(blockProperties);',
+      'if (blockAnswer === undefined) blockAnswer = { shouldBlock: false };',
+      "blockProperties ??= { shouldBlock: { type: 'boolean' } };",
       'if (blockAnswer !== undefined) {',
       "  return { toolCalls: [fakeToolCall('respond_in_schema', blockAnswer, 'loop-classifier')] };",
       '}',
@@ -3684,11 +3762,23 @@ describe('managed-agent-server e2e runner', () => {
       "return { toolCalls: [fakeToolCall('respond_in_schema', allow, 'loop-fire-classifier')] };",
     ].join('\n');
     const wiring = loopClassifierWiring(hostile);
-    // The comment names the binding three times and spells the allow literal;
-    // none of it reaches the AST inventory.
-    expect(wiring.declarations).toEqual(['blockProperties']);
-    expect(wiring.gates).toHaveLength(1);
+    // The comment names the binding three times and spells the allow literal
+    // and the tool name; none of it reaches the AST inventory.
     expect(wiring.schemaNameLiterals).toBe(2);
+    expect(wiring.allowSites).toEqual(['(top-level)']);
+    // The fabricated provenance is recorded verbatim, so it cannot pass as the
+    // schema-tool lookup the real arms use.
+    expect(wiring.definitions).toEqual([
+      "schemaTool ? { shouldBlock: { type: 'boolean' } } : undefined",
+    ]);
+    // A `let` decision still counts as a helper binding, but its reassignment
+    // to an inline allow is visible — the gate and answer pins alone miss it.
+    expect(wiring.declarations).toEqual(['blockProperties']);
+    expect(wiring.reassignments).toEqual([
+      'blockAnswer = { shouldBlock: false }',
+      "blockProperties ??= { shouldBlock: { type: 'boolean' } }",
+    ]);
+    expect(wiring.gates).toHaveLength(1);
     expect(wiring.answers).toHaveLength(2);
     expect(wiring.answers[0].isGatedBinding).toBe(true);
     // The sibling answers through a second binding: detected, not hidden.

@@ -15,7 +15,7 @@ import {
   type ManagedLoopProfile,
 } from './managed-loop-skill.js';
 import { parseSkillContent } from '../../skill-load.js';
-import { parseCron } from '../../../utils/cronParser.js';
+import { compileCron } from '../../../managed-runtime/managed-automation-slots.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const contractsDir = join(here, '../../../managed-runtime/contracts');
@@ -385,15 +385,18 @@ describe('managed loop skill parity', () => {
     expect(javaTargets).toEqual([...MANAGED_LOOP_PROFILES].sort());
   });
 
-  it('the Nd month-boundary caveat matches the shipped cron parser', () => {
+  it('the Nd month-boundary caveat matches the Managed slot compiler', () => {
     // The caveat flows verbatim from SKILL.md (no substitution), so deleting
     // or rewording it would otherwise regenerate green. Its arithmetic is
-    // DERIVED from parseCron — the parser the scheduler fires by — instead of
-    // restated as prose, so a wrong bound or a wrong example gap reddens even
-    // when the pin text is updated to match it. The N ≤ 31 off-by-one survived
-    // two review rounds precisely because nothing computed the bound.
-    const daySet = (step: number): Set<number> =>
-      parseCron(`0 0 */${step} * *`).dayOfMonth;
+    // DERIVED from compileCron — the TypeScript twin of the Java CronSlots
+    // scanner that actually fires a Managed schedule — instead of restated as
+    // prose, so a wrong bound or a wrong example gap reddens even when the pin
+    // text is updated to match it. The N ≤ 31 off-by-one survived two review
+    // rounds precisely because nothing computed the bound. utils/cronParser
+    // serves the local CLI scheduler, not this one: a Managed slot-semantics
+    // change would leave that parser (and a pin derived from it) untouched.
+    const daySet = (step: number): ReadonlySet<number> =>
+      compileCron(`0 0 */${step} * *`).dayOfMonth;
     // The day-of-month field is [1, 31] and a step past 31 collects day 1
     // alone, so scanning 1..31 covers every distinct day set.
     let maxStep = 1;
