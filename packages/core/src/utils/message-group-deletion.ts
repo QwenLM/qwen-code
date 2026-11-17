@@ -16,7 +16,10 @@ import type {
 import { prepareTranscriptRecords } from './transcript-records.js';
 
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
-import { removeFileHistorySnapshots } from './file-history-snapshots.js';
+import {
+  deletionDropsRequiredEndpoint,
+  removeFileHistorySnapshots,
+} from './file-history-snapshots.js';
 
 export interface MessageGroup {
   id: string;
@@ -501,8 +504,29 @@ export function deleteTranscriptMessageGroups(
     for (const snapshot of payload.snapshots)
       fileHistory.set(snapshot.promptId, snapshot);
   }
+  const timelineSnapshots = [...fileHistory.values()];
+  // A deletion that `removeFileHistorySnapshots` answers by dropping (not
+  // folding) a survivor's only diff endpoint would let a later rewind
+  // silently skip restoring that turn's files: the dropped paths vanish
+  // from the rebuilt trackedFiles without even a filesFailed entry. Refuse
+  // before any transcript record is rewritten so the persisted history
+  // keeps the endpoint.
+  for (let index = 0; index + 1 < timelineSnapshots.length; index++) {
+    const survivor = timelineSnapshots[index]!;
+    const next = timelineSnapshots[index + 1]!;
+    if (
+      !removedPromptIds.has(survivor.promptId) &&
+      removedPromptIds.has(next.promptId) &&
+      deletionDropsRequiredEndpoint(survivor, next)
+    ) {
+      throw new MessageGroupDeletionError(
+        'invalid_history',
+        'Deleting these message groups would discard a file history checkpoint endpoint whose capture directory cannot be proven; refusing to keep file restoration safe',
+      );
+    }
+  }
   const survivingSnapshots = new Map(
-    removeFileHistorySnapshots([...fileHistory.values()], removedPromptIds).map(
+    removeFileHistorySnapshots(timelineSnapshots, removedPromptIds).map(
       (snapshot) => [snapshot.promptId, snapshot],
     ),
   );

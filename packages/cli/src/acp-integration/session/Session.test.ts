@@ -34,7 +34,11 @@ import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
-import { FileHistoryService } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
+import {
+  FileHistoryService,
+  serializeSnapshot,
+  deserializeSnapshots,
+} from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
@@ -658,6 +662,7 @@ describe('Session', () => {
     makeSnapshot: ReturnType<typeof vi.fn>;
     getSnapshots: ReturnType<typeof vi.fn>;
     getForeignSnapshotCwds: ReturnType<typeof vi.fn>;
+    getUnrestorableDiscardedCaptures: ReturnType<typeof vi.fn>;
     restoreFromSnapshots: ReturnType<typeof vi.fn>;
     rewind: ReturnType<typeof vi.fn>;
   };
@@ -1099,6 +1104,7 @@ describe('Session', () => {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
       getSnapshots: vi.fn().mockReturnValue([]),
       getForeignSnapshotCwds: vi.fn().mockReturnValue([]),
+      getUnrestorableDiscardedCaptures: vi.fn().mockReturnValue([]),
       restoreFromSnapshots: vi.fn(),
       rewind: vi.fn(),
     };
@@ -13566,6 +13572,482 @@ describe('Session', () => {
       } finally {
         await fs.rm(dirA, { recursive: true, force: true });
         await fs.rm(dirB, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      { foreignSurvivor: false, outcome: 'allows a local survivor' },
+      { foreignSurvivor: true, outcome: 'refuses a foreign survivor' },
+    ])(
+      '$outcome when prechecking the actual rewind survivor slice',
+      async ({ foreignSurvivor }) => {
+        const root = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-fh-slice-'));
+        try {
+          const dirA = path.join(root, 'A');
+          const dirB = path.join(root, 'B');
+          await fs.mkdir(dirA);
+          await fs.mkdir(dirB);
+          const fileA = path.join(dirA, 'file.txt');
+          const fileB = path.join(dirB, 'file.txt');
+          await fs.writeFile(fileA, 'captured-in-a');
+          await fs.writeFile(fileB, 'captured-in-b');
+
+          const historySessionId = randomUUID();
+          const first = new FileHistoryService(
+            historySessionId,
+            true,
+            foreignSurvivor ? dirB : dirA,
+          );
+          await first.makeSnapshot('p1');
+          await first.trackEdit(foreignSurvivor ? fileB : fileA);
+          const second = new FileHistoryService(
+            historySessionId,
+            true,
+            foreignSurvivor ? dirA : dirB,
+          );
+          second.restoreFromSnapshots(first.getSnapshots());
+          await second.makeSnapshot('p2');
+          const current = new FileHistoryService(historySessionId, true, dirA);
+          current.restoreFromSnapshots(second.getSnapshots());
+          vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(current);
+
+          const history: Content[] = [
+            { role: 'user', parts: [{ text: 'first' }] },
+            { role: 'model', parts: [{ text: 'first reply' }] },
+            { role: 'user', parts: [{ text: 'second' }] },
+            { role: 'model', parts: [{ text: 'second reply' }] },
+          ];
+          markApiHistoryPrompt(history[0]!, 'p1');
+          markApiHistoryPrompt(history[2]!, 'p2');
+          vi.mocked(mockChat.getHistory).mockReturnValue(history);
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+          await fs.writeFile(fileA, 'edited-in-a');
+          const before = current.getSnapshots();
+          const replace = vi.spyOn(current, 'restoreFromSnapshots');
+          const precheck = vi.spyOn(current, 'getForeignSnapshotCwds');
+
+          if (foreignSurvivor) {
+            expect(() => session.rewindToTurn(0)).toThrow(
+              /different working directory/,
+            );
+            expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+            expect(mockChat.stripThoughtsFromHistory).not.toHaveBeenCalled();
+            expect(replace).not.toHaveBeenCalled();
+            expect(
+              mockChatRecordingService.rewindRecording,
+            ).not.toHaveBeenCalled();
+            expect(current.getSnapshots()).toEqual(before);
+          } else {
+            expect(session.rewindToTurn(0)).toEqual({
+              targetTurnIndex: 0,
+              apiTruncateIndex: 0,
+            });
+            expect(mockChat.truncateHistory).toHaveBeenCalledExactlyOnceWith(0);
+            expect(replace).toHaveBeenCalledExactlyOnceWith([before[0]]);
+            expect(current.getSnapshots().map((s) => s.promptId)).toEqual([
+              'p1',
+            ]);
+            expect(
+              mockChatRecordingService.rewindRecording,
+            ).toHaveBeenCalledWith(0, { truncatedCount: 4 }, [before[0]], {
+              mode: ApprovalMode.DEFAULT,
+            });
+            // The agent applies files only after Session has installed the
+            // surviving timeline. Exercise that real core restore as well.
+            expect(await current.rewind('p1')).toEqual({
+              filesChanged: [fileA],
+              filesFailed: [],
+            });
+          }
+          expect(precheck).toHaveBeenNthCalledWith(1, [before[0]]);
+          expect(await fs.readFile(fileA, 'utf-8')).toBe(
+            foreignSurvivor ? 'edited-in-a' : 'captured-in-a',
+          );
+          expect(await fs.readFile(fileB, 'utf-8')).toBe('captured-in-b');
+        } finally {
+          await fs.rm(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('refuses a file rewind whose discarded foreign checkpoint holds a baseline under the surviving root', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-fh-discard-'));
+      try {
+        const dirA = path.join(root, 'A');
+        const dirB = path.join(root, 'B');
+        await fs.mkdir(dirA);
+        await fs.mkdir(dirB);
+        const fileA = path.join(dirA, 'new.txt');
+
+        // p1 in A tracks nothing.
+        const first = new FileHistoryService('acp-discard', true, dirA);
+        await first.makeSnapshot('p1');
+
+        // The session relocates to B: p2 is labeled B and first-tracks the
+        // absolute A/new.txt path while the file does not exist yet, so p2
+        // holds the confirmed null first-version baseline — the only record
+        // that this file did not exist in p1's era.
+        const second = new FileHistoryService('acp-discard', true, dirB);
+        second.restoreFromSnapshots(first.getSnapshots());
+        await second.makeSnapshot('p2');
+        await second.trackEdit(fileA);
+
+        // Back in A, with the file created during p2's era.
+        const current = new FileHistoryService('acp-discard', true, dirA);
+        current.restoreFromSnapshots(second.getSnapshots());
+        vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(current);
+        await fs.writeFile(fileA, 'created-during-p2-era');
+
+        const history: Content[] = [
+          { role: 'user', parts: [{ text: 'first' }] },
+          { role: 'model', parts: [{ text: 'first reply' }] },
+          { role: 'user', parts: [{ text: 'second' }] },
+          { role: 'model', parts: [{ text: 'second reply' }] },
+        ];
+        markApiHistoryPrompt(history[0]!, 'p1');
+        markApiHistoryPrompt(history[2]!, 'p2');
+        vi.mocked(mockChat.getHistory).mockReturnValue(history);
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+        // The survivor slice [p1] is local, so the survivor foreign-cwd
+        // precheck passes; only the discard check can refuse. Without it,
+        // restoreFromSnapshots([p1]) drops p2, the tracked set becomes
+        // empty and the file restore reports an empty success while leaving
+        // the later-created file in place.
+        expect(() => session.rewindToTurn(0)).toThrow(
+          /hold the only restore record/,
+        );
+
+        expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+        expect(current.getSnapshots().map((s) => s.promptId)).toEqual([
+          'p1',
+          'p2',
+        ]);
+        expect(await fs.readFile(fileA, 'utf-8')).toBe('created-during-p2-era');
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(path.sep === '\\').each([false, true])(
+      'refuses parent-sensitive discarded baseline before truncating history (missing=%s)',
+      async (missing) => {
+        const root = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-fh-parent-'));
+        try {
+          const dirA = path.join(root, 'A');
+          const dirB = path.join(root, 'B');
+          await fs.mkdir(path.join(dirA, 'sub'), { recursive: true });
+          await fs.mkdir(dirB);
+          await fs.symlink(path.join(dirA, 'sub'), path.join(dirB, 'link'));
+          const target = path.join(dirA, 'f');
+          const decoy = path.join(dirB, 'f');
+          const expression = dirB + '/link/../f';
+          if (!missing) await fs.writeFile(target, 'TARGET-BEFORE');
+          await fs.writeFile(decoy, 'DECOY-BEFORE');
+          const id = randomUUID();
+          const first = new FileHistoryService(id, true, dirA);
+          await first.makeSnapshot('p1');
+          const second = new FileHistoryService(id, true, dirB);
+          second.restoreFromSnapshots(first.getSnapshots());
+          await second.makeSnapshot('p2');
+          await second.trackEdit(expression);
+          const disk = path.join(root, 'history.json');
+          await fs.writeFile(
+            disk,
+            JSON.stringify(second.getSnapshots().map(serializeSnapshot)),
+          );
+          const current = new FileHistoryService(id, true, dirA);
+          current.restoreFromSnapshots(
+            deserializeSnapshots(JSON.parse(await fs.readFile(disk, 'utf8'))),
+          );
+          await fs.writeFile(target, 'TARGET-EDITED');
+          await fs.writeFile(decoy, 'DECOY-EDITED');
+          vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(current);
+          const query = vi.spyOn(current, 'getUnrestorableDiscardedCaptures');
+          const history: Content[] = [
+            { role: 'user', parts: [{ text: 'first' }] },
+            { role: 'model', parts: [{ text: 'first reply' }] },
+            { role: 'user', parts: [{ text: 'second' }] },
+            { role: 'model', parts: [{ text: 'second reply' }] },
+          ];
+          markApiHistoryPrompt(history[0]!, 'p1');
+          markApiHistoryPrompt(history[2]!, 'p2');
+          vi.mocked(mockChat.getHistory).mockReturnValue(history);
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+          const before = current.getSnapshots().map(serializeSnapshot);
+          expect(() => session.rewindToTurn(0)).toThrow(
+            /hold the only restore record/,
+          );
+          expect(query).toHaveReturnedWith([expression]);
+          expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+          expect(current.getSnapshots().map(serializeSnapshot)).toEqual(before);
+          expect(await fs.readFile(target, 'utf8')).toBe('TARGET-EDITED');
+          expect(await fs.readFile(decoy, 'utf8')).toBe('DECOY-EDITED');
+        } finally {
+          await fs.rm(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.each(['', '/.'])(
+      'refuses a file rewind whose discarded root contains the current root (%s)',
+      async (cwdSuffix) => {
+        // R14 blocking: nested roots overlap. p1 was captured empty in
+        // /root/A; the session then ran from /root itself, where p2
+        // first-tracked A/new.txt before it existed — its confirmed null
+        // baseline resolves under BOTH p2's own root and the current root.
+        // The own-root exemption must not drop it: back in /root/A the
+        // rewind would otherwise report an empty success while leaving the
+        // later-created file in place.
+        const root = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-fh-nested-'));
+        try {
+          const dirA = path.join(root, 'A');
+          await fs.mkdir(dirA);
+          const fileA = path.join(dirA, 'new.txt');
+
+          // p1 in A tracks nothing.
+          const first = new FileHistoryService('acp-nested', true, dirA);
+          await first.makeSnapshot('p1');
+
+          // Relocated to the parent root: p2 is labeled /root and
+          // first-tracks the nested A/new.txt path while the file does not
+          // exist yet, holding the sole confirmed null first-version
+          // baseline for it.
+          const second = new FileHistoryService('acp-nested', true, root);
+          second.restoreFromSnapshots(first.getSnapshots());
+          await second.makeSnapshot('p2');
+          await second.trackEdit(fileA);
+
+          // Back in A, with the file created during p2's era.
+          const current = new FileHistoryService(
+            'acp-nested',
+            true,
+            dirA + cwdSuffix,
+          );
+          current.restoreFromSnapshots(second.getSnapshots());
+          vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(current);
+          await fs.writeFile(fileA, 'created-during-p2-era');
+
+          const history: Content[] = [
+            { role: 'user', parts: [{ text: 'first' }] },
+            { role: 'model', parts: [{ text: 'first reply' }] },
+            { role: 'user', parts: [{ text: 'second' }] },
+            { role: 'model', parts: [{ text: 'second reply' }] },
+          ];
+          markApiHistoryPrompt(history[0]!, 'p1');
+          markApiHistoryPrompt(history[2]!, 'p2');
+          vi.mocked(mockChat.getHistory).mockReturnValue(history);
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+          // The survivor slice [p1] is local, so the survivor foreign-cwd
+          // precheck passes; only the discard check can refuse. The
+          // discarded capture path falls under p2's own root, but it also
+          // falls under the current root — this service can still restore
+          // it, so its baseline is required and must not be exempted as
+          // p2's own file.
+          expect(() => session.rewindToTurn(0)).toThrow(
+            /hold the only restore record/,
+          );
+
+          expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+          expect(current.getSnapshots().map((s) => s.promptId)).toEqual([
+            'p1',
+            'p2',
+          ]);
+          expect(await fs.readFile(fileA, 'utf-8')).toBe(
+            'created-during-p2-era',
+          );
+        } finally {
+          await fs.rm(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('refuses a file rewind whose discarded foreign checkpoint holds the sole baseline for an external absolute path', async () => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-fh-ext-'));
+      try {
+        const dirA = path.join(root, 'A');
+        const dirB = path.join(root, 'B');
+        const shared = path.join(root, 'Shared');
+        await fs.mkdir(dirA);
+        await fs.mkdir(dirB);
+        await fs.mkdir(shared);
+        const sharedFile = path.join(shared, 'new.txt');
+
+        // p1 in A tracks nothing.
+        const first = new FileHistoryService('acp-ext-discard', true, dirA);
+        await first.makeSnapshot('p1');
+
+        // Relocated to B: p2 first-tracks an absolute path under NEITHER
+        // root while the file does not exist yet — the sole confirmed-null
+        // baseline for a restore target outside both checkpoint roots
+        // (R12 blocking 1). The old under-the-surviving-root containment
+        // missed it because the path resolves under no root at all.
+        const second = new FileHistoryService('acp-ext-discard', true, dirB);
+        second.restoreFromSnapshots(first.getSnapshots());
+        await second.makeSnapshot('p2');
+        await second.trackEdit(sharedFile);
+
+        // Back in A, with the external file created during p2's era.
+        const current = new FileHistoryService('acp-ext-discard', true, dirA);
+        current.restoreFromSnapshots(second.getSnapshots());
+        vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(current);
+        await fs.writeFile(sharedFile, 'created-during-p2-era');
+
+        const history: Content[] = [
+          { role: 'user', parts: [{ text: 'first' }] },
+          { role: 'model', parts: [{ text: 'first reply' }] },
+          { role: 'user', parts: [{ text: 'second' }] },
+          { role: 'model', parts: [{ text: 'second reply' }] },
+        ];
+        markApiHistoryPrompt(history[0]!, 'p1');
+        markApiHistoryPrompt(history[2]!, 'p2');
+        vi.mocked(mockChat.getHistory).mockReturnValue(history);
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+        // Both survivor prechecks pass ([p1] is local and empty); only the
+        // discarded-baseline check can refuse. Without it, dropping p2
+        // forgets the external path before the restore, which then reports
+        // an empty success while leaving the later-created file in place.
+        expect(() => session.rewindToTurn(0)).toThrow(
+          /hold the only restore record/,
+        );
+
+        expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+        expect(current.getSnapshots().map((s) => s.promptId)).toEqual([
+          'p1',
+          'p2',
+        ]);
+        expect(await fs.readFile(sharedFile, 'utf-8')).toBe(
+          'created-during-p2-era',
+        );
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses a file rewind whose discarded capture differs only by Win32 drive-letter case', async () => {
+      vi.resetModules();
+      vi.doMock('node:path', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:path')>();
+        return { ...actual, ...actual.win32 };
+      });
+      const { FileHistoryService: WindowsReader } = await import(
+        '@qwen-code/qwen-code-core/services/fileHistoryService.js'
+      );
+      vi.doUnmock('node:path');
+      vi.resetModules();
+      // A Win32 drive letter names the same drive in either case
+      // (path.win32 resolves `C:\Current` against `c:\Current\new.txt`), so
+      // a lowercase-drive capture is a baseline for the surviving root
+      // (R12 blocking 2). The synthetic win32 labels need no filesystem:
+      // the refusal happens in the prechecks, before anything is touched.
+      const current = new WindowsReader('acp-drive-case', true, 'C:\\Current');
+      current.restoreFromSnapshots([
+        {
+          promptId: 'p1',
+          cwd: 'C:\\Current',
+          timestamp: new Date('2026-10-09T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'p2',
+          cwd: 'C:\\Other',
+          timestamp: new Date('2026-10-09T00:00:02.000Z'),
+          trackedFileBackups: {
+            'c:\\Current\\new.txt': {
+              backupFileName: null,
+              version: 1,
+              backupTime: new Date('2026-10-09T00:00:01.000Z'),
+            },
+          },
+        },
+      ]);
+      vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(current);
+
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      markApiHistoryPrompt(history[0]!, 'p1');
+      markApiHistoryPrompt(history[2]!, 'p2');
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        /hold the only restore record/,
+      );
+
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(current.getSnapshots().map((s) => s.promptId)).toEqual([
+        'p1',
+        'p2',
+      ]);
+    });
+
+    it('allows a file rewind whose discarded foreign checkpoint only duplicates a surviving baseline', async () => {
+      const root = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'acp-fh-redundant-'),
+      );
+      try {
+        const dirA = path.join(root, 'A');
+        const dirB = path.join(root, 'B');
+        await fs.mkdir(dirA);
+        await fs.mkdir(dirB);
+        const fileA = path.join(dirA, 'file.txt');
+        const fileB = path.join(dirB, 'file.txt');
+        await fs.writeFile(fileA, 'old');
+        await fs.writeFile(fileB, 'captured-in-b');
+
+        // p1 in A already holds the confirmed first-version baseline for
+        // file.txt.
+        const first = new FileHistoryService('acp-redundant', true, dirA);
+        await first.makeSnapshot('p1');
+        await first.trackEdit(fileA);
+
+        // Relocated to B: p2 re-tracks the SAME file (absolute spelling).
+        // Its record duplicates an identity the surviving p1 already
+        // restores, so the discarded capture is redundant and must not
+        // block the rewind (R12 medium: over-conservative refusal).
+        const second = new FileHistoryService('acp-redundant', true, dirB);
+        second.restoreFromSnapshots(first.getSnapshots());
+        await second.makeSnapshot('p2');
+        await fs.writeFile(fileA, 'edited-from-b');
+        await second.trackEdit(fileA);
+
+        const current = new FileHistoryService('acp-redundant', true, dirA);
+        current.restoreFromSnapshots(second.getSnapshots());
+        vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(current);
+
+        const history: Content[] = [
+          { role: 'user', parts: [{ text: 'first' }] },
+          { role: 'model', parts: [{ text: 'first reply' }] },
+          { role: 'user', parts: [{ text: 'second' }] },
+          { role: 'model', parts: [{ text: 'second reply' }] },
+        ];
+        markApiHistoryPrompt(history[0]!, 'p1');
+        markApiHistoryPrompt(history[2]!, 'p2');
+        vi.mocked(mockChat.getHistory).mockReturnValue(history);
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+        expect(session.rewindToTurn(0)).toEqual({
+          targetTurnIndex: 0,
+          apiTruncateIndex: 0,
+        });
+        expect(mockChat.truncateHistory).toHaveBeenCalledExactlyOnceWith(0);
+        // The agent applies files after Session installs the surviving
+        // slice; exercising the real restore shows the rewind truly is safe
+        // without the discarded duplicate.
+        expect(await current.rewind('p1')).toEqual({
+          filesChanged: [fileA],
+          filesFailed: [],
+        });
+        expect(await fs.readFile(fileA, 'utf-8')).toBe('old');
+        expect(await fs.readFile(fileB, 'utf-8')).toBe('captured-in-b');
+      } finally {
+        await fs.rm(root, { recursive: true, force: true });
       }
     });
 

@@ -4,16 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Config } from '../config/config.js';
+import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import { computeInitialTurnFromHistory } from '../services/session-turn-state.js';
 import type { Content } from '@google/genai';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { SessionFileHistoryAccumulator } from '../services/session-file-history-state.js';
+import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
 import { prepareTranscriptRecords } from './transcript-records.js';
 import {
+  MessageGroupDeletionError,
   deleteTranscriptMessageGroups,
   getTranscriptMessageGroups,
   messageGroupsSnapshot,
@@ -466,6 +473,465 @@ describe('message group deletion', () => {
       restoredAgain.finish()?.[0]?.diffAfterBackups?.['a.txt']?.version,
     ).toBe(2);
   });
+
+  // R1-3: a legacy survivor (no recorded cwd) whose next checkpoint is
+  // cwd-labeled cannot prove the fold is same-root, so the deletion helper
+  // drops the fold and the survivor silently loses its only diff endpoint —
+  // a later rewind then restores nothing for those files without even a
+  // filesFailed entry. The deletion must be refused before anything is
+  // rewritten instead.
+  it('refuses a deletion that would drop a required recovery endpoint of a legacy survivor', () => {
+    const snapshot = (promptId: string, version: number, cwd?: string) => ({
+      promptId,
+      timestamp: '2026-10-15T00:00:00Z',
+      trackedFileBackups: {
+        'a.txt': {
+          backupFileName: `a@v${version}`,
+          version,
+          backupTime: '2026-10-15T00:00:00Z',
+        },
+      },
+      ...(cwd === undefined ? {} : { cwd }),
+    });
+    const turn = (
+      id: string,
+      parent: string | null,
+      snap: ReturnType<typeof snapshot>,
+    ) => [
+      user(id, parent),
+      record(`f${id}`, id, 'system', {
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: [snap] },
+      }),
+    ];
+    // Same real root, but only the second turn's checkpoint carries the cwd
+    // label: exactly the upgraded-mixed-history shape.
+    const history = [
+      ...turn('a', null, snapshot('api-a', 1)),
+      ...turn('b', 'fa', snapshot('api-b', 2, '/project')),
+    ];
+
+    let caught: unknown;
+    try {
+      deleteTranscriptMessageGroups(history, ['b'], anchor);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(MessageGroupDeletionError);
+    expect((caught as MessageGroupDeletionError).code).toBe('invalid_history');
+    expect((caught as MessageGroupDeletionError).message).toMatch(
+      /capture directory/,
+    );
+
+    // Contrast: when the survivor itself is labeled with the same root, the
+    // fold keeps the endpoint and the same deletion stays allowed.
+    const labeled = [
+      ...turn('a2', null, snapshot('api-a2', 1, '/project')),
+      ...turn('b2', 'fa2', snapshot('api-b2', 2, '/project')),
+    ];
+    const keptLabeled = deleteTranscriptMessageGroups(
+      labeled,
+      ['b2'],
+      anchor,
+    ).records;
+    const survived = keptLabeled.flatMap((entry) =>
+      entry.subtype === 'file_history_snapshot'
+        ? (entry.systemPayload as { snapshots: unknown[] }).snapshots
+        : [],
+    );
+    expect(survived).toEqual([
+      expect.objectContaining({
+        promptId: 'api-a2',
+        diffAfterBackups: snapshot('api-b2', 2, '/project').trackedFileBackups,
+      }),
+    ]);
+  });
+
+  // R15 matrix A: deletion refusal and fold permission are two independent
+  // decisions. `deletionDropsRequiredEndpoint` answers only whether deleting
+  // the endpoint must be refused (a confirmed capture whose fold cannot prove
+  // a shared root); whether the records may fold into the survivor is a
+  // separate same-root question. A foreign failed record is deletable (no
+  // restorable data) yet still not graftable into the survivor's identity.
+  describe('endpoint deletion vs fold permission matrix (R15)', () => {
+    const failedRecord = (key: string, version = 1) => ({
+      [key]: {
+        backupFileName: null,
+        version,
+        failed: true,
+        backupTime: '2026-11-17T00:00:00Z',
+      },
+    });
+    const confirmedRecord = (key: string, version = 1) => ({
+      [key]: {
+        backupFileName: `f@v${version}`,
+        version,
+        backupTime: '2026-11-17T00:00:00Z',
+      },
+    });
+    const snapshot = (
+      promptId: string,
+      cwd: string | undefined,
+      trackedFileBackups: SerializedFileHistorySnapshot['trackedFileBackups'] = {},
+      diffAfterBackups?: SerializedFileHistorySnapshot['diffAfterBackups'],
+    ): SerializedFileHistorySnapshot => ({
+      promptId,
+      cwd,
+      timestamp: '2026-11-17T00:00:00Z',
+      trackedFileBackups,
+      ...(diffAfterBackups ? { diffAfterBackups } : {}),
+    });
+    const history = (
+      survivor: SerializedFileHistorySnapshot,
+      deleted: SerializedFileHistorySnapshot,
+    ) => [
+      user('a', null),
+      record('fa', 'a', 'system', {
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: [survivor] },
+      }),
+      user('b', 'fa'),
+      record('fb', 'b', 'system', {
+        subtype: 'file_history_snapshot',
+        systemPayload: { snapshots: [deleted] },
+      }),
+    ];
+    const survivingSnapshots = (records: ChatRecord[]) =>
+      records.flatMap((entry) =>
+        entry.subtype === 'file_history_snapshot'
+          ? (
+              entry.systemPayload as {
+                snapshots: SerializedFileHistorySnapshot[];
+              }
+            ).snapshots
+          : [],
+      );
+    /** Deletes turn b and returns the persisted survivor snapshots. */
+    const deleteLastTurn = (
+      survivor: SerializedFileHistorySnapshot,
+      deleted: SerializedFileHistorySnapshot,
+    ) =>
+      deleteTranscriptMessageGroups(history(survivor, deleted), ['b'], anchor)
+        .records;
+    /** The survivor kept its captured state and gained no diff endpoint. */
+    const noFold = (records: ChatRecord[]) => {
+      const [kept] = survivingSnapshots(records);
+      expect(kept).not.toHaveProperty('diffAfterBackups');
+      expect(kept.trackedFileBackups).toEqual({});
+    };
+    /** The survivor folded the deleted endpoint's records verbatim. */
+    const folded = (
+      records: ChatRecord[],
+      expected: SerializedFileHistorySnapshot['trackedFileBackups'],
+    ) => {
+      const [kept] = survivingSnapshots(records);
+      expect(kept.diffAfterBackups).toEqual(expected);
+    };
+    const refused = (
+      survivor: SerializedFileHistorySnapshot,
+      deleted: SerializedFileHistorySnapshot,
+    ) => {
+      let caught: unknown;
+      try {
+        deleteLastTurn(survivor, deleted);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(MessageGroupDeletionError);
+      expect((caught as MessageGroupDeletionError).code).toBe(
+        'invalid_history',
+      );
+    };
+
+    // A1: nothing captured at all — deletion succeeds, nothing to graft.
+    it('A1 empty cross-root endpoint deletes without grafting', () => {
+      noFold(deleteLastTurn(snapshot('api-a', '/A'), snapshot('api-b', '/B')));
+    });
+
+    // A2: same-root failed markers keep their diagnostic value.
+    it('A2 same-root failed-only endpoint folds its failure markers', () => {
+      folded(
+        deleteLastTurn(
+          snapshot('api-a', '/A'),
+          snapshot('api-b', '/A', failedRecord('d.txt')),
+        ),
+        failedRecord('d.txt'),
+      );
+    });
+
+    // A3 (R14 blocking ②): a foreign failed record is deletable, but folding
+    // it would reassign the failure to an identity the survivor never
+    // captured — reloading in /A would report filesFailed=['/A/d.txt'].
+    it('A3 foreign failed-only endpoint deletes without folding', () => {
+      noFold(
+        deleteLastTurn(
+          snapshot('api-a', '/A'),
+          snapshot('api-b', '/B', failedRecord('d.txt')),
+        ),
+      );
+    });
+
+    // A4: unlabeled (legacy) deleted data keeps folding as before.
+    it('A4 unlabeled failed-only endpoint still folds', () => {
+      folded(
+        deleteLastTurn(
+          snapshot('api-a', '/A'),
+          snapshot('api-b', undefined, failedRecord('d.txt')),
+        ),
+        failedRecord('d.txt'),
+      );
+    });
+
+    // A5: an unlabeled survivor cannot prove a shared root either.
+    it('A5 labeled failed-only endpoint does not fold into an unlabeled survivor', () => {
+      noFold(
+        deleteLastTurn(
+          snapshot('api-a', undefined),
+          snapshot('api-b', '/B', failedRecord('d.txt')),
+        ),
+      );
+    });
+
+    // A6: confirmed same-root data is exactly what the fold exists for.
+    it('A6 same-root confirmed endpoint folds', () => {
+      folded(
+        deleteLastTurn(
+          snapshot('api-a', '/A'),
+          snapshot('api-b', '/A', confirmedRecord('f.txt')),
+        ),
+        confirmedRecord('f.txt'),
+      );
+    });
+
+    // A7 (kept from R13): confirmed foreign data must refuse the deletion.
+    it('A7 foreign confirmed endpoint refuses the deletion', () => {
+      refused(
+        snapshot('api-a', '/A'),
+        snapshot('api-b', '/B', confirmedRecord('f.txt')),
+      );
+    });
+
+    // A8: an unlabeled survivor cannot prove the root of confirmed data.
+    it('A8 confirmed endpoint into an unlabeled survivor refuses', () => {
+      refused(
+        snapshot('api-a', undefined),
+        snapshot('api-b', '/B', confirmedRecord('f.txt')),
+      );
+    });
+
+    // A9: unlabeled (legacy) confirmed data keeps folding as before.
+    it('A9 unlabeled confirmed endpoint still folds', () => {
+      folded(
+        deleteLastTurn(
+          snapshot('api-a', '/A'),
+          snapshot('api-b', undefined, confirmedRecord('f.txt')),
+        ),
+        confirmedRecord('f.txt'),
+      );
+    });
+
+    // A10: a survivor holding its own diff endpoint loses nothing and keeps
+    // its original endpoint — never a deleted turn's rewind identity.
+    it('A10 survivor with its own diff endpoint neither refuses nor folds', () => {
+      const records = deleteLastTurn(
+        snapshot('api-a', '/A', {}, confirmedRecord('own.txt')),
+        snapshot('api-b', '/B', confirmedRecord('f.txt')),
+      );
+      const [kept] = survivingSnapshots(records);
+      expect(kept.diffAfterBackups).toEqual(confirmedRecord('own.txt'));
+    });
+
+    // A11: Win32 roots without a drive letter never prove a shared root.
+    it('A11 unknown-drive confirmed endpoint refuses the deletion', () => {
+      refused(
+        snapshot('api-a', '\\A'),
+        snapshot('api-b', '\\B', confirmedRecord('f.txt')),
+      );
+    });
+
+    // A12: the Win32 unknown-drive form of A3.
+    it('A12 unknown-drive failed-only endpoint deletes without folding', () => {
+      noFold(
+        deleteLastTurn(
+          snapshot('api-a', '\\A'),
+          snapshot('api-b', '\\B', failedRecord('d.txt')),
+        ),
+      );
+    });
+
+    // A13: one confirmed record anywhere makes the endpoint required.
+    it('A13 mixed confirmed+failed foreign endpoint refuses the deletion', () => {
+      refused(
+        snapshot('api-a', '/A'),
+        snapshot('api-b', '/B', {
+          ...confirmedRecord('ok.txt'),
+          ...failedRecord('bad.txt'),
+        }),
+      );
+    });
+
+    // A14: same-root folds preserve the whole map, failures included.
+    it('A14 mixed confirmed+failed same-root endpoint folds the whole map', () => {
+      const mixed = {
+        ...confirmedRecord('ok.txt'),
+        ...failedRecord('bad.txt'),
+      };
+      folded(
+        deleteLastTurn(snapshot('api-a', '/A'), snapshot('api-b', '/A', mixed)),
+        mixed,
+      );
+    });
+
+    // A15 (R21 medium ①): a deleted endpoint whose LABEL spells a
+    // refused Win32 capture root deletes — its records are inert for
+    // execution — but must not fold. `areSnapshotOriginsEqual`
+    // normalizes the refused root onto the survivor's ordinary root
+    // (`C:\w\C:f\..` → `C:\w`), so the same-root check alone cannot see
+    // the refusal, and the folded records would execute after reload
+    // under a root the record-time policy refuses (rewind dispatching
+    // unlink on a file the pre-fold timeline correctly left untouched).
+    // Fold admission now applies the same raw-root policy: the records
+    // go with the deleted checkpoint, exactly like cross-root records.
+    it.each([
+      ['dot-canceled', 'C:\\w\\C:f\\..'],
+      ['forward-slash', 'C:/w/C:f/..'],
+      ['lower-drive', 'c:\\w\\d:x\\..'],
+    ])(
+      'A15 deletes a %s refused-root endpoint without folding it (%s)',
+      (_kind, root) => {
+        noFold(
+          deleteLastTurn(
+            snapshot('api-a', 'C:\\w'),
+            snapshot('api-b', root, confirmedRecord('victim')),
+          ),
+        );
+      },
+    );
+
+    // A16: both sides spell the same refused root — still no grafting.
+    it('A16 same refused-root endpoints delete without folding', () => {
+      noFold(
+        deleteLastTurn(
+          snapshot('api-a', 'C:\\w\\C:f\\..'),
+          snapshot('api-b', 'C:\\w\\C:f\\..', confirmedRecord('victim')),
+        ),
+      );
+    });
+
+    // A17 (control): namespace labels never normalize onto the ordinary
+    // root, so their confirmed endpoints keep refusing the deletion.
+    it('A17 namespace-root endpoint keeps refusing the deletion', () => {
+      refused(
+        snapshot('api-a', 'C:\\w'),
+        snapshot('api-b', '\\\\?\\C:\\w', confirmedRecord('f.txt')),
+      );
+    });
+  });
+
+  it.each([false, true])(
+    'R11 refuses cross-grammar endpoint deletion with a Win32 reader (reverse=%s)',
+    async (reverse) => {
+      vi.resetModules();
+      vi.doMock('node:path', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:path')>();
+        return {
+          ...actual,
+          ...actual.win32,
+          resolve: (...args: string[]) =>
+            actual.win32.resolve('C:\\reader', ...args),
+        };
+      });
+      try {
+        const {
+          deleteTranscriptMessageGroups: remove,
+          MessageGroupDeletionError: DeletionError,
+        } = await import('./message-group-deletion.js');
+        const roots = reverse
+          ? ['/workspace', 'C:\\workspace']
+          : ['C:\\workspace', '/workspace'];
+        const history = ['a', 'b'].flatMap((id, i) => [
+          user(id, i === 0 ? null : 'fa'),
+          record(`f${id}`, id, 'system', {
+            subtype: 'file_history_snapshot',
+            systemPayload: {
+              snapshots: [
+                {
+                  promptId: `api-${id}`,
+                  cwd: roots[i],
+                  timestamp: '2026-10-15T00:00:00Z',
+                  trackedFileBackups: {
+                    f: {
+                      backupFileName: null,
+                      version: 1,
+                      backupTime: '2026-10-15T00:00:00Z',
+                    },
+                  },
+                },
+              ],
+            },
+          }),
+        ]);
+        const before = JSON.stringify(history);
+        let caught: unknown;
+        try {
+          remove(history, ['b'], anchor);
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBeInstanceOf(DeletionError);
+        expect((caught as MessageGroupDeletionError).code).toBe(
+          'invalid_history',
+        );
+        expect(JSON.stringify(history)).toBe(before);
+
+        const { ChatRecordingService } = await import(
+          '../services/chatRecordingService.js'
+        );
+        const directory = await mkdtemp(join(tmpdir(), 'r11-deletion-'));
+        const transcriptPath = join(directory, 'session.jsonl');
+        const config = {
+          getSessionId: () => 'session',
+          getResumedSessionData: () => undefined,
+          getProjectRoot: () => directory,
+          getCliVersion: () => 'test',
+        } as unknown as Config;
+        const lease = {
+          sessionId: 'session',
+          ownerId: 'test-owner',
+          assertOwnedAndUnchanged: vi.fn(async () => {}),
+          readTranscript: vi.fn(async () => readFile(transcriptPath, 'utf8')),
+          replaceTranscript: vi.fn(async (updated: string) =>
+            writeFile(transcriptPath, updated),
+          ),
+          release: vi.fn(async () => {}),
+        } as unknown as SessionWriterLease;
+        const recorder = new ChatRecordingService(config, undefined, true);
+        recorder.activate(lease);
+        try {
+          const bytes =
+            history.map((entry) => JSON.stringify(entry)).join('\n') + '\n';
+          await writeFile(transcriptPath, bytes);
+          const groups = await recorder.getMessageGroups();
+          expect(groups.groups.map((group) => group.id)).toEqual(['a', 'b']);
+          await expect(
+            recorder.deleteMessageGroups({
+              snapshot: groups.snapshot,
+              groupIds: ['b'],
+            }),
+          ).rejects.toMatchObject({ code: 'invalid_history' });
+          expect(lease.replaceTranscript).not.toHaveBeenCalled();
+          expect(await readFile(transcriptPath, 'utf8')).toBe(bytes);
+          expect((await recorder.getMessageGroups()).groups).toHaveLength(2);
+        } finally {
+          await recorder.close();
+          await rm(directory, { recursive: true, force: true });
+        }
+      } finally {
+        vi.doUnmock('node:path');
+        vi.resetModules();
+      }
+    },
+  );
 
   it('accepts complete fragments and deletes every selected physical fragment', () => {
     const question = user('u', null);

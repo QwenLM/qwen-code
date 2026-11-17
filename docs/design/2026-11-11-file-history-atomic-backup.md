@@ -206,16 +206,38 @@ The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
 **new** cwd — is the P1 reported as #16982 and is implemented by PR #17400:
 
 - **Decision**: `FileHistorySnapshot` gains an optional `cwd` recording the
-  working directory the snapshot was captured under (`makeSnapshot`
-  resolves it). Serialized payloads without the field keep their previous
-  meaning; the managed CSI contract carries the field with the same
-  absolute-path validation used for `absolutePath`.
-- **Refusal semantics**: file rewind refuses at the application point when
-  the timeline holds any checkpoint captured under a different root —
-  `rewind` throws before any file is touched or history is truncated, and
-  ACP `rewindToTurn` prechecks before truncating the session. Diff previews
-  (`getDiffStats`) report nothing for such timelines, and conversation-only
-  rewind stays available.
+  working directory the snapshot was captured under. The
+  `FileHistoryService` constructor anchors that directory once — native
+  `resolve()` on Win32, and on POSIX an absolute spelling verbatim (a
+  relative one anchored to the process cwd) — and `makeSnapshot` records
+  the anchored spelling, preserving POSIX parent expressions and
+  double-leading-slash syntax rather than resolving them away. Serialized
+  payloads without the field keep their previous
+  meaning. Generic remote snapshot origins accept canonical POSIX or Win32
+  paths independently of the reader OS and preserve their bytes; Linux CSI
+  specifically requires POSIX origins in both TypeScript and Java. Native
+  execution-directory validation is unchanged.
+- **Refusal semantics**: core `rewind` checks its complete checkpoint state
+  before touching files or truncating history. ACP `rewindToTurn` checks the
+  exact surviving checkpoint slice before truncating the conversation;
+  foreign checkpoints in a discarded suffix do not block a local restore.
+  A foreign surviving checkpoint yields `cross_directory_checkpoint`, mapped
+  to non-retryable HTTP 409. Both `getDiffStats` and `getTurnDiff` return no
+  preview while their timeline contains a foreign checkpoint.
+  Conversation-only rewind stays available, but its retained prefix can still
+  contain foreign checkpoints: ordinary truncation does not necessarily
+  make subsequent file rewind available. Returning to an earlier directory
+  only helps when every remaining labelled checkpoint matches that root.
+- **Deletion safety**: when a surviving checkpoint needs an endpoint from a
+  deleted successor but their capture roots cannot be shown to match,
+  message-group deletion is refused with the existing `invalid_history`
+  category before transcript replacement. This preserves the original
+  transcript and endpoint instead of silently dropping restoration data.
+  Some mixed legacy/labelled histories therefore cannot currently be
+  deleted. Checking only that the deleted checkpoint matches the current
+  root is insufficient: it can fold B's captured bytes into an unlabelled A
+  survivor and later restore B's content into A. Endpoint provenance or an
+  explicit legacy-root adoption policy remains a maintainer design decision.
 - **Legacy fallback**: checkpoints created before this change carry no
   `cwd` and never count as foreign — refusing them wholesale would make
   every pre-upgrade session unrestorable. On unlabeled timelines the
@@ -223,6 +245,14 @@ The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
   (for example marking a relocated timeline root-unknown and refusing file
   restore while keeping conversation-only rewind) is an explicit follow-up
   decision for the maintainers.
+- **Mixed-version deployment**: new readers accept old records without
+  `cwd`; old strict readers reject new records containing that key. This is
+  new-reader/old-payload compatibility, not old-reader/new-payload
+  compatibility. Upgrade all readers (including control-plane and Java CSI
+  consumers) before enabling writers that emit the field. Rolling back a
+  reader after new records have been written requires handling those records
+  first. No schema version negotiation, dual writing or storage migration is
+  introduced here.
 
 ## Constraints
 
@@ -387,5 +417,12 @@ The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
 
 ## Open questions
 
-None. The `cwd` item is resolved as "documented, no change" for worktree
-enter/exit; the `/cd` rehydration observation is tracked as #16982.
+The worktree enter/exit evaluation is "documented, no change"; the labelled
+full-resume relocation path from #16982 is protected by this PR's refusal.
+The attribution policy for unlabelled legacy checkpoints remains open, as
+does preserving deletability of mixed-origin history through explicit
+endpoint provenance rather than the conservative pre-write refusal above.
+The separate Config selective-restore lifecycle can lose its in-memory
+checkpoint payload when the service is recreated after relocation; that
+path is not changed here and must not be described as end-to-end coverage
+of every resume mode.

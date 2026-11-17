@@ -31,11 +31,21 @@ class CsiFileHistoryProtocolTest {
         for (var value : fixture.path("snapshotCwdCases")) {
             var observation = fixture.path("valid").get(2).path("observation").deepCopy();
             ((com.fasterxml.jackson.databind.node.ObjectNode) observation.path("state").path("snapshots").get(0))
-                    .put("cwd", value.path("cwd").textValue());
+                    .set("cwd", value.path("cwd"));
             if (value.path("valid").booleanValue()) {
                 assertDoesNotThrow(() -> CsiFileHistoryProtocol.observation(observation, owner), value.path("cwd").textValue());
             } else {
                 assertThrows(RuntimeException.class, () -> CsiFileHistoryProtocol.observation(observation, owner), value.path("cwd").textValue());
+            }
+        }
+        for (int length : new int[] {4096, 4097}) {
+            var observation = fixture.path("valid").get(2).path("observation").deepCopy();
+            ((com.fasterxml.jackson.databind.node.ObjectNode) observation.path("state").path("snapshots").get(0))
+                    .put("cwd", "/" + "x".repeat(length - 1));
+            if (length == 4096) {
+                assertDoesNotThrow(() -> CsiFileHistoryProtocol.observation(observation, owner));
+            } else {
+                assertThrows(RuntimeException.class, () -> CsiFileHistoryProtocol.observation(observation, owner));
             }
         }
         assertThrows(RuntimeException.class, () -> CsiFileHistoryProtocol.operation(

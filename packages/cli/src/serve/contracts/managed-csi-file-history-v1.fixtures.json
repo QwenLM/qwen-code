@@ -56,7 +56,27 @@
     { "cwd": "/workspace/sub/..", "valid": false },
     { "cwd": "/workspace/[notes]", "valid": true },
     { "cwd": "/workspace/with spaces", "valid": true },
-    { "cwd": "/workspace/项目", "valid": true }
+    { "cwd": "/workspace/项目", "valid": true },
+    { "cwd": "/runtime/workspaces/workspace-a", "valid": true },
+    { "cwd": "/workspace/a\\b\"c\nd", "valid": true },
+    { "cwd": "/workspace/...", "valid": true },
+    { "cwd": "/workspace/../other", "valid": false },
+    { "cwd": "/./workspace", "valid": false },
+    { "cwd": "C:\\workspace", "valid": false },
+    { "cwd": "C:\\", "valid": false },
+    { "cwd": "C:\\workspace\\", "valid": false },
+    { "cwd": "\\\\server\\share\\workspace", "valid": false },
+    { "cwd": "\\\\server\\share\\", "valid": false },
+    { "cwd": "\\workspace", "valid": false },
+    { "cwd": "C:/workspace", "valid": false },
+    { "cwd": "workspace", "valid": false },
+    { "cwd": "", "valid": false },
+    { "cwd": "/workspace/a\u0000b", "valid": false },
+    { "cwd": null, "valid": false },
+    { "cwd": 17, "valid": false },
+    { "cwd": false, "valid": false },
+    { "cwd": [], "valid": false },
+    { "cwd": {}, "valid": false }
   ],
   "valid": [
     {

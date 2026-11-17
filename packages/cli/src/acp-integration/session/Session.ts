@@ -5615,19 +5615,48 @@ export class Session implements SessionContext {
     const daemonPromptId = this.getRewindDaemonPromptId(promptId);
 
     const rewindFiles = opts?.rewindFiles !== false;
+    const survivingSnapshots = rewindFiles
+      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
+      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
     if (rewindFiles) {
-      // A timeline holding checkpoints from another working directory cannot
-      // restore files here (relative tracked paths expand against the wrong
-      // root). Refuse before anything is truncated so the conversation and
-      // the snapshot timeline stay intact; conversation-only rewind below
-      // stays available.
+      // Only the surviving checkpoints will be applied by the file restore.
+      // Refuse a foreign survivor before anything is truncated so the
+      // conversation and snapshot timeline stay intact; discarded later
+      // checkpoints must not block a safe restore of the surviving slice.
       const foreignCwds = this.config
         .getFileHistoryService()
-        .getForeignSnapshotCwds();
+        .getForeignSnapshotCwds(survivingSnapshots);
       if (foreignCwds.length > 0) {
         throw new RequestError(
           -32602,
           `Cannot rewind files: the session timeline contains checkpoints captured in a different working directory (${foreignCwds.join(', ')}) and cannot restore them from the current working directory`,
+          { errorKind: 'cross_directory_checkpoint' },
+        );
+      }
+      // The discarded suffix can hold the only baseline for files the
+      // restore still targets — e.g. a foreign-root checkpoint that first
+      // tracked a path under the surviving root or an external absolute
+      // path before the file existed (a confirmed null first-version
+      // record). Dropping it would leave a later-created file in place
+      // while the restore reports an empty success, so refuse before any
+      // truncation. Captures the surviving slice can itself select a
+      // baseline for are redundant and do not block; records under a
+      // discarded checkpoint's own root are safe to drop with it unless
+      // the path also falls under the current root (nested or filesystem
+      // roots overlap), in which case this session can still restore it.
+      const discardedSnapshots = snapshotsBeforeRewind.slice(
+        targetTurnIndex + 1,
+      );
+      const unrestorableCaptures = this.config
+        .getFileHistoryService()
+        .getUnrestorableDiscardedCaptures(
+          discardedSnapshots,
+          survivingSnapshots,
+        );
+      if (unrestorableCaptures.length > 0) {
+        throw new RequestError(
+          -32602,
+          `Cannot rewind files: the checkpoints that would be discarded hold the only restore record for ${unrestorableCaptures.join(', ')} captured in a different working directory. Rewind the conversation only, or from a turn that keeps those records`,
           { errorKind: 'cross_directory_checkpoint' },
         );
       }
@@ -5659,9 +5688,6 @@ export class Session implements SessionContext {
     //
     // The file path keeps the target snapshot: the agent restores files by
     // promptId after this returns, so that snapshot must still be findable.
-    const survivingSnapshots = rewindFiles
-      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
-      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     const approvalMode = this.config.getApprovalMode();

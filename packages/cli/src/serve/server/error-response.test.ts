@@ -10,9 +10,11 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import { describe, expect, it, vi } from 'vitest';
 import {
   AcpChildCapacityExceededError,
+  InvalidRewindTargetError,
   ManagedSessionBranchUnsupportedError,
   McpAuthenticationInProgressError,
   RequestedSessionIdRejectedError,
+  SessionBusyError,
   SessionNotFoundError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
@@ -205,6 +207,74 @@ describe('message deletion errors', () => {
       error: 'Invalid history',
       code: 'message_history_invalid',
     });
+  });
+});
+
+describe('cross-directory checkpoint errors', () => {
+  it.each(['bridge', 'rpc'] as const)(
+    'keeps a %s session_busy refusal retryable at 409',
+    (transport) => {
+      const { response, status, json, set } = responseMock();
+      const error =
+        transport === 'bridge'
+          ? new SessionBusyError('session-1')
+          : new RequestError(-32602, 'The session is busy.', {
+              errorKind: 'session_busy',
+            });
+
+      sendBridgeError(response, error);
+
+      expect(status).toHaveBeenCalledWith(409);
+      expect(json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: 'session_busy',
+          errorKind: 'session_busy',
+          retryable: true,
+        }),
+      );
+      expect(set).toHaveBeenCalledWith('Retry-After', '5');
+    },
+  );
+
+  it('keeps an invalid rewind target at 400', () => {
+    const { response, status, json, set } = responseMock();
+    const error = new InvalidRewindTargetError('session-1');
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: error.message,
+      code: 'invalid_rewind_target',
+      sessionId: 'session-1',
+    });
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it('maps a cross-directory checkpoint refusal to a non-retryable 409', () => {
+    const { response, status, json, set } = responseMock();
+    const error = new RequestError(
+      -32602,
+      'Cannot rewind files: the session timeline contains checkpoints captured in a different working directory',
+      { errorKind: 'cross_directory_checkpoint' },
+    );
+
+    sendBridgeError(response, error, {
+      route: 'POST /session/:id/rewind',
+      sessionId: 'session-1',
+    });
+
+    // A deterministic client error, not a 5xx: the client picked a rewind
+    // target whose survivor timeline cannot be restored from this root.
+    expect(status).toHaveBeenCalledWith(409);
+    expect(status).not.toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({
+      error: error.message,
+      code: 'cross_directory_checkpoint',
+      errorKind: 'cross_directory_checkpoint',
+    });
+    // Not retryable: no Retry-After hint and no retryable flag in the body.
+    expect(set).not.toHaveBeenCalled();
   });
 });
 

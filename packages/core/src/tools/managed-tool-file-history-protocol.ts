@@ -147,11 +147,11 @@ function snapshots(value: unknown): SerializedFileHistorySnapshot[] {
     const promptId = parseManagedToolFileHistoryPromptId(snapshot['promptId']);
     if (prompts.has(promptId)) throw new ManagedToolProtocolError();
     prompts.add(promptId);
-    // Same absolute-path contract as `executionCwd`: bounded length, no NUL,
-    // absolute and lexically normalized. Anything else would poison the
-    // cross-directory guard that compares it against the service root.
+    // Snapshot origins describe the producer, not the reader's execution OS.
     const cwd =
-      snapshot['cwd'] === undefined ? undefined : absolutePath(snapshot['cwd']);
+      snapshot['cwd'] === undefined
+        ? undefined
+        : snapshotOrigin(snapshot['cwd']);
     return {
       promptId,
       timestamp: timestamp(snapshot['timestamp']),
@@ -197,6 +197,18 @@ function snapshots(value: unknown): SerializedFileHistorySnapshot[] {
       ),
     };
   });
+}
+
+function snapshotOrigin(value: unknown): string {
+  const result = text(value, 4096);
+  if (
+    ![path.posix, path.win32].some(
+      (grammar) =>
+        grammar.isAbsolute(result) && grammar.normalize(result) === result,
+    )
+  )
+    throw new ManagedToolProtocolError();
+  return result;
 }
 
 function absolutePath(value: unknown): string {

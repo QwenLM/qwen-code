@@ -5,7 +5,7 @@
  */
 
 import * as path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   captureManagedToolExecutionContext,
   parseManagedToolFileHistoryBinding,
@@ -15,6 +15,10 @@ import {
 } from './managed-tool-file-history-protocol.js';
 import { managedToolDigest } from './managed-tool-protocol.js';
 import type { Config } from '../config/config.js';
+
+vi.mock('node:path', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:path')>()),
+}));
 
 const ownerSessionId = '550e8400-e29b-41d4-a716-446655440108';
 const ownerRuntimeSessionId = '550e8400-e29b-41d4-a716-446655440109';
@@ -311,6 +315,116 @@ describe('managed file history protocol', () => {
     'rejects invalid prompt ID',
     (promptId) => {
       expect(() => parseManagedToolFileHistoryPromptId(promptId)).toThrow();
+    },
+  );
+
+  describe.each(['posix', 'win32'] as const)(
+    'snapshot origins with injected native %s grammar (not host execution)',
+    (grammar) => {
+      const native = path[grammar];
+      const executionCwd =
+        grammar === 'posix' ? '/runtime/workspace' : 'C:\\runtime\\workspace';
+      const nativeBinding = {
+        ...binding,
+        executionCwd,
+        executionContext: {
+          ...context,
+          workspaceDirectories: [executionCwd],
+          memoryBaseDir: executionCwd,
+        },
+      };
+
+      beforeEach(() => {
+        vi.spyOn(path, 'isAbsolute').mockImplementation(native.isAbsolute);
+        vi.spyOn(path, 'normalize').mockImplementation(native.normalize);
+      });
+      afterEach(() => vi.restoreAllMocks());
+
+      it.each([
+        ['runtime POSIX origin', '/runtime/workspaces/workspace-a'],
+        ['POSIX root', '/'],
+        ['POSIX trailing separator', '/workspace/'],
+        ['POSIX filename characters', '/workspace/[notes] 项目'],
+        ['POSIX escapes', '/workspace/a\\b"c\nd'],
+        ['Win32 drive', 'C:\\workspace'],
+        ['Win32 drive root', 'C:\\'],
+        ['Win32 trailing separator', 'C:\\workspace\\'],
+        ['Win32 UNC', '\\\\server\\share\\workspace'],
+        ['Win32 UNC root', '\\\\server\\share\\'],
+        ['Win32 rooted path compatibility', '\\workspace'],
+        ['Win32 filename characters', 'C:\\workspace\\[notes] 项目'],
+        ['POSIX length limit', `/${'x'.repeat(4095)}`],
+        ['Win32 length limit', `C:\\${'x'.repeat(4093)}`],
+      ])('preserves %s in state and binding', (_name, cwd) => {
+        const snapshots = [{ ...snapshot, cwd }];
+        const state = { ownerSessionId, revision: 1, snapshots };
+        const input = { ...nativeBinding, snapshots };
+        expect(parseManagedToolFileHistoryState(state)).toEqual(state);
+        expect(parseManagedToolFileHistoryBinding(input)).toEqual(input);
+      });
+
+      it.each([
+        ['empty', ''],
+        ['null', null],
+        ['number', 17],
+        ['boolean', false],
+        ['array', []],
+        ['object', {}],
+        ['relative', 'workspace'],
+        ['POSIX repeated root', '//'],
+        ['POSIX repeated separator', '/workspace//sub'],
+        ['POSIX repeated trailing separator', '/workspace//'],
+        ['POSIX dot', '/workspace/.'],
+        ['POSIX parent', '/workspace/sub/..'],
+        ['POSIX NUL', '/workspace/a\0b'],
+        ['POSIX over limit', `/${'x'.repeat(4096)}`],
+        ['Win32 drive relative', 'C:workspace'],
+        ['Win32 forward slashes', 'C:/workspace'],
+        ['Win32 repeated separator', 'C:\\workspace\\\\sub'],
+        ['Win32 dot', 'C:\\workspace\\.'],
+        ['Win32 parent', 'C:\\workspace\\sub\\..'],
+        ['Win32 NUL', 'C:\\workspace\\a\0b'],
+        ['Win32 over limit', `C:\\${'x'.repeat(4094)}`],
+      ])('rejects %s in state and binding', (_name, cwd) => {
+        const snapshots = [{ ...snapshot, cwd }];
+        expect(() =>
+          parseManagedToolFileHistoryState({
+            ownerSessionId,
+            revision: 1,
+            snapshots,
+          }),
+        ).toThrow();
+        expect(() =>
+          parseManagedToolFileHistoryBinding({ ...nativeBinding, snapshots }),
+        ).toThrow();
+      });
+
+      it('preserves legacy omission and keeps execution paths native', () => {
+        expect(parseManagedToolFileHistoryBinding(nativeBinding)).toEqual(
+          nativeBinding,
+        );
+        const foreign =
+          grammar === 'posix' ? 'C:\\workspace' : '/runtime/workspace';
+        for (const invalid of [
+          { ...nativeBinding, executionCwd: foreign },
+          {
+            ...nativeBinding,
+            executionContext: {
+              ...nativeBinding.executionContext,
+              workspaceDirectories: [foreign],
+            },
+          },
+          {
+            ...nativeBinding,
+            executionContext: {
+              ...nativeBinding.executionContext,
+              memoryBaseDir: foreign,
+            },
+          },
+        ]) {
+          expect(() => parseManagedToolFileHistoryBinding(invalid)).toThrow();
+        }
+      });
     },
   );
 

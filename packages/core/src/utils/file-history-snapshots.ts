@@ -4,11 +4,264 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { resolve } from 'node:path';
+import { posix, win32 } from 'node:path';
 import type {
   FileHistorySnapshot,
   SerializedFileHistorySnapshot,
 } from '../services/fileHistoryService.js';
+
+/** Capture coordinates use the producer's grammar, never the reader's drive. */
+export function getSnapshotPathGrammar(cwd: string): typeof posix {
+  return cwd.startsWith('/') ? posix : win32;
+}
+
+function normalizeCapturePath(cwd: string, filePath: string): string {
+  const grammar = getSnapshotPathGrammar(cwd);
+  const normalized = qualifyCapturePathRoot(cwd, filePath);
+  if (grammar === posix) {
+    // Simplify only separators and interior dots, never parent traversal or
+    // the terminal directory requirement. Two leading slashes stay distinct.
+    const prefix =
+      normalized.startsWith('//') && !normalized.startsWith('///')
+        ? '//'
+        : normalized.startsWith('/')
+          ? '/'
+          : '';
+    const parts = normalized.split('/');
+    const body = parts
+      .filter(
+        (part, index) =>
+          part !== '' && (part !== '.' || index === parts.length - 1),
+      )
+      .join('/');
+    return prefix + body + (body && normalized.endsWith('/') ? '/' : '');
+  }
+  const root = grammar.parse(normalized).root;
+  const trimmed =
+    normalized.length > root.length && normalized.endsWith(grammar.sep)
+      ? normalized.slice(0, -1)
+      : normalized;
+  // A Win32 drive letter names the same drive in either case — path.win32
+  // resolves `C:\Current` against `c:\Current\new.txt` — while the
+  // remaining components keep their case-sensitive spelling (the POSIX
+  // grammar has no drive letters, and a `c:`-prefixed POSIX name is an
+  // ordinary filename). Fold only the letter so identities, containment
+  // and origin equality compare consistently across spellings.
+  return grammar === win32 && /^[A-Za-z]:/.test(trimmed)
+    ? trimmed[0]!.toUpperCase() + trimmed.slice(1)
+    : trimmed;
+}
+
+/** Qualify a Win32 rooted path using only its capture drive or UNC share. */
+export function qualifyCapturePathRoot(cwd: string, filePath: string): string {
+  const grammar = getSnapshotPathGrammar(cwd);
+  if (grammar === posix) return filePath;
+  const normalized = grammar.normalize(filePath);
+  if (grammar === win32 && grammar.parse(normalized).root === '\\') {
+    const root = win32.parse(win32.normalize(cwd)).root;
+    // join() uses no process/reader drive. An unknown capture root must
+    // stay unknown; both identity lookup and executable keys use this rule.
+    if (root !== '\\' && win32.isAbsolute(root)) {
+      return win32.join(root, normalized);
+    }
+  }
+  return normalized;
+}
+
+export function getCapturePath(cwd: string, key: string): string {
+  const grammar = getSnapshotPathGrammar(cwd);
+  // resolve() supplies the reader's drive for a rooted Win32 path. join()
+  // keeps an unknown drive unknown; POSIX backslashes stay literal bytes.
+  const captured =
+    grammar.isAbsolute(key) || (/^[A-Za-z]:/.test(key) && grammar === win32)
+      ? key
+      : grammar === posix
+        ? cwd + (cwd.endsWith('/') ? '' : '/') + key
+        : grammar.join(cwd, key);
+  return `${grammar === posix ? 'posix' : 'win32'}:${normalizeCapturePath(cwd, captured)}`;
+}
+
+export function areSnapshotOriginsEqual(left: string, right: string): boolean {
+  // Identical rooted spellings still do not prove that two unknown drives
+  // were the same drive. Never supply that missing provenance from the reader.
+  if (
+    [left, right].some(
+      (cwd) =>
+        getSnapshotPathGrammar(cwd) === win32 && win32.parse(cwd).root === '\\',
+    )
+  )
+    return false;
+  const originIdentity = (cwd: string): string => {
+    if (getSnapshotPathGrammar(cwd) === win32) return getCapturePath(cwd, cwd);
+    // An origin names a directory; unlike a file key its trailing directory
+    // syntax can be removed, but parent components still cannot be cancelled.
+    const trimmed = cwd.replace(/(?:\/\.|\/)+$/g, '');
+    const root = cwd.startsWith('//') && !cwd.startsWith('///') ? '//' : '/';
+    return getCapturePath(cwd, trimmed || root);
+  };
+  return originIdentity(left) === originIdentity(right);
+}
+
+/**
+ * Win32 extended-namespace spellings (`\\?\`, including `\\?\UNC\`, and
+ * `\\.\`), detected separator-agnostically: `win32.normalize` folds `/`
+ * into `\`, so a mixed spelling like `\\?/UNC/…` still names the
+ * namespace once normalized — historical labels may arrive in that
+ * shape. The prefix is also fragile under normalization's dot-segment
+ * rules (`\\.\foo\..` collapses to the bare `\\.\`), so detection must
+ * run on the original spelling, before any shortening or qualification
+ * can erase the prefix. The boundary is enforced by refusing such
+ * captures, never by re-qualifying them.
+ *
+ * Exported for FileHistoryService's constructor, which classifies the
+ * caller's original cwd spelling under the READER's separator (not the
+ * label grammar) before resolve() can erase an incomplete prefix.
+ */
+export function isWin32NamespacePath(value: string): boolean {
+  return /^[\\/][\\/][?.](?:[\\/]|$)/.test(value);
+}
+
+/**
+ * Drive-relative Win32 coordinate: `C:f` or `C:` (a drive letter not
+ * followed by a separator names that drive's own current directory,
+ * which this service never recorded), and any input CONTAINING such a
+ * component (`.\\C:f`, `C:\\w\\C:f`). On Win32 a colon may belong only
+ * to the leading drive root, so an `X:` component after any separator
+ * is the same unrepresentable coordinate. The predicate is applied to
+ * the caller's original input, before shortening: `relative(cwd,
+ * 'C:\\w\\C:f')` would manufacture exactly the bare `C:f` key the
+ * direct spelling is refused for, while `normalize('.\\C:f')` keeps the
+ * explicit-relative spelling verbatim — classifying after the transform
+ * would refuse one spelling of a coordinate and accept its twin.
+ *
+ * Exported for the same constructor-side classification as
+ * `isWin32NamespacePath`.
+ */
+export function isWin32DriveRelativePath(value: string): boolean {
+  if (/^[A-Za-z]:(?![\\/])/.test(value)) return true;
+  return value
+    .split(/[\\/]/)
+    .slice(1)
+    .some((component) => /^[A-Za-z]:/.test(component));
+}
+
+/**
+ * Key-spelling half of the raw-coordinate admission policy: a raw key
+ * that names a Win32 namespace or drive-relative coordinate in ANY
+ * spelling (`C:f`, `.\\C:f`, `C:\\w\\C:f`, `\\?\…`, `\\.\…`, either
+ * separator). Hydration uses this half to keep such singleton keys
+ * verbatim — shortening them would manufacture the ordinary spelling of
+ * a coordinate the record-time policy refuses.
+ */
+export function isRefusedWin32KeySpelling(key: string): boolean {
+  return isWin32NamespacePath(key) || isWin32DriveRelativePath(key);
+}
+
+/**
+ * THE raw-coordinate admission policy — one predicate for every
+ * admission call-site family. A record names an executable coordinate
+ * only when, under the capture grammar of `base`, neither the capture
+ * root nor the raw key spells a refused Win32 coordinate. POSIX bases
+ * never refuse.
+ *
+ * Wired into (FileHistoryService unless noted):
+ * - capture admission: `trackEdit` (raw input + resolved cwd + the
+ *   constructor's original-cwd flag) refuses before any transform;
+ * - execution-candidate admission: `collectTrackedFiles` and
+ *   `getExecutionPaths` classify each candidate key together with its
+ *   capture root, before shortening, so preview (`getTurnDiff`) and
+ *   restore (`rewind`/`applySnapshot`) admit identically;
+ * - executable baseline selection: `getSnapshotBackup` filters identity
+ *   aliases on the raw spelling (`getUnrestorableDiscardedCaptures`
+ *   mirrors it), so a refused record can never authorize execution
+ *   through an ordinary candidate from another checkpoint;
+ * - fold admission: `removeFileHistorySnapshots` (this module, R21)
+ *   refuses to graft a deleted endpoint's records into a survivor when
+ *   the deleted endpoint's capture root spells a refused coordinate —
+ *   see `isRefusedWin32CaptureRoot`.
+ *
+ * Deliberately NOT admission-filtered (raw records stay preserved):
+ * serialize/deserialize round-trips, version reservation
+ * (`getBackupsForPath`/`getMaxVersion`), and backup retention
+ * (`validateRestoredSnapshots`, `cleanupOrphanedBackups`).
+ */
+export function isRefusedWin32CaptureCoordinate(
+  base: string,
+  key: string,
+): boolean {
+  if (getSnapshotPathGrammar(base).sep !== '\\') return false;
+  return (
+    isWin32NamespacePath(base) ||
+    isWin32DriveRelativePath(base) ||
+    isRefusedWin32KeySpelling(key)
+  );
+}
+
+/**
+ * Root half of the policy, applied to a snapshot's capture-root label
+ * (the fold's provenance face): the label itself must spell an ordinary
+ * Win32 root before its records may be relabeled into another
+ * checkpoint. An unlabeled (legacy) snapshot has no root to refuse.
+ */
+export function isRefusedWin32CaptureRoot(cwd: string | undefined): boolean {
+  if (cwd === undefined) return false;
+  if (getSnapshotPathGrammar(cwd).sep !== '\\') return false;
+  return isWin32NamespacePath(cwd) || isWin32DriveRelativePath(cwd);
+}
+
+/**
+ * Whether a survivor snapshot can prove that a deleted snapshot's backups
+ * were captured under the same root: the deleted data is unlabeled (legacy,
+ * folds as before), or both snapshots carry cwd labels that resolve to the
+ * same directory.
+ */
+function sameRootProven<
+  T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
+>(survivor: T, deleted: T): boolean {
+  return (
+    deleted.cwd === undefined ||
+    (survivor.cwd !== undefined &&
+      areSnapshotOriginsEqual(survivor.cwd, deleted.cwd))
+  );
+}
+
+/**
+ * Whether the snapshot's endpoint holds any confirmed capture — a record
+ * that actually captured a baseline. A failed capture recorded nothing,
+ * and an empty checkpoint even less: neither carries restoration data
+ * whose loss could matter, so their folds protect nothing.
+ */
+function hasConfirmedCaptures<
+  T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
+>(snapshot: T): boolean {
+  return Object.values(snapshot.trackedFileBackups ?? {}).some(
+    (backup) => !backup.failed,
+  );
+}
+
+/**
+ * Whether deleting `deleted` would drop a recovery endpoint the timeline
+ * still needs. This is the REFUSAL predicate only — it answers whether a
+ * deletion that persists history must be refused, never whether the
+ * deleted records may fold into the survivor (a separate same-root
+ * question, see `removeFileHistorySnapshots`).
+ *
+ * Refuse when `survivor` has no diff endpoint of its own, so its only
+ * "after" state is the deleted snapshot's backups, the deleted endpoint
+ * carries at least one confirmed capture, and the fold that would
+ * preserve them cannot prove a shared capture root (a labeled survivor
+ * with a different root, or an unlabeled legacy survivor). An endpoint
+ * with no confirmed capture (nothing tracked, or only failed captures)
+ * holds no restoration data, so deleting it across roots stays allowed
+ * and must not block harmless empty-history edits.
+ */
+export function deletionDropsRequiredEndpoint<
+  T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
+>(survivor: T, deleted: T): boolean {
+  if (survivor.diffAfterBackups) return false;
+  if (!hasConfirmedCaptures(deleted)) return false;
+  return !sameRootProven(survivor, deleted);
+}
 
 export function removeFileHistorySnapshots<
   T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
@@ -22,20 +275,38 @@ export function removeFileHistorySnapshots<
       next &&
       removedPromptIds.has(next.promptId)
     ) {
-      // Folding a deleted snapshot's backups into a survivor from another
-      // working directory would hide their origin: rewind resolves those
-      // backups through first-version fallback and expands their keys
-      // against the survivor's root, silently writing foreign captures into
-      // unrelated files. Drop the fold whenever the deleted snapshot is
-      // cwd-labeled and the survivor cannot prove the same root (a labeled
-      // survivor with a different root, or an unlabeled legacy survivor).
-      // Unlabeled (legacy) deleted data keeps folding as before.
-      const sameRootProven =
-        next.cwd === undefined ||
-        (snapshot.cwd !== undefined &&
-          resolve(snapshot.cwd) === resolve(next.cwd));
+      // Fold permission is a same-root question, deliberately independent
+      // of the refusal predicate above: an endpoint may be safely
+      // deletable (no confirmed capture, so deletionDropsRequiredEndpoint
+      // is false) while its records are still not graftable into the
+      // survivor. Folding records captured under another root — failed
+      // markers included — would reassign them to identities the survivor
+      // never captured: reloading in the survivor's directory would report
+      // those failures (or restore those captures) against unrelated local
+      // files. Records the fold cannot take go with the deleted snapshot.
+      // Unlabeled (legacy) deleted data keeps folding as before, and an
+      // empty endpoint has nothing to graft either way.
+      //
+      // R21 fold admission completes the same-root check with the
+      // raw-root policy (`isRefusedWin32CaptureRoot`): a deleted
+      // endpoint whose LABEL spells a refused Win32 capture root
+      // (`C:\w\C:f\..`, `C:/w/C:f/..`, `c:\w\d:x\…`) normalizes onto
+      // the survivor's ordinary root, so origin equality alone cannot
+      // see the refusal — yet grafting its records would relabel them
+      // into the survivor's root and make them executable after reload
+      // (rewind would dispatch unlink on a file the pre-fold timeline
+      // correctly left untouched). Those records were already excluded
+      // from every execution face under their own root; the fold must
+      // not launder them, so they go with the deleted checkpoint
+      // exactly like cross-root records. Refused KEY spellings need no
+      // gate here: they stay refused under the survivor's root at every
+      // execution face, so their folds stay inert.
+      const foldable =
+        Object.keys(next.trackedFileBackups ?? {}).length > 0 &&
+        sameRootProven(snapshot, next) &&
+        !isRefusedWin32CaptureRoot(next.cwd);
       return [
-        sameRootProven
+        foldable
           ? { ...snapshot, diffAfterBackups: next.trackedFileBackups }
           : snapshot,
       ];

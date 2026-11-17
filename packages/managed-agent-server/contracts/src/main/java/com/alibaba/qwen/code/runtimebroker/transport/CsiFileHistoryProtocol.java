@@ -10,7 +10,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.math.BigInteger;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -123,7 +122,7 @@ public final class CsiFileHistoryProtocol {
             require(prompt.length() <= 128 && prompts.add(prompt) && snapshot.path("trackedFileBackups").isObject());
             timestamp(text(snapshot, "timestamp"));
             if (snapshot.has("cwd")) {
-                absolutePath(text(snapshot, "cwd"));
+                posixSnapshotOrigin(text(snapshot, "cwd"));
             }
             snapshot.path("trackedFileBackups").fields().forEachRemaining(entry -> {
                 path(entry.getKey());
@@ -156,19 +155,12 @@ public final class CsiFileHistoryProtocol {
         require(!".".equals(path) && WorkspaceRelativePath.normalize(path).equals(path));
     }
 
-    /**
-     * Same absolute-path contract as the runtime side of the protocol: the
-     * recorded snapshot root must be absolute, lexically normalized and free
-     * of NUL, mirroring the TypeScript validator for `cwd`. Node's
-     * `path.normalize` preserves one trailing separator, so a single trailing
-     * slash stays acceptable while `java.nio.file.Path` would strip it.
-     */
-    private static void absolutePath(String value) {
-        require(value.indexOf('\0') < 0);
-        var normalized = Path.of(value).normalize();
-        require(normalized.isAbsolute() && (normalized.toString().equals(value)
-                || !normalized.toString().equals("/") && value.endsWith("/")
-                && (normalized.toString() + "/").equals(value)));
+    /** CSI origins use canonical POSIX syntax, regardless of the reader host. */
+    private static void posixSnapshotOrigin(String value) {
+        require(value.startsWith("/") && value.indexOf('\0') < 0 && !value.contains("//"));
+        for (String segment : value.split("/")) {
+            require(!".".equals(segment) && !"..".equals(segment));
+        }
     }
 
     private static void leaf(String value) {
