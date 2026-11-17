@@ -52,7 +52,7 @@
 
 ## WebShell 与文字交接
 
-独立于执行 phase 展示受阻原因和有效操作，发送遵守恢复准入。持久化 Turn 取消幂等键，部署支持时跟踪原 durable operation；刷新和响应丢失不能产生另一条取消。只有确认终态才能显示已取消。页面可见时每五秒刷新未完成恢复，终态 SSE 到达立即刷新。
+独立于执行 phase 展示受阻原因和有效操作，发送遵守恢复准入。持久化 Turn 取消幂等键，部署支持时跟踪原 durable operation；刷新和响应丢失不能产生另一条取消。只有确认终态才能显示已取消。页面可见时每五秒刷新未完成恢复，稳定的 `operator_required` 裁决按指数退避到三十秒；终态 SSE 到达或标签页重新聚焦时立即刷新，`session_not_active` 后停止轮询。同一次 `recovery_evidence_unavailable` 读取视为待确认：只有同一 Turn 再次报告缺失才接受，期间保留上一次裁决及其发送能力，并由客户端主动发起确认读取。
 
 未启用 durable operations 时，已收到 ACK 的取消保留投递跟踪槽，直到同一原 Turn 有匹配的 ready 证据，或新读取的 Session 已选择后续 Turn。退休投递槽不表示原 Turn 已取消，也不开放发送；只有用户再次明确请求时，才取消后续 Turn。丢回复时保留原 Turn/key，durable operation 继续跟踪原操作直至取得操作终态。
 

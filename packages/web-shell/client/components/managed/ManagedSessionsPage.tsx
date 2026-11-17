@@ -433,6 +433,10 @@ function ManagedSessionsContent({
     interactive,
     detail.refreshSummary,
   );
+  // The recovery hold can disagree with the raw summary while the hook keeps a
+  // confirmed verdict through one replica miss, so send gates follow the hook.
+  const recoveryCanSend = recovery.canSend ?? summary?.capabilities.canSend;
+  const sessionEnded = recovery.value?.reasonCode === 'session_not_active';
   const turnCancel = useManagedTurnCancel(
     provider,
     clientId,
@@ -501,8 +505,14 @@ function ManagedSessionsContent({
   const terminalIds = useRef(new Map<string, string>());
   const terminalOpen = !!sessionId && terminalSession === sessionId;
   const publicChildren = detail.summary?.capabilities.childAgents === true;
-  // 面板关闭时不再 3s 轮询任务列表；需要实时视图时由面板打开触发
-  const tasks = useManagedTasks(provider, clientId, sessionId, taskPanelOpen);
+  // 面板关闭时不再 3s 轮询任务列表；未结算的取消意图仍需后台对账
+  const [cancelPending, setCancelPending] = useState(false);
+  const tasks = useManagedTasks(
+    provider,
+    clientId,
+    sessionId,
+    taskPanelOpen || cancelPending,
+  );
   const [childView, setChildView] = useState<{
     provider: ManagedAgentProvider;
     clientId: string;
@@ -523,6 +533,8 @@ function ManagedSessionsContent({
     tasks.refresh,
     tasks.apply,
   );
+  const cancelOutstanding = taskCancel.pendingTaskIds.length > 0;
+  useEffect(() => setCancelPending(cancelOutstanding), [cancelOutstanding]);
   useEffect(() => {
     const element = pageRef.current;
     if (!element) return;
@@ -603,6 +615,13 @@ function ManagedSessionsContent({
   const userMessages = useManagedUserMessages(
     provider,
     interactive ? sessionId : undefined,
+  );
+  // The composer, the footer and the submit guard share this send gate.
+  const sendsBlocked = Boolean(
+    sessionId &&
+      (sessionEnded ||
+        ((!recoveryCanSend || recovery.value?.nextTurnAllowed === false) &&
+          !userMessages.supported)),
   );
   const sideQueries = useManagedSideQueries(provider, clientId, sessionId, {
     idle:
@@ -1251,10 +1270,7 @@ function ManagedSessionsContent({
     if (!attempt) {
       if (
         (!submittedText.trim() && !images?.length && !files?.length) ||
-        (sessionId &&
-          (!detail.summary?.capabilities.canSend ||
-            recovery.value?.nextTurnAllowed === false) &&
-          !userMessages.supported)
+        sendsBlocked
       )
         return;
       let input: ManagedInputBlock[];
@@ -1988,12 +2004,7 @@ function ManagedSessionsContent({
     modelChange.blocked ||
     compression.blocked ||
     approvalChange.blocked ||
-    Boolean(
-      sessionId &&
-        (!summary?.capabilities.canSend ||
-          recovery.value?.nextTurnAllowed === false) &&
-        !userMessages.supported,
-    );
+    sendsBlocked;
   return (
     <div
       ref={pageRef}
@@ -3239,17 +3250,14 @@ function ManagedSessionsContent({
                     {t('managed.approvalFixed')}
                   </p>
                 )}
-              {((sessionId &&
-                !active &&
-                summary &&
-                !summary.capabilities.canSend) ||
+              {((sessionId && !active && summary && !recoveryCanSend) ||
                 (!home && cancelButton) ||
                 Boolean(text.trim())) && (
                 <div className="flex items-center justify-end gap-2">
                   {sessionId &&
                     !active &&
                     summary &&
-                    !summary.capabilities.canSend &&
+                    !recoveryCanSend &&
                     !alignManagedChatWithHost && (
                       <span className="mr-auto text-sm text-muted-foreground">
                         {t('managed.newRequired')}

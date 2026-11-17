@@ -54,6 +54,7 @@ describe('ManagedRecoveryPanel', () => {
     };
     await render();
     expect(container.textContent).toContain('This Session has ended');
+    expect(container.textContent).toContain('The original Session is closed');
     expect(container.textContent).toContain('Continue in a new Session');
     expect(container.textContent).not.toContain('operator attention');
   });

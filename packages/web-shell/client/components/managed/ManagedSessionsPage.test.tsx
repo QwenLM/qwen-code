@@ -1367,6 +1367,97 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
+  it('keeps the composer usable while one replica miss is unconfirmed', async () => {
+    const ready = {
+      state: 'ready' as const,
+      reasonCode: 'native_settled',
+      turnId: 'p1',
+      nextTurnAllowed: true,
+      actions: {
+        recheck: false,
+        cancel: false,
+        continueInNewSession: false,
+      },
+    };
+    const miss = {
+      state: 'operator_required' as const,
+      reasonCode: 'recovery_evidence_unavailable',
+      turnId: 'p1',
+      nextTurnAllowed: false,
+      actions: { recheck: true, cancel: false, continueInNewSession: true },
+    };
+    let report!: () => void;
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => (report = resolve));
+      yield { ...event(2, ''), type: 'completed' };
+    });
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { recovery: ready }),
+    );
+    const query = vi.fn().mockResolvedValue({ ...ready });
+    provider = {
+      ...provider,
+      recovery: { query, recheck: vi.fn() },
+    };
+    await render('s1');
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    const reads = mocks.client.getSession.mock.calls.length;
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false },
+        recovery: miss,
+      }),
+    );
+    await act(async () => {
+      report();
+      await flush();
+    });
+    await vi.waitFor(() =>
+      expect(mocks.client.getSession.mock.calls.length).toBeGreaterThan(reads),
+    );
+    // The single miss is not confirmed, so the panel stays hidden and the
+    // composer follows the held ready verdict instead of the raw summary.
+    expect(container.textContent).not.toContain('needs operator attention');
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    expect(container.textContent).not.toContain('Start a new task');
+  });
+
+  it('keeps a terminated Session read-only even when queued messages are supported', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false },
+        recovery: {
+          state: 'operator_required',
+          reasonCode: 'session_not_active',
+          turnId: 'p1',
+          nextTurnAllowed: false,
+          actions: {
+            recheck: false,
+            cancel: false,
+            continueInNewSession: true,
+          },
+        },
+      }),
+    );
+    const command = vi.fn();
+    provider = {
+      ...provider,
+      userMessages: {
+        query: vi.fn().mockResolvedValue({ paused: false, messages: [] }),
+        command,
+      },
+    };
+    await render('s1');
+    expect(container.textContent).toContain('This Session has ended');
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+    await act(async () => {
+      await mocks.editorProps!.onSubmit('Another turn');
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(command).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['en', 'billing'],
     ['zh-CN', '余额'],

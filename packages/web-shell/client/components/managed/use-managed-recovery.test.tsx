@@ -42,6 +42,11 @@ describe('useManagedRecovery', () => {
     act(async () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
+  const advance = async (ms: number) => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  };
   beforeEach(() => {
     vi.useFakeTimers();
     interactive = true;
@@ -128,28 +133,162 @@ describe('useManagedRecovery', () => {
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps a confirmed ready verdict until an evidence miss repeats', async () => {
-    summary.recovery = {
-      ...blocked,
-      state: 'ready',
-      reasonCode: 'ready',
-      nextTurnAllowed: true,
-      actions: { recheck: false, cancel: false, continueInNewSession: false },
-    };
-    const miss: ManagedSessionRecovery = {
-      ...blocked,
-      state: 'operator_required',
-      reasonCode: 'recovery_evidence_unavailable',
-    };
-    vi.mocked(provider.recovery!.query).mockResolvedValue(miss);
-    await render();
-    summary.recovery = { ...miss };
+  const ready: ManagedSessionRecovery = {
+    ...blocked,
+    state: 'ready',
+    reasonCode: 'ready',
+    turnId: 't1',
+    nextTurnAllowed: true,
+    actions: { recheck: false, cancel: false, continueInNewSession: false },
+  };
+  const miss: ManagedSessionRecovery = {
+    ...blocked,
+    state: 'operator_required',
+    reasonCode: 'recovery_evidence_unavailable',
+    turnId: 't1',
+  };
+
+  it('keeps a confirmed ready verdict when a summary miss is contradicted', async () => {
+    summary.recovery = ready;
+    summary.capabilities = { canSend: true, canCancel: false };
+    // The confirming read reaches a replica that holds the attachment.
+    vi.mocked(provider.recovery!.query).mockResolvedValue({ ...ready });
     await render();
     expect(current.value?.state).toBe('ready');
-    expect(refresh).not.toHaveBeenCalled();
-    summary.recovery = { ...miss };
+    summary = {
+      ...summary,
+      capabilities: { canSend: false, canCancel: false },
+      recovery: { ...miss },
+    };
+    await render();
+    expect(current.value?.state).toBe('ready');
+    // The held verdict also keeps the send gate the summary no longer reports.
+    expect(current.canSend).toBe(true);
+    expect(current.value).not.toBe(summary.recovery);
+  });
+
+  it('adopts the miss once the recovery read agrees', async () => {
+    summary.recovery = ready;
+    summary.capabilities = { canSend: true, canCancel: false };
+    vi.mocked(provider.recovery!.query).mockResolvedValue({ ...miss });
+    await render();
+    expect(current.value?.state).toBe('ready');
+    summary = {
+      ...summary,
+      capabilities: { canSend: false, canCancel: false },
+      recovery: { ...miss },
+    };
     await render();
     expect(current.value?.state).toBe('operator_required');
+    expect(current.canSend).toBeUndefined();
+  });
+
+  it('holds a first miss even when nothing has been published yet', async () => {
+    summary.recovery = undefined;
+    vi.mocked(provider.recovery!.query).mockResolvedValue({ ...ready });
+    await render();
+    expect(current.value).toBeUndefined();
+    summary = { ...summary, recovery: { ...miss } };
+    await render();
+    expect(current.value?.state).toBe('ready');
+    expect(provider.recovery!.query).toHaveBeenCalled();
+  });
+
+  it('clears the verdict when a summary drops recovery', async () => {
+    interactive = false;
+    await render();
+    expect(current.value?.state).toBe('awaiting_evidence');
+    summary = { ...summary, recovery: undefined };
+    await render();
+    expect(current.value).toBeUndefined();
+  });
+
+  it('backs off while operator_required stays stable and caps at thirty seconds', async () => {
+    const stable: ManagedSessionRecovery = {
+      ...blocked,
+      state: 'operator_required',
+      reasonCode: 'recovery_blocked',
+    };
+    summary.recovery = stable;
+    vi.mocked(provider.recovery!.query).mockImplementation(async () => ({
+      ...stable,
+    }));
+    await render();
+    expect(provider.recovery!.query).toHaveBeenCalledTimes(1);
+    await advance(5_000);
+    expect(provider.recovery!.query).toHaveBeenCalledTimes(2);
+    await advance(10_000);
+    expect(provider.recovery!.query).toHaveBeenCalledTimes(3);
+    await advance(20_000);
+    expect(provider.recovery!.query).toHaveBeenCalledTimes(4);
+    await advance(30_000);
+    expect(provider.recovery!.query).toHaveBeenCalledTimes(5);
+    await advance(30_000);
+    expect(provider.recovery!.query).toHaveBeenCalledTimes(6);
+  });
+
+  it('restarts the backoff when another Session becomes selected', async () => {
+    const stable: ManagedSessionRecovery = {
+      ...blocked,
+      state: 'operator_required',
+      reasonCode: 'recovery_blocked',
+    };
+    summary.recovery = stable;
+    vi.mocked(provider.recovery!.query).mockImplementation(async () => ({
+      ...stable,
+    }));
+    await render();
+    await advance(35_000);
+    expect(provider.recovery!.query).toHaveBeenCalledTimes(4);
+    summary = { ...summary, sessionId: 's2', recovery: { ...stable } };
+    await render();
+    const afterSwitch = vi.mocked(provider.recovery!.query).mock.calls.length;
+    await advance(5_000);
+    expect(provider.recovery!.query).toHaveBeenCalledTimes(afterSwitch + 1);
+  });
+
+  it('keeps the recheck state while a summary refresh lands', async () => {
+    vi.mocked(provider.recovery!.recheck).mockReturnValue(
+      new Promise<never>(() => undefined),
+    );
+    await render();
+    await act(async () => {
+      void current.recheck();
+    });
+    expect(current.busy).toBe(true);
+    summary = { ...summary, recovery: { ...blocked } };
+    await render();
+    expect(current.busy).toBe(true);
+  });
+
+  it('keeps the recheck refusal while a summary refresh lands', async () => {
+    vi.mocked(provider.recovery!.recheck).mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(
+        409,
+        'recovery_recheck_unavailable',
+        'no work',
+      ),
+    );
+    await render();
+    await act(async () => {
+      await current.recheck();
+    });
+    expect(current.errorCode).toBe('recovery_recheck_unavailable');
+    summary = { ...summary, recovery: { ...blocked } };
+    await render();
+    expect(current.errorCode).toBe('recovery_recheck_unavailable');
+  });
+
+  it('re-reads the summary when recheck reports a changed target', async () => {
+    vi.mocked(provider.recovery!.recheck).mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(409, 'recovery_target_changed', 'moved'),
+    );
+    await render();
+    await act(async () => {
+      await current.recheck();
+    });
+    expect(current.errorCode).toBe('recovery_target_changed');
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it('stops polling once the Session is terminal', async () => {
