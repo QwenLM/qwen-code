@@ -233,8 +233,9 @@ target session and type the same message there.
   depth limit does not apply either, so a sub-session's page can send too: it
   exists to stop a model delegating without end, and a person's send does
   not recurse.
-- The reply does not start a turn in the caller (see "The exchange in the
-  caller" below). The person asked the target, not the caller's model.
+- The message is recorded in the caller, and the reply comes back as a turn
+  in which the caller's model passes it on to the person (see "The exchange
+  in the caller" below).
 - A new session's title has no thread glyph. The person started it, so it
   reads like any session they start.
 
@@ -253,29 +254,44 @@ the daemon's permission wait has no timeout by default and nothing else on
 the caller's page would say the target is blocked. When the turn finishes
 the chip goes away.
 
-**The exchange in the caller.** The caller's conversation shows both sides.
-When the send is accepted, the message appears as a row on the user's side,
-headed "To <workspace> · <session>". When the target's turn settles, its reply
-appears as a message headed "<workspace> · <session>". Neither starts a turn
-in the caller: a model that answers a reply addressed to the user only adds a
-comment on it (in testing it said the result needed no action, or doubted
-where it came from). Both go into the caller's history, so its model knows
-them at the user's next message.
+**The exchange in the caller.** It reads like two sessions talking: the
+target answers the caller, and the caller tells the person. When the send is
+accepted, the message appears in the caller as a row on the user's side,
+headed "To <workspace> · <session>". When the target's turn settles, the
+caller runs a turn of its own, headed "Cross-session message · <workspace> ·
+<session>" like a message from another session, in which its model tells the
+person what the target replied, in its own words, and anything to act on. The
+target's own words are not shown again in the caller: they are in the
+target, which the chip's tab opens while it works and the card's "View
+details" opens afterwards. The card stays in view when the finished turn
+folds its steps, so the source of what the caller says stays visible.
 
-They are written through the daemon's external-record call
+The message row is written through the daemon's external-record call
 (`appendExternalRecord`), which Agent Collaboration uses for a message from
-another party: it writes a durable record, shows it live, queues its model
-text for the next turn, and holds a record that arrives during a turn until
-the turn settles. The message is an `agent_mention` record with a new
-`sentTo` field (the target's id, workspace and title); the reply is an
-`agent_message` record whose author is the target, with the turn's status.
-The record keys are the completion's task id, so a repeat writes nothing.
-If the caller is no longer live when the reply arrives, the reply is not
-recorded there; it is still in the target.
+another party: it writes a durable record, shows it live, and queues its
+model text for the caller's next turn, so the model sees what the person
+asked before it sees the answer. It is an `agent_mention` record with a new
+`sentTo` field (the target's id, workspace and title), keyed by the
+completion's task id so a repeat writes nothing. It does not start a turn.
 
-The model's own `sent` launches are unchanged: their completion is a
-notification that starts a turn, because the model started them to use the
-result.
+The reply is the completion notification a `sent` launch of the tool
+delivers, with three changes for a person's send. Its summary says the user
+sent the message with `/send` and asks the model to tell the user what the
+target replied; it repeats the message (up to 2,000 characters) in case the
+record is not in context. It leaves out the session link the tool's
+notification carries, which the model otherwise showed the person verbatim.
+Its label is "<workspace> · <session>", and its display text links the target
+without the thread glyph and with its workspace, which is how Web Shell tells
+the turn is another session talking and which session the card opens.
+
+The first design started no turn and showed the target's reply as a message
+in the caller; the person wanted the caller to take in the reply and tell
+them, as with a message between sessions. An even earlier version started a
+turn with no record of the send in the caller, and the model then doubted
+where the result came from; the message row fixes that.
+
+If the caller is no longer live when the reply arrives, the reply waits as
+any `sent` completion does.
 
 **The message in the target.** The prompt the target receives carries a
 `source` entry among its `inputAnnotations` (the caller's id, workspace and
@@ -317,7 +333,7 @@ loses a pending notification.
   only "Internal error", which the tool used to print as `[object Object]`.
 - `packages/cli/src/serve/create-sub-session.ts`: caller-side checks,
   handing off to the target launcher, the approval rule, notification
-  routing, the records of a person's exchange, and the follow-up path (lineage check, resume, client release,
+  routing, the record of a person's message, and the follow-up path (lineage check, resume, client release,
   task id, prompt-id matching).
 - `packages/cli/src/serve/run-qwen-serve.ts`: register each launcher by
   workspace and give launchers the resolver; expose the launcher lookup to
@@ -389,17 +405,19 @@ loses a pending notification.
   tool reports itself; the tasks route adds them only when asked; `/send`
   parsing and completion; the chip for a running send and for one whose target
   waits for an answer; a read-only pane keeps approvals and drops the
-  composer; a person's send writes the message and the reply to the caller as
-  records and enqueues no notification, names the caller on the target's
-  prompt, and titles a new session without the glyph; `sentTo` survives
+  composer; a person's send writes the message to the caller as a record and
+  returns the reply as a notification that asks the model to pass it on,
+  names the caller on the target's prompt, and titles a new session without
+  the glyph; a turn started by a session's reply is labeled as a
+  cross-session message; `sentTo` survives
   replay and the SDK parser, and a malformed one is dropped; the "To" and
   "From" lines on a user message.
 - Step 3, end to end: from a Web Shell session in A, `/send` to a new session
   in B: the page stays, the message shows in A headed "To B", a chip shows
   while B works, clicking it opens B in the right panel with the message
-  headed "From A", and B's reply then shows in A without A's model running;
-  A's model knows the exchange at the next message, and both rows survive a
-  reload; `/send` to a session in B that A did not create and see its lineage
+  headed "From A", and when B finishes A runs a turn headed "Cross-session
+  message · B · …" in which it tells the person what B answered; the rows
+  survive a reload; `/send` to a session in B that A did not create and see its lineage
   unchanged; send to a target in an ask mode and approve its tool call from
   the tab; a target that asks a question turns the chip to "needs your
   answer" until it is answered in the tab; a send made through the API shows

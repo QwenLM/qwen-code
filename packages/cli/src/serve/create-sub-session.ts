@@ -231,7 +231,7 @@ export type OutgoingSubSessionStatus =
 
 /** Records a reported launch on the caller's launcher. */
 interface OutgoingReport {
-  /** `message`: what a person sent, to show in the caller's conversation. */
+  /** `message`: what a person sent, recorded in the caller's conversation. */
   started(
     task: Pick<
       OutgoingSubSessionTask,
@@ -240,44 +240,33 @@ interface OutgoingReport {
     message?: string,
   ): void;
   waiting(waitingForInput: boolean): void;
-  /** `reply`: the target's answer to a person's message, shown likewise. */
-  settled(
-    status: Exclude<OutgoingSubSessionStatus, 'running'>,
-    reply?: string,
-  ): void;
+  settled(status: Exclude<OutgoingSubSessionStatus, 'running'>): void;
 }
 
-type SentExchangeTarget = Pick<
+type SentMessageTarget = Pick<
   OutgoingSubSessionTask,
   'id' | 'sessionId' | 'workspaceCwd' | 'label'
 >;
 
-function sentExchangeAttributes(target: SentExchangeTarget): string {
-  return (
-    `session="${escapeXml(target.sessionId)}" ` +
-    `workspace="${escapeXml(target.workspaceCwd)}"`
-  );
-}
-
 /** What a person sent with `/send`, as a record in the caller's conversation. */
 function sentMessageRecord(
-  target: SentExchangeTarget,
+  target: SentMessageTarget,
   message: string,
 ): BridgeSessionExternalRecordRequest {
   const open =
-    `<sent-message ${sentExchangeAttributes(target)}>` +
-    'The user sent this message to another session with /send. It is not a request to you; that session will answer it.\n';
+    `<sent-message session="${escapeXml(target.sessionId)}" workspace="${escapeXml(target.workspaceCwd)}">` +
+    'The user sent this message to another session with /send. It is not a request to you: that session will answer it, and its reply will come to you to pass on to the user.\n';
   const close = '</sent-message>';
   const body = escapeXmlWithinBudget(
     message,
-    MAX_SENT_EXCHANGE_TEXT_CHARS - open.length - close.length,
+    MAX_SENT_MESSAGE_TEXT_CHARS - open.length - close.length,
   );
   return {
     kind: 'agent_mention',
     recordKey: `send:${target.id}`,
     modelText: `${open}${body.text}${close}`,
     payload: {
-      displayText: truncateCodePoints(message, MAX_SENT_EXCHANGE_TEXT_CHARS),
+      displayText: truncateCodePoints(message, MAX_SENT_MESSAGE_TEXT_CHARS),
       mentionedAgentIds: [],
       sentTo: {
         sessionId: target.sessionId,
@@ -288,38 +277,8 @@ function sentMessageRecord(
   };
 }
 
-/** The target's answer to it, likewise. Neither record starts a turn. */
-function sentReplyRecord(
-  target: SentExchangeTarget,
-  status: Exclude<OutgoingSubSessionStatus, 'running'>,
-  reply: string,
-): BridgeSessionExternalRecordRequest {
-  const open =
-    `<session-reply ${sentExchangeAttributes(target)} status="${status}">` +
-    "That session's reply to the message the user sent it with /send.\n";
-  const close = '</session-reply>';
-  const body = escapeXmlWithinBudget(
-    reply,
-    MAX_SENT_EXCHANGE_TEXT_CHARS - open.length - close.length,
-  );
-  return {
-    kind: 'agent_message',
-    recordKey: `send-reply:${target.id}`,
-    modelText: `${open}${body.text}${close}`,
-    payload: {
-      displayText: reply,
-      author: {
-        agentId: `session:${target.sessionId}`,
-        name: `${basename(target.workspaceCwd)} · ${target.label}`,
-      },
-      runId: `send:${target.id}`,
-      status,
-    },
-  };
-}
-
-/** Room for one side of a `/send` exchange in a record (the child's cap is 65,536). */
-const MAX_SENT_EXCHANGE_TEXT_CHARS = 60_000;
+/** Room for a `/send` message in a record (the child's cap is 65,536). */
+const MAX_SENT_MESSAGE_TEXT_CHARS = 60_000;
 
 /** Outgoing records kept per caller; the oldest settled ones go first. */
 export const MAX_OUTGOING_PER_CALLER = 20;
@@ -590,6 +549,9 @@ function truncateCodePoints(value: string, max: number): string {
   return `${codePoints.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
+/** How much of a person's `/send` message the reply's notification repeats. */
+const MAX_PERSON_MESSAGE_CHARS = 2_000;
+
 function buildSentCompletionNotification(
   sessionId: string,
   label: string,
@@ -597,6 +559,11 @@ function buildSentCompletionNotification(
   stopReason: string,
   workspaceCwd?: string,
   taskId = sessionId,
+  /**
+   * The message a person sent with `/send`. Its reply comes back as a turn
+   * in which the caller's model tells the person what the target said.
+   */
+  personMessage?: string,
 ) {
   const status = sentCompletionStatus(stopReason);
   const boundedStopReason = truncateCodePoints(stopReason, 128);
@@ -611,7 +578,10 @@ function buildSentCompletionNotification(
     (workspaceCwd
       ? `?${new URLSearchParams({ workspace: workspaceCwd })}`
       : '');
-  const sessionLink = `[🧵 ${sessionId.slice(0, 8)}](${sessionUrl})`;
+  const sessionLink =
+    personMessage === undefined
+      ? `[🧵 ${sessionId.slice(0, 8)}](${sessionUrl})`
+      : `[${sessionId.slice(0, 8)}](${sessionUrl})`;
   const safeResult =
     result.trim() || `No text output (stopReason: ${stopReason}).`;
   const modelSessionId = truncateCodePoints(sessionId, 256);
@@ -620,8 +590,14 @@ function buildSentCompletionNotification(
     '<task-notification>',
     `<task-id>${escapeXml(modelSessionId)}</task-id>`,
     `<status>${status}</status>`,
-    `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
-    `<session-link>${escapeXml(sessionUrl)}</session-link>`,
+    personMessage === undefined
+      ? `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`
+      : `<summary>The user sent the message below to another session with /send. That session's turn ${escapeXml(statusText)}, and its reply is the result. Tell the user what it replied, in your own words, and anything they need to act on.</summary>` +
+        `<message>${escapeXml(truncateCodePoints(personMessage, MAX_PERSON_MESSAGE_CHARS))}</message>`,
+    // A person's reply is for the person, who has the session in the page.
+    ...(personMessage === undefined
+      ? [`<session-link>${escapeXml(sessionUrl)}</session-link>`]
+      : []),
     '<result>',
   ].join('');
   const modelTextSuffix = '</result></task-notification>';
@@ -639,7 +615,10 @@ function buildSentCompletionNotification(
   }
   const modelText = `${modelTextPrefix}${preview.text}${modelTextSuffix}`;
   return {
-    displayText: `Sub-session ${sessionLink} ${statusText}.`,
+    displayText:
+      personMessage === undefined
+        ? `Sub-session ${sessionLink} ${statusText}.`
+        : `Session ${sessionLink} replied (${statusText}).`,
     modelText,
     taskId,
     status,
@@ -1798,11 +1777,15 @@ export function createSubSessionLauncher(
         const label =
           (byPerson && reusing ? sessionTitle(bridge, sessionId) : undefined) ??
           subSessionName(info.name ?? info.prompt, false);
-        // A person's message and its reply go into the caller's conversation
-        // as records, without a turn: the person asked the target, not the
-        // caller's model.
-        const notify = !byPerson && (notifySentCompletion || remote || reusing);
-        let reply: string | undefined;
+        // A person's message goes into the caller's conversation as a record;
+        // the reply comes back as a turn in which the caller's model tells the
+        // person what the target said, named by where it came from.
+        const notify = notifySentCompletion || remote || reusing || byPerson;
+        const notificationLabel = byPerson
+          ? `${basename(boundWorkspace)} · ${label}`
+          : label;
+        const linkWorkspace = remote || byPerson ? boundWorkspace : undefined;
+        const personMessage = byPerson ? info.prompt : undefined;
         report?.started(
           {
             id: completionTaskId,
@@ -1878,32 +1861,30 @@ export function createSubSessionLauncher(
                 );
               }
               settledStatus = sentCompletionStatus(completion.stopReason);
-              reply =
-                completion.result.trim() ||
-                `No text output (stopReason: ${completion.stopReason}).`;
               if (notify) {
                 notification = buildSentCompletionNotification(
                   sessionId,
-                  label,
+                  notificationLabel,
                   completion.result,
                   completion.stopReason,
-                  remote ? boundWorkspace : undefined,
+                  linkWorkspace,
                   completionTaskId,
+                  personMessage,
                 );
               }
             } catch (err) {
               if (stopAc.signal.aborted && !targetStopped()) return;
               settledStatus = targetStopped() ? 'cancelled' : 'failed';
-              const message = err instanceof Error ? err.message : String(err);
-              reply = message;
               if (!notify) return;
+              const message = err instanceof Error ? err.message : String(err);
               notification = buildSentCompletionNotification(
                 sessionId,
-                label,
+                notificationLabel,
                 message,
                 targetStopped() ? 'shutdown' : 'error',
-                remote ? boundWorkspace : undefined,
+                linkWorkspace,
                 completionTaskId,
+                personMessage,
               );
             } finally {
               if (remote) {
@@ -1941,7 +1922,7 @@ export function createSubSessionLauncher(
             // free the slot.
             releaseOnce();
             remote?.releaseCompletionSlot?.();
-            report?.settled(settledStatus, byPerson ? reply : undefined);
+            report?.settled(settledStatus);
           }
         })();
         return {
@@ -2169,21 +2150,20 @@ export function createSubSessionLauncher(
   const outgoingReport = (callerSessionId: string): OutgoingReport => {
     const key = normalizeSessionIdForLookup(callerSessionId);
     let record: OutgoingSubSessionTask | undefined;
-    // One after the other, so the reply never lands above its message.
-    let recorded: Promise<unknown> = Promise.resolve();
-    const appendRecord = (request: BridgeSessionExternalRecordRequest) => {
-      recorded = recorded
-        .then(() => getBridge()?.appendExternalRecord(callerSessionId, request))
-        .catch((error: unknown) => {
-          writeStderrLine(
-            `qwen serve: could not record a /send exchange in session ${callerSessionId}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
-    };
     return {
       started(task, message) {
-        if (message !== undefined)
-          appendRecord(sentMessageRecord(task, message));
+        if (message !== undefined) {
+          getBridge()
+            ?.appendExternalRecord(
+              callerSessionId,
+              sentMessageRecord(task, message),
+            )
+            .catch((error: unknown) => {
+              writeStderrLine(
+                `qwen serve: could not record a /send message in session ${callerSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            });
+        }
         record = {
           ...task,
           status: 'running',
@@ -2204,11 +2184,8 @@ export function createSubSessionLauncher(
         record.waitingForInput = waitingForInput;
         outgoingChanged(callerSessionId);
       },
-      settled(status, reply) {
+      settled(status) {
         if (!record || record.status !== 'running') return;
-        if (reply !== undefined) {
-          appendRecord(sentReplyRecord(record, status, reply));
-        }
         record.status = status;
         record.endTime = Date.now();
         record.waitingForInput = false;

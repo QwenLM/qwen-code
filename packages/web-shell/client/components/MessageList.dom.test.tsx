@@ -6844,6 +6844,47 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(assistantActions(c, 'a1')).toBe('true');
   });
 
+  it.each([
+    [true, true],
+    [false, false],
+  ])(
+    'keeps the card of a turn another session started in view: from a session %s',
+    (fromSession, visible) => {
+      const backgroundTurn = {
+        turnId: 'turn-b',
+        taskId: 'kid',
+        kind: 'agent' as const,
+        label: 'projB · Kid',
+        startedAt: 10,
+      };
+      const card: SystemMessage = {
+        id: 'card',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'projB · Kid',
+        data: {
+          ...backgroundTurn,
+          backgroundTask: {
+            status: 'completed',
+            ...(fromSession ? { fromSession: { sessionId: 'kid' } } : {}),
+          },
+        },
+        backgroundTurn,
+      };
+      const c = mount([
+        userMsg('u1'),
+        asstMsg('a0'),
+        card,
+        toolMsg('g1'),
+        { ...asstMsg('a1'), backgroundTurn },
+      ]);
+      expect(isCollapsed(c, 'g1')).toBe(true);
+      expect(has(c, 'card')).toBe(visible);
+      expect(has(c, 'a1')).toBe(true);
+    },
+  );
+
   it('gives a turn of only an agent reply no final answer', () => {
     const c = mount([
       userMsg('u1'),

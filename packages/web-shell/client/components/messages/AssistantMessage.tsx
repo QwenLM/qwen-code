@@ -229,10 +229,7 @@ export const AssistantMessage = memo(function AssistantMessage({
     <div className={styles.message}>
       {author && (
         <div className={styles.author}>
-          {/* Another session's reply to `/send` is named, with no avatar. */}
-          {!agentMessage?.author?.agentId.startsWith('session:') && (
-            <AuthorAvatar name={author.name} color={author.color} />
-          )}
+          <AuthorAvatar name={author.name} color={author.color} />
           <span className={styles.authorName}>{author.name}</span>
           {squadLabel && <SquadTag name={squadLabel} />}
         </div>

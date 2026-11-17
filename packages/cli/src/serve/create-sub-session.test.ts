@@ -1633,7 +1633,7 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
-  it("records a person's send and its reply in the caller without a turn", async () => {
+  it("records a person's send in the caller and returns the reply as a turn to pass on", async () => {
     const fake = makeFakeBridge({
       events: (pid) => [chunk('done <b>'), turnComplete(pid)],
       titles: { 'parent-1': 'Caller title' },
@@ -1646,7 +1646,7 @@ describe('sub-session launcher', () => {
       callerSessionId: 'parent-1',
       prompt: 'research <it>',
     });
-    await vi.waitFor(() => expect(fake.externalRecords).toHaveLength(2));
+    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
     const target = `session="${launched.sessionId}" workspace="${WS}"`;
     expect(fake.externalRecords).toEqual([
       {
@@ -1670,30 +1670,27 @@ describe('sub-session launcher', () => {
           },
         },
       },
-      {
-        sessionId: 'parent-1',
-        request: {
-          kind: 'agent_message',
-          recordKey: `send-reply:${launched.sessionId}`,
-          modelText: expect.stringMatching(
-            new RegExp(
-              `^<session-reply ${target} status="completed">[^<]*\\ndone &lt;b&gt;</session-reply>$`,
-            ),
-          ),
-          payload: {
-            displayText: 'done <b>',
-            author: {
-              agentId: `session:${launched.sessionId}`,
-              name: 'ws · research <it>',
-            },
-            runId: `send:${launched.sessionId}`,
-            status: 'completed',
-          },
-        },
-      },
     ]);
-    // The person asked the target, not the caller's model.
-    expect(fake.notifications).toEqual([]);
+    // The reply starts a turn in which the caller's model tells the person
+    // what the target said, named by where it came from.
+    expect(fake.notifications[0]).toMatchObject({
+      sessionId: 'parent-1',
+      notification: {
+        taskId: launched.sessionId,
+        status: 'completed',
+        kind: 'agent',
+        label: 'ws · research <it>',
+        displayText: `Session [${launched.sessionId.slice(0, 8)}](qwen-session://${launched.sessionId}?workspace=%2Ftmp%2Fws) replied (completed).`,
+      },
+    });
+    const modelText = fake.notifications[0]!.notification.modelText;
+    expect(modelText).toContain(
+      'Tell the user what it replied, in your own words',
+    );
+    expect(modelText).toContain('<message>research &lt;it&gt;</message>');
+    expect(modelText).toContain('<result>done &lt;b&gt;</result>');
+    expect(modelText).not.toContain('<session-link>');
+
     // The target's transcript names who sent it, and its title has no glyph.
     expect(fake.promptMetas).toEqual([
       {
@@ -2714,12 +2711,12 @@ describe('sub-sessions in another workspace', () => {
         expectedApprovalMode: 'auto',
       }),
     ]);
-    await vi.waitFor(() => expect(a.externalRecords).toHaveLength(2));
-    expect(a.externalRecords[1]).toMatchObject({
+    await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
+    expect(a.notifications[0]).toMatchObject({
       sessionId: 'caller',
-      request: { kind: 'agent_message', payload: { status: 'completed' } },
+      notification: { taskId: 'sub-1', status: 'completed' },
     });
-    expect(a.notifications).toEqual([]);
+    expect(a.externalRecords).toHaveLength(1);
   });
 
   it("lists a send to another workspace on the caller's launcher", async () => {
@@ -3819,8 +3816,8 @@ describe('following up a sub-session', () => {
         sourceType: 'side_task',
       }),
     ]);
-    await vi.waitFor(() => expect(fake.externalRecords).toHaveLength(2));
-    expect(fake.externalRecords[1]).toMatchObject({ sessionId: 'caller' });
+    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
+    expect(fake.notifications[0]).toMatchObject({ sessionId: 'caller' });
     await expect(
       launcher.launchForPerson({
         callerSessionId: 'caller',
@@ -4261,19 +4258,14 @@ describe('following up a sub-session', () => {
       sessionId: 'kid',
     });
     expect(sent).toMatchObject({ sessionId: 'kid', workspaceCwd: WS_B });
-    // The exchange is recorded in the caller, named by the target's title.
-    await vi.waitFor(() => expect(a.externalRecords).toHaveLength(2));
-    expect(a.externalRecords[1]).toMatchObject({
+    // The reply comes back to the caller, named by the target's title.
+    await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
+    expect(a.notifications[0]).toMatchObject({
       sessionId: 'caller',
-      request: {
-        kind: 'agent_message',
-        payload: {
-          displayText: 'from b',
-          author: { agentId: 'session:kid', name: 'ws-b · Kid title' },
-        },
-      },
+      notification: { label: 'ws-b · Kid title' },
     });
-    expect(a.notifications).toEqual([]);
+    expect(a.externalRecords).toHaveLength(1);
+    expect(b.notifications).toEqual([]);
     expect(b.externalRecords).toEqual([]);
     expect(b.promptMetas[0]).toEqual({
       inputAnnotations: [

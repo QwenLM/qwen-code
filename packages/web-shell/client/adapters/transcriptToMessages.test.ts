@@ -5873,6 +5873,43 @@ describe('background execution identity', () => {
       });
     },
   );
+  it.each([
+    [
+      'Session [kid](qwen-session://kid?workspace=%2Fw%2Fb) replied (completed).',
+      { sessionId: 'kid', workspaceCwd: '/w/b' },
+    ],
+    ['Background agent "worker" completed.', undefined],
+  ])(
+    'marks the turn a completion %j starts as from a session: %j',
+    (text, fromSession) => {
+      const task = { taskId: 'task-1', kind: 'agent', status: 'completed' };
+      const messages = transcriptBlocksToDaemonMessages([
+        textBlock('completed', 'assistant', text, 5, false, {
+          meta: {
+            source: 'background_task_completed',
+            qwenDiscreteMessage: true,
+            backgroundTask: task,
+          },
+        }),
+        textBlock('start', 'assistant', 'Continue', 10, false, {
+          meta: {
+            source: 'background_notification_turn_started',
+            backgroundTurn: { ...backgroundTurn, toolUseId: undefined },
+          },
+        }),
+        textBlock('answer', 'assistant', 'It said MARIGOLD.', 12, false, {
+          backgroundTurn,
+        }),
+      ]);
+      const marker = messages.find(
+        (message) => message.source === 'background_notification_turn_started',
+      );
+      expect(
+        (marker?.data as { backgroundTask?: { fromSession?: unknown } })
+          ?.backgroundTask?.fromSession,
+      ).toEqual(fromSession);
+    },
+  );
   it.each([false, true])(
     'reconciles a persisted daemon notification before completion and automatic reply (tool first: %s)',
     (toolFirst) => {

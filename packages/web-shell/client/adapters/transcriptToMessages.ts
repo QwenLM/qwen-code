@@ -117,6 +117,19 @@ function isInputSourceAnnotation(
   );
 }
 
+/** The session a `sent` completion links to: `[…](qwen-session://<id>?workspace=<cwd>)`. */
+function parseReplyingSession(
+  text: string,
+): { sessionId: string; workspaceCwd?: string } | undefined {
+  const match = /\]\(qwen-session:\/\/([^)?\s]+)(?:\?([^)\s]*))?\)/.exec(text);
+  if (!match?.[1]) return undefined;
+  const workspaceCwd = new URLSearchParams(match[2] ?? '').get('workspace');
+  return {
+    sessionId: decodeURIComponent(match[1]),
+    ...(workspaceCwd ? { workspaceCwd } : {}),
+  };
+}
+
 function collectBackgroundTaskUpdates(
   blocks: readonly DaemonTranscriptBlock[],
 ) {
@@ -137,7 +150,13 @@ function collectBackgroundTaskUpdates(
     );
     const taskId = getString(task, 'taskId');
     if (task && taskId && (completed || source === 'background_notification')) {
-      latestTasks.set(taskId, task);
+      // A reply from another session links to it (`qwen-session://`), and
+      // the turn it starts is that session talking to this one.
+      const fromSession =
+        (completed && 'text' in block && typeof block.text === 'string'
+          ? parseReplyingSession(block.text)
+          : undefined) ?? latestTasks.get(taskId)?.['fromSession'];
+      latestTasks.set(taskId, fromSession ? { ...task, fromSession } : task);
       if (!completed) lastConsumedTaskIndex.set(taskId, index);
       const toolUseId = getString(task, 'toolUseId');
       const status = getString(task, 'status');

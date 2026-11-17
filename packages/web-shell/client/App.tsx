@@ -6856,7 +6856,12 @@ export function App({
     [getDefaultReviewPanelWidth],
   );
   const openSessionPanel = useCallback(
-    (task: DaemonSessionSubSessionTaskStatus) => {
+    (
+      task: Pick<
+        DaemonSessionSubSessionTaskStatus,
+        'sessionId' | 'workspaceCwd' | 'label'
+      >,
+    ) => {
       const tab: ArtifactPanelTab = {
         id: `session:${task.sessionId}`,
         kind: 'session',
@@ -26287,6 +26292,19 @@ export function App({
                                     backgroundTurn: turn,
                                     sourceSessionId: connection.sessionId,
                                     workspaceCwd: connection.workspaceCwd,
+                                  });
+                                }}
+                                onOpenSession={(request) => {
+                                  // Without a workspace in the link, the
+                                  // session runs beside this one.
+                                  const workspaceCwd =
+                                    request.workspaceCwd ??
+                                    connection.workspaceCwd;
+                                  if (!workspaceCwd) return;
+                                  openSessionPanel({
+                                    sessionId: request.sessionId,
+                                    workspaceCwd,
+                                    label: request.title,
                                   });
                                 }}
                               >

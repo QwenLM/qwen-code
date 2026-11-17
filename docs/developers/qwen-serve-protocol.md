@@ -4172,7 +4172,7 @@ The response carries `sessionId`, `workspaceCwd` when the session runs in anothe
 
 While the target runs, the send is listed in `GET /session/:id/tasks?includeSubSessions=true`.
 
-The exchange is written to `:id`'s conversation without starting a turn there. The message is an `agent_mention` record whose `_meta.qwenAgentMessage.sentTo` is `{ sessionId, workspaceCwd, title? }` (the target); when the target's turn settles, its reply is an `agent_message` record whose author is the target. Both enter `:id`'s model history at its next turn. The prompt the target receives carries `{ type: "source", sessionId, workspaceCwd, title? }` (the caller) among `_meta.inputAnnotations` on its `user_message_chunk`, live and on replay; the model's `create_sub_session` launches carry it too.
+The message is written to `:id`'s conversation as an `agent_mention` record whose `_meta.qwenAgentMessage.sentTo` is `{ sessionId, workspaceCwd, title? }` (the target), without starting a turn. When the target's turn settles, `:id` receives the completion notification and runs a turn in which its model tells the person what the target replied; the notification's label is `<workspace> · <title>`, and its display text links `qwen-session://<target>?workspace=<cwd>`. The prompt the target receives carries `{ type: "source", sessionId, workspaceCwd, title? }` (the caller) among `_meta.inputAnnotations` on its `user_message_chunk`, live and on replay; the model's `create_sub_session` launches carry it too.
 
 ### `DELETE /session/:id`
 

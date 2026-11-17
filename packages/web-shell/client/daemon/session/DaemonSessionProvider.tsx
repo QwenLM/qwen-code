@@ -4159,11 +4159,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
-              // A `/send` exchange is recorded here without a turn here, so
-              // it never says this session is working.
-              const turnEvents = uiEvents.filter(
-                (e) => !isSentExchangeEvent(e),
-              );
+              // A `/send` message is recorded here without a turn here, so it
+              // never says this session is working.
+              const turnEvents = uiEvents.filter((e) => !isSentMessageEvent(e));
               if (
                 event.type === 'model_switched' &&
                 isRecord(event.data) &&
@@ -6829,22 +6827,14 @@ export function useDaemonSessionNotices(): {
 }
 
 /**
- * The message a person sent to another session with `/send`, or that
- * session's reply, as recorded in this one. Neither is a turn of this session.
+ * The message a person sent to another session with `/send`, as recorded in
+ * this one. It is not a turn of this session.
  */
-function isSentExchangeEvent(event: DaemonUiEvent): boolean {
-  if (
-    event.type !== 'user.text.delta' &&
-    event.type !== 'assistant.text.delta'
-  ) {
-    return false;
-  }
-  const agentMessage = parseQwenAgentMessageMeta(
-    event.meta?.[QWEN_AGENT_MESSAGE_META_KEY],
-  );
+function isSentMessageEvent(event: DaemonUiEvent): boolean {
+  if (event.type !== 'user.text.delta') return false;
   return (
-    agentMessage?.sentTo !== undefined ||
-    agentMessage?.author?.agentId.startsWith('session:') === true
+    parseQwenAgentMessageMeta(event.meta?.[QWEN_AGENT_MESSAGE_META_KEY])
+      ?.sentTo !== undefined
   );
 }
 

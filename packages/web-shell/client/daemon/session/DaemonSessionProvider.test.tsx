@@ -6610,21 +6610,6 @@ describe('DaemonSessionProvider', () => {
         },
       },
     ],
-    [
-      "another session's reply recorded here",
-      'agent_message_chunk',
-      'idle',
-      {
-        source: 'agent_message',
-        qwenDiscreteMessage: true,
-        qwenAgentMessage: {
-          kind: 'agent_message',
-          author: { agentId: 'session:kid', name: 'b · Kid' },
-          runId: 'send:kid',
-          status: 'completed',
-        },
-      },
-    ],
   ] as const)(
     'reads %s (%s) as %s',
     async (_name, sessionUpdate, expected, meta) => {
