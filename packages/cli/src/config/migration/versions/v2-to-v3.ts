@@ -103,9 +103,15 @@ export class V2ToV3Migration implements SettingsMigration {
   /**
    * Migration trigger rule.
    *
-   * Execute only when `$version === 2`.
-   * This includes V2 files with no migratable disable* booleans so that version
-   * metadata still advances to 3.
+   * Execute when `$version === 2`. This includes V2 files with no migratable
+   * disable* booleans so that version metadata still advances to 3.
+   *
+   * Also execute for a versionless file that carries any of the nested V2
+   * disable* keys, e.g. a hand-written `{ "general": { "disableAutoUpdate":
+   * true } }`. V1 -> V2 skips object-valued keys, so no earlier migration
+   * claims this shape, and the loader would otherwise stamp the current
+   * `$version` over keys nothing reads any more: the setting would be ignored
+   * for good. Same approach as V3 -> V4's versionless `gitCoAuthor` branch.
    */
   shouldMigrate(settings: unknown): boolean {
     if (typeof settings !== 'object' || settings === null) {
@@ -114,8 +120,15 @@ export class V2ToV3Migration implements SettingsMigration {
 
     const s = settings as Record<string, unknown>;
 
-    // Migrate if $version is 2
-    return s['$version'] === 2;
+    if (s['$version'] === 2) {
+      return true;
+    }
+    if (s['$version'] === undefined) {
+      return Object.keys(V2_TO_V3_BOOLEAN_MAP).some(
+        (path) => getNestedProperty(s, path) !== undefined,
+      );
+    }
+    return false;
   }
 
   /**

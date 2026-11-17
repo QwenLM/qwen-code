@@ -47,6 +47,40 @@ describe('V2ToV3Migration', () => {
       expect(migration.shouldMigrate(v1Settings)).toBe(false);
     });
 
+    it('should return true for versionless settings with a nested disable* key', () => {
+      const handWritten = {
+        general: { disableAutoUpdate: true },
+      };
+
+      expect(migration.shouldMigrate(handWritten)).toBe(true);
+    });
+
+    it('should return true for versionless settings with a deeply nested disable* key', () => {
+      const handWritten = {
+        model: { generationConfig: { disableCacheControl: false } },
+      };
+
+      expect(migration.shouldMigrate(handWritten)).toBe(true);
+    });
+
+    it('should return false for versionless settings without disable* keys', () => {
+      const handWritten = {
+        general: { enableAutoUpdate: false },
+        ui: { theme: 'dark' },
+      };
+
+      expect(migration.shouldMigrate(handWritten)).toBe(false);
+    });
+
+    it('should return false for a V3 file that still carries a disable* key', () => {
+      const v3Settings = {
+        $version: 3,
+        general: { disableAutoUpdate: true },
+      };
+
+      expect(migration.shouldMigrate(v3Settings)).toBe(false);
+    });
+
     it('should return true for V2 settings without deprecated keys', () => {
       const cleanV2Settings = {
         $version: 2,
