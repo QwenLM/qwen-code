@@ -16,7 +16,7 @@ this slice (see Scope boundaries).
 
 ## Problem
 
-The managed channel path has two adapters, email and DingTalk. WeCom is a
+The managed channel path has three adapters, email, DingTalk, and GitHub. WeCom is a
 first-class Legacy channel (intelligent bot, application callback, group
 webhook) but has no managed-path adapter, so a WeCom bot cannot route inbound
 messages into bound Managed Agent Sessions or deliver receipted replies
@@ -73,7 +73,7 @@ or reports the same segment `unknown`, never a second input and never a second
 send.
 
 - **Shared contract.** Widen `ManagedChannelAdapter` in `channel-base` to
-  `'email' | 'dingtalk' | 'wecom'` and the command factory's `adapterType`
+  `'email' | 'dingtalk' | 'github' | 'wecom'` and the command factory's `adapterType`
   union with it. This is an additive widening of a published package's type;
   no existing export changes shape.
 - **Enablement.** Add `'wecom'` to `MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS`
@@ -280,8 +280,9 @@ webhooks.
 ## Validation plan
 
 - Contract witnesses: the widened union accepts `wecom` and still accepts
-  `email` and `dingtalk`; enablement admits `wecom` and still refuses an
-  unknown adapter; the email and DingTalk suites stay green unchanged.
+  `email`, `dingtalk`, and `github`; enablement admits `wecom` and still refuses
+  an unknown adapter; the email, DingTalk, and GitHub suites stay green
+  unchanged.
 - Adapter witnesses (deps-injected, no live provider), mirroring the DingTalk
   suite: an inbound frame is admitted once and a redelivery replays; a group
   frame, a non-text frame, a frame without `msgid` and a refused sender are

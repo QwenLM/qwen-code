@@ -15,7 +15,7 @@
 
 ## 问题
 
-托管渠道路径现有 email 与 DingTalk 两个适配器。WeCom 是一等 Legacy 渠道
+托管渠道路径现有 email、DingTalk 与 GitHub 三个适配器。WeCom 是一等 Legacy 渠道
 （智能机器人、应用 callback、群 webhook），但没有托管路径适配器，因此 WeCom
 机器人无法把入站消息路由进绑定的 Managed Agent Session，也无法通过控制面的
 发件箱投递带回执的回复。共享适配器契约（`ManagedChannelAdapter`、
@@ -59,7 +59,7 @@
 第二次发送。
 
 - **共享契约。** `channel-base` 的 `ManagedChannelAdapter` 放宽为
-  `'email' | 'dingtalk' | 'wecom'`，命令工厂的 `adapterType` 联合同步放宽。这是
+  `'email' | 'dingtalk' | 'github' | 'wecom'`，命令工厂的 `adapterType` 联合同步放宽。这是
   已发布包类型的增量放宽；既有导出形状不变。
 - **启用。** core 的 `MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS` 增加 `'wecom'`，
   并更新钉死的契约测试。Java 模式已接纳该名字。
@@ -210,8 +210,8 @@ name+account key 形状；`0700` 目录内 `0600` 状态文件，原子写 + fsy
 
 ## 验证计划
 
-- 契约见证：放宽后的联合接受 `wecom` 且仍接受 `email` 与 `dingtalk`；启用接纳
-  `wecom` 且仍拒绝未知适配器；email 与 DingTalk 套件不变保持绿。
+- 契约见证：放宽后的联合接受 `wecom` 且仍接受 `email`、`dingtalk` 与 `github`；启用接纳
+  `wecom` 且仍拒绝未知适配器；email、DingTalk 与 GitHub 套件不变保持绿。
 - 适配器见证（deps 注入、无真实提供方），镜像 DingTalk 套件：入站帧准入一次且
   重投重放；群帧、非文本帧、无 `msgid` 帧与被拒发送者各带诊断丢弃；无 `chatid`
   的单聊帧按发送者 userid 路由；超长入站文本截断到线上界；保存失败丢帧并记录
