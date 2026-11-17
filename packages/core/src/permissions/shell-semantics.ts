@@ -39,13 +39,17 @@ import {
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import {
+  envSplitStringCommand,
   getShellPrefixCommand,
   MAX_SHELL_UNWRAP_DEPTH,
 } from '../utils/shell-command-prefixes.js';
 import { tokenizeShellWords as tokenize } from '../utils/shell-word-tokenizer.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
-import { removeShellLineContinuations } from './shell-command-syntax.js';
+import {
+  removeShellLineContinuations,
+  shellCommandMayChangeCwd,
+} from './shell-command-syntax.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -1985,6 +1989,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 export function extractShellOperations(
   simpleCommand: string,
   cwd: string,
+  depth = 0,
 ): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
 
@@ -2001,25 +2006,45 @@ export function extractShellOperations(
 
   while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
     tokens.shift();
+    bares.shift();
   }
 
+  const ops: ShellOperation[] = [];
   let commandIndex = 0;
   for (;;) {
+    if (tokens[commandIndex] === '!' && bares[commandIndex] === '1') {
+      commandIndex++;
+      continue;
+    }
     const prefix = getShellPrefixCommand(tokens, commandIndex);
     if (prefix === undefined) break;
+    if (prefix.splitString !== undefined) {
+      if (depth < MAX_SHELL_UNWRAP_DEPTH) {
+        const payload = envSplitStringCommand(
+          prefix.splitString,
+          tokens.slice(prefix.commandIndex),
+        );
+        if (payload !== undefined) {
+          ops.push(...walkCompoundCommand(payload, cwd, depth + 1, true));
+        }
+      }
+      commandIndex = tokens.length;
+      break;
+    }
     commandIndex = prefix.commandIndex;
   }
 
   const cmdName = tokens[commandIndex];
   if (!cmdName) {
     // Only assignments and/or redirections were present.
-    return toRedirectOperations({
-      readFiles: redirectReads,
-      writeFiles: redirectWrites,
-    });
+    return [
+      ...ops,
+      ...toRedirectOperations({
+        readFiles: redirectReads,
+        writeFiles: redirectWrites,
+      }),
+    ];
   }
-
-  const ops: ShellOperation[] = [];
 
   // Prefixes advance through the same argv; reparsing joined words would turn
   // quoted arguments such as `echo 'hi > file'` into executable redirections.
@@ -2081,7 +2106,8 @@ function resolveCdTargetCwd(
   // its marking are read from the filtered arrays.
   const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
 
-  if (words[0] === 'popd') return { kind: 'dynamic', redirects };
+  if (['popd', 'source', '.'].includes(words[0] ?? ''))
+    return { kind: 'dynamic', redirects };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
 
   if (words[0] === 'pushd') {
@@ -2127,7 +2153,12 @@ function resolveCdTargetCwd(
   return {
     kind: 'static',
     cwd: resolvePath(target, cwd, targetBare),
-    cwdUnknown: targetIsDecoded || (cwdUnknown && !isShellAbsolutePath(target)),
+    cwdUnknown:
+      targetIsDecoded ||
+      (cwdUnknown && !isShellAbsolutePath(target)) ||
+      (!!process.env['CDPATH'] &&
+        !isShellAbsolutePath(target) &&
+        !/^(?:\.|\.\.)(?:\/|$)/.test(target)),
     redirects,
   };
 }
@@ -2304,6 +2335,23 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
+interface ShellCwdState {
+  cwd: string;
+  unknown: boolean;
+}
+
+// Keep one representative path, but never grant from it when execution paths
+// disagree. This bounds the analysis regardless of the number of &&/|| joins.
+function joinCwdStates(
+  first: ShellCwdState,
+  second: ShellCwdState,
+): ShellCwdState {
+  return {
+    cwd: first.cwd,
+    unknown: first.unknown || second.unknown || first.cwd !== second.cwd,
+  };
+}
+
 function walkCompoundCommand(
   command: string,
   cwd: string,
@@ -2314,69 +2362,115 @@ function walkCompoundCommand(
   const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
 
   const ops: ShellOperation[] = [];
-  let effectiveCwd = cwd;
-  let cwdUnknown = initialCwdUnknown;
+  let succeeded: ShellCwdState = { cwd, unknown: initialCwdUnknown };
+  let failed = succeeded;
+  let listStart = succeeded;
+  let previous = '';
 
-  for (const { command: rawSub, terminator } of subCommands) {
-    const sub = stripShellCommandNegation(rawSub);
-    // `cd x & …` runs the `cd` in a background subshell, so it does not move
-    // the cwd the following segments run in. Treating it as a foreground `cd`
-    // would attribute their relative writes to the wrong directory — for
-    // `cd /tmp & echo {} > settings.json` the write lands in the *original*
-    // cwd, which is exactly where a protected settings file would be.
-    const backgrounded = terminator === '&';
+  for (let index = 0; index < subCommands.length; index++) {
+    const input =
+      previous === '&&'
+        ? succeeded
+        : previous === '||'
+          ? failed
+          : previous === '&'
+            ? listStart
+            : joinCwdStates(succeeded, failed);
+    if (previous !== '&&' && previous !== '||') listStart = input;
 
-    const cdTarget = resolveCdTargetCwd(sub, effectiveCwd, cwdUnknown);
-    if (cdTarget.kind !== 'not-cd') {
-      const redirectOps = toRedirectOperations(cdTarget.redirects);
-      ops.push(
-        ...(cwdUnknown
-          ? markCwdUnknownOps(redirectOps, sub, effectiveCwd)
-          : redirectOps),
-      );
-      if (!backgrounded) {
+    // A pipeline runs its commands in separate processes. Analyse their file
+    // effects from the pipeline's input cwd, without carrying a cd to a sibling
+    // or to the foreground list that follows it.
+    let pipelineEnd = index;
+    while (
+      ['|', '|&'].includes(subCommands[pipelineEnd]!.terminator) &&
+      pipelineEnd + 1 < subCommands.length
+    )
+      pipelineEnd++;
+    let nextSuccess = input;
+    let nextFailure = input;
+
+    for (let part = index; part <= pipelineEnd; part++) {
+      const rawSub = subCommands[part]!.command;
+      const sub = stripShellCommandNegation(rawSub);
+      const cdTarget = resolveCdTargetCwd(sub, input.cwd, input.unknown);
+      if (cdTarget.kind !== 'not-cd') {
+        const redirectOps = toRedirectOperations(cdTarget.redirects);
+        ops.push(
+          ...(input.unknown
+            ? markCwdUnknownOps(redirectOps, sub, input.cwd)
+            : redirectOps),
+        );
         if (cdTarget.kind === 'static') {
-          effectiveCwd = cdTarget.cwd;
-          cwdUnknown = cdTarget.cwdUnknown;
+          nextSuccess = { cwd: cdTarget.cwd, unknown: cdTarget.cwdUnknown };
+          nextFailure = input;
         } else {
-          cwdUnknown = true;
+          // source/. can change cwd even when the sourced command fails.
+          nextSuccess = nextFailure = { ...input, unknown: true };
+        }
+      } else {
+        // Unwrap after the outer split so sibling segments remain visible.
+        const strictPrefix = stripShellCommandPrefixes(sub);
+        const unprefixed =
+          strictPrefix ?? stripShellCommandPrefixes(sub, true) ?? sub;
+        const subCwdUnknown = input.unknown || strictPrefix === undefined;
+        const subOps = extractShellOperations(sub, input.cwd, depth);
+        ops.push(
+          ...(subCwdUnknown
+            ? markCwdUnknownOps(subOps, sub, input.cwd)
+            : subOps),
+        );
+        const unwrapped = stripShellWrapper(unprefixed);
+        if (unwrapped !== unprefixed) {
+          if (depth < MAX_SHELL_UNWRAP_DEPTH) {
+            ops.push(
+              ...walkCompoundCommand(
+                unwrapped,
+                input.cwd,
+                depth + 1,
+                subCwdUnknown,
+              ),
+            );
+          } else {
+            shellSemanticsDebugLogger.warn(
+              `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
+            );
+          }
+          // An explicit child shell cannot change the parent's cwd.
+          nextSuccess = nextFailure = input;
+        } else {
+          nextSuccess = nextFailure = shellCommandMayChangeCwd(sub)
+            ? { ...input, unknown: true }
+            : input;
         }
       }
-      continue;
-    }
 
-    // Unwrap per segment, after the outer split, so wrapper suffixes like
-    // `bash -lc 'safe' && echo > file` are not discarded.
-    const unprefixed = stripShellCommandPrefixes(sub) ?? sub;
-    if (depth < MAX_SHELL_UNWRAP_DEPTH) {
-      const subUnwrapped = stripShellWrapper(unprefixed);
-      if (subUnwrapped !== unprefixed) {
-        const outerOps = extractShellOperations(sub, effectiveCwd);
-        ops.push(
-          ...(cwdUnknown
-            ? markCwdUnknownOps(outerOps, sub, effectiveCwd)
-            : outerOps),
-          ...walkCompoundCommand(
-            subUnwrapped,
-            effectiveCwd,
-            depth + 1,
-            cwdUnknown,
-          ),
-        );
-        continue;
+      if (sub.startsWith('(') && sub.endsWith(')')) {
+        // A complete parenthesized segment is a subshell, not a parent cd.
+        nextSuccess = nextFailure = input;
+      } else if (
+        (rawSub.slice(0, rawSub.length - sub.length).match(/!/g)?.length ?? 0) %
+        2
+      ) {
+        [nextSuccess, nextFailure] = [nextFailure, nextSuccess];
       }
-    } else if (stripShellWrapper(unprefixed) !== unprefixed) {
-      shellSemanticsDebugLogger.warn(
-        `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
-      );
     }
+    if (pipelineEnd !== index) nextSuccess = nextFailure = input;
 
-    const subOps = extractShellOperations(sub, effectiveCwd);
-    if (cwdUnknown) {
-      ops.push(...markCwdUnknownOps(subOps, sub, effectiveCwd));
+    // && / || are left associative. Carry the branch that skipped this command
+    // into the appropriate result, rather than treating the final cd as certain.
+    if (previous === '&&') {
+      failed = joinCwdStates(nextFailure, failed);
+      succeeded = nextSuccess;
+    } else if (previous === '||') {
+      succeeded = joinCwdStates(nextSuccess, succeeded);
+      failed = nextFailure;
     } else {
-      ops.push(...subOps);
+      succeeded = nextSuccess;
+      failed = nextFailure;
     }
+    previous = subCommands[pipelineEnd]!.terminator;
+    index = pipelineEnd;
   }
 
   return ops;

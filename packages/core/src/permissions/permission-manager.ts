@@ -9,6 +9,7 @@ import {
   parseRule,
   matchesRule,
   matchesCommandPattern,
+  hasUnsupportedShellSyntax,
   hasAmbiguousMcpGrant,
   resolveToolName,
   splitCompoundCommand,
@@ -27,12 +28,11 @@ import {
 import {
   getShellConfiguration,
   normalizeMonitorCommand,
-  stripShellCommandPrefixes,
 } from '../utils/shell-utils.js';
-import { tokenizeShellWords } from '../utils/shell-word-tokenizer.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   removeShellLineContinuations,
+  shellCommandMayChangeCwd,
   staticShellCommand,
 } from './shell-command-syntax.js';
 import {
@@ -68,44 +68,7 @@ function compoundContexts(
       SHELL_TOOL_NAMES.has(ctx.toolName) &&
       getShellConfiguration().shell === 'bash'
     ) {
-      const unprefixed = stripShellCommandPrefixes(command) ?? command;
-      let first = staticShellCommand(unprefixed)?.words.split(' ')[0];
-      if (!first) {
-        const bares: string[] = [];
-        const expansions = new Set<number>();
-        const tokens = tokenizeShellWords(
-          unprefixed,
-          undefined,
-          undefined,
-          bares,
-          true,
-          expansions,
-        );
-        const dynamic = tokens.findIndex((_, index) => expansions.has(index));
-        // Arguments after an expansion cannot identify the command. Preserve
-        // leading redirects and quoting while inspecting the static prefix.
-        const prefix = tokens
-          .slice(0, dynamic < 0 ? tokens.length : dynamic)
-          .map(
-            (word, index) =>
-              word
-                .split('')
-                .map((character, offset) =>
-                  bares[index]![offset] === '1'
-                    ? character
-                    : `'${character.replaceAll("'", "'\\''")}'`,
-                )
-                .join('') || "''",
-          )
-          .join(' ');
-        first = staticShellCommand(prefix)?.words.split(' ')[0];
-      }
-      const name = first?.replace(/%([0-9a-f]{4})/g, (_, unit: string) =>
-        String.fromCharCode(Number.parseInt(unit, 16)),
-      );
-      cwdUnknown ||=
-        name === undefined ||
-        ['cd', 'pushd', 'popd', 'source', '.'].includes(name);
+      cwdUnknown ||= shellCommandMayChangeCwd(command);
     }
     return next;
   });
@@ -594,7 +557,11 @@ export class PermissionManager {
         if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
           return 'ask';
       }
-      if (this.hasUncertainShellRedirect(ctx)) return 'ask';
+      if (
+        this.hasUncertainShellRedirect(ctx) ||
+        this.hasUnmodeledRestrictedFileEffects(ctx)
+      )
+        return 'ask';
       // Priority 3: allow rules
       for (const rule of [
         ...this.activeSessionAllowRules(),
@@ -652,7 +619,7 @@ export class PermissionManager {
 
   private hasUncertainShellRedirect(ctx: ShellRuleContext): boolean {
     const { command } = ctx;
-    if (!ctx.cwdUnknown || !command) return false;
+    if (!command) return false;
     const actual = staticShellCommand(command);
     return [
       ...this.sessionRules.deny,
@@ -668,7 +635,7 @@ export class PermissionManager {
         return false;
       const expected = staticShellCommand(rule.specifier, true);
       if (!expected?.redirects.length) return false;
-      if (!actual) return /[<>]/.test(command);
+      if (!actual) return !!ctx.cwdUnknown && /[<>]/.test(command);
       return (
         matchesCommandPattern(expected.words, actual.words) &&
         expected.redirects.some((redirect) =>
@@ -676,10 +643,15 @@ export class PermissionManager {
             (candidate) =>
               (candidate.kind === redirect.kind ||
                 candidate.kind === 'readwrite') &&
-              // The static view encodes a literal leading slash as %002f.
-              ((!redirect.target.startsWith('%002f') &&
-                !redirect.target.startsWith('*')) ||
-                !candidate.target.startsWith('%002f')),
+              // A parent component cannot be collapsed lexically across a
+              // possible symlink. Keep a relevant restriction unresolved.
+              (/(?:^|%002f)%002e%002e(?:%002f|$)/.test(candidate.target) ||
+                /(?:^|%002f)%002e%002e(?:%002f|$)/.test(redirect.target) ||
+                // The static view encodes a literal leading slash as %002f.
+                (ctx.cwdUnknown &&
+                  ((!redirect.target.startsWith('%002f') &&
+                    !redirect.target.startsWith('*')) ||
+                    !candidate.target.startsWith('%002f')))),
           ),
         )
       );
@@ -744,6 +716,19 @@ export class PermissionManager {
     ].some(
       (rule) =>
         !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
+  }
+
+  private hasUnmodeledRestrictedFileEffects(ctx: ShellRuleContext): boolean {
+    // An unmodelled shell can still touch files covered by an explicit rule.
+    // Keep that restriction relevant even when no Bash allow matches; otherwise
+    // callers can skip this manager and retain their default allow decision.
+    return (
+      SHELL_TOOL_NAMES.has(ctx.toolName) &&
+      ctx.command !== undefined &&
+      (this.hasDenyOrAskRuleForTool('read_file') ||
+        this.hasDenyOrAskRuleForTool('write_file')) &&
+      hasUnsupportedShellSyntax(ctx.command)
     );
   }
 
@@ -1406,13 +1391,22 @@ export class PermissionManager {
 
     return (
       this.hasUncertainShellRedirect(ctx) ||
+      this.hasUnmodeledRestrictedFileEffects(ctx) ||
       restrictiveRules.some((rule) =>
         matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
       ) ||
       allowRules.some(
         (rule) =>
-          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
-          !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity),
+          // A syntactically vetoed shell allow still requires evaluation.
+          // Otherwise callers skip this manager and inherit their L3 allow.
+          // Restrictive matching is used for relevance only, never approval.
+          matchesRule(
+            rule,
+            ...matchArgs,
+            undefined,
+            mcpIdentity,
+            SHELL_TOOL_NAMES.has(toolName),
+          ) && !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity),
       )
     );
   }
@@ -1465,7 +1459,7 @@ export class PermissionManager {
           if (
             op.cwdUnknown &&
             op.pathMayDependOnCwd &&
-            this.hasAskRuleForTool(op.virtualTool)
+            this.hasDenyOrAskRuleForTool(op.virtualTool)
           ) {
             return true;
           }
@@ -1515,16 +1509,10 @@ export class PermissionManager {
 
     return (
       this.hasUncertainShellRedirect(ctx) ||
+      this.hasUnmodeledRestrictedFileEffects(ctx) ||
       askRules.some((rule) =>
         matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
       )
-    );
-  }
-
-  private hasAskRuleForTool(toolName: string): boolean {
-    return [...this.sessionRules.ask, ...this.persistentRules.ask].some(
-      (rule) =>
-        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
     );
   }
 

@@ -23,8 +23,13 @@ import {
   stripShellCommandPrefixes,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
-import { MAX_SHELL_UNWRAP_DEPTH } from '../utils/shell-command-prefixes.js';
+import {
+  MAX_SHELL_UNWRAP_DEPTH,
+  SHELL_ASSIGNMENT_PREFIX,
+  SHELL_EXECUTION_ENV_VARIABLE,
+} from '../utils/shell-command-prefixes.js';
 import { tokenizeShellWords } from '../utils/shell-word-tokenizer.js';
+import { ShellCommentContext } from '../utils/shell-comment-context.js';
 
 import {
   maskConstantArithmetic,
@@ -1096,7 +1101,8 @@ function findOperatorBoundaries(
   let inAnsiC = false;
   let dollarPending = false;
   let escaped = false;
-  let wordStart = true;
+  const comments = new ShellCommentContext();
+  let retainedCommentEnd = -1;
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
@@ -1106,10 +1112,39 @@ function findOperatorBoundaries(
     const ansiCIntroducer: boolean = dollarPending;
     dollarPending = false;
 
+    if (i === retainedCommentEnd) {
+      boundaries.push({ start: i, end: i + 1, operator: '\n' });
+      inSingle = false;
+      inDouble = false;
+      inAnsiC = false;
+      escaped = false;
+      arithmeticDepth = 0;
+      retainedCommentEnd = -1;
+      continue;
+    }
     if (escaped) {
       escaped = false;
-      wordStart = false;
       continue;
+    }
+    const comment = comments.read(
+      command,
+      i,
+      inSingle,
+      inDouble || arithmeticDepth > 0,
+    );
+    if (comment && i === comment.start) {
+      if (respectComments) {
+        boundaries.push({
+          start: i,
+          end: Math.min(comment.end + 1, command.length),
+          operator: comment.end < command.length ? '\n' : '',
+        });
+        i = comment.end;
+        continue;
+      }
+      // Retain the conservative reading of comment text, but its backslashes
+      // and quotes cannot consume the next executable physical line.
+      retainedCommentEnd = comment.end;
     }
     // In bash a backslash is literal inside a plain `'…'` (so `'a\'` closes)
     // but escapes inside ANSI-C `$'…'` (so `$'a\''` closes at the third quote).
@@ -1118,59 +1153,26 @@ function findOperatorBoundaries(
       (reading === 'escape-everywhere' || !(inSingle && !inAnsiC))
     ) {
       // `$\⏎'…'` is still ANSI-C, so the pending `$` survives a continuation.
-      if (command[i + 1] === '\n') {
+      if (command[i + 1] === '\n' && i + 1 !== retainedCommentEnd) {
         dollarPending = ansiCIntroducer;
         i++;
         continue;
       }
       escaped = true;
-      wordStart = false;
-      continue;
-    }
-    // Parameter expansion has its own word grammar, including spaces and
-    // hashes. Keep the remaining text when this scanner cannot certify it.
-    if (!inSingle && ch === '$' && command[i + 1] === '{') {
-      respectComments = false;
-    }
-    // Only the Bash reading may discard comments; the alternative reading
-    // can add operator boundaries, but cannot erase executable text.
-    if (
-      respectComments &&
-      !inSingle &&
-      !inDouble &&
-      arithmeticDepth === 0 &&
-      ch === '#' &&
-      wordStart
-    ) {
-      const newline = command.indexOf('\n', i);
-      boundaries.push({
-        start: i,
-        end: newline < 0 ? command.length : newline + 1,
-        operator: newline < 0 ? '' : '\n',
-      });
-      if (newline < 0) break;
-      i = newline;
-      wordStart = true;
       continue;
     }
     if (ch === "'" && !inDouble) {
       inAnsiC = inSingle ? false : ansiCIntroducer;
       inSingle = !inSingle;
-      wordStart = false;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
-      wordStart = false;
       continue;
     }
     if (inSingle || inDouble) {
-      wordStart = false;
       continue;
     }
-    // Only an unquoted, unescaped whitespace boundary certifies a comment.
-    // Operators and closing expansion syntax may still belong to a word.
-    wordStart = /[ \t\n]/.test(ch);
     if (ch === '$') {
       // The second `$` of `$$` (the PID) cannot open `$'…'`.
       dollarPending = !ansiCIntroducer;
@@ -1212,7 +1214,6 @@ function findOperatorBoundaries(
         continue;
       }
       boundaries.push({ start: i, end: i + op.length, operator: op });
-      wordStart = op === '\n';
       i += op.length - 1; // -1 because the loop will i++
       break;
     }
@@ -1298,11 +1299,50 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
   if (detectCommandSubstitution(substitutionView)) return true;
   // Match the tracker's per-segment shell unwrapping, including its depth cap.
   for (const segment of splitCompoundCommand(command, true)) {
+    // CDPATH can send a relative cd outside the tracked cwd. A shell-local
+    // assignment persists for later segments, so this is not transparent.
+    for (const word of tokenizeShellWords(segment)) {
+      if (!SHELL_ASSIGNMENT_PREFIX.test(word)) break;
+      if (SHELL_EXECUTION_ENV_VARIABLE.test(word)) return true;
+    }
     const unprefixed = stripShellCommandPrefixes(segment);
     if (unprefixed === undefined) return true;
-    const firstWord = tokenizeShellWords(unprefixed)[0];
+    if (
+      tokenizeShellWords(
+        unprefixed,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      ).includes('')
+    )
+      return true;
+    const words = tokenizeShellWords(unprefixed);
+    const firstWord = words[0];
     if (
       firstWord === 'eval' ||
+      // Enabling shopt options (notably lastpipe) changes pipeline scope.
+      // Queries remain ordinary commands; dynamic enabling flags are unknown.
+      (firstWord === 'shopt' &&
+        words
+          .slice(1)
+          .some((word) => /^-[^-]*s/.test(word) || word.includes('$'))) ||
+      // printf -v can assign CDPATH or a nameref; its output is shell state.
+      (firstWord === 'printf' && words[1]?.startsWith('-v')) ||
+      ([
+        'export',
+        'declare',
+        'typeset',
+        'local',
+        'readonly',
+        'unset',
+        'read',
+        'mapfile',
+        'readarray',
+      ].includes(firstWord ?? '') &&
+        words
+          .slice(1)
+          .some((word) => SHELL_EXECUTION_ENV_VARIABLE.test(word))) ||
       hasUnmodeledShellCommandString(unprefixed) ||
       firstWord?.split('/').at(-1) === 'xargs' ||
       /^[^\s()]+\s*\(\s*\)/.test(unprefixed) ||
@@ -1352,10 +1392,23 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
   // Only an empty token or a bare 1/2 can precede a supported operator.
   let token: '' | '1' | '2' | undefined = '';
   let redirectTarget: 'pending' | 'word' | undefined;
+  const comments = new ShellCommentContext();
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
     const ansiCQuote =
       character === '$' ? /^\$(?:\\\n)*'/.exec(command.slice(index)) : null;
+    const comment = comments.read(
+      command,
+      index,
+      quote === "'" || quote === "$'",
+      quote === '"',
+    );
+    if (comment) {
+      index = comment.end;
+      token = '';
+      if (redirectTarget === 'word') redirectTarget = undefined;
+      continue;
+    }
     if (redirectTarget === 'pending' && !/[ \t\n]/.test(character)) {
       if (
         /^~[^/ \t\n'"\\;&|<>(){}]+(?=\/|[ \t\n;&|<>(){}]|$)/.test(
@@ -1409,10 +1462,6 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
     } else if (/[ \t\n]/.test(character)) {
       token = '';
       if (redirectTarget === 'word') redirectTarget = undefined;
-    } else if (character === '#' && token === '') {
-      const newline = command.indexOf('\n', index);
-      if (newline < 0) break;
-      index = newline;
     } else if (
       character === '<' ||
       character === '>' ||
@@ -1555,7 +1604,15 @@ function matchesStaticShellCommand(
   if (
     !expected ||
     !actual ||
-    !matchesCommandText(expected.words, actual.words)
+    !matchesCommandText(
+      expected.words,
+      // Empty argument words cannot erase a restrictive command pattern.
+      // Keep an empty first word: it must never promote argv[1] to executable.
+      actual.words
+        .split(' ')
+        .filter((word, index) => index === 0 || word !== '')
+        .join(' '),
+    )
   ) {
     return false;
   }

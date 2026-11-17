@@ -310,6 +310,18 @@ describe('isCommandAllowed', () => {
         await expectAllowed('echo hello # $(rm -rf /)');
       });
 
+      it.each([
+        "echo $${x # don't\ncat $(printf /tmp/protected)",
+        "echo $$\\\n{x # don't\ncat $(printf /tmp/protected)",
+        'echo $$$\\\n{x:- #$(printf /tmp/protected)}',
+        'echo $\\\n{x:- #$(printf /tmp/protected)}',
+      ])(
+        'keeps PID and parameter introductions distinct in %s',
+        async (command) => {
+          await expectSubstitutionBlocked(command);
+        },
+      );
+
       it('should not treat # inside a word as a comment starter', async () => {
         await expectSubstitutionBlocked('echo foo#$(rm -rf /)');
       });
@@ -1004,11 +1016,11 @@ describe('normalizeMonitorCommand', () => {
     );
   });
 
-  it('unwraps shell wrappers with option operands for safety analysis', () => {
+  it('retains shell option operands in the safety command', () => {
     expectNormalized(
       `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
       'echo $(cat secret.txt)',
-      'echo $(cat secret.txt)',
+      `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
     );
   });
 

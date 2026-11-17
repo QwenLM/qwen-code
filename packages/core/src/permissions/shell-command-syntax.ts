@@ -5,18 +5,31 @@
  */
 
 import { tokenizeShellWords } from '../utils/shell-word-tokenizer.js';
+import { stripShellCommandPrefixes } from '../utils/shell-utils.js';
 import { SHELL_ASSIGNMENT_PREFIX } from '../utils/shell-command-prefixes.js';
+import { ShellCommentContext } from '../utils/shell-comment-context.js';
 
 /** Remove Bash continuations without changing literal single-quoted text. */
 export function removeShellLineContinuations(command: string): string {
   let result = '';
   let quote = '';
   let pendingDollar = false;
-  let wordStart = true;
+  const comments = new ShellCommentContext();
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
     const afterDollar: boolean = pendingDollar;
     pendingDollar = false;
+    const comment = comments.read(
+      command,
+      index,
+      quote === "'" || quote === "$'",
+      quote === '"',
+    );
+    if (comment) {
+      result += command.slice(index, comment.end + 1);
+      index = comment.end;
+      continue;
+    }
     if (character === '\\' && quote !== "'") {
       if (command[index + 1] === '\n' && quote !== "$'") {
         pendingDollar = afterDollar;
@@ -25,15 +38,6 @@ export function removeShellLineContinuations(command: string): string {
       }
       result += character;
       if (index + 1 < command.length) result += command[++index];
-      wordStart = false;
-      continue;
-    }
-    if (!quote && character === '#' && wordStart) {
-      const end = command.indexOf('\n', index);
-      if (end < 0) return result + command.slice(index);
-      result += command.slice(index, end + 1);
-      index = end;
-      wordStart = true;
       continue;
     }
     result += character;
@@ -46,7 +50,6 @@ export function removeShellLineContinuations(command: string): string {
     } else if (character === '$') {
       pendingDollar = !afterDollar;
     }
-    wordStart = !quote && /[ \t\n;&|()<>]/.test(character);
   }
   return result;
 }
@@ -128,6 +131,48 @@ interface ShellWord {
   hasExpansion: boolean;
 }
 
+/** Shared cwd invalidation for the Bash matcher and virtual-operation tracker. */
+export function shellCommandMayChangeCwd(command: string): boolean {
+  const unprefixed = stripShellCommandPrefixes(command) ?? command;
+  let first = staticShellCommand(unprefixed)?.words.split(' ')[0];
+  if (!first) {
+    const bares: string[] = [];
+    const expansions = new Set<number>();
+    const tokens = tokenizeShellWords(
+      unprefixed,
+      undefined,
+      undefined,
+      bares,
+      true,
+      expansions,
+    );
+    const dynamic = tokens.findIndex((_, index) => expansions.has(index));
+    // Only the static prefix can identify the executable. Keep the original
+    // redirect and quote markings when an argument after it expands.
+    const prefix = tokens
+      .slice(0, dynamic < 0 ? tokens.length : dynamic)
+      .map(
+        (word, index) =>
+          word
+            .split('')
+            .map((character, offset) =>
+              bares[index]![offset] === '1'
+                ? character
+                : `'${character.replaceAll("'", "'\\''")}'`,
+            )
+            .join('') || "''",
+      )
+      .join(' ');
+    first = staticShellCommand(prefix)?.words.split(' ')[0];
+  }
+  const name = first?.replace(/%([0-9a-f]{4})/g, (_, unit: string) =>
+    String.fromCharCode(Number.parseInt(unit, 16)),
+  );
+  return (
+    name === undefined || ['cd', 'pushd', 'popd', 'source', '.'].includes(name)
+  );
+}
+
 export interface StaticShellCommand {
   words: string;
   redirects: Array<{ kind: 'read' | 'write' | 'readwrite'; target: string }>;
@@ -179,7 +224,7 @@ export function staticShellCommand(
         pieces.push({ text: prefix, bare: prefixBare, hasExpansion });
       }
       const syntax = text
-        .slice(index)
+        .slice(index, index + 3)
         .split('')
         .map((char, offset) => (bare[index + offset] === '1' ? char : '\0'))
         .join('');

@@ -787,10 +787,19 @@ describe('extractShellOperationsAcrossCommand', () => {
       "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
       [write(REPO_SETTINGS)],
     ],
+    // A newline does not prove cd succeeded. Keep the successful path as a
+    // representative, with uncertainty only affecting relative file targets.
     [
       'splits literal newlines as command boundaries',
       'cd .qwen\ncp /tmp/malicious settings.json',
-      [read('/tmp/malicious'), write(REPO_SETTINGS)],
+      [
+        {
+          ...read('/tmp/malicious'),
+          cwdUnknown: true,
+          pathMayDependOnCwd: false,
+        },
+        uncertainWrite(REPO_SETTINGS),
+      ],
     ],
     [
       'tracks cwd through brace-grouped commands',
@@ -811,12 +820,12 @@ describe('extractShellOperationsAcrossCommand', () => {
         'EOF',
         'echo > settings.json',
       ].join('\n'),
-      [write(REPO_SETTINGS)],
+      [uncertainWrite(REPO_SETTINGS)],
     ],
     [
       'does not treat quoted heredoc-looking text as a heredoc marker',
       ["echo '<<EOF'", 'cd .qwen', "echo '{}' > settings.json"].join('\n'),
-      [write(REPO_SETTINGS)],
+      [uncertainWrite(REPO_SETTINGS)],
     ],
     [
       'handles `cd --` and other POSIX flag forms before the target',
@@ -887,7 +896,11 @@ describe('extractShellOperationsAcrossCommand', () => {
     [
       'preserves operation order across compound segments',
       'echo a > one.txt && cd sub && echo b > two.txt; cat /etc/hosts',
-      [write('/repo/one.txt'), write('/repo/sub/two.txt'), read('/etc/hosts')],
+      [
+        write('/repo/one.txt'),
+        write('/repo/sub/two.txt'),
+        { ...read('/etc/hosts'), cwdUnknown: true, pathMayDependOnCwd: false },
+      ],
     ],
     [
       'returns no ops when only `cd` segments are present',
