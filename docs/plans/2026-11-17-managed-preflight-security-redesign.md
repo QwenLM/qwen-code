@@ -15,7 +15,10 @@ Work in this same worktree directory in a NEW session (do not `--resume` the lar
 JDK 21 and Maven >= 3.8.9. Use a task-isolated Maven repository and install the sibling SDK from this checkout first:
 
 ```
-cp -Rc ~/.m2/repository /tmp/preflight-m2
+# Plain copy works everywhere; prefer a copy-on-write clone when available:
+#   macOS (APFS): cp -Rc ~/.m2/repository /tmp/preflight-m2
+#   Linux (GNU):  cp -R --reflink=auto ~/.m2/repository /tmp/preflight-m2
+cp -R ~/.m2/repository /tmp/preflight-m2
 mvn -Dmaven.repo.local=/tmp/preflight-m2 -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 ```
 

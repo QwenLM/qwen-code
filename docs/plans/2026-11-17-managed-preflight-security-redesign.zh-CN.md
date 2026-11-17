@@ -15,7 +15,10 @@
 JDK 21 与 Maven >= 3.8.9。使用任务隔离的 Maven 仓库，并先从本 checkout 安装 sibling SDK：
 
 ```
-cp -Rc ~/.m2/repository /tmp/preflight-m2
+# 普通拷贝跨平台可用；有条件时优先写时克隆：
+#   macOS (APFS): cp -Rc ~/.m2/repository /tmp/preflight-m2
+#   Linux (GNU):  cp -R --reflink=auto ~/.m2/repository /tmp/preflight-m2
+cp -R ~/.m2/repository /tmp/preflight-m2
 mvn -Dmaven.repo.local=/tmp/preflight-m2 -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 ```
 

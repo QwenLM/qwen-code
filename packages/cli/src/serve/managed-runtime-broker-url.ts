@@ -51,10 +51,9 @@ function canonicalHost(rawHost: string, parsedHostname: string): boolean {
       lower === parsedHostname
     );
   }
-  // An xn-- label is left to the URL parser's IDNA, which may keep or refuse it.
-  if (labels.some((label) => label.startsWith('xn--'))) {
-    return true;
-  }
+  // An xn-- label is left to the URL parser's IDNA, which may keep or refuse
+  // it; a kept punycode label still has to match the raw spelling, so a
+  // U-label elsewhere in the same host is not smuggled through.
   return lower === parsedHostname;
 }
 
@@ -83,15 +82,17 @@ export function resolveManagedRuntimeBrokerBaseUrl(raw: string): URL {
       throw new Error(INVALID);
     }
   }
-  if (rawPath !== undefined && rawPath !== '/') {
-    throw new Error(NOT_ORIGIN);
-  }
+  // Parse first: a host the running parser's IDNA refuses is invalid, not a
+  // path problem, and the verdict must not depend on path-before-parse order.
   const url = parseOrNull(raw);
   if (url === null) {
     throw new Error(INVALID);
   }
   if (!canonicalHost(rawHost, url.hostname)) {
     throw new Error(INVALID);
+  }
+  if (rawPath !== undefined && rawPath !== '/') {
+    throw new Error(NOT_ORIGIN);
   }
   if (url.protocol === 'http:' && !isLoopbackBind(url.hostname)) {
     throw new Error(

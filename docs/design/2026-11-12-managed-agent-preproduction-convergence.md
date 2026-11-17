@@ -87,8 +87,10 @@ Counts below are whole-repository scans; figures affected by the tier-1 merges
 - **preflight.** 4,393 production lines across 5 files plus 5,513 test lines
   across 6 files (~9,900 total) serve `--check`: `ServerEnvironment` (1,095,
   `StackWalker` format sniffing at :229), `ManagedAgentPreflight` (2,486,
-  `YamlWalk` comment AST at :794), `HarnessBrokerUrl` (410, WHATWG subset shared
-  with `packages/cli/src/serve/managed-runtime-broker-url.fixtures.json`),
+  `YamlWalk` comment AST at :794), `HarnessBrokerUrl` (410 at this pre-change
+  baseline, a WHATWG subset shared with
+  `packages/cli/src/serve/managed-runtime-broker-url.fixtures.json`; ~215 after
+  the Slice 6 canonical gate, #17510),
   `ServiceAccount` (194, user-space `namei`).
 - **Packaging.** A single `exec` repackage remains (#17064 removed the six
   classifier fat-JAR executions; the operator tools survive as admin

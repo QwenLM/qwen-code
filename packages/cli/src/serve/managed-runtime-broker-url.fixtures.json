@@ -101,6 +101,7 @@
       "hostname": "[::1]",
       "port": 80
     },
+    { "url": "http://[::1]:4182/broker", "verdict": "not-origin" },
     { "url": "http://::1:4182", "verdict": "invalid" },
     { "url": "http://[::1:4182", "verdict": "invalid" },
     {
@@ -132,11 +133,14 @@
     { "url": "http://127.0.0.1:99999", "verdict": "invalid" },
     { "url": "http://127.0.0.1:", "verdict": "invalid" },
     { "url": "http://127.0.0.1:0", "verdict": "invalid" },
+    { "url": "http://127.0.0.1:99999999999999999999", "verdict": "invalid" },
     { "url": "http://127.0.0.1:port", "verdict": "invalid" },
     { "url": "https://qwen_broker:port", "verdict": "invalid" },
     { "url": "http://192.0.2.7:4182", "verdict": "plain-outside-loopback" },
     { "url": "http://qwen_broker:4182", "verdict": "plain-outside-loopback" },
     { "url": "http://localhost.:4182", "verdict": "invalid" },
+    { "url": "https://broker.example.:8443", "verdict": "invalid" },
+    { "url": "https://localhost.:8443", "verdict": "invalid" },
     { "url": "http://128.0.0.1:4182", "verdict": "plain-outside-loopback" },
     { "url": "127.0.0.1:4182", "verdict": "invalid" },
     { "url": "localhost:4182", "verdict": "not-origin" },
