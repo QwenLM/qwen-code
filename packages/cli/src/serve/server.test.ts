@@ -8,6 +8,7 @@ import { existsSync, realpathSync, promises as fsp } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { createServer, type ServerResponse } from 'node:http';
+import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import {
@@ -243,6 +244,8 @@ import {
 } from './live/types.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
+import { EventBus } from '@qwen-code/acp-bridge/eventBus';
+import { TEST_TLS_CERT, TEST_TLS_KEY } from './test-tls-cert.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
@@ -46543,19 +46546,199 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     }
   });
 
-  it('evicts an idle SSE writer with a terminal client_evicted frame', async () => {
-    // Bridge yields nothing, ever — simulating an idle stream where
-    // the only writes the timer would observe are the SSE handshake
-    // (`retry: 3000`) and (eventually) the 15s heartbeat. With a
-    // 200ms idle deadline the timer must fire well before the
-    // heartbeat refreshes `lastWriteAt`. Expected terminal frame:
-    // `client_evicted` with the new `reason: 'writer_idle_timeout'`.
+  it('evicts a writer stalled on drain with a terminal client_evicted frame', async () => {
+    // The consumer stopped reading: force `res.write` to return false on
+    // the first event frame and swallow the chunk so no natural `drain`
+    // can ever fire. The unresolved-stall stamp set in the backpressure
+    // branch must trip the reaper after the budget. Expected terminal
+    // frame: `client_evicted` with `reason: 'writer_idle_timeout'`.
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        // Swallow the frame AND report backpressure: the kernel buffer
+        // stays empty, so the reader below cannot provoke a natural
+        // `drain` — the stall is permanent, exactly like a frozen peer.
+        forcedStall = true;
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+
+      const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+      expect(res.status).toBe(200);
+
+      // Read until we see the eviction frame OR the stream closes. The
+      // 1500ms budget is well below the 15s heartbeat so a regression
+      // that disables the idle timer would still fail loudly here.
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let evictedData: unknown;
+      const deadline = Date.now() + 1_500;
+      while (Date.now() < deadline) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const raw = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
+          // Parse the frame; look for event: client_evicted.
+          let eventName = '';
+          let dataLine = '';
+          for (const line of raw.split('\n')) {
+            if (line.startsWith('event: ')) eventName = line.slice(7);
+            else if (line.startsWith('data: ')) dataLine = line.slice(6);
+          }
+          if (eventName === 'client_evicted') {
+            evictedData = JSON.parse(dataLine);
+            break;
+          }
+        }
+        if (evictedData !== undefined) break;
+      }
+      await reader.cancel().catch(() => undefined);
+
+      // Pin the precondition: the eviction must come from a REAL
+      // backpressure stall, not from the healthy-idle path.
+      expect(forcedStall).toBe(true);
+      expect(evictedData).toBeDefined();
+      expect(evictedData).toMatchObject({
+        v: 1,
+        type: 'client_evicted',
+        data: {
+          reason: 'writer_idle_timeout',
+          errorKind: 'writer_idle_timeout',
+          timeoutMs: 200,
+        },
+      });
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('RSTs the socket and frees the slot when the eviction frame write throws', async () => {
+    // When the terminal frame cannot be queued at all (write THROWS —
+    // e.g. the socket already errored), the eviction must RST the socket
+    // via resetAndDestroy() so the slot is freed; a graceful end would
+    // queue a FIN a stalled peer never ACKs (FIN-WAIT-1 linger). The
+    // buffered-frame case (write returns false) is covered by the
+    // paused-resume regression below.
+    const http = await import('node:http');
+    const net = await import('node:net');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall) {
+        // The terminal frame cannot be queued at all: the write throws
+        // (socket already errored). That is the immediate-RST branch.
+        if (text.includes('event: client_evicted')) {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        }
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    try {
+      const beforeActive = getActiveSseCount();
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+      expect(res.status).toBe(200);
+      expect(getActiveSseCount()).toBe(beforeActive + 1);
+
+      // Past the 200ms budget + the 250ms polling floor.
+      await new Promise((r) => setTimeout(r, 800));
+
+      expect(forcedStall).toBe(true);
+      expect(resetSpy).toHaveBeenCalled();
+      expect(getActiveSseCount()).toBe(beforeActive);
+      await res.body!.cancel().catch(() => undefined);
+    } finally {
+      writeSpy.mockRestore();
+      resetSpy.mockRestore();
+    }
+  });
+
+  it('does NOT evict a healthy idle stream even with a small explicit budget', async () => {
+    // Discriminating pin for the stall-based semantics: the reaper keys
+    // on an unresolved `drain` stall, NOT on the last successful flush.
+    // A healthy idle stream (event delivered, heartbeats flushing) must
+    // survive a 200ms budget — the pre-fix "no successful write for n ms"
+    // semantics evicted it here, which is exactly the footgun that made
+    // operators leave the flag off and let stalled writers accumulate.
     const bridge = fakeBridge({
-      // eslint-disable-next-line require-yield
       async *subscribeImpl(_sessionId, _opts) {
-        // Park forever; the test triggers eviction via the timer.
-        // No yield: the test asserts that the daemon's idle-timeout
-        // path fires even when the bridge produces zero frames.
+        yield { id: 1, v: 1, type: 'session_update', data: { ok: true } };
         await new Promise(() => {});
       },
     });
@@ -46572,57 +46755,48 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
 
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
-
-    // Read until we see the eviction frame OR the stream closes. The
-    // 1500ms budget is well below the 15s heartbeat so a regression
-    // that disables the idle timer would still fail loudly here.
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buf = '';
-    let evictedData: unknown;
-    const deadline = Date.now() + 1_500;
+    let sawFirstEvent = false;
+    let sawEviction = false;
+    const deadline = Date.now() + 700;
     while (Date.now() < deadline) {
-      const { value, done } = await reader.read();
+      const readPromise = reader.read();
+      const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
+        setTimeout(
+          () => r({ value: undefined, done: false }),
+          Math.max(0, deadline - Date.now() + 10),
+        );
+      });
+      const { value, done } = (await Promise.race([readPromise, wakeup])) as {
+        value: Uint8Array | undefined;
+        done: boolean;
+      };
       if (done) break;
+      if (value === undefined) break;
       buf += decoder.decode(value, { stream: true });
       let idx: number;
       while ((idx = buf.indexOf('\n\n')) !== -1) {
         const raw = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
         if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
-        // Parse the frame; look for event: client_evicted.
-        let eventName = '';
-        let dataLine = '';
         for (const line of raw.split('\n')) {
-          if (line.startsWith('event: ')) eventName = line.slice(7);
-          else if (line.startsWith('data: ')) dataLine = line.slice(6);
-        }
-        if (eventName === 'client_evicted') {
-          evictedData = JSON.parse(dataLine);
-          break;
+          if (line.startsWith('event: session_update')) sawFirstEvent = true;
+          if (line.startsWith('event: client_evicted')) sawEviction = true;
         }
       }
-      if (evictedData !== undefined) break;
     }
     await reader.cancel().catch(() => undefined);
 
-    expect(evictedData).toBeDefined();
-    expect(evictedData).toMatchObject({
-      v: 1,
-      type: 'client_evicted',
-      data: {
-        reason: 'writer_idle_timeout',
-        errorKind: 'writer_idle_timeout',
-        timeoutMs: 200,
-      },
-    });
+    expect(sawFirstEvent).toBe(true);
+    expect(sawEviction).toBe(false);
   });
 
-  it('does not evict when the writer idle timeout is unset (legacy contract)', async () => {
-    // Without `writerIdleTimeoutMs`, the existing 15s-heartbeat-only
-    // behavior must be preserved bit-for-bit. We open a stream, read
-    // a real event, then wait ~600ms — no client_evicted frame may
-    // appear in that window.
+  it('does not evict a healthy stream when the flag is unset (default reaper targets stalls only)', async () => {
+    // With the default-on reaper (60s stall budget), a healthy stream
+    // must be unaffected: we open a stream, read a real event, then wait
+    // ~600ms — no client_evicted frame may appear in that window.
     const bridge = fakeBridge({
       async *subscribeImpl(_sessionId, _opts) {
         yield { id: 1, v: 1, type: 'session_update', data: { ok: true } };
@@ -46677,13 +46851,13 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     expect(sawEviction).toBe(false);
   });
 
-  it('does NOT evict when active writes keep refreshing lastWriteAt (#4514 T2.9 wenshao review)', async () => {
-    // wenshao flagged that the existing "fires when idle" + "doesn't
-    // fire when unset" tests don't cover the case where REAL writes
-    // (event yields, not just heartbeats) refresh `lastWriteAt`
-    // inside `doWrite`. With idle timeout = 300ms and an event every
-    // 100ms, the timer should keep deferring — the connection stays
-    // alive even past several timeout cycles.
+  it('does NOT evict while real writes keep flushing without backpressure (#4514 T2.9 wenshao review)', async () => {
+    // wenshao flagged that the "fires when stalled" + "doesn't fire
+    // when unset" tests don't cover an ACTIVE stream. With a 300ms
+    // stall budget and an event every 100ms, every write flushes
+    // synchronously (no unresolved drain stall), so the reaper must
+    // keep deferring — the connection stays alive even past several
+    // budget cycles.
     const bridge = fakeBridge({
       async *subscribeImpl(_sessionId, _opts) {
         // Yield 5 events at ~100ms intervals — well below the 300ms
@@ -46714,10 +46888,9 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
 
-    // Read for ~700ms — long enough that an IDLE writer would have
-    // been evicted twice over (300ms timeout, polled every ~250ms),
-    // but the per-100ms event stream refreshes lastWriteAt before the
-    // check fires.
+    // Read for ~700ms — several 300ms budget cycles. Every per-100ms
+    // event write flushes synchronously, so no unresolved drain stall
+    // ever exists and the reaper must not fire.
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buf = '';
@@ -49861,3 +50034,909 @@ it.each(['patch', 'delete', 'delete-workspace'] as const)(
     }
   },
 );
+
+describe('SSE listener-slot exhaustion guard (daemon stability)', () => {
+  let handle: RunHandle | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+  });
+
+  function parkedBridge() {
+    return fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        // Park forever: the stream stays open until the client cancels,
+        // occupying one listener slot exactly like a production SSE client.
+        await new Promise(() => {});
+      },
+    });
+  }
+
+  async function openStream(port: number, sessionId: string) {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/${sessionId}/events`,
+    );
+    expect(res.status).toBe(200);
+    return res;
+  }
+
+  it('rejects SSE overflow with 503 + Retry-After while /health stays reachable', async () => {
+    // Listener cap 10 ⇒ derived SSE cap floor(10 × 0.8) = 8. Eight parked
+    // streams saturate the SSE quota; the ninth must get an explicit 503
+    // (not a silent accept-time socket close), and short requests must
+    // still be served through the reserved listener headroom.
+    const beforeActive = getActiveSseCount();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const streams: Response[] = [];
+    for (let i = 0; i < 8; i++) {
+      streams.push(await openStream(port, `sess-cap-${i}`));
+    }
+    expect(getActiveSseCount()).toBe(beforeActive + 8);
+
+    const overflow = await fetch(
+      `http://127.0.0.1:${port}/session/sess-overflow/events`,
+    );
+    expect(overflow.status).toBe(503);
+    expect(overflow.headers.get('retry-after')).toBe('5');
+    const overflowBody = (await overflow.json()) as {
+      code: string;
+      limit: number;
+      active: number;
+    };
+    expect(overflowBody.code).toBe('sse_connection_limit_exceeded');
+    expect(overflowBody.limit).toBe(8);
+    expect(overflowBody.active).toBe(8);
+
+    // The whole point of the cap: the diagnostic surface stays alive
+    // while the SSE fleet is saturated.
+    const health = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(health.status).toBe(200);
+    const caps = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(caps.status).toBe(200);
+
+    // Freeing one slot readmits the next stream.
+    await streams[0]!.body!.cancel();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(getActiveSseCount()).toBe(beforeActive + 7);
+    const readmitted = await openStream(port, 'sess-readmitted');
+    await readmitted.body!.cancel();
+    for (const stream of streams.slice(1)) {
+      await stream.body!.cancel();
+    }
+  });
+
+  it('reports the derived SSE cap and live occupancy in daemon status', async () => {
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const statusRes = await fetch(
+      `http://127.0.0.1:${port}/daemon/status?detail=full`,
+    );
+    expect(statusRes.status).toBe(200);
+    const status = (await statusRes.json()) as {
+      limits: { listenerMaxConnections: number; maxSseConnections: number };
+      runtime: { transport: { restSseActive: number } };
+    };
+    expect(status.limits.listenerMaxConnections).toBe(256);
+    expect(status.limits.maxSseConnections).toBe(204);
+    const beforeActive = status.runtime.transport.restSseActive;
+
+    const stream = await openStream(port, 'sess-status');
+    const afterRes = await fetch(
+      `http://127.0.0.1:${port}/daemon/status?detail=full`,
+    );
+    const after = (await afterRes.json()) as {
+      runtime: { transport: { restSseActive: number } };
+    };
+    expect(after.runtime.transport.restSseActive).toBe(beforeActive + 1);
+    await stream.body!.cancel();
+  });
+
+  it('honors an explicit maxSseConnections override and the disabled sentinels', async () => {
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+        maxSseConnections: 5,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const status = (await (
+      await fetch(`http://127.0.0.1:${port}/daemon/status?detail=full`)
+    ).json()) as { limits: { maxSseConnections: number | null } };
+    expect(status.limits.maxSseConnections).toBe(5);
+    await handle.close();
+    handle = undefined;
+
+    // Listener cap disabled ⇒ SSE cap disabled too (operator opted out of
+    // connection bounding entirely).
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 0,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port2 = (handle.server.address() as { port: number }).port;
+    const status2 = (await (
+      await fetch(`http://127.0.0.1:${port2}/daemon/status?detail=full`)
+    ).json()) as { limits: { maxSseConnections: number | null } };
+    expect(status2.limits.maxSseConnections).toBeNull();
+  });
+
+  it('reports SSE occupancy and cap on the deep health probe', async () => {
+    const beforeActive = getActiveSseCount();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const stream = await openStream(port, 'sess-health');
+    const deep = (await (
+      await fetch(`http://127.0.0.1:${port}/health?deep=1`)
+    ).json()) as {
+      connectedClients: number;
+      connectedClientsMax: number | null;
+    };
+    expect(deep.connectedClients).toBe(beforeActive + 1);
+    expect(deep.connectedClientsMax).toBe(8);
+    await stream.body!.cancel();
+  });
+
+  it.each([-1, Number.NaN])(
+    'rejects invalid maxSseConnections (%s) at boot',
+    async (value) => {
+      await expect(
+        runQwenServe(
+          {
+            hostname: '127.0.0.1',
+            port: 0,
+            mode: 'http-bridge',
+            maxSseConnections: value,
+          },
+          { bridge: parkedBridge() },
+        ),
+      ).rejects.toThrow(/maxSseConnections/);
+    },
+  );
+
+  it('enables TCP keepalive on accepted sockets', async () => {
+    const net = await import('node:net');
+    const spy = vi.spyOn(net.Socket.prototype, 'setKeepAlive');
+    try {
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge: fakeBridge() },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalledWith(true, 30_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('HTTPS SSE eviction force-close (TLS regression)', () => {
+  // TLSSocket inherits net.Socket.resetAndDestroy, but its TLSWrap handle
+  // rejects the call with ERR_INVALID_HANDLE_TYPE WITHOUT closing anything.
+  // A force-close helper that only tries resetAndDestroy() therefore leaks
+  // the TLS connection (and its listener/SSE slot) on every eviction path.
+  // These regressions drive REAL HTTPS servers with paused clients and
+  // assert the socket closes and both connection counts return to baseline.
+  let handle: RunHandle | undefined;
+  let tlsDir: string | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+    if (tlsDir) {
+      await fsp.rm(tlsDir, { recursive: true, force: true });
+      tlsDir = undefined;
+    }
+  });
+
+  async function startTlsServe(
+    opts: Partial<ServeOptions>,
+    bridge: ReturnType<typeof fakeBridge>,
+  ) {
+    tlsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qws-tls-sse-'));
+    const tlsCert = path.join(tlsDir, 'cert.pem');
+    const tlsKey = path.join(tlsDir, 'key.pem');
+    await fsp.writeFile(tlsCert, TEST_TLS_CERT);
+    await fsp.writeFile(tlsKey, TEST_TLS_KEY);
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        tlsCert,
+        tlsKey,
+        ...opts,
+      },
+      { bridge },
+    );
+    return (handle.server.address() as { port: number }).port;
+  }
+
+  function openPausedHttpsStream(
+    port: number,
+    path_: string,
+    deadlineMs = 2500,
+  ) {
+    // Resolves with the first close/abort/error signal the client sees;
+    // 'timeout' means the server never closed the connection. The client
+    // stays paused for the whole call (it never resumes), so it holds a
+    // zero receive window; callers that must outlast the 5s force-close
+    // fallback pass a larger deadlineMs.
+    return new Promise<string>((resolve) => {
+      const req = https.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: path_,
+          rejectUnauthorized: false,
+          agent: false,
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            resolve(`status:${res.statusCode}`);
+            res.resume();
+            return;
+          }
+          res.pause();
+          res.on('close', () => resolve('res-close'));
+          res.on('aborted', () => resolve('res-aborted'));
+          res.on('error', (e) => resolve(`res-error:${e.code}`));
+        },
+      );
+      req.on('error', (e) => resolve(`req-error:${e.code}`));
+      req.end();
+      setTimeout(() => resolve('timeout'), deadlineMs).unref();
+    });
+  }
+
+  async function serverConnectionCount(): Promise<number> {
+    return new Promise((resolve) => {
+      handle!.server.getConnections((_err, count) => resolve(count));
+    });
+  }
+
+  async function expectCountsReleased(beforeActive: number): Promise<void> {
+    // The client sees the RST before the server-side TLSSocket 'close'
+    // propagates to finalize(), so poll for convergence instead of
+    // asserting synchronously. A leaked slot never converges and the
+    // final expectations fail with the actual counts.
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline) {
+      if (
+        getActiveSseCount() === beforeActive &&
+        (await serverConnectionCount()) === 0
+      ) {
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(getActiveSseCount()).toBe(beforeActive);
+    expect(await serverConnectionCount()).toBe(0);
+  }
+
+  it('writer-timeout eviction closes the TLS socket and frees the slot', async () => {
+    // Write-throw simulation: after the first stalled write, the reaper's
+    // terminal-frame write THROWS (socket already errored), so eviction
+    // takes the immediate force-close branch — the exact path that threw
+    // ERR_INVALID_HANDLE_TYPE on TLSSocket. The buffered-frame case (write
+    // returning false) takes the graceful branch and is covered by the
+    // paused-resume regression below.
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall) {
+        // Terminal frame write throws → immediate-RST branch on TLS.
+        if (text.includes('event: client_evicted')) {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        }
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    try {
+      const beforeActive = getActiveSseCount();
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+          await new Promise(() => {});
+        },
+      });
+      const port = await startTlsServe({ writerIdleTimeoutMs: 200 }, bridge);
+      const outcome = await openPausedHttpsStream(
+        port,
+        '/session/sess-A/events',
+      );
+      expect(forcedStall).toBe(true);
+      expect(outcome).not.toBe('timeout');
+      expect(outcome).not.toMatch(/^status:/);
+      await expectCountsReleased(beforeActive);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('EventBus overflow eviction closes the TLS socket and frees the slot', async () => {
+    // Real EventBus, real queue overflow: a paused HTTPS client with
+    // maxQueued=16 while 1MiB frames are published. The overflow
+    // diagnostic drives the route's client_evicted + force-close path.
+    const bus = new EventBus();
+    const bridge = fakeBridge();
+    (bridge as unknown as { subscribeEvents: unknown }).subscribeEvents = (
+      _sessionId: string,
+      opts: Parameters<EventBus['subscribe']>[0],
+    ) => bus.subscribe(opts);
+    try {
+      const beforeActive = getActiveSseCount();
+      const port = await startTlsServe({}, bridge);
+      const outcomePromise = openPausedHttpsStream(
+        port,
+        '/session/sess-A/events?maxQueued=16',
+      );
+      // Wait for the subscription to attach before publishing.
+      const attachDeadline = Date.now() + 2000;
+      while (bus.subscriberCount === 0 && Date.now() < attachDeadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(bus.subscriberCount).toBe(1);
+      const payload = 'x'.repeat(1024 * 1024);
+      for (let i = 0; i < 40; i++) {
+        bus.publish({ type: 'session_update', data: { i, payload } });
+      }
+      const outcome = await outcomePromise;
+      expect(outcome).not.toBe('timeout');
+      expect(outcome).not.toMatch(/^status:/);
+      await expectCountsReleased(beforeActive);
+    } finally {
+      bus.close();
+    }
+  });
+
+  it('RSTs the underlying TCP socket (_parent) on TLS eviction via the fallback', async () => {
+    // Pins the TLS _parent RST fallback specifically (verify-pr F1 / M7).
+    // Real kernel backpressure (8MiB replay) + a client that stays paused
+    // (never resumes), so eviction takes the graceful branch and the 5s
+    // forceCloseSseResponse fallback is the only thing that can close the
+    // zero-window peer. On TLS the helper's own resetAndDestroy() throws
+    // (ERR_INVALID_HANDLE_TYPE); the RST must land on the underlying TCP
+    // socket (_parent.resetAndDestroy). Deleting the _parent fallback (M7)
+    // leaves only TLSSocket.destroy(), so no plain net.Socket is reset —
+    // this assertion turns red. (The client-side error code does NOT
+    // discriminate: TLSSocket.destroy() also surfaces ECONNRESET; the
+    // property pinned here is the server-side parent RST.)
+    //
+    // The peer is kept paused and we POLL the spy for the parent reset
+    // instead of resuming on a fixed timer (review R4-1): a fixed resume
+    // races the 5s fallback — if a loaded runner delays the reaper tick, the
+    // resume drains the replay first and the graceful close cancels the
+    // fallback, failing correct code. Polling observes the actual RST.
+    const net = await import('node:net');
+    const tls = await import('node:tls');
+    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
+    try {
+      const beforeActive = getActiveSseCount();
+      const blob = 'x'.repeat(8 * 1024 * 1024);
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { blob } };
+          await new Promise(() => {});
+        },
+      });
+      const port = await startTlsServe({ writerIdleTimeoutMs: 200 }, bridge);
+      // Shared paused-client handshake (review R4-2); it stays paused, and
+      // the deadline sits comfortably past the 5s fallback even if the
+      // reaper tick is delayed on a loaded runner. The client is kept paused
+      // for the whole test (backpressure); afterEach handle.close() reaps it.
+      const outcomePromise = openPausedHttpsStream(
+        port,
+        '/session/sess-A/events',
+        13_000,
+      );
+      const parentReset = () =>
+        resetSpy.mock.instances.some((s) => !(s instanceof tls.TLSSocket));
+      const deadline = Date.now() + 12_000;
+      while (!parentReset() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // The fallback must have RST'd the underlying TCP socket: at least one
+      // resetAndDestroy call whose receiver is a plain net.Socket (the
+      // _parent), not the TLSSocket whose own call throws. This server-side
+      // spy is the authoritative signal — a truly paused zero-window client
+      // does not process the RST until it resumes, so its close/error is not
+      // asserted here.
+      expect(parentReset()).toBe(true);
+      await expectCountsReleased(beforeActive);
+      // Let the paused client settle so it does not leak into the next test.
+      await outcomePromise;
+    } finally {
+      resetSpy.mockRestore();
+    }
+  }, 25_000);
+});
+
+describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () => {
+  let handle: RunHandle | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+    vi.restoreAllMocks();
+  });
+
+  async function expectCountReleased(beforeActive: number): Promise<void> {
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      if (getActiveSseCount() === beforeActive) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(getActiveSseCount()).toBe(beforeActive);
+  }
+
+  it('delivers the terminal eviction frame to a client that pauses then resumes', async () => {
+    // Real kernel backpressure: an 8MiB event fills the send buffer while
+    // the client pauses. res.write() returning false means the chunk WAS
+    // buffered — the reaper must end gracefully (bounded RST fallback) so
+    // a consumer that resumes reads event: client_evicted before EOF,
+    // not ECONNRESET (review R1-7).
+    const beforeActive = getActiveSseCount();
+    const blob = 'x'.repeat(8 * 1024 * 1024);
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: { blob } };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 200,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const http = await import('node:http');
+    const outcome = await new Promise<{
+      sawEvicted: boolean;
+      done: boolean;
+      error?: string;
+    }>((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/session/sess-A/events',
+          agent: false,
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            resolve({
+              sawEvicted: false,
+              done: false,
+              error: `status:${res.statusCode}`,
+            });
+            res.resume();
+            return;
+          }
+          let buf = '';
+          let sawEvicted = false;
+          let resumed = false;
+          res.pause();
+          setTimeout(() => {
+            resumed = true;
+            res.resume();
+          }, 600).unref();
+          res.on('data', (c) => {
+            if (!resumed) return;
+            buf += c.toString();
+            if (
+              buf.includes('event: client_evicted') &&
+              buf.includes('writer_idle_timeout')
+            ) {
+              sawEvicted = true;
+            }
+          });
+          res.on('end', () => resolve({ sawEvicted, done: true }));
+          res.on('error', (e) =>
+            resolve({ sawEvicted, done: false, error: e.code }),
+          );
+        },
+      );
+      req.on('error', (e) =>
+        resolve({ sawEvicted: false, done: false, error: e.code }),
+      );
+      req.end();
+      setTimeout(
+        () => resolve({ sawEvicted: false, done: false, error: 'timeout' }),
+        5000,
+      ).unref();
+    });
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.done).toBe(true);
+    expect(outcome.sawEvicted).toBe(true);
+    await expectCountReleased(beforeActive);
+  });
+
+  it('frees the slot via the 5s RST fallback when a buffered-frame eviction peer never resumes', async () => {
+    // Graceful branch (review R2-1), driven by REAL kernel backpressure: an
+    // 8MiB replay fills the send buffer while the client pauses and NEVER
+    // resumes. The terminal frame write returns false naturally (buffered,
+    // not thrown), so the route ends gracefully and arms the 5s
+    // forceCloseSseResponse fallback. The zero-window peer never ACKs the
+    // FIN queued behind the unsent replay, 'close' never fires on its own,
+    // and that timer is the only path that RSTs the socket so
+    // 'close' -> finalize -> activeSseCount-- releases the listener slot.
+    // Deleting the setTimeout(..., 5_000) fallback must turn this red (the
+    // FIN-WAIT-1 leak this PR exists to fix would otherwise ship green).
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    // Observing spy only (calls through to the real write): pins that the
+    // terminal frame was BUFFERED (write returned false), i.e. the graceful
+    // branch was taken — not the write-throw immediate-RST branch.
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let evictionFrameBuffered = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const wrote =
+        typeof encodingOrCb === 'function'
+          ? originalWrite.call(this, chunk, encodingOrCb)
+          : originalWrite.call(this, chunk, encodingOrCb, cb);
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (text.includes('event: client_evicted') && wrote === false) {
+        evictionFrameBuffered = true;
+      }
+      return wrote;
+    });
+    try {
+      const beforeActive = getActiveSseCount();
+      const blob = 'x'.repeat(8 * 1024 * 1024);
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { blob } };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      // Paused client that NEVER resumes; the fallback RST (~5s after the
+      // ~250ms eviction) is what closes it. 8s ceiling > 5s fallback.
+      const outcome = await new Promise<string>((resolve) => {
+        const req = http.request(
+          {
+            hostname: '127.0.0.1',
+            port,
+            path: '/session/sess-A/events',
+            agent: false,
+          },
+          (res) => {
+            if (res.statusCode !== 200) {
+              resolve(`status:${res.statusCode}`);
+              res.resume();
+              return;
+            }
+            res.pause();
+            res.on('close', () => resolve('res-close'));
+            res.on('error', (e) => resolve(`res-error:${e.code}`));
+          },
+        );
+        req.on('error', (e) => resolve(`req-error:${e.code}`));
+        req.end();
+        setTimeout(() => resolve('timeout'), 8000).unref();
+      });
+      expect(evictionFrameBuffered).toBe(true);
+      // The paused client never resumes, so it does not process the RST
+      // until resume (known measurement artifact) — its outcome may be
+      // 'timeout'. The SERVER-side counters are authoritative: the 8s wait
+      // above outlasts the 5s fallback, which must have RST'd and freed the
+      // slot. Removing the fallback leaves the socket in FIN-WAIT-1 and
+      // these counts held (red).
+      expect(outcome).not.toMatch(/^status:/);
+      await expectCountReleased(beforeActive);
+      await expect(
+        new Promise<number>((resolve) =>
+          handle!.server.getConnections((_err, count) => resolve(count)),
+        ),
+      ).resolves.toBe(0);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it('arms the reaper at the default budget when no flag is set', async () => {
+    // Pins default-on ARMING behaviorally: opening a stream with no
+    // explicit budget must register the reaper's polling interval
+    // (60000/4 = 5000ms), and ticking it under a permanent stall must
+    // evict. Reverting the arm gate to explicit-flag-only ships green
+    // without this test (review R1-6 revert 1).
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall && !text.includes('event: client_evicted')) {
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const beforeActive = getActiveSseCount();
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const baseline5k = intervalSpy.mock.calls.filter(
+      (c) => c[1] === 5000,
+    ).length;
+    const idxBeforeOpen = intervalSpy.mock.calls.length;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const stallDeadline = Date.now() + 2000;
+    while (!forcedStall && Date.now() < stallDeadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(forcedStall).toBe(true);
+
+    const new5k = intervalSpy.mock.calls
+      .slice(idxBeforeOpen)
+      .filter((c) => c[1] === 5000);
+    // The default 60s budget polls at 5000ms; arming must add exactly
+    // one such interval for this stream.
+    expect(new5k.length).toBe(1);
+    expect(intervalSpy.mock.calls.filter((c) => c[1] === 5000).length).toBe(
+      baseline5k + 1,
+    );
+
+    // Advance the reaper's clock past the default budget and tick the
+    // newly armed callback manually (no 60s real-time wait).
+    const nowSpy = vi
+      .spyOn(performance, 'now')
+      .mockReturnValue(performance.now() + 70_000);
+    try {
+      (new5k[0][0] as () => void)();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    let sawEvicted = false;
+    const readDeadline = Date.now() + 2000;
+    let buf = '';
+    const WAKE = Symbol('wake');
+    while (Date.now() < readDeadline && !sawEvicted) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<typeof WAKE>((r) => setTimeout(() => r(WAKE), 200)),
+      ]);
+      if (chunk === WAKE) continue;
+      if (chunk.done) break;
+      buf += new TextDecoder().decode(chunk.value);
+      if (buf.includes('event: client_evicted')) sawEvicted = true;
+    }
+    await reader.cancel().catch(() => undefined);
+    expect(sawEvicted).toBe(true);
+    await expectCountReleased(beforeActive);
+  });
+
+  it('evicts a heartbeat-only stall when no events are ever yielded', async () => {
+    // For a phantom client that yields no events, the 15s heartbeat is
+    // the only write that can ever observe the stall. Routing the
+    // heartbeat through a plain write that bypasses backpressure would
+    // ship green without this test (review R1-6 revert 2).
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.startsWith(': heartbeat')) {
+        // Heartbeat reports backpressure and is swallowed: the stall
+        // stamp must be set by the heartbeat itself.
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall && !text.includes('event: client_evicted')) {
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    const beforeActive = getActiveSseCount();
+    const bridge = fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 200,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    let sawEvicted = false;
+    let streamEnded = false;
+    let buf = '';
+    // First heartbeat at 15s; eviction within the next poll window.
+    const deadline = Date.now() + 18_000;
+    const WAKE = Symbol('wake');
+    while (Date.now() < deadline && !sawEvicted) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<typeof WAKE>((r) => setTimeout(() => r(WAKE), 500)),
+      ]);
+      if (chunk === WAKE) continue;
+      if (chunk.done) {
+        streamEnded = true;
+        break;
+      }
+      buf += new TextDecoder().decode(chunk.value);
+      if (
+        buf.includes('event: client_evicted') &&
+        buf.includes('writer_idle_timeout')
+      ) {
+        sawEvicted = true;
+      }
+    }
+    await reader.cancel().catch(() => undefined);
+    // The heartbeat stall must trigger the reaper: the stream closes
+    // (frame delivery to a reading client is pinned by the
+    // paused-resume regression) and the SSE slot is released.
+    expect(forcedStall).toBe(true);
+    expect(sawEvicted || streamEnded).toBe(true);
+    await expectCountReleased(beforeActive);
+  }, 25_000);
+
+  it('honors maxSseConnections: 0 as unlimited', async () => {
+    // The documented opt-out must not start enforcing a cap of 1
+    // (review R1-6 revert 3).
+    const beforeActive = getActiveSseCount();
+    const bridge = fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxSseConnections: 0,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const status = (await (
+      await fetch(`http://127.0.0.1:${port}/daemon/status?detail=full`)
+    ).json()) as { limits: { maxSseConnections: number | null } };
+    expect(status.limits.maxSseConnections).toBeNull();
+    const first = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(first.status).toBe(200);
+    const second = await fetch(
+      `http://127.0.0.1:${port}/session/sess-B/events`,
+    );
+    expect(second.status).toBe(200);
+    expect(getActiveSseCount()).toBe(beforeActive + 2);
+    await first.body!.cancel();
+    await second.body!.cancel();
+  });
+});

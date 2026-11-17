@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.27.4",
+  "version": "0.28.0",
   "packageManager": "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000",
   "engines": {
     "node": ">=22.0.0"
@@ -36,7 +36,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.27.4"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.28.0"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -71,6 +71,7 @@
     "test:e2e:managed-continuation-failover": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover",
     "test:e2e:managed-big-output": "tsx scripts/run-managed-agent-server-e2e.ts --big-output",
     "test:e2e:managed-loop-skill": "tsx scripts/run-managed-agent-server-e2e.ts --loop-skill",
+    "test:e2e:managed-loop-fire": "tsx scripts/run-managed-agent-server-e2e.ts --loop-fire",
     "test:e2e:managed-harness-restart-failover": "tsx scripts/run-managed-agent-server-e2e.ts --session-failover --harness-only",
     "test:e2e:managed-harness-restart-inflight-failover": "tsx scripts/run-managed-agent-server-e2e.ts --inflight-failover --harness-only",
     "test:e2e:managed-harness-restart-continuation-failover": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only",
