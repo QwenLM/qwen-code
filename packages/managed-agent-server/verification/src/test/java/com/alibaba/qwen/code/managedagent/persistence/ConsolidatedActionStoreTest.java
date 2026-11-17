@@ -125,7 +125,8 @@ class ConsolidatedActionStoreTest {
                 ManagedReceipts.actorScope(actor), "create", "create-digest", "CREATE_SESSION", actor,
                 "session", null, "COMPLETED", null, true, 0);
         assertThatThrownBy(() -> transactions.execute(status -> actions.admit(
-                "tenant", "session", "actor", "actor-digest", "response", "request", ACTION, response("allow"), 10)))
+                "tenant", "session", null, "actor", "actor-digest", "response", "request", ACTION,
+                response("allow"), 10)))
                 .isInstanceOfSatisfying(ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("action_forbidden"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Long.class)).isZero();
@@ -141,7 +142,7 @@ class ConsolidatedActionStoreTest {
     }
 
     private StoreModels.OperationAdmission admit(String key, String digest, JsonNode response) {
-        return transactions.execute(status -> actions.admit("tenant", "session", null, "anonymous", key, digest, ACTION, response, 10));
+        return transactions.execute(status -> actions.admit("tenant", "session", null, null, "anonymous", key, digest, ACTION, response, 10));
     }
 
     private void project(String state, JsonNode answer, long sequence) throws Exception {

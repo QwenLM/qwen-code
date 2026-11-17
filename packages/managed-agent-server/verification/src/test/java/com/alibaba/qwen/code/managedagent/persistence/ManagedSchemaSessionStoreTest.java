@@ -60,6 +60,11 @@ public class ManagedSchemaSessionStoreTest {
                         new JdbcManagedWorkspaceRegistry(jdbc),
                         new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         tenant = "tenant-" + UUID.randomUUID();
+        // This create writes the immutable ma_session_principal row: under the
+        // unified ownership contract (94958d032422d, "unify unbound Session
+        // authority under the ownership row") a present row is the sole
+        // authority, so the mutations below must carry the owning actor — an
+        // actorless caller answers 404 by design.
         session =
                 tx.execute(
                                 status ->
@@ -617,7 +622,8 @@ public class ManagedSchemaSessionStoreTest {
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload"))
+                                                "payload",
+                                                "actor"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));
@@ -725,7 +731,8 @@ public class ManagedSchemaSessionStoreTest {
                                                 "digest",
                                                 session,
                                                 List.of(),
-                                                "payload"))
+                                                "payload",
+                                                "actor"))
                         .turnId();
         tx.execute(
                 status -> store.claimTurn(tenant, session, turn, "owner", Duration.ofMinutes(1)));

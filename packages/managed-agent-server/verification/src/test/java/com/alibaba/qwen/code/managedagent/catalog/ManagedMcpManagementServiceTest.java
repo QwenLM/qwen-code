@@ -8,6 +8,8 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpManagementCo
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpServerPin;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -23,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -38,6 +41,18 @@ class ManagedMcpManagementServiceTest {
     @BeforeEach
     void setUp() {
         when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
+        // submit/get/operation read the visibility gate first; without a
+        // readable Workspace Session every call NPEs on the unstubbed return.
+        when(session.workspace()).thenReturn(new ContextBinding("tenant", "workspace", 1,
+                "workspace", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1));
+        when(sessions.requireReadableSession(
+                any(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class),
+                eq("session"))).thenReturn(session);
+        when(sessions.requireReadableSession(eq("tenant"),
+                any(com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class),
+                eq("session"))).thenReturn(session);
+        when(sessions.requireReadableSession(eq("tenant"), nullable(String.class),
+                eq("session"))).thenReturn(session);
         when(store.requireMcpManagement(eq("tenant"), anyString(), eq("session"), any())).thenReturn(session);
         when(harness.supportsMcpManagement()).thenReturn(true);
         when(harness.supportsLifecycle("hosted-workspace-shell/1")).thenReturn(true);
@@ -45,7 +60,7 @@ class ManagedMcpManagementServiceTest {
     }
 
     @Test
-    void keysOneCommandByActorSessionAndIdempotencyKeyWithoutCopyingRecipes() {
+    void keysOneCommandByActorSessionAndIdempotencyKeyWithoutCopyingRecipes() throws Exception {
         var command = new ManagedMcpManagementCommand("add", "docs", 0L,
                 new ManagedMcpServerPin("docs", 2, "a".repeat(64)));
         service.submit("tenant", "actor", "session", "key", command);
@@ -59,6 +74,27 @@ class ManagedMcpManagementServiceTest {
         assertThat(values.get(2).get("operationId")).isNotEqualTo(values.get(0).get("operationId"));
         assertThat(values.get(0)).containsOnlyKeys("operationId", "actorKey", "action", "serverId", "expectedRevision", "server");
         assertThat(((Map<?, ?>) values.get(0).get("server")).keySet()).isEqualTo(Set.of("serverId", "serverRevision", "definitionDigest"));
+        // A subjectless principal must keep the exact pre-ownership identity
+        // so keys recorded before the subject column existed still replay.
+        String legacy = java.util.UUID.nameUUIDFromBytes(new ObjectMapper().writeValueAsBytes(
+                List.of("managed-mcp-command", "tenant", "actor", "session", "key"))).toString();
+        assertThat(values.get(0).get("operationId")).isEqualTo(legacy);
+    }
+
+    @Test
+    void onlyAnActualSubjectForksTheCommandIdentity() {
+        var command = new ManagedMcpManagementCommand("add", "docs", 0L,
+                new ManagedMcpServerPin("docs", 2, "a".repeat(64)));
+        service.submit("tenant", "actor", "session", "key", command);
+        var withSubject = new com.alibaba.qwen.code.managedagent.model.SessionPrincipal("tenant", "actor", "subject");
+        service.submit(withSubject, "session", "key", command);
+        service.submit(withSubject, "session", "key", command);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> requests = ArgumentCaptor.forClass(Map.class);
+        verify(harness, org.mockito.Mockito.times(3)).manageMcp(eq("tenant"), eq("session"), requests.capture());
+        var values = requests.getAllValues();
+        assertThat(values.get(1)).isEqualTo(values.get(2));
+        assertThat(values.get(1).get("operationId")).isNotEqualTo(values.get(0).get("operationId"));
     }
 
     @Test

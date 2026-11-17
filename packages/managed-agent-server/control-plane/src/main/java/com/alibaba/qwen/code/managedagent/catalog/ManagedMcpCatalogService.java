@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.catalog;
 
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -24,6 +25,15 @@ public class ManagedMcpCatalogService {
 
     public JsonNode get(String tenantId, String actorId, String sessionId) {
         sessions.requireReadableSession(tenantId, actorId, sessionId);
+        return catalog(tenantId, sessionId);
+    }
+
+    public JsonNode get(SessionPrincipal principal, String sessionId) {
+        sessions.requireReadableSession(principal, sessionId);
+        return catalog(principal.tenantId(), sessionId);
+    }
+
+    private JsonNode catalog(String tenantId, String sessionId) {
         Map<String, JsonNode> latest = new LinkedHashMap<>();
         for (JsonNode record : records.listRecords(tenantId, sessionId, "mcp_configuration")) {
             latest.merge(record.get("serverId").textValue(), record, (previous, next) -> {

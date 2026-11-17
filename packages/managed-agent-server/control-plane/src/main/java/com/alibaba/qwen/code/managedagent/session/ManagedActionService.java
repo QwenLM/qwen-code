@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore;
@@ -73,7 +74,21 @@ public class ManagedActionService {
 
     public PublicActionList listPublic(
             String tenant, String actor, String session, String cursor, int limit) {
-        List<Action> rows = page(tenant, actor, session, cursor, limit);
+        return listPublic(tenant, null, actor, session, cursor, limit);
+    }
+
+    public PublicActionList listPublic(
+            SessionPrincipal principal, String session, String cursor, int limit) {
+        return listPublic(principal == null ? null : principal.tenantId(),
+                principal, principal == null ? null : principal.userId(),
+                session, cursor, limit);
+    }
+
+    // The tenant stays explicit so an anonymous caller still reads inside its
+    // own tenant; the read grant admits a legacy no-row Session tenant-wide.
+    private PublicActionList listPublic(String tenant, SessionPrincipal principal,
+            String rawActor, String session, String cursor, int limit) {
+        List<Action> rows = page(tenant, principal, rawActor, session, cursor, limit);
         boolean more = rows.size() > limit;
         List<Action> page = rows.subList(0, Math.min(limit, rows.size()));
         return new PublicActionList(
@@ -84,25 +99,55 @@ public class ManagedActionService {
 
     public PublicActionList listPublic(String tenant, String actor, String session,
             String cursor, int limit, boolean includeChildren) {
+        return listPublic(tenant, null, actor, session, cursor, limit,
+                includeChildren);
+    }
+
+    public PublicActionList listPublic(SessionPrincipal principal, String session,
+            String cursor, int limit, boolean includeChildren) {
+        return listPublic(principal == null ? null : principal.tenantId(),
+                principal, principal == null ? null : principal.userId(),
+                session, cursor, limit, includeChildren);
+    }
+
+    private PublicActionList listPublic(String tenant, SessionPrincipal principal,
+            String rawActor, String session, String cursor, int limit,
+            boolean includeChildren) {
         if (!includeChildren) {
-            return listPublic(tenant, actor, session, cursor, limit);
+            return listPublic(tenant, principal, rawActor, session, cursor, limit);
         }
-        var rows = childPage(tenant, actor, session, cursor, limit);
+        var rows = childPage(tenant, principal, rawActor, session, cursor, limit);
         boolean more = rows.size() > limit;
         var page = rows.subList(0, Math.min(limit, rows.size()));
-        return new PublicActionList(page.stream().map(row -> view(tenant, row.sessionId(), row.action(), false)).toList(),
+        return new PublicActionList(page.stream().map(row -> view(tenant,
+                row.sessionId(), row.action(), false)).toList(),
                 more, more ? childCursor(tenant, session, page.getLast()) : null);
     }
 
     public WebShellPage<JsonNode> listWebShell(String tenant, String actor, String session,
             String cursor, int limit, boolean includeChildren) {
+        return listWebShell(tenant, null, actor, session, cursor, limit,
+                includeChildren);
+    }
+
+    public WebShellPage<JsonNode> listWebShell(SessionPrincipal principal,
+            String session, String cursor, int limit, boolean includeChildren) {
+        return listWebShell(principal == null ? null : principal.tenantId(),
+                principal, principal == null ? null : principal.userId(),
+                session, cursor, limit, includeChildren);
+    }
+
+    private WebShellPage<JsonNode> listWebShell(String tenant, SessionPrincipal principal,
+            String rawActor, String session, String cursor, int limit,
+            boolean includeChildren) {
         if (!includeChildren) {
-            return listWebShell(tenant, actor, session, cursor, limit);
+            return listWebShell(tenant, principal, rawActor, session, cursor, limit);
         }
-        var rows = childPage(tenant, actor, session, cursor, limit);
+        var rows = childPage(tenant, principal, rawActor, session, cursor, limit);
         boolean more = rows.size() > limit;
         var page = rows.subList(0, Math.min(limit, rows.size()));
-        return new WebShellPage<>(page.stream().map(row -> view(tenant, row.sessionId(), row.action(), true)).toList(),
+        return new WebShellPage<>(page.stream().map(row -> view(tenant,
+                row.sessionId(), row.action(), true)).toList(),
                 more ? childCursor(tenant, session, page.getLast()) : null, more);
     }
 
@@ -110,9 +155,10 @@ public class ManagedActionService {
         return "children:" + org.apache.commons.codec.digest.DigestUtils.sha256Hex(tenant + "\u0000" + session) + ":";
     }
 
-    private List<ManagedActionStore.ScopedAction> childPage(String tenant, String actor, String session,
+    private List<ManagedActionStore.ScopedAction> childPage(String tenant,
+            SessionPrincipal principal, String rawActor, String session,
             String cursor, int limit) {
-        var root = sessions.requireReadableSession(tenant, actor, session);
+        var root = readable(tenant, principal, rawActor, session);
         if (root.publicChildAgentsVersion() != 1 || limit < 1 || limit > 100) {
             throw new ManagedAgentException(400, "unsupported_feature", "Child Action aggregation is unavailable");
         }
@@ -142,11 +188,22 @@ public class ManagedActionService {
                 throw new ManagedAgentException(400, "invalid_cursor", "Child Action cursor is invalid");
             }
         }
-        var rows = actions.listWithChildren(tenant, session, before, beforeSession, beforeId, limit + 1);
+        var rows = actions.listWithChildren(tenant, session, before,
+                beforeSession, beforeId, limit + 1);
         for (var row : rows) {
-            sessions.requireReadableSession(tenant, actor, row.sessionId());
+            readable(tenant, principal, rawActor, row.sessionId());
         }
         return rows;
+    }
+
+    // The raw-actor read path keeps its actor verbatim; only a supplied
+    // trusted principal takes the principal read (R7-1).
+    private com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord readable(
+            String tenant, SessionPrincipal principal, String rawActor,
+            String session) {
+        return principal == null
+                ? sessions.requireReadableSession(tenant, rawActor, session)
+                : sessions.requireReadableSession(tenant, principal, session);
     }
 
     private String childCursor(String tenant, String session, ManagedActionStore.ScopedAction row) {
@@ -157,7 +214,19 @@ public class ManagedActionService {
 
     public WebShellPage<JsonNode> listWebShell(
             String tenant, String actor, String session, String cursor, int limit) {
-        List<Action> rows = page(tenant, actor, session, cursor, limit);
+        return listWebShell(tenant, null, actor, session, cursor, limit);
+    }
+
+    public WebShellPage<JsonNode> listWebShell(SessionPrincipal principal,
+            String session, String cursor, int limit) {
+        return listWebShell(principal == null ? null : principal.tenantId(),
+                principal, principal == null ? null : principal.userId(),
+                session, cursor, limit);
+    }
+
+    private WebShellPage<JsonNode> listWebShell(String tenant, SessionPrincipal principal,
+            String rawActor, String session, String cursor, int limit) {
+        List<Action> rows = page(tenant, principal, rawActor, session, cursor, limit);
         boolean more = rows.size() > limit;
         List<Action> page = rows.subList(0, Math.min(limit, rows.size()));
         return new WebShellPage<>(
@@ -167,7 +236,25 @@ public class ManagedActionService {
     }
 
     public JsonNode get(String tenant, String actor, String session, String id, boolean web) {
-        sessions.requireReadableSession(tenant, actor, session);
+        return get(tenant, null, actor, session, id, web);
+    }
+
+    public JsonNode get(SessionPrincipal principal, String session, String id,
+            boolean web) {
+        return get(principal == null ? null : principal.tenantId(),
+                principal, principal == null ? null : principal.userId(),
+                session, id, web);
+    }
+
+    private JsonNode get(String tenant, SessionPrincipal principal, String session,
+            String id, boolean web) {
+        return get(tenant, principal, principal == null ? null : principal.userId(),
+                session, id, web);
+    }
+
+    private JsonNode get(String tenant, SessionPrincipal principal,
+            String rawActor, String session, String id, boolean web) {
+        readable(tenant, principal, rawActor, session);
         return view(
                 tenant,
                 session,
@@ -181,6 +268,9 @@ public class ManagedActionService {
                 web);
     }
 
+    // The raw-actor respond path: the action gate keys on the actor id
+    // alone, so the filter-admitted actor never needs a byte-bounded
+    // principal (R7-1).
     public OperationAdmission respond(
             String tenant,
             String actor,
@@ -190,14 +280,56 @@ public class ManagedActionService {
             String kind,
             JsonNode revision,
             String policy,
-            String option) {
-        return respond(tenant, actor, session, id, key, kind, revision, policy, option, null, false);
+            String option,
+            JsonNode answers,
+            boolean publicNames) {
+        return respondInternal(tenant, null, actor, session, id, key, kind,
+                revision, policy, option, answers, publicNames);
     }
 
+    // The principal keeps its business-actor subject: the read grant and the
+    // admission both key on the Session's ownership record, so a sibling
+    // sharing only the user id is refused exactly as the reads refuse it.
     public OperationAdmission respond(
-            String tenant, String actor, String session, String id, String key,
-            String kind, JsonNode revision, String policy, String option, JsonNode answers, boolean publicNames) {
-        sessions.requireReadableSession(tenant, actor, session);
+            String tenant,
+            SessionPrincipal principal,
+            String session,
+            String id,
+            String key,
+            String kind,
+            JsonNode revision,
+            String policy,
+            String option,
+            JsonNode answers,
+            boolean publicNames) {
+        return respondInternal(tenant, principal,
+                principal == null ? null : principal.userId(), session, id,
+                key, kind, revision, policy, option, answers, publicNames);
+    }
+
+    private OperationAdmission respondInternal(
+            String tenant,
+            SessionPrincipal principal,
+            String actorId,
+            String session,
+            String id,
+            String key,
+            String kind,
+            JsonNode revision,
+            String policy,
+            String option,
+            JsonNode answers,
+            boolean publicNames) {
+        // The full read grant, not a lighter action read: only it enforces the
+        // owner_only fence and, for an unbound Session, the ownership row
+        // (R13-3), and it keys on the principal whenever the caller has one.
+        // The tenant stays explicit so an anonymous caller still reads inside
+        // its own tenant rather than collapsing to a null-tenant 404.
+        if (principal == null) {
+            sessions.requireReadableSession(tenant, actorId, session);
+        } else {
+            sessions.requireReadableSession(principal, session);
+        }
         ManagedAgentService.validateIdempotencyKey(key);
         if (!("permission".equals(kind) || "question".equals(kind))
                 || revision == null
@@ -231,15 +363,17 @@ public class ManagedActionService {
                 actions.admit(
                         tenant,
                         session,
-                        actor,
-                        digests.digest(Map.of("actorId", actor == null ? "" : actor)),
+                        principal,
+                        actorId,
+                        digests.digest(Map.of("actorId", actorId == null ? "" : actorId)),
                         key,
                         digests.digest(Map.of("actionId", id, "response", body)),
                         id,
                         body,
                         clock.millis());
         if (!List.of("COMPLETED", "FAILED").contains(admitted.operation().state())) {
-            coordinator.dispatch(tenant, session, admitted.operation().operationId());
+            coordinator.dispatch(tenant, session,
+                    admitted.operation().operationId());
         }
         return admitted;
     }
@@ -288,9 +422,9 @@ public class ManagedActionService {
                         response.decisionReceiptId());
     }
 
-    private List<Action> page(
-            String tenant, String actor, String session, String cursor, int limit) {
-        sessions.requireReadableSession(tenant, actor, session);
+    private List<Action> page(String tenant, SessionPrincipal principal,
+            String rawActor, String session, String cursor, int limit) {
+        readable(tenant, principal, rawActor, session);
         if (limit < 1 || limit > 100) {
             throw new ManagedAgentException(
                     400, "invalid_limit", "Limit must be between 1 and 100.");
