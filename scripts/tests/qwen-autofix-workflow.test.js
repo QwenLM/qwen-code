@@ -310,6 +310,18 @@ const hasSha256sum =
     stdio: 'ignore',
   }).status === 0;
 
+// The staleness-cutoff derivation executes `date -u -d "N minutes ago"`,
+// GNU date syntax: BSD date (macOS without the GNU toolchain fronting PATH)
+// rejects the relative string and prints nothing, so the executed witness
+// reads NaN while the workflow itself only ever runs on Linux runners.
+// Probe the host like hasBashMapfile does — a Mac with GNU coreutils
+// fronting PATH keeps the coverage; the pin gates only the executed
+// derivation, never its text pins.
+const hasGnuDate =
+  spawnSync('bash', ['-c', 'date -u -d "1 minute ago" +%s > /dev/null 2>&1'], {
+    stdio: 'ignore',
+  }).status === 0;
+
 function readAutofixSkill() {
   return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
 }
@@ -687,31 +699,37 @@ describe('qwen-autofix workflow', () => {
       /PENDING_CUTOFF="\$\(date[^\n]*\n\s*PENDING_LONG_CUTOFF="\$\(date[^\n]*\n/,
     )?.[0];
     expect(derivLines, 'staleness cutoff derivation lines').toBeTruthy();
-    const staleMinConst = reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1];
-    const longMinConst = reviewScanJob.match(
-      /PENDING_LONG_STALE_MIN=(\d+)/,
-    )?.[1];
-    const derivOut = execFileSync(
-      'bash',
-      [
-        '-c',
-        `${derivLines}\nprintf '%s %s' "$PENDING_CUTOFF" "$PENDING_LONG_CUTOFF"`,
-      ],
-      {
-        env: {
-          ...process.env,
-          PENDING_STALE_MIN: staleMinConst,
-          PENDING_LONG_STALE_MIN: longMinConst,
+    // Execute the derivations only where GNU date parses the relative
+    // string (see hasGnuDate): on a BSD-date host the spawn yields empty
+    // timestamps and the gap reads NaN — a host artifact the Linux runner
+    // can never hit. The text pins above still hold on every host.
+    if (hasGnuDate) {
+      const staleMinConst = reviewScanJob.match(/PENDING_STALE_MIN=(\d+)/)?.[1];
+      const longMinConst = reviewScanJob.match(
+        /PENDING_LONG_STALE_MIN=(\d+)/,
+      )?.[1];
+      const derivOut = execFileSync(
+        'bash',
+        [
+          '-c',
+          `${derivLines}\nprintf '%s %s' "$PENDING_CUTOFF" "$PENDING_LONG_CUTOFF"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PENDING_STALE_MIN: staleMinConst,
+            PENDING_LONG_STALE_MIN: longMinConst,
+          },
+          encoding: 'utf8',
         },
-        encoding: 'utf8',
-      },
-    )
-      .trim()
-      .split(' ');
-    const derivGapMin =
-      (new Date(derivOut[0]).getTime() - new Date(derivOut[1]).getTime()) /
-      60000;
-    expect(derivGapMin).toBe(Number(longMinConst) - Number(staleMinConst));
+      )
+        .trim()
+        .split(' ');
+      const derivGapMin =
+        (new Date(derivOut[0]).getTime() - new Date(derivOut[1]).getTime()) /
+        60000;
+      expect(derivGapMin).toBe(Number(longMinConst) - Number(staleMinConst));
+    }
     // The staleness filter itself, including the comparison operator: a check only
     // blocks if its start is newer than its row's cutoff. Asserting `> $rowcut`
     // too means a flipped comparison (which would age out live checks →

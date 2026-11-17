@@ -242,6 +242,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsSavedLifecycle(String profile) {
+        return call(() -> delegate.supportsSavedLifecycle(profile));
+    }
+
+    @Override
     public void prepareLifecycleResources(OperationRecord operation) {
         run(() -> delegate.prepareLifecycleResources(operation));
     }
