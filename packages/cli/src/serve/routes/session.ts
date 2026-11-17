@@ -5231,6 +5231,16 @@ export function registerSessionRoutes(
                 });
                 return;
               }
+              // Policy (6902429921): the occupancy guard protects a live
+              // HUMAN attachment — a user actively viewing/editing the shared
+              // checkout whose HEAD a handoff would move. Agent sessions
+              // (AGENT_HOST / AGENT source types) are daemon-spawned subagent
+              // subprocesses, not independent user attachments: they have no
+              // user watching the checkout, and their work is owned by the
+              // parent session's worktree lifecycle, so they are deliberately
+              // excluded. Worktree sessions are excluded too (they live in
+              // their own checkout, not this shared one). clientCount > 0
+              // keeps only sessions with a live attachment.
               const occupyingSession = runtime.bridge
                 .listWorkspaceSessions(runtime.workspaceCwd)
                 .find(
@@ -5543,15 +5553,23 @@ export function registerSessionRoutes(
                     await localService.applyStashSnapshot(localCwd, snapshot);
                   } catch (error) {
                     // A conflicting 3-way apply writes markers and unmerged
-                    // index entries into the user's checkout; an environment
+                    // index entries into the user's checkout. An environment
                     // failure (unwritable index, unreadable index state) did
-                    // not land the work at all. Rollback restores the checkout
-                    // either way; refuse with a typed code that distinguishes
-                    // content to resolve from a carry that could not apply.
+                    // not land the work at all; a conflict whose own restore
+                    // failed (restoreFailed) may leave markers behind until
+                    // rollback's force-checkout runs. Rollback restores the
+                    // checkout either way; refuse with a typed code that
+                    // distinguishes content to resolve from a carry that could
+                    // not apply, and surface restoreFailed so the refusal never
+                    // claims a clean restore the service could not make
+                    // (6903276958).
                     await rollback();
                     const isConflict =
                       error instanceof WorktreeDirtyCarryConflictError &&
                       error.conflict;
+                    const restoreFailed =
+                      error instanceof WorktreeDirtyCarryConflictError &&
+                      error.restoreFailed;
                     res.status(409).json({
                       error: isConflict
                         ? 'The worktree snapshot conflicts with the local checkout'
@@ -5560,7 +5578,12 @@ export function registerSessionRoutes(
                         ? 'handoff_snapshot_conflict'
                         : 'handoff_carry_failed',
                       detail:
-                        error instanceof Error ? error.message : String(error),
+                        (error instanceof Error
+                          ? error.message
+                          : String(error)) +
+                        (restoreFailed
+                          ? ' — the local checkout was force-restored by rollback; inspect it if conflict markers remain'
+                          : ''),
                       sessionId: storageSessionId,
                     });
                     return;

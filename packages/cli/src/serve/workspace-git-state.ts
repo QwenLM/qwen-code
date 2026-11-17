@@ -159,6 +159,17 @@ export class WorkspaceGitState {
     // the (possibly stale) summary branch. A missing summary yields the
     // branch-only shape with no `computedAt`, which clients distinguish from
     // "computed and clean".
+    //
+    // Decision (6882263037): the cold-cache shape deliberately omits
+    // `hasHead` (and every other computed field) rather than guessing a
+    // value before the first status refresh lands. Absent `hasHead` means
+    // "not yet computed", NOT "has a head": a consumer must treat an absent
+    // field as unknown and wait for a payload with `computedAt` before
+    // gating on it. A reader that tests `hasHead !== false` would misread
+    // unknown as yes — that is a consumer bug, not a reason to fabricate a
+    // cold-cache `hasHead`. The first payload after daemon start is
+    // branch-only by design; the watcher's refresh fills the computed fields
+    // shortly after.
     if (!status) {
       return { v: 2, workspaceCwd, branch: entry.branch ?? null };
     }

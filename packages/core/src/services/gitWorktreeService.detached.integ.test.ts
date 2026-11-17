@@ -521,6 +521,29 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     await expect(fs.lstat(worktree.path)).rejects.toThrow();
   });
 
+  it('removeUserWorktree with branchOwned=false keeps a user worktree-<slug> branch the checkout was switched onto (6890579653)', async () => {
+    // A detached session worktree later switched in place onto a user-created
+    // worktree-<slug> branch: the recorded ownership (branchOwned=false, as
+    // the sidecar-based callers pass for a detached creation) is authoritative.
+    // The current branch must not infer ownership and delete the user's ref.
+    git(repoRoot, 'branch', 'worktree-sess-inplace');
+    const userTip = git(repoRoot, 'rev-parse', 'worktree-sess-inplace');
+    const worktree = await createDetached('sess-inplace');
+    git(worktree.path, 'checkout', '-q', 'worktree-sess-inplace');
+
+    const result = await service.removeUserWorktree('sess-inplace', {
+      deleteBranch: true,
+      branchOwned: false,
+      baseCommit: git(repoRoot, 'rev-parse', 'HEAD'),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.deletedBranch).toBeUndefined();
+    expect(result.keptBranch).toBe('worktree-sess-inplace');
+    expect(git(repoRoot, 'rev-parse', 'worktree-sess-inplace')).toBe(userTip);
+    await expect(fs.lstat(worktree.path)).rejects.toThrow();
+  });
+
   it('createWorktreeBranch succeeds when the post-checkout hook fails after the switch', async () => {
     const worktree = await createDetached('sess-hooked');
     // The worktree inherits the repo's hooks (configureHooksPath). A

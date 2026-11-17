@@ -4425,12 +4425,17 @@ export class GitWorktreeService {
     }
 
     // A named creation provably owns its slug ref (creation refuses a
-    // pre-existing branch), even when the checkout later moved away.
-    // Otherwise only a checkout sitting on the slug branch owns it:
-    // detached and in-place-branched session worktrees never created that
-    // ref, and an existing one belongs to someone else who must keep it.
+    // pre-existing branch), even when the checkout later moved away. An
+    // explicit `branchOwned: false` (a detached/in-place session worktree,
+    // whose sidecar records no slug branch) is authoritative: such a
+    // worktree never created the slug ref, so even if it was later switched
+    // in place onto a user-created `worktree-<slug>` branch, that ref belongs
+    // to its creator and must be kept — the current branch must not override
+    // the recorded ownership (6890579653). The current-branch fallback only
+    // applies when the caller did not record ownership at all.
     const ownsSlugBranch =
-      options.branchOwned === true || actualBranch === branchName;
+      options.branchOwned === true ||
+      (options.branchOwned === undefined && actualBranch === branchName);
     const keptOther =
       actualBranch !== '' && actualBranch !== branchName
         ? actualBranch

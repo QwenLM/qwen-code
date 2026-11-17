@@ -1313,6 +1313,37 @@ describe('POST /session/:id/worktree-handoff', () => {
     }
   });
 
+  it('surfaces restoreFailed in the conflict refusal detail (6903276958)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    // Dirty the worktree so a non-empty snapshot is captured and the apply
+    // path (not the clean-tree skip) runs.
+    writeFileSync(path.join(fixture.worktreeDir, 'README.md'), 'dirty\n');
+    // A conflict whose own restore failed: rollback force-restores the
+    // checkout, so the refusal must not claim a clean restore the service
+    // could not make.
+    const spy = vi
+      .spyOn(GitWorktreeService.prototype, 'applyStashSnapshot')
+      .mockRejectedValueOnce(
+        new WorktreeDirtyCarryConflictError('conflict', {
+          conflict: true,
+          restoreFailed: true,
+        }),
+      );
+    try {
+      const res = await request(fixture.app)
+        .post(`/session/${fixture.sessionId}/worktree-handoff`)
+        .send({ to: 'local' });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('handoff_snapshot_conflict');
+      expect(res.body.detail).toContain('force-restored by rollback');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('refuses handoff to local when the recorded base is missing', async () => {
     const fixture = makeFixture();
     fixture.writeTranscript();
