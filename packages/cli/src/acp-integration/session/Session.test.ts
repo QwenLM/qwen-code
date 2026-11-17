@@ -1783,7 +1783,10 @@ describe('Session', () => {
       await session.flushPendingPeerNotifications();
       manager.leaderCallback?.('late report', 'late report', ['security']);
 
-      const tally = session.droppedNotifications.take();
+      const internals = session as unknown as {
+        droppedNotifications: { take(): { status: string; modelText: string } | undefined };
+      };
+      const tally = internals.droppedNotifications.take();
       expect(tally).toBeDefined();
       expect(tally!.modelText).toContain('teammate report');
       session.dispose();
