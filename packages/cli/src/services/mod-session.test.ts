@@ -17,6 +17,7 @@ import {
   MOD_MAX_BYTES,
   type ModCommand,
   type ModLog,
+  type ModModelHost,
   type ModPromptSubmit,
   type ModPromptSubmitted,
   type ModQueuedPrompt,
@@ -187,6 +188,35 @@ describe('Mod session ownership', () => {
     await session.toolCall(repeat)!({ tool: 'write_file' }, next, signal);
     expect(next).toHaveBeenCalledTimes(2);
     expect(repeat).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts old session.end model calls during a session switch', async () => {
+    const generateText = vi.fn().mockResolvedValue({ text: 'current answer' });
+    const { session, runtime, config } = setup({
+      getModel: () => 'current-model',
+      getContentGeneratorConfig: () => ({ authType: 'openai' }),
+      getAllConfiguredModels: () => [],
+      getBaseLlmClient: () => ({ generateText }),
+    });
+    const signal = new AbortController().signal;
+    await session.initialize(signal);
+    const runModel = mocks.create.mock.calls[0][12] as ModModelHost;
+    const input = { model: 'sonnet', prompt: 'test request' };
+    let ending: Awaited<ReturnType<ModModelHost>> | undefined;
+    runtime.end.mockImplementationOnce(async () => {
+      ending = await runModel(input, signal);
+    });
+
+    config.getSessionId.mockReturnValue('session-2');
+    await session.syncSession('clear');
+    expect(ending).toMatchObject({ isAnswered: false, reason: 'aborted' });
+    expect(generateText).not.toHaveBeenCalled();
+
+    await expect(runModel(input, signal)).resolves.toMatchObject({
+      isAnswered: true,
+      text: 'current answer',
+    });
+    expect(generateText).toHaveBeenCalledOnce();
   });
 
   it('serializes roots and refuses a queued call after group invalidation', async () => {

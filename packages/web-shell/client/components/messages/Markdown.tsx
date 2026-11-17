@@ -44,6 +44,7 @@ import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 import { FootnoteSection, FootnoteSup } from './FootnoteCard';
 import { rehypeFootnoteCards } from './rehype-footnote-cards';
+import { openSessionLink } from './session-link';
 import {
   DEFAULT_WEB_SHELL_MARKDOWN_CHART,
   WebShellMarkdownChartProvider,
@@ -491,7 +492,10 @@ function MermaidBlock({ code }: { code: string }) {
             {t('mermaid.errorLabel')}
           </span>
         </div>
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       </div>
@@ -547,7 +551,10 @@ function MermaidBlock({ code }: { code: string }) {
         </span>
       </div>
       {viewMode === 'code' ? (
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       ) : !svg ? (
@@ -701,10 +708,14 @@ function CodeBlock({
       {!documentMode && !isStreaming && html !== null ? (
         <div
           className={styles.codeBlockContent}
+          dir="auto"
           dangerouslySetInnerHTML={{ __html: html }}
         />
       ) : (
-        <pre className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}>
+        <pre
+          className={`${styles.codeBlockContent} ${styles.codeBlockPlain}`}
+          dir="auto"
+        >
           <code>{code}</code>
         </pre>
       )}
@@ -722,7 +733,11 @@ function extractRawFenceLanguage(className: string | undefined): string {
 }
 
 function InlineCode({ children }: { children: ReactNode }) {
-  return <code className={styles.inlineCode}>{children}</code>;
+  return (
+    <code className={styles.inlineCode} dir="auto">
+      {children}
+    </code>
+  );
 }
 
 function PlainMarkdownTable({ children }: { children?: ReactNode }) {
@@ -951,7 +966,7 @@ function MarkdownLink({
     if (renderMode !== 'interactive') {
       return <span className={styles.link}>{children}</span>;
     }
-    const sessionId = href.trim().replace(QWEN_SESSION_SCHEME, '');
+    const target = href.trim().replace(QWEN_SESSION_SCHEME, '');
     return (
       <a
         href="#"
@@ -960,9 +975,7 @@ function MarkdownLink({
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          window.dispatchEvent(
-            new CustomEvent('qwen:open-session', { detail: sessionId }),
-          );
+          openSessionLink(target);
         }}
       >
         {children}
@@ -1293,6 +1306,7 @@ export const Markdown = memo(function Markdown({
       <div
         className={source !== 'thinking' ? styles.content : undefined}
         data-markdown-source={source}
+        dir="auto"
         data-markdown-streaming-plain-text="true"
       >
         <pre className={styles.streamingPlainText}>{renderedContent}</pre>
@@ -1326,6 +1340,7 @@ export const Markdown = memo(function Markdown({
     <div
       className={source !== 'thinking' ? styles.content : undefined}
       data-markdown-source={source}
+      dir="auto"
     >
       <MarkdownInertContext.Provider value={!!inert}>
         <IsStreamingContext.Provider value={!!isStreaming}>

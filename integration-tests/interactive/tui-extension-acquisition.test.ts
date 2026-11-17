@@ -29,6 +29,19 @@ const runtime = resolveE2eCliCommand(renderer);
 const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 const until = createUntil(15_000);
+/**
+ * The framed Sources input row at this session's pinned cols: 120. The value
+ * and its padding own 95 columns inside the border, caret cell included, and
+ * both renderers pad to that same width — ink trims the row tail, OpenTUI pads
+ * it to the terminal, so only the whitespace outside the frame stays tolerant.
+ * The value arm must be column-exact: a `[ \t]*` there absorbs the phantom
+ * column an unguarded empty caret segment mounts. Reverting the guards shifts
+ * `source-undo` from `bZ` to ` bZ` — a leading empty `before` node costs a
+ * column, while a trailing empty `after` node collapses to zero. Values are
+ * the plain ASCII this scenario types.
+ */
+const sourceRow = (value: string) =>
+  new RegExp(`^[ \\t]*│ > ${value} {${95 - value.length}}│[ \\t]*$`, 'm');
 type Policy = {
   name: string;
   defaultActivation: string;
@@ -65,6 +78,19 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
   const exits: unknown[] = [];
   const sessions: InteractiveSession[] = [];
   const cleanupErrors: string[] = [];
+  const sourceStates: Record<string, Record<string, string | null>> = {};
+  const sourceState = () =>
+    Object.fromEntries(
+      Object.entries({
+        registry,
+        state,
+        preferences,
+        enablement: join(home, 'extensions', 'extension-enablement.json'),
+      }).map(([name, file]) => [
+        name,
+        existsSync(file) ? readFileSync(file, 'utf8') : null,
+      ]),
+    );
   let session: InteractiveSession | undefined;
   let server: Awaited<ReturnType<typeof startFakeOpenAIServer>> | undefined;
   let failure: unknown;
@@ -221,15 +247,89 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       await screen(`startup-${sessions.length}`, ['Type your message']);
     };
     await start();
+    sourceStates['startup'] = sourceState();
     await submit('/extensions manage');
     await screen('installed-empty', ['Installed', 'Discover', 'Sources']);
     await key('\t');
     await screen('discover-empty', ['No extensions discovered.']);
     await key('\t');
     await screen('sources-empty', ['No marketplaces added yet.']);
+    await until(() => {
+      const current = sourceState();
+      return current['state'] !== null && current['enablement'] !== null;
+    }, 'initial extension authority');
+    sourceStates['pre-add'] = sourceState();
+    expect(JSON.parse(sourceStates['pre-add']['state']!)).toMatchObject({
+      version: 2,
+      generation: 0,
+      extensions: {},
+    });
+    expect(JSON.parse(sourceStates['pre-add']['state']!).extensions).toEqual(
+      {},
+    );
+    expect(JSON.parse(sourceStates['pre-add']['enablement']!)).toEqual({});
+    for (const name of ['registry', 'preferences']) {
+      expect(sourceStates['pre-add'][name]).toBe(sourceStates['startup'][name]);
+    }
     await key('\x1b[B');
     await key('\r');
     await screen('source-input', [
+      'Add Marketplace',
+      'Enter marketplace source (Claude format):',
+    ]);
+    for (const sequence of ['a', 'b', 'c', '\x1b[D', '\x0b', 'Z'])
+      await key(sequence);
+    await session!.idle(150, 2000);
+    await screen('source-kill-right', ['Add Marketplace', 'abZ']);
+    expect(frames['source-kill-right']).toMatch(sourceRow('abZ'));
+    for (const sequence of ['\x01', '\x1b[C', '\x15', 'Q']) await key(sequence);
+    await session!.idle(150, 2000);
+    await screen('source-kill-left', ['Add Marketplace', 'QbZ']);
+    expect(frames['source-kill-left']).toMatch(sourceRow('QbZ'));
+    for (const [label, sequence, expected] of [
+      ['source-undo', '\x1a', sourceRow('bZ')],
+      ['source-redo', '\x1b[27;6;122~', sourceRow('QbZ')],
+      ['source-history-branch', '\x1aR', sourceRow('RbZ')],
+      ['source-no-stale-redo', '\x1b[27;6;122~', sourceRow('RbZ')],
+    ] as const) {
+      await key(sequence);
+      await session!.idle(150, 2000);
+      await until(async () => {
+        frames[label] = await session!.viewport();
+        return (
+          frames[label].includes('Add Marketplace') &&
+          expected.test(frames[label])
+        );
+      }, label);
+      expect(server!.requests).toHaveLength(0);
+    }
+    await key('\x03');
+    await until(async () => {
+      frames['source-clear-empty'] = await session!.viewport();
+      return (
+        frames['source-clear-empty'].includes('Add Marketplace') &&
+        frames['source-clear-empty'].includes('Press Ctrl+C again to exit.') &&
+        sourceRow('').test(frames['source-clear-empty'])
+      );
+    }, 'source-clear-empty');
+    expect(session!.exitResult()).toBeUndefined();
+    expect(server!.requests).toHaveLength(0);
+    await key('\x1a');
+    await until(async () => {
+      frames['source-clear-undo'] = await session!.viewport();
+      return (
+        frames['source-clear-undo'].includes('Add Marketplace') &&
+        sourceRow('RbZ').test(frames['source-clear-undo'])
+      );
+    }, 'source-clear-undo');
+    expect(session!.exitResult()).toBeUndefined();
+    expect(server!.requests).toHaveLength(0);
+    await key('\x1b');
+    await screen('source-add-cancelled', ['No marketplaces added yet.']);
+    sourceStates['post-cancel'] = sourceState();
+    expect(sourceStates['post-cancel']).toEqual(sourceStates['pre-add']);
+    await key('\r');
+    await screen('source-input-reopened', [
       'Add Marketplace',
       'Enter marketplace source (Claude format):',
     ]);
@@ -325,6 +425,9 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       json(join(evidence, 'requests.json'), server?.requests ?? []),
     );
     await preserve(() => json(join(evidence, 'frames.json'), frames));
+    await preserve(() =>
+      json(join(evidence, 'source-edit-states.json'), sourceStates),
+    );
     const exitBeforeClose = session?.exitResult();
     for (const active of sessions) await preserve(() => active.close());
     await preserve(() => server?.close());

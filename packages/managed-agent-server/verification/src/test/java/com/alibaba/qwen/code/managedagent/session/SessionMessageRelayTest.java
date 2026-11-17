@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
-import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
-import com.alibaba.qwen.code.managedagent.persistence.SessionMessageRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionMessageRelayStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore.Lineage;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore.MessageRow;
 import com.alibaba.qwen.code.managedagent.repository.SessionMessageRelayStore.PendingMessage;
@@ -39,8 +39,8 @@ class SessionMessageRelayTest {
     private static final byte[] CONTENT = "also check the tests"
             .getBytes(StandardCharsets.UTF_8);
 
-    private SessionMessageRelayStore store;
-    private ChildResultRelayStore records;
+    private JdbcSessionMessageRelayStore store;
+    private JdbcChildResultRelayStore records;
     private RecordingHarness harness;
     private SessionMessageRelay relay;
     private AtomicReference<MessageRow> row;
@@ -121,8 +121,8 @@ class SessionMessageRelayTest {
 
     @BeforeEach
     void setUp() {
-        store = mock(SessionMessageRelayStore.class);
-        records = mock(ChildResultRelayStore.class);
+        store = mock(JdbcSessionMessageRelayStore.class);
+        records = mock(JdbcChildResultRelayStore.class);
         harness = new RecordingHarness();
         relay = new SessionMessageRelay(store, records, harness, mapper,
                 () -> 1_000L);
@@ -167,7 +167,7 @@ class SessionMessageRelayTest {
         }).when(store).defer(any(MessageRow.class), anyString(),
                         anyLong(), any(), anyLong(), anyLong());
         when(store.currentRecord(anyString(), anyString(), anyString(), anyString()))
-                .thenAnswer(ignored -> new SessionMessageRelayStore
+                .thenAnswer(ignored -> new JdbcSessionMessageRelayStore
                         .CurrentRecord(pending.get().deliveryState(),
                                 "resource-message"));
         when(records.sessionStatus(TENANT, PARENT)).thenReturn("ACTIVE");
@@ -188,7 +188,7 @@ class SessionMessageRelayTest {
     private void task(String status, boolean submissionAttempted,
             String epoch) {
         when(records.firstTurn(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.TurnLine("turn-1", status, null,
+                new JdbcChildResultRelayStore.TurnLine("turn-1", status, null,
                         null, submissionAttempted, epoch));
     }
 
@@ -458,7 +458,7 @@ class SessionMessageRelayTest {
     private void childOwesMessageWork(int pendingInputs) {
         when(records.hasSessionMessages(TENANT, CHILD)).thenReturn(true);
         when(records.journalTurns(TENANT, CHILD)).thenReturn(
-                new ChildResultRelayStore.JournalTurns(pendingInputs,
+                new JdbcChildResultRelayStore.JournalTurns(pendingInputs,
                         java.util.Set.of("msg_in:message"), 0L, null));
     }
 
@@ -888,9 +888,9 @@ class SessionMessageRelayTest {
                 anyString()))
                 .thenAnswer(invocation -> PARENT
                         .equals(invocation.getArgument(1))
-                                ? new SessionMessageRelayStore.CurrentRecord(
+                                ? new JdbcSessionMessageRelayStore.CurrentRecord(
                                         "accepting", "resource-message")
-                                : new SessionMessageRelayStore.CurrentRecord(
+                                : new JdbcSessionMessageRelayStore.CurrentRecord(
                                         "consumed", "resource-receipt"));
         when(records.readResource(TENANT, CHILD, "resource-receipt")).thenReturn(
                 "{\"direction\":\"inbound\",\"replyRef\":{\"resourceId\":"
@@ -916,7 +916,7 @@ class SessionMessageRelayTest {
                 anyString()))
                 .thenAnswer(invocation -> PARENT
                         .equals(invocation.getArgument(1))
-                                ? new SessionMessageRelayStore.CurrentRecord(
+                                ? new JdbcSessionMessageRelayStore.CurrentRecord(
                                         "accepting", "resource-message")
                                 : null);
         relay.scan();
@@ -935,7 +935,7 @@ class SessionMessageRelayTest {
         harness.refuseCode = "session_command_failed";
         when(store.currentRecord(anyString(), anyString(), anyString(),
                 anyString()))
-                .thenAnswer(invocation -> new SessionMessageRelayStore
+                .thenAnswer(invocation -> new JdbcSessionMessageRelayStore
                         .CurrentRecord("planned", "resource-message"));
         row.set(new MessageRow(TENANT, PARENT, MESSAGE, null, "relaying",
                 "owner", 31_000L, 63, 0, null));
@@ -981,7 +981,7 @@ class SessionMessageRelayTest {
     void givesUpFromTheEntryAsTheFailedStepLeftIt() {
         body("to_child", PARENT, CHILD);
         when(store.currentRecord(anyString(), anyString(), anyString(), anyString()))
-                .thenAnswer(ignored -> new SessionMessageRelayStore
+                .thenAnswer(ignored -> new JdbcSessionMessageRelayStore
                         .CurrentRecord(kinds().contains("handover")
                                 ? "accepting" : "planned",
                                 "resource-message"));

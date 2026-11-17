@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -33,13 +33,13 @@ class ManagedAgentServiceWorktreeTest {
     private final WorkspaceSelection selection = new WorkspaceSelection("workspace", ".");
     private final SessionWorktreeService.Request request = new SessionWorktreeService.Request("main");
     private final ManagedAgentService service = new ManagedAgentService(store, new RequestDigests(),
-            coordinator, harness, mock(ManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            coordinator, harness, mock(JdbcManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void creationDoesNotWarmOrDispatchBeforeTheWorktreeIsReady(boolean prompted) {
         service.setSessionWorktrees(worktrees);
-        var plan = mock(SessionWorktreeStore.Plan.class);
+        var plan = mock(JdbcSessionWorktreeStore.Plan.class);
         when(worktrees.preflight("tenant", "actor", selection, request)).thenReturn(plan);
         when(harness.isAvailable()).thenReturn(true);
         when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
@@ -80,8 +80,8 @@ class ManagedAgentServiceWorktreeTest {
         verifyNoInteractions(worktrees, coordinator);
     }
 
-    private static SessionWorktreeStore.Descriptor descriptor() {
-        return new SessionWorktreeStore.Descriptor("worktree", "session", "workspace", "preparing",
+    private static JdbcSessionWorktreeStore.Descriptor descriptor() {
+        return new JdbcSessionWorktreeStore.Descriptor("worktree", "session", "workspace", "preparing",
                 "qwen/session", "a".repeat(40), ".qwen-managed-worktrees/worktree", "operation", 1, null);
     }
 }

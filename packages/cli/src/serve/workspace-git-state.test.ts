@@ -46,6 +46,7 @@ function summary(
     conflicted: 0,
     stashCount: 0,
     ...overrides,
+    hasHead: overrides.hasHead ?? true,
   };
 }
 
@@ -180,6 +181,7 @@ describe('WorkspaceGitState', () => {
     getGitWorkingTreeStatusMock.mockResolvedValue({
       branch: 'main',
       detached: false,
+      hasHead: true,
       hasUpstream: true,
       ahead: 2,
       behind: 1,
@@ -201,6 +203,7 @@ describe('WorkspaceGitState', () => {
       workspaceCwd: '/workspace',
       branch: 'main',
       detached: false,
+      hasHead: true,
       hasUpstream: true,
       ahead: 2,
       behind: 1,
@@ -220,6 +223,7 @@ describe('WorkspaceGitState', () => {
     getGitWorkingTreeStatusMock.mockResolvedValue({
       branch: 'main',
       detached: false,
+      hasHead: true,
       hasUpstream: false,
       ahead: 0,
       behind: 0,
@@ -246,6 +250,7 @@ describe('WorkspaceGitState', () => {
     getGitWorkingTreeStatusMock.mockResolvedValue({
       branch: null,
       detached: true,
+      hasHead: true,
       hasUpstream: false,
       ahead: 0,
       behind: 0,
@@ -265,6 +270,7 @@ describe('WorkspaceGitState', () => {
     ).resolves.toMatchObject({
       branch: 'a1b2c3d',
       detached: true,
+      hasHead: true,
     });
   });
 
@@ -385,6 +391,50 @@ describe('WorkspaceGitState', () => {
         type: 'git_status_changed',
         data: expect.objectContaining({ staged: 3 }),
       });
+    } finally {
+      vi.useRealTimers();
+    }
+    state.dispose();
+  });
+
+  it('publishes when the only delta is hasHead (the first commit)', async () => {
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    getGitWorkingTreeStatusMock.mockResolvedValue(summary({ hasHead: false }));
+    const state = new WorkspaceGitState();
+    const { bridge, publishWorkspaceEvent } = bridgeWith();
+
+    await state.getStatus('/workspace', bridge);
+    await vi.waitFor(() =>
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1),
+    );
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // The first commit flips hasHead without touching any counter; the
+      // worktree default waits for exactly this transition.
+      getGitWorkingTreeStatusMock.mockResolvedValue(summary({ hasHead: true }));
+      vi.setSystemTime(Date.now() + 2_000);
+      await state.getStatus('/workspace', bridge);
+      await vi.waitFor(() =>
+        expect(publishWorkspaceEvent).toHaveBeenCalledTimes(2),
+      );
+      expect(publishWorkspaceEvent).toHaveBeenLastCalledWith({
+        type: 'git_status_changed',
+        data: expect.objectContaining({ hasHead: true }),
+      });
+
+      // One-sided absence is not a change: a summary omitting the field
+      // must not storm against the cached hasHead:true.
+      const withoutHasHead = summary({ hasHead: true });
+      delete (withoutHasHead as Partial<GitWorkingTreeStatus>).hasHead;
+      getGitWorkingTreeStatusMock.mockResolvedValue(withoutHasHead);
+      vi.setSystemTime(Date.now() + 2_000);
+      await state.getStatus('/workspace', bridge);
+      await vi.waitFor(() =>
+        expect(getGitWorkingTreeStatusMock).toHaveBeenCalledTimes(3),
+      );
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

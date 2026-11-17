@@ -5,6 +5,7 @@ import org.apache.commons.codec.digest.DigestUtils;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.HexFormat;
 
 public final class RuntimeRequestKeys {
     private RuntimeRequestKeys() { }
@@ -47,6 +48,6 @@ public final class RuntimeRequestKeys {
                 digest.update(bytes);
             }
         }
-        return java.util.HexFormat.of().formatHex(digest.digest());
+        return HexFormat.of().formatHex(digest.digest());
     }
 }

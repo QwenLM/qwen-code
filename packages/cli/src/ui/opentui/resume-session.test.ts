@@ -482,6 +482,39 @@ describe('opentui resume mapping', () => {
     ]);
   });
 
+  it("restores a Mod's own prompt as the line naming the Mod", () => {
+    const events = resumeEventsFromSession({
+      conversation: {
+        messages: [
+          {
+            type: 'user',
+            provenance: 'mod_prompt',
+            message: {
+              role: 'user',
+              parts: [{ text: '<qwen:mod-prompt>framed</qwen:mod-prompt>' }],
+            },
+            systemPayload: {
+              displayText: 'List the TODOs',
+              hookContext: '',
+              mod: 'followup-mod',
+            },
+          },
+          {
+            type: 'assistant',
+            message: { role: 'model', parts: [{ text: 'Two TODOs.' }] },
+          },
+        ],
+      },
+    });
+    expect(events.filter((event) => event.type === 'user')).toEqual([]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'info',
+        text: 'Mod followup-mod: List the TODOs',
+      }),
+    );
+  });
+
   it('returns undefined for a config without a resumed session', () => {
     const config = {
       getResumedSessionData: () => undefined,

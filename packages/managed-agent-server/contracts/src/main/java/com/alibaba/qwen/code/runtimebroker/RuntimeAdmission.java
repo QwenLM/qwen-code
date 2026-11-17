@@ -1,5 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+
+import java.time.Instant;
+import java.util.Objects;
+
 /** Checks performed while the parent generation admission lock is held. */
 public final class RuntimeAdmission {
     private RuntimeAdmission() {
@@ -20,6 +25,7 @@ public final class RuntimeAdmission {
                 || !binding.getRequest().getScope().equals(session.getSession().getScope())
                 || binding.getState() != RuntimeBindingRecord.State.READY
                         && binding.getState() != RuntimeBindingRecord.State.DRAINING
+                        && !receiptBackedExternalLoss(binding)
                         && (binding.getRequest().isManagedContext() || !binding.hasStoppedWriters())) {
             throw new RuntimeBrokerException(503, "runtime_reconciliation_required",
                     "Runtime release requires recovery of the original generation", true);
@@ -40,19 +46,26 @@ public final class RuntimeAdmission {
     }
 
     public static void requireStoppedRelease(RuntimeBindingRecord binding, RuntimeBindingRecord claim,
-            RuntimeSessionRecord session, java.time.Instant now) {
+            RuntimeSessionRecord session, Instant now) {
         requireRelease(binding, session);
         if (!binding.sameIdentity(claim) || !binding.getRequest().isManagedContext()
-                || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(binding.getRequest().getProvisionerKind())
-                        && !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                || !RuntimeProviderKinds.LOCAL_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                        && !RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
+                        && !RuntimeProviderKinds.EXTERNAL_WORKSPACE
+                                .equals(binding.getRequest().getProvisionerKind())
                 || !(HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                         || WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                                 && binding.getRequest().getIsolationKey().equals(session.getSession().getHarnessSessionId()))
                 || session.getState() != RuntimeSessionRecord.State.RELEASING
-                || binding.getState() != RuntimeBindingRecord.State.DRAINING || !binding.isDrainRequested()
+                || binding.getState() != RuntimeBindingRecord.State.DRAINING && !receiptBackedExternalLoss(binding)
+                || !binding.isDrainRequested()
                 || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding)
                 || !binding.getDrainReceipt().equals(claim.getDrainReceipt())
-                || !java.util.Objects.equals(binding.getResourceHandle(), claim.getResourceHandle())
+                || !Objects.equals(binding.getResourceHandle(), claim.getResourceHandle())
+                || WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
+                        && (binding.getResourceHandle() == null || binding.getProvisionSeed() == null
+                                || !binding.getProvisionSeed().equals(claim.getProvisionSeed())
+                                || !binding.getProvisionSeed().matches(binding.getLease()))
                 || binding.getLease() == null || claim.getLease() == null
                 || !binding.getLease().getRuntimeInstanceId().equals(claim.getLease().getRuntimeInstanceId())
                 || !binding.getLease().getEndpoint().equals(claim.getLease().getEndpoint())
@@ -66,5 +79,11 @@ public final class RuntimeAdmission {
             throw new RuntimeBrokerException(503, "runtime_close_claim_pending",
                     "Original stopped Session release was fenced", true);
         }
+    }
+
+    private static boolean receiptBackedExternalLoss(RuntimeBindingRecord binding) {
+        return WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
+                && binding.getState() == RuntimeBindingRecord.State.LOST && binding.isDrainRequested()
+                && binding.getDrainReceipt() != null && binding.getDrainReceipt().matches(binding);
     }
 }

@@ -851,7 +851,9 @@ describe('isolated code mode host', () => {
     const result = await run(
       `setTimeout(() => text('late'), 60_000);
       text('done');`,
-      { timeoutMs: 25 },
+      // Wall-clock budget: generous enough that CI contention cannot
+      // interrupt this trivial program during setup.
+      { timeoutMs: 5_000 },
     );
 
     expect(result.output).toBe('done');

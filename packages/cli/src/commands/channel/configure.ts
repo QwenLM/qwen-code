@@ -6,7 +6,23 @@ import {
   clearAccount,
   DEFAULT_BASE_URL,
 } from '@qwen-code/channel-weixin/accounts';
-import { startLogin, waitForLogin } from '@qwen-code/channel-weixin/login';
+import {
+  startLogin,
+  waitForLogin,
+  type WeixinQrCode,
+} from '@qwen-code/channel-weixin/login';
+
+/**
+ * The login helpers report progress as events so the daemon can serve them to
+ * a browser; the terminal rendering lives here.
+ */
+function printQrCode(qr: WeixinQrCode): void {
+  if (qr.qrcodeUrl) {
+    writeStderrLine(`QR code URL: ${qr.qrcodeUrl}`);
+    writeStderrLine('Scan this URL with WeChat.');
+  }
+  writeStderrLine('Scan the QR code with WeChat to connect.');
+}
 
 export const configureWeixinCommand: CommandModule<
   object,
@@ -56,8 +72,21 @@ export const configureWeixinCommand: CommandModule<
     writeStdoutLine('Starting WeChat QR code login...\n');
 
     try {
-      const qrcodeId = await startLogin(baseUrl);
-      const result = await waitForLogin({ qrcodeId, apiBaseUrl: baseUrl });
+      const qrcode = await startLogin(baseUrl);
+      printQrCode(qrcode);
+      const result = await waitForLogin({
+        qrcodeId: qrcode.qrcodeId,
+        apiBaseUrl: baseUrl,
+        onEvent: (event) => {
+          if (event.type === 'scanned') {
+            writeStderrLine('QR code scanned, waiting for confirmation...');
+          } else if (event.type === 'expired') {
+            writeStderrLine('QR code expired, refreshing...');
+          } else {
+            printQrCode(event);
+          }
+        },
+      });
 
       if (result.connected && result.token) {
         saveAccount({
