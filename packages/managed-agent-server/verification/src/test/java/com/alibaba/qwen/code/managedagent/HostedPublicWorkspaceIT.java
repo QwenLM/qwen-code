@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
+import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -64,6 +65,14 @@ import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.AdditionalAnswers.delegatesTo;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
@@ -89,9 +98,6 @@ class HostedPublicWorkspaceIT {
     private boolean definitionApproval;
     private String shellDecision = "allow";
     private boolean durableClose;
-    private boolean resident;
-    private boolean residentRestart;
-    private com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.Placement retainedPlacement;
     private boolean shellLifecycleV2;
     private boolean publicChildren;
     private boolean publicChildBackground;
@@ -99,6 +105,7 @@ class HostedPublicWorkspaceIT {
     private boolean restarted;
     private boolean publicChildFallback;
     private boolean personalMemory;
+    private boolean holdRuntimeStartup;
     private final Map<String, Map<String, Object>> memoryEntries = new java.util.concurrent.ConcurrentHashMap<>();
     private final AtomicInteger memoryRequests = new AtomicInteger();
     private final AtomicInteger memoryWrites = new AtomicInteger();
@@ -540,6 +547,115 @@ class HostedPublicWorkspaceIT {
     @Timeout(150)
     void publicCreationRunsFilesThroughProductionWorkspaceBinding() throws Exception {
         runFiles();
+    }
+
+    @Test
+    @Timeout(90)
+    void workspacePreparationOutlivesAdmissionBudgetOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        holdRuntimeStartup = true;
+        List<Path> roots = boot();
+        HarnessConnector observed = observePreparationHarness();
+        String session = createPreparingWorkspaceSession();
+        assertPreparationHeld(session, observed);
+
+        Files.writeString(temporary.resolve("worker-release"), "release");
+        awaitTurn(session, null, "child", roots.getFirst());
+
+        String prompt = jdbc.queryForObject("SELECT prompt_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session);
+        verify(observed).createOrLoad(tenant, session, false);
+        verify(observed).submit(eq(tenant), eq(session), eq(prompt), any(), anyString());
+        assertThat(modelRequests).hasSize(4);
+        assertThat(modelFailure.get()).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                        + " AND status = 'COMPLETED' AND retry_count = 0", Integer.class, tenant, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?"
+                        + " AND execution_state = 'SETTLED'", Integer.class, session)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
+                Integer.class, session)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                        + " AND is_terminal = TRUE", Integer.class, tenant, session)).isEqualTo(1);
+        Long ready = jdbc.queryForObject("SELECT MIN(sequence_id) FROM ma_public_event WHERE tenant_id = ?"
+                        + " AND session_id = ? AND event_type = 'environment.ready'", Long.class, tenant, session);
+        Long firstModel = jdbc.queryForObject("SELECT MIN(sequence_id) FROM ma_public_event WHERE tenant_id = ?"
+                        + " AND session_id = ? AND event_type IN ('item.output_text.delta', 'item.reasoning.delta')",
+                Long.class, tenant, session);
+        assertThat(ready).isNotNull();
+        assertThat(firstModel).isNotNull();
+        assertThat(ready).isLessThan(firstModel);
+    }
+
+    @Test
+    @Timeout(90)
+    void cancelDuringWorkspacePreparationNeverAdmitsAfterLateReadyOnMySql() throws Exception {
+        assertThat(System.getProperty("mysql.url")).startsWith("jdbc:mysql:");
+        holdRuntimeStartup = true;
+        boot();
+        HarnessConnector observed = observePreparationHarness();
+        String session = createPreparingWorkspaceSession();
+        assertPreparationHeld(session, observed);
+        String turn = jdbc.queryForObject("SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session);
+        request("POST", "/v1/agents/sessions/" + session + "/events",
+                Map.of("type", "agent.session.cancel", "turn_id", turn), "cancel-preparation", "actor", 202);
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                assertThat(turnStatus(session, turn)).isEqualTo("CANCELLED"));
+
+        Files.writeString(temporary.resolve("worker-release"), "release");
+        await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding WHERE tenant_id = ?"
+                            + " AND binding_state = 'READY'", Integer.class, tenant)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ?"
+                            + " AND session_id = ? AND event_type = 'environment.ready'", Integer.class, tenant, session)).isEqualTo(1);
+        });
+        await().during(Duration.ofSeconds(1)).atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+            assertThat(turnStatus(session, turn)).isEqualTo("CANCELLED");
+            assertNoPreparationAdmission(session, observed);
+        });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                        + " AND is_terminal = TRUE", Integer.class, tenant, session)).isEqualTo(1);
+    }
+
+    private HarnessConnector observePreparationHarness() {
+        HarnessConnector observed = mock(HarnessConnector.class, delegatesTo(spring.getBean(HarnessConnector.class)));
+        ReflectionTestUtils.setField(spring.getBean(HarnessCoordinator.class), "harness", observed);
+        return observed;
+    }
+
+    private String createPreparingWorkspaceSession() throws Exception {
+        register("workspace-0", "storage-0");
+        return request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code", "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")),
+                        "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
+                "preparing-workspace", "actor", 202).path("id").asText();
+    }
+
+    private void assertPreparationHeld(String session, HarnessConnector observed) {
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(temporary.resolve("worker-started")).exists());
+        long started = System.nanoTime();
+        await().pollInterval(Duration.ofMillis(25)).during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5))
+                .untilAsserted(() -> {
+                    assertThat(turnStatus(session, null)).isIn("ACCEPTED", "RUNNING");
+                    assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_binding WHERE tenant_id = ?"
+                                    + " AND binding_state = 'PROVISIONING'", Integer.class, tenant)).isEqualTo(1);
+                    assertNoPreparationAdmission(session, observed);
+                });
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).isGreaterThan(Duration.ofMillis(30));
+    }
+
+    private void assertNoPreparationAdmission(String session, HarnessConnector observed) {
+        verify(observed, never()).createOrLoad(eq(tenant), eq(session), anyBoolean());
+        verify(observed, never()).recoverManagedRuntime(eq(tenant), eq(session), anyBoolean());
+        verify(observed, never()).submit(eq(tenant), eq(session), anyString(), any(), anyString());
+        assertThat(modelRequests).isEmpty();
+        assertThat(modelFailure.get()).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                        + " AND is_submission_attempted = 0 AND retry_count = 0 AND consecutive_failures = 0"
+                        + " AND budget_exempt_failures = 0", Integer.class, tenant, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
+                Integer.class, session)).isZero();
     }
 
     @Test
@@ -1161,224 +1277,19 @@ class HostedPublicWorkspaceIT {
                 + " WHERE session_id = ? AND turn_id = ?", String.class,
                 session, turnId);
     }
-    @Test
-    @EnabledOnOs(OS.MAC)
-    @Timeout(180)
-    void residentPublicCloseHandsRetainedFilesToTheNextSession() throws Exception {
-        residentPublicHandoff(false);
-    }
-
-    @Test
-    @EnabledOnOs(OS.MAC)
-    @Timeout(180)
-    void residentPublicHandoffReconstructsTheApplicationAndBroker() throws Exception {
-        residentPublicHandoff(true);
-    }
-
-    @Test
-    @EnabledOnOs(OS.MAC)
-    @Timeout(180)
-    void residentUnsupportedToolRefusalAllowsCloseAndAnotherFileSession() throws Exception {
-        residentPublicHandoff(false, true);
-    }
-
-    private void residentPublicHandoff(boolean reconstruct) throws Exception {
-        residentPublicHandoff(reconstruct, false);
-    }
-
-    private void residentPublicHandoff(boolean reconstruct, boolean unsupportedTool) throws Exception {
-        assertThat(System.getProperty("mysql.url")).as("ordinary H2 scope only").isNull();
-        resident = true;
-        residentRestart = reconstruct;
-        var roots = boot();
-        register("workspace-0", "storage-0");
-        var fixture = spring.getBean(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.class);
-        var bindingRepository = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
-        var runtimeSessions = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class);
-        var state = spring.getBean(com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.class);
-        String first = residentSession("G0_RESIDENT_FIRST", "resident-first");
-        saveResidentOwnership("after-first-turn");
-        assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-first-" + tenant);
-        var context = state.requireSession(tenant, first).workspace();
-        var residentMapping = new com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces(
-                spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
-                        .getRuntimeBroker().getResidentWorkspaces());
-        var original = bindingRepository.findActive(residentMapping.request(context));
-        var oldContexts = runtimeSessions.findByBinding(original.getBindingId(), original.getGeneration(), null, 100);
-        assertThat(oldContexts).isNotEmpty();
-        assertThat(oldContexts).allSatisfy(row -> assertThat(row.getSession().getHarnessSessionId()).isEqualTo(first));
-        JsonNode bindingBefore = com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
-        JsonNode slotBefore = com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey());
-        JsonNode storageBefore = com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage WHERE alias_key = ?",
-                spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
-                        .getRuntimeBroker().getResidentWorkspaces().getFirst().registration().aliasKey());
-        var registration = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
-                .getRuntimeBroker().getResidentWorkspaces().getFirst().registration();
-        var expectedOwner = (com.fasterxml.jackson.databind.node.ObjectNode) com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
-                "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0);
-        assertThat(expectedOwner.path("holder_key").isNull()).isTrue();
-        assertThat(expectedOwner.path("runtime_session_id").isNull()).isTrue();
-        Map<String, Object> nextBody = Map.of("agent_id", "qwen-code", "input", List.of(),
-                "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
-        assertThat(request("POST", "/v1/agents/sessions", nextBody, "busy-before-close", "actor", 409)
-                .path("error").path("code").asText()).isEqualTo("workspace_busy");
-        String operation = closeResidentSession(first, "resident-close");
-        saveResidentOwnership("after-first-close");
-        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?", String.class, tenant, first)).isEqualTo("CLOSED");
-        assertThat(jdbc.queryForObject("SELECT lifecycle_protocol_version FROM ma_operation WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
-                Integer.class, tenant, first, operation)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
-                String.class, tenant, first)).isEqualTo("SEALED");
-        assertThat(runtimeSessions.findByBinding(original.getBindingId(), original.getGeneration(), null, 100))
-                .allSatisfy(row -> assertThat(row.getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.RELEASED));
-        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId())).isEqualTo(bindingBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey())).isEqualTo(slotBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage WHERE alias_key = ?", registration.aliasKey())).isEqualTo(storageBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc, "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0)).isEqualTo(expectedOwner);
-        assertThat(bindingRepository.findById(original.getBindingId()).getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY);
-        assertThat(bindingRepository.findById(original.getBindingId()).isDrainRequested()).isFalse();
-        assertThat(fixture.workerAlive()).isTrue();
-        assertThat(fixture.physicalReleases).hasValue(0);
-        assertThat(request("POST", "/v1/agents/sessions/" + first + "/close", null,
-                "resident-close", "actor", 202).path("id").asText()).isEqualTo(operation);
-        com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.assertConflict(() -> new com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport()
-                .activateWorkspace(original, oldContexts.getFirst(), context, true).toCompletableFuture().join());
-        com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.assertConflict(() -> spring.getBean(EmbeddedRuntimeBroker.class).service()
-                .acquire(first, oldContexts.getFirst().getRuntimeSessionId(), oldContexts.getFirst().getSession().getTurnKind())
-                .toCompletableFuture().join());
-        if (reconstruct) {
-            var previousApplication = spring;
-            var previousBroker = spring.getBean(EmbeddedRuntimeBroker.class);
-            var previousSource = jdbc.getDataSource();
-            var properties = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class);
-            int harnessPort = URI.create(properties.getHarness().getBaseUrl()).getPort();
-            int brokerPort = properties.getRuntimeBroker().getPort();
-            spring.close();
-            assertThat(previousApplication.isActive()).isFalse();
-            assertThat(fixture.workerAlive()).isTrue();
-            startSpring(Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath(),
-                    roots, harnessPort, brokerPort);
-            assertThat(spring).isNotSameAs(previousApplication);
-            assertThat(spring.getBean(EmbeddedRuntimeBroker.class)).isNotSameAs(previousBroker);
-            assertThat(jdbc.getDataSource()).isNotSameAs(previousSource);
-            fixture = spring.getBean(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.class);
-            bindingRepository = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
-            runtimeSessions = spring.getBean(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class);
-            state = spring.getBean(com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.class);
-            assertThat(fixture.workerAlive()).isTrue();
-            assertThat(fixture.starts).hasValue(1);
-            saveResidentOwnership("after-application-reconstruction");
-        }
-        if (unsupportedTool) {
-            String refused = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code",
-                    "input", List.of(Map.of("type", "input_text", "text", "G0_RESIDENT_UNSUPPORTED")),
-                    "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")),
-                    "resident-unsupported", "actor", 202).path("id").asText();
-            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> {
-                assertThat(modelFailure.get()).isNull();
-                assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?",
-                        String.class, refused)).isEqualTo("COMPLETED");
-            });
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution WHERE harness_session_id = ?",
-                    Long.class, refused)).isZero();
-            assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-first-" + tenant);
-            closeResidentSession(refused, "resident-unsupported-close");
-        }
-        String second = residentSession("G0_RESIDENT_SECOND", "resident-second");
-        saveResidentOwnership("after-second-turn");
-        assertThat(second).isNotEqualTo(first);
-        var retained = bindingRepository.findActive(residentMapping.request(state.requireSession(tenant, second).workspace()));
-        assertThat(retained.getBindingId()).isEqualTo(original.getBindingId());
-        assertThat(retained.getGeneration()).isEqualTo(original.getGeneration());
-        assertThat(retained.getRequest()).isEqualTo(original.getRequest());
-        assertThat(retained.getProvisionSeed()).isEqualTo(original.getProvisionSeed());
-        assertThat(retained.hasSameLease(original.getLease())).isTrue();
-        assertThat(retained.getResourceHandle()).isEqualTo(original.getResourceHandle());
-        assertThat(Files.readString(roots.getFirst().resolve("child/proof.txt"))).isEqualTo("after-second-" + tenant);
-        assertThat(decoy.resolve("child/proof.txt")).doesNotExist();
-        assertThat(fixture.starts).hasValue(1);
-        assertThat(fixture.physicalReleases).hasValue(0);
-        assertThat(fixture.workerAlive()).isTrue();
-        JsonNode bindingBeforeSecondClose = com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
-                "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId());
-        closeResidentSession(second, "resident-second-close");
-        saveResidentOwnership("after-second-close");
-        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
-                String.class, tenant, second)).isEqualTo("CLOSED");
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
-                String.class, tenant, second)).isEqualTo("SEALED");
-        assertThat(runtimeSessions.findByBinding(original.getBindingId(), original.getGeneration(), null, 100))
-                .allSatisfy(row -> assertThat(row.getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord.State.RELEASED));
-        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
-                "SELECT * FROM ma_runtime_binding WHERE binding_id = ?", original.getBindingId())).isEqualTo(bindingBeforeSecondClose);
-        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
-                "SELECT * FROM ma_runtime_slot WHERE request_key = ?", original.getRequest().requestKey())).isEqualTo(slotBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
-                "SELECT * FROM ma_storage WHERE alias_key = ?", registration.aliasKey())).isEqualTo(storageBefore);
-        assertThat(com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.snapshot(jdbc,
-                "SELECT * FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'CSI'", registration.physicalKey()).get(0)).isEqualTo(expectedOwner);
-        assertThat(bindingRepository.findById(original.getBindingId()).getState()).isEqualTo(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY);
-        assertThat(bindingRepository.findById(original.getBindingId()).isDrainRequested()).isFalse();
-        assertThat(fixture.starts).hasValue(1);
-        assertThat(fixture.physicalReleases).hasValue(0);
-        assertThat(fixture.workerAlive()).isTrue();
-        assertThat(modelFailure.get()).isNull();
-    }
-
-    private void saveResidentOwnership(String stage) throws IOException {
-        var mapping = spring.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
-                .getRuntimeBroker().getResidentWorkspaces().getFirst();
-        var reader = new com.alibaba.qwen.code.managedagent.session.ResidentAcceptanceSnapshot(jdbc,
-                spring.getBean(org.springframework.transaction.PlatformTransactionManager.class), mapping, json);
-        var snapshot = reader.capture();
-        assertThat(snapshot.path("tables").path("ma_runtime_binding")).hasSize(1);
-        assertThat(snapshot.path("tables").path("ma_runtime_slot")).hasSize(1);
-        assertThat(snapshot.path("tables").path("ma_storage_owner")).hasSize(1);
-        Files.writeString(temporary.resolve(stage + "-ownership.json"), json.writeValueAsString(snapshot) + "\n",
-                java.nio.file.StandardOpenOption.CREATE_NEW);
-    }
-
-    private String closeResidentSession(String session, String key) throws Exception {
-        String operation = request("POST", "/v1/agents/sessions/" + session + "/close", null,
-                key, "actor", 202).path("id").asText();
-        try {
-            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(request("GET",
-                    "/v1/agents/sessions/" + session + "/operations/" + operation, null, null, "actor", 200)
-                    .path("status").asText()).isEqualTo("completed"));
-        } catch (RuntimeException | AssertionError cause) {
-            throw new AssertionError("Resident close failed: " + Files.readString(temporary.resolve("harness.log")), cause);
-        }
-        return operation;
-    }
-
-    private String residentSession(String prompt, String key) throws Exception {
-        String session = request("POST", "/v1/agents/sessions", Map.of("agent_id", "qwen-code",
-                "input", List.of(Map.of("type", "input_text", "text", prompt)),
-                "workspace", Map.of("workspace_id", "workspace-0", "cwd_relative", "child")), key, "actor", 202).path("id").asText();
-        await().atMost(Duration.ofSeconds(35)).failFast(() -> {
-            if ("FAILED".equals(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?", String.class, session))) {
-                throw new AssertionError("Resident turn failed: " + Files.readString(temporary.resolve("harness.log")));
-            }
-        }).untilAsserted(() -> {
-            assertThat(modelFailure.get()).isNull();
-            assertThat(jdbc.queryForObject("SELECT status FROM ma_turn WHERE session_id = ?", String.class, session)).isEqualTo("COMPLETED");
-        });
-        String journal = String.join("\n", jdbc.query("SELECT record_bytes FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? ORDER BY journal_revision",
-                (row, n) -> new String(row.getBytes(1), StandardCharsets.UTF_8), tenant, session));
-        assertThat(journal).contains("tool_result");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_tool_execution e JOIN ma_runtime_binding b"
-                + " ON b.binding_id = e.binding_id WHERE b.tenant_id = ? AND e.harness_session_id = ?"
-                + " AND e.execution_state = 'SETTLED'", Long.class, tenant, session)).isEqualTo(3);
-        assertThat(request("GET", "/v1/agents/sessions/" + session + "/events", null, null, "actor", 200).toString()).contains("G0_DONE");
-        return session;
-    }
-
     private List<Path> boot() throws Exception {
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../dist/cli.js")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the CLI first").isRegularFile();
         node = System.getProperty("node.executable");
         assertThat(node).as("Pass -Dnode.executable with an absolute Node.js 22+ path").isNotBlank();
         temporary = temporary.toRealPath();
+        if (holdRuntimeStartup) {
+            Path launcher = temporary.resolve("worker-barrier-node");
+            Files.writeString(launcher, "#!/bin/sh\n: > " + quote(temporary.resolve("worker-started").toString())
+                    + "\nwhile [ ! -f " + quote(temporary.resolve("worker-release").toString())
+                    + " ]; do /bin/sleep 0.05; done\nexec " + quote(node) + " \"$@\"\n");
+            Files.setPosixFilePermissions(launcher, PosixFilePermissions.fromString("rwx------"));
+        }
         decoy = Files.createDirectory(temporary.resolve("harness-decoy"));
         if (durableClose || definitionApproval || personalMemory) {
             Files.createDirectory(temporary.resolve("broker"), PosixFilePermissions.asFileAttribute(
@@ -1415,10 +1326,6 @@ class HostedPublicWorkspaceIT {
                 storeRelay.createContext("/internal/managed-session-store/", this::relayStore);
                 storeRelay.start();
             }
-        }
-        if (residentRestart) {
-            retainedPlacement = new com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.Placement(
-                    List.of(node, cli.toString(), "managed-runtime-worker"), temporary.resolve("broker"));
         }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
@@ -1775,8 +1682,15 @@ class HostedPublicWorkspaceIT {
                 "--qwen.managed-agent.runtime-broker.state-directory=" + temporary.resolve("broker"),
                 "--qwen.managed-agent.runtime-broker.credential-key-id=g0-fixture",
                 "--qwen.managed-agent.runtime-broker.credential-key=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                "--qwen.managed-agent.runtime-broker.node-executable=" + node,
+                "--qwen.managed-agent.runtime-broker.node-executable="
+                        + (holdRuntimeStartup ? temporary.resolve("worker-barrier-node") : node),
                 "--qwen.managed-agent.runtime-broker.worker-entry=" + cli));
+        if (holdRuntimeStartup) {
+            arguments.addAll(List.of("--qwen.managed-agent.dispatch.scan-delay=10ms",
+                    "--qwen.managed-agent.dispatch.retry-initial-delay=10ms",
+                    "--qwen.managed-agent.dispatch.max-pre-admission-retries=2",
+                    "--qwen.managed-agent.harness.load-timeout=20s"));
+        }
         if (approvals) {
             arguments.add("--qwen.managed-agent.harness.approval-mode="
                     + (shell && "deny".equals(shellDecision) ? "auto-edit" : "default"));
@@ -1801,11 +1715,8 @@ class HostedPublicWorkspaceIT {
         }
         arguments.add("--qwen.managed-agent.runtime-broker.durable-local-process=" + (durableClose || definitionApproval || personalMemory));
         arguments.add("--qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled="
-                + (definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name"))));
-        if (resident) {
-            com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.arguments(arguments, tenant, roots.getFirst());
-        }
-        for (int i = 0; !resident && i < roots.size(); i++) {
+                + (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name"))));
+        for (int i = 0; i < roots.size(); i++) {
             String prefix = "--qwen.managed-agent.runtime-broker.workspace-mounts[" + i + "].";
             arguments.add(prefix + "tenant-id=" + tenant);
             arguments.add(prefix + "storage-id=storage-" + i);
@@ -1814,11 +1725,6 @@ class HostedPublicWorkspaceIT {
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(ManagedAgentServerApplication.class)
                 .initializers(context -> {
                     context.getBeanFactory().registerSingleton("g0Authentication", authentication());
-                    if (resident) {
-                        com.alibaba.qwen.code.managedagent.workspace.runtime.ResidentHostedRuntimeFixture.install(context,
-                                List.of(node, cli.toString(), "managed-runtime-worker"), temporary.resolve("broker"),
-                                retainedPlacement);
-                    }
                     if (shellLifecycleV2) {
                         if (publicationObjects == null) {
                             publicationObjects = new java.util.concurrent.ConcurrentHashMap<>();
@@ -1829,7 +1735,7 @@ class HostedPublicWorkspaceIT {
                 })
                 .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
-        if (!restarted && (definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
+        if (!restarted && (holdRuntimeStartup || definitionApproval || personalMemory || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
                 WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
@@ -1989,6 +1895,10 @@ class HostedPublicWorkspaceIT {
         try {
             JsonNode body = json.readTree(exchange.getRequestBody());
             modelRequests.add(body);
+            if (holdRuntimeStartup) {
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event WHERE tenant_id = ?"
+                                + " AND event_type = 'environment.ready'", Integer.class, tenant)).isEqualTo(1);
+            }
             if (personalMemory) {
                 memoryModelReply(exchange, body);
                 return;
@@ -2018,8 +1928,6 @@ class HostedPublicWorkspaceIT {
                         assertThat(tool.at("/function/parameters/properties").has("is_background")).isEqualTo(shellLifecycleV2);
                     }
                 });
-            } else if (resident) {
-                assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit");
             } else {
                 assertThat(tools).containsExactlyInAnyOrder("read_file", "write_file", "edit", "web_fetch", "glob", "ask_user_question");
             }
@@ -2055,14 +1963,6 @@ class HostedPublicWorkspaceIT {
             if (!runShell && step == 3) {
                 assertThat(results.get(2).toString()).contains("after");
             }
-            boolean residentSecond = resident && prompt.get().contains("G0_RESIDENT_SECOND");
-            boolean residentUnsupported = resident && prompt.get().contains("G0_RESIDENT_UNSUPPORTED");
-            if (residentUnsupported && step >= 1) {
-                assertThat(results.getFirst().toString()).contains("Resident Workspace supports only");
-            }
-            if (residentSecond && step >= 1) {
-                assertThat(results.getFirst().toString()).contains("after-first-" + tenant);
-            }
             if (runShell && shellFault == null && step >= 1 && "allow".equals(shellDecision)) {
                 assertThat(results.getFirst().toString()).contains("G0_SHELL_STDOUT");
             }
@@ -2078,30 +1978,20 @@ class HostedPublicWorkspaceIT {
                         .doesNotContain(("A".equals(questionChild) ? "B" : "A") + "-only");
             }
             boolean toolCall = publicChildren ? publicParent ? step == 0 && prompt.get().contains("G0_PUBLIC_PARENT") : step < 2
-                    : step < (questionTurn || residentUnsupported ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
+                    : step < (questionTurn ? 1 : definitionTurn ? 2 : runShell ? 1 : 3);
             if (publicChildQuestions) {
                 toolCall = step < 2 && (!publicParent || prompt.get().contains("G0_PUBLIC_QUESTIONS_PARENT"));
             }
             if (toolCall) {
                 String name = runShell ? "run_shell_command"
-                        : (residentSecond ? List.of("read_file", "edit", "read_file")
-                                : List.of("write_file", "edit", "read_file")).get(step);
+                        : List.of("write_file", "edit", "read_file").get(step);
                 Map<String, Object> args = runShell
                         ? Map.of("command", "printf 'once\\n' >> shell-proof.txt; pwd; printf 'G0_SHELL_STDOUT\\n'", "description", "Write a Shell proof")
                         : switch (step) {
                     case 0 -> Map.of("file_path", "proof.txt", "content", "before");
-                    case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", resident ? "after-first-" + tenant : "after");
+                    case 1 -> Map.of("file_path", "proof.txt", "old_string", "before", "new_string", "after");
                     default -> Map.of("file_path", "proof.txt");
                 };
-                if (residentSecond) {
-                    args = step == 1
-                            ? Map.of("file_path", "proof.txt", "old_string", "after-first-" + tenant, "new_string", "after-second-" + tenant)
-                            : Map.of("file_path", "proof.txt");
-                }
-                if (residentUnsupported) {
-                    name = "web_fetch";
-                    args = Map.of("url", "https://resident.invalid/never-requested", "prompt", "Unsupported resident tool");
-                }
                 if (definitionTurn) {
                     String marker = prompt.get().split("[^A-Z0-9_]", 2)[0];
                     name = step == 0 ? "write_file" : "run_shell_command";
@@ -2356,6 +2246,11 @@ class HostedPublicWorkspaceIT {
         Throwable failure = null;
         List<org.junit.jupiter.api.function.Executable> cleanup = List.of(
                 () -> {
+                    if (holdRuntimeStartup && temporary != null && Files.isDirectory(temporary)) {
+                        Files.writeString(temporary.resolve("worker-release"), "cleanup");
+                    }
+                },
+                () -> {
                     if (harness != null) {
                         harness.descendants().forEach(ProcessHandle::destroyForcibly);
                         harness.destroyForcibly();
@@ -2367,9 +2262,6 @@ class HostedPublicWorkspaceIT {
                 } },
                 () -> { if (spring != null) {
                     spring.close();
-                } },
-                () -> { if (retainedPlacement != null) {
-                    retainedPlacement.close();
                 } },
                 () -> { if (storeRelay != null) {
                     storeRelay.stop(0);

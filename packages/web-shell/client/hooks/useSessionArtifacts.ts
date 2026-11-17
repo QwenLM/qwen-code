@@ -70,6 +70,15 @@ export function useSessionArtifacts(): SessionArtifactsState {
   );
   const previousArtifactsVersionRef = useRef(artifactsVersion);
 
+  const restoredSnapshot =
+    connection.restoredArtifactsSessionId === sessionId
+      ? connection.restoredArtifacts
+      : undefined;
+  // Read by the refresh failure path: a failed gated fetch must not cache an
+  // empty placeholder over a snapshot the client already holds for this session.
+  const restoredSnapshotRef = useRef(restoredSnapshot);
+  restoredSnapshotRef.current = restoredSnapshot;
+
   const refresh = useCallback(async () => {
     const requestId = ++requestIdRef.current;
     if (!sessionKey) {
@@ -91,11 +100,15 @@ export function useSessionArtifacts(): SessionArtifactsState {
         );
       }
     } catch {
-      // The artifacts panel treats a failed refresh as an empty error state.
+      // The artifacts panel treats a failed refresh as an empty error state —
+      // but only when there is no load-embedded snapshot to keep showing. A
+      // cached [] would shadow the snapshot for the rest of the hook's life,
+      // since ?? does not fall through on a defined empty array.
       if (
         requestIdRef.current === requestId &&
         owner.isCurrent() &&
-        !artifactsBySessionRef.current.has(sessionKey)
+        !artifactsBySessionRef.current.has(sessionKey) &&
+        restoredSnapshotRef.current === undefined
       ) {
         cacheArtifacts(artifactsBySessionRef.current, sessionKey, []);
       }
@@ -135,6 +148,7 @@ export function useSessionArtifacts(): SessionArtifactsState {
   const visibleArtifacts =
     sessionKey && supportsArtifacts
       ? (artifactsBySessionRef.current.get(sessionKey)?.artifacts ??
+        restoredSnapshot ??
         EMPTY_ARTIFACTS)
       : EMPTY_ARTIFACTS;
   const artifactById = useMemo(
@@ -152,7 +166,10 @@ export function useSessionArtifacts(): SessionArtifactsState {
       Boolean(
         sessionId && isConnected && !connection.catchingUp && supportsArtifacts,
       ) &&
-      Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)),
+      Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)) &&
+      // The embedded snapshot already supplies a list; showing a skeleton over
+      // it between catch-up and the gated fetch would flicker the early entry.
+      restoredSnapshot === undefined,
     error: null,
     hydrated,
     refresh,

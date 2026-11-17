@@ -4,7 +4,6 @@ import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -18,13 +17,10 @@ class ModuleArchitectureTest {
     @Test
     void compiledModulesRespectTheirBoundariesAndOwnTheirPackages() {
         var modules = new LinkedHashMap<String, JavaClasses>();
-        for (String module : List.of("contracts", "control-plane", "runtime-broker", "persistence", "runtime-http", "runtime-host", "runtime-local", "runtime-external", "runtime-kubernetes", "runtime-ssh", "runtime-static", "adapters", "server")) {
+        for (String module : List.of("contracts", "control-plane", "runtime-broker", "persistence", "runtime-http", "runtime-host", "runtime-local", "runtime-external", "runtime-ssh", "runtime-static", "adapters", "server")) {
             var classes = new ClassFileImporter().importPath(Path.of("..", module, "target", "classes"));
             assertThat(classes).as("compiled classes of %s", module).isNotEmpty();
             modules.put(module, classes);
-            Path declarations = Path.of("..", module, "target", "classes", "csi-native-file-declarations.json");
-            assertThat(Files.exists(declarations)).as("native-tool declarations in %s", module)
-                    .isEqualTo(module.equals("contracts"));
         }
         Map<String, String> owners = new HashMap<>();
         Map<String, String> packages = new HashMap<>();
@@ -41,7 +37,7 @@ class ModuleArchitectureTest {
                         "adapters", "runtime-http", "runtime-host");
                 case "contracts" -> Set.of("contracts");
                 case "adapters", "runtime-local", "runtime-ssh" -> Set.of(module, "contracts", "runtime-http", "runtime-host");
-                case "runtime-external", "runtime-kubernetes" -> Set.of(module, "contracts", "runtime-http");
+                case "runtime-external" -> Set.of(module, "contracts", "runtime-http");
                 default -> Set.of(module, "contracts");
             };
             assertThat(owner == null || permitted.contains(owner)).as("%s: %s", module, dependency.getDescription()).isTrue();

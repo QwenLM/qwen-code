@@ -1803,11 +1803,12 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(bridge.setSessionPrs).toHaveBeenCalledTimes(1);
     expect(bridge.setSessionPrs).toHaveBeenCalledWith(
       SESSION_A,
-      persisted?.map(({ number, url, state, role }) => ({
+      persisted?.map(({ number, url, state, role, source }) => ({
         number,
         url,
         ...(state ? { state } : {}),
         ...(role ? { role } : {}),
+        ...(source ? { source } : {}),
       })),
     );
 
