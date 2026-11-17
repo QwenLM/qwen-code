@@ -61,6 +61,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   auth_provider_install: [],
   workspace_memory: [],
   memory_import_v1: [],
+  workspace_auto_memory: [],
   workspace_memory_remember: [],
   workspace_memory_remember_project_scope: [],
   workspace_memory_remember_user_scope: [],
