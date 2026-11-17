@@ -1023,6 +1023,14 @@ describe('GrepTool', () => {
         .execute(controller.signal);
 
       expect(grepArgv()).toHaveLength(0);
+      // The corpus lookup is the first thing strategy 2 does, so a spawn here
+      // means the cancellation was swallowed instead of propagated.
+      expect(
+        spawnMock.mock.calls.filter(
+          (call) =>
+            call[0] === 'git' && (call[1] as string[])[4] === 'ls-files',
+        ),
+      ).toHaveLength(0);
       expect(String(result.llmContent)).toMatch(/abort/i);
     });
   });
