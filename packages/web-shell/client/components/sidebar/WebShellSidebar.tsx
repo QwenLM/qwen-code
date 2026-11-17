@@ -8360,8 +8360,11 @@ export function WebShellSidebar({
               {!liveView && !hideProjectHeader && (
                 <div className={styles.projectsHeader}>
                   {activityDateMode ? (
-                    <span className={styles.projectsHeaderToggle}>
-                      {t('sidebar.project')}
+                    <span
+                      className={styles.projectsHeaderToggle}
+                      style={{ cursor: 'default' }}
+                    >
+                      {t('sidebar.recentConversations')}
                     </span>
                   ) : (
                     <button

@@ -44,7 +44,7 @@ async function openWorkspaceFilter(page: Page) {
     name: 'Display options',
     exact: true,
   });
-  await expect(displayOptions.locator('../..')).toContainText('Workspaces');
+  await expect(displayOptions).toBeVisible();
   await displayOptions.locator('../..').hover();
   await displayOptions.click();
   await page.getByRole('menuitem', { name: /^Workspace/ }).hover();
@@ -58,7 +58,7 @@ async function openGroupBy(page: Page) {
     name: 'Display options',
     exact: true,
   });
-  await expect(displayOptions.locator('../..')).toContainText('Workspaces');
+  await expect(displayOptions).toBeVisible();
   await displayOptions.locator('../..').hover();
   await displayOptions.click();
   await page.getByRole('menuitem', { name: /^Group by/ }).hover();
@@ -162,6 +162,9 @@ test('activity date grouping filters, persists, and restores workspace grouping'
     .getByRole('menuitemradio', { name: 'Activity date', exact: true })
     .click();
   await expect.poll(() => order(page)).toEqual([]);
+  await expect(
+    page.getByText('Recent conversations', { exact: true }),
+  ).toBeVisible();
   const today = page.getByRole('region', { name: 'Today', exact: true });
   const thisWeek = page.getByRole('region', {
     name: 'This week',

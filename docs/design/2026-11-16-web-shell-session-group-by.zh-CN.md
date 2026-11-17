@@ -36,7 +36,7 @@
 
 ## 兼容与失败行为
 
-Workspace 模式保留当前工作区区域、拖拽排序、自定义分组、展开控件和数据查询。Activity date 模式只替换当前 host 的 `orderedProjectWorkspaces` 列表。Workspaces 标题保留显示选项，但在日期模式下变为静态文本；仅属于工作区模式的数量、拖拽和全部折叠控件会隐藏。此前折叠的 Workspaces 区域不会隐藏日期分组，其持久化展开偏好会为 Workspace 模式保留。
+Workspace 模式保留当前工作区区域、拖拽排序、自定义分组、展开控件和数据查询。Activity date 模式只替换当前 host 的 `orderedProjectWorkspaces` 列表。该模式下区域标题变为静态的「最近对话」（Recent conversations），并保留显示选项；仅属于工作区模式的数量、拖拽和全部折叠控件会隐藏。此前折叠的 Workspaces 区域不会隐藏日期分组，其持久化展开偏好会为 Workspace 模式保留。
 
 无工作区会话继续留在独立区域，因为 Activity 目录是 workspace-qualified。其他 host 的项目也保持不变，因为偏好和目录都限定在当前 host。Live、归档、Recent 和置顶区域保持现有行为。
 
@@ -44,7 +44,7 @@ Workspace 模式保留当前工作区区域、拖拽排序、自定义分组、�
 
 ## 无障碍与展示
 
-沿用现有 Radix 嵌套菜单和 portal primitives，支持键盘导航、`menuitemradio` 和 `aria-checked`。复用现有区域标题和会话行，不引入新的视觉语言。为中英文分别增加 `Group by`、`Workspace` 和 `Activity date` 文案。
+沿用现有 Radix 嵌套菜单和 portal primitives，支持键盘导航、`menuitemradio` 和 `aria-checked`。复用现有区域标题和会话行，不引入新的视觉语言。为中英文分别增加 `Group by`、`Workspace`、`Activity date` 以及日期模式下「最近对话」标题文案。
 
 ## 验证
 

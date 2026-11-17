@@ -639,6 +639,7 @@ export const RU_PART3: Record<
   'sidebar.groupThisWeek': 'На этой неделе',
   'sidebar.groupLast30Days': 'За последние 30 дней',
   'sidebar.groupOlder': 'Ранее',
+  'sidebar.recentConversations': 'Недавние разговоры',
   'sidebar.sortBy': 'Сортировать',
   'sidebar.sortActivity': 'Недавняя активность',
   'sidebar.sortQuestion': 'Последний вопрос',

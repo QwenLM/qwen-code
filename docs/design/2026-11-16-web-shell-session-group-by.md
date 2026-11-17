@@ -36,7 +36,7 @@ Each range uses the existing group-section presentation, including a count, coll
 
 ## Compatibility and failure behavior
 
-Workspace mode keeps the current workspace sections, drag ordering, custom groups, expansion controls, and data queries unchanged. Activity date mode replaces only the focused host's `orderedProjectWorkspaces` list. The Workspaces header retains display options but becomes static text in date mode, while workspace-only count, drag, and collapse-all controls are hidden. A previously collapsed Workspaces section does not hide the date groups, and its stored expansion preference is preserved for Workspace mode.
+Workspace mode keeps the current workspace sections, drag ordering, custom groups, expansion controls, and data queries unchanged. Activity date mode replaces only the focused host's `orderedProjectWorkspaces` list. In that mode the section header becomes static `Recent conversations` text and keeps display options, while workspace-only count, drag, and collapse-all controls are hidden. A previously collapsed Workspaces section does not hide the date groups, and its stored expansion preference is preserved for Workspace mode.
 
 Standalone sessions stay in their dedicated section because the activity catalog is workspace-qualified. Other-host projects also remain unchanged because the preference and catalog are focused-host scoped. Live, archived, Recent, and Pinned sections keep their current behavior.
 
@@ -44,7 +44,7 @@ If any visible project workspace is untrusted, lacks an absolute qualified path,
 
 ## Accessibility and presentation
 
-Use the existing Radix nested-menu and portal primitives, with keyboard navigation, `menuitemradio`, and `aria-checked`. Reuse existing section headers and session rows rather than adding a new visual language. Add matching English and Chinese strings for `Group by`, `Workspace`, and `Activity date`.
+Use the existing Radix nested-menu and portal primitives, with keyboard navigation, `menuitemradio`, and `aria-checked`. Reuse existing section headers and session rows rather than adding a new visual language. Add matching English and Chinese strings for `Group by`, `Workspace`, `Activity date`, and the date-mode `Recent conversations` header.
 
 ## Validation
 

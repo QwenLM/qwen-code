@@ -429,6 +429,12 @@ describe('WebShellSidebar session grouping', () => {
     await selectGroupBy('Activity date');
     expect(workspaceCwds()).toEqual([]);
     expect(activity.open).toBe(true);
+    expect(container.textContent).toContain('Recent conversations');
+    expect(
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Workspaces',
+      ),
+    ).toBeUndefined();
     expect(
       container.querySelector('span[aria-label="2 workspaces"]'),
     ).toBeNull();
@@ -440,6 +446,7 @@ describe('WebShellSidebar session grouping', () => {
     await selectGroupBy('Workspace');
     expect(workspaceCwds()).toEqual(['/tmp/project', '/tmp/second']);
     expect(activity.open).toBe(false);
+    expect(container.textContent).not.toContain('Recent conversations');
     expect(
       container.querySelector('span[aria-label="2 workspaces"]'),
     ).not.toBeNull();
@@ -600,6 +607,7 @@ describe('WebShellSidebar session grouping', () => {
     );
     expect(today).not.toBeNull();
     expect(today!.closest('[hidden]')).toBeNull();
+    expect(container.textContent).toContain('Recent conversations');
     expect(
       Array.from(container.querySelectorAll('button')).find(
         (button) => button.textContent === 'Workspaces',

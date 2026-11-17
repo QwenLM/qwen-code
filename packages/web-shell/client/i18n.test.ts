@@ -644,9 +644,15 @@ describe('web-shell ru locale', () => {
       'sidebar.groupThisWeek',
       'sidebar.groupLast30Days',
       'sidebar.groupOlder',
+      'sidebar.recentConversations',
     ]) {
       expect(ru(key)).not.toBe(en(key));
     }
+    expect(en('sidebar.recentConversations')).toBe('Recent conversations');
+    expect(getTranslator('zh-CN')('sidebar.recentConversations')).toBe(
+      '最近对话',
+    );
+    expect(ru('sidebar.recentConversations')).toBe('Недавние разговоры');
   });
 
   it('pluralises turn counters the Russian way', () => {
