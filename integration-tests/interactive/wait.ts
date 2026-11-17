@@ -11,7 +11,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // machine can expire mid-repaint in CI. Scaling keeps the local signal tight
 // and gives the pool room without turning a stuck UI into a pass: every
 // caller still fails on the same assertion, only later.
-const CI_MULTIPLIER = process.env['CI'] === 'true' ? 3 : 1;
+// Exported so the ceiling pins read the factor instead of re-spelling it.
+export const CI_WAIT_MULTIPLIER = 3;
+const CI_MULTIPLIER = process.env['CI'] === 'true' ? CI_WAIT_MULTIPLIER : 1;
 
 export function scaledWait(localMs: number): number {
   return localMs * CI_MULTIPLIER;

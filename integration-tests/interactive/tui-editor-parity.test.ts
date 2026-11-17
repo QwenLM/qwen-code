@@ -29,7 +29,8 @@ import {
 } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
-import { createUntil } from './wait.js';
+import { createUntil, scaledWait } from './wait.js';
+import { readyPromptBudgetMs } from '../ready-prompt-budget.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -54,9 +55,16 @@ const keys = {
 };
 
 // The shared pool has stalled this CLI past 90s (#13552, #14191), so a
-// mid-turn repaint gets the boot's stall tier: createUntil triples this in
+// mid-turn repaint gets the boot's stall tier: createUntil scales this in
 // CI, and the old 12s capped it at 36s (#17544).
-const until = createUntil(30_000);
+const WAIT_LOCAL_MS = 30_000;
+const until = createUntil(WAIT_LOCAL_MS);
+
+// The /permissions cases pin their own ceiling to fail fast on a wedged
+// dialog. It must outrank the boot window plus one stalled wait, or vitest's
+// bare "Test timed out" pre-empts the wait's own label (#17544).
+const PERMISSIONS_CASE_TIMEOUT =
+  readyPromptBudgetMs(process.env) + scaledWait(WAIT_LOCAL_MS) + 60_000;
 
 function lastUser(server: FakeOpenAIServer): string {
   const messages = server.requests.at(-1)?.body['messages'];
@@ -1026,7 +1034,7 @@ it(
         expect(server.requests).toHaveLength(0);
       },
     ),
-  90_000,
+  PERMISSIONS_CASE_TIMEOUT,
 );
 
 it(
@@ -1134,7 +1142,7 @@ it(
         expect(server.requests).toHaveLength(0);
       },
     ),
-  90_000,
+  PERMISSIONS_CASE_TIMEOUT,
 );
 
 it(
@@ -1184,5 +1192,5 @@ it(
         expect(server.requests).toHaveLength(0);
       },
     ),
-  90_000,
+  PERMISSIONS_CASE_TIMEOUT,
 );
