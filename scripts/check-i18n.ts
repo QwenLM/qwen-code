@@ -67,6 +67,22 @@ const EN_SEMANTIC_KEY_EXCEPTIONS: ReadonlySet<string> = new Set([
   // Multi-line copy is intentionally keyed by a stable identifier so wording
   // changes do not silently break locale lookup.
   'auto_mode.entry_notice',
+  // Goal budget stop-reason: composed at render time from limitKind + budget.
+  'goal.reason.token_budget',
+  'goal.reason.turn_budget',
+  'goal.reason.time_budget',
+  'goal.reason.unit.token.one',
+  'goal.reason.unit.token.few',
+  'goal.reason.unit.token.many',
+  'goal.reason.unit.turn.one',
+  'goal.reason.unit.turn.few',
+  'goal.reason.unit.turn.many',
+  'goal.reason.unit.minute.one',
+  'goal.reason.unit.minute.few',
+  'goal.reason.unit.minute.many',
+  'goal.reason.unit.second.one',
+  'goal.reason.unit.second.few',
+  'goal.reason.unit.second.many',
 ]);
 
 export function shouldWriteUnusedKeysJson(): boolean {

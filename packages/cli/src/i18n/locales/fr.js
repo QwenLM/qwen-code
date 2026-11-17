@@ -2415,4 +2415,26 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Les modifications du gestionnaire de compétences automatiques ne sont disponibles que dans les espaces de travail approuvés. Marquez ce dossier comme approuvé avec `/trust`, puis réessayez.',
   'Kept model as {{model}}': 'Modèle conservé : {{model}}',
+
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    "L'objectif a épuisé son budget autonome de jetons ({{count}} {{unit}}). Reprenez l'objectif pour autoriser une autre fenêtre de budget, ou supprimez-le.",
+  'goal.reason.turn_budget':
+    "L'objectif a épuisé son budget de tours ({{count}} {{unit}}). Reprenez l'objectif pour autoriser une autre fenêtre de tours, ou supprimez-le.",
+  'goal.reason.time_budget':
+    "L'objectif a épuisé son budget de temps actif ({{count}} {{unit}}). Reprenez l'objectif pour autoriser une autre fenêtre de temps, ou supprimez-le.",
+  'goal.reason.unit.token.one': 'jeton',
+  'goal.reason.unit.token.few': 'jetons',
+  'goal.reason.unit.token.many': 'jetons',
+  'goal.reason.unit.turn.one': 'tour',
+  'goal.reason.unit.turn.few': 'tours',
+  'goal.reason.unit.turn.many': 'tours',
+  'goal.reason.unit.minute.one': 'min',
+  'goal.reason.unit.minute.few': 'min',
+  'goal.reason.unit.minute.many': 'min',
+  'goal.reason.unit.second.one': 'seconde',
+  'goal.reason.unit.second.few': 'secondes',
+  'goal.reason.unit.second.many': 'secondes',
 };

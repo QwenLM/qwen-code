@@ -2410,4 +2410,26 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Änderungen durch den Auto-Skill-Kurator sind nur in vertrauenswürdigen Arbeitsbereichen verfügbar. Stufen Sie diesen Ordner mit `/trust` als vertrauenswürdig ein und versuchen Sie es erneut.',
   'Kept model as {{model}}': 'Modell als {{model}} beibehalten',
+
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    'Der Goal hat sein autonomes Token-Budget ({{count}} {{unit}}) aufgebraucht. Setze den Goal fort, um ein weiteres Budgetfenster freizugeben, oder lösche ihn.',
+  'goal.reason.turn_budget':
+    'Der Goal hat sein Rund-Budget ({{count}} {{unit}}) aufgebraucht. Setze den Goal fort, um ein weiteres Rundfenster freizugeben, oder lösche ihn.',
+  'goal.reason.time_budget':
+    'Der Goal hat sein Aktivzeit-Budget ({{count}} {{unit}}) aufgebraucht. Setze den Goal fort, um ein weiteres Zeitfenster freizugeben, oder lösche ihn.',
+  'goal.reason.unit.token.one': 'Token',
+  'goal.reason.unit.token.few': 'Token',
+  'goal.reason.unit.token.many': 'Token',
+  'goal.reason.unit.turn.one': 'Runde',
+  'goal.reason.unit.turn.few': 'Runden',
+  'goal.reason.unit.turn.many': 'Runden',
+  'goal.reason.unit.minute.one': 'Minute',
+  'goal.reason.unit.minute.few': 'Minuten',
+  'goal.reason.unit.minute.many': 'Minuten',
+  'goal.reason.unit.second.one': 'Sekunde',
+  'goal.reason.unit.second.few': 'Sekunden',
+  'goal.reason.unit.second.many': 'Sekunden',
 };

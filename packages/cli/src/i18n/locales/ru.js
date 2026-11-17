@@ -2383,4 +2383,26 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
   'Kept model as {{model}}': 'Оставлена модель {{model}}',
+
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    'Цель исчерпала автономный бюджет токенов ({{count}} {{unit}}). Возобновите цель, чтобы выдать ещё одно окно бюджета, или снимите её.',
+  'goal.reason.turn_budget':
+    'Цель исчерпала бюджет ходов ({{count}} {{unit}}). Возобновите цель, чтобы выдать ещё одно окно ходов, или снимите её.',
+  'goal.reason.time_budget':
+    'Цель исчерпала бюджет активного времени ({{count}} {{unit}}). Возобновите цель, чтобы выдать ещё одно окно времени, или снимите её.',
+  'goal.reason.unit.token.one': 'токен',
+  'goal.reason.unit.token.few': 'токена',
+  'goal.reason.unit.token.many': 'токенов',
+  'goal.reason.unit.turn.one': 'ход',
+  'goal.reason.unit.turn.few': 'хода',
+  'goal.reason.unit.turn.many': 'ходов',
+  'goal.reason.unit.minute.one': 'минута',
+  'goal.reason.unit.minute.few': 'минуты',
+  'goal.reason.unit.minute.many': 'минут',
+  'goal.reason.unit.second.one': 'секунда',
+  'goal.reason.unit.second.few': 'секунды',
+  'goal.reason.unit.second.many': 'секунд',
 };

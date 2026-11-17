@@ -3111,4 +3111,26 @@ export default {
     'Tip: Use /btw to ask a quick side question without interrupting the current work',
   '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
     '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)',
+
+  // ============================================================================
+  // Goal budget stop-reason
+  // ============================================================================
+  'goal.reason.token_budget':
+    'The Goal spent its autonomous token budget ({{count}} {{unit}}). Resume the Goal to authorize another budget window, or clear it.',
+  'goal.reason.turn_budget':
+    'The Goal ran its Goal-turn budget ({{count}} {{unit}}). Resume the Goal to authorize another window of turns, or clear it.',
+  'goal.reason.time_budget':
+    'The Goal ran its active-time budget ({{count}} {{unit}}). Resume the Goal to authorize another window of time, or clear it.',
+  'goal.reason.unit.token.one': 'token',
+  'goal.reason.unit.token.few': 'tokens',
+  'goal.reason.unit.token.many': 'tokens',
+  'goal.reason.unit.turn.one': 'turn',
+  'goal.reason.unit.turn.few': 'turns',
+  'goal.reason.unit.turn.many': 'turns',
+  'goal.reason.unit.minute.one': 'minute',
+  'goal.reason.unit.minute.few': 'minutes',
+  'goal.reason.unit.minute.many': 'minutes',
+  'goal.reason.unit.second.one': 'second',
+  'goal.reason.unit.second.few': 'seconds',
+  'goal.reason.unit.second.many': 'seconds',
 };

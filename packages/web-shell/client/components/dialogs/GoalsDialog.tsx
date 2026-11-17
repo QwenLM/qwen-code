@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildGoalControlRequest } from '../../utils/goalControlRequest';
+import { composeGoalBudgetReason } from '../../utils/goalBudgetReason';
 import { canResumeGoal } from '../../utils/goalGate';
 import {
   useWorkspaceActions,
@@ -92,7 +93,7 @@ export function GoalsDialog({
   defaultWorkspaceCwd,
   onError,
 }: GoalsDialogProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const actions = useWorkspaceActions();
 
   // Multi-workspace aggregation, mirroring ScheduledTasksDialog. Memoized so
@@ -776,7 +777,8 @@ export function GoalsDialog({
                   <span className={styles.reasonLabel}>
                     {t('goal.lastCheck')}:
                   </span>{' '}
-                  {goal.lastReason}
+                  {composeGoalBudgetReason(goal, language, t) ??
+                    goal.lastReason}
                 </div>
               )}
 

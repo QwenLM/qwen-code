@@ -70,7 +70,17 @@ import {
   skipHeadlessLoopSentinel,
   TurnInterruptedError,
 } from './nonInteractiveCli.js';
-import { vi, type Mock, type MockInstance } from 'vitest';
+import {
+  composeGoalBudgetReason,
+  type GoalT,
+} from './ui/utils/goal-budget-reason.js';
+import {
+  getTranslationModuleExport,
+  isTranslationDict,
+  type TranslationDict,
+} from './i18n/translationDict.js';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { beforeAll, vi, type Mock, type MockInstance } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -104,6 +114,38 @@ import {
   _resetExitLatchForTest,
 } from './utils/errors.js';
 import { expectWithinLatencyBudget } from './test-utils/latency-budget.js';
+
+/** The locale dict the formatGoalState budget-reason cases compose over. */
+async function loadGoalLocaleDict(code: string): Promise<TranslationDict> {
+  const localePath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    'i18n/locales',
+    `${code}.js`,
+  );
+  const module = await import(pathToFileURL(localePath).href);
+  const dict = getTranslationModuleExport(module);
+  if (!isTranslationDict(dict)) {
+    throw new Error(`Invalid locale module: ${localePath}`);
+  }
+  return dict;
+}
+
+/** Mirror of `t`/`interpolate` in `i18n/index.ts` over a static dict. */
+function makeGoalT(dict: TranslationDict): GoalT {
+  return (key, params) => {
+    const translation = dict[key] ?? key;
+    if (Array.isArray(translation)) {
+      return key;
+    }
+    if (!params) {
+      return translation;
+    }
+    return translation.replace(
+      /\{\{(\w+)\}\}/g,
+      (match, name) => params[name] ?? match,
+    );
+  };
+}
 
 // Mock core modules
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
@@ -13739,6 +13781,12 @@ describe('formatGoalState', () => {
     },
   });
 
+  let tEn: GoalT;
+
+  beforeAll(async () => {
+    tEn = makeGoalT(await loadGoalLocaleDict('en'));
+  });
+
   it('shows budgets on a stopped Goal in the usage order', () => {
     expect(
       formatGoalState(
@@ -13855,5 +13903,53 @@ describe('formatGoalState', () => {
     expect(
       formatGoalState({ v: 2, activity: 'idle', goal: null }, 'clear'),
     ).toBe('Goal cleared.');
+  });
+
+  it('renders the composed budget stop reason when a composer is passed', () => {
+    const composed = composeGoalBudgetReason(
+      { limitKind: 'token_budget', tokenBudget: 30_000_000 },
+      tEn,
+      'en',
+    );
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'usage_limited',
+          tokensUsed: 30_000_000,
+          tokenBudget: 30_000_000,
+          limitKind: 'token_budget',
+          lastReason:
+            'The Goal spent its autonomous token budget (30,000,000 tokens). ' +
+            'Resume the Goal to authorize another budget window, or clear it.',
+        }),
+        'status',
+        (goal) => composeGoalBudgetReason(goal, tEn, 'en'),
+      ),
+    ).toBe(
+      `Goal usage limited: ship the release notes\n` +
+        `Usage: 30,000,000 of 30,000,000 tokens\n` +
+        `Reason: ${composed}`,
+    );
+  });
+
+  it('keeps the raw stop reason when no composer is passed', () => {
+    expect(
+      formatGoalState(
+        goalSnapshot({
+          status: 'usage_limited',
+          tokensUsed: 30_000_000,
+          tokenBudget: 30_000_000,
+          lastReason:
+            'The Goal spent its autonomous token budget (30,000,000 tokens). ' +
+            'Resume the Goal to authorize another budget window, or clear it.',
+        }),
+        'status',
+      ),
+    ).toBe(
+      'Goal usage limited: ship the release notes\n' +
+        'Usage: 30,000,000 of 30,000,000 tokens\n' +
+        'Reason: The Goal spent its autonomous token budget (30,000,000 tokens). ' +
+        'Resume the Goal to authorize another budget window, or clear it.',
+    );
   });
 });

@@ -6898,7 +6898,10 @@ function normalizeGoalStatusEvent(event: DaemonEvent): DaemonUiEvent | null {
   if (status) {
     return createGoalStatusUiEvent(
       event,
-      restoreCanonicalGoalStatusKind(status, meta['goalState']),
+      withGoalBudgetContext(
+        restoreCanonicalGoalStatusKind(status, meta['goalState']),
+        meta['goalState'],
+      ),
     );
   }
 
@@ -6943,6 +6946,27 @@ function restoreCanonicalGoalStatusKind(
     return status;
   }
   return { ...status, kind: canonicalStatus };
+}
+
+function withGoalBudgetContext(
+  status: Record<string, unknown>,
+  goalState: unknown,
+): Record<string, unknown> {
+  // The card event carries the stop reason; the canonical state in the same
+  // event carries the machine-readable half. Thread the budget fields so the
+  // card can compose the reason in the client language instead of reusing
+  // the persisted EN prose.
+  const goal = isRecord(goalState) ? goalState['goal'] : undefined;
+  if (!isRecord(goal)) return status;
+  const out: Record<string, unknown> = { ...status };
+  if (typeof goal['limitKind'] === 'string') {
+    out['limitKind'] = goal['limitKind'];
+  }
+  for (const key of ['tokenBudget', 'turnBudget', 'activeTimeBudgetMs']) {
+    const value = goal[key];
+    if (typeof value === 'number' && Number.isFinite(value)) out[key] = value;
+  }
+  return out;
 }
 
 function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {

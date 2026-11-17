@@ -28,6 +28,7 @@ export type GoalSnapshotLike = {
     tokensUsed?: number;
     tokenBudget?: number;
     lastReason?: string;
+    limitKind?: string;
   } | null;
   activity?: string;
 };
@@ -68,6 +69,9 @@ export type GoalCardView =
 export function describeGoalCard(
   snapshot: GoalSnapshotLike | undefined,
   cause?: string,
+  budgetReason?: (
+    goal: NonNullable<GoalSnapshotLike['goal']>,
+  ) => string | undefined,
 ): GoalCardView {
   const goal = snapshot?.goal ?? null;
   if (!goal) {
@@ -141,9 +145,10 @@ export function describeGoalCard(
         : `${used}/${formatTokenCount(goal.tokenBudget)} tokens`,
     );
   }
+  const composed = budgetReason?.(goal);
   const reason =
     (goal.status ?? 'active') !== 'active' || activity === 'verifying'
-      ? goal.lastReason?.trim()
+      ? (composed ?? goal.lastReason?.trim())
       : undefined;
   return {
     state: 'card',

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { t } from './i18n/index.js';
+import { getCurrentLanguage, t } from './i18n/index.js';
 import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -39,6 +39,7 @@ import type {
 import { formatDuration } from './ui/utils/formatters.js';
 import { waitForPendingMemoryTasks } from './nonInteractive/memory-tasks.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
+import { composeGoalBudgetReason } from './ui/utils/goal-budget-reason.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
 import type { LoadedSettings } from './config/settings.js';
@@ -238,6 +239,9 @@ function sameGoalPermit(
 export function formatGoalState(
   snapshot: GoalSnapshotV2,
   operation: 'status' | 'set' | 'edit' | 'pause' | 'resume' | 'clear',
+  budgetReason?: (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+  ) => string | undefined,
 ): string {
   const goal = snapshot.goal;
   if (!goal) {
@@ -275,8 +279,9 @@ export function formatGoalState(
   // ships it -- and the user doc promises every pause states why.
   // Written to stdout as it is, so it is sanitized: a pause reason can embed
   // a raw provider error.
-  if (goal.status !== 'active' && goal.lastReason) {
-    lines.push(`Reason: ${sanitizeTerminalText(goal.lastReason)}`);
+  if (goal.status !== 'active') {
+    const reason = budgetReason?.(goal) ?? goal.lastReason;
+    if (reason) lines.push(`Reason: ${sanitizeTerminalText(reason)}`);
   }
   return lines.join('\n');
 }
@@ -1460,6 +1465,8 @@ export async function runNonInteractive(
               const message = formatGoalState(
                 snapshot,
                 slashCommandResult.operation.kind,
+                (goal) =>
+                  composeGoalBudgetReason(goal, t, getCurrentLanguage()),
               );
               if (!shouldRunGoalWorker) {
                 await emitNonInteractiveFinalMessage({
