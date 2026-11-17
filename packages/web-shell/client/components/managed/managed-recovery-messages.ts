@@ -7,6 +7,7 @@ export const MANAGED_RECOVERY_MESSAGES_EN = {
   'managed.recovery.state.ready': 'Ready to continue',
   'managed.recovery.state.operator_required':
     'This Session needs operator attention',
+  'managed.recovery.state.ended': 'This Session has ended',
   'managed.recovery.explanation.recovering':
     'The original Turn is being reconciled. New input will be available after its outcome is confirmed.',
   'managed.recovery.explanation.awaiting_evidence':
@@ -17,12 +18,18 @@ export const MANAGED_RECOVERY_MESSAGES_EN = {
     'You can send the next message in this Session.',
   'managed.recovery.explanation.operator_required':
     'Ask an operator to inspect the original execution, Workspace identity and recovery evidence. You can prepare a new Session while the original records are retained.',
+  'managed.recovery.explanation.ended':
+    'The original Session is closed. Review the retained records, or continue in a new Session.',
   'managed.recovery.recheck': 'Check again',
   'managed.recovery.endTurn': 'End this turn',
   'managed.recovery.handoff': 'Continue in a new Session',
   'managed.recovery.diagnostics': 'Recovery details',
   'managed.recovery.requestFailed':
     'The latest recovery state could not be confirmed. Existing restrictions remain in effect.',
+  'managed.recovery.recheckUnavailable':
+    'The original Turn can no longer be rechecked here. If its runtime was reclaimed, continue in a new Session.',
+  'managed.recovery.targetChanged':
+    'This Session moved to a different Turn. Review the latest recovery state before retrying.',
   'managed.recovery.cancel.stopping':
     'Stop requested; waiting for confirmation.',
   'managed.recovery.cancel.unconfirmed':
@@ -52,6 +59,7 @@ export const MANAGED_RECOVERY_MESSAGES_ZH: Record<
   'managed.recovery.state.cleanup_pending': '本轮已结束，清理尚未完成',
   'managed.recovery.state.ready': '可以继续使用',
   'managed.recovery.state.operator_required': '原会话需要运维处理',
+  'managed.recovery.state.ended': '会话已结束',
   'managed.recovery.explanation.recovering':
     '正在核对原轮次；确认结果后才能接收下一条消息。',
   'managed.recovery.explanation.awaiting_evidence':
@@ -61,12 +69,18 @@ export const MANAGED_RECOVERY_MESSAGES_ZH: Record<
   'managed.recovery.explanation.ready': '现在可以在原会话发送下一条消息。',
   'managed.recovery.explanation.operator_required':
     '请运维核对原执行、Workspace 身份和恢复凭证。原记录会保留，你可以先准备新会话的交接内容。',
+  'managed.recovery.explanation.ended':
+    '原会话已关闭。可以查看保留的记录，或在新会话继续。',
   'managed.recovery.recheck': '重新检查',
   'managed.recovery.endTurn': '结束本轮',
   'managed.recovery.handoff': '在新会话继续',
   'managed.recovery.diagnostics': '恢复详情',
   'managed.recovery.requestFailed':
     '未能确认最新恢复状态，现有执行限制仍然生效。',
+  'managed.recovery.recheckUnavailable':
+    '原轮次已无法在这里重新检查。如果运行环境已被回收，请在新会话继续。',
+  'managed.recovery.targetChanged':
+    '会话已切换到新的轮次，请先确认最新恢复状态再重试。',
   'managed.recovery.cancel.stopping': '停止请求已提交，正在等待确认。',
   'managed.recovery.cancel.unconfirmed': '尚未确认原执行已经停止。',
   'managed.recovery.cancel.failed': '取消未完成，请先核对当前轮次状态。',
@@ -95,6 +109,7 @@ export const MANAGED_RECOVERY_MESSAGES_RU: Record<
   'managed.recovery.state.ready': 'Готово к продолжению',
   'managed.recovery.state.operator_required':
     'Этой сессии требуется внимание оператора',
+  'managed.recovery.state.ended': 'Сессия завершена',
   'managed.recovery.explanation.recovering':
     'Исходный ход сверяется. Новый ввод станет доступен после подтверждения результата.',
   'managed.recovery.explanation.awaiting_evidence':
@@ -105,12 +120,18 @@ export const MANAGED_RECOVERY_MESSAGES_RU: Record<
     'Вы можете отправить следующее сообщение в этой сессии.',
   'managed.recovery.explanation.operator_required':
     'Попросите оператора проверить исходное выполнение, идентичность рабочей области и данные восстановления. Вы можете подготовить новую сессию, пока исходные записи сохраняются.',
+  'managed.recovery.explanation.ended':
+    'Исходная сессия закрыта. Просмотрите сохранённые записи или продолжите в новой сессии.',
   'managed.recovery.recheck': 'Проверить снова',
   'managed.recovery.endTurn': 'Завершить этот ход',
   'managed.recovery.handoff': 'Продолжить в новой сессии',
   'managed.recovery.diagnostics': 'Сведения о восстановлении',
   'managed.recovery.requestFailed':
     'Не удалось подтвердить последнее состояние восстановления. Текущие ограничения остаются в силе.',
+  'managed.recovery.recheckUnavailable':
+    'Исходный ход больше нельзя проверить здесь. Если среда выполнения была освобождена, продолжите в новой сессии.',
+  'managed.recovery.targetChanged':
+    'Сессия перешла к другому ходу. Перед повторной попыткой проверьте последнее состояние восстановления.',
   'managed.recovery.cancel.stopping':
     'Остановка запрошена; ожидается подтверждение.',
   'managed.recovery.cancel.unconfirmed':
@@ -132,12 +153,19 @@ export const MANAGED_RECOVERY_MESSAGES_RU: Record<
 };
 import { useI18n } from '../../i18n';
 
+export type ManagedRecoveryMessageKey =
+  keyof typeof MANAGED_RECOVERY_MESSAGES_EN;
+
 export function useManagedRecoveryText() {
   const { language } = useI18n();
-  return (key: keyof typeof MANAGED_RECOVERY_MESSAGES_EN): string =>
-    (language === 'zh-CN'
+  const messages =
+    language === 'zh-CN'
       ? MANAGED_RECOVERY_MESSAGES_ZH
       : language === 'ru'
         ? MANAGED_RECOVERY_MESSAGES_RU
-        : MANAGED_RECOVERY_MESSAGES_EN)[key];
+        : MANAGED_RECOVERY_MESSAGES_EN;
+  // 旧版本前端可能先于后端拿到未知 state/reason，缺 key 时退回通用运维文案，避免空白面板
+  const table: Partial<Record<ManagedRecoveryMessageKey, string>> = messages;
+  return (key: ManagedRecoveryMessageKey): string =>
+    table[key] ?? messages['managed.recovery.state.operator_required'];
 }

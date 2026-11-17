@@ -501,12 +501,8 @@ function ManagedSessionsContent({
   const terminalIds = useRef(new Map<string, string>());
   const terminalOpen = !!sessionId && terminalSession === sessionId;
   const publicChildren = detail.summary?.capabilities.childAgents === true;
-  const tasks = useManagedTasks(
-    provider,
-    clientId,
-    sessionId,
-    taskPanelOpen || publicChildren,
-  );
+  // 面板关闭时不再 3s 轮询任务列表；需要实时视图时由面板打开触发
+  const tasks = useManagedTasks(provider, clientId, sessionId, taskPanelOpen);
   const [childView, setChildView] = useState<{
     provider: ManagedAgentProvider;
     clientId: string;
@@ -2321,6 +2317,7 @@ function ManagedSessionsContent({
               recovery={recovery.value}
               busy={!interactive || recovery.busy || turnCancel.busy}
               error={recovery.error}
+              errorCode={recovery.errorCode}
               onRecheck={() => void recovery.recheck()}
               onCancel={
                 cancellationEnabled && summary?.capabilities.canCancel
