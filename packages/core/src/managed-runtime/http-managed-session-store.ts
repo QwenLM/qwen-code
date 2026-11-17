@@ -4059,9 +4059,9 @@ export function collectNestedResourceRefs(
     // A config_install record names its own bundle, root snapshot and the
     // stage/enable acknowledgements (managed-session-resource-references.ts),
     // and its predecessor through previousRecordRef. The commit closes over
-    // them exactly like an extension bundle's contributions, or a reopened
-    // reader finds the record but 404s on the hop the settings history and
-    // the package selection both walk.
+    // the record's own edges but not the predecessor chain — re-closing it
+    // would grow linearly with the session's config history (R1-2), and a
+    // pre-fix predecessor's children were never persisted (R1-1).
     const record = parseManagedSessionRecordJson(
       bytes.toString('utf8'),
       MANAGED_SESSION_LIMITS.maxEventBytes,
@@ -4070,6 +4070,17 @@ export function collectNestedResourceRefs(
       return collectRefs([(record as { messagesRef?: unknown }).messagesRef]);
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
+    if (ref.kind === 'managed-config_install') {
+      // Exclude previousRecordRef: the predecessor was committed by its own
+      // transaction, so its children are already persisted. Re-closing the
+      // chain would grow linearly (R1-2) and break on pre-fix records whose
+      // children were never uploaded (R1-1).
+      const { previousRecordRef: _, ...ownEdges } = record as Record<
+        string,
+        unknown
+      >;
+      return collectRefs([ownEdges]);
+    }
     return collectRefs([record]);
   }
   // A result manifest names its page envelopes: they are Session resources

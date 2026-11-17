@@ -9984,10 +9984,11 @@ describe('collectNestedResourceRefs', () => {
         }),
       ),
     );
-    expect(nested).toHaveLength(7);
+    // previousRecordRef is excluded: re-closing the chain would grow linearly
+    // (R1-2), and a pre-fix predecessor's children were never persisted (R1-1).
+    expect(nested).toHaveLength(6);
     expect(nested).toEqual(
       expect.arrayContaining([
-        predecessorRef,
         bundleRef,
         previousBundleRef,
         restoresBundleRef,
@@ -9995,6 +9996,9 @@ describe('collectNestedResourceRefs', () => {
         stageAckRef,
         enableAckRef,
       ]),
+    );
+    expect(nested).not.toEqual(
+      expect.arrayContaining([predecessorRef]),
     );
     // The first revision names no predecessor and no restore target; its own
     // edges still ship.
