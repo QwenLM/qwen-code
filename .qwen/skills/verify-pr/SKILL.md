@@ -736,8 +736,10 @@ delivered head). `<r>` is this round's number — pick the next integer and
 **repeat the same value in `--complete`**; the completion is matched by head and
 round. Then run prepare (trusted host metadata); it creates and prints the
 artifact directory `<dir>`, which you record at `--complete`. If prepare fails
-after `--start`, recover with `--release --head <headSha>` so the head is not
-stranded in flight.
+after `--start`, recover with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>`
+so the head is not stranded in flight (`--repo` is required: `--start` recorded
+it, and every verb refuses an omitted `--repo` once a repo is recorded).
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container
@@ -959,7 +961,9 @@ ambiguous rather than verify a guessed PR. Then, in order:
    `<r>` is this round's number; repeat the same value in `--complete`. Then run
    prepare; it creates and prints the artifact directory `<dir>`, which you
    record at `--complete`. If prepare fails after `--start`, recover with
-   `--release --head <H>` so the head is not stranded in flight.
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> [--round <r>] --repo <owner>/<repo>`
+   so the head is not stranded in flight (`--repo` is required once `--start`
+   recorded it).
    Exit 3 means the file already records `H` as verified or in flight, or
    another head's round is in flight (one round per PR): let that round
    answer instead of starting a duplicate. A cross-head refusal records `H`

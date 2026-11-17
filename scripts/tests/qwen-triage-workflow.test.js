@@ -6628,7 +6628,21 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'no `--artifact-dir`, because prepare has not printed the directory yet',
     );
-    expect(flat).toContain('If prepare fails after `--start`, recover with');
+    // R1-1: the prepare-failure recovery must carry the full --release form
+    // with --repo (a recorded repo refuses an omitted --repo, so a shortened
+    // copy would strand the marker — reintroducing R17-2). Removing --repo
+    // from the sentence reds this whole-form pin.
+    expect(flat).toContain(
+      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> [--round <r>] --repo <owner>/<repo>`',
+    );
+    // R1-2: a positional pin — registration precedes prepare in this section
+    // (an order-insensitive toContain would stay green if --start moved back
+    // below prepare).
+    expect(
+      flat.indexOf(
+        'Register the round in the shared watch state **ahead of prepare**',
+      ),
+    ).toBeLessThan(flat.indexOf('Then run prepare; it creates'));
     expect(flat).toContain(
       'Exit 3 means the file already records `H` as verified or in flight',
     );
@@ -6721,6 +6735,16 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'a round killed in the prepare window leaves a recoverable in-flight marker rather than a silently dropped head',
     );
+    // R1-1: the watch prompt's prepare-failure recovery carries the full
+    // --release form with --repo (the <headSha> variant; the manual section
+    // uses <H>). Removing --repo reds this whole-form pin.
+    expect(flat).toContain(
+      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>`',
+    );
+    // R1-2: positional pin — registration precedes prepare in the watch prompt.
+    expect(
+      flat.indexOf('Register the round **first, ahead of prepare** (R17-2)'),
+    ).toBeLessThan(flat.indexOf('Then run prepare (trusted host metadata)'));
     // The completion and release forms carry --repo too: the guard
     // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(

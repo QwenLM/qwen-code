@@ -3264,21 +3264,62 @@ describe('R17-2 register ahead of prepare', () => {
     expect(verified.artifactDir).toBe('r11');
   });
 
+  // R1-2: driven through the CLI so it exercises parseArgs (the only helper
+  // code this PR changes); restoring the --artifact-dir requirement reds it.
   it('a prepare-window kill leaves a recoverable marker, not a dropped head', () => {
     const root = makeRoot();
-    // Register first (no dir), then the round dies during prepare: no
-    // --complete runs. The marker stays in flight and is recoverable.
+    // Register first through the CLI (no dir), then the round dies during
+    // prepare: no --complete runs. The marker stays in flight.
+    expect(run(root, START).status).toBe(0);
     expect(
-      startRound(root, { pr: 1, head: HEAD, round: 11 }).duplicate,
-    ).toBeUndefined();
-    expect(readState(root, 1).inFlightHeads[0].artifactDir ?? null).toBeNull();
-    // Recovery releases the dead round's marker...
-    const released = releaseRound(root, { pr: 1, head: HEAD });
-    expect(released.released).toBe(true);
+      readState(root, 16866).inFlightHeads[0].artifactDir ?? null,
+    ).toBeNull();
+    // Recovery releases the dead round's marker through the CLI...
+    expect(run(root, ['16866', '--release', '--head', HEAD]).status).toBe(0);
     // ...and the head is startable again, not silently deduped away.
     expect(
-      startRound(root, { pr: 1, head: HEAD, round: 12 }).duplicate,
-    ).toBeUndefined();
-    expect(readState(root, 1).inFlightHeads[0].round).toBe(12);
+      run(root, ['16866', '--start', '--head', HEAD, '--round', '12']).status,
+    ).toBe(0);
+    expect(readState(root, 16866).inFlightHeads[0].round).toBe(12);
+  });
+
+  // R1-3: the register-ahead marker carries no directory, so a non-inconclusive
+  // completion that resolves to none warns (the verdict has no evidence link).
+  it('a non-inconclusive completion with no directory warns', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'findings',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir ?? null).toBeNull();
+  });
+
+  it('an inconclusive completion with no directory does not warn', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'inconclusive',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).not.toMatch(/no artifact directory/);
   });
 });

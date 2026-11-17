@@ -63,31 +63,42 @@ watch prompt 与手动复验步骤均改为：
    ——目录在此记录。
 
 新职责：因标记现在先于 prepare 存在，**`--start` 后 prepare 失败**必须
-`--release --head <H>`（或 `--complete inconclusive`），以免 head 搁浅在飞。契约
-显式说明此点。既有死轮恢复（`--start` 后死掉的轮用 `--release`）现在也覆盖
-prepare 期间死掉的轮。
+`--release --head <H> [--round <r>] --repo <owner>/<repo>`，以免 head 搁浅在飞
+（`--start` 记录了 repo 后 `--repo` 必填；每个动词都对已记录 repo 拒绝省略
+`--repo`）。用 `--release`，**而非** `--complete inconclusive`：inconclusive 是
+唯一增加 head 重试计数的判定，而计数上限即终态（not-covered），故两次瞬时
+prepare 失败会让一个从未跑过轮次的 head 被退役（R1-5）。契约显式说明此点。既有
+死轮恢复（`--start` 后死掉的轮用 `--release`）现在也覆盖 prepare 期间死掉的轮。
 
 ### 钉与见证
 
 - `scripts/tests/qwen-triage-workflow.test.js`：`--start` 命令钉去掉
-  `--artifact-dir`；`--complete` 命令钉加上 `--artifact-dir <dir>`；顺序钉断言
-  注册先于 prepare。
-- `scripts/tests/verify-pr-watch-state.test.js`：新见证——`--start` 不带
-  `--artifact-dir` 注册在飞且目录为 `null`；`--complete --artifact-dir <dir>`
-  记录之；`--start --artifact-dir <dir>` 仍可用（向后兼容）；先注册后 prepare 的
-  轮在模拟 prepare 被杀后 release 能恢复 head（无静默丢弃）。
+  `--artifact-dir`；`--complete` 命令钉加上 `--artifact-dir <dir>`；**位置**钉
+  断言注册句先于每节的 `Then run prepare` 句（watch 用 `<headSha>`、手动用
+  `<H>`）；prepare 失败恢复钉断言完整 `--release` 形式带 `--repo`（删 `--repo`
+  变红）。
+- `scripts/tests/verify-pr-watch-state.test.js`：新见证走 **CLI**（`run(root, …)`，
+  故演练 `parseArgs`——本 PR 在助手唯一改动处）——`--start` 不带 `--artifact-dir`
+  注册在飞且目录 `null`（恢复强制要求变红）；`--complete --artifact-dir <dir>`
+  记录之；`--start --artifact-dir <dir>` 仍可用（向后兼容）；非 inconclusive 的
+  `--complete` 无解析目录时打印无产物目录警告，而继承 start 目录的用例保持绿；
+  先注册后 prepare 无 `--complete`（prepare 被杀）再经 CLI `--release` 恢复 head
+  （无静默丢弃）。
 
 ## 关键设计决定
 
 - **`--complete` 可选而非强制。** 目录供判定的产物链接，非认证本身。保持可选
   保留 inconclusive/replay 回退路径；契约指示传它。强制会破坏继承先前目录的
-  重放完成。
+  重放完成。因提前注册的标记不带目录，非 inconclusive 的完成若解析不到目录会在
+  stderr **警告**该判定无产物目录（R1-3）——披露丢失的链接而不破坏回退。HELP
+  写明真实回退（同 head 更早判定的目录，否则无），而非空洞的「继承标记里的」。
 - **向后兼容。** `--start --artifact-dir` 仍接受；改动只移除一个强制要求并重排契约。
 - **不去重/defer/release 语义改动。** 标记的目的是去重/恢复；`null` 目录不影响它。
 
 ## 涉及文件
 
-- `scripts/verify-pr-watch-state.mjs` —— 移除 `parseArgs` 强制；HELP。
+- `scripts/verify-pr-watch-state.mjs` —— 移除 `parseArgs` 强制；HELP 真实回退；
+  `completeRound` 返回解析目录；非 inconclusive 的 null 目录完成给警告。
 - `.qwen/skills/verify-pr/SKILL.md` —— watch prompt + 手动复验顺序；start 后
   prepare 失败的恢复。
 - `scripts/tests/qwen-triage-workflow.test.js` —— 命令/顺序钉。
@@ -104,6 +115,11 @@ prepare 期间死掉的轮。
 ## 待决问题
 
 - 无阻塞项。活性收益是可观测/可恢复性：投递后在 prepare 被杀的 head 现在留下
-  在飞标记，操作者或下一次 head move 可恢复，而非消失。watch 只在 head move 时
-  醒来，故*最后一个* head 上被杀的轮仍等待新 move 或手动 `--release`；修复确保
-  head 绝不被静默无记录。
+  在飞标记，操作者或下一次 head move 可恢复，而非消失。修复**收窄**静默丢弃窗口，
+  并未消除。两条残余仍存，跟踪于 #17371：(1) 闸门先写游标再打印事件
+  （`packages/cli/src/commands/autofix-pr/snapshot.ts`），故会话在闸门投递与首次
+  `--start` 之间被杀仍使 head 无记录——窗口收窄到该「投递→--start」区间，并未
+  闭合（闭合需把标记写在闸门侧，那里本就握着 headSha）；(2) watch prompt 是任务上
+  的持久快照，故本改动前安装的 watch 仍按 prepare→register 旧顺序，直到任务重建
+  ——而 `--start --artifact-dir` 仍被接受，无机制强制重建。watch 只在 head move 时
+  醒来，故*最后一个* head 上被杀的轮仍等待新 move 或手动 `--release`。

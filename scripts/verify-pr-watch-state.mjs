@@ -815,6 +815,7 @@ export function completeRound(
       state,
       deferred,
       keptVerdict,
+      artifactDir: dir,
     };
   });
 }
@@ -902,7 +903,9 @@ Register with --start AHEAD of prepare (R17-2): --artifact-dir is optional on
 --start because prepare has not printed the directory yet; a round killed in
 the prepare window then leaves a recoverable in-flight marker, not a silently
 dropped head. Record the directory prepare printed at --complete
-(--artifact-dir <dir>); a completion that omits it inherits the marker's.
+(--artifact-dir <dir>). A completion that omits it inherits an earlier verdict's
+directory for the same head if one exists, and otherwise records none — a
+non-inconclusive verdict then warns that it has no evidence directory.
 --start exits 3 when the head is already verified or any round is in flight
 for the PR (one round per PR). Every verb exits 3 when the state belongs to
 another repo (a PR number is only unique within its repository); an omitted
@@ -1150,6 +1153,16 @@ function main(argv) {
               : `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (not verified; the head stays startable and is re-deferred for the next round) at ${result.path}\n`
           : `verify-pr watch-state: PR ${args.pr} round ${args.round} verified ${args.head} (${args.verdict}) at ${result.path}\n`,
       );
+      // Registration runs ahead of prepare, so the in-flight marker carries no
+      // directory; a non-inconclusive completion that resolves to no directory
+      // files a verdict with no machine-readable pointer to its evidence (R1-3).
+      // Disclose it rather than silently dropping the link; --artifact-dir stays
+      // optional so a replayed completion can still inherit a prior directory.
+      if (args.verdict !== 'inconclusive' && result.artifactDir === null) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded ${args.verdict} with no artifact directory (--artifact-dir omitted and the marker carries none); pass --artifact-dir <dir> prepare printed to link the verdict to its evidence\n`,
+        );
+      }
       printDeferred(args.pr, result.deferred);
     } else {
       const result = releaseRound(root, args);

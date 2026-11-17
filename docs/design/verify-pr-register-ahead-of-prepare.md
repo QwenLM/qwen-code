@@ -73,21 +73,34 @@ The watch prompt and the manual re-verification step both change to:
 <owner>/<repo>` — the directory is recorded here.
 
 New responsibility: because the marker now exists before prepare, a **prepare
-failure after `--start`** must `--release --head <H>` (or `--complete
-inconclusive`) so the head is not stranded in flight. The contract states this
-explicitly. The existing dead-round recovery (`--release` for a round that died
-after `--start`) now also covers a round that died during prepare.
+failure after `--start`** must
+`--release --head <H> [--round <r>] --repo <owner>/<repo>` so the head is not
+stranded in flight (`--repo` is required once `--start` recorded it; every verb
+refuses an omitted `--repo` against a recorded repo). Use `--release`, **not**
+`--complete inconclusive`: inconclusive is the only verdict that increments the
+head's retry counter, and the counter's cap is the terminal not-covered state,
+so two transient prepare failures would retire a head no round ever examined
+(R1-5). The contract states this explicitly. The existing dead-round recovery
+(`--release` for a round that died after `--start`) now also covers a round that
+died during prepare.
 
 ### Pins and witnesses
 
 - `scripts/tests/qwen-triage-workflow.test.js`: the `--start` command pin drops
   `--artifact-dir`; the `--complete` command pin gains `--artifact-dir <dir>`;
-  the ordering pin asserts registration precedes prepare.
-- `scripts/tests/verify-pr-watch-state.test.js`: new witnesses — `--start`
-  without `--artifact-dir` registers in flight with a `null` dir; `--complete
+  a **positional** pin asserts the registration sentence precedes the
+  `Then run prepare` sentence in each section (watch `<headSha>`, manual `<H>`);
+  the prepare-failure recovery pin asserts the full `--release` form carries
+  `--repo` (removing `--repo` reds it).
+- `scripts/tests/verify-pr-watch-state.test.js`: new witnesses driven through
+  the **CLI** (`run(root, …)`, so they exercise `parseArgs` — the only helper
+  code this PR changes) — `--start` without `--artifact-dir` registers in flight
+  with a `null` dir (restoring the requirement reds it); `--complete
 --artifact-dir <dir>` records it; `--start --artifact-dir <dir>` still works
-  (backward compatibility); a start-before-prepare round released after a
-  simulated prepare kill recovers the head (no silent drop).
+  (backward compatibility); a non-inconclusive `--complete` with no resolved dir
+  prints the no-evidence-directory warning while the inherit-a-start-dir case
+  stays green; a start-before-prepare round with no `--complete` (a prepare
+  kill) then `--release` through the CLI recovers the head (no silent drop).
 
 ## Key design decisions
 
@@ -95,6 +108,11 @@ after `--start`) now also covers a round that died during prepare.
   artifact link, not certification. Keeping it optional preserves the
   inconclusive/replay fallback paths; the contract instructs passing it. Making
   it required would break a replayed completion that inherits the prior dir.
+  Because the register-ahead marker carries no directory, a non-inconclusive
+  completion that resolves to no directory **warns** on stderr that the verdict
+  has no evidence directory (R1-3) — disclosing the lost link without breaking
+  the fallback. The HELP states the real fallback (an earlier verdict's dir for
+  the same head, else none) rather than a vacuous "inherits the marker's".
 - **Backward compatible.** `--start --artifact-dir` still accepted; the change
   only removes a requirement and reorders the contract.
 - **No dedup/defer/release semantic change.** The marker's purpose is
@@ -102,7 +120,9 @@ after `--start`) now also covers a round that died during prepare.
 
 ## Files affected
 
-- `scripts/verify-pr-watch-state.mjs` — `parseArgs` requirement removed; HELP.
+- `scripts/verify-pr-watch-state.mjs` — `parseArgs` requirement removed; HELP
+  real fallback; `completeRound` returns the resolved dir; a non-inconclusive
+  null-dir completion warns.
 - `.qwen/skills/verify-pr/SKILL.md` — watch prompt + manual re-verification
   ordering; prepare-failure-after-start recovery.
 - `scripts/tests/qwen-triage-workflow.test.js` — command/ordering pins.
@@ -121,6 +141,15 @@ after `--start`) now also covers a round that died during prepare.
 
 - None blocking. The liveness gain is observability/recoverability: a head
   delivered then killed in prepare now leaves an in-flight marker an operator
-  or the next head move can recover, instead of vanishing. A watch only wakes on
-  head moves, so a killed round on the _last_ head still awaits a new move or a
-  manual `--release`; the fix ensures the head is never silently unrecorded.
+  or the next head move can recover, instead of vanishing. The fix **narrows**
+  the silent-drop window; it does not eliminate it. Two residuals remain, tracked
+  in #17371: (1) the gate writes its cursor before it prints the event
+  (`packages/cli/src/commands/autofix-pr/snapshot.ts`), so a session killed
+  between the gate's delivery and the first `--start` still leaves the head
+  unrecorded — the window is narrowed to that delivery→`--start` interval, not
+  closed (closing it would put the marker in the gate, which already holds
+  `headSha`); (2) the watch prompt is a persisted task snapshot, so a watch
+  installed before this change keeps the prepare-then-register order until its
+  task is re-created — and `--start --artifact-dir` remains accepted, so nothing
+  forces re-creation. A watch only wakes on head moves, so a killed round on the
+  _last_ head still awaits a new move or a manual `--release`.
