@@ -39,6 +39,7 @@ import type {
   EffortOverride,
   EffortStatus,
   EffortTier,
+  PermissionResult,
   WorkflowModeState,
 } from '../types/types.js';
 import { isSdkMcpServerConfig } from '../types/types.js';
@@ -122,6 +123,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   private abortController: AbortController;
   private pendingControlRequests: Map<string, PendingControlRequest> =
     new Map();
+  private incomingControlRequests = new Map<string, AbortController>();
   private pendingMcpResponses: Map<string, PendingMcpResponse> = new Map();
   private sdkMcpTransports: Map<string, SdkControlServerTransport> = new Map();
   private sdkMcpServers: Map<string, McpServer> = new Map();
@@ -432,7 +434,14 @@ export class Query implements AsyncIterable<SDKMessage> {
 
   private async routeMessage(message: unknown): Promise<void> {
     if (isControlRequest(message)) {
-      await this.handleControlRequest(message);
+      void this.handleControlRequest(message).catch((error: unknown) => {
+        this.inputStream.error(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+        this.close().catch((cleanupError) => {
+          logger.error('Error during control request cleanup:', cleanupError);
+        });
+      });
       return;
     }
 
@@ -490,6 +499,11 @@ export class Query implements AsyncIterable<SDKMessage> {
     }
     this.transportReadFinalized = true;
 
+    for (const controller of this.incomingControlRequests.values()) {
+      controller.abort();
+    }
+    this.incomingControlRequests.clear();
+
     const rejectionError =
       error ??
       this.transport.exitError ??
@@ -535,12 +549,14 @@ export class Query implements AsyncIterable<SDKMessage> {
   private async handleControlRequest(
     request: CLIControlRequest,
   ): Promise<void> {
+    if (this.closed) return;
     const { request_id, request: payload } = request;
 
-    logger.debug(`Handling control request: ${payload.subtype}`);
     const requestAbortController = new AbortController();
+    this.incomingControlRequests.set(request_id, requestAbortController);
 
     try {
+      logger.debug(`Handling control request: ${payload.subtype}`);
       let response: Record<string, unknown> | null = null;
 
       switch (payload.subtype) {
@@ -566,12 +582,17 @@ export class Query implements AsyncIterable<SDKMessage> {
           );
       }
 
-      await this.sendControlResponse(request_id, true, response);
+      if (!requestAbortController.signal.aborted) {
+        await this.sendControlResponse(request_id, true, response);
+      }
     } catch (error) {
+      if (requestAbortController.signal.aborted) return;
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       logger.error(`Control request error (${payload.subtype}):`, errorMessage);
       await this.sendControlResponse(request_id, false, errorMessage);
+    } finally {
+      this.incomingControlRequests.delete(request_id);
     }
   }
 
@@ -586,6 +607,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       return { behavior: 'deny', message: 'Denied' };
     }
 
+    let onAbort: (() => void) | undefined;
     try {
       const canUseToolTimeout =
         this.options.timeout?.canUseTool ?? DEFAULT_CAN_USE_TOOL_TIMEOUT;
@@ -596,6 +618,15 @@ export class Query implements AsyncIterable<SDKMessage> {
           canUseToolTimeout,
         );
       });
+      const abortPromise = new Promise<PermissionResult>((resolve) => {
+        onAbort = () =>
+          resolve({
+            behavior: 'deny',
+            message: 'Permission request cancelled',
+          });
+        if (signal.aborted) onAbort();
+        else signal.addEventListener('abort', onAbort, { once: true });
+      });
 
       const result = await Promise.race([
         Promise.resolve(
@@ -605,6 +636,7 @@ export class Query implements AsyncIterable<SDKMessage> {
           }),
         ),
         timeoutPromise,
+        abortPromise,
       ]);
 
       if (timeoutId) {
@@ -641,6 +673,8 @@ export class Query implements AsyncIterable<SDKMessage> {
         behavior: 'deny',
         message: `Permission check failed: ${errorMessage}`,
       };
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort);
     }
   }
 
@@ -774,6 +808,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       this.pendingControlRequests.delete(request_id);
       pending.reject(new AbortError('Request cancelled'));
     }
+    this.incomingControlRequests.get(request_id)?.abort();
   }
 
   private async sendControlRequest(
@@ -880,6 +915,11 @@ export class Query implements AsyncIterable<SDKMessage> {
     }
 
     this.closed = true;
+
+    for (const controller of this.incomingControlRequests.values()) {
+      controller.abort();
+    }
+    this.incomingControlRequests.clear();
 
     // Remove abort listener to prevent memory leak
     if (this.abortHandler) {
