@@ -201,9 +201,13 @@ export function isSafeImageSrc(
  * otherwise the browser requests e.g. `/Users/foo/shot.png` against the
  * Web Shell origin, gets a 404, and the message keeps a broken `<img>`
  * placeholder (#17452).
+ *
+ * Backslashes arrive percent-encoded by the markdown pipeline before this
+ * predicate runs (`C:\…` → `C:%5C…`), so both the raw and the encoded
+ * separator are accepted.
  */
 const LOCAL_FILESYSTEM_IMAGE_SRC =
-  /^(?:[A-Za-z]:[\\/]|\\\\|~(?:\w+)?[/\\]|\/(?:Users|home|tmp|var|opt|private|Volumes|mnt|media|srv|data|root|etc|boot|bin|sbin|usr|lib64|lib|dev|run|proc|sys)[\\/])/i;
+  /^(?:[A-Za-z]:(?:[\\/]|%5[cC])|%5[cC]%5[cC]|\\\\|~(?:\w+)?[/\\]|\/(?:Users|home|tmp|var|opt|private|Volumes|mnt|media|srv|data|root|etc|boot|bin|sbin|usr|lib64|lib|dev|run|proc|sys)[\\/])/i;
 
 export function isLocalFilesystemImageSrc(url: string | undefined): boolean {
   if (!url) return false;
@@ -994,6 +998,7 @@ function MarkdownLink({
 }
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
   const documentMode = renderMode === 'document';
   const trimmedSrc = (src ?? '').trim();
@@ -1008,14 +1013,19 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
         : 'unsafe-src';
     // Document mode (export) never writes a src — remote or local — into the
     // DOM: the export document must not contain machine paths or URLs the
-    // viewer did not author.
-    const pathText = documentMode ? '' : trimmedSrc;
+    // viewer did not author. The chip shows the path the user wrote, so the
+    // percent-encoded backslashes the markdown pipeline produced are reversed.
+    const pathText = documentMode ? '' : trimmedSrc.replace(/%5[cC]/g, '\\');
+    // The export renderer is standalone (no i18n provider — useI18n falls
+    // back to the raw key), so document mode stays on a fixed English label.
     const text = pathText
       ? alt && alt !== pathText
         ? `${alt} — ${pathText}`
         : pathText
       : alt ||
-        (documentMode ? '(image unavailable)' : '(missing image source)');
+        (documentMode
+          ? '(image unavailable)'
+          : t('markdown.imageMissingSource'));
     return (
       <span
         className={styles.imageFallback}
@@ -1321,8 +1331,19 @@ export const Markdown = memo(function Markdown({
     documentMode,
     sourceComponents?.sup,
   ]);
+  // Image `src` values that MarkdownImage turns into a fallback chip —
+  // local filesystem paths, safe base64 data images — would otherwise be
+  // blanked by the sanitizer before the chip can show the path, so let
+  // them through. Scoped to `src` (link hrefs keep the sanitizer) and off
+  // in document mode, where the export DOM must not carry machine paths.
   const urlTransform = useMemo(
-    () => (url: string) => markdownUrlTransform(url, documentMode),
+    () => (url: string, key?: string) => {
+      if (key === 'src' && !documentMode) {
+        if (isLocalFilesystemImageSrc(url)) return url;
+        if (SAFE_IMAGE_DATA_URI.test(url.trim())) return url;
+      }
+      return markdownUrlTransform(url, documentMode);
+    },
     [documentMode],
   );
 

@@ -9,7 +9,7 @@ import {
   type MarkdownRenderContext,
   type WebShellCodeBlockRenderInfo,
 } from '../../customization';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, getTranslator } from '../../i18n';
 import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import { ThemeProvider } from '../../themeContext';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
@@ -225,6 +225,12 @@ describe('isLocalFilesystemImageSrc', () => {
     expect(isLocalFilesystemImageSrc('C:\\Users\\foo\\shot.png')).toBe(true);
     expect(isLocalFilesystemImageSrc('d:/temp/shot.png')).toBe(true);
     expect(isLocalFilesystemImageSrc('\\\\server\\share\\shot.png')).toBe(true);
+    // Backslash forms arrive percent-encoded from the markdown pipeline.
+    expect(isLocalFilesystemImageSrc('C:%5CUsers%5Cfoo%5Cshot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('c:%5ctemp%5cshot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('%5C%5Cserver%5Cshare%5Cshot.png')).toBe(
+      true,
+    );
   });
 
   it('detects ~ home paths', () => {
@@ -261,21 +267,54 @@ describe('markdown image fallback', () => {
         '[data-web-shell-image-fallback="local-path"]',
       );
       expect(chip).toBeTruthy();
-      expect(chip!.textContent).toContain('/Users/foo/shot.png');
+      expect(chip!.textContent).toBe('screenshot — /Users/foo/shot.png');
     } finally {
       cleanup(view);
     }
   });
 
-  it('renders a Windows drive path without an <img>', () => {
-    // react-markdown sanitizes the drive-letter scheme to '', so the chip
-    // must still appear from the unsafe-src branch, not a broken image.
+  it('renders a Windows drive path as a chip with the path the user wrote', () => {
+    // The sanitizer rejects the drive-letter scheme and the backslashes
+    // arrive percent-encoded; the chip must still show the written path,
+    // from the local-path branch, not a broken image.
     const view = renderMd('![screenshot](C:\\Users\\foo\\shot.png)');
     try {
       expect(view.querySelector('img')).toBeNull();
-      expect(
-        view.querySelector('[data-web-shell-image-fallback]'),
-      ).toBeTruthy();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('screenshot — C:\\Users\\foo\\shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('shows the path, not a missing-source placeholder, for a no-alt drive image', () => {
+    const view = renderMd('![](C:\\temp\\shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('C:\\temp\\shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('renders a UNC path as a local-path chip with the written path', () => {
+    // Four leading backslashes survive micromark's destination unescaping
+    // (`\\` → `\`), leaving the two-backslash UNC the user wrote.
+    const view = renderMd('![unc](\\\\\\\\server\\\\share\\\\shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('unc — \\\\server\\share\\shot.png');
     } finally {
       cleanup(view);
     }
@@ -289,7 +328,21 @@ describe('markdown image fallback', () => {
         '[data-web-shell-image-fallback="local-path"]',
       );
       expect(chip).toBeTruthy();
-      expect(chip!.textContent).toContain('~/shot.png');
+      expect(chip!.textContent).toBe('shot — ~/shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('shows the path once when the alt duplicates it', () => {
+    const view = renderMd('![/Users/foo/shot.png](/Users/foo/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('/Users/foo/shot.png');
     } finally {
       cleanup(view);
     }
@@ -299,9 +352,65 @@ describe('markdown image fallback', () => {
     const view = renderMd('![secret](file:///tmp/private.png)');
     try {
       expect(view.querySelector('img')).toBeNull();
-      expect(
-        view.querySelector('[data-web-shell-image-fallback="unsafe-src"]'),
-      ).toBeTruthy();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="unsafe-src"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('secret');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('shows the localized placeholder for a no-alt unsafe chip', () => {
+    const view = renderMd('![](file:///tmp/x.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="unsafe-src"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('(missing image source)');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('localizes the no-alt placeholder from the active catalog', () => {
+    const expected = getTranslator('zh-CN')('markdown.imageMissingSource');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'zh-CN' },
+          createElement(Markdown, { content: '![](file:///tmp/x.png)' }),
+        ),
+      );
+    });
+    try {
+      const chip = container.querySelector(
+        '[data-web-shell-image-fallback="unsafe-src"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe(expected);
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
+  it('keeps a safe base64 data image as an <img>', () => {
+    const view = renderMd('![c](data:image/png;base64,iVBORw0KGgo=)');
+    try {
+      const img = view.querySelector('img');
+      expect(img).toBeTruthy();
+      expect(img!.getAttribute('src')).toBe(
+        'data:image/png;base64,iVBORw0KGgo=',
+      );
+      expect(view.querySelector('[data-web-shell-image-fallback]')).toBeNull();
     } finally {
       cleanup(view);
     }
@@ -320,7 +429,7 @@ describe('markdown image fallback', () => {
         '[data-web-shell-image-fallback="load-error"]',
       );
       expect(chip).toBeTruthy();
-      expect(chip!.textContent).toContain('chart');
+      expect(chip!.textContent).toBe('chart — https://example.com/chart.png');
     } finally {
       cleanup(view);
     }
