@@ -89,14 +89,16 @@ release 打印的 deferred 列表中、由你启动——所启动的更新 head
 headRefOid`）并 `--start` 它；重启后的轮次现为 `<newer>` 于 `<next>`，`--complete`
 重复这两个值，而非原来的 `<H>` 与 `<r>`（第 6 轮）。不要在旧标记下 `git checkout`
 更新的 head，否则会把更新 head 的证据记到所投递 head 的判定名下（R1-1 第 3 轮、
-R4-1）。prepare 段的错 HEAD checkout 补救是注册感知的（R5-1 第 7 轮）：若 prepare
-点名的 head **比本轮注册的 head 更新**，即 moved-head 情形——按 moved-head 恢复
-（释放本轮标记；绝不在旧标记下 checkout 更新 head）；否则点名的 head 即本轮自己的
-head，普通 checkout 即补救。提前注册下 prepare 期间唯一在飞标记即本轮自己的，故
-第 6 轮三态写法的「仍在飞→让该轮作答」分支会卡死本轮、「已验证」分支可能把更新
-head 的证据记到所投递 head 名下；改以 prepare 的目标 head（而非树的 head 状态）
-为判据即消除两者。两个 moved-head release 形式都像兄弟恢复形式一样带
-`[--round <r>]`。完成形式的 `--artifact-dir` 可选：重放完成省略它
+R4-1）。prepare 段的错 HEAD checkout 补救以同一性（而非新旧）为判据（R5-1 第 8
+轮）：若本轮注册了 head，仅当 prepare 点名的 head **就是**该 head 时普通 checkout
+才是补救；点名的 head 不同（移动或 force-push——prepare 是精确相等判定、不含顺序
+信息）即 moved-head 情形（释放本轮标记；绝不在其下 checkout 点名 head）。未注册任何
+head 的轮次（全新 `/verify-pr <n>`，从不调用 `--start`）没有自己的标记：先读状态文件
+的在飞条目，另一轮次的标记仍活时让该轮作答、不在其下 checkout。第 7 轮「比本轮注册
+head 更新」的写法对全新轮次无定义、也漏掉 force-push，其 else 分支认可在另一轮活
+标记下 checkout 点名 head——`completeRound` 只按 head+round 匹配标记，点名 head 的
+证据会被记到注册 head 的判定名下、`duplicateHead` 从此拒绝再查。两个 moved-head
+release 形式都像兄弟恢复形式一样带 `[--round <r>]`。完成形式的 `--artifact-dir` 可选：重放完成省略它
 以继承该 head 已记录的目录，而非覆盖。死标记条目的 `--round` 是
 阻塞标记的轮次，从状态文件的在飞条目读出并传入（读状态允许，只有手写 JSON 被
 禁止）：省略 `--round` 会跳过比对，重试的 release 会删掉同 head 较新轮次的活
@@ -114,10 +116,13 @@ head 的证据记到所投递 head 名下；改以 prepare 的目标 head（而�
   一节的副本不为另一节作不在场证明：无 `--artifact-dir` 不变量与重放省略子句各钉
   在本节切片上，错 HEAD 例外（R5-1）与 moved-head 完成重绑定被钉住，通用入口
   条目钉到 prepare 块（注册是 watch/复验程序），边界节则限定注册先于 prepare。
-  第 7 轮把错 HEAD 补救改为注册感知（以 prepare 点名的 head 是否比本轮注册的 head
-  更新为判据，取代第 6 轮三态写法——其在飞分支会在本轮自己的标记上卡死），各节钉
-  瞬时「重试不 release」恢复与 watch moved-head 完成重绑定，写明误拼 `--repo` 的
-  重置，并新增 CLI 见证：显式完成目录覆盖不同的 start 目录（重排解析链即变红）。
+  第 7 轮把错 HEAD 补救改为注册感知（取代第 6 轮三态写法——其在飞分支会在本轮自己
+  的标记上卡死），各节钉瞬时「重试不 release」恢复与 watch moved-head 完成重绑定，
+  写明误拼 `--repo` 的重置，并新增 CLI 见证：显式完成目录覆盖不同的 start 目录
+  （重排解析链即变红）。第 8 轮把补救细化为同一性判据（仅当点名 head 就是本轮注册
+  head 才普通 checkout；不同即 moved-head；全新轮次读状态在飞条目、对活标记让该轮
+  作答），钉住该措辞使改回「比…更新」变红，补重置的重注册步骤，并见证 prior 臂目录
+  优先级、以及完成会按所给目录登记活 head（checkout 补救是唯一防线）。
 - `scripts/tests/verify-pr-watch-state.test.js`：新见证走 **CLI**（`run(root, …)`，
   演练本 PR 改动的助手代码——`parseArgs` 要求、`completeRound` 返回字段、`main`
   告警）——`--start` 不带 `--artifact-dir` 注册在飞且目录 `null`（恢复强制要求

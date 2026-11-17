@@ -6826,22 +6826,28 @@ describe('qwen-triage verify hardening round 2', () => {
       'Run the full step-1 prepare block on the host before any work inside the boundary — the watch-state registration precedes it (R17-2)',
     );
     expect(flat).not.toContain('before anything else');
-    // R5-1 (round 7): the wrong-HEAD remedy is registration-aware — it keys off
-    // whether prepare names a head NEWER than this round's registered head (the
-    // moved-head case), not the tree's head state. Under register-ahead the only
-    // in-flight marker during prepare is this round's own, so the round-6
-    // three-state "still in flight → let that round answer" arm wedged the round
-    // and the "verified" arm could file newer evidence under the delivered head.
-    // Reverting to the tree-state form reds these pins.
+    // R5-1 (round 8): the wrong-HEAD remedy keys off IDENTITY, not recency — the
+    // plain checkout is the remedy only when the named head IS this round's
+    // registered head; a head that DIFFERS (moved or force-pushed — prepare tests
+    // exact equality, no ordering) is the moved-head case. A fresh /verify-pr <n>
+    // registers nothing, so it reads the state's in-flight entry and defers to a
+    // live marker rather than checking out under it (which would file the named
+    // head's evidence under the registered head's verdict). The round-7 "newer
+    // than" framing was ill-defined for a fresh round and missed force-push;
+    // reverting to it reds these pins.
     expect(flat).toContain(
-      "a wrong HEAD names the `git checkout` to run — but if the head prepare names is **newer than this round's registered head**, that is the moved-head case",
+      'a wrong HEAD names the `git checkout` to run — but if this round registered a head, the plain checkout is the remedy only when the named head **is** that head',
     );
     expect(flat).toContain(
-      "follow the moved-head recovery below (release this round's marker; never check out the newer head under the old marker",
+      "a head that differs is the moved-head case below (release this round's marker; never check out the named head under it",
     );
     expect(flat).toContain(
-      "otherwise the named head is this round's own and the plain checkout is the remedy",
+      'A round that registered nothing (a fresh `/verify-pr <n>`) has no marker of its own',
     );
+    expect(flat).toContain(
+      "read the state file's in-flight entry first, and while another round's marker is live, let that round answer — never check out under a live marker",
+    );
+    expect(flat).not.toContain("newer than this round's registered head");
     expect(flat).not.toContain(
       'let that round answer — do not release a live marker or check out under it',
     );
@@ -6903,6 +6909,12 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     expect(promptSlice).toContain(
       "the reset is to delete the state file `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree",
+    );
+    // Deferred (round 8): the reset drops the delivered head's only delivery
+    // record, so the contract must say to re-register it (the cursor already
+    // advanced; no fire delivers it again).
+    expect(promptSlice).toContain(
+      'and then re-register the delivered head with the correct slug (`--start`)',
     );
     // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
     // --release form with --repo (anchored on the watch-only continuation, so

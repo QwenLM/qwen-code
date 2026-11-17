@@ -267,13 +267,14 @@ command redirected to `prepare.log`, plus the `sed` that captures the snapshot
 digest into `pr.sha256` (step 7 binds the snapshot's bytes to it). It fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
 materialised checkout of the PR head (a wrong HEAD names the `git checkout`
-to run — but if the head prepare names is **newer than this round's registered
-head**, that is the moved-head case: follow the moved-head recovery below
-(release this round's marker; never check out the newer head under the old
-marker, which would file the newer head's evidence under the registered head's
-verdict); otherwise the named head is this round's own and the plain checkout
-is the remedy — checking it out touches no other head's already-filed verdict;
-uncommitted changes name the entries and a stash
+to run — but if this round registered a head, the plain checkout is the remedy
+only when the named head **is** that head; a head that differs is the moved-head
+case below (release this round's marker; never check out the named head under
+it, which would file its evidence under the registered head's verdict). A round
+that registered nothing (a fresh `/verify-pr <n>`) has no marker of its own:
+read the state file's in-flight entry first, and while another round's marker is
+live, let that round answer — never check out under a live marker; uncommitted
+changes name the entries and a stash
 form that clears them; index flags that hide tracked state — a sparse checkout's
 skip-worktree, assume-unchanged — are refused too; the script never stashes
 for you),
@@ -806,7 +807,9 @@ Exit 3 has several shapes, each with its own reaction:
   reject it, and every later verb then refuses the correct slug without naming
   the file; the reset is to delete the state file
   `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree
-  (this drops the PR's dedup history), so check the slug at `--start`.
+  (this drops the PR's dedup history) and then re-register the delivered head
+  with the correct slug (`--start`) — the probe cursor already advanced past
+  it, so no fire will deliver it again; check the slug at `--start`.
 
 Record the finished round with the same script's completion form:
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`

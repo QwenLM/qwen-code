@@ -3296,6 +3296,75 @@ describe('R17-2 register ahead of prepare', () => {
     expect(verified.artifactDir).toBe('dirB');
   });
 
+  // Deferred (round 8): the prior arm's precedence is pinned — a replayed
+  // completion that supplies an explicit dir must override the prior verdict's
+  // dir. A prior-first reorder would file the stale prior dir and keep every
+  // other dir case green.
+  it('a replayed completion with an explicit dir overrides the prior directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'merge-ready',
+      ]).status,
+    ).toBe(0);
+    const replay = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'r99',
+    ]);
+    expect(replay.status).toBe(0);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r99');
+  });
+
+  // R8-1: completeRound matches the marker by head+round alone and files whatever
+  // directory it is given — it cannot see that the tree moved to another head. So
+  // completing the live head with a DIFFERENT head's evidence directory is
+  // accepted and files it verified with that evidence; a re-start is then refused
+  // forever. The contract's checkout remedy (never check out under a live marker)
+  // is the only guard — this witnesses the harm it prevents, not a tool guarantee.
+  it('a completion files the live head with whatever directory it is given', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'tmp/pr16866-verify-otherhead',
+    ]);
+    expect(res.status).toBe(0);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('tmp/pr16866-verify-otherhead');
+    expect(
+      run(root, ['16866', '--start', '--head', HEAD, '--round', '12']).status,
+    ).toBe(3);
+  });
+
   // R2-3: a replayed completion (no in-flight marker) inherits the prior
   // verdict's directory and prints no warning.
   it('a replayed completion inherits the prior verdict directory', () => {

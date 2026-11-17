@@ -115,16 +115,21 @@ now `<newer>` at `<next>`, and `--complete` repeats those values, not the
 original `<H>` and `<r>` (round 6). Do not `git checkout` the newer head under
 the old marker, which would file the newer head's evidence under the delivered
 head's verdict (R1-1 round 3, R4-1). The prepare paragraph's wrong-HEAD checkout
-remedy is registration-aware (R5-1 round 7): if the head prepare names is
-**newer than this round's registered head**, that is the moved-head case —
-follow the moved-head recovery (release this round's marker; never check out the
-newer head under the old marker); otherwise the named head is this round's own
-and the plain checkout is the remedy. Under register-ahead the only in-flight
-marker during prepare is this round's own, so the round-6 three-state form's
-"still in flight → let that round answer" arm wedged the round and its
-"verified" arm could file newer evidence under the delivered head; keying off
-prepare's target head instead of the tree's head state removes both. Both
-moved-head release forms carry `[--round <r>]` like the sibling recovery form.
+remedy keys off identity, not recency (R5-1 round 8): if this round registered a
+head, the plain checkout is the remedy only when the named head **is** that
+head; a head that differs (moved or force-pushed — prepare tests exact equality
+and states no ordering) is the moved-head case (release this round's marker;
+never check out the named head under it). A round that registered nothing (a
+fresh `/verify-pr <n>`, which never calls `--start`) has no marker of its own:
+it reads the state file's in-flight entry first and, while another round's
+marker is live, lets that round answer rather than checking out under it. The
+round-7 "newer than this round's registered head" framing was ill-defined for a
+fresh round and missed force-push, and its else arm endorsed checking out the
+named head under another round's live marker — `completeRound` matches the
+marker by head and round alone, so the named head's evidence would be filed
+under the registered head's verdict and `duplicateHead` would refuse to
+re-examine it. Both moved-head release forms carry `[--round <r>]` like the
+sibling recovery form.
 The completion form's `--artifact-dir` is optional: a replayed completion omits
 it to inherit the directory already recorded for the head rather than
 overwriting it. The dead-marker bullet's `--round` is the
@@ -152,13 +157,19 @@ existing dead-round recovery (`--release` for a round that died after
   moved-head completion re-binding are pinned, and the general entry-path
   bullet is pinned to the prepare block (registration is a watch/re-verification
   procedure) with the boundary section qualifying that registration precedes
-  prepare. Round 7 makes the wrong-HEAD remedy registration-aware (keying off
-  whether prepare names a head newer than this round's registered head, replacing
-  the round-6 three-state form whose in-flight arm wedged on this round's own
+  prepare. Round 7 makes the wrong-HEAD remedy registration-aware (replacing the
+  round-6 three-state form whose in-flight arm wedged on this round's own
   marker), pins the transient retry-without-release recovery in each section and
   the watch moved-head completion re-binding, documents the mistyped-`--repo`
   reset, and adds a CLI witness that an explicit completion directory overrides a
-  different start directory (reordering the resolution chain reds it).
+  different start directory (reordering the resolution chain reds it). Round 8
+  refines the remedy to identity (the plain checkout only when the named head IS
+  this round's registered head; a differing head is the moved-head case; a fresh
+  round reads the state's in-flight entry and defers to a live marker), pins that
+  wording so reverting to "newer than" reds it, adds the reset's re-register step,
+  and witnesses the prior-arm dir precedence and that a completion files the live
+  head with whatever directory it is given (the checkout remedy is the only
+  guard).
 - `scripts/tests/verify-pr-watch-state.test.js`: new witnesses driven through
   the **CLI** (`run(root, …)`, exercising the helper code this PR changes — the
   `parseArgs` requirement, `completeRound`'s return field, and `main`'s
