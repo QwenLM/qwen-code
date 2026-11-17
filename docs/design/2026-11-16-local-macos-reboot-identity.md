@@ -1,0 +1,53 @@
+# Local macOS reboot recovery and filesystem identity
+
+[English](2026-11-16-local-macos-reboot-identity.md) | [简体中文](2026-11-16-local-macos-reboot-identity.zh-CN.md)
+
+## Problem and scope
+
+macOS can assign a different `st_dev` to the same APFS volume after reboot. Local storage registration currently hashes the numeric device, inode and native birth time. Session worktrees independently persist the JDK file key, which also contains the numeric device. Both checks can therefore reject the original directory after a legitimate reboot. Linux has trusted whole-host writer-stop recovery, but its numeric storage identity has the same limitation if its device changes. macOS additionally excludes its native boot identity from that recovery path.
+
+This change adds stable macOS volume identity, extends the existing opt-in whole-host stop proof to macOS, and supplies explicit offline re-attestation for a legacy registration and its completed Session worktrees. It preserves the original Session, dirty files, Git branch, journal and immutable Runtime requests. Linux filesystem UUID discovery, relocation, merging conflicting physical owners and recovery of interrupted Git maintenance are outside this change.
+
+## Stable identity and compatibility
+
+The macOS native reader resolves the canonical path's FileStore device and obtains its unique `VolumeUUID` from bounded `diskutil info -plist` output. It verifies the returned device and rechecks the path's numeric device, inode and creation time around the probe. Missing, ambiguous or malformed UUIDs fail closed. No device-to-volume cache survives a probe.
+
+New storage registrations use the lowercase UUID without hyphens as the 32-character device identity, a `local-storage/2` physical-key namespace, and storage marker version 3. Legacy unsigned decimal device values have at most 20 characters and retain marker version 2 and `local-storage/1`. Ordinary verification can still compare a legacy registration with the current numeric identity; it never invents its historical UUID or rewrites it. The file read/upload protocol continues to receive the current numeric `stat.dev` and inode through the legacy/native read path.
+
+New macOS worktree anchors use a versioned `macos-volume/1` identity containing volume UUID, inode and JDK creation time. Old anchors continue to compare the complete old file key, including device. Stable identities cover the root, source common Git directory, target worktree, gitfile and registered Git metadata directory. Canonical paths, no symlinks, exact gitfile/back-reference/common-directory checks and completion records remain mandatory.
+
+## Whole-host writer-stop proof
+
+With `trusted-local-reboot-recovery=true`, a saved Runtime can use the existing reboot cleanup only when its hardware host matches, its platform namespace shape matches, and the native kernel boot ID differs. macOS uses paired `macos` namespace labels and `kern.bootsessionuuid`; Linux retains its existing sources. A process restart, same-boot namespace change, foreign host or platform mismatch is insufficient.
+
+Cleanup retires the exact saved registration under its existing lock and returns the existing loss and writer-stop evidence. It neither launches a replacement nor signals a PID from a different boot. Broker cleanup still settles uncertain executions without redispatch and releases only the original binding/generation. New execution requires a separate authorized admission.
+
+## Explicit offline legacy re-attestation
+
+The private maintenance entry accepts a prepared request and `--offline-confirmed`. The operator stops all services sharing the catalog and directory and preserves a clean database/state/files backup. The request identifies the exact legacy owner, expected current volume UUID, native host/boot evidence, all logical aliases, all completed worktree rows and exact old marker bytes. A dry-run produces the complete inventory before mutation. It is an operator establishment of a new baseline, not proof of an unrecorded historical volume UUID.
+
+The tool supports one physical owner and all of its fully registered aliases. Another overlapping owner, incomplete inventory, active Runtime binding, execution membership, holder, upload, maintenance, journal writer lease or unsettled lifecycle operation blocks final promotion. Under the persisted fences, retirement claims each exact original generation and records only native loss and writer-stop evidence that matches its saved seed, handle and lease. Broker recovery then performs the existing bounded abandonment/member cleanup before retirement reaches its terminal state. It does not rewrite Runtime handles, seeds, requests, credentials, leases, generation counters or execution membership to simulate cleanup.
+
+The tool verifies unchanged canonical paths, host, inode and birth time; old worktree anchor inode/creation values; exact Git registration; and exact original storage/plan/completion marker bytes. Legacy worktree anchors must resolve to the explicitly attested volume. Worktrees created after the binary upgrade but before the reboot already carry stable anchors on the legacy owner: the plan verifies those anchors against the attested volume and carries their plan and completion records forward unchanged, and only legacy anchors are rewritten. A legacy plan whose completion was already captured in the stable format (an interrupted preparation retried after the upgrade) upgrades the plan anchors and preserves the completion bytes. Anchors naming a different volume, or a stable plan paired with a legacy completion, are refused. It records a durable `STORAGE_MIGRATION` operation with request subtype `same-path-identity-reattest/1`, preserving the complete old/new inventory and marker bytes. Existing aliases and owner receive admission fences before filesystem changes. This uses existing schema kinds and requires no catalog reset.
+
+A submitted RUNNING Turn already parked with `hosted_harness_recovery_blocked` can keep its original status while this same-path identity repair completes, provided every original Runtime is retired and no holder, execution member or valid journal writer remains. All other active Turns, pending commands and lifecycle operations block promotion. This narrow exception changes no Turn or input record and authorizes no replay; ordinary Harness recovery still decides whether execution may continue. A relocation has different constraints and retains its existing blanket active-Turn refusal.
+
+Each marker replacement accepts only its recorded old bytes or this operation's expected new bytes, writes and fsyncs a temporary file, atomically replaces the marker and fsyncs its directory. A mismatch blocks while leaving the fences in place. Retrying the same operation resumes from its durable receipt. Another request with the same ID is refused.
+
+After all new markers and native identities verify, one SQL transaction changes the owner's physical key and mount identity, all covered aliases, completed worktree physical keys and anchor plans, and the matching `SESSION_WORKTREE` operation physical keys. Only an identity-conflict-blocked completed worktree becomes READY; other failure states are refused. The original worktree operation request/digest and the plan's historical admission `storageIdentity` remain unchanged. Terminal historical operations remain unchanged. The transaction completes the receipt and removes its fences. A completed retry verifies the new state without modifying it.
+
+## Affected components
+
+`MacOsHostIdentity` supplies volume probing and stable anchor identity. `NativeStorageIdentityReader` retains numeric reads for legacy verification and live file operations. `WorkspaceStorageGuard` recognizes both registration encodings, with local identity compatibility and relocation-history reads delegated to the existing `LocalStorageOwners` helper. `SessionWorktreeGit` verifies both anchor formats and exposes a separate offline re-attestation calculation. Runtime-local reuses its existing stop protocol. A persistence maintenance store and a private server main own the durable offline transition; the reference distribution maps that main to its existing offline admin launcher as `workspace-identity-reattest`. No public route or TypeScript payload changes are required.
+
+Pending directory-import receipts select the encoding of their saved identity when retrying. A new alias of an unchanged legacy owner reuses its complete matching numeric identity; it does not create a competing UUID owner. Completed re-attestation receipts carry a distinct phase so file-history validation skips them and still finds the latest actual relocation receipt. The local serve launcher retains its existing disabled trusted-reboot default; the private maintenance command explicitly enables trusted native reboot observation.
+
+## Validation and acceptance
+
+Use focused Java tests for native UUID parsing and probe failure, stable identity with changed numeric device, different UUID/inode/birth refusal, legacy refusal without mutation, every worktree anchor and Git pointer, live numeric file identity, both platforms' trusted reboot proof, same-boot/foreign-platform refusal and existing escaped-writer protection. Test offline inventory omissions, active writers, byte conflicts, retry after each marker boundary, conflicting request IDs and immutable old requests/journal. A mixed inventory of legacy and already-stable worktree anchors must complete with the stable records carried forward byte-for-byte, including a legacy plan over an already-stable completion; foreign-volume stable anchors must be refused before any fence.
+
+The actual original Session is accepted only after its old Runtime cleanup is proven, offline re-attestation completes, recovery query allows a new Turn, and a newly submitted Turn executes on that same Session and branch with its saved edits intact. The cancelled Turn is not replayed. Preserve previous timeout/root-cause evidence separately. Java checks share the user-authorized 1,800-second budget. Real MySQL 8.4 and full Hosted/fault profiles remain required CI gates when unavailable locally; H2 is not a substitute.
+
+## Risks and open questions
+
+Native probes add bounded process cost and must stay outside new unbounded loops. Loss of an old marker, unsupported volume UUID, conflicting physical owners, interrupted Git creation/removal or an unproven writer remains an explicit blocker. Volume UUID is local host trust evidence, not a guarantee against a privileged actor cloning a volume. There are no unresolved automatic fallback or legacy inference decisions; unsupported cases fail closed.

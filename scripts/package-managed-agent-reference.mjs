@@ -62,6 +62,11 @@ export const ADMIN_COMMANDS = Object.freeze([
     'Retire, prepare, promote, abort or inspect a Workspace migration.',
   ],
   [
+    'workspace-identity-reattest',
+    `${PERSISTENCE}.WorkspaceIdentityReattestationMain`,
+    'Plan, fence, retire or complete an offline macOS storage identity upgrade.',
+  ],
+  [
     'maintenance-recovery',
     `${PERSISTENCE}.WorkspaceMaintenanceRecoveryMain`,
     'Inspect or reconcile a Workspace held by maintenance.',
