@@ -121,6 +121,10 @@ public class ProcessTransport implements Transport {
     /** {@inheritDoc} */
     @Override
     public void close() throws IOException {
+        if (process != null) {
+            // End pipe reads before closing readers that hold their lock while blocked.
+            process.destroy();
+        }
         if (processInput != null) {
             processInput.close();
         }
@@ -129,9 +133,6 @@ public class ProcessTransport implements Transport {
         }
         if (processError != null) {
             processError.close();
-        }
-        if (process != null) {
-            process.destroy();
         }
     }
 
