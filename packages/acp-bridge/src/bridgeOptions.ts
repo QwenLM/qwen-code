@@ -774,6 +774,11 @@ export interface CreateSubSessionInfo {
    */
   workspace?: string;
   workspaceGeneration?: string;
+  /**
+   * A sub-session the caller created earlier, in `workspace`, to send the
+   * prompt to instead of creating one. Never set for scheduled-task runs.
+   */
+  sessionId?: string;
   /** Optional immutable creator attribution for the fresh session. */
   sourceType?: string;
   /** Optional source-specific identifier paired with `sourceType`. */
@@ -799,6 +804,9 @@ export interface CreateSubSessionResult {
    * transcript. `false` = live-only (gone from the persisted list after a
    * daemon restart). Absent when the spawn carried no parent. */
   parentSessionPersisted?: boolean;
+  /** The task id a `sent` completion will carry, when it is not `sessionId`:
+   * one session can report several completions to the same caller. */
+  taskId?: string;
 }
 
 /** Daemon-host callback that spawns a sub-session and (for `'first-turn'`) waits
