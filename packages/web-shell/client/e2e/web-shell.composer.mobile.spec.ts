@@ -235,6 +235,7 @@ test('keeps the unavailable-model authorize action reachable inside the mobile s
     'data-authorize-clicked',
     'true',
   );
+  await expect(sheet).toBeVisible();
 });
 
 test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({

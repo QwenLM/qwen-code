@@ -218,6 +218,11 @@ export function UnavailableModelTooltip({
         data-web-shell-toolbar-popover=""
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
+        onFocusOutside={(event) => {
+          // A PopoverAnchor has no trigger for Radix to exempt, so WebKit
+          // re-focusing the tapped row would dismiss the hint as focus-outside.
+          if (containsFocus(event.target)) event.preventDefault();
+        }}
         onPointerEnter={cancelClose}
         onPointerLeave={closeAfterDelay}
         onFocus={cancelClose}
