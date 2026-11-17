@@ -41,7 +41,16 @@ walks three layers in order:
 
 The classifier uses your configured fast model
 (`/model --fast`). If no fast model is configured, the main session
-model is used instead.
+model is used instead. If the fast model's Stage 1 reaches its deadline and
+the session model has a different configured identifier, Auto Mode asks the
+session model for one complete independent review before falling back to
+manual approval. The pending action and session stay in Auto Mode.
+
+This review receives the same filtered context and policy, with a fresh
+deadline using `permissions.autoMode.classifier.timeouts.stage2Ms` (30 seconds
+by default). With the default Stage 1 budget of 10 seconds, fallback can add
+up to 30 seconds of request time. It does not retry an already completed
+policy block, and user cancellation stops the review.
 
 > [!tip]
 >
@@ -214,9 +223,12 @@ want non-English reasons, add a hint like
 
 Auto Mode protects you from getting stuck:
 
-- If the classifier API is unreachable, times out, exceeds its context window,
-  or returns an invalid response, the current action immediately falls back to
-  manual approval. The confirmation recommends Default Mode and offers
+- A fast-model Stage 1 deadline first gets the distinct session-model review
+  described above. If that review also fails or times out, or the configured
+  fast and session model identifiers match, the action falls back to manual
+  approval. Other classifier failures (API errors, context overflow, invalid
+  responses, or a failed Stage 2 review) still fall back directly. The
+  confirmation recommends Default Mode and offers
   **Switch to Default Mode and allow once** alongside Allow once and Reject.
   Switching affects only the current runtime session; it does not change your
   saved settings.
@@ -309,9 +321,11 @@ tightened over time.
 
 **Does Auto Mode send my code to a third party?**
 
-Auto Mode reuses your existing model configuration — same endpoint as
-the main agent. If you've configured Qwen Code to use a self-hosted
-model, the classifier runs against that endpoint too.
+Auto Mode uses the endpoint configured for your fast model, or your session
+model when no fast model is configured or a Stage 1 timeout triggers the
+session-model review. Configure both models with your self-hosted endpoint
+if classification must stay there. Fallback uses the same filtered context;
+it does not add tool results or full conversation contents.
 
 **Will my secrets / `.env` contents reach the classifier?**
 

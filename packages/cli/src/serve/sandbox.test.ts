@@ -111,6 +111,93 @@ describe('start_sandbox', () => {
     await expect(result).resolves.toBe(0);
   });
 
+  // Container cases below share one two-spawn dance: the first spawn is the
+  // `docker image inspect` probe, the second is the sandbox itself. Stub the
+  // ambient debug knobs too — inheriting a developer's DEBUG_PORT or
+  // SANDBOX_PORTS would make these assertions environment-dependent.
+  async function runContainerSandbox(
+    env: Record<string, string>,
+  ): Promise<string[]> {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.stubEnv('DEBUG_PORT', '');
+    vi.stubEnv('SANDBOX_PORTS', '');
+    for (const [key, value] of Object.entries(env)) {
+      vi.stubEnv(key, value);
+    }
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+    return args;
+  }
+
+  it('does not enable the debugger when DEBUG is the string "false"', async () => {
+    // Regression: `DEBUG=false` used to be truthy, so the sandbox started
+    // `node --inspect-brk` and waited for a debugger that never attached.
+    const args = await runContainerSandbox({ DEBUG: 'false', DEBUG_MODE: '' });
+    expect(args.some((arg) => arg.includes('--inspect-brk'))).toBe(false);
+    expect(args).not.toContain('9229:9229');
+  });
+
+  it('enables the debugger and the 9229 publish when DEBUG=1', async () => {
+    const args = await runContainerSandbox({ DEBUG: '1', DEBUG_MODE: '' });
+    expect(args.some((arg) => arg.includes('--inspect-brk=0.0.0.0:9229'))).toBe(
+      true,
+    );
+    expect(args).toContain('9229:9229');
+  });
+
+  it('keeps DEBUG_MODE from pausing the sandbox at a breakpoint', async () => {
+    const args = await runContainerSandbox({ DEBUG: '', DEBUG_MODE: '1' });
+    expect(args.some((arg) => arg.includes('--inspect-brk'))).toBe(false);
+    expect(args).not.toContain('9229:9229');
+  });
+
+  it('parses DEBUG case-insensitively like the sibling sandbox flags', async () => {
+    const args = await runContainerSandbox({ DEBUG: ' TRUE ', DEBUG_MODE: '' });
+    expect(args.some((arg) => arg.includes('--inspect-brk=0.0.0.0:9229'))).toBe(
+      true,
+    );
+  });
+
+  it('starts the development entrypoint without a breakpoint when DEBUG=false', async () => {
+    const args = await runContainerSandbox({
+      DEBUG: 'false',
+      DEBUG_MODE: '',
+      NODE_ENV: 'development',
+    });
+    const entrypoint = args.at(-1) ?? '';
+    expect(entrypoint).toContain('npm rebuild && npm run start --');
+    expect(entrypoint).not.toContain('npm run debug --');
+  });
+
   it('lets the runtime choose a hostname for image-ID containers', async () => {
     vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
     vi.stubEnv('QWEN_CODE_WARNINGS_FILE', '');
@@ -146,6 +233,58 @@ describe('start_sandbox', () => {
     const containerName = args[args.indexOf('--name') + 1];
     expect(containerName.length).toBeGreaterThan(64);
     expect(args).not.toContain('--hostname');
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
+
+  it('creates the container user home directory when matching host UID/GID', async () => {
+    // Regression (#16861): HOME is passed through below, but `useradd`
+    // without `-m` never creates it inside the container, so an in-container
+    // CLI crashed resolving HOME. The entrypoint must create the home dir.
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'true');
+    vi.stubEnv('DEBUG_PORT', '');
+    vi.stubEnv('SANDBOX_PORTS', '');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockImplementation((command: string) =>
+      Buffer.from(command === 'id -u' || command === 'id -g' ? '1001' : ''),
+    );
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js'],
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    const home = os.homedir();
+    const entrypoint = args.at(-1) ?? '';
+    expect(entrypoint).toContain(
+      `useradd -o -m -u 1001 -g 1001 -d ${home} -s /bin/bash qwen`,
+    );
+    // The HOME passthrough must stay: `su -p` would otherwise reset it to '/'.
+    const homeFlagIndex = args.indexOf(`HOME=${home}`);
+    expect(homeFlagIndex).toBeGreaterThan(0);
+    expect(args[homeFlagIndex - 1]).toBe('--env');
 
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);
@@ -475,6 +614,43 @@ describe('resolveSeatbeltProfileFile', () => {
       await expect(result).resolves.toBe(0);
     },
   );
+
+  it.each([
+    ['false', false],
+    ['1', true],
+  ])(
+    'sets NODE_OPTIONS --inspect-brk only for an enabled DEBUG=%s seatbelt run',
+    async (debugValue, expected) => {
+      // The seatbelt branch embeds the flag inside the final `sh -c` payload,
+      // so a truthiness regression here would hang macOS sandboxes with no
+      // docker `--publish` output to point at it.
+      vi.stubEnv('DEBUG', debugValue);
+      vi.stubEnv('DEBUG_MODE', '');
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
+      vi.spyOn(fs, 'realpathSync').mockImplementation(
+        (filePath) => String(filePath) || '/tmp',
+      );
+      execSyncMock.mockReturnValue(Buffer.from('/tmp/cache\n'));
+
+      const child = new EventEmitter();
+      spawnMock.mockReturnValue(child);
+      const result = start_sandbox(
+        { command: 'sandbox-exec', image: '' },
+        [],
+        undefined,
+        [process.execPath, '/path/to/cli.js', '--acp'],
+      );
+
+      const args = spawnMock.mock.calls[0]?.[1] as string[];
+      expect(args.at(-1)?.includes('NODE_OPTIONS="--inspect-brk"')).toBe(
+        expected,
+      );
+
+      child.emit('close', 0);
+      await expect(result).resolves.toBe(0);
+    },
+  );
 });
 
 describe('getSandboxPassthroughEnvArgs', () => {
@@ -491,6 +667,8 @@ describe('getSandboxPassthroughEnvArgs', () => {
         QWEN_CODE_DESKTOP: '1',
         QWEN_CODE_ENABLE_WORKFLOWS: '1',
         QWEN_CODE_DISABLE_WORKFLOWS: '1',
+        QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '0',
+        QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: '0',
       }),
     ).toEqual([
       '--env',
@@ -513,6 +691,10 @@ describe('getSandboxPassthroughEnvArgs', () => {
       'QWEN_CODE_ENABLE_WORKFLOWS=1',
       '--env',
       'QWEN_CODE_DISABLE_WORKFLOWS=1',
+      '--env',
+      'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=0',
+      '--env',
+      'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=0',
     ]);
   });
 });

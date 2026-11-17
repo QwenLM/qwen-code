@@ -2,7 +2,7 @@
 
 [English](2026-11-08-daemon-pr-watch-observation.md) | [简体中文](2026-11-08-daemon-pr-watch-observation.zh-CN.md)
 
-Status: proposed (2026-11-08). This is the next increment of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design" below). It implements §1 observation and §3 transition detection only; delivery (§4–§5), configuration (§6) and the channel migration (§7) stay out of this increment.
+Status: implemented as #16611 (proposed 2026-11-08). This is the next increment of [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) (the "master design" below). It implements §1 observation and §3 transition detection only; delivery (§4–§5), configuration (§6) and the channel migration (§7) stay out of this increment. The body below describes the increment as designed; PR B (#17214) later removed the internal switch, so enablement is now deps presence.
 
 ## Problem
 
@@ -29,7 +29,7 @@ The master design's foundations are merged: the per-PR watch store and its owner
 - Watch-file deletion and `lastBoundAt` maintenance (§2): deletion needs the drain's scan-completeness rules; this increment only creates and updates files. The owner-record claim is wired so a non-owner observes nothing.
 - The serve-lifecycle close reorder (§2): with no drain or restore in flight there is nothing to stop ahead of the record removal yet; the claim/release already exist.
 - Daemon-level provision of the watch deps in `run-qwen-serve.ts` (allowed-hosts discovery from the `gh` config hosts and the hosted channels' web hosts, the lock registry and the watch dir): the timer exposes a `getPrWatchDeps` seam, but populating it is only exercised once the switch is on, so it lands with the enablement increment. With the switch off the seam is never read.
-- Coupling the observation to the refresh's slim listing: the sweep accepts a `listedKeys` set (and tests it) so a closed PR the listing returned is not re-viewed, and master §1 also has the listing write a merged/closed PR's `state`/`observedAt` to the watch file. The orchestration does not run the listing, so it passes no `listedKeys` and there is no listing→watch write yet; both land with the enablement increment that wires the listing result through. Until then every closed binding is viewed (correct, slightly more views) and a merged/closed state reaches the watch file only via a view.
+- Coupling the observation to the refresh's slim listing: the sweep accepts a `listedKeys` set (and tests it) so a closed PR the listing returned is not re-viewed, and master §1 also has the listing write a merged/closed PR's `state`/`observedAt` to the watch file. The orchestration itself does not run the listing; the enablement increment wired it through, so the refresh timer now carries `listedKeys` per workspace into the next tick and the listing writes `state`/`observedAt` — and the `state_change` the replaced view would have fired — to the watch file. A closed binding the listing covered is no longer re-viewed; one it did not cover still is, so a reopen is caught.
 
 ## Proposed changes
 
@@ -73,7 +73,7 @@ Two layers, both unit-testable without a daemon:
 ## Key design decisions
 
 1. **Detection is pure and separate from I/O.** The transition rules are the part most likely to regress; isolating them lets the master §3 validation list be exercised directly without a daemon or `gh`.
-2. **Off by default behind an internal constant, not a setting.** Matches master §7 PR A: no build runs the observer until a later increment turns it on; the setting is not read yet.
+2. **Off by default behind an internal constant, not a setting.** Matches master §7 PR A: no build ran the observer until a later increment enabled it, and the setting was not read yet. PR B (#17214) removed the constant outright rather than flipping it.
 3. **No delivery, no deletion.** `pending` accumulates (bounded by the store cap) but is never drained; deletion and `lastBoundAt` wait for the drain increment so scan-completeness rules are decided in one place.
 4. **Reuse, not reimplement.** The view fetch, rollup, store, lock registry and prompt contract are all merged; this increment adds only the observation orchestration and detection.
 
@@ -98,8 +98,8 @@ Two layers, both unit-testable without a daemon:
 
 ## Open questions
 
-- Inherited from the master design (on-by-default, `cancelled`/`stale` CI predicate, `review_decision`, Aone parity, manual-push ledger); none are decided here.
+- Inherited from the master design (`review_decision`, Aone parity, manual-push ledger); none are decided here. On-by-default and the `cancelled`/`stale` CI predicate were settled on 2026-11-14: off by default, and core's predicate kept.
 
 ## Resolved implementation choices
 
-- The internal switch is a module constant `SESSION_PR_WATCH_OBSERVATION_ENABLED` (off) gating the timer hook, with an `observationEnabled` timer-deps test seam defaulting to that constant so a fixture can exercise the on path; production omits the seam, so the constant governs. The sweep functions are exported and tested directly. Flipping the constant alone still no-ops until `getPrWatchDeps` is populated (fail closed).
+- Enablement is deps presence: an empty subscription builds no watch deps, and both the periodic tick and the on-demand drain gate on them. The internal constant `SESSION_PR_WATCH_OBSERVATION_ENABLED` that gated the timer hook when this increment was designed was removed in PR B (#17214), not flipped. The `observationEnabled` timer-deps test seam remains, with `false` forcing the watch off; absent or `true` leaves enablement to deps presence. The sweep functions are exported and tested directly.

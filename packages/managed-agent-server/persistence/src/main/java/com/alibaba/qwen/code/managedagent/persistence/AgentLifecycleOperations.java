@@ -14,7 +14,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -110,20 +110,17 @@ final class AgentLifecycleOperations {
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, null, false);
     }
 
-    OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId,
-            String actorDigest, String key, String digest, boolean supported) {
+    OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId, String actorDigest, String key, String digest, boolean supported) {
         return beginLifecycle(tenantId, sessionId, OperationKind.CLOSE, actorDigest, key, digest, actorId, supported);
     }
 
-    OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
-            OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean closeSupported) {
+    OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean closeSupported) {
         // H4b child close is the only production caller. Public lifecycle uses
         // the protocol overload and requires v2 for an active Shell or MCP Session.
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, closeSupported, 0, false);
     }
 
-    OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
-            OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
+    OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, supported, protocolVersion, true);
     }
 
@@ -134,8 +131,7 @@ final class AgentLifecycleOperations {
         AgentSessionAccess.requireWorkspaceCreator(session, actorId, workspaces);
     }
 
-    SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
-            String actorId, String scopedKey, String requestDigest) {
+    SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId, String actorId, String scopedKey, String requestDigest) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         requireWorkspaceCreator(session, actorId);
@@ -181,11 +177,11 @@ final class AgentLifecycleOperations {
                 now);
         Map<String, Object> data = Map.of("sessionId", sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null, "session.unarchive.requested", data, false,
-                AgentSessionCommands.mutationSource(namespace, scopedKey, "requested"), now);
+                SessionMutationEvents.mutationSource(namespace, scopedKey, "requested"), now);
         jdbc.update("UPDATE ma_session SET status = 'CLOSED', gmt_modified = ?, version = version + 1"
                 + " WHERE tenant_id = ? AND session_id = ?", now, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null, "session.unarchived", data, false,
-                AgentSessionCommands.mutationSource(namespace, scopedKey, "completed"), now);
+                SessionMutationEvents.mutationSource(namespace, scopedKey, "completed"), now);
         return new SessionMutation(storeRows.requireSessionForUpdate(tenantId, sessionId), false);
     }
 
@@ -222,8 +218,7 @@ final class AgentLifecycleOperations {
                 .findFirst();
     }
 
-    Optional<OperationRecord> replayOperation(String tenantId, String sessionId,
-            OperationKind kind, String actorDigest, String idempotencyKey) {
+    Optional<OperationRecord> replayOperation(String tenantId, String sessionId, OperationKind kind, String actorDigest, String idempotencyKey) {
         return jdbc
                 .query(
                         "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE scope_key = ? AND operation_kind = ? AND"
@@ -305,8 +300,7 @@ final class AgentLifecycleOperations {
                         ? WorkspaceToolProfiles.lifecycleProtocol(storeRows.requireSession(tenantId, childSessionId).toolProfile()) : 0, true, true);
     }
 
-    OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
-            String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported) {
+    OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind, String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported) {
         return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, actorId, supported, 0, true);
     }
 
@@ -367,7 +361,7 @@ final class AgentLifecycleOperations {
         var failedBefore =
                 kind != OperationKind.ACTION_RESPONSE
                         && kind != OperationKind.CWD_CHANGE
-                        && pendingStatus(kind).equals(session.status())
+                        && LifecycleOperationNames.pendingStatus(kind).equals(session.status())
                 ? latestFailedLifecycleOperation(tenantId, sessionId, kind)
                 : Optional.<FailedLifecycleOperation>empty();
         boolean resumed = failedBefore.isPresent();
@@ -384,10 +378,6 @@ final class AgentLifecycleOperations {
                                 || !sessionQueries.hasCompletedWorkspaceClose(tenantId, sessionId)))) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        if (sessionPolicies.hasPendingRenameDelivery(tenantId, sessionId)) {
-            throw new ManagedAgentException(409, "session_operation_active",
-                    "The Session has a title delivery awaiting completion.");
-        }
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
@@ -396,7 +386,7 @@ final class AgentLifecycleOperations {
         }
         if (session.workspace() != null && !resumed) {
             if (kind == OperationKind.CLOSE || kind == OperationKind.DELETE && "ACTIVE".equals(session.status()) && WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
-                if (!supported || protocolVersion == 1 && !workspaceFilesEnabled) {
+                if (!supported || protocolVersion == 1 && !workspaceFilesEnabled && !ExternalWorkspaceSessionPolicies.admitsLegacyClose(session, workspaces)) {
                     throw AgentSessionPolicies.workspaceExecutionUnavailable();
                 }
                 if ("ACTIVE".equals(session.status())) {
@@ -427,7 +417,11 @@ final class AgentLifecycleOperations {
             validateOperationStart(session, kind);
         }
         if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
-            JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId, true, protocolVersion == 2);
+            if (lifecycle != null) {
+                lifecycle.requireIdleJournalWithPacks(tenantId, sessionId, true, protocolVersion == 2);
+            } else {
+                JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId, true, protocolVersion == 2);
+            }
         }
         long now = storeRows.lifecycleDatabaseTime();
         String operationId = AgentStoreRows.publicId("op");
@@ -500,8 +494,8 @@ final class AgentLifecycleOperations {
                             + " 'LIFECYCLE_ONLY' AND operation_id IS NULL OR"
                             + " phase = 'DRAINING' AND operation_id = ?)",
                     operationId,
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId, sessionId, failedBefore.get().operationId());
             // The effects the failed operation validated stay valid for its
             // resume: the receipt moves to the new operation with them, and
@@ -522,7 +516,7 @@ final class AgentLifecycleOperations {
             }
         } else if (WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
+                RuntimeAdmissionFences.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
                 return null;
             });
             if (protocolVersion == 2) {
@@ -533,32 +527,31 @@ final class AgentLifecycleOperations {
                                 + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
                                 + " AND head_kind = 'MANAGED_SESSION' AND phase = 'LIFECYCLE_ONLY' AND operation_id = ? AND state = 'ACTIVE'"
                                 + " AND writer_lease_until > (" + ManagedSchemaTime.SQL_NOW + ")",
-                        lifecycleHandoffMillis, JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                        JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId, operationId);
+                        lifecycleHandoffMillis, RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                        RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId, operationId);
             }
         }
         jdbc.update("UPDATE ma_session SET status = ?,"
                         + " gmt_modified = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ?",
-                archive ? "ARCHIVED" : pendingStatus(kind), now, tenantId,
+                archive ? "ARCHIVED" : LifecycleOperationNames.pendingStatus(kind), now, tenantId,
                 sessionId);
+        ManagedSideQueryStore.cancelSession(jdbc, tenantId, sessionId);
         eventJournal.appendEvent(tenantId, sessionId, null,
-                archive ? completedEvent(kind) : requestedEvent(kind), data,
+                archive ? LifecycleOperationNames.completedEvent(kind) : LifecycleOperationNames.requestedEvent(kind), data,
                 false, AgentEventJournal.operationSource(operationId,
                         archive ? "completed" : "requested"), now);
         return new OperationAdmission(findOperation(tenantId, sessionId,
                 operationId).orElseThrow(), false);
     }
 
-    Optional<OperationRecord> findOperation(String tenantId,
-            String sessionId, String operationId) {
+    Optional<OperationRecord> findOperation(String tenantId, String sessionId, String operationId) {
         return findSessionOperation(tenantId, sessionId, operationId, false)
                 .or(() -> findTurnCommandOperation(tenantId, sessionId,
                         operationId));
     }
 
-    List<OperationTarget> findDeliverableOperations(long now,
-            int limit) {
+    List<OperationTarget> findDeliverableOperations(long now, int limit) {
         now = storeRows.lifecycleDatabaseTime();
         List<OperationTarget> targets =
                 new ArrayList<>(
@@ -575,18 +568,14 @@ final class AgentLifecycleOperations {
                                     + " operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE',"
                                     + " 'CWD_CHANGE') AND state IN ('PENDING', 'RUNNING',"
                                     + " 'RECOVERY_BLOCKED') AND delivery_state IN ('PENDING',"
-                                    + " 'BLOCKED') AND available_at <= ? AND EXISTS (SELECT 1 FROM"
-                                    + " ma_session private_scope WHERE private_scope.tenant_id ="
-                                    + " ma_operation.tenant_id AND private_scope.session_id ="
-                                    + " ma_operation.session_id AND private_scope.is_csi_guard ="
-                                    + " FALSE) ORDER BY available_at LIMIT ?",
+                                    + " 'BLOCKED') AND available_at <= ? ORDER BY available_at LIMIT ?",
                                 operationTargetMapper,
                                 now,
                                 limit));
         if (targets.size() < limit) {
             targets.addAll(
                     jdbc.query(
-                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE') AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_operation.tenant_id AND private_scope.session_id = ma_operation.session_id AND private_scope.is_csi_guard = FALSE) ORDER BY claim_until LIMIT ?",
+                            "SELECT tenant_id, session_id, operation_id FROM ma_operation WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE', 'CWD_CHANGE') AND state = 'RUNNING' AND delivery_state = 'LEASED' AND claim_until < " + ManagedSchemaTime.SQL_NOW + " ORDER BY claim_until LIMIT ?",
                             operationTargetMapper,
                             limit - targets.size()));
         }
@@ -596,7 +585,7 @@ final class AgentLifecycleOperations {
     Optional<OperationRecord> claimOperation(String tenantId,
             String sessionId, String operationId, String owner,
             Duration leaseDuration) {
-        ManagedLegacySessionGuard.requireLegacyMutation(lockOperationSession(tenantId, sessionId));
+        lockOperationSession(tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         int updated =
                 jdbc.update(
@@ -628,7 +617,6 @@ final class AgentLifecycleOperations {
     boolean completeOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
         if (WorkspaceToolProfiles.lifecycleProtocol(target.lifecycleProtocolVersion())) {
             JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
@@ -663,7 +651,7 @@ final class AgentLifecycleOperations {
                 || operation.claimGeneration() != claimGeneration) {
             return false;
         }
-        if (!pendingStatus(operation.kind()).equals(session.status())) {
+        if (!LifecycleOperationNames.pendingStatus(operation.kind()).equals(session.status())) {
             throw new IllegalStateException("Session " + sessionId + " is "
                     + session.status() + " during its "
                     + operation.kind() + " operation");
@@ -716,7 +704,7 @@ final class AgentLifecycleOperations {
                 sessionId,
                 operationId);
         eventJournal.appendEvent(tenantId, sessionId, null,
-                completedEvent(operation.kind()),
+                LifecycleOperationNames.completedEvent(operation.kind()),
                 Map.of("sessionId", sessionId, "operationId", operationId),
                 operation.kind() == OperationKind.DELETE,
                 AgentEventJournal.operationSource(operationId, "completed"), now);
@@ -771,16 +759,15 @@ final class AgentLifecycleOperations {
                             + " WHERE tenant_key = ? AND harness_key = ? AND"
                             + " tenant_id = ? AND harness_session_id = ? AND"
                             + " operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId, sessionId, operationId);
         }
         return updated == 1;
     }
 
-    boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
-            String owner, long generation, Duration duration) {
-        ManagedLegacySessionGuard.requireLegacyMutation(lockOperationSession(tenantId, sessionId));
+    boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId, String owner, long generation, Duration duration) {
+        lockOperationSession(tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         int updated =
                 jdbc.update(
@@ -822,8 +809,8 @@ final class AgentLifecycleOperations {
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_generation = ?, claim_lease_until = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND (phase = 'LIFECYCLE_ONLY' OR ? = 2 AND phase = 'DRAINING')",
                     row.get("claim_generation"),
                     row.get("claim_lease_until"),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId,
                     operationId, version.intValue());
@@ -833,7 +820,7 @@ final class AgentLifecycleOperations {
     void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt,
             boolean budgetExempt) {
-        ManagedLegacySessionGuard.requireLegacyMutation(lockOperationSession(tenantId, sessionId));
+        lockOperationSession(tenantId, sessionId);
         long now = storeRows.lifecycleDatabaseTime();
         // The exempt count increments from itself, never from
         // attempt_count: a wait refunds no already-charged attempt, so
@@ -865,8 +852,8 @@ final class AgentLifecycleOperations {
         if (updated == 1) {
             jdbc.update(
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId,
                     operationId,
@@ -877,7 +864,7 @@ final class AgentLifecycleOperations {
     void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt, boolean budgetExempt) {
-        ManagedLegacySessionGuard.requireLegacyMutation(lockOperationSession(tenantId, sessionId));
+        lockOperationSession(tenantId, sessionId);
         long delay = Math.max(0, availableAt - clock.millis());
         long now = storeRows.lifecycleDatabaseTime();
         availableAt = Math.addExact(now, delay);
@@ -908,8 +895,8 @@ final class AgentLifecycleOperations {
         if (updated == 1) {
             jdbc.update(
                     "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
-                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
-                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId,
                     operationId,
@@ -917,17 +904,14 @@ final class AgentLifecycleOperations {
         }
     }
 
-    private boolean lockOperationSession(String tenantId, String sessionId) {
+    private void lockOperationSession(String tenantId, String sessionId) {
         // Match lifecycle admission's Session -> operation -> head order without
         // creating a root when a stale caller names a missing Session.
-        return jdbc.queryForList("SELECT is_csi_guard FROM ma_session WHERE tenant_id = ?"
-                        + " AND session_id = ? FOR UPDATE", Boolean.class, tenantId, sessionId)
-                .stream().anyMatch(Boolean.TRUE::equals);
+        jdbc.queryForList("SELECT 1 FROM ma_session WHERE tenant_id = ?"
+                        + " AND session_id = ? FOR UPDATE", Integer.class, tenantId, sessionId);
     }
 
-    void markOperationAnswered(String tenantId, String sessionId,
-            String operationId, String owner, long claimGeneration) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
+    void markOperationAnswered(String tenantId, String sessionId, String operationId, String owner, long claimGeneration) {
         long now = storeRows.lifecycleDatabaseTime();
         // Watermark only: the row stays leased and no reschedule runs here —
         // the catch block's own retryOperation (or a throw losing it) decides
@@ -953,8 +937,8 @@ final class AgentLifecycleOperations {
                 claimGeneration);
     }
 
-    // One lifecycle change at a time: a pending rename or unarchive command
-    // blocks an operation, and an open operation blocks both commands.
+    // One lifecycle change at a time: a pending unarchive command blocks an
+    // operation, and an open operation blocks the command.
     /** The latest terminally failed lifecycle operation of the kind: the
      * status the Session carried when it began and the protocol it ran
      * under — both re-pinned by a resumed admission. */
@@ -974,12 +958,10 @@ final class AgentLifecycleOperations {
                 : Optional.of(rows.getFirst());
     }
 
-    record FailedLifecycleOperation(String operationId,
-            String sessionStatusBefore, int lifecycleProtocolVersion) {
+    record FailedLifecycleOperation(String operationId, String sessionStatusBefore, int lifecycleProtocolVersion) {
     }
 
-    void validateOperationStart(SessionRecord session,
-            OperationKind kind) {
+    void validateOperationStart(SessionRecord session, OperationKind kind) {
         String status = session.status();
         switch (kind) {
             case CLOSE -> AgentSessionPolicies.requireSessionStatus(status, "ACTIVE");
@@ -1014,37 +996,5 @@ final class AgentLifecycleOperations {
                         + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "')",
                 Integer.class, tenantId, sessionId);
         return count != null && count > 0;
-    }
-
-    // ARCHIVING remains only for an archive admitted before V17, which closes
-    // the Harness as archive used to.
-    static String pendingStatus(OperationKind kind) {
-        return switch (kind) {
-            case CLOSE -> "CLOSING";
-            case ARCHIVE -> "ARCHIVING";
-            case DELETE -> "DELETING";
-            case ACTION_RESPONSE, CWD_CHANGE, CONTEXT_COMPRESSION, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
-                    throw new IllegalArgumentException("Not a lifecycle operation");
-        };
-    }
-
-    static String requestedEvent(OperationKind kind) {
-        return switch (kind) {
-            case CLOSE -> "session.close.requested";
-            case ARCHIVE -> "session.archive.requested";
-            case DELETE -> "session.delete.requested";
-            case ACTION_RESPONSE, CWD_CHANGE, CONTEXT_COMPRESSION, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
-                    throw new IllegalArgumentException("Not a lifecycle operation");
-        };
-    }
-
-    static String completedEvent(OperationKind kind) {
-        return switch (kind) {
-            case CLOSE -> "session.closed";
-            case ARCHIVE -> "session.archived";
-            case DELETE -> "session.deleted";
-            case ACTION_RESPONSE, CWD_CHANGE, CONTEXT_COMPRESSION, TASK_CANCEL, SUBMIT_INPUT, CANCEL ->
-                    throw new IllegalArgumentException("Not a lifecycle operation");
-        };
     }
 }

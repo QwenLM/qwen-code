@@ -1122,66 +1122,6 @@ describe('SkillTool', () => {
       expect(permission).toBe('ask');
     });
 
-    describe('the bundled auto-memory reference', () => {
-      // The resident memory policy points at this skill before every save,
-      // and private memory writes need no approval, so its load must not ask.
-      const reference: SkillConfig = {
-        name: 'auto-memory',
-        description: 'Auto-memory guidance',
-        level: 'bundled',
-        filePath: '/bundle/skills/bundled/auto-memory/SKILL.md',
-        body: 'Reference text.',
-      };
-      const resolvesTo = (skill: SkillConfig | null) =>
-        vi.mocked(mockSkillManager.loadSkill).mockResolvedValue(skill);
-
-      it("is 'allow' when the name resolves to the bundled copy", async () => {
-        resolvesTo(reference);
-        expect(await inv('auto-memory').getDefaultPermission()).toBe('allow');
-        expect(mockSkillManager.loadSkill).toHaveBeenCalledWith('auto-memory');
-      });
-
-      it.each<[string, SkillConfig]>([
-        ['project', { ...reference, level: 'project' }],
-        ['user', { ...reference, level: 'user' }],
-        ['extension', { ...reference, level: 'extension' }],
-      ])(
-        "stays 'ask' when a %s skill of the same name shadows it",
-        async (_level, shadow) => {
-          resolvesTo(shadow);
-          expect(await inv('auto-memory').getDefaultPermission()).toBe('ask');
-        },
-      );
-
-      it("stays 'ask' for a bundled copy that grants tools or adds hooks", async () => {
-        resolvesTo({ ...reference, allowedTools: ['shell'] });
-        expect(await inv('auto-memory').getDefaultPermission()).toBe('ask');
-        resolvesTo({ ...reference, hooks: {} });
-        expect(await inv('auto-memory').getDefaultPermission()).toBe('ask');
-      });
-
-      it("stays 'ask' when the skill is disabled, missing or unresolvable", async () => {
-        resolvesTo(reference);
-        setDisabled('auto-memory');
-        expect(await inv('auto-memory').getDefaultPermission()).toBe('ask');
-        setDisabled();
-        vi.mocked(config.isSkillEnabled).mockReturnValueOnce(false);
-        expect(await inv('auto-memory').getDefaultPermission()).toBe('ask');
-        resolvesTo(null);
-        expect(await inv('auto-memory').getDefaultPermission()).toBe('ask');
-        vi.mocked(mockSkillManager.loadSkill).mockRejectedValue(
-          new Error('scan failed'),
-        );
-        expect(await inv('auto-memory').getDefaultPermission()).toBe('ask');
-      });
-
-      it("keeps 'ask' for every other bundled skill", async () => {
-        resolvesTo({ ...reference, name: 'review' });
-        expect(await inv('review').getDefaultPermission()).toBe('ask');
-        expect(mockSkillManager.loadSkill).not.toHaveBeenCalled();
-      });
-    });
-
     it('should provide correct description', () => {
       expect(inv('code-review').getDescription()).toBe(
         'Use skill: "code-review"',

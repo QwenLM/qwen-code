@@ -667,7 +667,7 @@ public final class ChildWorktreeGit implements ChildWorktreeOperations {
                 throw ChildWorkspaceException.diverged("A submodule pointer cannot be written at " + change.getKey());
             }
         }
-        Map<String, Entry> owed = changes(root, repository, parentTree, mergedTree);
+        Map<String, Entry> owed = changes(recorded);
         if (owed.isEmpty()) {
             return;
         }
@@ -1033,8 +1033,12 @@ public final class ChildWorktreeGit implements ChildWorktreeOperations {
 
     /** The non-gitlink paths that differ between two trees, with their {@code to} entries. */
     private Map<String, Entry> changes(Path root, Repository repository, String from, String to) {
+        return changes(diffTree(root, repository, from, to));
+    }
+
+    private Map<String, Entry> changes(Map<String, Change> diff) {
         Map<String, Entry> changes = new LinkedHashMap<>();
-        for (Map.Entry<String, Change> change : diffTree(root, repository, from, to).entrySet()) {
+        for (Map.Entry<String, Change> change : diff.entrySet()) {
             if (!change.getValue().gitlink()) {
                 changes.put(change.getKey(), new Entry(change.getValue().toMode(), change.getValue().toObjectId()));
             }

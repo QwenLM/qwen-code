@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPol
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcHarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore.Placement;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -62,6 +63,33 @@ class HarnessPoolConnectorTest {
             assertThat(pool.supportsPersonalMemory()).isFalse();
             pool.refresh();
             assertThat(pool.supportsPersonalMemory()).isEqualTo(supported);
+        }
+    }
+
+    @Test
+    void sessionAwareClientFilesDelegatesToAReachableMember() {
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.capabilities().getFeatures()).thenReturn(
+                List.of("harness-pool-owner/1", "harness-instance-lifecycle/1", "client-files/1"));
+        var leafA = leaf();
+        var session = new SessionRecord("tenant", "session", "qwen-code", "title", "ACTIVE",
+                null, null, 0, 0, 1, 1, null, 1);
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leafA, null, null,
+                ignored -> clientA)) {
+            // No negotiated contract yet: the feature gate refuses before any
+            // member is consulted.
+            assertThat(pool.supportsClientFiles(session)).isFalse();
+            pool.refresh();
+            // The pool answers with the reachable member's session-aware verdict
+            // (not the parameterless capability), so a foregroundOnly refusal on
+            // the member is not masked by the pool.
+            when(leafA.supportsClientFiles(session)).thenReturn(false);
+            assertThat(pool.supportsClientFiles(session)).isFalse();
+            when(leafA.supportsClientFiles(session)).thenReturn(true);
+            assertThat(pool.supportsClientFiles(session)).isTrue();
+            verify(leafA, times(2)).supportsClientFiles(session);
         }
     }
 

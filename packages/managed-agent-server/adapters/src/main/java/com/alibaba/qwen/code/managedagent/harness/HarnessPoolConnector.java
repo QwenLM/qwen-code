@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPol
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore.Placement;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
@@ -68,6 +69,7 @@ public class HarnessPoolConnector implements HarnessConnector {
         private final QwenHostedHarnessConnector connector;
         private volatile boolean reachable;
         private volatile boolean quiescing;
+        private final AtomicInteger sideQueries = new AtomicInteger();
         Member(HarnessDiscovery.Endpoint endpoint, HostedHarnessClient client, QwenHostedHarnessConnector connector) {
             this.endpoint = endpoint;
             this.client = client;
@@ -106,8 +108,8 @@ public class HarnessPoolConnector implements HarnessConnector {
         if (settings.getToken().isBlank() || !settings.getCapabilityDigest().matches("sha256:[0-9a-f]{64}")) {
             throw new IllegalStateException("Harness pool requires a token and capability digest");
         }
-        if ("kubernetes".equals(settings.getPool().getDiscovery()) && tls == null) {
-            throw new IllegalStateException("Kubernetes Harness pool requires configured mTLS");
+        if (!"static".equals(settings.getPool().getDiscovery())) {
+            throw new IllegalStateException("Harness pool discovery must be static");
         }
         for (var endpoint : discovery.snapshot().endpoints()) {
             validateEndpoint(endpoint, tls);
@@ -225,7 +227,7 @@ public class HarnessPoolConnector implements HarnessConnector {
             }
             Member member = entry.getValue();
             boolean owns = placements.hasUnreleasedOwnership(member.owner().instanceId(), member.owner().bootId());
-            if (!owns) {
+            if (!owns && member.sideQueries.get() == 0) {
                 member.connector.close();
                 return true;
             }
@@ -376,6 +378,37 @@ public class HarnessPoolConnector implements HarnessConnector {
     public boolean supportsUserMessageQueue() { return feature(HarnessFeature.USER_MESSAGE_QUEUE); }
 
     @Override
+    public boolean supportsSideQueries() {
+        return feature(HarnessFeature.SIDE_QUERY) && !accepting.isEmpty();
+    }
+
+    @Override
+    public synchronized SideQueryTarget prepareSideQuery() {
+        if (closed || !supportsSideQueries()) {
+            throw new ManagedAgentException(503, "harness_unavailable", "No side-query Harness is available.");
+        }
+        var candidates = accepting;
+        var member = candidates.get(Math.floorMod(next.getAndIncrement(), candidates.size()));
+        var selected = member.connector.prepareSideQuery();
+        member.sideQueries.incrementAndGet();
+        return new SideQueryTarget() {
+            private boolean released;
+            @Override public String instanceId() { return member.owner().instanceId(); }
+            @Override public String bootId() { return member.owner().bootId(); }
+            @Override public Map<String, Object> submit(Map<String, Object> body) { return selected.submit(body); }
+            @Override public Map<String, Object> status(String id, Map<String, Object> claim) { return selected.status(id, claim); }
+            @Override public void cancel(String id, Map<String, Object> claim) { selected.cancel(id, claim); }
+            @Override public synchronized void close() {
+                if (!released) {
+                    released = true;
+                    selected.close();
+                    member.sideQueries.decrementAndGet();
+                }
+            }
+        };
+    }
+
+    @Override
     public boolean supportsContextCompression() {
         return feature(HarnessFeature.CONTEXT_COMPRESSION);
     }
@@ -433,6 +466,34 @@ public class HarnessPoolConnector implements HarnessConnector {
     @Override
     public boolean supportsRuntimeSkillImport() { return feature(HarnessFeature.RUNTIME_SKILL_IMPORT); }
 
+    @Override
+    public boolean supportsClientFiles() { return feature(HarnessFeature.CLIENT_FILES); }
+
+    @Override
+    public boolean supportsClientFiles(SessionRecord session) {
+        if (!feature(HarnessFeature.CLIENT_FILES)) {
+            return false;
+        }
+        // All pool members share the same deployment/session dispatch policy;
+        // ask any ready member so the capability matches the register refusal.
+        for (Member member : accepting) {
+            if (member.reachable) {
+                return member.connector.supportsClientFiles(session);
+            }
+        }
+        return true;
+    }
+
+    @Override
+    public Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
+        Selected selected = select(tenantId, sessionId, false);
+        if (selected == null) {
+            throw new ManagedAgentException(503, "client_files_relay_unavailable",
+                    "No Hosted Harness accepts the Session.");
+        }
+        return call(selected, connector -> connector.clientFilesOperation(tenantId, sessionId, body));
+    }
+
     private <T> T existingRuntimeSkillOwner(String tenant, String session, Function<QwenHostedHarnessConnector, T> action) {
         Selected selected = select(tenant, session, false);
         if (selected == null) {
@@ -483,9 +544,19 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public boolean supportsLifecycle(String profile) {
+        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
+            return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
+        }
         return contract != null && (WorkspaceToolProfiles.FILES.equals(profile)
                 ? isWorkspaceFilesAvailable() && contract.lifecycle() == 1
                 : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2 && contract.profiles().contains(profile));
+    }
+
+    @Override
+    public boolean supportsSavedLifecycle(String profile) {
+        return WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                ? contract != null && contract.lifecycle() == 1 && contract.features().contains(WorkspaceToolProfiles.EXTERNAL_FILES)
+                : supportsLifecycle(profile);
     }
 
     @Override

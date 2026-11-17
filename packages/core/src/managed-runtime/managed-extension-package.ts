@@ -14,6 +14,12 @@ import type { ManagedHookCatalogPin } from './managed-hook-protocol.js';
 import type { ManagedPackageContributions } from '../extension/managed-package.js';
 import type { OperationGrant } from './managed-extension-record.js';
 
+// 96 entries (32 live + 64 tombstones) is the largest total whose worst-case
+// effective bundle - widest ids, revisions and digests, plus 32 package views,
+// 32 prepared pins and 16 base pins - stays inside the 64 KiB inline bound. The
+// bundle carries the retained array once, from independentMcpSelections.
+export const MAX_MCP_SELECTION_ENTRIES = 96;
+
 export interface ManagedExtensionCommandControl {
   readonly kind: 'extension-command';
   readonly operationId: string;
@@ -341,7 +347,8 @@ export function parseManagedExtensionApplyCommand(
 function mcpSelections(
   value: unknown,
 ): readonly ManagedExtensionMcpSelection[] {
-  if (!Array.isArray(value) || value.length > 32) invalid('MCP selection');
+  if (!Array.isArray(value) || value.length > MAX_MCP_SELECTION_ENTRIES)
+    invalid('MCP selection');
   const selected = value.map((value): ManagedExtensionMcpSelection => {
     const candidate = object(value, 'MCP selection');
     const { state, ...pin } = candidate;
@@ -354,6 +361,7 @@ function mcpSelections(
   });
   if (
     new Set(selected.map((entry) => entry.serverId)).size !== selected.length ||
+    selected.filter((entry) => entry.state !== 'removed').length > 32 ||
     selected.filter((entry) => entry.state === 'enabled').length > 16
   )
     invalid('MCP selection');

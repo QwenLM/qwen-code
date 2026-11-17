@@ -21,8 +21,10 @@ const windowsRun = [
   `node -e "const r = require('./integration-tests/hosted-process-suite.json'); if (r.numTotalTests === 0 || r.numPassedTests !== r.numTotalTests) { console.error('::error::' + r.numPassedTests + ' of ' + r.numTotalTests + ' Hosted cases passed; Windows must run every case'); process.exit(1); }"`,
 ].join('\n');
 
-// One row per failover arm the Hosted failover job runs: step name, npm
-// script, and the runner flags that make the row a different arm.
+// One row per deterministic E2E arm the Hosted failover job runs: step name,
+// npm script, and the runner flags that make the row a different arm. The
+// failover arms plus the /loop skill model-turn arm, which shares the same
+// packaged-stack prerequisites.
 const failoverArms = [
   [
     'Run in-flight owner failover E2E',
@@ -43,6 +45,11 @@ const failoverArms = [
     'Run long-answer persistence E2E',
     'test:e2e:managed-big-output',
     ['--big-output'],
+  ],
+  [
+    'Run /loop skill model-turn E2E',
+    'test:e2e:managed-loop-skill',
+    ['--loop-skill'],
   ],
   [
     'Run Harness-restart session failover E2E',
@@ -716,16 +723,17 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (205 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (209 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     // The MySQL job's ceiling carries 33 minutes of setup allowance, above
     // the 13-minute floor: a Verify that timed out used to skip admission,
     // and now that path too can fill all four ceilings, so a slow setup
     // must still leave the O4 gates time to run.
-    ['hosted-harness-mysql', 295, 328, 33],
-    // Twenty-eight failover arms at 10 each plus the capped rewritten-command
-    // cgroup delegation at 10; the allowance is ~13 minutes of setup plus 2.
-    ['hosted-failover-e2e', 290, 305, 15],
+    ['hosted-harness-mysql', 299, 332, 33],
+    // Twenty-nine deterministic E2E arms at 10 each plus the capped
+    // rewritten-command cgroup delegation at 10; the allowance is ~13 minutes
+    // of setup plus 2.
+    ['hosted-failover-e2e', 300, 315, 15],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling, allowance) => {
@@ -847,6 +855,7 @@ describe('Hosted real-process gates', () => {
         '--frozen-control-plane',
         '--g3-verify',
         '--big-output',
+        '--loop-skill',
       ]) {
         if (!flags.some((entry) => entry.split(' ')[0] === flag)) {
           expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(
@@ -988,12 +997,14 @@ describe('Hosted real-process gates', () => {
       // minutes; the FG12d detach-unknown cell adds 55 s (2x its measured
       // 27.4 s), moving the fork to 11591 and the step to 204 minutes; the
       // FG12d stopped-worker close cell adds 67 s (2x its measured 33.1 s),
-      // moving the fork to 11658 and the step to 205 minutes until
+      // moving the fork to 11658 and the step to 205 minutes; the client-files
+      // relay joint fixture adds 204 s (2x its measured 101.6 s), moving the
+      // fork to 11862 and the step to 209 minutes until
       // CI measures it: the relational check above tolerates anything up to
       // step*60, so the value is pinned literally here — an unnoticed raise
       // has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11658);
+        expect(forkSeconds).toBe(11862);
       }
     },
   );
@@ -1295,12 +1306,15 @@ describe('Hosted real-process gates', () => {
   // adds 28s (2x its measured 13.8s), so it becomes 10664s. The pool fixture
   // provisionally reserves 180s (its 120s method ceiling plus 60s for
   // process/context cleanup), so it becomes 10844s until CI measures it. The
-  // largest
-  // ceiling (600s) plus
+  // side-query process fixture provisionally reserves 120s (its 60s method
+  // ceiling plus 60s for process/context cleanup), so it becomes 10964s until
+  // CI measures it. The client-files relay joint fixture adds 204s (2x its
+  // measured 101.6s for the registration-loop and turn cases), so it becomes
+  // 11168s until CI measures it. The largest ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10844;
+  const hostedForkHealthySeconds = 11168;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/verification/pom.xml')
@@ -1364,6 +1378,7 @@ describe('Hosted real-process gates', () => {
       'HostedChannelFaultGatesIT',
       'HostedChannelProcessCrashIT',
       'HostedCleanupRetentionMySqlIT',
+      'HostedClientFilesRelayIT',
       'HostedCommittedEventLineReplayIT',
       'HostedConcurrentTurnBurstMySqlIT',
       'HostedEventStreamLivenessIT',
@@ -1386,6 +1401,7 @@ describe('Hosted real-process gates', () => {
       'HostedPublicWorkspaceIT',
       'HostedSessionRelayFaultGatesIT',
       'HostedShellLifecycleRecoveryIT',
+      'HostedSideQueryProcessIT',
       'HostedTeamLeadMySqlIT',
       'HostedTeamMemberCommandMySqlIT',
       'HostedWorkflowFaultGatesIT',

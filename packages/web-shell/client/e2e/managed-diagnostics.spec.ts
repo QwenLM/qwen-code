@@ -169,6 +169,15 @@ for (const width of [1280, 390]) {
     page,
   }, testInfo) => {
     type Schemas = components['schemas'];
+    const measuredItem: Schemas['ManagedActivityInvocation'] = {
+      ...activityItem,
+      measurements: {
+        availability: 'available',
+        sourceSequence: '9',
+        executionDurationMs: '0',
+        file: null,
+      },
+    };
     const errors: string[] = [];
     const unexpected: string[] = [];
     const activityRequests: Array<{ kind: string; cursor?: string }> = [];
@@ -219,6 +228,25 @@ for (const width of [1280, 390]) {
       ...activityStatistics,
       statistics: {
         ...activityStatistics.statistics!,
+        measurementStartSequence: '9',
+        tools: {
+          ...activityStatistics.statistics!.tools,
+          measurements: {
+            availability: 'available',
+            recorded: '1',
+            unsupported: '0',
+            partial: '0',
+            executionDurationMs: '0',
+            executionDurationSamples: '1',
+            fileSamples: '0',
+            modelDiffSamples: '0',
+            appliedDiffSamples: '0',
+            modelLinesAdded: '0',
+            modelLinesRemoved: '0',
+            appliedLinesAdded: '0',
+            appliedLinesRemoved: '0',
+          },
+        },
         skills: activityStatistics.statistics!.tools,
         skillLoads: activityStatistics.statistics!.tools,
         skillBuckets: [
@@ -304,7 +332,7 @@ for (const width of [1280, 390]) {
             ? [skillItem]
             : body.cursor
               ? [deniedItem]
-              : [activityItem];
+              : [measuredItem];
         return route.fulfill({
           json: {
             ...header,
@@ -366,6 +394,9 @@ for (const width of [1280, 390]) {
     await dialog.getByRole('tab', { name: 'Statistics', exact: true }).click();
     await dialog.getByRole('button', { name: 'Tools', exact: true }).click();
     await expect(dialog).toContainText('Observed since');
+    await expect(dialog).toContainText('Mean measured duration');
+    await expect(dialog).toContainText('0.0 ms');
+    await expect(dialog).toContainText('First measurement sequence');
     await expect(dialog).toContainText(
       'Some observations are unavailable or incomplete.',
     );
@@ -382,6 +413,9 @@ for (const width of [1280, 390]) {
     await expect(
       readCall.locator('dt:has-text("Output capture") + dd'),
     ).toHaveText('Complete');
+    await expect(
+      readCall.locator('dt:has-text("Executor duration") + dd'),
+    ).toHaveText('0 ms');
     await page.screenshot({
       path: testInfo.outputPath('activity-tools.png'),
       animations: 'disabled',

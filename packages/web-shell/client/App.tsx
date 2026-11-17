@@ -1,3 +1,4 @@
+import { randomUUID } from './utils/random-uuid.js';
 import { useWorkspaceFileChanges } from './components/artifacts/useWorkspaceFileChanges';
 import {
   filterWorkspaceFileChanges,
@@ -29,6 +30,7 @@ import type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipMount,
 } from './unavailableModels';
+import type { WebShellModelPickerOptions } from './model-picker';
 import './styles/globals.css';
 import {
   useMessageNavigation,
@@ -114,6 +116,7 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionWorkflowTaskStatus,
   DaemonSessionArtifact,
   DaemonSessionSummary,
   DaemonStandaloneCreationRecovery,
@@ -156,11 +159,11 @@ import {
   isRetryableTurnErrorKind,
   transcriptBlocksToDaemonMessages,
 } from './adapters/transcriptToMessages';
-import type {
-  MessageListProps,
-  MessageListHandle,
-} from './components/MessageList';
-import { TranscriptViewport } from './components/TranscriptViewport';
+import type { MessageListHandle } from './components/MessageList';
+import {
+  TranscriptViewport,
+  type TranscriptViewportProps,
+} from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { TurnCallsProvider } from './turnCallsContext';
@@ -168,11 +171,9 @@ import { useModelConfigurations } from './hooks/useModelConfigurations';
 import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
+import { createToolRevealStore, ToolRevealProvider } from './toolRevealContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import {
-  hasActiveBackgroundAgent,
-  isComposerTask,
-} from './utils/composerTasks';
+import { isComposerTask } from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -220,7 +221,11 @@ import {
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import type { AttachmentPreviewRequest } from './adapters/messageTypes';
-import { StatusBar, type StatusBarHandle } from './components/StatusBar';
+import {
+  ComposerTaskChips,
+  type ComposerTaskChipsHandle,
+} from './components/ComposerTaskChips';
+import { ComposerUsageStats } from './components/ComposerUsageStats';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import { SessionLimitBanner } from './components/SessionLimitBanner';
@@ -235,10 +240,13 @@ import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
+  createWebShellToast,
+  appendToastDeduped,
   type ToastRequestDetail,
   type ToastTone,
   type WebShellToast,
 } from './components/ToastHost';
+import { ReportedArtifactRegistration } from './components/ReportedArtifactRegistration';
 import { TodoPanel } from './components/panels/TodoPanel';
 import {
   EnvironmentPanel,
@@ -270,6 +278,7 @@ import type {
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
+  managedSelectionFromRoute,
   managedSelectionFromUrl,
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
@@ -464,7 +473,10 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
-import { getSubagentDetailsUnavailableReason } from './components/messages/toolFormatting';
+import {
+  getSubagentDetailsUnavailableReason,
+  toolContainsCallId,
+} from './components/messages/toolFormatting';
 import { isSessionDisconnectedError } from './utils/sessionErrors';
 import {
   projectStreamingTailMessages,
@@ -561,7 +573,10 @@ import type {
   Message,
   PermissionRequest,
 } from './adapters/types';
-import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
+import {
+  isBackgroundSubAgentToolCall,
+  isNamedSubSessionApproval,
+} from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
@@ -643,8 +658,6 @@ import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
 
-const MAX_TOASTS = 4;
-const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
@@ -1285,7 +1298,7 @@ function buildDisplayMessages(
 }
 
 type LiveMessageListProps = Omit<
-  MessageListProps,
+  TranscriptViewportProps,
   'messages' | 'transcriptBlockCount'
 > & {
   baselineBlocks: readonly DaemonTranscriptBlock[];
@@ -1451,6 +1464,8 @@ export interface WebShellProps {
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
   modelManagement?: WebShellModelManagementOptions;
+  /** Host-owned header and per-model display content in composer pickers. */
+  modelPicker?: WebShellModelPickerOptions;
   /** Extra catalog models shown disabled in the composer picker. */
   unavailableModels?: readonly WebShellUnavailableModel[];
   /** Host-owned hint for a disabled model. DOM/Solid hosts mount into the container. */
@@ -1699,6 +1714,15 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Artifact-card rendering overrides. */
   artifact?: WebShellArtifactCustomization;
+  /**
+   * 与普通会话对齐 Managed 对话区文案与能力提示口径（宿主已有外壳时置 true）。
+   */
+  alignManagedChatWithHost?: boolean;
+  /**
+   * 宿主外壳已展示会话身份（如宿主侧栏）时置 false，Managed 对话区不重复渲染
+   * 自有的会话标题 / 工作区 / 状态徽章。默认 true 保持独立整页行为。
+   */
+  showManagedSessionHeader?: boolean;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
@@ -1945,10 +1969,12 @@ const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
   'environment',
   'rightPanel',
+  'artifacts',
 ];
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'review',
   'sideTask',
+  'changeOverview',
 ];
 /**
  * Right-panel entries that work without a session; the empty new-task page
@@ -1958,6 +1984,7 @@ const EMPTY_STATE_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'files',
   'terminal',
   'webPreview',
+  'changeOverview',
 ];
 /**
  * Key prefix backing the empty new-task page's panel state: one draft entry
@@ -2272,6 +2299,10 @@ type PersistedArtifactPanelTab =
       'id' | 'kind' | 'title' | 'sessionId'
     >
   | Pick<
+      Extract<ArtifactPanelTab, { kind: 'change_overview' }>,
+      'id' | 'kind' | 'title' | 'workspaceCwd' | 'workspaceId' | 'sessionId'
+    >
+  | Pick<
       Extract<ArtifactPanelTab, { kind: 'token_usage' }>,
       'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
     >
@@ -2485,6 +2516,17 @@ function parsePersistedArtifactPanelTab(
         kind: 'trajectory',
         sessionId: tab['sessionId'],
       } as PersistedArtifactPanelTab;
+    case 'change_overview':
+      if (typeof tab['workspaceCwd'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'change_overview',
+        workspaceCwd: tab['workspaceCwd'],
+        ...(typeof tab['workspaceId'] === 'string'
+          ? { workspaceId: tab['workspaceId'] }
+          : {}),
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     case 'token_usage':
     case 'context_usage':
       if (typeof tab['sessionId'] !== 'string') return;
@@ -2663,6 +2705,19 @@ function serializeArtifactPanelTabs(
           : [];
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
+      case 'change_overview':
+        // Persist the identity like the neighbouring trajectory/workflow arms;
+        // the panel refetches its content from git on mount.
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            workspaceCwd: tab.workspaceCwd,
+            workspaceId: tab.workspaceId,
+            sessionId: tab.sessionId,
+          },
+        ];
       case 'pending': {
         const common = {
           id,
@@ -2870,11 +2925,16 @@ function getChatWidthStyle(
   chatMaxWidth: number | undefined,
 ): CSSProperties {
   const contentWidth = `${getChatMaxWidth(chatMaxWidth)}px`;
-  const shellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  // Reserve timeline gutters where they fit without over-shrinking phone layouts.
+  const responsiveContentWidth = `min(${contentWidth}, clamp(440px, 85cqw, calc(100cqw - 128px)))`;
+  const regularShellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
-    '--chat-regular-shell-width': shellWidth,
+    '--chat-regular-shell-width': regularShellWidth,
     '--chat-content-width': mode === 'wide' ? '100%' : contentWidth,
+    '--chat-responsive-content-width':
+      mode === 'wide' ? '100%' : responsiveContentWidth,
     '--chat-shell-width': mode === 'wide' ? '100%' : shellWidth,
   } as CSSProperties;
 }
@@ -3447,6 +3507,22 @@ function findToolCall(
   return undefined;
 }
 
+/** The id of the tool-group message whose row (or nested row) is `callId`. */
+function findToolMessageId(
+  messages: readonly Message[],
+  callId: string,
+): string | undefined {
+  for (const message of messages) {
+    if (
+      message.role === 'tool_group' &&
+      message.tools.some((tool) => toolContainsCallId(tool, callId))
+    ) {
+      return message.id;
+    }
+  }
+  return undefined;
+}
+
 function transcriptEventsToMessages(events: readonly DaemonEvent[]): Message[] {
   const state = createDaemonTranscriptState({
     maxBlocks: Math.max(2_000, events.length),
@@ -3554,6 +3630,9 @@ function isSameGitStatus(
     current.workspaceCwd === next.workspaceCwd &&
     current.branch === next.branch &&
     current.detached === next.detached &&
+    // ?? true: the field is optional on the wire; a one-sided absence is
+    // not a change, but the first-commit false → true transition must be.
+    (current.hasHead ?? true) === (next.hasHead ?? true) &&
     current.staged === next.staged &&
     current.unstaged === next.unstaged &&
     current.untracked === next.untracked &&
@@ -3620,6 +3699,10 @@ export function App({
   artifact,
   fileDropAction,
   renderToolHeaderExtra,
+  alignManagedChatWithHost,
+
+  showManagedSessionHeader,
+
   renderWelcomeHeader,
   renderWelcomeFooter,
   mobileWelcomeFooterMiddle = false,
@@ -3644,6 +3727,7 @@ export function App({
   sidebar,
   settings: settingsPresentation,
   modelManagement,
+  modelPicker,
   unavailableModels,
   mountUnavailableModelTooltip,
   header,
@@ -3710,11 +3794,18 @@ export function App({
   const navigation = useWebShellNavigation();
   const navigationRef = useRef(navigation);
   navigationRef.current = navigation;
+  const standaloneShell = useContext(StandaloneContext);
   const [managedHome, setManagedHome] = useState(
     () =>
       managedAgentProvider !== undefined &&
-      managedSelectionFromUrl(
-        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      managedSelectionFromRoute(
+        navigation?.route,
+        // Classify with the same rule WorkspaceSessionProvider applies. A
+        // route-less host reaches App two ways: the standalone embedding
+        // (StandaloneContext), which gates App in only for local targets, and
+        // the managed-only shell, which wraps App itself and defaults to the
+        // managed home. Only the former counts as a local target here.
+        standaloneShell,
       ).open,
   );
   const managedMode = managedAgentProvider !== undefined && managedHome;
@@ -3785,6 +3876,7 @@ export function App({
   const titleHeaderItemVisible = chatHeaderItems.includes('title');
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
+  const artifactsHeaderItemVisible = chatHeaderItems.includes('artifacts');
   const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
   const contextUsageHeaderItemVisible =
     chatHeaderItems.includes('contextUsage');
@@ -3797,9 +3889,10 @@ export function App({
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
   // The environment panel is only reachable through the chat header toggle,
-  // so its sections replace the composer git entry / footer task pills only
-  // when that header is actually enabled. Embeddings that omit the header keep
-  // the legacy entries.
+  // so its sections replace the composer git entry (and give background
+  // agents a home, which the composer task chips rely on) only when that
+  // header is actually enabled. Embeddings that omit the header keep the
+  // legacy entries.
   const environmentPanelReachable =
     chatHeaderEnabled &&
     environmentHeaderItemVisible &&
@@ -3998,6 +4091,7 @@ export function App({
   const customization = useMemo(
     () => ({
       onRefreshModels,
+      modelPicker,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -4008,8 +4102,11 @@ export function App({
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
+      alignManagedChatWithHost,
+      showManagedSessionHeader,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      composerPlaceholders,
       parseUserMessageContent,
       renderUserMessageContent,
       renderComposerTag,
@@ -4037,6 +4134,7 @@ export function App({
     }),
     [
       onRefreshModels,
+      modelPicker,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -4047,8 +4145,11 @@ export function App({
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
+      alignManagedChatWithHost,
+      showManagedSessionHeader,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      composerPlaceholders,
       parseUserMessageContent,
       renderUserMessageContent,
       renderComposerTag,
@@ -4681,6 +4782,14 @@ export function App({
   useEffect(() => {
     gitModeIntentRef.current = gitModeIntent;
   }, [gitModeIntent]);
+  // True once the user explicitly picked a git mode for the current draft;
+  // the worktree default must not overwrite an explicit choice. Cleared at
+  // draft boundaries (session created/opened, workspace switched).
+  const gitModeIntentTouchedRef = useRef(false);
+  // Bumped on every fresh draft so the worktree-default effect re-arms even
+  // when sessionId and workspace stay unchanged ("New chat" from an empty
+  // draft produces no rising edge on the eligibility deps alone).
+  const [gitDraftGeneration, setGitDraftGeneration] = useState(0);
 
   useEffect(() => {
     if (
@@ -4938,6 +5047,21 @@ export function App({
     resolveWorkspaceMaintenanceTargetCwd,
     workspaceContextActive,
   ]);
+  const composerWorkspaceCwd = workspaceContextActive
+    ? (ordinaryWorkspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
+        ?.cwd ??
+      (connection.sessionId
+        ? connection.workspaceCwd
+        : resolveWorkspaceMaintenanceTargetCwd()))
+    : undefined;
+  const modelPickerScope = useMemo(
+    () => ({
+      sessionId: connection.sessionId,
+      workspaceCwd: composerWorkspaceCwd,
+      daemonBaseUrl: workspace.baseUrl,
+    }),
+    [connection.sessionId, composerWorkspaceCwd, workspace.baseUrl],
+  );
   // The chat header always answers "which workspace is this session in?": the
   // workspace's name when there is one, and nothing when the session lives
   // outside every workspace (standalone, Live), which the header shows as the
@@ -5000,21 +5124,8 @@ export function App({
       onToastRef.current(tone, message);
       return;
     }
-    const toast: WebShellToast = {
-      id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
-      tone,
-      message,
-      // Deadline instead of duration: the host remounts its items when the
-      // elevated portal moves, and a fresh timer per remount would keep a
-      // toast on screen indefinitely across repeated fullscreen toggles.
-      dismissAt: Date.now() + TOAST_AUTO_DISMISS_MS,
-    };
-    setToasts((current) => {
-      const withoutDuplicate = current.filter(
-        (item) => item.tone !== tone || item.message !== message,
-      );
-      return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
-    });
+    const toast = createWebShellToast(tone, message, ++toastIdRef.current);
+    setToasts((current) => appendToastDeduped(current, toast));
   }, []);
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
@@ -5176,7 +5287,7 @@ export function App({
     error: artifactsError,
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
-  } = useSessionArtifacts(t);
+  } = useSessionArtifacts();
   const sourcesState = useSessionSources();
   const refreshSources = sourcesState.refresh;
   const [sourceRegistrationRetries, setSourceRegistrationRetries] = useState<
@@ -5971,7 +6082,7 @@ export function App({
     [createSideTask],
   );
   const openWebPreviewTab = useCallback(() => {
-    const id = `web-preview:${crypto.randomUUID()}`;
+    const id = `web-preview:${randomUUID()}`;
     setArtifactPanelTabs((tabs) => [
       ...tabs,
       {
@@ -6004,7 +6115,7 @@ export function App({
     [],
   );
   const openTerminalTab = useCallback(() => {
-    const id = `terminal:${crypto.randomUUID()}`;
+    const id = `terminal:${randomUUID()}`;
     const count = artifactPanelTabsRef.current.filter(
       (tab) => tab.kind === 'terminal',
     ).length;
@@ -6621,6 +6732,51 @@ export function App({
     latestReviewTurnId,
     openReviewPanel,
   ]);
+  const openChangeOverviewPanel = useCallback(() => {
+    const cwd = activeWorkspaceCwd;
+    if (!cwd) return;
+    const workspaceId = resolveArtifactWorkspaceOwner(
+      workspaceCapabilitiesRef.current,
+      cwd,
+    )?.id;
+    const tab: ArtifactPanelTab = {
+      id: 'change_overview',
+      kind: 'change_overview',
+      title: t('changeOverview.title'),
+      workspaceCwd: cwd,
+      ...(workspaceId ? { workspaceId } : {}),
+      ...(connection.sessionId ? { sessionId: connection.sessionId } : {}),
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id)
+        ? tabs.map((item) => (item.id === tab.id ? tab : item))
+        : [tab, ...tabs],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+    );
+    setArtifactPanelOpen(true);
+  }, [activeWorkspaceCwd, connection.sessionId, getDefaultReviewPanelWidth, t]);
+  // A change-overview tab opened on the new-task page has no session yet; when
+  // the first prompt materializes one, adopt the live session id so the per-PR
+  // units and worktree scoping appear without reopening the tab. Only tabs that
+  // lack a session are touched, so the draft-adoption path stays untouched.
+  useEffect(() => {
+    const liveSessionId = connection.sessionId;
+    if (!liveSessionId) return;
+    setArtifactPanelTabs((tabs) => {
+      let changed = false;
+      const next = tabs.map((tab) => {
+        if (tab.kind === 'change_overview' && !tab.sessionId) {
+          changed = true;
+          return { ...tab, sessionId: liveSessionId };
+        }
+        return tab;
+      });
+      return changed ? next : tabs;
+    });
+  }, [connection.sessionId]);
   const openScheduledTaskPanel = useCallback(
     (
       task: TurnOutputScheduledTask,
@@ -6760,6 +6916,18 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  // The composer reading refreshes in the background, so it reads the route
+  // directly: a failed read must not raise a notice the way the session
+  // action does.
+  const loadComposerUsageStats = useCallback(
+    (sessionId: string) => workspace.client.sessionStats(sessionId),
+    [workspace.client],
+  );
+  const openComposerUsagePanel = useCallback(() => {
+    if (connection.sessionId) {
+      openTokenUsagePanel(connection.sessionId, sessionActions);
+    }
+  }, [connection.sessionId, openTokenUsagePanel, sessionActions]);
   const openTrajectoryPanel = useCallback(
     (sourceSessionId: string) => {
       const tab: ArtifactPanelTab = {
@@ -8040,6 +8208,17 @@ export function App({
                       sessionAgentTraceSupported)
                     ? tab
                     : undefined;
+                case 'change_overview':
+                  // A stored tab outlives the host's opt-in, so a host that
+                  // has stopped listing the item must not get the panel back
+                  // — and fetching with it — through the browser profile.
+                  if (!rightPanelItems.includes('changeOverview')) {
+                    return undefined;
+                  }
+                  // Identity only; the panel refetches from git on mount. A
+                  // tab saved without a session picks up the live one via the
+                  // session-id reconciliation effect.
+                  return tab;
               }
             },
           ),
@@ -8149,6 +8328,7 @@ export function App({
     hydrateRestoredAttachmentTab,
     panelStateKey,
     resetEmptyArtifactPanel,
+    rightPanelItems,
     sessionAgentTraceSupported,
     sessionActions,
     trajectoryAvailable,
@@ -9435,8 +9615,9 @@ export function App({
     () => (renderFooter ? footerHostTasks.map(mapToWebShellTaskInfo) : []),
     [footerHostTasks, renderFooter],
   );
-  const statusBarRef = useRef<StatusBarHandle>(null);
+  const composerTaskChipsRef = useRef<ComposerTaskChipsHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
+  const toolRevealStore = useMemo(createToolRevealStore, []);
   const locateWaitingActivity = useCallback((messageId: string) => {
     messageListRef.current?.scrollToMessage(messageId);
   }, []);
@@ -10784,8 +10965,9 @@ export function App({
   if (managedHistoryRevision !== navigation?.historyRevision) {
     setManagedHistoryRevision(navigation?.historyRevision);
     if (managedAgentProvider) {
-      const selection = managedSelectionFromUrl(
-        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      const selection = managedSelectionFromRoute(
+        navigation?.route,
+        standaloneShell,
       );
       setManagedHome(selection.open);
       if (managedSessionId !== selection.sessionId) {
@@ -11011,31 +11193,7 @@ export function App({
         if (item === 'workflows') return workflowsEnabled;
         if (item === 'prWatches') return prWatchesAvailable;
         return true;
-      }) ||
-        (sidebarOptions.footer !== false &&
-          sidebarOptions.footer?.items?.some((item) => {
-            if (item === 'collapse') return false;
-            if (item === 'settings') return settingsAvailable;
-            if (item === 'sessionsOverview' || item === 'splitView') {
-              return isSidebarFooterItemAvailable(
-                item,
-                projectFeaturesAvailable,
-                isLargeScreen,
-              );
-            }
-            if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
-            if (item === 'localFiles' || item === 'desktopRelay')
-              return isPageOriginDaemon(workspace.baseUrl);
-            if (item === 'update') {
-              return (
-                !isDesktopShell() &&
-                Boolean(
-                  connection.capabilities?.features?.includes('daemon_update'),
-                )
-              );
-            }
-            return true;
-          })),
+      }),
     );
   const navigationRailVisible =
     sidebarOptions.enabled &&
@@ -12032,7 +12190,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
-            promptId: `local-command:${crypto.randomUUID()}`,
+            promptId: `local-command:${randomUUID()}`,
             text: change.version
               ? t('extensions.install.installedWithVersion', {
                   name,
@@ -12050,7 +12208,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
-            promptId: `local-command:${crypto.randomUUID()}`,
+            promptId: `local-command:${randomUUID()}`,
             text: t(key, { name, version: change.version ?? '' }),
           },
         ]);
@@ -13619,7 +13777,14 @@ export function App({
   const gitModeEligible = Boolean(
     !connection.sessionId &&
       activeWorkspaceTrusted &&
-      selectedWorkspaceGitStatus?.branch,
+      // A detached-HEAD workspace (tag/SHA checkout) reports branch:null
+      // with detached:true; it is exactly the shared-checkout shape the
+      // worktree default exists to isolate.
+      (selectedWorkspaceGitStatus?.branch ||
+        selectedWorkspaceGitStatus?.detached) &&
+      // An unborn HEAD (no commits yet) has no worktree base; the create
+      // path would refuse. Keep the composer on the current branch.
+      selectedWorkspaceGitStatus?.hasHead !== false,
   );
   const branchWorktreeEligible = Boolean(
     connection.sessionId &&
@@ -13695,6 +13860,32 @@ export function App({
       view: 'log',
     });
   }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
+  // "Create branch here": the daemon branches the detached checkout in
+  // place; only the local branch metadata changes.
+  const handleCreateWorktreeBranch = useCallback(
+    async (name: string) => {
+      const sessionIdAtCall = connection.sessionId;
+      const result = await sessionActions.createWorktreeBranch(name);
+      // The user may have switched sessions while the request was in
+      // flight; never apply the response to a different session's state.
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
+      setSessionWorktree((current) =>
+        current ? { ...current, branch: result.worktree.branch } : current,
+      );
+    },
+    [sessionActions, connection.sessionId],
+  );
+  // "Hand off": the daemon moves the session between checkouts; the local
+  // worktree association follows the response (null => back on local).
+  const handleHandoff = useCallback(
+    async (to: 'local' | 'worktree') => {
+      const sessionIdAtCall = connection.sessionId;
+      const result = await sessionActions.handoffWorktree(to);
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
+      setSessionWorktree(result.worktree ?? undefined);
+    },
+    [sessionActions, connection.sessionId],
+  );
   // Every modal the shell itself tracks, plus host-registered interaction
   // blocks. View navigation hotkeys gate on this rather than dialogOpen,
   // because dialogOpen also counts activePanel and the Session Overview is
@@ -14606,7 +14797,7 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
-      localCommandId = `local-command:echo:${crypto.randomUUID()}`,
+      localCommandId = `local-command:echo:${randomUUID()}`,
     ): boolean =>
       appendOrDeferLocalUserMessage(
         streamingStateRef.current !== 'idle',
@@ -14630,7 +14821,7 @@ export function App({
   // mid-turn with only the echo skipped.
   const echoLocalCommandIfIdle = useCallback(
     (text: string): string => {
-      const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+      const localCommandId = `local-command:echo:${randomUUID()}`;
       beginLocalCommand(store, localCommandId);
       if (streamingStateRef.current === 'idle') {
         store.appendLocalUserMessage(text, undefined, {
@@ -14653,7 +14844,7 @@ export function App({
       store.dispatch([
         {
           type: 'status',
-          promptId: localCommandId ?? `local-command:${crypto.randomUUID()}`,
+          promptId: localCommandId ?? `local-command:${randomUUID()}`,
           text,
           ...(data !== undefined ? { data } : {}),
           clearActiveText: false,
@@ -14758,6 +14949,39 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
     )?.values.effective !== false;
+  const defaultWorktreeForNewSessions =
+    workspaceSettings.find(
+      (setting) => setting.key === 'worktree.defaultForNewSessions',
+    )?.values.effective === true;
+  const handleGitModeIntentChange = useCallback((intent: SessionGitIntent) => {
+    gitModeIntentTouchedRef.current = true;
+    gitModeIntentRef.current = intent;
+    setGitModeIntent(intent);
+  }, []);
+  // An explicit choice belongs to one draft: reset the touched flag at
+  // draft boundaries (session created/opened, workspace switched), not on
+  // transient eligibility drops — a git-status blip must not let the
+  // default overwrite an explicit current-branch choice.
+  useEffect(() => {
+    gitModeIntentTouchedRef.current = false;
+  }, [connection.sessionId, activeWorkspaceCwd]);
+  // Apply the worktree default on the rising edge of eligibility + setting
+  // (settings load asynchronously, so the default may land after the chip
+  // first renders). An explicit selection wins.
+  const gitModeDefaultConditionRef = useRef(false);
+  useEffect(() => {
+    const condition = gitModeEligible && defaultWorktreeForNewSessions;
+    if (
+      condition &&
+      !gitModeDefaultConditionRef.current &&
+      !gitModeIntentTouchedRef.current &&
+      gitModeIntentRef.current.mode === 'current'
+    ) {
+      gitModeIntentRef.current = { mode: 'worktree' };
+      setGitModeIntent({ mode: 'worktree' });
+    }
+    gitModeDefaultConditionRef.current = condition;
+  }, [gitModeEligible, defaultWorktreeForNewSessions, gitDraftGeneration]);
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -15510,7 +15734,7 @@ export function App({
       store.dispatch([
         {
           type: 'status',
-          promptId: `local-command:${crypto.randomUUID()}`,
+          promptId: `local-command:${randomUUID()}`,
           text: t('clear.blocked'),
         },
       ]);
@@ -15595,6 +15819,7 @@ export function App({
           !planMode &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
+          !isNamedSubSessionApproval(approval) &&
           (modeId === 'yolo' ||
             (modeId === 'auto-edit' && isEditToolPermission(approval)))
         ) {
@@ -15605,7 +15830,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('mode.autoApproved', { tool: approval.title || '' }),
               },
             ]);
@@ -16352,7 +16577,7 @@ export function App({
           store.dispatch([
             {
               type: 'status',
-              promptId: `local-command:${crypto.randomUUID()}`,
+              promptId: `local-command:${randomUUID()}`,
               text: t('branch.success', {
                 name: result.displayName,
               }),
@@ -16680,6 +16905,14 @@ export function App({
           : { mode: 'current' };
       gitModeIntentRef.current = nextGitIntent;
       setGitModeIntent(nextGitIntent);
+      // A fresh draft is a new explicit-choice boundary: re-arm the
+      // worktree default. Without the generation bump the rising-edge
+      // effect never re-fires when "New chat" leaves sessionId and
+      // workspace unchanged, silently dropping the enabled default. A
+      // caller-supplied intent counts as an explicit choice and wins.
+      gitModeIntentTouchedRef.current = opts?.gitIntent !== undefined;
+      gitModeDefaultConditionRef.current = false;
+      setGitDraftGeneration((generation) => generation + 1);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -18143,6 +18376,7 @@ export function App({
               sessionId?: unknown;
               workspaceCwd?: unknown;
               sessionContext?: unknown;
+              source?: unknown;
             }
         >
       ).detail;
@@ -18184,6 +18418,13 @@ export function App({
         lockedWorkspaceCwd &&
         (sessionContext?.kind !== 'workspace' ||
           sessionContext.cwd !== lockedWorkspaceCwd)
+      )
+        return;
+      if (
+        lockedWorkspaceCwd &&
+        typeof detail === 'object' &&
+        detail?.source === 'session-link' &&
+        workspaceCwd !== lockedWorkspaceCwd
       )
         return;
       if (typeof sessionId === 'string' && sessionId.trim()) {
@@ -18619,6 +18860,61 @@ export function App({
       openTasksPanel();
     },
     [handleOpenMonitorDetails, handleOpenShellDetails, openTasksPanel],
+  );
+  // A workflow chip scrolls the transcript to the call that started the run
+  // and opens its inline view. A run with no row in this transcript (started
+  // from the runs page, a rerun, or history that is not loaded) opens in the
+  // tasks dialog instead, which renders the same run view.
+  const locateWorkflowTask = useCallback(
+    (task: DaemonSessionWorkflowTaskStatus) => {
+      const callId = task.toolUseId;
+      const messageId = callId
+        ? findToolMessageId(messages, callId)
+        : undefined;
+      if (callId && messageId) {
+        toolRevealStore.request(callId);
+        if (messageListRef.current?.scrollToMessage(messageId, callId)) return;
+        toolRevealStore.cancel(callId);
+      }
+      openTasksPanel();
+    },
+    [messages, openTasksPanel, toolRevealStore],
+  );
+  const openComposerTask = useCallback(
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
+      switch (task.kind) {
+        case 'workflow':
+          locateWorkflowTask(task);
+          return;
+        case 'shell':
+          handleOpenShellDetails(task);
+          return;
+        case 'monitor':
+          handleOpenMonitorDetails(task);
+          return;
+        case 'agent': {
+          if (!connection.sessionId) return;
+          const tool = task.toolUseId
+            ? findToolCall(messages, task.toolUseId)
+            : undefined;
+          openSubagentPanelForSession(
+            tool ?? agentTaskAsToolCall(task),
+            connection.sessionId,
+            connection.workspaceCwd,
+          );
+          return;
+        }
+      }
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      handleOpenMonitorDetails,
+      handleOpenShellDetails,
+      locateWorkflowTask,
+      messages,
+      openSubagentPanelForSession,
+    ],
   );
 
   const refreshGoal = useCallback(async () => {
@@ -19098,7 +19394,7 @@ export function App({
         // transcript belongs to the session the user navigated to.
         if (!detachedGoalSession) {
           store.appendLocalUserMessage(text, undefined, {
-            localCommandId: `local-command:${crypto.randomUUID()}`,
+            localCommandId: `local-command:${randomUUID()}`,
           });
         }
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
@@ -19181,7 +19477,6 @@ export function App({
       ),
     [hiddenSlashCommands],
   );
-  const hideSettings = hiddenCommands.has('settings');
 
   const handleSubmit = useCallback(
     (
@@ -19569,7 +19864,7 @@ export function App({
               store.dispatch([
                 {
                   type: 'status',
-                  promptId: `local-command:${crypto.randomUUID()}`,
+                  promptId: `local-command:${randomUUID()}`,
                   text: [
                     t('language.current', {
                       language: languageLabel(selectedLanguage),
@@ -19600,7 +19895,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
-                    promptId: `local-command:${crypto.randomUUID()}`,
+                    promptId: `local-command:${randomUUID()}`,
                     text: [
                       t('language.set'),
                       '',
@@ -19640,7 +19935,7 @@ export function App({
                 store.dispatch([
                   {
                     type: result.status === 'error' ? 'error' : 'status',
-                    promptId: `local-command:${crypto.randomUUID()}`,
+                    promptId: `local-command:${randomUUID()}`,
                     text: translateCopyMessage(result.message, t),
                   },
                 ]);
@@ -19918,7 +20213,7 @@ export function App({
             if (toolsArg === 'desc' || toolsArg === 'descriptions') {
               setShowToolsDialog(true);
             } else {
-              const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+              const localCommandId = `local-command:echo:${randomUUID()}`;
               if (echoOrDeferLocalCommand(text, images, localCommandId))
                 return true;
               const owner = sessionOwnerGuard.capture();
@@ -20064,7 +20359,7 @@ export function App({
                   break;
                 }
               }
-              const localCommandId = `local-command:${crypto.randomUUID()}`;
+              const localCommandId = `local-command:${randomUUID()}`;
               if (parseError) {
                 store.appendLocalUserMessage(text, undefined, {
                   localCommandId,
@@ -20120,7 +20415,7 @@ export function App({
                 });
               return true;
             }
-            const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+            const localCommandId = `local-command:echo:${randomUUID()}`;
             if (echoOrDeferLocalCommand(text, images, localCommandId))
               return true;
             store.dispatch([
@@ -20203,7 +20498,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
-                    promptId: `local-command:${crypto.randomUUID()}`,
+                    promptId: `local-command:${randomUUID()}`,
                     text: t('rename.success', { name: displayName }),
                   },
                 ]);
@@ -20385,7 +20680,7 @@ export function App({
           }
           if (cmd === 'bug') {
             const bugTitle = text.slice(match[0].length).trim();
-            const localCommandId = `local-command:${crypto.randomUUID()}`;
+            const localCommandId = `local-command:${randomUUID()}`;
             if (echoOrDeferLocalCommand(text, images, localCommandId))
               return true;
             const owner = sessionOwnerGuard.capture();
@@ -20925,9 +21220,9 @@ export function App({
     hasQueuedPrompts,
   ]);
 
-  const handleFocusTaskPill = useCallback((): boolean => {
+  const handleFocusTaskChips = useCallback((): boolean => {
     if (interactionBlocked) return false;
-    return statusBarRef.current?.focusTaskPill() ?? false;
+    return composerTaskChipsRef.current?.focus() ?? false;
   }, [interactionBlocked]);
 
   const handleReturnToEditor = useCallback((text?: string) => {
@@ -21181,7 +21476,7 @@ export function App({
       store.dispatch([
         {
           type: 'status',
-          promptId: `local-command:${crypto.randomUUID()}`,
+          promptId: `local-command:${randomUUID()}`,
           text: t('retry.none'),
         },
       ]);
@@ -21763,7 +22058,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('settings.models.runtimeSyncFailed'),
               },
             ]);
@@ -21774,7 +22069,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('settings.requiresRestart'),
               },
             ]);
@@ -21857,7 +22152,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('settings.requiresRestart'),
               },
             ]);
@@ -22038,7 +22333,7 @@ export function App({
           store.dispatch([
             {
               type: 'status',
-              promptId: `local-command:${crypto.randomUUID()}`,
+              promptId: `local-command:${randomUUID()}`,
               text: t('settings.requiresRestart'),
             },
           ]);
@@ -22574,7 +22869,11 @@ export function App({
     ? getDefaultChatWidthMode()
     : chatWidthMode;
   const activeGitBranch = sessionWorktree
-    ? (selectedWorkspaceGitStatus?.branch ?? sessionWorktree.branch)
+    ? // A detached managed worktree has no branch (live status reports
+      // null, creation metadata ''); show its slug instead.
+      selectedWorkspaceGitStatus?.branch ||
+      sessionWorktree.branch ||
+      sessionWorktree.slug
     : sessionBranch
       ? (selectedWorkspaceGitStatus?.branch ?? sessionBranch.name)
       : connection.sessionId
@@ -22700,6 +22999,10 @@ export function App({
     sessionWorktree,
     gitStatusTarget,
   ]);
+  // Bumped when the header artifact entry opens the panel, so the panel
+  // expands its artifacts section even if the user had collapsed it (the
+  // panel hides rather than unmounts, so its local section state persists).
+  const [artifactsExpandSignal, setArtifactsExpandSignal] = useState(0);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
       persistEnvironmentPanelOpen(open);
@@ -22713,6 +23016,22 @@ export function App({
     },
     [persistEnvironmentPanelOpen],
   );
+  // The count and the opener are derived from one gate so an embedder never
+  // receives a count it cannot act on: the built-in header additionally
+  // requires both props, but the custom renderChatHeader contract does not.
+  const artifactsHeaderEntry =
+    artifactsHeaderItemVisible &&
+    mainView === 'chat' &&
+    environmentPanelItems.includes('artifacts') &&
+    connection.sessionId
+      ? {
+          artifactCount: artifacts.length,
+          onOpenArtifacts: () => {
+            handleEnvironmentPanelOpenChange(true);
+            setArtifactsExpandSignal((value) => value + 1);
+          },
+        }
+      : {};
   const dismissEnvironmentPanel = useCallback(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
     persistEnvironmentPanelOpen(false);
@@ -22781,8 +23100,6 @@ export function App({
   }, [artifactPanelOpen, environmentPanelFits]);
   const environmentPanelMounted =
     !isChatEmptyState && !activePanel && mainView === 'chat';
-  const chatWidthToggleMin = getChatMaxWidth(chatMaxWidth);
-
   const appClassName = [
     styles.app,
     styles.appChat,
@@ -23134,6 +23451,11 @@ export function App({
     onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
     onOpenLatestReview: openLatestReviewPanel,
+    // Available for any workspace; the panel itself reports non-git workspaces.
+    // Deliberately not gated on the branch chip's git status, which is only
+    // fetched while that chip (or the environment panel) is visible.
+    changeOverviewAvailable: Boolean(activeWorkspaceCwd),
+    onOpenChangeOverview: openChangeOverviewPanel,
     onOpenTrajectory: connection.sessionId
       ? () => openTrajectoryPanel(connection.sessionId!)
       : undefined,
@@ -23250,6 +23572,15 @@ export function App({
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
+          {/* Rendered inside the portal-root provider so the registration
+              failure toast is scoped to this shell; App's own body runs
+              above the provider it returns. */}
+          <ReportedArtifactRegistration
+            registered={artifacts}
+            hydrated={artifactsHydrated}
+            refresh={refreshArtifacts}
+            translateError={t}
+          />
           {/* Compact view is fixed on for every message surface (main chat,
               split panes, subagent detail, drawer) — no toggle remains. */}
           <CompactModeContext.Provider value={true}>
@@ -23491,7 +23822,7 @@ export function App({
                 store.dispatch([
                   type === 'error'
                     ? { type: 'error', text }
-                    : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
+                    : { type: 'status', promptId: `local-command:${randomUUID()}`, text },
                 ]);
               }}
               onClose={handleCloseAuthDialog}
@@ -23545,7 +23876,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
-                      promptId: `local-command:${crypto.randomUUID()}`,
+                      promptId: `local-command:${randomUUID()}`,
                       text:
                         sessionIds.length === 1
                           ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
@@ -23578,7 +23909,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
-                      promptId: `local-command:${crypto.randomUUID()}`,
+                      promptId: `local-command:${randomUUID()}`,
                       text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
                     },
                   ]);
@@ -24181,6 +24512,7 @@ export function App({
                                 ),
                             }
                           : {}),
+                        ...artifactsHeaderEntry,
                         onOpenLocalControlSettings:
                           showMobileAccess && workspaceContextActive
                             ? handleOpenLocalControlSettings
@@ -24252,6 +24584,7 @@ export function App({
                               )
                           : undefined
                       }
+                      {...artifactsHeaderEntry}
                       onOpenLocalControlSettings={
                         showMobileAccess && workspaceContextActive
                           ? handleOpenLocalControlSettings
@@ -24519,7 +24852,10 @@ export function App({
                           configurations: modelConfigurations.models,
                           onUpdateContextWindow: handleModelContextWindowUpdate,
                           currentModelId:
-                            connection.currentModel ?? undefined,
+                            (connection.sessionId
+                              ? connection.currentModel
+                              : currentModel || connection.currentModel) ??
+                            undefined,
                           loading:
                             providersState.loading ||
                             modelConfigurations.loading,
@@ -24651,6 +24987,13 @@ export function App({
                             : returnToChat
                         }
                         initialFocusRef={panelHeadingRef}
+                        // A cleared session keeps clientId and workspaceCwd,
+                        // so the workspace comparison alone would still send
+                        // an id the daemon no longer knows (400).
+                        clientId={
+                          connection.sessionId ? connection.clientId : undefined
+                        }
+                        sessionWorkspaceCwd={connection.workspaceCwd}
                       />
                     ) : activePanel === 'channel-events' ? (
                       <ChannelEventsPage
@@ -24998,14 +25341,54 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <GoalsDialog
-                      onCreateGoal={async (condition) => {
+                      // Registered workspaces (multi-workspace daemons only) so
+                      // the page aggregates every project's goals and the New
+                      // form can target one; absent/single → primary-only view.
+                      workspaces={
+                        lockedWorkspaceCwd
+                          ? visibleWorkspaces
+                          : ordinaryWorkspaces
+                      }
+                      lockedWorkspace={lockedWorkspaceCapability}
+                      defaultWorkspaceCwd={resolveWorkspaceMaintenanceTargetCwd()}
+                      onCreateGoal={async (condition, workspaceCwd) => {
                         const stranded = strandedGoalSessionRef.current;
+                        // Reuse the stranded session only when the picker still
+                        // targets its workspace; otherwise a retry after a failed
+                        // attempt would silently create the goal in the previous
+                        // workspace while the picker displays the new one.
                         const canReuseStranded =
                           stranded !== undefined &&
-                          connectionRef.current.sessionId === stranded;
+                          connectionRef.current.sessionId === stranded &&
+                          (workspaceCwd === undefined ||
+                            workspaceCwd ===
+                              connectionRef.current.workspaceCwd);
                         if (!canReuseStranded) {
+                          // The picker can outlive a trust change or workspace
+                          // removal: re-validate its cwd before createNewSession,
+                          // which clears the current session before allocation
+                          // would refuse an untrusted target.
+                          const pickedCwd =
+                            workspaceCwd === undefined
+                              ? undefined
+                              : ordinaryWorkspaces.find(
+                                  (entry) =>
+                                    entry.cwd === workspaceCwd &&
+                                    entry.trusted !== false,
+                                )?.cwd;
+                          if (workspaceCwd !== undefined && !pickedCwd) {
+                            reportError(
+                              new Error(t('goals.error.workspaceUnavailable')),
+                              'Failed to create the goal',
+                            );
+                            return false;
+                          }
+                          // Only forget the stranded session once the retry
+                          // actually proceeds; a refused target must leave the
+                          // recovery handle intact for a later retry.
                           strandedGoalSessionRef.current = undefined;
                           const targetCwd =
+                            pickedCwd ??
                             resolveWorkspaceMaintenanceTargetCwd();
                           if (!targetCwd) return false;
                           const created = await createNewSession(
@@ -25087,10 +25470,11 @@ export function App({
                         strandedGoalSessionRef.current = undefined;
                         showChat();
                       }}
-                      onOpenSession={(sessionId) => {
-                        // The goal's session transcript IS its history.
+                      onOpenSession={(sessionId, workspaceCwd) => {
+                        // The goal's session transcript IS its history — load
+                        // it in the goal's own workspace.
                         showChat();
-                        loadSidebarSession(sessionId).catch(
+                        loadSidebarSession(sessionId, workspaceCwd).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
                           },
@@ -25267,10 +25651,13 @@ export function App({
                       managedAgentProvider={managedAgentProvider}
                       creationSkills={managedCreationSkills}
                       interactive={managedChatVisible}
+                      // sidebar:false 表示外壳由宿主提供（宿主外壳即如此）。此处传 null 而非 undefined：
+                      // 按 navigationTarget 的既有约定，null 保持 home 布局但不挂载内置侧栏槽位，
+                      // 托管页因此与 ChatPane 一样不渲染自己的导航与「新建/刷新」工具条。
                       navigationTarget={
                         sidebarOptions.enabled
                           ? managedNavigationTarget
-                          : undefined
+                          : null
                       }
                       archivedNavigationTarget={managedArchivedNavigationTarget}
                       onArchivedSessionsStatusChange={setManagedArchivedStatus}
@@ -25281,6 +25668,9 @@ export function App({
               <div
                 className={[
                   styles.chatViewWrap,
+                  approvalOverlayActive && mainView === 'chat'
+                    ? styles.chatViewWithApproval
+                    : undefined,
                   hasMobileComposerBottom
                     ? styles.chatViewWithMobileComposerBottom
                     : undefined,
@@ -25395,6 +25785,7 @@ export function App({
                                     terminalBackgroundShellTaskIds
                                   }
                                   pendingApproval={pendingToolApproval}
+                                  approvalOverlayActive={approvalOverlayActive}
                                   onShowContextDetail={
                                     contextUsageAvailable
                                       ? openCurrentContextUsagePanel
@@ -25519,7 +25910,9 @@ export function App({
                               );
                               const messageListWithWorkflowDetails = (
                                 <WorkflowDetailsProvider tasks={sessionTasks}>
-                                  {messageListWithTurnCalls}
+                                  <ToolRevealProvider store={toolRevealStore}>
+                                    {messageListWithTurnCalls}
+                                  </ToolRevealProvider>
                                 </WorkflowDetailsProvider>
                               );
                               const messageListWithSubagentDetails = (
@@ -25691,7 +26084,8 @@ export function App({
                         {/* Workspace-level hooks trust decision uses the same
                             approval slot and card as tool approvals; it is not
                             a session permission request. */}
-                        {!managedMode &&
+                        {workspaceContextActive &&
+                          !managedMode &&
                           !pendingToolApproval &&
                           mainView === 'chat' && (
                             <div className={styles.approvalOverlay}>
@@ -25999,6 +26393,18 @@ export function App({
                               )}
                             </div>
                           )}
+                          {!CustomFooter && (
+                            <ComposerTaskChips
+                              ref={composerTaskChipsRef}
+                              tasks={sessionTasks}
+                              // Headerless embeds have no environment panel to
+                              // list background agents, and keep them out of
+                              // their task surfaces.
+                              includeAgents={environmentTasksReplacementEnabled}
+                              onSelectTask={openComposerTask}
+                              onReturnToInput={handleReturnToEditor}
+                            />
+                          )}
                           {(queuedPrompts.length > 0 ||
                             liveGoalSnapshot?.goal) && (
                             <div
@@ -26032,6 +26438,11 @@ export function App({
                                   onPause={() => runGoalControl('pause')}
                                   onResume={() => runGoalControl('resume')}
                                   onClear={() => runGoalControl('clear')}
+                                  onOpenGoals={
+                                    projectFeaturesAvailable
+                                      ? openGoals
+                                      : undefined
+                                  }
                                 />
                               )}
                             </div>
@@ -26156,7 +26567,7 @@ export function App({
                             }
                             voiceStatusRevision={mainVoiceStatusRevision}
                             queuedMessages={queuedTexts}
-                            onFocusFooter={handleFocusTaskPill}
+                            onFocusFooter={handleFocusTaskChips}
                             onPopQueuedMessages={editLastQueuedPrompt}
                             onClearQueuedMessages={clearQueuedPrompts}
                             currentMode={executionMode}
@@ -26180,7 +26591,7 @@ export function App({
                                 : undefined
                             }
                             gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
-                            onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
+                            onGitModeIntentChange={gitModeEligible ? handleGitModeIntentChange : undefined}
                             gitStatus={
                               workspaceContextActive
                                 ? selectedWorkspaceGitStatus
@@ -26206,9 +26617,26 @@ export function App({
                                 ? handleOpenLog
                                 : undefined
                             }
+                            onCreateWorktreeBranch={
+                              sessionWorktree &&
+                              !sessionWorktree.branch &&
+                              workspace.capabilities?.features?.includes(
+                                'session_worktree_branch_v1',
+                              )
+                                ? handleCreateWorktreeBranch
+                                : undefined
+                            }
+                            onHandoff={
+                              connection.sessionId &&
+                              workspaceContextActive &&
+                              workspace.capabilities?.features?.includes(
+                                'session_worktree_handoff_v1',
+                              )
+                                ? handleHandoff
+                                : undefined
+                            }
                             chatWidthMode={chatWidthMode}
                             showChatWidthToggle={!isChatEmptyState}
-                            chatWidthToggleMin={chatWidthToggleMin}
                             visibleToolbarActions={visibleComposerToolbarActions}
                             // Before the session exists the workspace and git
                             // chips sit under the composer, next to the prompt
@@ -26236,6 +26664,7 @@ export function App({
                             }
                             modelRefresh={modelRefresh}
                             availableModels={availableModels}
+                            modelPickerScope={modelPickerScope}
                             unavailableModels={unavailableModels}
                             mountUnavailableModelTooltip={
                               mountUnavailableModelTooltip
@@ -26299,16 +26728,7 @@ export function App({
                             workspaceSelectionDisabled={
                               !composerWorkspaceSelectEnabled
                             }
-                            atWorkspaceCwd={
-                              workspaceContextActive
-                                ? (ordinaryWorkspaces.find(
-                                    (entry) => entry.cwd === lockedWorkspaceCwd,
-                                  )?.cwd ??
-                                  (connection.sessionId
-                                    ? connection.workspaceCwd
-                                    : resolveWorkspaceMaintenanceTargetCwd()))
-                                : undefined
-                            }
+                            atWorkspaceCwd={composerWorkspaceCwd}
                             composerScopeKey={
                               effectiveSessionContext?.kind === 'standalone'
                                 ? 'standalone'
@@ -26444,53 +26864,24 @@ export function App({
                               onSelectModel={handleModelSelect}
                             />
                           )
-                        ) : (
-                          <StatusBar
-                            onSelectMode={() =>
-                              setShowApprovalModeDialog((v) => !v)
-                            }
-                            onSelectModel={() =>
-                              isStandaloneModelPickerUnavailable({
-                                sessionId: connection.sessionId,
-                                sessionContextKind: effectiveSessionContext?.kind,
-                                models: connection.models,
-                              })
-                                ? pushToast('info', t('model.unavailable'))
-                                : setModelDialogMode((v) =>
-                                    v ? null : 'main',
-                                  )
-                            }
-                            onShowContext={() =>
-                              showContextUsage('/context', false)
-                            }
-                            onOpenSettings={() => openPanel('settings')}
-                            ref={statusBarRef}
-                            onOpenTasks={() => openTasksPanel()}
-                            onReturnToInput={handleReturnToEditor}
-                            // The pill filters composer tasks itself; it also
-                            // counts background agents, which the
-                            // pre-filtered list would have dropped. The full
-                            // snapshot reaches the pill only while a
-                            // background agent is still running in the
-                            // shipped entry, where the environment panel
-                            // replaces the footer task list; the empty chat
-                            // and headerless embeds keep the pre-filtered
-                            // composer tasks, so agents never reach them.
-                            tasks={
-                              isChatEmptyState ||
-                              !environmentTasksReplacementEnabled
-                                ? backgroundTasks
-                                : hasActiveBackgroundAgent(sessionTasks)
-                                  ? sessionTasks
-                                  : []
-                            }
-                            hideSettings={
-                              hideSettings || !workspaceContextActive
-                            }
-                            onToggleShortcuts={handleToggleShortcuts}
-                            compact={true}
-                          />
-                        )}
+                        ) : null}
+                        {!CustomFooter &&
+                          tokenUsageHeaderItemVisible &&
+                          !isChatEmptyState &&
+                          connection.status === 'connected' &&
+                          connection.sessionId && (
+                            <ComposerUsageStats
+                              sessionId={connection.sessionId}
+                              loadStats={loadComposerUsageStats}
+                              refreshSignal={connection.tokenCount}
+                              running={
+                                streamingState !== 'idle' ||
+                                sessionHasActivePrompt ||
+                                sessionActiveWorkState === 'active'
+                              }
+                              onOpen={openComposerUsagePanel}
+                            />
+                          )}
                         {isChatEmptyState && welcomeFooter && (
                           <div
                             className={[
@@ -26567,6 +26958,7 @@ export function App({
                 }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
+                artifactsExpandSignal={artifactsExpandSignal}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   workspaceContextActive && gitDiffWorkspaceCwd

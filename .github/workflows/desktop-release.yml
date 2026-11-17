@@ -398,7 +398,7 @@ jobs:
           # legacy 4.0 API, and Tauri needs libwebkit2gtk-4.1.so.0.
           - name: 'Linux x64 (rpm, RHEL 10)'
             os: 'ubuntu-22.04'
-            container: 'quay.io/centos/centos@sha256:511d358446140e9c4ba16451affb103a14237cbf40059b18adeaef6e3080a72b'
+            container: 'quay.io/centos/centos@sha256:5eaff839eea6ca355f8122044dcfaefbac5ac991940f223b668dcf80478e3166'
             artifact_suffix: 'linux-x64-rpm-rhel10'
             glibc_floor: '2.39'
             rpm: 'true'

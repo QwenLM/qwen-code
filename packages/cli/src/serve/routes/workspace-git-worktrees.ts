@@ -531,6 +531,7 @@ export function registerWorkspaceQualifiedGitWorktreeRoutes(
               available: true,
               branch: status.branch,
               detached: status.detached,
+              hasHead: status.hasHead,
               staged: status.staged,
               unstaged: status.unstaged,
               untracked: status.untracked,

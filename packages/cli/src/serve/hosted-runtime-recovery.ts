@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { recordManagedToolMeasurements } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-measurements.js';
 import { parseManagedConfigInstallRecord } from '@qwen-code/qwen-code-core/managed-runtime/managed-config-install.js';
 import { expandHostedExtensionCommand } from './hosted-extension-command.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -206,7 +207,12 @@ export type HostedRecoveryDeclineReason =
   /** The checkpoint's durable bytes fail the parse/identity verdict. */
   | 'checkpoint_blocked'
   /** The recovered state still does not authorize this Turn. */
-  | 'unresolved_after_settle';
+  | 'unresolved_after_settle'
+  /** #17260: the Turn's saved public-child recovery profile belongs to a
+   * topology this Harness cannot open at all (a shell-era child profile
+   * after the move off the shell topology). No retry re-opens it, so the
+   * coordinator abandons the recovery on the first drive. */
+  | 'public_child_recovery_unsupported';
 
 export type HostedRuntimeRecoveryOutcome =
   | { readonly kind: 'recovered'; readonly turn: HostedRecoveryTurn }
@@ -580,6 +586,13 @@ export async function settleParkedTurnCancelled(input: {
         'managed-tool-outcome',
         outcomeBytes(item, parts),
       ));
+    await recordManagedToolMeasurements(
+      input.session,
+      item.executionCallId,
+      outcomeRef,
+      input.broker?.toolMeasurements(item.executionCallId),
+    );
+    input.broker?.releaseToolMeasurements(item.executionCallId);
     // The assistant's functionCall must meet its functionResponse in the next
     // turn's history, or providers reject the request as malformed.
     if (!journaled.has(item.functionCallId)) {
@@ -3043,6 +3056,13 @@ export async function recoverHostedRuntimeTurn(input: {
             'managed-tool-outcome',
             outcome,
           );
+          await recordManagedToolMeasurements(
+            session,
+            item.executionCallId,
+            outcomeRef,
+            broker.toolMeasurements(item.executionCallId),
+          );
+          broker.releaseToolMeasurements(item.executionCallId);
           if (!journaled.has(item.functionCallId)) {
             await writeRecoveryRecord(session, record);
           }

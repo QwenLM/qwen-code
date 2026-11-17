@@ -75,15 +75,35 @@ const coreMocks = vi.hoisted(() => ({
   transferWorktreeSessionMarkerOwner: vi.fn(),
 }));
 
+// The shared restore core reads the sidecar through the module that defines
+// it, not the barrel, so the deep path needs the same spy — otherwise the
+// restore bypasses it and the call-count assertions below undercount. The
+// real implementations are captured here rather than from the barrel:
+// `importOriginal` does not bypass mocks transitively, so the barrel's
+// "actual" sidecar reader is this very spy, and installing it as its own
+// implementation would recurse.
+vi.mock(
+  '@qwen-code/qwen-code-core/services/worktreeSessionService.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/worktreeSessionService.js')
+      >();
+    coreMocks.real.writeWorktreeSession = actual.writeWorktreeSession;
+    coreMocks.real.readWorktreeSessionStrict = actual.readWorktreeSessionStrict;
+    return {
+      ...actual,
+      writeWorktreeSession: coreMocks.writeWorktreeSession,
+      readWorktreeSessionStrict: coreMocks.readWorktreeSessionStrict,
+    };
+  },
+);
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
-  coreMocks.real = {
-    writeWorktreeSession: actual.writeWorktreeSession,
-    readWorktreeSessionStrict: actual.readWorktreeSessionStrict,
-    transferWorktreeSessionMarkerOwner:
-      actual.transferWorktreeSessionMarkerOwner,
-  };
+  coreMocks.real.transferWorktreeSessionMarkerOwner =
+    actual.transferWorktreeSessionMarkerOwner;
   return {
     ...actual,
     writeWorktreeSession: coreMocks.writeWorktreeSession,

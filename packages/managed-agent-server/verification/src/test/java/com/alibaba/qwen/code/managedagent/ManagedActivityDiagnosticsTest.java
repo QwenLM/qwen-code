@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
@@ -98,6 +99,56 @@ class ManagedActivityDiagnosticsTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE task_kind IS NOT NULL", Integer.class)).isZero();
         JdbcManagedExtensionRecordStore restarted = new JdbcManagedExtensionRecordStore(jdbc);
         assertThat(restarted.findActivityStatistics(TENANT, SESSION)).isEqualTo(summary);
+    }
+
+    @Test
+    void measuredExecutionCommitsWithItsProjectionAndReplaysWithoutDoubleCounting() throws Exception {
+        commitRequests();
+        String execution = "execution-measured";
+        ObjectNode observation = fact(1, "edit").put("executionCallId", execution).put("admission", "allowed");
+        observation.putObject("file").put("operation", "edit").put("path", "src/file.ts").put("cwdRelative", ".");
+        ObjectNode source = evidence("intent:" + execution);
+        source.withArray("observations").add(observation);
+        CommitResource diagnostics = resource(ManagedActivityDiagnostics.KIND, ExtensionRecordJournal.bytes(source));
+        CommitResource args = resource("managed-tool-args", "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var intent = journal.request("recordIntent", execution, args.digest().getBytes(java.nio.charset.StandardCharsets.UTF_8), 1001, event -> {
+            event.put("kind", "tool.intent").put("eventId", "intent:" + execution);
+            ObjectNode payload = event.putObject("payload").put("executionCallId", execution).put("batchId", "assistant").put("ordinal", 1)
+                    .put("outcomeSource", "runtime");
+            payload.set("toolDefinitionRef", ManagedExtensionRecordStoreTest.hookRef(args));
+            payload.set("argsRef", ManagedExtensionRecordStoreTest.hookRef(args));
+            payload.set("diagnosticsRef", ManagedExtensionRecordStoreTest.hookRef(diagnostics));
+        }, lines -> lines);
+        commit(withResources(intent, ManagedActivityDiagnostics.commitDigest(args.digest(), ManagedExtensionRecordStoreTest.hookRef(diagnostics)), List.of(args, diagnostics)));
+        JsonNode fixture = json.readTree(Files.readString(Path.of("..", "..", "core", "src", "managed-runtime", "contracts", "managed-tool-measurements-v1.fixtures.json")));
+        ObjectNode body = fixture.path("evidence").deepCopy();
+        body.put("executionCallId", execution).set("invocationId", observation.get("invocationId"));
+        CommitResource measured = resource(ManagedToolMeasurements.KIND, ExtensionRecordJournal.bytes(body));
+        CommitResource outcome = resource("managed-tool-outcome", ExtensionRecordJournal.bytes(json.createObjectNode().put("executionCallId", execution)));
+        ObjectNode carrier = json.createObjectNode().put("executionCallId", execution);
+        carrier.set("toolOutcomeRef", ManagedExtensionRecordStoreTest.hookRef(outcome));
+        carrier.set("measurementsRef", ManagedExtensionRecordStoreTest.hookRef(measured));
+        var base = journal.request("recordToolMeasurements", execution, ExtensionRecordJournal.bytes(body), 1002, event -> {
+            event.put("kind", "tool.measured").put("eventId", "tool-measured:" + execution).set("payload", carrier);
+        }, lines -> lines);
+        var request = withResources(base, ManagedToolMeasurements.commitDigest(carrier), List.of(outcome, measured));
+        commit(request);
+        JsonNode summary = records.findActivityStatistics(TENANT, SESSION).deepCopy();
+        transactions.executeWithoutResult(status -> journal.commit(request));
+        assertThat(records.findActivityStatistics(TENANT, SESSION)).isEqualTo(summary);
+        assertThat(summary.path("tools").path("requested").asInt()).isEqualTo(4);
+        assertThat(summary.path("files").path("measurements").path("executionDurationSamples").asText()).isEqualTo("1");
+        assertThat(summary.path("files").path("measurements").path("modelLinesAdded").asText()).isEqualTo("3");
+        assertThat(summary.path("files").path("measurements").path("appliedLinesAdded").asText()).isEqualTo("2");
+        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, SESSION)).isEqualTo(5);
+        var api = new ManagedSessionActivityService(mock(ManagedAgentService.class), records);
+        assertThat(api.list(TENANT, "reader", SESSION, "tools", null, 100).toString()).doesNotContain("_measurementEvidenceDigest", "_measurementOutcomeKnown", "resultDigest");
+        transactions.executeWithoutResult(status -> {
+            jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'SESSION_RECORD' AND session_id = ?", SESSION);
+            jdbc.update("DELETE FROM ma_session_record WHERE session_id = ?", SESSION);
+        });
+        journal.acquire();
+        assertThat(records.findActivityStatistics(TENANT, SESSION)).isEqualTo(summary);
     }
 
     @Test
@@ -334,6 +385,13 @@ class ManagedActivityDiagnosticsTest {
     private CommitResource resource(String kind, byte[] body) {
         return new CommitResource(kind + ":" + ExtensionRecordJournal.sha256(body), kind, 1, body.length,
                 ExtensionRecordJournal.sha256(body), Base64.getEncoder().encodeToString(body));
+    }
+
+    private CommitTransactionRequest withResources(CommitTransactionRequest base, String digest, List<CommitResource> resources) {
+        return new CommitTransactionRequest(base.workspaceId(), base.writerId(), base.writerGeneration(), base.expectedJournalRevision(),
+                base.expectedCommittedSequence(), base.transactionId(), base.operation(), base.commandId(), digest,
+                base.firstSequence(), base.lastSequence(), base.eventCount(), base.eventsDigest(), base.previousCommitDigest(), base.commitDigest(),
+                base.activationEpoch(), base.latestCheckpointResourceId(), base.recordCount(), base.recordBytesBase64(), base.recordDigest(), resources);
     }
 
     private void commit(CommitTransactionRequest request) {

@@ -352,7 +352,26 @@ it.each(['before', 'read', 'replace', 'after'] as const)(
       'daemon-kept',
     );
     const catalog = await recorder.getMessageGroups();
-    const late = () =>
+    const late = () => {
+      recorder.recordUiTelemetryEvent({
+        v: 1,
+        kind: 'hook',
+        'event.name': 'hook_lifecycle',
+        executionId: 'deleted-hook-execution',
+        runtimeId: 'runtime',
+        sessionId: 'session',
+        promptId: 'api-first',
+        agentId: null,
+        eventName: 'Stop',
+        hookType: 'command',
+        source: 'project',
+        name: 'safe',
+        startedAt: 1,
+        phase: 'ended',
+        endedAt: 2,
+        durationMs: 1,
+        outcome: 'success',
+      });
       recorder.recordUiTelemetryEvent({
         ...new ApiResponseEvent(
           'response',
@@ -365,6 +384,7 @@ it.each(['before', 'read', 'replace', 'after'] as const)(
         ),
         'event.name': EVENT_API_RESPONSE,
       } as UiEvent);
+    };
     if (phase === 'before') late();
     if (phase === 'read') {
       const read = lease.readTranscript.bind(lease);
@@ -402,6 +422,7 @@ it.each(['before', 'read', 'replace', 'after'] as const)(
     await recorder.flush();
     const text = await fs.readFile(transcriptPath, 'utf8');
     expect(text).not.toContain('private deleted response');
+    expect(text).not.toContain('deleted-hook-execution');
     expect(text).toContain('retained response');
     expect(
       prepareTranscriptRecords(parseMessageGroupTranscript(text)).gaps,

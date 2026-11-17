@@ -2,7 +2,7 @@
 
 [English](2026-11-08-daemon-pr-watch-observation.md) | [简体中文](2026-11-08-daemon-pr-watch-observation.zh-CN.md)
 
-状态：proposed（2026-11-08）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）的下一步，仅实现 §1 观测与 §3 转换检测；投递（§4–§5）、配置（§6）与 channel 迁移（§7）不在本增量内。
+状态：已实现（#16611；2026-11-08 提案）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.zh-CN.md)（下称「主设计」）的下一步，仅实现 §1 观测与 §3 转换检测；投递（§4–§5）、配置（§6）与 channel 迁移（§7）不在本增量内。下文按该增量当时的设计描述；PR B（#17214）此后移除了内部开关，启用现在即 deps 存在性。
 
 ## 问题
 
@@ -29,7 +29,7 @@
 - watch 文件删除与 `lastBoundAt` 维护（§2）：删除需要 drain 的 scan-completeness 规则；本增量只创建与更新文件。owner-record claim 会被接线，使非 owner 不观测任何东西。
 - serve-lifecycle close 重排（§2）：由于没有 drain 或 restore 在途，目前没有任何在途工作需要在移除 record 前停止；claim/release 已存在。
 - `run-qwen-serve.ts` 中 daemon 级 watch deps 的提供（从 `gh` 配置 host 与托管 channel 的 web host 发现 allowed hosts、lock registry、watch dir）：timer 暴露 `getPrWatchDeps` 接缝，但填充它只有在开关开启后才会被用到，故随启用增量落地。开关关闭时该接缝永不被读取。
-- 观测与 refresh 精简 listing 的耦合：扫描接受 `listedKeys` 集合（并有测试），使 listing 已返回的 closed PR 不被重复 view；主 §1 还要求 listing 把 merged/closed PR 的 `state`/`observedAt` 写入 watch 文件。编排者不跑 listing，故不传 `listedKeys`、也尚无 listing→watch 写入；两者随把 listing 结果接进来的启用增量落地。在此之前每个 closed 绑定都会被 view（正确，只是视图略多），merged/closed 状态只能经 view 到达 watch 文件。
+- 观测与 refresh 精简 listing 的耦合：扫描接受 `listedKeys` 集合（并有测试），使 listing 已返回的 closed PR 不被重复 view；主 §1 还要求 listing 把 merged/closed PR 的 `state`/`observedAt` 写入 watch 文件。编排者自身不跑 listing；启用增量已把它接通，因此 refresh timer 现在按 workspace 把 `listedKeys` 带进下一个 tick，listing 也会把 `state`/`observedAt`——以及它所替代的那次 view 本会触发的 `state_change`——写入 watch 文件。被 listing 覆盖的 closed 绑定不再被重复 view；未覆盖的仍然会，以便捕捉 reopen。
 
 ## 提议改动
 
@@ -73,7 +73,7 @@
 ## 关键设计决策
 
 1. **检测纯函数化、与 I/O 分离。** 转换规则是最易回归的部分；隔离后可直接运行主 §3 验证清单，无需 daemon 或 `gh`。
-2. **默认 off，置于内部常量而非设置之后。** 符合主 §7 PR A：在后继增量开启前任何 build 都不跑观测器；尚不读取设置。
+2. **默认 off，置于内部常量而非设置之后。** 符合主 §7 PR A：在后继增量启用前任何 build 都不跑观测器；当时尚不读取设置。PR B（#17214）直接移除了该常量，而不是翻开它。
 3. **不投递、不删除。** `pending` 累积（受 store 上限约束）但永不 drain；删除与 `lastBoundAt` 等待 drain 增量，使 scan-completeness 规则在一处决定。
 4. **复用而非重实现。** view 抓取、rollup、store、lock registry 与 prompt 契约均已合入；本增量只新增观测编排与检测。
 
@@ -98,8 +98,8 @@
 
 ## 开放问题
 
-- 继承自主设计（默认开启、`cancelled`/`stale` CI 谓词、`review_decision`、Aone parity、手动推送账本）；此处均不决定。
+- 继承自主设计（`review_decision`、Aone parity、手动推送账本）；此处均不决定。默认开启与 `cancelled`/`stale` CI 谓词已于 2026-11-14 定案：默认关闭，保留 core 的谓词。
 
 ## 已决实现选择
 
-- 内部开关是模块常量 `SESSION_PR_WATCH_OBSERVATION_ENABLED`（off），门控 timer 钩子；timer deps 带一个默认取该常量的 `observationEnabled` 测试接缝，使夹具能覆盖 on 路径。生产不传该接缝，故由常量决定。扫描函数被导出并直接测试。仅翻转常量仍会 no-op，直到 `getPrWatchDeps` 被填充（fail closed）。
+- 启用即 deps 存在性：空订阅不构建 watch deps，周期 tick 与按需 drain 都以它们为闸门。本增量设计时门控 timer 钩子的内部常量 `SESSION_PR_WATCH_OBSERVATION_ENABLED` 已在 PR B（#17214）中被移除，而不是翻开。`observationEnabled` 这个 timer deps 测试接缝仍在，`false` 强制关闭监视；缺席或 `true` 则把启用交给 deps 存在性。扫描函数被导出并直接测试。

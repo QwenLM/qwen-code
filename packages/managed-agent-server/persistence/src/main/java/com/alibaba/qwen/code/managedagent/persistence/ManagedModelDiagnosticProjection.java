@@ -63,7 +63,11 @@ final class ManagedModelDiagnosticProjection {
         });
         boolean activity = validated.stream().anyMatch(resource ->
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.resource().kind()));
-        return activity ? 4 : diagnostics ? 3 : promotes ? 2 : 1;
+        boolean measured = new String(records, StandardCharsets.UTF_8).lines().anyMatch(line -> {
+            JsonNode envelope = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
+            return envelope != null && "tool.measured".equals(envelope.path("managedSession").path("kind").asText());
+        });
+        return measured ? 5 : activity ? 4 : diagnostics ? 3 : promotes ? 2 : 1;
     }
 
     static void validateResource(StoredResource resource) {

@@ -60,6 +60,44 @@ it('resolves and pins Harness capability once without acquiring or warming a Run
   expect(broker.runtime).toBeUndefined();
 });
 
+it('retains frozen measurements observed by a cancellation status poll', async () => {
+  const metadata = {
+    protocolVersion: 4,
+    executionProtocol: 2,
+    resultDigest: 'a'.repeat(64),
+    measurements: {
+      protocol: 'managed-tool-measurements/1',
+      executionDurationMs: 0,
+      executionOutcome: 'success',
+      file: null,
+    },
+  };
+  const broker = await fixture(() => ({
+    body: {
+      ...identity,
+      executionCallId: 'execution',
+      status: {
+        state: 'settled',
+        result: {
+          executionStatus: 'success',
+          responseParts: [],
+          diagnostics: metadata,
+        },
+      },
+    },
+  }));
+  expect(await broker.status('execution')).toEqual({
+    state: 'settled',
+    executionStatus: 'success',
+  });
+  expect(broker.toolMeasurements('execution')).toEqual({
+    resultDigest: metadata.resultDigest,
+    measurements: metadata.measurements,
+  });
+  broker.releaseToolMeasurements('execution');
+  expect(broker.toolMeasurements('execution')).toBeUndefined();
+});
+
 it('reads a fresh saved Workspace context after capabilities were cached', async () => {
   let generation = 0;
   const broker = await fixture(() => ({
