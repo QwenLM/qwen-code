@@ -6616,12 +6616,19 @@ describe('qwen-triage verify hardening round 2', () => {
     // the hand-written completion write and left the file two heads stale,
     // so the contract now names one command per step instead of a JSON edit.
     expect(flat).toContain(
-      'Register the round in the shared watch state before starting it',
+      'Register the round in the shared watch state **ahead of prepare**',
     );
     expect(flat).toContain('never hand-write');
+    // R17-2: registration runs ahead of prepare, so --start carries no
+    // --artifact-dir (prepare has not printed the directory yet); a prepare
+    // window kill then leaves a recoverable marker, not a dropped head.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>',
     );
+    expect(flat).toContain(
+      'no `--artifact-dir`, because prepare has not printed the directory yet',
+    );
+    expect(flat).toContain('If prepare fails after `--start`, recover with');
     expect(flat).toContain(
       'Exit 3 means the file already records `H` as verified or in flight',
     );
@@ -6640,8 +6647,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'the same write-before-start rule the watch prompt follows',
     );
+    // R17-2: the directory prepare printed is recorded at --complete.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo <owner>/<repo>',
     );
     // Registration is a step of its own ahead of the round, not an
     // afterthought behind it.
@@ -6702,13 +6710,21 @@ describe('qwen-triage verify hardening round 2', () => {
   it('spells out the watch prompt completion and release forms', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
     // The full registration form, every required flag included.
+    // R17-2: the watch prompt registers ahead of prepare, so --start carries
+    // no --artifact-dir; the directory is recorded at --complete.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>',
+    );
+    expect(flat).toContain(
+      'Register the round **first, ahead of prepare** (R17-2)',
+    );
+    expect(flat).toContain(
+      'a round killed in the prepare window leaves a recoverable in-flight marker rather than a silently dropped head',
     );
     // The completion and release forms carry --repo too: the guard
     // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo <owner>/<repo>',
     );
     // The duty, not just the command string: deleting the consequence
     // sentence while keeping the command must go red too.

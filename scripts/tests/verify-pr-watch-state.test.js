@@ -1749,7 +1749,6 @@ describe('CLI', () => {
         '--artifact-dir',
         'r',
       ],
-      ['16866', '--start', '--head', HEAD, '--round', '1'],
       [
         '16866',
         '--complete',
@@ -3192,5 +3191,94 @@ describe('round-12 witnesses', () => {
     expect(re.duplicate).toBe('in-flight');
     const entry = readState(root, 1).deferredHeads.find((e) => e.head === HEAD);
     expect(entry.seq).toBeNull();
+  });
+});
+
+// R17-2: registration runs ahead of prepare, so --start no longer requires
+// --artifact-dir (prepare has not printed the directory yet). A round killed
+// in the prepare window leaves a recoverable in-flight marker, not a silently
+// dropped head; the directory prepare printed is recorded at --complete.
+describe('R17-2 register ahead of prepare', () => {
+  it('--start without --artifact-dir registers in flight with a null dir', () => {
+    const root = makeRoot();
+    const res = run(root, START);
+    expect(res.status).toBe(0);
+    const st = readState(root, 16866);
+    expect(st.inFlightHeads[0]).toMatchObject({ head: HEAD, round: 11 });
+    expect(st.inFlightHeads[0].artifactDir).toBeNull();
+  });
+
+  it('--start with --artifact-dir still records it (backward compatible)', () => {
+    const root = makeRoot();
+    const res = run(root, [...START, '--artifact-dir', 'r11']);
+    expect(res.status).toBe(0);
+    expect(readState(root, 16866).inFlightHeads[0].artifactDir).toBe('r11');
+  });
+
+  it('--start still rejects an empty --artifact-dir', () => {
+    const root = makeRoot();
+    const res = run(root, [...START, '--artifact-dir', '']);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--artifact-dir must not be empty/);
+  });
+
+  it('--complete records the directory prepare printed', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'r11',
+    ]);
+    expect(res.status).toBe(0);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r11');
+  });
+
+  it('--complete without a dir inherits the start directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+    ]);
+    expect(res.status).toBe(0);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r11');
+  });
+
+  it('a prepare-window kill leaves a recoverable marker, not a dropped head', () => {
+    const root = makeRoot();
+    // Register first (no dir), then the round dies during prepare: no
+    // --complete runs. The marker stays in flight and is recoverable.
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 11 }).duplicate,
+    ).toBeUndefined();
+    expect(readState(root, 1).inFlightHeads[0].artifactDir ?? null).toBeNull();
+    // Recovery releases the dead round's marker...
+    const released = releaseRound(root, { pr: 1, head: HEAD });
+    expect(released.released).toBe(true);
+    // ...and the head is startable again, not silently deduped away.
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 12 }).duplicate,
+    ).toBeUndefined();
+    expect(readState(root, 1).inFlightHeads[0].round).toBe(12);
   });
 });

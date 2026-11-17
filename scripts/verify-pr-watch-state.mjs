@@ -18,7 +18,7 @@
  *
  * Usage:
  *   node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> \
- *     --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
+ *     [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
  *   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> \
  *     --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] \
  *     [--repo <owner>/<repo>] [--state-root <dir>]
@@ -893,11 +893,16 @@ export function releaseRound(stateRoot, { pr, head, round, repo }) {
 }
 
 const HELP = `Usage:
-  node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
   node verify-pr-watch-state.mjs <pr> --release --head <oid> [--round <n>] [--repo <owner>/<repo>] [--state-root <dir>]
 
 Owns .qwen/tmp/verify-pr-watch-<pr>.json so rounds never hand-write it.
+Register with --start AHEAD of prepare (R17-2): --artifact-dir is optional on
+--start because prepare has not printed the directory yet; a round killed in
+the prepare window then leaves a recoverable in-flight marker, not a silently
+dropped head. Record the directory prepare printed at --complete
+(--artifact-dir <dir>); a completion that omits it inherits the marker's.
 --start exits 3 when the head is already verified or any round is in flight
 for the PR (one round per PR). Every verb exits 3 when the state belongs to
 another repo (a PR number is only unique within its repository); an omitted
@@ -976,9 +981,9 @@ function parseArgs(argv) {
   if (out.round !== null && (!Number.isInteger(out.round) || out.round <= 0)) {
     throw new Error(`--round must be a positive integer\n\n${HELP}`);
   }
-  if (out.start && !out.artifactDir) {
-    throw new Error(`--start requires --artifact-dir\n\n${HELP}`);
-  }
+  // --artifact-dir is optional on --start: registration runs ahead of prepare
+  // (R17-2), before the directory exists. The directory is recorded at
+  // --complete; a start that already knows it may still pass it.
   // A valueless or empty --artifact-dir on --complete would blank the
   // recorded directory ('' is not null, so the ?? fallback never fires);
   // reject it like every sibling flag.

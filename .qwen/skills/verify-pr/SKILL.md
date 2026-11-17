@@ -727,12 +727,17 @@ Build the task in this order and stop at the first failure:
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
-Run prepare first (trusted host metadata), then register the round with
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`
-**before** the verification work starts, so a round that dies does not
-replay the same head; `<dir>` is the artifact directory prepare printed,
-and `<r>` is this round's number — pick the next integer and **repeat the
-same value in `--complete`**; the completion is matched by head and round.
+Register the round **first, ahead of prepare** (R17-2), with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>`
+— no `--artifact-dir`, because prepare has not printed the directory yet — so
+a round killed in the prepare window leaves a recoverable in-flight marker
+rather than a silently dropped head (the probe cursor already advanced past the
+delivered head). `<r>` is this round's number — pick the next integer and
+**repeat the same value in `--complete`**; the completion is matched by head and
+round. Then run prepare (trusted host metadata); it creates and prints the
+artifact directory `<dir>`, which you record at `--complete`. If prepare fails
+after `--start`, recover with `--release --head <headSha>` so the head is not
+stranded in flight.
 The helper runs from the trusted clone — the state root defaults to its
 main worktree, never the round's PR clone. The default resolves from the
 script's own location, so a copy outside the trusted clone — the container
@@ -760,8 +765,10 @@ Exit 3 has several shapes, each with its own reaction:
   it once the state records a repo.
 
 Record the finished round with the same script's completion form:
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>`
-— `--verdict` is one of `merge-ready | findings | blocked | inconclusive`,
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo <owner>/<repo>`
+— `--artifact-dir <dir>` records the directory prepare printed (the `--start`
+registration ran before prepare and carried none); `--verdict` is one of
+`merge-ready | findings | blocked | inconclusive`,
 verbatim; a completion without it exits 2 and leaves the head in flight
 forever. A completion whose `--round` differs from the in-flight marker, or
 from a round that already answered for the head, is refused (exit 3) rather
@@ -942,13 +949,17 @@ ambiguous rather than verify a guessed PR. Then, in order:
    reviews and CI results that arrived since are data to fold into that
    answer, never a reason to re-verify — the same rule the watch gate
    applies.
-3. Register the round in the shared watch state before starting it, through
-   the helper that owns `.qwen/tmp/verify-pr-watch-<n>.json` — never hand-write
-   that JSON. Run it from the trusted clone (the state root defaults to its
-   main worktree, never the round's PR clone), after prepare has printed the
-   artifact directory — `<dir>` is that printed path:
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>`.
-   `<r>` is this round's number; repeat the same value in `--complete`.
+3. Register the round in the shared watch state **ahead of prepare** (R17-2),
+   through the helper that owns `.qwen/tmp/verify-pr-watch-<n>.json` — never
+   hand-write that JSON. Run it from the trusted clone (the state root defaults
+   to its main worktree, never the round's PR clone), before prepare runs, so a
+   round killed in the prepare window leaves a recoverable in-flight marker:
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>`
+   — no `--artifact-dir`, because prepare has not printed the directory yet.
+   `<r>` is this round's number; repeat the same value in `--complete`. Then run
+   prepare; it creates and prints the artifact directory `<dir>`, which you
+   record at `--complete`. If prepare fails after `--start`, recover with
+   `--release --head <H>` so the head is not stranded in flight.
    Exit 3 means the file already records `H` as verified or in flight, or
    another head's round is in flight (one round per PR): let that round
    answer instead of starting a duplicate. A cross-head refusal records `H`
@@ -975,7 +986,8 @@ ambiguous rather than verify a guessed PR. Then, in order:
    **before** the round starts — the same write-before-start rule the watch
    prompt follows, so a watch fire during the manual round skips `H`. Once
    the round completes, record it with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>`.
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> --artifact-dir <dir> [--comment-id <id>] --repo <owner>/<repo>`
+   (`<dir>` is the artifact directory prepare printed).
    A completion whose `--round` differs from the marker, or from a round
    that already answered for `H`, is refused (exit 3).
    Measured case: two consecutive rounds skipped the hand-written completion
