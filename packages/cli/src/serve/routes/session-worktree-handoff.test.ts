@@ -1344,6 +1344,41 @@ describe('POST /session/:id/worktree-handoff', () => {
     }
   });
 
+  it('does not claim a restore when rollback force-checkout also fails (round-9 S18)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    writeFileSync(path.join(fixture.worktreeDir, 'README.md'), 'dirty\n');
+    // Compound fault: the apply's own restore failed (restoreFailed) AND the
+    // same held lock fails rollback's force-checkout. The checkout still holds
+    // conflict markers, so the refusal must not claim a restore that never
+    // happened.
+    const applySpy = vi
+      .spyOn(GitWorktreeService.prototype, 'applyStashSnapshot')
+      .mockRejectedValueOnce(
+        new WorktreeDirtyCarryConflictError('conflict', {
+          conflict: true,
+          restoreFailed: true,
+        }),
+      );
+    const checkoutSpy = vi
+      .spyOn(GitWorktreeService.prototype, 'forceCheckoutBranch')
+      .mockRejectedValueOnce(new Error('index lock held'));
+    try {
+      const res = await request(fixture.app)
+        .post(`/session/${fixture.sessionId}/worktree-handoff`)
+        .send({ to: 'local' });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('handoff_snapshot_conflict');
+      expect(res.body.detail).toContain('could not be restored');
+      expect(res.body.detail).not.toContain('force-restored by rollback');
+    } finally {
+      applySpy.mockRestore();
+      checkoutSpy.mockRestore();
+    }
+  });
+
   it('refuses handoff to local when the recorded base is missing', async () => {
     const fixture = makeFixture();
     fixture.writeTranscript();

@@ -5431,7 +5431,13 @@ export function registerSessionRoutes(
               let localOriginalBranch: string | null = null;
               let detachedFrom: string | null = null;
               let copiedUntracked: string[] = [];
-              const rollback = async () => {
+              const rollback = async (): Promise<boolean> => {
+                // Whether the local checkout was force-restored to its
+                // pre-handoff committed state. A failed force-checkout (e.g.
+                // the same held index lock that failed the apply's own reset)
+                // leaves conflict markers behind, so the refusal must not
+                // claim a restore that did not happen (round-9 S18).
+                let localRestored = false;
                 if (copiedUntracked.length > 0) {
                   const localTop =
                     (await localService.getRepoTopLevel().catch(() => null)) ??
@@ -5445,9 +5451,10 @@ export function registerSessionRoutes(
                   }
                 }
                 if (localOriginalBranch !== null) {
-                  await localService
+                  localRestored = await localService
                     .forceCheckoutBranch(localCwd, localOriginalBranch)
-                    .catch(() => undefined);
+                    .then(() => true)
+                    .catch(() => false);
                 }
                 if (autoBranch !== null) {
                   const deleted = await wtService
@@ -5481,6 +5488,7 @@ export function registerSessionRoutes(
                     .checkoutBranchInCheckout(realTarget, detachedFrom)
                     .catch(() => undefined);
                 }
+                return localRestored;
               };
               // Capture the local ref before ANY mutation (the stash apply
               // and untracked carry run even when no branch is promoted),
@@ -5556,14 +5564,17 @@ export function registerSessionRoutes(
                     // index entries into the user's checkout. An environment
                     // failure (unwritable index, unreadable index state) did
                     // not land the work at all; a conflict whose own restore
-                    // failed (restoreFailed) may leave markers behind until
-                    // rollback's force-checkout runs. Rollback restores the
-                    // checkout either way; refuse with a typed code that
-                    // distinguishes content to resolve from a carry that could
-                    // not apply, and surface restoreFailed so the refusal never
-                    // claims a clean restore the service could not make
-                    // (6903276958).
-                    await rollback();
+                    // failed (restoreFailed) leaves markers behind for
+                    // rollback's force-checkout to clear. Refuse with a typed
+                    // code that distinguishes content to resolve from a carry
+                    // that could not apply, and surface restoreFailed so the
+                    // refusal never claims a clean restore the service could
+                    // not make (6903276958). The note must track what rollback
+                    // actually did: when the same fault (e.g. a held index
+                    // lock) also fails rollback's force-checkout, the checkout
+                    // still holds markers and the refusal must say so rather
+                    // than claim a restore that never happened (round-9 S18).
+                    const localRestored = await rollback();
                     const isConflict =
                       error instanceof WorktreeDirtyCarryConflictError &&
                       error.conflict;
@@ -5582,7 +5593,9 @@ export function registerSessionRoutes(
                           ? error.message
                           : String(error)) +
                         (restoreFailed
-                          ? ' — the local checkout was force-restored by rollback; inspect it if conflict markers remain'
+                          ? localRestored
+                            ? ' — the local checkout was force-restored by rollback; inspect it if conflict markers remain'
+                            : ' — the local checkout could not be restored and may still hold conflict markers; inspect it before retrying'
                           : ''),
                       sessionId: storageSessionId,
                     });

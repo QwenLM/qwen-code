@@ -163,13 +163,17 @@ export class WorkspaceGitState {
     // Decision (6882263037): the cold-cache shape deliberately omits
     // `hasHead` (and every other computed field) rather than guessing a
     // value before the first status refresh lands. Absent `hasHead` means
-    // "not yet computed", NOT "has a head": a consumer must treat an absent
-    // field as unknown and wait for a payload with `computedAt` before
-    // gating on it. A reader that tests `hasHead !== false` would misread
-    // unknown as yes — that is a consumer bug, not a reason to fabricate a
-    // cold-cache `hasHead`. The first payload after daemon start is
-    // branch-only by design; the watcher's refresh fills the computed fields
-    // shortly after.
+    // "not yet computed" — a transient unknown, not a definitive answer.
+    // The worktree default (design D1) intentionally reads this optimistically:
+    // `App.gitModeEligible` arms on `hasHead !== false` and `gitModeIntent`
+    // treats `hasHead === undefined` as transient, so an omitted field keeps
+    // an armed intent alive; only a definitive `hasHead: false` (an unborn
+    // HEAD with no worktree base) clears it. That is the shipped contract,
+    // not a misreading. A consumer that needs a definitive answer before
+    // acting must wait for a payload carrying `computedAt`; the cold-cache
+    // shape is not a reason to fabricate a `hasHead` value. The first payload
+    // after daemon start is branch-only by design; the watcher's refresh
+    // fills the computed fields shortly after.
     if (!status) {
       return { v: 2, workspaceCwd, branch: entry.branch ?? null };
     }
