@@ -7,8 +7,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
+import * as processLiveness from '../utils/process-liveness.js';
 import { SessionService } from './sessionService.js';
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
@@ -97,6 +98,10 @@ describe('SessionService project relinking', () => {
       fixture.oldChatsDir,
       `${SESSION_ID}.ledger.jsonl`,
     );
+    const titlePath = path.join(
+      fixture.oldChatsDir,
+      `${SESSION_ID}.title.json`,
+    );
     fs.writeFileSync(
       runtimePath,
       JSON.stringify({
@@ -119,6 +124,10 @@ describe('SessionService project relinking', () => {
     );
     fs.writeFileSync(prPath, '{"number":42}\n');
     fs.writeFileSync(ledgerPath, '{"event":"terminal"}\n');
+    fs.writeFileSync(
+      titlePath,
+      '{"version":1,"displayName":"kept title","source":"manual","updatedAt":"2026-09-24T00:00:00.000Z"}\n',
+    );
     const projectTempDir = fixture.oldStorage.getProjectTempDir();
     fs.mkdirSync(projectTempDir, { recursive: true });
     const tempSentinel = path.join(projectTempDir, 'unrelated-project-data');
@@ -128,7 +137,9 @@ describe('SessionService project relinking', () => {
     const lookup = await fixture.service.findRelinkCandidate(SESSION_ID);
     expect(lookup.status).toBe('candidate');
     if (lookup.status !== 'candidate') throw new Error('expected candidate');
-    await fixture.service.relinkSession(lookup.candidate);
+    await expect(
+      fixture.service.relinkSession(lookup.candidate),
+    ).resolves.toEqual({ status: 'relinked' });
 
     const newChatsDir = path.dirname(
       fixture.service.getSessionTranscriptPath(SESSION_ID),
@@ -138,6 +149,7 @@ describe('SessionService project relinking', () => {
     expect(fs.existsSync(worktreePath)).toBe(false);
     expect(fs.existsSync(prPath)).toBe(false);
     expect(fs.existsSync(ledgerPath)).toBe(false);
+    expect(fs.existsSync(titlePath)).toBe(false);
     expect(fs.readFileSync(tempSentinel, 'utf8')).toBe('leave me');
 
     const migratedRecords = fs
@@ -180,6 +192,15 @@ describe('SessionService project relinking', () => {
         'utf8',
       ),
     ).toBe('{"event":"terminal"}\n');
+    expect(
+      fs.readFileSync(
+        path.join(newChatsDir, `${SESSION_ID}.title.json`),
+        'utf8',
+      ),
+    ).toContain('"displayName":"kept title"');
+    await expect(
+      fixture.service.loadSession(SESSION_ID),
+    ).resolves.toBeDefined();
   });
 
   it('refuses to relink while the recorded source directory still exists', async () => {
@@ -227,7 +248,9 @@ describe('SessionService project relinking', () => {
     const lookup = await service.findRelinkCandidate(SESSION_ID);
     expect(lookup.status).toBe('candidate');
     if (lookup.status !== 'candidate') throw new Error('expected candidate');
-    await service.relinkSession(lookup.candidate);
+    await expect(service.relinkSession(lookup.candidate)).resolves.toEqual({
+      status: 'relinked',
+    });
 
     expect(service.getSessionTranscriptPath(SESSION_ID)).toBe(transcriptPath);
     const record = JSON.parse(fs.readFileSync(transcriptPath, 'utf8')) as {
@@ -257,12 +280,9 @@ describe('SessionService project relinking', () => {
     ).resolves.toMatchObject({ status: 'ambiguous' });
   });
 
-  it('does not move anything when a target sidecar already exists', async () => {
+  it('reports a target sidecar conflict before confirmation', async () => {
     const fixture = makeFixture();
     fs.rmSync(fixture.oldCwd, { recursive: true });
-    const lookup = await fixture.service.findRelinkCandidate(SESSION_ID);
-    expect(lookup.status).toBe('candidate');
-    if (lookup.status !== 'candidate') throw new Error('expected candidate');
     const targetChatsDir = path.dirname(
       fixture.service.getSessionTranscriptPath(SESSION_ID),
     );
@@ -271,8 +291,8 @@ describe('SessionService project relinking', () => {
     fs.writeFileSync(targetSidecar, '{"number":99}\n');
 
     await expect(
-      fixture.service.relinkSession(lookup.candidate),
-    ).rejects.toThrow('already exists');
+      fixture.service.findRelinkCandidate(SESSION_ID),
+    ).resolves.toMatchObject({ status: 'blocked', reason: 'target_conflict' });
     expect(fs.existsSync(fixture.transcriptPath)).toBe(true);
     expect(
       fs.existsSync(fixture.service.getSessionTranscriptPath(SESSION_ID)),
@@ -320,6 +340,59 @@ describe('SessionService project relinking', () => {
     await expect(
       fixture.service.findRelinkCandidate(SESSION_ID),
     ).resolves.toMatchObject({ status: 'blocked', reason: 'active_writer' });
+  });
+
+  it('treats a runtime writer from another PID namespace as active', async () => {
+    const fixture = makeFixture();
+    fs.writeFileSync(
+      path.join(fixture.oldChatsDir, `${SESSION_ID}.runtime.json`),
+      JSON.stringify({
+        schema_version: 1,
+        pid: 2147483647,
+        proc_start: 'foreign-start',
+        pid_ns: -1,
+        session_id: SESSION_ID,
+        work_dir: fixture.oldCwd,
+        hostname: os.hostname(),
+        started_at: 1,
+        qwen_version: null,
+      }),
+    );
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+
+    await expect(
+      fixture.service.findRelinkCandidate(SESSION_ID),
+    ).resolves.toMatchObject({ status: 'blocked', reason: 'active_writer' });
+  });
+
+  it('does not treat a recycled PID as the original writer', async () => {
+    const fixture = makeFixture();
+    const procStart = vi
+      .spyOn(processLiveness, 'readProcStartToken')
+      .mockReturnValue('actual-process-start');
+    fs.writeFileSync(
+      path.join(fixture.oldChatsDir, `${SESSION_ID}.runtime.json`),
+      JSON.stringify({
+        schema_version: 1,
+        pid: process.pid,
+        proc_start: 'definitely-not-this-process',
+        pid_ns: null,
+        session_id: SESSION_ID,
+        work_dir: fixture.oldCwd,
+        hostname: os.hostname(),
+        started_at: 1,
+        qwen_version: null,
+      }),
+    );
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+
+    try {
+      await expect(
+        fixture.service.findRelinkCandidate(SESSION_ID),
+      ).resolves.toMatchObject({ status: 'candidate' });
+    } finally {
+      procStart.mockRestore();
+    }
   });
 
   it('refuses a hard-linked transcript', async () => {
@@ -410,16 +483,137 @@ describe('SessionService project relinking', () => {
     ).toBe(false);
   });
 
-  it('refuses an invalid transcript', async () => {
+  it('recovers the same truncated tail that normal session loading tolerates', async () => {
     const fixture = makeFixture();
     fs.appendFileSync(fixture.transcriptPath, '{truncated');
     fs.rmSync(fixture.oldCwd, { recursive: true });
 
+    const lookup = await fixture.service.findRelinkCandidate(SESSION_ID);
+    expect(lookup.status).toBe('candidate');
+    if (lookup.status !== 'candidate') throw new Error('expected candidate');
     await expect(
-      fixture.service.findRelinkCandidate(SESSION_ID),
-    ).resolves.toMatchObject({
+      fixture.service.relinkSession(lookup.candidate),
+    ).resolves.toEqual({ status: 'relinked' });
+    await expect(
+      fixture.service.loadSession(SESSION_ID),
+    ).resolves.toBeDefined();
+  });
+
+  it('returns source_unavailable with read diagnostics', async () => {
+    const fixture = makeFixture();
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+    const originalReadFile = fs.promises.readFile.bind(fs.promises);
+    const readFile = vi
+      .spyOn(fs.promises, 'readFile')
+      .mockImplementation(async (filePath, options) => {
+        if (filePath === fixture.transcriptPath) {
+          throw Object.assign(new Error('permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        return originalReadFile(filePath, options as never);
+      });
+    try {
+      await expect(
+        fixture.service.findRelinkCandidate(SESSION_ID),
+      ).resolves.toMatchObject({
+        status: 'blocked',
+        reason: 'source_unavailable',
+        detail: expect.stringContaining('permission denied'),
+      });
+    } finally {
+      readFile.mockRestore();
+    }
+  });
+
+  it('refuses a transcript appended after candidate lookup', async () => {
+    const fixture = makeFixture();
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+    const lookup = await fixture.service.findRelinkCandidate(SESSION_ID);
+    expect(lookup.status).toBe('candidate');
+    if (lookup.status !== 'candidate') throw new Error('expected candidate');
+    fs.appendFileSync(fixture.transcriptPath, '\n');
+
+    await expect(
+      fixture.service.relinkSession(lookup.candidate),
+    ).resolves.toEqual({
       status: 'blocked',
-      reason: 'invalid_transcript',
+      result: { status: 'blocked', reason: 'source_unavailable' },
     });
+    expect(fs.existsSync(fixture.transcriptPath)).toBe(true);
+  });
+
+  it('returns the refreshed active-writer refusal', async () => {
+    const fixture = makeFixture();
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+    const lookup = await fixture.service.findRelinkCandidate(SESSION_ID);
+    expect(lookup.status).toBe('candidate');
+    if (lookup.status !== 'candidate') throw new Error('expected candidate');
+    fs.writeFileSync(
+      path.join(fixture.oldChatsDir, `${SESSION_ID}.runtime.json`),
+      JSON.stringify({
+        schema_version: 1,
+        pid: process.pid,
+        proc_start: null,
+        pid_ns: null,
+        session_id: SESSION_ID,
+        work_dir: fixture.oldCwd,
+        hostname: os.hostname(),
+        started_at: 1,
+        qwen_version: null,
+      }),
+    );
+
+    await expect(
+      fixture.service.relinkSession(lookup.candidate),
+    ).resolves.toEqual({
+      status: 'blocked',
+      result: {
+        status: 'blocked',
+        reason: 'active_writer',
+        recordedCwd: fixture.oldCwd,
+      },
+    });
+    expect(fs.existsSync(fixture.transcriptPath)).toBe(true);
+  });
+
+  it('rolls back a partial publish without leaving staging files', async () => {
+    const fixture = makeFixture();
+    fs.writeFileSync(
+      path.join(fixture.oldChatsDir, `${SESSION_ID}.pr.json`),
+      '{"number":42}\n',
+    );
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+    const lookup = await fixture.service.findRelinkCandidate(SESSION_ID);
+    expect(lookup.status).toBe('candidate');
+    if (lookup.status !== 'candidate') throw new Error('expected candidate');
+    const sourceBefore = fs.readFileSync(fixture.transcriptPath);
+    const originalLink = fs.linkSync;
+    let calls = 0;
+    const link = vi.spyOn(fs, 'linkSync').mockImplementation((from, to) => {
+      calls += 1;
+      if (calls === 2) throw new Error('forced publish failure');
+      return originalLink(from, to);
+    });
+    try {
+      await expect(
+        fixture.service.relinkSession(lookup.candidate),
+      ).rejects.toThrow('forced publish failure');
+    } finally {
+      link.mockRestore();
+    }
+    expect(fs.readFileSync(fixture.transcriptPath)).toEqual(sourceBefore);
+    const targetChatsDir = path.dirname(
+      fixture.service.getSessionTranscriptPath(SESSION_ID),
+    );
+    expect(
+      fs.existsSync(fixture.service.getSessionTranscriptPath(SESSION_ID)),
+    ).toBe(false);
+    expect(
+      fs.existsSync(path.join(targetChatsDir, `${SESSION_ID}.pr.json`)),
+    ).toBe(false);
+    expect(
+      fs.readdirSync(targetChatsDir).some((name) => name.includes('.relink-')),
+    ).toBe(false);
   });
 });

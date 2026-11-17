@@ -132,10 +132,7 @@ import {
   superviseInProcess,
 } from './utils/processUtils.js';
 import { getInstallationInfo } from './utils/installationInfo.js';
-import {
-  isInteractiveResumeInvocation,
-  maybeRelinkResumeSession,
-} from './utils/session-relink.js';
+import { maybeRelinkResumeSession } from './utils/session-relink.js';
 import { isInteractiveInvocation } from './utils/interactive-mode.js';
 import { selectNpmBunHandoff } from './utils/npm-runtime.js';
 import { createLocalWorkflowAncestorTrustProvider } from './config/trustedFolders.js';
@@ -748,9 +745,14 @@ export async function main() {
     // another way to decouple refreshAuth from requiring a config.
 
     if (sandboxConfig) {
+      const sandboxBootstrapArgv = {
+        ...argv,
+        continue: undefined,
+        resume: undefined,
+      };
       const partialConfig = await loadCliConfig(
         settings.merged,
-        argv,
+        sandboxBootstrapArgv,
         undefined,
         [],
         // Pass separated hooks for proper source attribution
@@ -1096,7 +1098,15 @@ export async function main() {
       const relink = await maybeRelinkResumeSession({
         sessionId: argv.resume,
         cwd: process.cwd(),
-        interactive: isInteractiveResumeInvocation(argv),
+        interactive:
+          isInteractiveInvocation(argv) &&
+          Boolean(process.stdout.isTTY) &&
+          !(
+            isAcpMode ||
+            argv.inputFormat === InputFormat.STREAM_JSON ||
+            (argv.inputFile ?? settings.merged.dualOutput?.inputFile) ||
+            argv.jsonFd !== undefined
+          ),
       });
       if (relink.status === 'blocked') {
         writeStderrLine(relink.message);

@@ -8,6 +8,7 @@ import prompts from 'prompts';
 import {
   SessionService,
   type SessionRelinkLookupResult,
+  type SessionRelinkMutationResult,
 } from '@qwen-code/qwen-code-core/services/sessionService.js';
 
 interface RelinkSessionService {
@@ -20,7 +21,7 @@ interface RelinkSessionService {
       SessionRelinkLookupResult,
       { status: 'candidate' }
     >['candidate'],
-  ): Promise<void>;
+  ): Promise<SessionRelinkMutationResult>;
 }
 
 export type ResumeSessionRelinkResult =
@@ -29,22 +30,23 @@ export type ResumeSessionRelinkResult =
   | { status: 'cancelled' }
   | { status: 'blocked'; message: string };
 
-export function isInteractiveResumeInvocation(argv: {
-  promptInteractive?: string;
-  query?: string;
-  prompt?: string;
-  outputFormat?: string;
-}): boolean {
-  if (argv.promptInteractive) return true;
-  if (!argv.query && !argv.prompt) return process.stdin.isTTY ?? false;
-  return false;
-}
-
 function blockedMessage(result: SessionRelinkLookupResult): string {
   if (result.status === 'ambiguous') {
+    const directories = [
+      ...new Set(
+        result.matches
+          .map((match) => match.recordedCwd)
+          .filter((cwd): cwd is string => cwd !== undefined),
+      ),
+    ];
+    const locations =
+      directories.length > 0
+        ? ` Recorded project directories: ${directories.join(', ')}.`
+        : '';
     return (
       'More than one saved session has this ID in another project. ' +
-      'Qwen Code did not move any files; remove the duplicate or resume from the original directory.'
+      'Qwen Code did not move any files; remove the duplicate or resume from the original directory.' +
+      locations
     );
   }
   if (result.status !== 'blocked') return '';
@@ -63,9 +65,15 @@ function blockedMessage(result: SessionRelinkLookupResult): string {
     case 'target_conflict':
       return 'A session artifact with this ID already exists for the current project, so Qwen Code did not overwrite it.';
     case 'scan_incomplete':
-      return 'Qwen Code could not safely complete the saved-session search, so it did not move any files.';
+      return (
+        'Qwen Code could not safely complete the saved-session search, so it did not move any files.' +
+        (result.detail ? ` ${result.detail}` : '')
+      );
     case 'source_unavailable':
-      return 'The saved session changed or became unavailable while Qwen Code was checking it.';
+      return (
+        'The saved session changed or became unavailable while Qwen Code was checking it.' +
+        (result.detail ? ` ${result.detail}` : '')
+      );
     default:
       return 'The saved session cannot be safely reattached.';
   }
@@ -113,7 +121,10 @@ export async function maybeRelinkResumeSession(options: {
   if (!confirmed) return { status: 'cancelled' };
 
   try {
-    await service.relinkSession(lookup.candidate);
+    const mutation = await service.relinkSession(lookup.candidate);
+    if (mutation.status === 'blocked') {
+      return { status: 'blocked', message: blockedMessage(mutation.result) };
+    }
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return {

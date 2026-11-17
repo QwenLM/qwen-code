@@ -60,7 +60,6 @@ vi.mock(
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockMaybeRelinkResumeSession = vi.hoisted(() => vi.fn());
-const mockIsInteractiveResumeInvocation = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
@@ -234,7 +233,6 @@ vi.mock('./utils/stdioHelpers.js', () => ({
 
 vi.mock('./utils/session-relink.js', () => ({
   maybeRelinkResumeSession: mockMaybeRelinkResumeSession,
-  isInteractiveResumeInvocation: mockIsInteractiveResumeInvocation,
 }));
 
 vi.mock('./utils/relaunch.js', () => ({
@@ -402,8 +400,6 @@ describe('llm.tsx main function', () => {
   beforeEach(() => {
     mockMaybeRelinkResumeSession.mockReset();
     mockMaybeRelinkResumeSession.mockResolvedValue({ status: 'unchanged' });
-    mockIsInteractiveResumeInvocation.mockReset();
-    mockIsInteractiveResumeInvocation.mockReturnValue(true);
     mockStartNonInteractiveOpenAILogHousekeeping.mockClear();
     mockStopNonInteractiveOpenAILogHousekeeping.mockClear();
     lspConfigWatcherMock.instances.length = 0;
@@ -461,9 +457,41 @@ describe('llm.tsx main function', () => {
     vi.restoreAllMocks();
   });
 
+  const prepareResumeStartup = async (
+    argv: Partial<CliArgs>,
+    relinkResult:
+      | { status: 'unchanged' }
+      | { status: 'relinked'; previousCwd: string }
+      | { status: 'cancelled' }
+      | { status: 'blocked'; message: string },
+  ) => {
+    process.env['SANDBOX'] = '1';
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    vi.mocked(parseArguments).mockResolvedValue({
+      ...argv,
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: { advanced: {}, security: { auth: {} }, ui: {} },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getSystemHooks: () => undefined,
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    mockMaybeRelinkResumeSession.mockResolvedValue(relinkResult);
+    return { loadCliConfig };
+  };
+
   it('prints a blocked resume relink as one CLI error and exits with status 1', async () => {
     const sessionId = '11111111-1111-4111-8111-111111111111';
     const refusal = 'Qwen Code could not safely complete session reattachment.';
+    process.env['SANDBOX'] = '1';
     const processExitSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation((code) => {
@@ -527,12 +555,106 @@ describe('llm.tsx main function', () => {
     expect(mockMaybeRelinkResumeSession).toHaveBeenCalledWith({
       sessionId,
       cwd: process.cwd(),
-      interactive: true,
+      interactive: false,
     });
     expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
     expect(mockWriteStderrLine).toHaveBeenCalledWith(refusal);
     expect(processExitSpy).toHaveBeenCalledWith(1);
   });
+
+  it.each([
+    ['unchanged', { status: 'unchanged' } as const],
+    [
+      'relinked',
+      { status: 'relinked', previousCwd: '/workspace/before' } as const,
+    ],
+  ])(
+    'continues into config loading after a %s relink result',
+    async (_name, result) => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const { loadCliConfig } = await prepareResumeStartup(
+        { resume: sessionId },
+        result,
+      );
+      vi.mocked(loadCliConfig).mockRejectedValue(new Error('after relink'));
+
+      await expect(main()).rejects.toThrow('after relink');
+      expect(mockMaybeRelinkResumeSession).toHaveBeenCalledOnce();
+      expect(loadCliConfig).toHaveBeenCalledOnce();
+      if (result.status === 'relinked') {
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('Reattached session'),
+        );
+      }
+    },
+  );
+
+  it('exits cleanly after a cancelled relink confirmation', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const { loadCliConfig } = await prepareResumeStartup(
+      { resume: sessionId },
+      { status: 'cancelled' },
+    );
+    const exit = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new MockProcessExitError(code);
+    });
+
+    await expect(main()).rejects.toEqual(new MockProcessExitError(0));
+    expect(exit).toHaveBeenCalledWith(0);
+    expect(loadCliConfig).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['redirected stdout', {}, false],
+    ['stream-json protocol', { inputFormat: 'stream-json' }, true],
+    ['ACP protocol', { acp: true }, true],
+  ])(
+    'does not prompt for relink in %s mode',
+    async (_name, argv, stdoutIsTTY) => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const stdoutDescriptor = Object.getOwnPropertyDescriptor(
+        process.stdout,
+        'isTTY',
+      );
+      const stdinDescriptor = Object.getOwnPropertyDescriptor(
+        process.stdin,
+        'isTTY',
+      );
+      Object.defineProperty(process.stdout, 'isTTY', {
+        configurable: true,
+        value: stdoutIsTTY,
+      });
+      Object.defineProperty(process.stdin, 'isTTY', {
+        configurable: true,
+        value: true,
+      });
+      const exit = vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+      await prepareResumeStartup(
+        { ...argv, resume: sessionId } as Partial<CliArgs>,
+        { status: 'blocked', message: 'confirmation unavailable' },
+      );
+      try {
+        await expect(main()).rejects.toEqual(new MockProcessExitError(1));
+        expect(mockMaybeRelinkResumeSession).toHaveBeenCalledWith(
+          expect.objectContaining({ interactive: false }),
+        );
+        expect(exit).toHaveBeenCalledWith(1);
+      } finally {
+        if (stdoutDescriptor) {
+          Object.defineProperty(process.stdout, 'isTTY', stdoutDescriptor);
+        } else {
+          delete (process.stdout as { isTTY?: unknown }).isTTY;
+        }
+        if (stdinDescriptor) {
+          Object.defineProperty(process.stdin, 'isTTY', stdinDescriptor);
+        } else {
+          delete (process.stdin as { isTTY?: unknown }).isTTY;
+        }
+      }
+    },
+  );
 
   it.each([
     [false, undefined, undefined],
@@ -2753,6 +2875,7 @@ describe('llm.tsx main function', () => {
     argv: string[],
     sessionId = '123e4567-e89b-12d3-a456-426614174000',
     command: 'docker' | 'podman' | 'sandbox-exec' = 'sandbox-exec',
+    parsedArgs: Partial<CliArgs> = { debug: true, prompt: 'hello' },
   ): Promise<string[]> => {
     const originalArgv = process.argv;
     process.argv = argv;
@@ -2773,8 +2896,7 @@ describe('llm.tsx main function', () => {
     vi.mocked(start_sandbox).mockClear();
     vi.mocked(relaunchOnExitCode).mockClear();
     vi.mocked(parseArguments).mockResolvedValue({
-      debug: true,
-      prompt: 'hello',
+      ...parsedArgs,
       extensions: [],
     } as unknown as CliArgs);
     vi.mocked(loadSettings).mockReturnValue({
@@ -2829,6 +2951,25 @@ describe('llm.tsx main function', () => {
     expect(idx).not.toBe(-1);
     expect(sandboxArgs[idx + 1]).toBe(sessionId);
     expect(sandboxArgs).not.toContain('--session-id');
+  });
+
+  it('defers moved-session resolution to the sandbox child', async () => {
+    const resumeId = '11111111-1111-4111-8111-111111111111';
+    const sandboxArgs = await runSandboxRelaunch(
+      ['node', 'script.js', '--resume', resumeId],
+      'host-bootstrap-session',
+      'docker',
+      { resume: resumeId },
+    );
+    const { loadCliConfig } = await import('./config/config.js');
+    const bootstrapArgv = vi.mocked(loadCliConfig).mock.calls[0]?.[1];
+
+    expect(bootstrapArgv?.resume).toBeUndefined();
+    expect(bootstrapArgv?.continue).toBeUndefined();
+    expect(sandboxArgs).toContain('--resume');
+    expect(sandboxArgs).toContain(resumeId);
+    expect(sandboxArgs).not.toContain('--sandbox-session-id');
+    expect(mockMaybeRelinkResumeSession).not.toHaveBeenCalled();
   });
 
   it('starts a fresh CLI after the host update completes', async () => {

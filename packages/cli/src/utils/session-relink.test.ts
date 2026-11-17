@@ -5,10 +5,10 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import {
-  isInteractiveResumeInvocation,
-  maybeRelinkResumeSession,
-} from './session-relink.js';
+import { maybeRelinkResumeSession } from './session-relink.js';
+
+const mockPrompts = vi.hoisted(() => vi.fn());
+vi.mock('prompts', () => ({ default: mockPrompts }));
 
 const SESSION_ID = '11111111-1111-4111-8111-111111111111';
 const candidate = {
@@ -23,7 +23,7 @@ function serviceWithLookup(lookup: unknown) {
   return {
     getSessionLocation: vi.fn().mockResolvedValue(undefined),
     findRelinkCandidate: vi.fn().mockResolvedValue(lookup),
-    relinkSession: vi.fn().mockResolvedValue(undefined),
+    relinkSession: vi.fn().mockResolvedValue({ status: 'relinked' }),
   };
 }
 
@@ -98,6 +98,28 @@ describe('resume session relinking', () => {
     });
   });
 
+  it('preserves a refreshed structured refusal', async () => {
+    const service = serviceWithLookup({ status: 'candidate', candidate });
+    service.relinkSession.mockResolvedValue({
+      status: 'blocked',
+      result: { status: 'blocked', reason: 'active_writer' },
+    });
+
+    await expect(
+      maybeRelinkResumeSession({
+        sessionId: SESSION_ID,
+        cwd: '/workspace/after',
+        interactive: true,
+        service,
+        confirm: vi.fn().mockResolvedValue(true),
+      }),
+    ).resolves.toEqual({
+      status: 'blocked',
+      message:
+        'The saved session appears to be active in another Qwen Code process, so it cannot be reattached.',
+    });
+  });
+
   it('explains how to confirm when invoked non-interactively', async () => {
     const service = serviceWithLookup({ status: 'candidate', candidate });
     const result = await maybeRelinkResumeSession({
@@ -115,7 +137,11 @@ describe('resume session relinking', () => {
   it('reports ambiguous matches without prompting', async () => {
     const service = serviceWithLookup({
       status: 'ambiguous',
-      matches: [{ transcriptPath: '/one' }, { transcriptPath: '/two' }],
+      matches: [
+        { transcriptPath: '/one', recordedCwd: '/workspace/one' },
+        { transcriptPath: '/two', recordedCwd: '/workspace/two' },
+        { transcriptPath: '/three' },
+      ],
     });
     const confirm = vi.fn();
     const result = await maybeRelinkResumeSession({
@@ -126,7 +152,29 @@ describe('resume session relinking', () => {
       confirm,
     });
     expect(result).toMatchObject({ status: 'blocked' });
+    if (result.status !== 'blocked') throw new Error('expected blocked result');
+    expect(result.message).toContain('/workspace/one');
+    expect(result.message).toContain('/workspace/two');
+    expect(result.message).not.toContain('undefined');
     expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('includes available scan diagnostics in the refusal', async () => {
+    const service = serviceWithLookup({
+      status: 'blocked',
+      reason: 'scan_incomplete',
+      detail: 'permission denied',
+    });
+    const result = await maybeRelinkResumeSession({
+      sessionId: SESSION_ID,
+      cwd: '/workspace/after',
+      interactive: true,
+      service,
+    });
+    expect(result).toMatchObject({
+      status: 'blocked',
+      message: expect.stringContaining('permission denied'),
+    });
   });
 
   it('leaves managed sessions with their session authority', async () => {
@@ -152,11 +200,24 @@ describe('resume session relinking', () => {
     expect(service.relinkSession).not.toHaveBeenCalled();
   });
 
-  it('treats only an interactive prompt or an empty TTY invocation as interactive', () => {
-    expect(isInteractiveResumeInvocation({ promptInteractive: 'plan' })).toBe(
-      true,
-    );
-    expect(isInteractiveResumeInvocation({ prompt: 'do work' })).toBe(false);
-    expect(isInteractiveResumeInvocation({ query: 'do work' })).toBe(false);
+  it('uses the real default-No prompt and treats cancellation as declined', async () => {
+    const service = serviceWithLookup({ status: 'candidate', candidate });
+    mockPrompts.mockResolvedValueOnce({ confirmed: undefined });
+
+    await expect(
+      maybeRelinkResumeSession({
+        sessionId: SESSION_ID,
+        cwd: '/workspace/after',
+        interactive: true,
+        service,
+      }),
+    ).resolves.toEqual({ status: 'cancelled' });
+    expect(mockPrompts).toHaveBeenCalledWith({
+      type: 'confirm',
+      name: 'confirmed',
+      message: expect.stringMatching(/\/workspace\/before.*\/workspace\/after/),
+      initial: false,
+    });
+    expect(service.relinkSession).not.toHaveBeenCalled();
   });
 });

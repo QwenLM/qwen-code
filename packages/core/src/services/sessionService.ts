@@ -19,7 +19,6 @@ import { getProjectHash } from '../utils/paths.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import path from 'node:path';
 import fs from 'node:fs';
-import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
@@ -50,7 +49,10 @@ import {
 import { uiTelemetryService, type UiEvent } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
-import { readRuntimeStatus } from '../utils/runtimeStatus.js';
+import {
+  getRuntimeStatusPathState,
+  readRuntimeStatus,
+} from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
   isManagedExecutionTranscriptSync,
@@ -133,6 +135,14 @@ export {
 const debugLogger = createDebugLogger('SESSION');
 
 const SESSION_RELINK_SCAN_MAX_PROJECTS = 5000;
+const SESSION_RELINK_ARTIFACT_SUFFIXES = [
+  '.jsonl',
+  '.runtime.json',
+  '.worktree.json',
+  '.pr.json',
+  '.ledger.jsonl',
+  '.title.json',
+] as const;
 
 export type SessionRelinkBlockedReason =
   | 'active_writer'
@@ -181,6 +191,21 @@ export type SessionRelinkLookupResult =
       recordedCwd?: string;
       detail?: string;
     };
+
+export type SessionRelinkMutationResult =
+  | { status: 'relinked' }
+  | {
+      status: 'blocked';
+      result: Extract<
+        SessionRelinkLookupResult,
+        { status: 'blocked' | 'ambiguous' }
+      >;
+    };
+
+type RelinkTranscriptReadResult =
+  | { status: 'valid'; recordedCwd: string }
+  | { status: 'invalid' }
+  | { status: 'unavailable'; detail: string };
 
 function relinkFileIdentity(stats: fs.Stats): SessionRelinkFileIdentity {
   return {
@@ -1327,7 +1352,11 @@ export class SessionService {
       entry.isDirectory(),
     );
     if (projectDirectories.length > SESSION_RELINK_SCAN_MAX_PROJECTS) {
-      return { status: 'blocked', reason: 'scan_incomplete' };
+      return {
+        status: 'blocked',
+        reason: 'scan_incomplete',
+        detail: `Found more than ${SESSION_RELINK_SCAN_MAX_PROJECTS} project storage directories.`,
+      };
     }
 
     const currentProjectDir = this.storage.getProjectDir();
@@ -1344,7 +1373,7 @@ export class SessionService {
           },
         ]
       : [];
-    let scanIncomplete = false;
+    let scanIncompleteDetail: string | undefined;
     for (const entry of projectDirectories) {
       const projectDir = path.join(projectsDir, entry.name);
       if (projectDir === currentProjectDir) continue;
@@ -1353,19 +1382,24 @@ export class SessionService {
       try {
         const stats = await fs.promises.lstat(transcriptPath);
         if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
-          scanIncomplete = true;
+          scanIncompleteDetail ??=
+            'A matching transcript is not a regular single-link file.';
           continue;
         }
         matches.push({ transcriptPath, chatsDir, stats });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          scanIncomplete = true;
+          scanIncompleteDetail ??= String(error);
         }
       }
     }
 
-    if (scanIncomplete) {
-      return { status: 'blocked', reason: 'scan_incomplete' };
+    if (scanIncompleteDetail !== undefined) {
+      return {
+        status: 'blocked',
+        reason: 'scan_incomplete',
+        detail: scanIncompleteDetail,
+      };
     }
     if (matches.length === 0) return { status: 'not_found' };
     if (matches.length > 1) {
@@ -1379,6 +1413,24 @@ export class SessionService {
     }
 
     const match = matches[0];
+    if (match.chatsDir !== localChatsDir) {
+      for (const suffix of SESSION_RELINK_ARTIFACT_SUFFIXES) {
+        try {
+          await fs.promises.lstat(
+            path.join(localChatsDir, `${sessionId}${suffix}`),
+          );
+          return { status: 'blocked', reason: 'target_conflict' };
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            return {
+              status: 'blocked',
+              reason: 'source_unavailable',
+              detail: String(error),
+            };
+          }
+        }
+      }
+    }
     if (isManagedSessionTranscriptSync(match.transcriptPath)) {
       return { status: 'blocked', reason: 'managed_session' };
     }
@@ -1386,7 +1438,14 @@ export class SessionService {
       match.transcriptPath,
       sessionId,
     );
-    if (transcript === undefined) {
+    if (transcript.status === 'unavailable') {
+      return {
+        status: 'blocked',
+        reason: 'source_unavailable',
+        detail: transcript.detail,
+      };
+    }
+    if (transcript.status === 'invalid') {
       return { status: 'blocked', reason: 'invalid_transcript' };
     }
     let currentStats: fs.Stats;
@@ -1435,13 +1494,11 @@ export class SessionService {
       }
     }
 
-    const runtimeStatus = await readRuntimeStatus(
+    const runtimeStatusState = await getRuntimeStatusPathState(
       path.join(match.chatsDir, `${sessionId}.runtime.json`),
+      sessionId,
     );
-    if (
-      runtimeStatus?.sessionId === sessionId &&
-      this.isRelinkRuntimeActive(runtimeStatus.hostname, runtimeStatus.pid)
-    ) {
+    if (runtimeStatusState === 'active' || runtimeStatusState === 'unknown') {
       return {
         status: 'blocked',
         reason: 'active_writer',
@@ -1462,42 +1519,51 @@ export class SessionService {
   }
 
   /** Move a previously confirmed session into this service's project. */
-  async relinkSession(candidate: SessionRelinkCandidate): Promise<void> {
+  async relinkSession(
+    candidate: SessionRelinkCandidate,
+  ): Promise<SessionRelinkMutationResult> {
     const refreshed = await this.findRelinkCandidate(candidate.sessionId);
+    if (refreshed.status !== 'candidate') {
+      return {
+        status: 'blocked',
+        result:
+          refreshed.status === 'not_found'
+            ? { status: 'blocked', reason: 'source_unavailable' }
+            : refreshed,
+      };
+    }
     if (
-      refreshed.status !== 'candidate' ||
       refreshed.candidate.sourceTranscriptPath !==
         candidate.sourceTranscriptPath ||
       !sameRelinkFileIdentity(refreshed.candidate.identity, candidate.identity)
     ) {
-      throw new SessionTranscriptChangedError();
+      return {
+        status: 'blocked',
+        result: { status: 'blocked', reason: 'source_unavailable' },
+      };
     }
 
     const targetChatsDir = this.getChatsDir();
     const inPlace = candidate.sourceChatsDir === targetChatsDir;
     fs.mkdirSync(targetChatsDir, { recursive: true });
-    const suffixes = [
-      '.jsonl',
-      '.runtime.json',
-      '.worktree.json',
-      '.pr.json',
-      '.ledger.jsonl',
-    ] as const;
     const artifacts: SessionRelinkArtifact[] = [];
 
     if (!inPlace) {
-      for (const suffix of suffixes) {
+      for (const suffix of SESSION_RELINK_ARTIFACT_SUFFIXES) {
         const targetPath = path.join(
           targetChatsDir,
           `${candidate.sessionId}${suffix}`,
         );
         if (fs.existsSync(targetPath)) {
-          throw new Error(`Session artifact already exists: ${targetPath}`);
+          return {
+            status: 'blocked',
+            result: { status: 'blocked', reason: 'target_conflict' },
+          };
         }
       }
     }
 
-    for (const suffix of suffixes) {
+    for (const suffix of SESSION_RELINK_ARTIFACT_SUFFIXES) {
       const sourcePath = path.join(
         candidate.sourceChatsDir,
         `${candidate.sessionId}${suffix}`,
@@ -1589,7 +1655,7 @@ export class SessionService {
         }
         throw error;
       }
-      return;
+      return { status: 'relinked' };
     }
 
     const createdTargets: SessionRelinkArtifact[] = [];
@@ -1669,6 +1735,7 @@ export class SessionService {
       }
       throw error;
     }
+    return { status: 'relinked' };
   }
 
   private async readRelinkRecordedCwd(
@@ -1700,39 +1767,57 @@ export class SessionService {
   private async readRelinkTranscript(
     transcriptPath: string,
     sessionId: string,
-  ): Promise<{ recordedCwd: string } | undefined> {
+  ): Promise<RelinkTranscriptReadResult> {
     try {
       const contents = await fs.promises.readFile(transcriptPath, 'utf8');
-      const lines = contents.split('\n').filter((line) => line.trim() !== '');
-      if (lines.length === 0) return undefined;
-      let recordedCwd: string | undefined;
-      for (const [index, line] of lines.entries()) {
-        const record: unknown = JSON.parse(line);
+      const parsed = this.parseRelinkTranscript(
+        contents,
+        sessionId,
+        transcriptPath,
+      );
+      return parsed === undefined
+        ? { status: 'invalid' }
+        : { status: 'valid', recordedCwd: parsed.recordedCwd };
+    } catch (error) {
+      return { status: 'unavailable', detail: String(error) };
+    }
+  }
+
+  private parseRelinkTranscript(
+    contents: string,
+    sessionId: string,
+    transcriptPath: string,
+  ):
+    | { recordedCwd: string; records: Array<Record<string, unknown>> }
+    | undefined {
+    const records: Array<Record<string, unknown>> = [];
+    for (const line of contents.split('\n')) {
+      if (!line.trim()) continue;
+      const parsed = jsonl.parseLineTolerantWithIntegrity<
+        Record<string, unknown>
+      >(line, transcriptPath);
+      for (const record of parsed.records) {
         if (!record || typeof record !== 'object' || Array.isArray(record)) {
           return undefined;
         }
-        const object = record as Record<string, unknown>;
         if (
-          typeof object['sessionId'] === 'string' &&
-          object['sessionId'] !== sessionId
+          typeof record['sessionId'] === 'string' &&
+          record['sessionId'] !== sessionId
         ) {
           return undefined;
         }
-        if (index === 0) {
-          if (
-            object['sessionId'] !== sessionId ||
-            typeof object['cwd'] !== 'string' ||
-            object['cwd'].length === 0
-          ) {
-            return undefined;
-          }
-          recordedCwd = object['cwd'];
-        }
+        records.push(record);
       }
-      return recordedCwd === undefined ? undefined : { recordedCwd };
-    } catch {
+    }
+    const first = records[0];
+    if (
+      first?.['sessionId'] !== sessionId ||
+      typeof first['cwd'] !== 'string' ||
+      first['cwd'].length === 0
+    ) {
       return undefined;
     }
+    return { recordedCwd: first['cwd'], records };
   }
 
   private rewriteRelinkTranscript(
@@ -1740,19 +1825,15 @@ export class SessionService {
     sessionId: string,
     oldRoot: string,
   ): string {
-    const lines = contents.split('\n').filter((line) => line.trim() !== '');
-    const rewritten = lines.map((line) => {
-      const record: unknown = JSON.parse(line);
-      if (!record || typeof record !== 'object' || Array.isArray(record)) {
-        throw new Error('Invalid session transcript record.');
-      }
-      const object = record as Record<string, unknown>;
-      if (
-        typeof object['sessionId'] === 'string' &&
-        object['sessionId'] !== sessionId
-      ) {
-        throw new Error('Session transcript contains a different session ID.');
-      }
+    const parsed = this.parseRelinkTranscript(
+      contents,
+      sessionId,
+      '<session-relink>',
+    );
+    if (parsed === undefined) {
+      throw new Error('Invalid session transcript record.');
+    }
+    const rewritten = parsed.records.map((object) => {
       if ('cwd' in object) {
         object['cwd'] = remapRelinkPath(
           object['cwd'],
@@ -1788,17 +1869,6 @@ export class SessionService {
       return Buffer.from(`${JSON.stringify(object, null, 2)}\n`);
     } catch {
       return data;
-    }
-  }
-
-  private isRelinkRuntimeActive(hostname: string, pid: number): boolean {
-    if (hostname !== os.hostname()) return true;
-    if (pid <= 0) return true;
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code !== 'ESRCH';
     }
   }
 

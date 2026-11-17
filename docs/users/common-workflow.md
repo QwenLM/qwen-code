@@ -371,7 +371,7 @@ Use arrow keys to navigate and press Enter to select a conversation. Press Esc t
 qwen --resume 123e4567-e89b-12d3-a456-426614174000
 ```
 
-If the current project directory was renamed or moved, an explicit session ID lets Qwen Code perform a bounded scan of up to 5,000 Qwen-managed local project storage directories for that exact session. When exactly one safe match is found and its recorded project directory no longer exists, Qwen Code shows the old and new paths and asks whether to reattach the session. It never overwrites an existing session, moves a session with an active writer, or chooses between duplicate IDs. This recovery prompt is interactive; `--continue`, the conversation picker, title lookup, and headless commands remain scoped to the current project.
+If the current project directory was renamed or moved, an explicit session ID lets Qwen Code perform a bounded scan of up to 5,000 Qwen-managed local project storage directories for that exact session. When exactly one safe match is found and its recorded project directory no longer exists, Qwen Code shows the old and new paths and asks whether to reattach the session. It never overwrites an existing session, moves a session with an active writer, or chooses between duplicate IDs. This recovery prompt is interactive; `--continue`, the conversation picker, and title lookup remain scoped to the current project, while a headless `--resume <sessionId>` may perform the lookup but never moves files without interactive confirmation (see [Headless mode](./features/headless.md)).
 
 > [!tip]
 >
