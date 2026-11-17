@@ -1,8 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher;
-import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.ContextCompressionState;
@@ -47,7 +45,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
-import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -86,7 +83,7 @@ public class ManagedAgentStore implements AgentStateStore {
             ManagedAgentSettings properties, HarnessRules harnessRules) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 null, new JdbcManagedSessionSkills(jdbc, objectMapper, new RequestDigests(), null), null,
-                null, null, null, null, null);
+                null, null, null, null);
     }
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
@@ -96,11 +93,11 @@ public class ManagedAgentStore implements AgentStateStore {
             JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
             JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
-            JdbcSessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
+            JdbcSessionWorktreeStore sessionWorktrees,
             JdbcManagedExtensionRecordStore configRecords) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
-                sessionWorktrees, journalEventTransport, configRecords, null, null);
+                sessionWorktrees, configRecords, null, null);
     }
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
@@ -110,11 +107,11 @@ public class ManagedAgentStore implements AgentStateStore {
             JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
             JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
-            JdbcSessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
+            JdbcSessionWorktreeStore sessionWorktrees,
             JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
-                sessionWorktrees, journalEventTransport, configRecords, modelConfigs, null);
+                sessionWorktrees, configRecords, modelConfigs, null);
     }
 
     @Autowired
@@ -125,7 +122,7 @@ public class ManagedAgentStore implements AgentStateStore {
             JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
             @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
-            @Nullable JdbcSessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
+            @Nullable JdbcSessionWorktreeStore sessionWorktrees,
             @Lazy @Nullable JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
             @Nullable JdbcJournalPacks journalPacks) {
         String approvalMode = properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
@@ -133,14 +130,12 @@ public class ManagedAgentStore implements AgentStateStore {
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
         List<String> definitionModels = properties.getDefinitionModels();
         List<WebShellModelOption> modelCatalog = ManagedSessionModelConfigs.catalog(properties);
-        boolean journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         boolean workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         boolean workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         boolean workspaceChildAgentsEnabled = properties.admitsPublicChildAgents();
         boolean managedExtensionExecutionEnabled = properties.getExtensions().isEnabled() && properties.getManagedExtensions().isEnabled();
         long lifecycleHandoffMillis = properties.getSessionStore().getWriterLeaseDuration().toMillis();
         List<? extends ManagedAgentSettings.RuntimeBroker.WorkspaceMount> workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
-        ResidentWorkspaces residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
         WorkspaceCreationRoots createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         if (StringUtils.isBlank(agentRevision)
                 || agentRevision.length() > 128) {
@@ -151,10 +146,10 @@ public class ManagedAgentStore implements AgentStateStore {
         this.eventJournal = new AgentEventJournal(storeRows, jdbc, clock, eventPublisher);
         this.sessionQueries = new AgentSessionQueries(storeRows, worktreeFiles, jdbc, modelCatalog);
         this.messageProjection = new AgentMessageProjection(eventJournal, storeRows, jdbc, objectMapper, clock);
-        this.sessionPolicies = new AgentSessionPolicies(eventJournal, sessionQueries, storeRows, worktreeFiles, harnessRules, configRecords, jdbc, objectMapper, clock, approvalMode, workspaces, agentRevision, definitionToolProfiles, definitionModels, modelCatalog, definitions, creationSkills, workspaceFilesEnabled, workspaceShellEnabled, residentWorkspaces);
+        this.sessionPolicies = new AgentSessionPolicies(eventJournal, sessionQueries, storeRows, worktreeFiles, harnessRules, configRecords, jdbc, objectMapper, clock, approvalMode, workspaces, agentRevision, definitionToolProfiles, definitionModels, modelCatalog, definitions, creationSkills, workspaceFilesEnabled, workspaceShellEnabled);
         this.sessionCommands = new AgentSessionCommands(eventJournal, sessionPolicies, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, workspaceShellEnabled);
         this.lifecycleOperations = new AgentLifecycleOperations(eventJournal, sessionCommands, sessionPolicies, sessionQueries, storeRows, jdbc, lifecycle, objectMapper, clock, workspaces, workspaceFilesEnabled, lifecycleHandoffMillis);
-        this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, residentWorkspaces, createdRoots, journalEventTransport, journalEventTransportEnabled, modelConfigs);
+        this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, createdRoots, modelConfigs);
         this.turnExecution = new AgentTurnExecution(eventJournal, messageProjection, sessionCommands, storeRows, jdbc, objectMapper, clock, journalPacks);
         this.executionOperations = new AgentExecutionOperations(eventJournal, lifecycleOperations, sessionPolicies, sessionQueries, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, journalPacks);
     }
@@ -219,22 +214,6 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public Admission replayWorkspaceSessionCommand(String tenantId, String actorId, String idempotencyKey, String requestDigest) {
         return sessionAdmissions.replayWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest);
-    }
-
-    Admission insertCsiSessionCommand(
-            WorkspaceCsiRegistration registration,
-            String actorId,
-            String idempotencyKey,
-            String requestDigest,
-            String requestedRevision,
-            String title,
-            WorkspaceSelection selection) {
-        return sessionAdmissions.insertCsiSessionCommand(registration, actorId, idempotencyKey, requestDigest, requestedRevision, title, selection);
-    }
-
-    RuntimeProvisionRequest requireCsiRequest(
-            WorkspaceCsiRegistration registration, String sessionId) {
-        return sessionAdmissions.requireCsiRequest(registration, sessionId);
     }
 
     @Override

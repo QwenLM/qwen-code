@@ -148,7 +148,6 @@ public class JdbcManagedActionStore
             if (!"action.changed".equals(event.path("kind").asText())) {
                 continue;
             }
-            ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
             jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
                     String.class, tenantId, sessionId);
             JsonNode envelope = event.deepCopy();
@@ -482,7 +481,6 @@ public class JdbcManagedActionStore
             String actionId,
             JsonNode body,
             long now) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         // Serialize admission with journal projection and other Session commands.
         // The guard may have opened an older repeatable-read snapshot.
         String sessionStatus = jdbc.queryForObject(
@@ -809,7 +807,6 @@ public class JdbcManagedActionStore
             String decisionReceiptId,
             boolean harnessConfirmed,
             long now) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, op.tenantId(), op.sessionId());
         jdbc.update(
                 "UPDATE ma_operation SET state = ?, phase = 'SETTLED', admission_stage = ?, delivery_state = 'CONFIRMED', receipt_id = ?, failure_code = ?, decision_receipt_id = ?, claim_owner = NULL, claim_until = NULL, gmt_modified = ?, completed_at = ? WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED' AND claim_owner = ? AND operation_kind = 'ACTION_RESPONSE' AND claim_generation = ? AND claim_until > " + ManagedSchemaTime.SQL_NOW,
                 errorCode == null ? "COMPLETED" : "FAILED",

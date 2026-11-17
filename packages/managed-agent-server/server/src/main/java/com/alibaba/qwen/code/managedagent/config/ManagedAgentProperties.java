@@ -308,8 +308,7 @@ public class ManagedAgentProperties
         if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceId())) {
             sessionStore.setWorkspaceId(runtimeBroker.getWorkspaceId());
         } else if (StringUtils.isNotBlank(runtimeBroker.getWorkspaceCwd())
-                && (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(provisioner)
-                        || "kubernetes".equals(provisioner))) {
+                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(provisioner)) {
             sessionStore.setWorkspaceId(EmbeddedRuntimeBroker.workspaceId(runtimeBroker));
         }
     }
@@ -392,20 +391,6 @@ public class ManagedAgentProperties
                 && !runtimeBroker.getSsh().getNodes().isEmpty()
                 && "session".equals(runtimeBroker.getIsolationClass())
                 && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
-        boolean residentFiles = "kubernetes-workspace".equals(runtimeBroker.getProvisioner())
-                && "workspace".equals(runtimeBroker.getIsolationClass())
-                && !runtimeBroker.getResidentWorkspaces().isEmpty() && runtimeBroker.getWorkspaceMounts().isEmpty()
-                && runtimeBroker.getSsh().getNodes().isEmpty()
-                && !runtimeBroker.isTrustedLocalRebootRecovery() && !runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
-                && !runtimeBroker.isChildWorkspacesEnabled() && !harness.isWorkspaceShellEnabled()
-                && !runtimeBroker.getResidentKubernetesApiUrl().isBlank()
-                && !runtimeBroker.getResidentKubernetesTokenFile().isBlank() && !runtimeBroker.getResidentKubernetesCaFile().isBlank();
-        if (!runtimeBroker.getResidentWorkspaces().isEmpty()) {
-            new com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces(runtimeBroker.getResidentWorkspaces());
-            if (!residentFiles || !harness.isWorkspaceFilesEnabled()) {
-                throw new IllegalStateException("Resident Workspaces require exclusive CSI/files configuration");
-            }
-        }
         if (harness.isWorkspaceShellEnabled()
                 && (!harness.isWorkspaceFilesEnabled()
                         || mode == null
@@ -417,7 +402,7 @@ public class ManagedAgentProperties
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !residentFiles && !sshFiles && !isExternalWorkspaceFilesConfigured()
+                        || !sshFiles && !isExternalWorkspaceFilesConfigured()
                         && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
@@ -729,13 +714,6 @@ public class ManagedAgentProperties
         private String keyStorePasswordFile = "";
         private String trustStoreFile = "";
         private String trustStorePasswordFile = "";
-        private String kubernetesApiUrl = "https://kubernetes.default.svc";
-        private String kubernetesTokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token";
-        private String kubernetesCaFile = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt";
-        private String namespace = "";
-        private String serviceName = "";
-        private String serviceUid = "";
-        private String portName = "https";
     }
 
     @Getter
@@ -975,10 +953,6 @@ public class ManagedAgentProperties
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
         private List<WorkspaceMount> workspaceMounts = List.of();
-        private List<ResidentWorkspace> residentWorkspaces = List.of();
-        private String residentKubernetesApiUrl = "";
-        private String residentKubernetesTokenFile = "";
-        private String residentKubernetesCaFile = "";
         private String workspaceCreationRoot = "";
         private boolean localDirectoryImportEnabled;
         private String isolationClass = "session";
@@ -1049,39 +1023,6 @@ public class ManagedAgentProperties
         public record WorkspaceMount(String tenantId, String storageId, String root)
                 implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                         .RuntimeBroker.WorkspaceMount {}
-
-        public record ResidentWorkspace(
-                String workspaceId,
-                long workspaceGeneration,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration
-                        registration,
-                com.alibaba.qwen.code.managedagent.contracts.runtime.ProtectionIdentity protection,
-                String image,
-                List<String> command,
-                List<com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact> artifacts)
-                implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
-                        .RuntimeBroker.ResidentWorkspace {
-            public ResidentWorkspace {
-                if (registration == null || protection == null || workspaceId == null || workspaceId.isBlank()
-                        || workspaceGeneration < 1 || image == null || !image.matches("[^\\s]+@sha256:[0-9a-f]{64}")
-                        || command == null || command.isEmpty() || command.size() > 32
-                        || command.stream().anyMatch(value -> value == null || value.isBlank()
-                                || value.length() > 8192 || value.indexOf('\0') >= 0)
-                        || artifacts == null || artifacts.size() > 48
-                        || artifacts.stream().anyMatch(java.util.Objects::isNull)
-                        || artifacts.stream().map(com.alibaba.qwen.code.managedagent.contracts.runtime.WorkerArtifact::configMapName)
-                                .distinct().count() != artifacts.size()) {
-                    throw new IllegalArgumentException("Invalid resident Workspace configuration");
-                }
-                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(registration.tenantId(),
-                        workspaceId, workspaceGeneration, registration.storageId(), ".",
-                        com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
-                command = List.copyOf(command);
-                artifacts = List.copyOf(artifacts);
-            }
-        }
-
-        public void setResidentWorkspaces(List<ResidentWorkspace> value) { residentWorkspaces = List.copyOf(value); }
     }
 
     /** H6b/H6c: the automation scanner, its lease and the slot window. */

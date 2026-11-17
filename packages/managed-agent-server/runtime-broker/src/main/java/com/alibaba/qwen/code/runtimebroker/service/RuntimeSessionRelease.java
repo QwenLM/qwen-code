@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
@@ -207,9 +206,6 @@ final class RuntimeSessionRelease {
         if (current == null) {
             throw notFound("runtime_session_not_found",
                     "Runtime Session was not found");
-        }
-        if (CsiFilesRetirementProfile.isProfile(current.getSession().getScope())) {
-            throw CsiFilesRetirementProfile.releaseUnavailable();
         }
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current.getState()

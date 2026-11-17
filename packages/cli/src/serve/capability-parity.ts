@@ -153,6 +153,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed progressive workspace artifact query with session summaries',
   ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
+  generated_ui_state: NO_MANAGED_EQUIVALENT(
+    'no Managed Generated UI view state store',
+  ),
   slow_client_warning: LEGACY_ONLY(
     'SSE backpressure is a legacy transport knob',
   ),
@@ -397,6 +400,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed GitHub setup route',
   ),
   workspace_github_prs: NO_MANAGED_EQUIVALENT('no Managed GitHub PRs route'),
+  workspace_github_pr_files: NO_MANAGED_EQUIVALENT(
+    'no Managed GitHub PR files route',
+  ),
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
   ),

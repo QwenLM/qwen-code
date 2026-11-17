@@ -56,9 +56,12 @@ test('keeps workspace tools available before and after the first prompt @smoke',
     .click();
   const panel = page.getByRole('complementary', { name: 'Right panel' });
   const actions = panel.getByTestId('right-panel-empty-actions');
-  await expect(actions.getByRole('button')).toHaveCount(3);
+  await expect(actions.getByRole('button')).toHaveCount(4);
   await expect(actions.getByRole('button', { name: /Files/ })).toBeVisible();
   await expect(actions.getByRole('button', { name: /Terminal/ })).toBeVisible();
+  await expect(
+    actions.getByRole('button', { name: /Change overview/ }),
+  ).toBeVisible();
   await expect(
     actions.getByTestId('right-panel-open-web-preview'),
   ).toBeVisible();
