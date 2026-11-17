@@ -971,6 +971,26 @@ describe('merged session catalog pagination', () => {
       expect(result.sessions[0]?.artifactCount).toBeUndefined();
     });
 
+    it('keeps the sidecar count while the live entry marks its restore pending', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeArtifactSummarySidecar(session, sidecarBody(3));
+      // A restoring entry is live but not hydrated: the omitted count is
+      // unknown, not zero, so the sidecar-enriched count must survive.
+      const { bridge } = bridgeFor([
+        { ...session, artifactCountPending: true },
+      ]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(3);
+    });
+
     it('enriches the organized view from the same sidecar', async () => {
       const cold = summary(0);
       await persist(cold);

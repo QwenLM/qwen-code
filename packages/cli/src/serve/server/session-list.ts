@@ -664,7 +664,12 @@ function mergeLiveSessionSummary(
   // The live entry is authoritative for its artifact count (the spread above
   // already overlays a non-zero one). When it omits the field — count zero —
   // a stale sidecar-derived count from the persisted summary must not survive.
-  if (live.artifactCount === undefined) delete merged.artifactCount;
+  // The exception is a pending restore: the entry is live but its store is
+  // not hydrated yet, so the omission is unknown, not zero, and the
+  // sidecar-enriched count stays until the restore settles.
+  if (live.artifactCount === undefined && live.artifactCountPending !== true) {
+    delete merged.artifactCount;
+  }
   return merged;
 }
 
