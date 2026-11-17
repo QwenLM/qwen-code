@@ -8,7 +8,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { GitWorktreeService } from './gitWorktreeService.js';
+import {
+  GitWorktreeService,
+  WorktreeDirtyCarryConflictError,
+  carryApplyErrorDetection,
+} from './gitWorktreeService.js';
 import type { WorktreeInfo } from './gitWorktreeService.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 
@@ -442,13 +446,59 @@ describe('GitWorktreeService', () => {
 
     it('setupWorktrees should still succeed when stash apply fails', async () => {
       git.stash.mockResolvedValue('snapshot-sha\n');
-      git.raw.mockRejectedValue(new Error('stash apply conflict'));
+      // Only the apply fails; the reset/clean restore succeeds, so the
+      // worktree is back at committed state and the fail-open baseline is
+      // safe. (A restore that ALSO fails is refused — see the R8-3 case.)
+      git.raw.mockImplementation(async (args: string[]) => {
+        if (args[0] === 'stash' && args[1] === 'apply') {
+          throw new Error('stash apply conflict');
+        }
+        return '';
+      });
 
       const result = await setupCreated('a');
 
       // Setup should still succeed — dirty state failure is non-fatal
       expect(result.success).toBe(true);
       expect(result.errors).toHaveLength(0);
+    });
+
+    it('setupWorktrees refuses to baseline when the carry restore itself fails (R8-3)', async () => {
+      git.stash.mockResolvedValue('snapshot-sha\n');
+      // Every raw call rejects, so the reset/clean restore fails too: the
+      // worktree may hold a half-applied overlay and must not be baselined.
+      git.raw.mockRejectedValue(new Error('stash apply conflict'));
+
+      await expect(setupCreated('a')).rejects.toThrow(
+        /restore to committed state also failed/,
+      );
+    });
+
+    it('setupWorktrees reaps created worktrees when the carry restore fails (R11-4)', async () => {
+      const service = new GitWorktreeService('/repo');
+      vi.spyOn(service, 'isGitRepository').mockResolvedValue(true);
+      vi.spyOn(service, 'createWorktree').mockResolvedValue({
+        success: true,
+        worktree: worktreeInfo('a'),
+      });
+      const cleanup = vi.spyOn(service, 'cleanupSession').mockResolvedValue({
+        success: true,
+        removedWorktrees: [],
+        removedBranches: [],
+        errors: [],
+      });
+      git.stash.mockResolvedValue('snapshot-sha\n');
+      git.raw.mockRejectedValue(new Error('stash apply conflict'));
+
+      await expect(
+        service.setupWorktrees({
+          sessionId: 's1',
+          sourceRepoPath: '/repo',
+          worktreeNames: ['a'],
+        }),
+      ).rejects.toThrow(/restore to committed state also failed/);
+      // The abort must reap the worktrees already created, not orphan them.
+      expect(cleanup).toHaveBeenCalledWith('s1');
     });
 
     it('setupWorktrees should still succeed when stash create fails', async () => {
@@ -646,5 +696,160 @@ describe('GitWorktreeService', () => {
         /may only contain/,
       );
     });
+  });
+});
+
+describe('carryApplyErrorDetection', () => {
+  const result = (
+    exitCode: number,
+    stdOut: string[] = [],
+    stdErr: string[] = [],
+  ) => ({
+    exitCode,
+    stdOut: stdOut.map((s) => Buffer.from(s)),
+    stdErr: stdErr.map((s) => Buffer.from(s)),
+  });
+
+  it('treats a non-zero exit with empty stderr as an error (the CI git shape)', () => {
+    // simple-git's default detection is `exitCode && stdErr.length`; a git
+    // apply that fails with empty stderr must still surface, or the carry
+    // is recorded as landed when it never did.
+    const err = carryApplyErrorDetection(undefined, result(1));
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('exited with code 1');
+  });
+
+  it('surfaces the git message from either stream', () => {
+    expect(
+      carryApplyErrorDetection(
+        undefined,
+        result(1, [], ['could not write index']),
+      ),
+    ).toMatchObject({ message: 'could not write index' });
+    expect(
+      carryApplyErrorDetection(undefined, result(1, ['stdout message'], [])),
+    ).toMatchObject({ message: 'stdout message' });
+  });
+
+  it('passes a clean exit through', () => {
+    expect(carryApplyErrorDetection(undefined, result(0))).toBeUndefined();
+  });
+
+  it('preserves an error simple-git already detected', () => {
+    const prior = new Error('prior');
+    expect(carryApplyErrorDetection(prior, result(0))).toBe(prior);
+    expect(carryApplyErrorDetection(prior, result(1))).toBe(prior);
+  });
+});
+
+describe('applyStashSnapshot index-state verification', () => {
+  it('fails closed when the index cannot be read after a clean apply (R9)', async () => {
+    // The apply itself succeeds (exit 0), but ls-files -u fails, so the
+    // index state cannot be confirmed clean. The handoff must not move the
+    // session without that confirmation.
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'ls-files') throw new Error('index unreadable');
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toBeInstanceOf(WorktreeDirtyCarryConflictError);
+  });
+
+  it('marks an environment failure as non-conflict (R9)', async () => {
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'stash') throw new Error('could not write index');
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: false });
+  });
+
+  it('resolves on a clean apply with a readable empty index', async () => {
+    git.raw.mockResolvedValue('');
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('restores committed state after a conflicting apply', async () => {
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'ls-files') return '100644 sha 1\tf.txt\n';
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: true, restoreFailed: false });
+    expect(git.raw).toHaveBeenCalledWith(['reset', '--hard', 'HEAD']);
+  });
+
+  it('reports a failed restore after a conflicting apply (R8-3 sibling)', async () => {
+    // The apply conflicts (unmerged entries) AND the reset --hard restore
+    // fails (locked index): the error must not claim the checkout was
+    // restored — the caller's rollback must know markers may survive.
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'ls-files') return '100644 sha 1\tf.txt\n';
+      if (args[0] === 'reset') throw new Error('index locked');
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({
+      conflict: true,
+      restoreFailed: true,
+      message: expect.stringContaining(
+        'restore to committed state also failed',
+      ),
+    });
+  });
+
+  it('fails closed when the snapshot paths cannot be determined (R12-2)', async () => {
+    git.raw.mockClear();
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'diff') throw new Error('bad snapshot');
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(git.raw).not.toHaveBeenCalledWith(['stash', 'apply', 'snap']);
+  });
+
+  it('fails closed when the target repository root cannot be determined (R15-1)', async () => {
+    git.raw.mockClear();
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'diff') return 'secret.env\0';
+      if (args[0] === 'rev-parse') throw new Error('not a repository');
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(git.raw).not.toHaveBeenCalledWith(['stash', 'apply', 'snap']);
+  });
+
+  it('fails closed when the ignored set cannot be determined (R12-2)', async () => {
+    git.raw.mockClear();
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'diff') return 'secret.env\0';
+      if (args[0] === 'rev-parse') return '/repo\n';
+      if (args[0] === 'ls-files' && args[1] === '--others') {
+        throw new Error('index unreadable');
+      }
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: true });
+    expect(git.raw).not.toHaveBeenCalledWith(['stash', 'apply', 'snap']);
   });
 });
