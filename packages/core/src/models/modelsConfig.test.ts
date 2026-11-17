@@ -177,6 +177,31 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getModel()).toBe('dual-role-model');
   });
 
+  it('applies capabilities.vision to session modalities on model switch', async () => {
+    // Session modalities must agree with the per-request path
+    // (BaseLlmClient.resolveForModel): a catalog-unknown model declared
+    // vision-capable gets image input without a generationConfig.modalities
+    // entry, so the vision-bridge gate stays off after a switch.
+    const modelsConfig = openaiConfig([
+      { id: 'chat-model' },
+      { id: 'custom-vlm', capabilities: { vision: true } },
+    ]);
+
+    const gc = await switchOpenAI(modelsConfig, 'custom-vlm');
+
+    expect(gc.modalities?.image).toBe(true);
+  });
+
+  it('applies capabilities.vision to session modalities on auth refresh', () => {
+    const modelsConfig = openaiConfig([
+      { id: 'custom-vlm', capabilities: { vision: true } },
+    ]);
+
+    const gc = refreshOpenAI(modelsConfig, 'custom-vlm');
+
+    expect(gc.modalities?.image).toBe(true);
+  });
+
   it('rejects an image-only model during auth refresh without changing state', () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_ANTHROPIC,
