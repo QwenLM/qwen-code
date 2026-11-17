@@ -394,7 +394,10 @@ export function McpAppRuntime({
     let ready = false;
     const current = displayRef.current;
     const viewState =
-      viewStateHost && cardId && sessionId
+      import.meta.env.MODE !== 'transcript' &&
+      viewStateHost &&
+      cardId &&
+      sessionId
         ? new ViewStateCoordinator(
             { sessionId, ...viewStateHost },
             cardId,
@@ -703,6 +706,7 @@ export function McpAppRuntime({
       {builtInGeneratedUi ? (
         // No MCP framing: one quiet row for the host's own reset action and
         // save outcome, which the generated content cannot imitate.
+        import.meta.env.MODE !== 'transcript' &&
         (retained || viewStateStatus) && (
           <div className={styles.builtInBar}>
             <span>
