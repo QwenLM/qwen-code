@@ -154,6 +154,7 @@ describe('createPrWatchDeps', () => {
       activity?: ConversationRuntimeActivityGate;
       deadline?: number;
       config?: SessionPrWatchConfig;
+      language?: 'en' | 'zh';
     } = {},
   ) {
     const runtimes = overrides.runtimes ?? [runtime()];
@@ -172,6 +173,7 @@ describe('createPrWatchDeps', () => {
       conversationRuntimeActivity: () => overrides.activity,
       restore: restore as never,
       hostedGithubChannels: () => overrides.hosted ?? [],
+      ...(overrides.language ? { language: overrides.language } : {}),
       ...(overrides.deadline !== undefined
         ? { promptDeadlineMs: overrides.deadline }
         : {}),
@@ -276,6 +278,21 @@ describe('createPrWatchDeps', () => {
     });
     expect(drain.actionsForEvent!('head_change', 'github.com')).toBe(actions);
     expect(drain.wakeDormant).toBe(false);
+  });
+
+  it('carries the language to both seams', () => {
+    // The wiring this feature exists for: one value reaches the observation
+    // and the drain together, so they cannot disagree about the locale within
+    // one boot.
+    const { watch, drain } = build({ language: 'zh' });
+    expect(watch.language).toBe('zh');
+    expect(drain.language).toBe('zh');
+  });
+
+  it('leaves the language absent so both seams stay English', () => {
+    const { watch, drain } = build();
+    expect(watch.language).toBeUndefined();
+    expect(drain.language).toBeUndefined();
   });
 
   it('leaves actions absent so the drain keeps the legacy single winner', () => {

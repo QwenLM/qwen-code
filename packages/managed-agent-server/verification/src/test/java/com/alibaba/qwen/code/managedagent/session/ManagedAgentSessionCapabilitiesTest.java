@@ -13,7 +13,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
@@ -203,15 +202,12 @@ class ManagedAgentSessionCapabilitiesTest {
 
     @ParameterizedTest
     @CsvSource({
-        "csi-files-retirement/1,ACTIVE,true,true,true", "csi-files-retirement/1,CLOSED,true,true,true",
-        "csi-files-retirement/2,ACTIVE,true,true,true", "csi-files-retirement/2,CLOSED,true,true,true",
         "hosted-workspace-files/1,ACTIVE,true,true,true", "hosted-workspace-files/1,CLOSED,true,true,true",
         "hosted-workspace-files/1,ACTIVE,false,true,true", "hosted-workspace-files/1,ACTIVE,true,false,true",
         "hosted-workspace-files/1,ACTIVE,true,true,false"
     })
-    void publicAndWebShellViewsUseBindingCloseSupportAndKeepPrivateCsiUnavailable(String profile, String status,
+    void publicAndWebShellViewsUseBindingCloseSupport(String profile, String status,
             boolean globalSupport, boolean bindingSupport, boolean harnessSupport) {
-        boolean csi = CsiFilesRetirementProfile.isProfile(profile);
         var store = mock(AgentStateStore.class);
         var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
         var harness = mock(HarnessConnector.class);
@@ -242,16 +238,16 @@ class ManagedAgentSessionCapabilitiesTest {
         var publicViews = List.of(service.getPublicSession("tenant", "actor", "session"),
                 service.listPublicSessions("tenant", "actor", null, 10).data().getFirst());
         assertThat(publicViews).allSatisfy(view -> {
-            assertThat(view.capabilities().sessionClose()).isEqualTo(!csi && bindingSupport && harnessSupport);
+            assertThat(view.capabilities().sessionClose()).isEqualTo(bindingSupport && harnessSupport);
             assertThat(view.capabilities().sessionDelete())
-                    .isEqualTo(!csi && ("CLOSED".equals(status) || bindingSupport && harnessSupport));
+                    .isEqualTo("CLOSED".equals(status) || bindingSupport && harnessSupport);
         });
         var webShellViews = List.of(service.getWebShellSession("tenant", "actor", "session"),
                 service.listWebShellSessions("tenant", "actor", null, 10).data().getFirst());
         assertThat(webShellViews).allSatisfy(view -> {
-            assertThat(view.capabilities().sessionClose()).isEqualTo(!csi && bindingSupport && harnessSupport);
+            assertThat(view.capabilities().sessionClose()).isEqualTo(bindingSupport && harnessSupport);
             assertThat(view.capabilities().sessionDelete())
-                    .isEqualTo(!csi && ("CLOSED".equals(status) || bindingSupport && harnessSupport));
+                    .isEqualTo("CLOSED".equals(status) || bindingSupport && harnessSupport);
         });
     }
 

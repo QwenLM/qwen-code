@@ -285,8 +285,8 @@ final class LocalRuntimeStore {
     }
 
     boolean rebooted(Registration registration) {
-        return !"macos".equals(identity.pidNamespace())
-                && !"macos".equals(registration.handle().getValue().get("pidNamespace"))
+        return "macos".equals(identity.pidNamespace())
+                        == "macos".equals(registration.handle().getValue().get("pidNamespace"))
                 && identity.hostId().equals(registration.handle().getValue().get("hostId"))
                 && !identity.bootId().equals(registration.handle().getValue().get("bootId"));
     }

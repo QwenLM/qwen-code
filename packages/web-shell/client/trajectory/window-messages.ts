@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { plural } from '../utils/plural.js';
+import { plural, ruPlural } from '../utils/plural.js';
 
 type WindowMessage =
   | string
@@ -134,4 +134,74 @@ export const TRAJECTORY_WINDOW_MESSAGES_ZH: Record<string, WindowMessage> = {
   'trajectory.detail.identifiers': '标识符',
   'trajectory.detail.lifecycle': '生命周期',
   'trajectory.detail.copySection': (v) => `复制${v?.section ?? ''}`,
+};
+
+export const TRAJECTORY_WINDOW_MESSAGES_RU: Record<string, WindowMessage> = {
+  'trajectory.summary.elapsed': 'прошло',
+  'trajectory.summary.active': 'активно',
+  'trajectory.summary.model': 'модель',
+  'trajectory.summary.requests': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'запрос', 'запроса', 'запросов')}`,
+  'trajectory.summary.tools': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'инструмент', 'инструмента', 'инструментов')}`,
+  'trajectory.summary.tokens': 'токены',
+  'trajectory.summary.failed': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'ошибка', 'ошибки', 'ошибок')}`,
+  'trajectory.summary.failedFilter': 'Показать только неудачные записи',
+  'trajectory.pill.live': 'Live',
+  'trajectory.pill.connecting': 'Подключение…',
+  'trajectory.pill.reconnecting': 'Переподключение…',
+  'trajectory.pill.paused': 'Пауза',
+  'trajectory.pill.returning': 'Обновление…',
+  'trajectory.pill.history': 'Более раннее окно',
+  'trajectory.pill.pause': 'Остановить следование',
+  'trajectory.pill.resume': 'Вернуться к последнему',
+  'trajectory.jumpLatest': 'Перейти к последнему',
+  'trajectory.jumpLatest.updated': 'Появились новые выполнения',
+  'trajectory.warnings': 'Предупреждения',
+  'trajectory.about': 'Об этом виде',
+  'trajectory.about.scope': (v) =>
+    `Итоги охватывают загруженные записи: ${v?.pages ?? 0} ${ruPlural(v?.pages, 'страница', 'страницы', 'страниц')}, ${v?.turns ?? 0} ${ruPlural(v?.turns, 'ход', 'хода', 'ходов')}. Выделение и масштаб их не меняют.`,
+  'trajectory.about.tokens':
+    'Токены: ввод основной сессии → вывод. Кэшированный ввод входит во ввод.',
+  'trajectory.about.numbering':
+    'Номера запросов считаются с начала загруженных записей.',
+  'trajectory.boundary.earlier': 'Более ранние записи не загружены',
+  'trajectory.boundary.loadEarlier': 'Загрузить более ранние',
+  'trajectory.boundary.start': 'Начало сессии',
+  'trajectory.boundary.newer': 'Более новые записи',
+  'trajectory.window.outside':
+    'Более ранние записи вне этого окна не загружены.',
+  'trajectory.window.return': 'Назад к последнему',
+  'trajectory.window.released':
+    'Более новые закладки навигации освобождены. Вернитесь к последнему, чтобы читать более новые записи.',
+  'trajectory.window.changed':
+    'Окно изменилось. Выберите запись, чтобы просмотреть её.',
+  'trajectory.window.failed':
+    'Навигация не удалась; отображаемое окно сохранено.',
+  'trajectory.window.expired':
+    'Этот снимок истории недоступен. Вернитесь к последнему.',
+  'trajectory.window.protocol':
+    'История не смогла продолжиться: курсор страницы не продвинулся. Вернитесь к последнему.',
+  'trajectory.window.budget':
+    'Курсор истории превышает бюджет навигации. Вернитесь к последнему.',
+  'trajectory.detail.back': 'Назад к записям',
+  'trajectory.detail.previous': 'Предыдущая запись',
+  'trajectory.detail.next': 'Следующая запись',
+  'trajectory.detail.notRecorded': 'Не записано',
+  'trajectory.detail.generating': (v) => `${v?.duration ?? ''} генерации`,
+  'trajectory.detail.tokens': 'Токены',
+  'trajectory.detail.steps': 'Шаги',
+  'trajectory.detail.tools': 'Инструменты',
+  'trajectory.detail.modelTime': 'Время модели',
+  'trajectory.detail.resize': 'Изменить размер подробностей',
+  'trajectory.detail.tokenCounts': (v) =>
+    `${v?.input ?? 0} ввод · ${v?.cached ?? 0} кэш · ${v?.output ?? 0} вывод`,
+  'trajectory.detail.input': 'Ввод',
+  'trajectory.detail.output': 'Вывод',
+  'trajectory.detail.text': 'Текст',
+  'trajectory.detail.other': 'Прочие аргументы и метаданные',
+  'trajectory.detail.identifiers': 'Идентификаторы',
+  'trajectory.detail.lifecycle': 'Жизненный цикл',
+  'trajectory.detail.copySection': (v) => `Копировать ${v?.section ?? ''}`,
 };

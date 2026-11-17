@@ -4,6 +4,7 @@ import {
   GaugeIcon,
   LayoutListIcon,
   LayersIcon,
+  PackageIcon,
   PanelRightIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -48,6 +49,10 @@ interface ChatContextHeaderProps {
   onOpenTokenUsage?: () => void;
   /** Opens the session context panel; hidden when omitted. */
   onOpenContextUsage?: () => void;
+  /** Session artifact count; the artifact entry shows when greater than 0. */
+  artifactCount?: number;
+  /** Opens the environment panel's artifacts section; hidden when omitted. */
+  onOpenArtifacts?: () => void;
   /** Shows the Local Control QR entry; hidden when omitted. */
   onOpenLocalControlSettings?: () => void;
 }
@@ -68,6 +73,8 @@ export function ChatContextHeader({
   onOpenFiles,
   onOpenTokenUsage,
   onOpenContextUsage,
+  artifactCount,
+  onOpenArtifacts,
   onOpenLocalControlSettings,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
@@ -178,6 +185,21 @@ export function ChatContextHeader({
             onClick={onToggleRightPanel}
           >
             <PanelRightIcon />
+          </button>
+        )}
+        {onOpenArtifacts && artifactCount != null && artifactCount > 0 && (
+          <button
+            type="button"
+            className={`${styles.action} ${styles.artifactAction}`}
+            data-web-shell-artifacts-entry
+            aria-label={t('chatHeader.openArtifacts', { count: artifactCount })}
+            title={t('chatHeader.openArtifacts', { count: artifactCount })}
+            onClick={onOpenArtifacts}
+          >
+            <PackageIcon />
+            <span className={styles.artifactCount} aria-hidden="true">
+              {artifactCount}
+            </span>
           </button>
         )}
       </div>
