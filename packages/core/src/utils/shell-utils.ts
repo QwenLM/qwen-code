@@ -989,6 +989,7 @@ export function stripShellCommandNegation(command: string): string {
 export function stripShellCommandPrefixes(
   command: string,
   restrictive = false,
+  environment?: { homeUnknown: boolean },
 ): string | undefined {
   const words: string[] = [];
   const tails: string[] = [];
@@ -1009,6 +1010,7 @@ export function stripShellCommandPrefixes(
       continue;
     }
     const prefix = getShellPrefixCommand(words, start);
+    if (prefix?.homeRemoved && environment) environment.homeUnknown = true;
     if (prefix?.hasUnsupportedOption && !restrictive) return undefined;
     if (prefix?.splitString !== undefined) {
       return envSplitStringCommand(

@@ -635,7 +635,7 @@ export class PermissionManager {
         return false;
       const expected = staticShellCommand(rule.specifier, true);
       if (!expected?.redirects.length) return false;
-      if (!actual) return !!ctx.cwdUnknown && /[<>]/.test(command);
+      if (!actual) return /[<>]/.test(command);
       return (
         matchesCommandPattern(expected.words, actual.words) &&
         expected.redirects.some((redirect) =>
@@ -728,7 +728,7 @@ export class PermissionManager {
       ctx.command !== undefined &&
       (this.hasDenyOrAskRuleForTool('read_file') ||
         this.hasDenyOrAskRuleForTool('write_file')) &&
-      hasUnsupportedShellSyntax(ctx.command)
+      hasUnsupportedShellSyntax(ctx.command, 0, true)
     );
   }
 

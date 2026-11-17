@@ -55,6 +55,27 @@ describe.each(['run_shell_command', 'monitor'])(
         };
 
         it.each([
+          'git >./protected push "$BRANCH"',
+          'git >./protected push $BRANCH',
+          'git >./protected push origin "$BRANCH"',
+        ])(
+          'keeps an expanded argument from hiding a redirect: %s',
+          async (command) => {
+            const { manager } = restricted('protected');
+            const ctx = { toolName, command };
+            expect(manager.hasRelevantRules(ctx)).toBe(true);
+            expect(
+              await evaluatePermissionRules(manager, 'allow', ctx),
+            ).toEqual({
+              finalPermission: 'ask',
+              pmForcedAsk: true,
+            });
+            expect(manager.hasMatchingAskRule(ctx)).toBe(true);
+            expect(manager.findMatchingDenyRule(ctx)).toBeUndefined();
+          },
+        );
+
+        it.each([
           'cd /tmp',
           'pushd /tmp',
           'popd',

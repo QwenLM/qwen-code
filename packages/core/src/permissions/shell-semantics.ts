@@ -2255,28 +2255,53 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
   return ops;
 }
 
+interface HeredocDelimiter {
+  text: string;
+  quoted: boolean;
+}
+
 function stripHeredocBodies(command: string): string {
   const lines = command.split('\n');
   const kept: string[] = [];
-  const pendingDelimiters: string[] = [];
+  const pendingDelimiters: HeredocDelimiter[] = [];
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index++) {
+    let line = lines[index]!;
     if (pendingDelimiters.length > 0) {
-      if (line.trim() === pendingDelimiters[0]) {
+      const delimiter = pendingDelimiters[0]!;
+      const body: string[] = [];
+      while (
+        !delimiter.quoted &&
+        index + 1 < lines.length &&
+        (line.match(/\\+$/)?.[0].length ?? 0) % 2 === 1
+      ) {
+        body.push(line.slice(0, -1));
+        line = lines[++index]!;
+      }
+      body.push(line);
+      if (body.join('').trim() === delimiter.text) {
         pendingDelimiters.shift();
       }
       continue;
     }
 
+    while (
+      index + 1 < lines.length &&
+      !removeShellLineContinuations(line + '\n').endsWith('\n')
+    ) {
+      line += '\n' + lines[++index]!;
+    }
     kept.push(line);
-    pendingDelimiters.push(...getHeredocDelimiters(line));
+    pendingDelimiters.push(
+      ...getHeredocDelimiters(removeShellLineContinuations(line)),
+    );
   }
 
   return kept.join('\n');
 }
 
-function getHeredocDelimiters(line: string): string[] {
-  const delimiters: string[] = [];
+function getHeredocDelimiters(line: string): HeredocDelimiter[] {
+  const delimiters: HeredocDelimiter[] = [];
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -2328,7 +2353,7 @@ function getHeredocDelimiters(line: string): string[] {
     }
 
     if (wordEnd > wordStart) {
-      delimiters.push(line.slice(wordStart, wordEnd));
+      delimiters.push({ text: line.slice(wordStart, wordEnd), quoted });
     }
     i = wordEnd;
   }
@@ -2358,8 +2383,8 @@ function walkCompoundCommand(
   depth: number,
   initialCwdUnknown: boolean,
 ): ShellOperation[] {
-  command = removeShellLineContinuations(command);
-  const subCommands = splitCompoundCommandSegments(stripHeredocBodies(command));
+  command = removeShellLineContinuations(stripHeredocBodies(command));
+  const subCommands = splitCompoundCommandSegments(command);
 
   const ops: ShellOperation[] = [];
   let succeeded: ShellCwdState = { cwd, unknown: initialCwdUnknown };

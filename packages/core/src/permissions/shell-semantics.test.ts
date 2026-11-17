@@ -823,6 +823,33 @@ describe('extractShellOperationsAcrossCommand', () => {
       [uncertainWrite(REPO_SETTINGS)],
     ],
     [
+      'retains executable commands after a quoted heredoc ending in a backslash',
+      ["cat <<'EOF'", 'C:\\', 'EOF', 'echo x > /tmp/protected'].join('\n'),
+      [uncertainWrite('/tmp/protected', false)],
+    ],
+    [
+      'joins a continued heredoc delimiter before locating its body',
+      ['cat <<EO\\', 'F', 'hello', 'EOF', 'echo x > /tmp/protected'].join('\n'),
+      [uncertainWrite('/tmp/protected', false)],
+    ],
+    [
+      'joins a double-quoted continued delimiter without joining its body',
+      ['cat <<"EO\\', 'F"', 'C:\\', 'EOF', 'echo x > /tmp/protected'].join(
+        '\n',
+      ),
+      [uncertainWrite('/tmp/protected', false)],
+    ],
+    [
+      'keeps a continued unquoted body from ending at a swallowed delimiter',
+      ['cat <<EOF', 'C:\\', 'EOF', 'echo x > /tmp/protected'].join('\n'),
+      [],
+    ],
+    [
+      'joins an unquoted delimiter split across body lines',
+      ['cat <<EOF', 'EO\\', 'F', 'echo x > /tmp/protected'].join('\n'),
+      [uncertainWrite('/tmp/protected', false)],
+    ],
+    [
       'does not treat quoted heredoc-looking text as a heredoc marker',
       ["echo '<<EOF'", 'cd .qwen', "echo '{}' > settings.json"].join('\n'),
       [uncertainWrite(REPO_SETTINGS)],

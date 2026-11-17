@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import { tokenizeShellWords } from '../utils/shell-word-tokenizer.js';
 import { stripShellCommandPrefixes } from '../utils/shell-utils.js';
 import { SHELL_ASSIGNMENT_PREFIX } from '../utils/shell-command-prefixes.js';
@@ -273,6 +274,8 @@ export function staticShellCommand(
           return undefined;
         }
       }
+      const normalizedTarget = normalizeRedirectTarget(target, cwd);
+      if (!normalizedTarget) return undefined;
       redirects.push({
         kind:
           piece.operator === '<>'
@@ -280,7 +283,7 @@ export function staticShellCommand(
             : piece.operator === '<'
               ? 'read'
               : 'write',
-        target: encodeWord(normalizeRedirectTarget(target, cwd), pattern),
+        target: encodeWord(normalizedTarget, pattern),
       });
     } else {
       // Only unquoted prefix assignments and negation are syntax.
@@ -303,10 +306,23 @@ export function staticShellCommand(
     : undefined;
 }
 
-function normalizeRedirectTarget(word: ShellWord, cwd?: string): ShellWord {
-  if (!word.text || (word.text[0] === '~' && word.bare[0] === '1')) return word;
+function normalizeRedirectTarget(
+  word: ShellWord,
+  cwd?: string,
+): ShellWord | undefined {
+  if (!word.text) return word;
   let { text, bare } = word;
+  const tildeIsBare = text[0] === '~' && bare[0] === '1';
+  if (tildeIsBare) {
+    if (text !== '~' && !text.startsWith('~/')) return undefined;
+    const home = os.homedir().replace(/\\/g, '/');
+    const prefix =
+      text.length > 1 && home.endsWith('/') ? home.slice(0, -1) : home;
+    text = prefix + text.slice(1);
+    bare = '0'.repeat(prefix.length) + bare.slice(1);
+  }
   if (
+    !tildeIsBare &&
     cwd?.startsWith('/') &&
     !text.startsWith('/') &&
     // A leading rule wildcard may already match an absolute path.

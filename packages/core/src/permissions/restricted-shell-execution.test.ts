@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import os from 'node:os';
+import { describe, expect, it, vi } from 'vitest';
 import { evaluatePermissionRules } from '../core/permission-helpers.js';
 import {
   buildShellExecWarnings,
@@ -75,7 +76,7 @@ for (const command of ['source ./change-dir.sh', '. ./change-dir.sh']) {
     `${command} & git >protected push origin main`,
     {
       deny: protectedEdit,
-      decision: 'allow',
+      decision: 'not-allow',
     },
   );
 }
@@ -386,7 +387,228 @@ for (const command of ['gcc -c file.c', 'git -c user.name=test status']) {
   });
 }
 
-describe('R7 independently frozen permission boundaries', () => {
+for (const command of [
+  'source ./change-dir.sh',
+  '. ./change-dir.sh',
+  'trap "echo x > /tmp/protected" EXIT',
+  "parallel 'echo x > /tmp/protected' ::: 1",
+  "/usr/bin/parallel 'echo x > /tmp/protected' ::: 1",
+]) {
+  add('R8 execution entries', command, command, {
+    deny: protectedEdit,
+    unsupported: true,
+    decision: 'ask',
+    suggestions: [],
+  });
+}
+
+for (const restriction of ['deny', 'ask'] as const) {
+  for (const command of [
+    'cat $FILE',
+    'cat "$FILE"',
+    'cat $HOME/.ssh/id_rsa',
+    "bash -c 'cat $FILE'",
+    "sudo sh -c 'cat $FILE'",
+  ]) {
+    add('R8 expanded file paths', restriction + ' ' + command, command, {
+      [restriction]: protectedRead,
+      decision: 'ask',
+    });
+  }
+  for (const command of [
+    'cp /tmp/a $HOME/protected.txt',
+    'cp /tmp/a "$DESTINATION"',
+    "bash -c 'cp /tmp/a $DESTINATION'",
+  ]) {
+    add('R8 expanded file paths', restriction + ' ' + command, command, {
+      [restriction]: protectedEdit,
+      decision: 'ask',
+    });
+  }
+}
+for (const command of [
+  "cat '$FILE'",
+  'cat \\$FILE',
+  'FILE=$VALUE cat /tmp/public',
+  "bash -c 'cat /tmp/public'",
+]) {
+  add('R8 expanded file paths', 'literal control ' + command, command, {
+    deny: protectedRead,
+    decision: 'allow',
+  });
+}
+add(
+  'R8 heredoc body',
+  'literal backslash before a quoted delimiter',
+  ["cat <<'EOF'", 'C:\\', 'EOF', 'echo x > /tmp/protected'].join('\n'),
+  {
+    deny: protectedEdit,
+    decision: 'deny',
+    operation: { virtualTool: 'write_file', filePath: '/tmp/protected' },
+  },
+);
+
+for (const header of [
+  ['cat <<EO\\', 'F'],
+  ['cat <<"EO\\', 'F"'],
+]) {
+  add(
+    'R8 heredoc header',
+    header.join(' '),
+    [...header, 'hello', 'EOF', 'echo x > /tmp/protected'].join('\n'),
+    {
+      deny: protectedEdit,
+      decision: 'deny',
+      operation: { virtualTool: 'write_file', filePath: '/tmp/protected' },
+    },
+  );
+}
+
+for (const command of [
+  'HOME=/tmp bash -c "echo x > ~/protected"',
+  'env HOME=/tmp sh -c "echo x > ~/protected"',
+  'HOME=/tmp; echo x > ~/protected',
+  'export HOME=/tmp; echo x > ~/protected',
+  'unset HOME; echo x > ~/protected',
+]) {
+  add('R8 home environment', command, command, {
+    deny: protectedEdit,
+    unsupported: true,
+    decision: 'ask',
+    suggestions: [],
+  });
+}
+for (const command of [
+  'cat /etc/shad*',
+  'cat /etc/shado?',
+  'cat /etc/shad[ow]*',
+  'cat /etc/{shadow,passwd}',
+  "bash -c 'cat /etc/shad*'",
+]) {
+  add('R8 unresolved file arguments', command, command, {
+    deny: protectedRead,
+    decision: 'ask',
+  });
+}
+add('R8 unresolved file arguments', 'named home', 'cp /tmp/a ~root/protected', {
+  deny: ['Edit(//root/protected)'],
+  decision: 'ask',
+});
+for (const command of [
+  "cat '/etc/shad*'",
+  "cat '/etc/{shadow,passwd}'",
+  "cp /tmp/a '~root/protected'",
+]) {
+  add('R8 unresolved file arguments', 'literal ' + command, command, {
+    deny: [...protectedRead, 'Edit(//root/protected)'],
+    decision: 'allow',
+  });
+}
+
+for (const command of ['echo "$FILE"', 'echo "${FILE}"']) {
+  add('R8 expanded file paths', 'stdout control ' + command, command, {
+    deny: [...protectedRead, ...protectedEdit],
+    decision: 'allow',
+  });
+  add('R8 expanded file paths', 'redirect ' + command, command + ' >"$FILE"', {
+    deny: protectedEdit,
+    decision: 'ask',
+  });
+}
+
+add(
+  'R8 expanded file paths',
+  'printf remains unresolved',
+  'printf "%s" "$FILE"',
+  { deny: protectedEdit, decision: 'ask' },
+);
+add(
+  'R8 expanded file paths',
+  'expanded printf option can mutate HOME',
+  'OPTS=-v bash -c \'printf "$OPTS" HOME /tmp; echo x > ~/protected\'',
+  { deny: protectedEdit, decision: 'ask' },
+);
+add(
+  'R8 expanded file paths',
+  'substring arithmetic can mutate HOME',
+  'S=abc bash -c \'echo "${S: (HOME=0) :1}"; echo x > ~/protected\'',
+  { deny: ['Edit(//project/0/protected)'], decision: 'ask' },
+);
+
+for (const command of [
+  'env -i git status',
+  "env -u UNUSED bash -c 'printf %s ~/protected'",
+  'env -i bash -c \'printf %s "~/protected"\'',
+  'env -i bash -c \'echo x > "~/protected"\'',
+]) {
+  add('R8 cleared home environment', 'ordinary control ' + command, command, {
+    deny: protectedEdit,
+    decision: 'allow',
+    unsupported: false,
+  });
+}
+for (const command of [
+  "env -i bash -c 'echo x > /tmp/protected'",
+  "env -u HOME bash -c 'echo x > /tmp/protected'",
+]) {
+  add('R8 cleared home environment', 'absolute control ' + command, command, {
+    deny: protectedEdit,
+    decision: 'deny',
+    unsupported: false,
+  });
+}
+
+describe('restricted shell permission boundaries', () => {
+  it.each([
+    'env -u HOME',
+    'env -uHOME',
+    'env --unset HOME',
+    'env --unset=HOME',
+    'env -i',
+    'env --ignore-environment',
+    'exec -c',
+  ])('R8 cleared home environment: %s', async (prefix) => {
+    const home = vi.spyOn(os, 'homedir').mockReturnValue('/analysis-home');
+    try {
+      const config = {
+        getPermissionsAllow: () => ['Bash(*)'],
+        getPermissionsDeny: () => ['Edit(//passwd-home/protected)'],
+        getPermissionsAsk: () => [],
+        getProjectRoot: () => '/project',
+        getCwd: () => '/project',
+        getShellExecutionSandbox: () => true,
+      };
+      const pm = new PermissionManager(config);
+      const allowOnly = new PermissionManager({
+        ...config,
+        getPermissionsDeny: () => [],
+      });
+      pm.initialize();
+      allowOnly.initialize();
+      for (const payload of [
+        'echo x >~/protected',
+        'sh -c "echo x > ~/protected"',
+        "sh -c $'echo x > \\u007e/protected'",
+      ]) {
+        const quotedPayload = payload.replaceAll("'", "'\\''");
+        const command = `${prefix} bash -c '${quotedPayload}'`;
+        const ctx = { toolName: 'run_shell_command', command };
+        expect(hasUnsupportedShellSyntax(command)).toBe(true);
+        expect(await pm.evaluate(ctx)).toBe('ask');
+        expect(await allowOnly.evaluate(ctx)).toBe('ask');
+        expect(await evaluatePermissionRules(pm, 'allow', ctx)).toEqual({
+          finalPermission: 'ask',
+          pmForcedAsk: true,
+        });
+        expect(await suggestCommandRules(command, 'Bash')).toEqual({
+          permissionRules: [],
+        });
+      }
+    } finally {
+      home.mockRestore();
+    }
+  });
+
   it.each(probes)('$group: $id', async (probe) => {
     const cwd = probe.cwd ?? '/project';
     const pm = new PermissionManager({

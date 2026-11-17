@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import os from 'node:os';
 import {
   maskConstantArithmetic,
   removeShellLineContinuations,
@@ -162,7 +163,47 @@ describe('Bash permission syntax views', () => {
     ).toBeUndefined();
   });
 
-  it('does not collapse parent traversal, a double-slash root, or bare tilde', () => {
+  it.each(['~', '~/protected', '~/logs/../protected', '~/logs//./protected'])(
+    'expands a bare home target without collapsing parent traversal: %s',
+    (target) => {
+      const home = os.homedir().replace(/\\/g, '/');
+      const absolute =
+        target === '~' ? home : home.replace(/\/$/, '') + target.slice(1);
+      const quoted = "'" + absolute.replaceAll("'", "'\\''") + "'";
+      expect(staticShellCommand('git >' + target + ' push')).toEqual(
+        staticShellCommand('git >' + quoted + ' push'),
+      );
+    },
+  );
+
+  it.each([
+    '"~/protected"',
+    "'~/protected'",
+    '\\~/protected',
+    "$'~/protected'",
+    '~"/protected"',
+    '""~/protected',
+  ])('preserves a quoted tilde prefix as a literal: %s', (target) => {
+    expect(staticShellCommand('git >' + target + ' push')).toEqual(
+      staticShellCommand("git >'~/protected' push"),
+    );
+  });
+
+  it.each([
+    '>~"/protected">/tmp/log',
+    '>~"/protected" >/tmp/log',
+    '>""~/protected>/tmp/log',
+    '>""~/protected >/tmp/log',
+  ])(
+    'keeps tilde quote metadata across adjacent redirects: %s',
+    (redirects) => {
+      expect(staticShellCommand('echo ' + redirects)).toEqual(
+        staticShellCommand("echo >'~/protected' >/tmp/log"),
+      );
+    },
+  );
+
+  it('does not collapse parent traversal, double-slash roots, or named homes', () => {
     expect(staticShellCommand('git >/tmp/link/../protected push')).not.toEqual(
       staticShellCommand('git >/tmp/protected push'),
     );
@@ -171,7 +212,7 @@ describe('Bash permission syntax views', () => {
     );
     expect(
       staticShellCommand('git >~root/protected push', false, '/tmp'),
-    ).toEqual(staticShellCommand('git >~root/protected push'));
+    ).toBeUndefined();
   });
 
   it('removes assignments with quoted values but retains quoted command names', () => {

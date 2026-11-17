@@ -1293,7 +1293,12 @@ function trimCommandPadding(command: string): string {
 }
 
 /** Keep persistent grants within syntax the file-operation tracker can see. */
-export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
+export function hasUnsupportedShellSyntax(
+  command: string,
+  depth = 0,
+  restrictFileEffects = false,
+  homeUnknown = false,
+): boolean {
   command = removeShellLineContinuations(command);
   const substitutionView = maskConstantArithmetic(command);
   if (detectCommandSubstitution(substitutionView)) return true;
@@ -1305,22 +1310,61 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
       if (!SHELL_ASSIGNMENT_PREFIX.test(word)) break;
       if (SHELL_EXECUTION_ENV_VARIABLE.test(word)) return true;
     }
-    const unprefixed = stripShellCommandPrefixes(segment);
+    const environment = { homeUnknown };
+    const unprefixed = stripShellCommandPrefixes(segment, false, environment);
     if (unprefixed === undefined) return true;
+    const expansions = new Set<number>();
+    const bares: string[] = [];
+    const literalWords = tokenizeShellWords(
+      unprefixed,
+      undefined,
+      undefined,
+      bares,
+      true,
+      expansions,
+    );
+    const simpleVariable =
+      /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/;
+    // Echo's simple variable arguments are data. Complex expansions can mutate
+    // shell state, and other builtins can interpret an expanded option.
+    const echoArgumentsAreData =
+      literalWords[0] === 'echo' &&
+      [...expansions].every((index) =>
+        simpleVariable.test(literalWords[index]!),
+      );
     if (
-      tokenizeShellWords(
-        unprefixed,
-        undefined,
-        undefined,
-        undefined,
-        true,
-      ).includes('')
+      literalWords.includes('') ||
+      (homeUnknown &&
+        literalWords.some((word, index) =>
+          word
+            .split('')
+            .some(
+              (char, offset) => char === '~' && bares[index]![offset] === '1',
+            ),
+        )) ||
+      (restrictFileEffects &&
+        ((expansions.size > 0 && !echoArgumentsAreData) ||
+          literalWords.some((word, index) => {
+            const bare = bares[index]!;
+            return (
+              (word[0] === '~' &&
+                bare[0] === '1' &&
+                word !== '~' &&
+                !word.startsWith('~/')) ||
+              word
+                .split('')
+                .some(
+                  (char, offset) =>
+                    bare[offset] === '1' && '*?[]{}'.includes(char),
+                )
+            );
+          })))
     )
       return true;
     const words = tokenizeShellWords(unprefixed);
     const firstWord = words[0];
     if (
-      firstWord === 'eval' ||
+      ['eval', 'source', '.', 'trap'].includes(firstWord ?? '') ||
       // Enabling shopt options (notably lastpipe) changes pipeline scope.
       // Queries remain ordinary commands; dynamic enabling flags are unknown.
       (firstWord === 'shopt' &&
@@ -1344,7 +1388,7 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
           .slice(1)
           .some((word) => SHELL_EXECUTION_ENV_VARIABLE.test(word))) ||
       hasUnmodeledShellCommandString(unprefixed) ||
-      firstWord?.split('/').at(-1) === 'xargs' ||
+      ['xargs', 'parallel'].includes(firstWord?.split('/').at(-1) ?? '') ||
       /^[^\s()]+\s*\(\s*\)/.test(unprefixed) ||
       /^(?:[({]|(?:if|then|elif|else|fi|while|until|for|select|case|esac|do|done|function)(?:\s|$))/.test(
         unprefixed,
@@ -1374,7 +1418,12 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
           redirectFree !== segment &&
           (execution === undefined ||
             stripShellWrapper(execution) !== execution ||
-            hasUnsupportedShellSyntax(redirectFree, depth))
+            hasUnsupportedShellSyntax(
+              redirectFree,
+              depth,
+              restrictFileEffects,
+              environment.homeUnknown,
+            ))
         ) {
           return true;
         }
@@ -1383,7 +1432,12 @@ export function hasUnsupportedShellSyntax(command: string, depth = 0): boolean {
     if (
       inner !== unprefixed &&
       (depth >= MAX_SHELL_UNWRAP_DEPTH ||
-        hasUnsupportedShellSyntax(inner, depth + 1))
+        hasUnsupportedShellSyntax(
+          inner,
+          depth + 1,
+          restrictFileEffects,
+          environment.homeUnknown,
+        ))
     ) {
       return true;
     }

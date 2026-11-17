@@ -90,7 +90,7 @@ export const SHELL_ASSIGNMENT_PREFIX =
 // These variables can change directory lookup, shell options or startup code.
 // An assignment is not a transparent prefix to the command being analysed.
 export const SHELL_EXECUTION_ENV_VARIABLE =
-  /^(?:CDPATH|BASHOPTS|SHELLOPTS|BASH_ENV|ENV)(?:\[|\+?=|$)/;
+  /^(?:HOME|CDPATH|BASHOPTS|SHELLOPTS|BASH_ENV|ENV)(?:\[|\+?=|$)/;
 
 const ENV_SPLIT_ESCAPES: Readonly<Record<string, string>> = {
   f: '\f',
@@ -186,6 +186,7 @@ export function getShellPrefixCommand(
       commandIndex: number;
       hasUnsupportedOption: boolean;
       splitString?: string;
+      homeRemoved?: boolean;
     }
   | undefined {
   const executable = tokens[start];
@@ -201,6 +202,7 @@ export function getShellPrefixCommand(
   const flagsWithValue = PREFIX_COMMAND_FLAGS_WITH_VALUE.get(command);
   let index = start + 1;
   let hasUnsupportedOption = false;
+  let homeRemoved = false;
   let options = true;
   while (index < tokens.length) {
     const token = tokens[index]!;
@@ -212,6 +214,9 @@ export function getShellPrefixCommand(
         PREFIX_COMMAND_FLAGS_WITHOUT_VALUE.get(command)?.has(token) ||
         (command === 'nice' && /^-\d+$/.test(token))
       ) {
+        if (command === 'env' || (command === 'exec' && token === '-c')) {
+          homeRemoved = true;
+        }
         index++;
         continue;
       }
@@ -222,6 +227,14 @@ export function getShellPrefixCommand(
             ? token.startsWith(`${value}=`)
             : token.startsWith(value)),
       );
+      if (command === 'env' && (flag === '-u' || flag === '--unset')) {
+        const removed =
+          token === flag
+            ? tokens[index + 1]
+            : token.slice(flag.length + (flag.startsWith('--') ? 1 : 0));
+        if (removed === 'HOME' || /[$`]/.test(removed ?? ''))
+          homeRemoved = true;
+      }
       // The operation tracker cannot follow a prefix's working-directory change.
       if (command === 'sudo' && (flag === '-D' || flag === '--chdir')) {
         hasUnsupportedOption = true;
@@ -239,7 +252,12 @@ export function getShellPrefixCommand(
           token === flag
             ? tokens[index++]
             : token.slice(flag.length + (flag.startsWith('--') ? 1 : 0));
-        return { commandIndex: index, hasUnsupportedOption: true, splitString };
+        return {
+          commandIndex: index,
+          hasUnsupportedOption: true,
+          splitString,
+          ...(homeRemoved ? { homeRemoved: true } : {}),
+        };
       }
       if (!flag) {
         hasUnsupportedOption = true;
@@ -262,5 +280,9 @@ export function getShellPrefixCommand(
     if (index < tokens.length && /^\d/.test(tokens[index]!)) index++;
     else hasUnsupportedOption = true;
   }
-  return { commandIndex: index, hasUnsupportedOption };
+  return {
+    commandIndex: index,
+    hasUnsupportedOption,
+    ...(homeRemoved ? { homeRemoved: true } : {}),
+  };
 }

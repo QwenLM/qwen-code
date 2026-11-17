@@ -39,6 +39,7 @@ export function tokenizeShellWords(
   let hasExpansion = false;
   let wordStarted = false;
   let tildeQuoted = false;
+  let tildeOffset = 0;
   let ansiCBytes: number[] = [];
   const flushAnsiC = () => {
     if (ansiCBytes.length === 0) return;
@@ -133,7 +134,7 @@ export function tokenizeShellWords(
     while (ch === '$' && command.startsWith('\\\n', quoteAt)) quoteAt += 2;
     if (!(ch === '$' && command[quoteAt] === "'")) flushAnsiC();
     if (ch === "'" || ch === '"' || ch === '\\') {
-      if (!current.includes('/')) tildeQuoted = true;
+      if (!current.slice(tildeOffset).includes('/')) tildeQuoted = true;
       wordStarted = true;
     }
     if (escaped) {
@@ -154,14 +155,14 @@ export function tokenizeShellWords(
       while (command[next] === '\\' && command[next + 1] === '\n') next += 2;
       if (command[next] === "'") {
         wordStarted = true;
-        if (!current.includes('/')) tildeQuoted = true;
+        if (!current.slice(tildeOffset).includes('/')) tildeQuoted = true;
         inAnsiC = true;
         i = next;
         continue;
       }
       if (command[next] === '"') {
         wordStarted = true;
-        if (!current.includes('/')) tildeQuoted = true;
+        if (!current.slice(tildeOffset).includes('/')) tildeQuoted = true;
         inDouble = true;
         i = next;
         continue;
@@ -179,7 +180,9 @@ export function tokenizeShellWords(
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
       if (wordStarted) {
         if (preserveSyntax && hasExpansion) expansions?.add(tokens.length);
-        if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
+        if (tildeQuoted && current[tildeOffset] === '~') {
+          bare = bare.slice(0, tildeOffset) + '0' + bare.slice(tildeOffset + 1);
+        }
         if (current) {
           pushToken(
             tokens,
@@ -199,8 +202,16 @@ export function tokenizeShellWords(
         hasExpansion = false;
         wordStarted = false;
         tildeQuoted = false;
+        tildeOffset = 0;
       }
       continue;
+    }
+    if (!inSingle && !inDouble && '<>|&'.includes(ch)) {
+      if (tildeQuoted && current[tildeOffset] === '~') {
+        bare = bare.slice(0, tildeOffset) + '0' + bare.slice(tildeOffset + 1);
+      }
+      tildeOffset = current.length + 1;
+      tildeQuoted = false;
     }
     if (!inSingle && (ch === '$' || ch === '`')) hasExpansion = true;
     current += ch;
@@ -209,7 +220,9 @@ export function tokenizeShellWords(
   }
   flushAnsiC();
   if (preserveSyntax && hasExpansion) expansions?.add(tokens.length);
-  if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
+  if (tildeQuoted && current[tildeOffset] === '~') {
+    bare = bare.slice(0, tildeOffset) + '0' + bare.slice(tildeOffset + 1);
+  }
   if (current)
     pushToken(
       tokens,
