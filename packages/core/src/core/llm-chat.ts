@@ -2122,7 +2122,13 @@ export const ORPHAN_TOOL_USE_REPAIR_REASON =
  *       arrives.
  *   (2) Repair any remaining dangling `model[fc]` whose
  *       `user[fr]` never landed (`repairOrphanedToolUseTurns`):
- *         - SYNTHESIZE an `error` fr for ids with no matching response;
+ *         - WIDEN the search past the adjacent window and adopt the
+ *           first genuine `functionResponse` found later in history
+ *           before declaring an id unmatched (`adoptLateResponses`);
+ *         - SYNTHESIZE an `error` `functionResponse` for ids with no
+ *           `functionResponse` in the adjacent window and no genuine one
+ *           later in history (a placeholder already in the window
+ *           closes the pair);
  *         - HOIST the real fr into the immediately-adjacent user turn
  *           when it landed in a non-adjacent later turn;
  *         - DROP duplicate fr copies for the same id.
@@ -2324,17 +2330,10 @@ function planRepair(scan: ScanResult): RepairPlan {
 }
 
 /**
- * WIDEN — for ids the adjacent-window scan left unmatched, search the
- * REST of history for a genuine (non-synthesized) `functionResponse`
- * and adopt the first copy as the hoist survivor; extra genuine copies
- * drop as duplicates. The window scan only sees the consecutive user
- * run after a `model[functionCall]`, so a real result that landed
- * behind an ordinary `model[text]` turn (late submitQuery after a
- * follow-up prompt) used to be synthesized over: a placeholder went in
- * next to the call while the genuine answer stayed orphaned further
- * down, leaving two `tool_result` blocks for one id. Synthesized
- * placeholders never satisfy the search — hoisting one would relocate
- * an error stub, not the tool's real output. Mutates `plan` only.
+ * WIDEN — for ids the adjacent-window scan left unmatched, adopt the
+ * first genuine `functionResponse` found later in history as the hoist
+ * survivor; extra genuine copies drop as duplicates. See the canonical
+ * note for why the window scan can miss them.
  */
 function adoptLateResponses(
   history: Content[],

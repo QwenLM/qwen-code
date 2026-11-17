@@ -13195,6 +13195,73 @@ describe('LlmChat', async () => {
       });
     });
 
+    it('keeps a sibling late result alive while hoisting its partner from the same turn', () => {
+      // Two dangling calls answered in one late batch: the trailing user
+      // turn carries both fr(call_a) and fr(call_b). Hoisting fr(call_a)
+      // removes only that one part, so the `parts.length === 0` re-check
+      // must keep the turn alive until fr(call_b) is spliced out too —
+      // otherwise fr(call_b) is deleted and the model is told a finished
+      // tool "was not recorded" (the exact symptom this PR removes).
+      const { result, history } = repair([
+        userText('kick off'),
+        callTurn('call_a'),
+        userText('b'),
+        callTurn('call_b'),
+        userText('c'),
+        modelText('ok'),
+        content(
+          'user',
+          fnResponse('read_file', { output: 'real a' }, 'call_a'),
+          fnResponse('read_file', { output: 'real b' }, 'call_b'),
+        ),
+      ]);
+
+      expect(result.injected).toEqual([]);
+      expect(result.droppedDuplicates).toEqual([]);
+      // Both genuine results land in their own adjacent user turn, and the
+      // shared batch turn is removed only after its last fr is spliced out.
+      expect(history.length).toBe(6);
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('call_a');
+      expect(history[2]!.parts![0]!.functionResponse?.response).toEqual({
+        output: 'real a',
+      });
+      expect(history[2]!.parts![1]).toEqual({ text: 'b' });
+      expect(history[4]!.parts![0]!.functionResponse?.id).toBe('call_b');
+      expect(history[4]!.parts![0]!.functionResponse?.response).toEqual({
+        output: 'real b',
+      });
+      expect(history[4]!.parts![1]).toEqual({ text: 'c' });
+    });
+
+    it('inserts a new user turn when the call is followed by an ordinary model turn', () => {
+      // [model[fc], model[text], user[text], model[text], user[fr]]: the
+      // slot directly after the call is a model turn, so the hoist must
+      // splice a NEW user turn there. A regression that appends at the
+      // tail would ship the tool_result non-adjacent to its tool_use again.
+      const { result, history } = repair([
+        userText('kick off'),
+        callTurn('call_x'),
+        modelText('thinking'),
+        userText('follow up'),
+        modelText('ok'),
+        resultTurn('call_x', 'real x'),
+      ]);
+
+      expect(result.injected).toEqual([]);
+      expect(result.droppedDuplicates).toEqual([]);
+      expect(history.length).toBe(6);
+      // A fresh user turn now sits directly after the call, holding the fr.
+      expect(history[2]!.role).toBe('user');
+      expect(history[2]!.parts).toHaveLength(1);
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('call_x');
+      expect(history[2]!.parts![0]!.functionResponse?.response).toEqual({
+        output: 'real x',
+      });
+      // The intervening model turn survives right after it.
+      expect(history[3]!.role).toBe('model');
+      expect(history[3]!.parts![0]).toEqual({ text: 'thinking' });
+    });
+
     it('synthesizes the still-missing id while hoisting a late real copy of its sibling', () => {
       // Mixed plan in one pass: one parallel callId has a genuine copy
       // behind the model turn (hoist), the sibling has none (synthesize).

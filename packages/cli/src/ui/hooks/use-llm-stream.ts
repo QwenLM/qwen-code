@@ -6090,10 +6090,9 @@ export const useLlmStream = (
               // reported in issue #15297. The placeholder was itself
               // in-memory only, so the real result is the first durable
               // answer for this callId. On `--resume` the repair pass hoists
-              // it back only while it still sits in the user run right after
-              // the call; once a model turn intervenes the scan stops there
-              // and synthesizes a fresh placeholder instead, leaving the
-              // recorded result durable but unreferenced.
+              // it back next to its call even across an intervening model
+              // turn (the widened search), so the recorded result stays
+              // referenced rather than being synthesized over.
               const sharedResult = sharedResultsByCallId.get(entry.callId);
               if (sharedResult) {
                 sharedResult.record?.();
