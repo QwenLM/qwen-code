@@ -101,6 +101,14 @@ export function daemonBlockToMarkdown(
       const lang = block.stream === 'stderr' ? 'shellsession-stderr' : 'shell';
       return markdownFence(lang, text(block.text));
     }
+    case 'user_shell': {
+      const command = daemonToolPreviewToMarkdown(
+        { kind: 'command', command: block.command, cwd: block.cwd },
+        opts,
+      );
+      const lang = block.stream === 'stderr' ? 'shellsession-stderr' : 'shell';
+      return `**Shell command**\n\n${command}\n\n${markdownFence(lang, text(block.text))}`;
+    }
     case 'permission': {
       const optionList = block.options
         .map(
@@ -420,6 +428,13 @@ export function daemonBlockToPlainText(
     }
     case 'shell':
       return `[shell ${block.stream ?? 'stdout'}]\n${clean(block.text)}`;
+    case 'user_shell': {
+      const command = daemonToolPreviewToPlainText(
+        { kind: 'command', command: block.command, cwd: block.cwd },
+        opts,
+      );
+      return `${command}\n[shell ${block.stream ?? 'stdout'}]\n${clean(block.text)}`;
+    }
     case 'permission': {
       // Cap permission fields for parity.
       const optionList = block.options
@@ -596,6 +611,16 @@ export function daemonBlockToHtml(
     }
     case 'shell':
       return `<pre class="daemon-block daemon-shell" data-stream="${sanitizer(block.stream ?? 'stdout')}">${sanitizer(cap(block.text))}</pre>`;
+    case 'user_shell': {
+      const command = sanitizer(
+        daemonToolPreviewToPlainText(
+          { kind: 'command', command: block.command, cwd: block.cwd },
+          opts,
+        ),
+      );
+      const output = sanitizer(cap(sanitizeTerminalText(block.text)));
+      return `<div class="daemon-block daemon-user-shell" data-stream="${sanitizer(block.stream ?? 'stdout')}"><pre class="command">${command}</pre><pre>${output}</pre></div>`;
+    }
     case 'permission': {
       // Apply `cap()` for parity with every
       // other block kind in this function. The tool block's `cap(title)`
