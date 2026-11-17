@@ -376,4 +376,90 @@ describe('SessionService - artifact summary sidecar', () => {
       1,
     );
   });
+
+  it('does not clobber a correct sidecar from a journal with a history gap', async () => {
+    // The orphaned second user breaks the history chain; the artifact
+    // event attached to it falls off the active branch, so the rebuilt
+    // snapshot undercounts (2 of 3). A complete PARSE is not an
+    // authoritative read — the seed must leave the correct sidecar alone.
+    const a = persistedArtifact('https://example.com/gap-a');
+    const b = persistedArtifact('https://example.com/gap-b');
+    const c = persistedArtifact('https://example.com/gap-c');
+    const orphanUser: ChatRecord = {
+      uuid: 'user-2',
+      parentUuid: 'missing-parent',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:02.000Z',
+      type: 'user',
+      cwd: root,
+      version: '1.0.0',
+      message: { role: 'user', parts: [{ text: 'orphaned prompt' }] },
+    };
+    const orphanEvent: ChatRecord = {
+      ...artifactEventRecord([c], 2),
+      uuid: 'artifact-event-orphan',
+      parentUuid: 'user-2',
+    };
+    writeTranscript([
+      userRecord(),
+      artifactEventRecord([a, b]),
+      orphanUser,
+      orphanEvent,
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 3);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      3,
+    );
+  });
+
+  it('does not seed from a journal the mutation guard would refuse', async () => {
+    // A record-level damage warning (event without a changes array) is
+    // one the library removal path treats as non-authoritative; the seed
+    // must refuse the same journal instead of publishing its undercount.
+    const a = persistedArtifact('https://example.com/warn-a');
+    const damaged: ChatRecord = {
+      uuid: 'artifact-event-damaged',
+      parentUuid: 'user-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:02.000Z',
+      type: 'system',
+      subtype: 'session_artifact_event',
+      cwd: root,
+      version: '1.0.0',
+      // Deliberately malformed: an event payload without a changes array.
+      systemPayload: {
+        v: 2,
+        sessionId: SESSION_ID,
+        sequence: 2,
+        recordedAt: '2026-11-17T00:00:02.000Z',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([userRecord(), artifactEventRecord([a]), damaged]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 5);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      5,
+    );
+  });
+
+  it('still seeds when the only warnings are per-artifact skips', async () => {
+    // Tolerated warnings (missing id/title) leave the surviving sequence
+    // trustworthy: the seed publishes the rebuilt count, not the stale one.
+    const a = persistedArtifact('https://example.com/tolerated-a');
+    const titleless = { ...persistedArtifact('https://example.com/no-title') };
+    delete (titleless as { title?: string }).title;
+    writeTranscript([userRecord(), artifactEventRecord([a, titleless])]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 7);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
 });

@@ -356,6 +356,25 @@ export function rebuildSessionArtifactSnapshot(
   return accumulator.finish();
 }
 
+/**
+ * Whether a rebuilt snapshot's warnings disqualify the journal as an
+ * authority for derived writes. Per-artifact skips (malformed, oversized
+ * metadata, missing id/title) leave the surviving sequence trustworthy;
+ * record-level damage (stale sequences, malformed or truncated events)
+ * does not. Shared by the library mutation guard and the load-time
+ * sidecar seed so both refuse the same journals.
+ */
+export function hasDisqualifyingArtifactJournalWarning(
+  warnings: readonly string[],
+): boolean {
+  return warnings.some(
+    (warning) =>
+      !warning.startsWith('skipped malformed artifact ') &&
+      !warning.startsWith('skipped oversized metadata for artifact ') &&
+      warning !== 'skipped artifact without id/title',
+  );
+}
+
 export function remapSessionArtifactPayloadForFork(
   payload: unknown,
   sourceSessionId: string,

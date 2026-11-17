@@ -74,6 +74,7 @@ import {
   isSessionArtifactRecord,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   getWebPreviewSnapshotId,
+  hasDisqualifyingArtifactJournalWarning,
   type PersistedSessionArtifact,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
@@ -3510,12 +3511,7 @@ export class SessionService {
       );
     }
     if (
-      state.snapshot?.warnings.some(
-        (warning) =>
-          !warning.startsWith('skipped malformed artifact ') &&
-          !warning.startsWith('skipped oversized metadata for artifact ') &&
-          warning !== 'skipped artifact without id/title',
-      )
+      hasDisqualifyingArtifactJournalWarning(state.snapshot?.warnings ?? [])
     ) {
       throw new SessionArtifactLibraryError(
         sessionId,
@@ -3790,15 +3786,23 @@ export class SessionService {
     );
     // Seed the derived list cache so legacy sessions (journal records
     // predating the sidecar) and forks gain a count on their first open.
-    // Best-effort and only from a complete read: a partial transcript must
-    // not publish an undercount. The journal stays authoritative. Skip the
-    // write when the sidecar already carries this count so a warm load adds
-    // no disk write to the restore path. A zero count heals an existing
-    // stale sidecar (a failed best-effort zero write must not leave a
-    // phantom count forever) but never creates one for an artifact-free
-    // session. An undefined snapshot (no artifact records on the active
-    // branch at all) is a zero count for healing purposes.
-    if (sourceReadComplete) {
+    // Best-effort and only from an authoritative read: a partial transcript
+    // must not publish an undercount, a broken history chain can orphan
+    // artifact events off the active branch (same undercount), and a
+    // journal with record-level damage is one the library mutation guard
+    // refuses — the seed refuses it too rather than clobbering a correct
+    // sidecar. The journal stays authoritative. Skip the write when the
+    // sidecar already carries this count so a warm load adds no disk write
+    // to the restore path. A zero count heals an existing stale sidecar (a
+    // failed best-effort zero write must not leave a phantom count forever)
+    // but never creates one for an artifact-free session. An undefined
+    // snapshot (no artifact records on the active branch at all) is a zero
+    // count for healing purposes.
+    if (
+      sourceReadComplete &&
+      gaps.length === 0 &&
+      !hasDisqualifyingArtifactJournalWarning(artifactSnapshot?.warnings ?? [])
+    ) {
       const count = artifactSnapshot?.artifacts.length ?? 0;
       const summaryPath = this.getArtifactSummaryPathForState(sessionId, state);
       const existing = readSessionArtifactSummarySidecar(summaryPath);

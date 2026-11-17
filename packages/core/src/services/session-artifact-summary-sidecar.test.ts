@@ -12,6 +12,7 @@ import { MAX_PERSISTED_ARTIFACTS } from './session-artifact-persistence.js';
 import {
   moveSessionArtifactSummarySidecar,
   readSessionArtifactSummarySidecar,
+  readSessionArtifactSummarySidecarAsync,
   removeSessionArtifactSummarySidecar,
   sessionArtifactSummarySidecarPath,
   writeSessionArtifactSummarySidecar,
@@ -121,5 +122,57 @@ describe('session artifact summary sidecar', () => {
       moveSessionArtifactSummarySidecar(filePath, destination),
     ).not.toThrow();
     expect(fs.existsSync(destination)).toBe(false);
+  });
+});
+
+describe('session artifact summary sidecar — async reader', () => {
+  let directory: string;
+  let filePath: string;
+
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'artifact-summary-'));
+    filePath = sessionArtifactSummarySidecarPath(directory, 'session-1');
+  });
+
+  afterEach(() => {
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  it('reads a valid sidecar like the sync reader', async () => {
+    writeSessionArtifactSummarySidecar(filePath, 3);
+    await expect(
+      readSessionArtifactSummarySidecarAsync(filePath),
+    ).resolves.toEqual(readSessionArtifactSummarySidecar(filePath));
+  });
+
+  it('returns undefined for a missing sidecar (ENOENT)', async () => {
+    await expect(
+      readSessionArtifactSummarySidecarAsync(filePath),
+    ).resolves.toBeUndefined();
+  });
+
+  it('returns undefined for corrupt JSON', async () => {
+    fs.writeFileSync(filePath, '{not json');
+    await expect(
+      readSessionArtifactSummarySidecarAsync(filePath),
+    ).resolves.toBeUndefined();
+  });
+
+  it('rethrows non-ENOENT read errors (directory at the path)', async () => {
+    fs.mkdirSync(filePath);
+    await expect(
+      readSessionArtifactSummarySidecarAsync(filePath),
+    ).rejects.toMatchObject({ code: 'EISDIR' });
+  });
+
+  it('rejects with AbortError when the signal is already aborted', async () => {
+    writeSessionArtifactSummarySidecar(filePath, 3);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      readSessionArtifactSummarySidecarAsync(filePath, {
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
   });
 });
