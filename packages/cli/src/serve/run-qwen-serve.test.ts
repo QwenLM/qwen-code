@@ -14542,7 +14542,9 @@ describe('runQwenServe runtime startup failures', () => {
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
           promptDeadlineMs: null,
-          writerIdleTimeoutMs: null,
+          // Effective budget: the writer-stall reaper is default-on, so
+          // an unset flag reports the 60s default rather than null.
+          writerIdleTimeoutMs: 60_000,
           channelIdleTimeoutMs: 0,
           sessionIdleTimeoutMs: 1_800_000,
           sessionPromptSettledCloseGraceMs: 0,

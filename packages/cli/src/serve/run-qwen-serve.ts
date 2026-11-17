@@ -221,6 +221,7 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
+import { enableSocketKeepalive } from './socket-keepalive.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import { recoverBranchWorktreePreparations } from './branch-worktree-preparation.js';
@@ -232,6 +233,7 @@ import {
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
   pushChannelRestoreIssues,
+  resolveWriterIdleBudgetMs,
   sseMaxConnections,
   toDaemonStatusMemoryLimits,
   type DaemonStatusIssue,
@@ -2944,7 +2946,9 @@ function createBootstrapServeApp(input: {
         maxJournalEvents: opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
         maxJournalBytes: opts.maxJournalBytes ?? DEFAULT_MAX_JOURNAL_BYTES,
         promptDeadlineMs: positiveFiniteOrNull(opts.promptDeadlineMs),
-        writerIdleTimeoutMs: positiveFiniteOrNull(opts.writerIdleTimeoutMs),
+        writerIdleTimeoutMs: positiveFiniteOrNull(
+          resolveWriterIdleBudgetMs(opts.writerIdleTimeoutMs),
+        ),
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         sessionPromptSettledCloseGraceMs: sessionPromptSettledCloseGraceMs(
@@ -11629,21 +11633,10 @@ async function runQwenServeImpl(
     } else {
       server = deps.httpServerFactory?.(app) ?? createServer(app);
     }
-    // TCP keepalive on every accepted socket (30s idle before the first
-    // probe). Responsibility boundary with the SSE writer-stall reaper
-    // (routes/sse-events.ts): keepalive lets the KERNEL reap half-open
-    // connections whose peer vanished without FIN/RST while the socket
-    // sits idle (e.g. pooled keep-alive HTTP connections). It does NOT
-    // catch a live peer that stopped reading — its TCP stack still ACKs
-    // the probes — and it never fires on a connection that keeps
-    // sending heartbeats. Both of those cases are owned by the
-    // application-level reaper, which evicts writers stuck on `drain`.
-    // For HTTPS the 'connection' event carries the raw socket before
-    // the TLS handshake; the keepalive setting applies to the
-    // underlying TCP connection either way.
-    server.on('connection', (socket) => {
-      socket.setKeepAlive(true, 30_000);
-    });
+    // TCP keepalive on every accepted socket; the LAN listeners register
+    // the same helper. Boundary with the SSE writer-stall reaper: see
+    // socket-keepalive.ts.
+    enableSocketKeepalive(server);
     serveAppLifecycle.bindServer(server, {
       startupReady: serveAppStartupReady,
       drainHost: () => {

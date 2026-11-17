@@ -14,6 +14,7 @@ import type { Application } from 'express';
 import { MutableOriginAllowlist, parseAllowOriginPatterns } from './auth.js';
 import type { CredentialStore } from './local-control/credentials.js';
 import { tagListener } from './local-control/listener-identity.js';
+import { SOCKET_KEEPALIVE_IDLE_MS } from './socket-keepalive.js';
 
 export function remoteAccessInterfaces() {
   return Object.entries(networkInterfaces()).flatMap(
@@ -166,6 +167,8 @@ export class RemoteAccessService {
       server.on('connection', (socket) => {
         sockets.add(socket);
         socket.once('close', () => sockets.delete(socket));
+        // Same keepalive policy as the primary listener.
+        socket.setKeepAlive(true, SOCKET_KEEPALIVE_IDLE_MS);
       });
       server.maxConnections = 64;
       server.headersTimeout = 10_000;

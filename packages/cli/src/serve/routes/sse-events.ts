@@ -48,27 +48,14 @@ import {
 
 let activeSseCount = 0;
 
-/**
- * Default writer-stall budget applied when `--writer-idle-timeout-ms` is
- * unset. The reaper only fires while a write is stuck waiting for `drain`
- * (the consumer stopped reading and the kernel send buffer is full), so
- * healthy idle streams — whose 15s heartbeats keep flushing — are never
- * evicted regardless of this value. 60s bounds how long a stalled writer
- * can pin a listener slot before it is force-evicted.
- */
-export const DEFAULT_WRITER_IDLE_TIMEOUT_MS = 60_000;
-
-/**
- * Resolve the effective writer-stall budget. Unset ⇒ default-on reaper;
- * an explicit positive value wins; non-positive (direct embeds only — the
- * CLI flag validates positive integers) disables the reaper.
- */
-export function resolveWriterIdleBudgetMs(
-  flagValue: number | undefined,
-): number {
-  if (flagValue === undefined) return DEFAULT_WRITER_IDLE_TIMEOUT_MS;
-  return flagValue > 0 ? flagValue : 0;
-}
+// The writer-stall budget constant/resolver live in daemon-status.ts so
+// status surfaces can report the effective budget without importing route
+// code; re-exported here for the route's callers and tests.
+import { resolveWriterIdleBudgetMs } from '../daemon-status.js';
+export {
+  DEFAULT_WRITER_IDLE_TIMEOUT_MS,
+  resolveWriterIdleBudgetMs,
+} from '../daemon-status.js';
 
 const SSE_STREAM_ID_HEADER = 'X-Qwen-SSE-Stream-Id';
 // Keep in sync with the REST transport's response-header validator.

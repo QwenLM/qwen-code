@@ -463,7 +463,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Admission cap on concurrent SSE streams (GET /session/:id/events). ' +
           'Defaults to 80% of --max-connections so short requests (/health, static ' +
           'assets) keep listener headroom; streams at the cap get 503 + Retry-After ' +
-          'instead of a silent socket close. Set to 0 to disable.',
+          'instead of a silent socket close. Explicit values floor to at least one ' +
+          'stream and clamp to that headroom ceiling. Set to 0 to disable.',
       })
       .option('require-auth', {
         type: 'boolean',

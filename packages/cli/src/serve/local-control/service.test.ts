@@ -6,7 +6,11 @@
 
 import express, { type Request } from 'express';
 import { createServer, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import {
+  connect as netConnect,
+  type AddressInfo,
+  type Socket as NetSocket,
+} from 'node:net';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MutableOriginAllowlist } from '../auth.js';
 import { CredentialStore } from './credentials.js';
@@ -82,6 +86,48 @@ describe('LocalControlService', () => {
       interfaceName: 'en0',
       address: '127.0.0.1',
     });
+  });
+
+  it('enables TCP keepalive on accepted LAN sockets', async () => {
+    // The pairing listener sits behind NATs that silently drop idle
+    // flows; it must register the same keepalive policy as the primary
+    // listener (review R1-3).
+    const port = await unusedPort();
+    const credentials = new CredentialStore();
+    const origins = new MutableOriginAllowlist({
+      allowAny: false,
+      origins: new Set(),
+    });
+    const spy = vi.spyOn(
+      (await import('node:net')).Socket.prototype,
+      'setKeepAlive',
+    );
+    const service = new LocalControlService({
+      app: express(),
+      credentials,
+      originAllowlist: origins,
+      attachWebSocket: () => {},
+      detachWebSocket: () => {},
+      getPort: () => port,
+    });
+    try {
+      const enabled = await service.enable();
+      expect(enabled.url).toBeTruthy();
+      await new Promise<void>((resolve, reject) => {
+        const sock: NetSocket = netConnect(port, '127.0.0.1', () => {
+          sock.destroy();
+          resolve();
+        });
+        sock.on('error', reject);
+      });
+      // The server-side 'connection' handler runs after the client's
+      // connect callback; let the accept settle before asserting.
+      await new Promise((r) => setTimeout(r, 100));
+      expect(spy).toHaveBeenCalledWith(true, 30_000);
+    } finally {
+      spy.mockRestore();
+      await service.disable();
+    }
   });
 
   it('serializes lifecycle changes and fully revokes state on disable', async () => {
