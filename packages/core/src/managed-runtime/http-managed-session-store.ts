@@ -4048,6 +4048,7 @@ export function collectNestedResourceRefs(
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-config_install' ||
     ref.kind === 'managed-extension-config-bundle' ||
     ref.kind === 'managed-extension-contributions' ||
     ref.kind === 'managed-definition' ||
@@ -4055,6 +4056,12 @@ export function collectNestedResourceRefs(
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
   ) {
+    // A config_install record names its own bundle, root snapshot and the
+    // stage/enable acknowledgements (managed-session-resource-references.ts),
+    // and its predecessor through previousRecordRef. The commit closes over
+    // the record's own edges but not the predecessor chain — re-closing it
+    // would grow linearly with the session's config history (R1-2), and a
+    // pre-fix predecessor's children were never persisted (R1-1).
     const record = parseManagedSessionRecordJson(
       bytes.toString('utf8'),
       MANAGED_SESSION_LIMITS.maxEventBytes,
@@ -4063,6 +4070,17 @@ export function collectNestedResourceRefs(
       return collectRefs([(record as { messagesRef?: unknown }).messagesRef]);
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
+    if (ref.kind === 'managed-config_install') {
+      // Exclude previousRecordRef: the predecessor was committed by its own
+      // transaction, so its children are already persisted. Re-closing the
+      // chain would grow linearly (R1-2) and break on pre-fix records whose
+      // children were never uploaded (R1-1).
+      const { previousRecordRef: _, ...ownEdges } = record as Record<
+        string,
+        unknown
+      >;
+      return collectRefs([ownEdges]);
+    }
     return collectRefs([record]);
   }
   // A result manifest names its page envelopes: they are Session resources
@@ -4102,6 +4120,7 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-config_install',
       'managed-extension-config-bundle',
       'managed-extension-contributions',
       'managed-definition',

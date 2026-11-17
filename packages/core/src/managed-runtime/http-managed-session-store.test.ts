@@ -10130,6 +10130,79 @@ describe('collectNestedResourceRefs', () => {
     ).toEqual([contributionsRef]);
   });
 
+  it('closes over a config_install record and every resource it names', () => {
+    // The leak: RESOURCE_REF_PATHS declares six edges for this kind and the
+    // cold-load RESTORE_CONTAINER_KINDS queue descends into it, but this walk
+    // answered [] — so the commit shipped the record without the bundle,
+    // root snapshot and acknowledgements it names, and a reopened reader
+    // found the record and 404'd on the hop the MCP settings history and the
+    // package selection both walk.
+    const ref = closureRef('managed-config_install', 'record');
+    const predecessorRef = closureRef('managed-config_install', 'predecessor');
+    const bundleRef = closureRef('managed-extension-config-bundle', 'bundle');
+    const previousBundleRef = closureRef(
+      'managed-extension-config-bundle',
+      'previous-bundle',
+    );
+    const restoresBundleRef = closureRef(
+      'managed-extension-config-bundle',
+      'restores-bundle',
+    );
+    const rootSnapshotRef = closureRef('managed-extension-root', 'root');
+    const stageAckRef = closureRef('managed-extension-stage-ack', 'stage');
+    const enableAckRef = closureRef('managed-extension-enable-ack', 'enable');
+    const nested = collectNestedResourceRefs(
+      ref,
+      Buffer.from(
+        JSON.stringify({
+          kind: 'hosted-extension-config',
+          revision: 2,
+          previousRecordRef: predecessorRef,
+          bundleRef,
+          previousBundleRef,
+          restoresBundleRef,
+          rootSnapshotRef,
+          stageAckRefs: [stageAckRef],
+          enableAckRefs: [enableAckRef],
+        }),
+      ),
+    );
+    // previousRecordRef is excluded: re-closing the chain would grow linearly
+    // (R1-2), and a pre-fix predecessor's children were never persisted (R1-1).
+    expect(nested).toHaveLength(6);
+    expect(nested).toEqual(
+      expect.arrayContaining([
+        bundleRef,
+        previousBundleRef,
+        restoresBundleRef,
+        rootSnapshotRef,
+        stageAckRef,
+        enableAckRef,
+      ]),
+    );
+    expect(nested).not.toEqual(
+      expect.arrayContaining([predecessorRef]),
+    );
+    // The first revision names no predecessor and no restore target; its own
+    // edges still ship.
+    const first = collectNestedResourceRefs(
+      closureRef('managed-config_install', 'first'),
+      Buffer.from(
+        JSON.stringify({
+          kind: 'hosted-extension-config',
+          revision: 1,
+          previousRecordRef: null,
+          bundleRef,
+          rootSnapshotRef,
+          stageAckRefs: [],
+          enableAckRefs: [],
+        }),
+      ),
+    );
+    expect(first).toEqual(expect.arrayContaining([bundleRef, rootSnapshotRef]));
+    expect(first).toHaveLength(2);
+  });
+
   it('refuses a malformed file history record instead of collapsing its closure', () => {
     const ref = closureRef('managed-file_history', 'malformed');
     expect(() =>
