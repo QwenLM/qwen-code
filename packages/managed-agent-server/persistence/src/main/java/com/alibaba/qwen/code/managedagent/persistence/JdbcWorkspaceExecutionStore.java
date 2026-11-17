@@ -73,7 +73,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void requireExternalExecution(ContextBinding binding) {
         if (isExternal(binding) && (externalAdmission == null
-                || !externalAdmission.externalFilesAllowed(binding))) {
+                || !externalAdmission.externalExecutionAllowed(binding))) {
             throw unavailable();
         }
     }
@@ -82,7 +82,7 @@ public class JdbcWorkspaceExecutionStore
         requireExternalExecution(session.workspace());
         authorizePassiveAttachment(session);
         if (storageGuard != null
-                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !(WorkspaceToolProfiles.isExternal(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -95,7 +95,7 @@ public class JdbcWorkspaceExecutionStore
         }
         authorizePassiveAttachment(session, authority);
         if (storageGuard != null
-                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !(WorkspaceToolProfiles.isExternal(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -106,7 +106,7 @@ public class JdbcWorkspaceExecutionStore
         }
         authorizePassiveAttachment(session, null, true);
         if (storageGuard != null
-                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !(WorkspaceToolProfiles.isExternal(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -178,7 +178,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void authorizeExternal(SessionRecord session,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        if (!isExternal(session.workspace()) || !"hosted-workspace-external-files/1".equals(session.toolProfile())
+        if (!isExternal(session.workspace()) || !WorkspaceToolProfiles.isExternal(session.toolProfile())
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null) {
             throw unavailable();
         }
@@ -583,29 +583,11 @@ public class JdbcWorkspaceExecutionStore
 
     public boolean canStopExternalDrained(RuntimeBindingRecord saved, RuntimeBindingRepository repository) {
         if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(saved.getRequest())
+                || HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
                 || saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.isDrainRequested()
                 || saved.getOperationOwner() == null) {
             return false;
-        }
-        if (HarnessOwnership.sharesRuntimeSessions(saved.getRequest())) {
-            // A workspace-isolated external binding has no per-session proof to
-            // check (its isolation key is null by construction), so it cannot
-            // enter savedContext/requireExternalHarnessAdmission at all. The
-            // storage fence is its drain evidence: a short-circuit false is
-            // "not yet drainable", while an unavailable owner stays the
-            // mapped 409 refusal the drain coordinator retries against.
-            if (!(repository instanceof JdbcRuntimeBindingRepository original)
-                    || !original.usesDataSource(jdbc.getDataSource())) {
-                throw unavailable();
-            }
-            WorkspaceStorageKindGuard.requireFreshTransaction();
-            return Boolean.TRUE.equals(transaction.execute(status -> jdbc.execute(
-                    (org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
-                        JdbcExternalWorkspaceOwnership.lockOwner(connection, saved);
-                        var current = JdbcExternalWorkspaceOwnership.requireCurrent(connection, original, saved, false);
-                        return noActiveExecutions(current);
-                    })));
         }
         return external(null, saved, repository,
                 saved.getRequest().getScope(),

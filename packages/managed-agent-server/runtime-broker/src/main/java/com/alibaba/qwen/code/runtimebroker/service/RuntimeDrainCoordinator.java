@@ -311,6 +311,17 @@ final class RuntimeDrainCoordinator {
         }
         boolean activeExecutions = executionRepository.hasActiveByBinding(
                 claimed.getBindingId(), claimed.getGeneration());
+        if (RuntimeBrokerSupport.requiresExternalShellDrainProof(claimed)
+                && claimed.getDrainReceipt() == null
+                && (activeExecutions || lost || absence != null)) {
+            // A Shell in flight, a lost worker and a proven absence are all
+            // short of the one proof this lane accepts: the original worker's
+            // own drained stop. Keep the storage holder and ask for recovery.
+            bindingRegistry.releaseOperationQuietly(claimed.getBindingId(), claimed.getOperationGeneration());
+            return failed(activeExecutions
+                    ? conflict("workspace_close_execution_unsettled", "Original Shell resources are unsettled")
+                    : conflict("workspace_close_identity_unverified", "Original Shell worker needs recovery"));
+        }
         if ((lost || absence != null)
                 && !isLiveWorkerStopRecoverable(claimed, lost, absence, activeExecutions)
                 && (activeExecutions || absence == null && sessionRepository.countActiveByBinding(

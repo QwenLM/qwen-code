@@ -2,9 +2,17 @@ package com.alibaba.qwen.code.managedagent.contracts.workspace;
 
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 
+import java.util.List;
+
 public final class WorkspaceToolProfiles {
     public static final String FILES = "hosted-workspace-files/1";
     public static final String EXTERNAL_FILES = "hosted-workspace-external-files/1";
+    /**
+     * A separate profile from {@link #EXTERNAL_FILES}, never a reinterpretation
+     * of it: the files profile stays the exact four-tool set and its admission
+     * keeps reading {@link #EXTERNAL_FILES} alone.
+     */
+    public static final String EXTERNAL_SHELL = "hosted-workspace-external-shell/1";
     public static final String MCP = "hosted-workspace-mcp/1";
     public static final String SHELL = "hosted-workspace-shell/1";
     /**
@@ -39,6 +47,23 @@ public final class WorkspaceToolProfiles {
                 || SHELL_V4.equals(profile);
     }
 
+    /** The external profiles: registered storage, one worker per Session. */
+    public static boolean isExternal(String profile) {
+        return EXTERNAL_FILES.equals(profile) || EXTERNAL_SHELL.equals(profile);
+    }
+
+    /**
+     * The profiles whose Shell declarations come from the external lane rather
+     * than the local-process Shell family. Public Shell admission
+     * ({@link #isPublicShell}) deliberately excludes it: this profile has its
+     * own capability digest, its own publication consumer and foreground-only
+     * admission, so it must not inherit the local Shell lane's background,
+     * monitor or cron surface.
+     */
+    public static boolean isExternalShell(String profile) {
+        return EXTERNAL_SHELL.equals(profile);
+    }
+
     /** The internal team-lead lanes, never selectable by a public definition. */
     public static boolean isInternalTeamLead(String profile) {
         return INTERNAL_TEAM_LEAD.equals(profile) || INTERNAL_TEAM_LEAD_V2.equals(profile);
@@ -50,7 +75,8 @@ public final class WorkspaceToolProfiles {
     }
 
     public static int lifecycleProtocol(String profile) {
-        if (FILES.equals(profile) || EXTERNAL_FILES.equals(profile)) {
+        if (FILES.equals(profile) || EXTERNAL_FILES.equals(profile)
+                || EXTERNAL_SHELL.equals(profile)) {
             return 1;
         }
         if (SHELL.equals(profile) || SHELL_V3.equals(profile)
@@ -73,7 +99,7 @@ public final class WorkspaceToolProfiles {
                 && ("qwen-code".equals(session.agentId())
                         ? session.agentDefinitionDigest() == null
                         : session.agentDefinitionDigest() != null)
-                && (EXTERNAL_FILES.equals(session.toolProfile())
+                && (isExternal(session.toolProfile())
                         ? "qwen-code".equals(session.agentId()) && session.agentDefinitionDigest() == null
                                 && session.publicChildAgentsVersion() == 0
                         : FILES.equals(session.toolProfile()) || FILES_V3.equals(session.toolProfile())
@@ -83,5 +109,30 @@ public final class WorkspaceToolProfiles {
 
     public static boolean requiresApproval(String mode) {
         return "default".equals(mode) || "auto".equals(mode) || "auto-edit".equals(mode);
+    }
+
+    /**
+     * The approval modes a profile may publish. Foreground Shell on registered
+     * storage needs a policy that actually asks, so the modes that never prompt
+     * are unavailable to it — including the deployment's configured default,
+     * not only an explicit selection. The files profile keeps every mode.
+     */
+    public static List<String> approvalModes(String profile) {
+        return isPublicShell(profile) || isExternalShell(profile)
+                ? List.of("default", "auto-edit")
+                : List.of("default", "auto-edit", "yolo");
+    }
+
+    /**
+     * Whether an external profile that already holds this mode may keep it.
+     * Foreground Shell must not hold a mode that never prompts; external files
+     * is unconstrained, including the {@code auto} mode a live selection may
+     * install, which {@link #approvalModes} does not offer as a creation choice.
+     *
+     * <p>This is narrower than {@link #approvalModes} on purpose: it gates a
+     * stored mode on the external lane only, not the modes a caller may pick.
+     */
+    public static boolean admitsExternalApprovalMode(String profile, String mode) {
+        return !isExternalShell(profile) || approvalModes(profile).contains(mode);
     }
 }

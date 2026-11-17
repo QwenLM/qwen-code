@@ -30,6 +30,7 @@ public class JdbcManagedWorkspaceRegistry
     private final JdbcTemplate jdbc;
     private com.alibaba.qwen.code.managedagent.settings.SshSettings ssh;
     private java.util.function.BooleanSupplier externalFilesActivation = () -> false;
+    private java.util.function.BooleanSupplier externalShellActivation = () -> false;
     private ExternalStorageRegistrationStore externalRegistrations;
     private com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties;
 
@@ -50,10 +51,27 @@ public class JdbcManagedWorkspaceRegistry
             return harness != null && warmer != null && harness.supportsLifecycle(profile)
                     && warmer.supportsWorkspaceClose(profile);
         };
+        // Shell is negotiated on its own token and its own close support, so
+        // an operator that qualified files never gains Shell by inheriting
+        // that verdict: both profiles must be negotiated separately.
+        this.externalShellActivation = () -> {
+            if (!settings.isExternalWorkspaceShellConfigured()) {
+                return false;
+            }
+            var harness = harnesses.getIfAvailable();
+            var warmer = warmers.getIfAvailable();
+            String profile = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_SHELL;
+            return harness != null && warmer != null && harness.supportsLifecycle(profile)
+                    && warmer.supportsWorkspaceClose(profile);
+        };
     }
 
     public boolean externalFilesAvailable() {
         return externalFilesActivation.getAsBoolean();
+    }
+
+    public boolean externalShellAvailable() {
+        return externalShellActivation.getAsBoolean();
     }
 
     public boolean isExternal(ContextBinding binding) {
@@ -62,6 +80,21 @@ public class JdbcManagedWorkspaceRegistry
 
     public boolean externalFilesAllowed(ContextBinding binding) {
         return externalFilesAvailable() && externalBindingCurrent(binding);
+    }
+
+    public boolean externalShellAllowed(ContextBinding binding) {
+        return externalShellAvailable() && externalBindingCurrent(binding);
+    }
+
+    /**
+     * Execution eligibility for a registered external binding. The binding
+     * carries no tool profile, so this admits either negotiated profile and
+     * the Session-level admission decides which one this Session may use.
+     * Shell still requires its own flag and negotiation.
+     */
+    public boolean externalExecutionAllowed(ContextBinding binding) {
+        return externalFilesAllowed(binding)
+                || externalShellAvailable() && externalBindingCurrent(binding);
     }
 
     private boolean externalBindingCurrent(ContextBinding binding) {
@@ -342,7 +375,7 @@ public class JdbcManagedWorkspaceRegistry
         var external = java.util.stream.IntStream.range(0, rows.size())
                 .filter(index -> managedExternal(rows.get(index).storageKind()))
                 .boxed().toList();
-        if (external.isEmpty() || !externalFilesAvailable()) {
+        if (external.isEmpty() || !externalFilesAvailable() && !externalShellAvailable()) {
             return result;
         }
         java.util.Map<String, ExternalStorageRegistrationStore.RegistrationState> states =
@@ -495,9 +528,10 @@ public class JdbcManagedWorkspaceRegistry
             throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
         }
         if (isExternal(binding)
-                && (!ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(this, binding)
-                || !".".equals(binding.getCwdRelative()))) {
-            throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace files are unavailable.");
+                && (!(externalFilesAvailable() || externalShellAvailable())
+                        || !externalBindingCurrent(binding)
+                        || !".".equals(binding.getCwdRelative()))) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace execution is unavailable.");
         }
         return new ResolvedBinding(binding, record.getConfigRef(),
                 record.getPolicyRef());
