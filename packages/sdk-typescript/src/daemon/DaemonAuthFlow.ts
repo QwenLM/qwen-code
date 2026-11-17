@@ -300,7 +300,10 @@ async function pollUntilTerminal(
       opts.onThrottled?.(snapshot.intervalMs);
     }
     if (TERMINAL_STATUSES.has(snapshot.status)) return snapshot;
-    await waitFor(interval, signal);
+    const remaining = ceiling - Date.now();
+    if (remaining > 0) {
+      await waitFor(Math.min(interval, remaining), signal);
+    }
   }
 }
 

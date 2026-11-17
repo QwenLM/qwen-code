@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DaemonAuthFlow } from '../../src/daemon/DaemonAuthFlow.js';
 import {
   DaemonHttpError,
@@ -121,6 +121,44 @@ describe('DaemonAuthFlow.start (fold-in 10 #2)', () => {
 });
 
 describe('DaemonAuthFlow.awaitCompletion (fold-in 10 #2)', () => {
+  it.each([undefined, 10_000])(
+    'limits the polling sleep to the remaining timeout (interval: %s)',
+    async (intervalMs) => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      let completion: Promise<unknown> | undefined;
+      try {
+        const pending: DaemonDeviceFlowState = {
+          deviceFlowId: 'flow-A',
+          providerId: 'qwen-oauth',
+          status: 'pending',
+          createdAt: Date.now(),
+          ...(intervalMs !== undefined ? { intervalMs } : {}),
+        };
+        const { client, calls } = makeFakeClient({ getReplies: [pending] });
+        const handle = await new DaemonAuthFlow(client).start({
+          providerId: 'qwen-oauth',
+        });
+        let final: DaemonDeviceFlowState | undefined;
+        completion = handle
+          .awaitCompletion({ timeoutMs: 20, signal: controller.signal })
+          .then((result) => {
+            final = result;
+          });
+
+        await vi.advanceTimersByTimeAsync(20);
+        expect(final).toBe(pending);
+        expect(calls.get).toHaveLength(2);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        controller.abort();
+        await completion?.catch(() => {});
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('polls until the daemon reports a terminal state (authorized)', async () => {
     const expiresAt = Date.now() + 5_000;
     const { client, calls } = makeFakeClient({
