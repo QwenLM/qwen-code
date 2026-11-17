@@ -261,10 +261,28 @@ Degradation:
 2. Web Shell overview tab with uncommitted + PR + commit-fallback scopes.
 3. Verification (build, typecheck, focused unit tests, E2E) and self-audit.
 
+## Known limitations
+
+- **Commit-fallback with no bound PR and no recorded base branch.** The
+  shipped default walks HEAD's recent history (capped at
+  `COMMIT_FALLBACK_LIMIT`, labelled by scope). The original justification —
+  "worktree sessions start fresh" — is false: a worktree branch is created at
+  the base tip, so its HEAD carries the base branch's history, and a plain
+  session's git cwd is the user's own checkout. Consequence: such a session
+  may list up to `COMMIT_FALLBACK_LIMIT` pre-session commits as loose
+  `commit:` units with subjects and `+/-` totals. Every neighbouring state
+  refuses the unscoped walk; this one is retained as a maintainer-accepted
+  residual (display-only, read-only panel, no write path). The boundary fix —
+  persisting the session start commit and composing `<startCommit>..HEAD`,
+  suppressing the fallback when no start commit is known — is deferred.
+- **Binding recency is not commit-graph order.** With two bound PR heads that
+  are both ancestors of HEAD but not of each other, the last-bound head's
+  window re-lists the sibling PR's commits as loose units. Also a
+  maintainer-accepted residual (display duplication only); the fix needs
+  pairwise ancestry / batch reachability the client does not have, and is
+  deferred.
+
 ## Open questions
 
-- Commit-fallback when there is no bound PR and no `baseBranch`: show the
-  worktree's recent commits (worktree sessions start fresh) vs. requiring a
-  baseline. Default: recent commits, capped, labelled by scope.
 - Whether to also offer a "whole session" net diff (baseline..working tree) as an
   extra scope. Deferred; not required by the confirmed model.

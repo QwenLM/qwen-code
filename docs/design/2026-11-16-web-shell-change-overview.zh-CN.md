@@ -217,10 +217,21 @@ PR 方法保持一致。
 2. Web Shell 总览页，含未提交 + PR + commit 兜底范围。
 3. 验证（build、typecheck、聚焦单测、E2E）与自审。
 
+## 已知限制
+
+- **无绑定 PR 且无记录基线分支时的 commit 兜底。** 已交付的默认行为是遍历
+  HEAD 近期历史（上限 `COMMIT_FALLBACK_LIMIT`，按口径标注）。原始理由
+  「worktree 会话从零开始」不成立：worktree 分支在基线顶端创建，其 HEAD
+  携带基线分支历史；普通会话的 git cwd 就是用户自己的检出。后果：此类会话
+  可能把至多 `COMMIT_FALLBACK_LIMIT` 条会话前提交带着 subject 与 `+/-`
+  统计列为松散 `commit:` 单元。所有相邻状态都拒绝无范围遍历；此状态作为
+  维护者接受的残留保留（仅展示、只读面板、无写入路径）。边界修复——持久化
+  会话起点 commit 并组 `<startCommit>..HEAD`、未知起点则抑制兜底——延后。
+- **绑定时间序非提交图序。** 两个绑定 PR head 都是 HEAD 祖先但彼此不可比时，
+  最后绑定 head 的窗口会把兄弟 PR 的提交重复列为松散单元。同为维护者接受的
+  残留（仅展示重复）；修复需要客户端不具备的成对祖先/批量可达能力，延后。
+
 ## 待决问题
 
-- 无绑定 PR 且无 `baseBranch` 时的 commit 兜底：展示 worktree 近期 commit
-  （worktree 会话从零开始）还是要求 baseline。默认：近期 commit，设上限并按口径
-  标注。
 - 是否额外提供「整个会话」净 diff（baseline..工作区）作为一个范围。暂缓；已确认
   模型并不要求。
