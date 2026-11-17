@@ -2016,16 +2016,141 @@ describe('AoneChannel', () => {
       );
       ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
       ch.cursor.repos['test/repo'] = 5000;
-      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      // A FRESH (within-window) instant: this is a quiet repo's dormant poll,
+      // not an outage recovery, so agedOut is false and the stamp must fire.
+      const seeded = new Date(Date.now() - 60_000).toISOString();
+      ch.cursor.lastPoll = { 'test/repo': seeded };
       await ch.connect();
       installFakeA1({ events: () => [] }); // dormant: empty window
       await ch.testPollOnce();
       ch.disconnect();
-      // A dormant poll (fresh 0 <= slice 0) is a complete observation and must
-      // stamp lastPoll forward; deleting the trailing stamp freezes it at 2020.
+      // A quiet dormant poll (empty + not agedOut) is a complete observation
+      // and stamps lastPoll forward; deleting the trailing stamp freezes it.
       expect(Date.parse(ch.cursor.lastPoll['test/repo'])).toBeGreaterThan(
-        Date.parse('2024-01-01T00:00:00.000Z'),
+        Date.parse(seeded),
       );
+    });
+
+    it('an empty-window outage recovery keeps lastPoll stale, loss diagnosed (R4-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 1000;
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      // Recovery poll after a long outage: the window is empty (the cursor
+      // event and everything created during the outage already aged out).
+      installFakeA1({ events: () => [] });
+      await ch.testPollOnce();
+      // Empty + agedOut observed nothing of the gap: must NOT launder the
+      // instant to now, or the next poll would swallow the permanent loss.
+      expect(ch.cursor.lastPoll['test/repo']).toBe('2020-01-01T00:00:00.000Z');
+      // Traffic resumes: events newer than the cursor → the loss is diagnosed.
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 2000 })]) });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(records.some((r) => r.outcome === 'cursor_aged_out')).toBe(true);
+      stderr.mockRestore();
+    });
+
+    it('a drained poll with events advances lastPoll (R4-1 positive stamp)', async () => {
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 1000;
+      const seeded = '2020-01-01T00:00:00.000Z';
+      ch.cursor.lastPoll = { 'test/repo': seeded };
+      await ch.connect();
+      // One event, fully drained (fresh 1 <= slice 1): a complete observation
+      // that must stamp. Narrowing the stamp to empty windows only reds this.
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 2000 })]) });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(Date.parse(ch.cursor.lastPoll['test/repo'])).toBeGreaterThan(
+        Date.parse(seeded),
+      );
+    });
+
+    it('distinct aging episodes journal distinct records (R4-2)', async () => {
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 1;
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      let currentAll: unknown[] = [];
+      const setWindow = (start: number) => {
+        currentAll = Array.from({ length: 150 }, (_, i) =>
+          makeEvent({
+            id: start + i,
+            note: {
+              id: start + i,
+              note: 'qwen: x',
+              noteable_type: 'MergeRequest',
+            },
+          }),
+        );
+      };
+      installFakeA1({
+        events: (repo, page) => pagedEvents(currentAll)(repo, page),
+      });
+      // Episode 1: stale 2020, capped poll → record {cursor:1,...}.
+      setWindow(200);
+      await ch.testPollOnce();
+      // A new outage episode: a different stale instant (2021).
+      ch.cursor.lastPoll['test/repo'] = '2021-01-01T00:00:00.000Z';
+      setWindow(400);
+      await ch.testPollOnce(); // episode 2021 → a second, distinct record
+      ch.disconnect();
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l))
+        .filter((r) => r.outcome === 'cursor_aged_out');
+      // Two distinct episodes → two records (a repo-lifetime `has(repo)`
+      // dedupe would collapse them to one).
+      expect(records).toHaveLength(2);
+      expect(records[0].detail.cursor).toBe(1);
+      expect(records[1].detail.cursor).toBe(299);
     });
 
     it('the dispatch budget is monotonic: a 500-event backlog caps at 100', async () => {

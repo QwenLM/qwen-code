@@ -166,9 +166,12 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
   private botAccount = '';
   private baselineMs = NaN;
   private viewCache = new Map<string, { title: string; url: string }>();
-  // Dedupes the cursor_aged_out journal record per aging episode: a chronically
-  // backlogged repo re-enters the aging branch every poll, but its stale
-  // lastPoll value is constant, so one record per distinct stale instant.
+  // Dedupes the cursor_aged_out journal record per aging episode within this
+  // process's lifetime: a chronically backlogged repo re-enters the aging
+  // branch every poll with a constant stale lastPoll, so one record per
+  // distinct stale instant. In-memory only — a restart re-records an episode
+  // the journal already holds (the dedupe is per process, not per repo
+  // lifetime); persisting it would require another optional cursor field.
   private agedOutJournal = new Map<string, string>();
 
   constructor(
@@ -581,14 +584,16 @@ export class AoneChannel extends PollingChannelBase<AoneCursor> {
       this.cursor.repos[repo] = event.id;
       this.saveCursor();
     }
-    // Success exit: stamp the last-poll instant only when this poll DRAINED
-    // everything (fresh <= slice, including a dormant empty window). A capped
-    // poll (drain slower than arrival) is not a complete observation: stamping
-    // it would keep lastPoll fresh forever and silence the aging diagnostic
-    // while events below the window are lost. Keeping the last fully-drained
-    // instant lets prevPollMs eventually precede the window start so the
-    // diagnostic fires. A poll that threw above never reaches here either.
-    if (fresh.length <= slice.length) {
+    // Success exit: stamp the last-poll instant only when this poll is a
+    // complete observation that actually covers the gap. A capped poll (drain
+    // slower than arrival, fresh > slice) is not complete. An EMPTY window is
+    // complete only when it is not itself aged out: a quiet repo's dormant
+    // poll (agedOut false) stamps and stays silent, but an outage's recovery
+    // poll whose window is already empty (agedOut true) observed nothing of
+    // the gap, so it must keep the instant stale — otherwise the next
+    // non-empty poll would see a fresh lastPoll and swallow the outage's
+    // permanent loss. A poll that threw above never reaches here either.
+    if (fresh.length <= slice.length && (fresh.length > 0 || !agedOut)) {
       (this.cursor.lastPoll ??= {})[repo] = until.toISOString();
     }
     this.saveCursor();
