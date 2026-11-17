@@ -49743,6 +49743,109 @@ describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () 
     await expectCountReleased(beforeActive);
   });
 
+  it('frees the slot via the 5s RST fallback when a buffered-frame eviction peer never resumes', async () => {
+    // Graceful branch (review R2-1), driven by REAL kernel backpressure: an
+    // 8MiB replay fills the send buffer while the client pauses and NEVER
+    // resumes. The terminal frame write returns false naturally (buffered,
+    // not thrown), so the route ends gracefully and arms the 5s
+    // forceCloseSseResponse fallback. The zero-window peer never ACKs the
+    // FIN queued behind the unsent replay, 'close' never fires on its own,
+    // and that timer is the only path that RSTs the socket so
+    // 'close' -> finalize -> activeSseCount-- releases the listener slot.
+    // Deleting the setTimeout(..., 5_000) fallback must turn this red (the
+    // FIN-WAIT-1 leak this PR exists to fix would otherwise ship green).
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    // Observing spy only (calls through to the real write): pins that the
+    // terminal frame was BUFFERED (write returned false), i.e. the graceful
+    // branch was taken — not the write-throw immediate-RST branch.
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let evictionFrameBuffered = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const wrote =
+        typeof encodingOrCb === 'function'
+          ? originalWrite.call(this, chunk, encodingOrCb)
+          : originalWrite.call(this, chunk, encodingOrCb, cb);
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (text.includes('event: client_evicted') && wrote === false) {
+        evictionFrameBuffered = true;
+      }
+      return wrote;
+    });
+    try {
+      const beforeActive = getActiveSseCount();
+      const blob = 'x'.repeat(8 * 1024 * 1024);
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { blob } };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      // Paused client that NEVER resumes; the fallback RST (~5s after the
+      // ~250ms eviction) is what closes it. 8s ceiling > 5s fallback.
+      const outcome = await new Promise<string>((resolve) => {
+        const req = http.request(
+          {
+            hostname: '127.0.0.1',
+            port,
+            path: '/session/sess-A/events',
+            agent: false,
+          },
+          (res) => {
+            if (res.statusCode !== 200) {
+              resolve(`status:${res.statusCode}`);
+              res.resume();
+              return;
+            }
+            res.pause();
+            res.on('close', () => resolve('res-close'));
+            res.on('error', (e) => resolve(`res-error:${e.code}`));
+          },
+        );
+        req.on('error', (e) => resolve(`req-error:${e.code}`));
+        req.end();
+        setTimeout(() => resolve('timeout'), 8000).unref();
+      });
+      expect(evictionFrameBuffered).toBe(true);
+      // The paused client never resumes, so it does not process the RST
+      // until resume (known measurement artifact) — its outcome may be
+      // 'timeout'. The SERVER-side counters are authoritative: the 8s wait
+      // above outlasts the 5s fallback, which must have RST'd and freed the
+      // slot. Removing the fallback leaves the socket in FIN-WAIT-1 and
+      // these counts held (red).
+      expect(outcome).not.toMatch(/^status:/);
+      await expectCountReleased(beforeActive);
+      await expect(
+        new Promise<number>((resolve) =>
+          handle!.server.getConnections((_err, count) => resolve(count)),
+        ),
+      ).resolves.toBe(0);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  }, 15_000);
+
   it('arms the reaper at the default budget when no flag is set', async () => {
     // Pins default-on ARMING behaviorally: opening a stream with no
     // explicit budget must register the reaper's polling interval
