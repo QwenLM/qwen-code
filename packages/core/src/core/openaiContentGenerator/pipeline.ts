@@ -40,8 +40,11 @@ import {
 } from '../tokenLimits.js';
 import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
+  clampReasoningEffort,
   getGptReasoningCapabilities,
   isReasoningEffortPlaceholder,
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
 } from '../reasoning-effort.js';
 import {
   isQwenFamilyWireModel,
@@ -168,9 +171,27 @@ function applyConfiguredReasoningEffort(
   const reasoning = asObject(loose['reasoning']);
   if (!reasoning || !('effort' in reasoning)) return request;
 
-  const effort = capabilities.efforts.find(
-    (candidate) => candidate === reasoning['effort'],
+  const requested = reasoning['effort'];
+  let effort = capabilities.efforts.find(
+    (candidate) => candidate === requested,
   );
+  // The qwen4 generation's documented contract clamps legacy tiers onto the
+  // declared ladder (medium -> high, max -> xhigh) instead of dropping them
+  // to the server default. Other profile-less declarations keep their shipped
+  // drop semantics (the legacy no-re-tier contract).
+  if (
+    !effort &&
+    typeof requested === 'string' &&
+    REASONING_EFFORT_TIERS.includes(requested as ReasoningEffort) &&
+    String(loose['model'] ?? '')
+      .toLowerCase()
+      .startsWith('qwen4')
+  ) {
+    effort = clampReasoningEffort(
+      requested as ReasoningEffort,
+      capabilities.efforts,
+    );
+  }
   // GPT flattens after raw overrides merge in the provider.
   if (effort && getGptReasoningCapabilities(loose['model'] as string))
     return request;

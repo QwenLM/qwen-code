@@ -156,9 +156,11 @@ ttl:'1h' }`；否则省略 `ttl`（5m 默认）。泛化该设置的文档，使
   定型关闭形状之前就 sizing `max_tokens`，故只有 pipeline 知道最终模式；夹制
   放在那里，门控在 qwen4 前缀加最终的 `reasoning_effort:'none'` /
   `enable_thinking:false`。
-- **声明 `efforts:['low','high','xhigh']` 并依赖现有夹制。** 服务端也经映射
-  接受 `medium`/`max`，但暴露原生三档让 UI 如实反映模型可区分的档位；
-  `clampReasoningEffort` 处理遗留选择。
+- **声明 `efforts:['low','high','xhigh']` 并夹取遗留选择。** 服务端也经映射
+  接受 `medium`/`max`，但暴露原生三档让 UI 如实反映模型可区分的档位。
+  声明 capability 的线协议路径对 qwen4 世代经 `clampReasoningEffort` 把遗留
+  档位夹到声明阶梯（`medium→high`、`max→xhigh`）；其他无 profile 声明保持
+  已发布的丢弃回服务端默认语义（遗留不重分级契约）。
 - **订阅预算变更门控在 qwen4 前缀。** 订阅网关的 qwen3.8 预算契约是已发布
   行为；仅 qwen4 模型采用新档位。
 - **档位、输出预算与订阅预算作用于整个 `qwen4` 前缀，而非仅 `qwen4-max`。**
@@ -208,7 +210,9 @@ ttl:'1h' }`；否则省略 `ttl`（5m 默认）。泛化该设置的文档，使
    约束；思考禁用时夹到 131,072 非思考上限。
 3. 图像与视频 part 对 `qwen4-max` 送达线协议。
 4. `cacheRetention:'1h'` 在 qwen4 缓存断点标记 `ttl:'1h'`；默认省略 `ttl`。
-5. `imageDetail:'low'` 向图像 part 注入 `detail:'low'`；默认不注入。
+   仅限 DashScope 系通道——订阅 provider 不注入 `cache_control` 断点。
+5. `imageDetail:'low'` 向图像 part 注入 `detail:'low'`；默认不注入。仅限
+   DashScope 系通道——订阅 resolver 不透传该设置。
 6. qwen3.8-max 行为（档位、默认 `xhigh`、订阅预算表）不变。
 7. 既有 `qwen4*` 路由在 workspace provider 控件中投影世代档位
    （`none/low/high/xhigh`），邀请制预览与 stable 家族保持 qwen3.8-max 档位；

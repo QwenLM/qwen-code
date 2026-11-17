@@ -2229,6 +2229,46 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it('clamps legacy tiers onto the declared qwen4 ladder instead of dropping them', async () => {
+      // The presets declare efforts:['low','high','xhigh'] without a profile.
+      // A persisted `max`/`medium` must ship as xhigh/high per the documented
+      // contract, not vanish into the server default (high).
+      const capability = {
+        thinking: true,
+        efforts: ['low', 'high', 'xhigh'],
+        defaultEffort: 'high',
+        disableField: 'reasoning_effort',
+      };
+      const maxWire = await executeWithCapability(
+        capability,
+        { reasoning: { effort: 'max' } },
+        'qwen4-max',
+      );
+      expectFields(maxWire, { reasoning_effort: 'xhigh' });
+      const mediumWire = await executeWithCapability(
+        capability,
+        { reasoning: { effort: 'medium' } },
+        'qwen4-max',
+      );
+      expectFields(mediumWire, { reasoning_effort: 'high' });
+    });
+
+    it('keeps the drop-to-server-default semantics for non-qwen4 declarations', async () => {
+      // Profile-less legacy declarations are not re-tiered; an unsupported
+      // tier stays dropped outside the qwen4 generation.
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+        { reasoning: { effort: 'max' } },
+        'capability-probe',
+      );
+      expectFields(wire, { reasoning_effort: undefined });
+    });
+
     it.each(
       [
         'deepseek-v4-pro',

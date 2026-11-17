@@ -170,10 +170,13 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
   pipeline finalizes the disable shape, so only the pipeline knows the final
   mode; the clamp lives there, gated on the qwen4 prefix plus the final
   `reasoning_effort:'none'` / `enable_thinking:false`.
-- **Declare `efforts:['low','high','xhigh']` and rely on existing clamping.**
+- **Declare `efforts:['low','high','xhigh']` and clamp legacy selections.**
   The server also accepts `medium`/`max` via mapping, but exposing the native
-  three-tier ladder keeps the UI honest about what the model distinguishes;
-  `clampReasoningEffort` handles legacy selections.
+  three-tier ladder keeps the UI honest about what the model distinguishes.
+  The declared-capability wire path clamps legacy tiers onto the declared
+  ladder for the qwen4 generation (`medium→high`, `max→xhigh`) via
+  `clampReasoningEffort`; other profile-less declarations keep their shipped
+  drop-to-server-default semantics (the legacy no-re-tier contract).
 - **Gate subscription budget changes on the qwen4 prefix.** The subscription
   gateway's qwen3.8 budget contract is shipped behavior; only qwen4 models take
   the new ladder.
@@ -234,9 +237,11 @@ ttl:'1h' }`; otherwise omit `ttl` (the 5m default). Generalize the setting's
    131,072 non-thinking cap.
 3. Image and video parts reach the wire for `qwen4-max`.
 4. `cacheRetention:'1h'` stamps `ttl:'1h'` on qwen4 cache breakpoints; default
-   omits `ttl`.
+   omits `ttl`. DashScope-based channels only — the subscription provider
+   injects no `cache_control` breakpoints.
 5. `imageDetail:'low'` injects `detail:'low'` into image parts; default injects
-   nothing.
+   nothing. DashScope-based channels only — the subscription resolver does
+   not forward the setting.
 6. qwen3.8-max behavior (ladder, default `xhigh`, subscription budget table) is
    unchanged.
 7. Existing `qwen4*` routes project the generation ladder
