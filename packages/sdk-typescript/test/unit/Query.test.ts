@@ -1003,6 +1003,38 @@ describe('Query', () => {
       await query.close();
     });
 
+    it.each([
+      { label: 'allow', result: { behavior: 'allow' as const, updatedInput: {} } },
+      { label: 'deny', result: { behavior: 'deny' as const, message: 'Denied' } },
+    ])('clears the permission deadline on $label', async ({ result }) => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        canUseTool: () => result,
+      });
+      await respondToInitialize(transport, query);
+      vi.useFakeTimers();
+      try {
+        transport.simulateMessage(
+          createControlRequest('can_use_tool', 'ok-permission'),
+        );
+        await vi.waitFor(() => {
+          const response = findControlResponse(
+            transport.getAllWrittenMessages(),
+            'ok-permission',
+          );
+          expect(response?.response).toMatchObject({
+            subtype: 'success',
+            response: result,
+          });
+        });
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        await query.close();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
     it.each(['throw', 'reject'])(
       'clears the permission deadline when the callback fails (%s)',
       async (failure) => {
