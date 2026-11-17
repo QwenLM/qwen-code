@@ -70,12 +70,6 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   >({});
   const customInputValuesRef = useRef<Record<number, string>>({});
   const advanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Mirrors advanceTimerRef for the render: switches the free-text field off
-  // while a multi-select answer waits for its swap.
-  const [advancePending, setAdvancePending] = useState(false);
-  // The questions whose single answer was sent. A latch per confirmation, not
-  // per mount: one slot can hand this instance the next confirmation in place.
-  const confirmedRef = useRef<object | null>(null);
   useEffect(
     () => () => {
       if (advanceTimerRef.current !== null) {
@@ -176,29 +170,19 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   };
 
   // Select a value for the current question, then submit (single question) or advance to the next tab (multi-question).
-  // A second answer inside the 150 ms pause, or a second confirm of a single
-  // question, is dropped: two armed timers would skip the question between
-  // them, and two confirms send the same answer twice. Same guard as the
-  // OpenTUI port.
+  // A second answer inside the 150 ms pause is dropped: two armed timers would
+  // skip the question between them. Same armed-timer lock as the OpenTUI port.
   const selectAndAdvance = (value: string) => {
-    if (
-      advanceTimerRef.current !== null ||
-      confirmedRef.current === confirmationDetails.questions
-    ) {
-      return;
-    }
+    if (advanceTimerRef.current !== null) return;
     setSelectedOptions((prev) => ({ ...prev, [currentQuestionIndex]: value }));
 
     if (!hasMultipleQuestions) {
-      confirmedRef.current = confirmationDetails.questions;
       void onConfirm(ToolConfirmationOutcome.ProceedOnce, {
         answers: { [currentQuestionIndex]: value },
       });
     } else if (currentQuestionIndex < totalTabs - 1) {
-      setAdvancePending(true);
       advanceTimerRef.current = setTimeout(() => {
         advanceTimerRef.current = null;
-        setAdvancePending(false);
         setCurrentQuestionIndex((prev) => Math.min(prev + 1, totalTabs - 1));
         setSelectedIndex(0);
       }, 150);
@@ -209,7 +193,6 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     if (advanceTimerRef.current !== null) {
       clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
-      setAdvancePending(false);
     }
   };
 
@@ -234,10 +217,6 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   };
 
   const handleCustomInputSubmit = (inputValue = currentCustomInputValue) => {
-    // A second Enter inside the pause. The field may hold text the answer
-    // never took (a key from the same read as the first Enter), so it must
-    // not reach the checkbox below either.
-    if (advanceTimerRef.current !== null) return;
     const trimmedValue = inputValue.trim();
 
     if (isMultiSelect) {
@@ -336,11 +315,8 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         return;
       }
 
-      // Space to toggle multi-select. Not while an advance is pending: a
-      // multi-select answer is rebuilt from these ticks at submit, so a tick
-      // changed now would replace the answer already recorded.
+      // Space to toggle multi-select
       if (key.name === 'space' && isMultiSelect && currentQuestion) {
-        if (advanceTimerRef.current !== null) return;
         if (selectedIndex < currentQuestion.options.length) {
           const option = currentQuestion.options[selectedIndex];
           if (option) {
@@ -581,15 +557,6 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                 {currentQuestion!.options.length + 1}.{' '}
               </Text>
               <TextInput
-                // A multi-select answer is rebuilt from the typed value at
-                // submit, so the field is frozen while its advance is pending:
-                // switched off for later keys, and remounted from the recorded
-                // value, because TextInput keeps its own buffer and a key in
-                // the same read as the committing Enter is already in it. The
-                // buffer reports that key from an effect at the commit that
-                // remounts it, so onChange never sees it. A single-select
-                // answer is kept as recorded, so its field stays editable.
-                key={isMultiSelect && advancePending ? 'frozen' : 'open'}
                 value={currentCustomInputValue}
                 initialCursorOffset={currentCustomInputValue.length}
                 onChange={(value: string) => {
@@ -614,7 +581,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                 }}
                 onSubmit={handleCustomInputSubmit}
                 placeholder={t('Type something...')}
-                isActive={isFocused && !(isMultiSelect && advancePending)}
+                isActive={isFocused}
                 inputWidth={50}
               />
             </Box>

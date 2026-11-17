@@ -2028,15 +2028,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
                   {selectedApproval.approval.subagentId}
                 </Text>
               )}
-            {/* Keyed by the parked approval: answering one can put the next
-                one at [0] in the same commit, and a reused dialog would carry
-                the first one's answers, tab and latch over to it. */}
             <ToolConfirmationMessage
-              key={
-                selectedApproval?.kind === 'agent'
-                  ? `agent:${selectedApproval.ownerId}:${selectedApproval.approval.callId}:${selectedApproval.approval.subagentId ?? ''}`
-                  : `workflow:${selectedApproval?.ownerId}:${selectedApproval?.approval.approvalId}`
-              }
               confirmationDetails={approvalConfirmationDetails}
               config={config}
               isFocused={approvalActive}
