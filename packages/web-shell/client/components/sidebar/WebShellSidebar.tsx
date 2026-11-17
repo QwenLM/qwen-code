@@ -3797,7 +3797,14 @@ export function WebShellSidebar({
       setSessionBusy(sessionId, true, workspaceCwd);
       void (async () => {
         try {
-          await onLoadSession(sessionId, workspaceCwd, artifactCount);
+          // Preserve the two-argument call shape when no count is known:
+          // embedders (and their tests) pin the exact argument list, and an
+          // explicit undefined third argument is a different call.
+          if (artifactCount !== undefined) {
+            await onLoadSession(sessionId, workspaceCwd, artifactCount);
+          } else {
+            await onLoadSession(sessionId, workspaceCwd);
+          }
         } catch (err) {
           if (!isAbortError(err)) {
             onError(err, t('sidebar.switchFailed'));

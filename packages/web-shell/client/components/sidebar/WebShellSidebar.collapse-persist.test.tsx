@@ -1088,6 +1088,30 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).toBe(true);
   });
 
+  it('forwards the session artifact count to onLoadSession when the summary carries one', async () => {
+    // The click-time hint path: a summary with artifactCount must reach
+    // onLoadSession as a third argument; without one the call keeps its
+    // two-argument shape (pinned by the collapsed-switcher tests below).
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((el) => el.textContent?.includes('API review'));
+    expect(row).toBeDefined();
+    await act(async () => click(row!));
+
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
+  });
+
   it('keeps project sessions available from the collapsed sidebar', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',
