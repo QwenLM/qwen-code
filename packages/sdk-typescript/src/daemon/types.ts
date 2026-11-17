@@ -1807,6 +1807,13 @@ export interface DaemonSessionSummary {
   branch?: DaemonBranchInfo;
   /** Present when GitHub PRs have been bound to the session (last = latest). */
   prs?: DaemonSessionPrInfo[];
+  /**
+   * Session artifact count, present when non-zero. Live sessions carry the
+   * live public count; cold sessions carry the restorable count hydrated
+   * best-effort from the artifact summary sidecar. Absent means unknown
+   * (older daemon or no sidecar yet), not zero.
+   */
+  artifactCount?: number;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
