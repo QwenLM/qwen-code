@@ -927,7 +927,11 @@ export class BridgeClient implements Client {
      */
     private readonly mediator: Pick<
       PermissionMediator,
-      'policy' | 'request' | 'cancelForPrompt' | 'cancelWorkflowApproval' | 'vote'
+      | 'policy'
+      | 'request'
+      | 'cancelForPrompt'
+      | 'cancelWorkflowApproval'
+      | 'vote'
     >,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
@@ -1128,7 +1132,8 @@ export class BridgeClient implements Client {
       !appClientId &&
       params.toolCall?._meta?.['workflowApproval'] === true &&
       params.toolCall._meta?.['backgroundWorkflowApproval'] === true;
-    const usesPrompt = !appClientId && !backgroundWorkflowApproval && !sessionOwned;
+    const usesPrompt =
+      !appClientId && !backgroundWorkflowApproval && !sessionOwned;
     const backgroundTurn = usesPrompt
       ? (explicitBackgroundTurn ??
         (entry.promptActive ? undefined : entry.backgroundTurn))

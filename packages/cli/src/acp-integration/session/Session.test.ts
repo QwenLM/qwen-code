@@ -1784,7 +1784,9 @@ describe('Session', () => {
       manager.leaderCallback?.('late report', 'late report', ['security']);
 
       const internals = session as unknown as {
-        droppedNotifications: { take(): { status: string; modelText: string } | undefined };
+        droppedNotifications: {
+          take(): { status: string; modelText: string } | undefined;
+        };
       };
       const tally = internals.droppedNotifications.take();
       expect(tally).toBeDefined();
@@ -2397,7 +2399,6 @@ describe('Session', () => {
         kind: 'teammate',
       });
       session.dispose();
-
     });
   });
 
