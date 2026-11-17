@@ -18,7 +18,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
-final class JdbcRepositorySupport {
+public final class JdbcRepositorySupport {
     private JdbcRepositorySupport() {
     }
 
@@ -37,7 +37,7 @@ final class JdbcRepositorySupport {
         return RuntimeRequestKeys.scopeKey(scope);
     }
 
-    static String valueKey(String value) {
+    public static String valueKey(String value) {
         return RuntimeRequestKeys.valueKey(value);
     }
 
@@ -169,7 +169,7 @@ final class JdbcRepositorySupport {
         return false;
     }
 
-    static void setIdentity(java.sql.PreparedStatement statement, int index, String value) throws SQLException {
+    public static void setIdentity(java.sql.PreparedStatement statement, int index, String value) throws SQLException {
         statement.setBytes(index, value == null ? null
                 : com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value));
     }

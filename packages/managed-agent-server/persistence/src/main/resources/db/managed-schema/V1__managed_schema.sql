@@ -1128,6 +1128,7 @@ CREATE TABLE ma_tool_execution (
         (binding_id, runtime_generation, execution_state),
     INDEX idx_tool_execution_harness
         (harness_session_id, execution_call_id_hash),
+    shared_dispatch_class VARCHAR(16),
     CONSTRAINT uk_ma_tool_execution_business_key UNIQUE (execution_call_id_hash),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_tool_execution_id PRIMARY KEY (id),

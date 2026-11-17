@@ -92,8 +92,11 @@ public final class WorkspaceExecutionProfile {
                         .equals(request.getProvisionerKind())
                 && request.isManagedContext()
                 && admitsExternalWorkspaceDigest(request.getScope().getCapabilityDigest())
-                && admitsIsolationClass(request.getScope().getIsolationClass())
-                && request.getIsolationKey() != null && !request.getIsolationKey().trim().isEmpty()
+                && (admitsIsolationClass(request.getScope().getIsolationClass())
+                        && request.getIsolationKey() != null
+                        && !request.getIsolationKey().trim().isEmpty()
+                        || "workspace".equals(request.getScope().getIsolationClass())
+                                && request.getIsolationKey() == null)
                 && request.getScope().getWorkspaceId().equals(request.getStorageId());
     }
 
