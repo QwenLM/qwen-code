@@ -5,8 +5,10 @@
  */
 
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
+import { isNodeError } from '../utils/errors.js';
 import { MAX_PERSISTED_ARTIFACTS } from './session-artifact-persistence.js';
 
 /**
@@ -33,15 +35,9 @@ export function sessionArtifactSummarySidecarPath(
   );
 }
 
-export function readSessionArtifactSummarySidecar(
-  filePath: string,
+function parseSessionArtifactSummarySidecar(
+  raw: string,
 ): SessionArtifactSummarySidecar | undefined {
-  let raw: string;
-  try {
-    raw = fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return undefined;
-  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -67,6 +63,46 @@ export function readSessionArtifactSummarySidecar(
     artifactCount,
     updatedAt,
   };
+}
+
+export function readSessionArtifactSummarySidecar(
+  filePath: string,
+): SessionArtifactSummarySidecar | undefined {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return undefined;
+  }
+  return parseSessionArtifactSummarySidecar(raw);
+}
+
+/**
+ * Async variant for the session-list enrichment loop: awaiting it per
+ * session yields the event loop between reads, so a mid-scan abort is
+ * observable and concurrent requests are not stalled behind a large scan.
+ * A missing file reads as undefined; unexpected I/O errors throw (the
+ * caller's best-effort catch handles them), mirroring readSessionPrsDetailed.
+ */
+export async function readSessionArtifactSummarySidecarAsync(
+  filePath: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<SessionArtifactSummarySidecar | undefined> {
+  let raw: string;
+  try {
+    options.signal?.throwIfAborted();
+    raw = options.signal
+      ? await fsPromises.readFile(filePath, {
+          encoding: 'utf8',
+          signal: options.signal,
+        })
+      : await fsPromises.readFile(filePath, 'utf8');
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (isNodeError(error) && error.code === 'ENOENT') return undefined;
+    throw error;
+  }
+  return parseSessionArtifactSummarySidecar(raw);
 }
 
 /**

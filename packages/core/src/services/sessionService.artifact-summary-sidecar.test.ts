@@ -331,10 +331,14 @@ describe('SessionService - artifact summary sidecar', () => {
   });
 
   it('keeps the sidecar in step with a cold library removal', async () => {
+    // Three artifacts with one removed: the expected 2 is the REMAINING
+    // count, not the removed batch's size (which a 2/1 fixture cannot
+    // distinguish from the subtraction).
     const a = persistedArtifact('https://example.com/lib-a');
     const b = persistedArtifact('https://example.com/lib-b');
-    writeTranscript([userRecord(), artifactEventRecord([a, b])]);
-    writeSessionArtifactSummarySidecar(sidecarPath, 2);
+    const c = persistedArtifact('https://example.com/lib-c');
+    writeTranscript([userRecord(), artifactEventRecord([a, b, c])]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 3);
 
     const removed = await service.removeSessionArtifactForLibrary(
       SESSION_ID,
@@ -346,6 +350,28 @@ describe('SessionService - artifact summary sidecar', () => {
     );
 
     expect(removed).toBe(true);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  it('subtracts the whole removed batch on a cold library removal', async () => {
+    const a = persistedArtifact('https://example.com/lib-a');
+    const b = persistedArtifact('https://example.com/lib-b');
+    const c = persistedArtifact('https://example.com/lib-c');
+    writeTranscript([userRecord(), artifactEventRecord([a, b, c])]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 3);
+
+    const removed = await service.removeSessionArtifactsForLibrary(
+      SESSION_ID,
+      [a.id, b.id],
+      {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      },
+    );
+
+    expect(removed).toEqual([a.id, b.id]);
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
       1,
     );
