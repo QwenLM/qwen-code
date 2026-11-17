@@ -29,8 +29,7 @@ import {
 } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
-import { createUntil, scaledWait } from './wait.js';
-import { readyPromptBudgetMs } from '../ready-prompt-budget.js';
+import { permissionsCaseOptions, until } from './tui-editor-parity-budget.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -54,23 +53,7 @@ const keys = {
   editor: '\x18',
 };
 
-// The shared pool has stalled this CLI past 90s (#13552, #14191), so a
-// mid-turn repaint gets the boot's stall tier: createUntil scales this in
-// CI, and the old 12s capped it at 36s (#17544).
-const WAIT_LOCAL_MS = 30_000;
-const until = createUntil(WAIT_LOCAL_MS);
-
-// The /permissions cases pin their own ceiling to fail fast on a wedged
-// dialog. It must outrank the boot window plus a few repaints that each burn
-// a full wait budget and still pass — these cases poll a dozen times — or
-// vitest's bare "Test timed out" pre-empts the wait's own label (#17544).
-// retry: 0 because a wedged dialog repeats in a fresh worker, so the suite's
-// two retries would only triple the cost.
-const PERMISSIONS_CASE_OPTIONS = {
-  timeout:
-    readyPromptBudgetMs(process.env) + 3 * scaledWait(WAIT_LOCAL_MS) + 60_000,
-  retry: 0,
-};
+const PERMISSIONS_CASE_OPTIONS = permissionsCaseOptions(process.env);
 
 function lastUser(server: FakeOpenAIServer): string {
   const messages = server.requests.at(-1)?.body['messages'];
