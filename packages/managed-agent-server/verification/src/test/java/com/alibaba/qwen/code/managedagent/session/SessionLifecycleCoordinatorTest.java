@@ -1711,9 +1711,10 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
-    // The relay's stop arm tolerates a child that waits on its recovery or
-    // is already closing; the cascade mirrors exactly those two refusal
-    // codes — any other failure defers the Turn cancel, these two do not.
+    // The relay's stop arm tolerates a child that waits on its recovery,
+    // is already closing, or is out of cold-open slots; the cascade mirrors
+    // exactly those refusal codes — any other failure defers the Turn
+    // cancel, these do not.
     @Test
     void aToleratedMessageStopRefusalStillCancelsTheTurn() {
         World world = closingWorld("msg-tolerated-");
