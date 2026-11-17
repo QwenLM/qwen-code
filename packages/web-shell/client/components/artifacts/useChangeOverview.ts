@@ -94,7 +94,8 @@ export function useChangeOverview(
         // foreign PR's scale is not presented as the session's own work.
         // Legacy bindings without a source stay included.
         boundPrs = (summary?.prs ?? []).filter((pr) => pr.source !== 'review');
-        baseBranch = summary?.branch?.baseBranch;
+        baseBranch =
+          summary?.branch?.baseBranch ?? summary?.worktree?.baseBranch;
         // The immutable commit the session started from (branch base or
         // worktree base tip). Preferred fallback boundary; absent on legacy
         // sessions, which fall back to the base branch or suppress.

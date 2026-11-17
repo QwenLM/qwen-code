@@ -262,6 +262,20 @@ describe('workspace Git log routes', () => {
     expect(fetchGitLogMock).not.toHaveBeenCalled();
   });
 
+  it('rejects a separator-only exclude value with 400', async () => {
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspace/git/log?exclude=,,,');
+
+    expect(response.status).toBe(400);
+    expect(response.body.errorKind).toBe('parse_error');
+    expect(fetchGitLogMock).not.toHaveBeenCalled();
+  });
+
   it('omits range when the query parameter is absent or blank', async () => {
     fetchGitLogMock.mockResolvedValue({ entries: [], hasMore: false });
     const app = express();

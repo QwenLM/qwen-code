@@ -139,6 +139,16 @@ async function handleLogList(
         .split(',')
         .map((ref) => ref.trim())
         .filter((ref) => ref.length > 0);
+      // A separator-only value (`,,,`) filters to nothing; treating that as
+      // "no exclusion" would run the walk unfiltered, so refuse it too.
+      if (excludeRefs.length === 0) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: 'exclude must be a non-empty comma-separated ref list',
+          status: 400,
+        });
+        return;
+      }
     }
     const result = await fetchGitLog(workspaceCwd, {
       limit,

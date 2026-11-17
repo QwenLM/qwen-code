@@ -121,7 +121,11 @@ export function ChangeOverviewPanel({
       </div>
 
       {hasTabs && (
-        <div className={styles.scopeRow} role="tablist">
+        <div
+          className={styles.scopeRow}
+          role="tablist"
+          aria-label={t('changeOverview.title')}
+        >
           {units.map((unit, index) => {
             const badgeHidden =
               unit.kind === 'commit' ||

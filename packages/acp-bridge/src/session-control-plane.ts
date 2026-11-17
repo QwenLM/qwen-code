@@ -754,6 +754,7 @@ interface SessionEntry {
     path: string;
     branch: string;
     baseCommit?: string;
+    baseBranch?: string;
   };
   /** Branch metadata, when created with branch param. */
   branch?: { name: string; baseBranch: string; baseCommit?: string };
@@ -5610,6 +5611,7 @@ export function createSessionControlPlane(
       path: string;
       branch: string;
       baseCommit?: string;
+      baseBranch?: string;
     },
     branch?: { name: string; baseBranch: string; baseCommit?: string },
     baseCommit?: string,
@@ -7586,6 +7588,7 @@ export function createSessionControlPlane(
         path: string;
         branch: string;
         baseCommit?: string;
+        baseBranch?: string;
       };
       branch?: { name: string; baseBranch: string; baseCommit?: string };
       baseCommit?: string;

@@ -3142,7 +3142,13 @@ export function registerSessionRoutes(
       | undefined;
     let branchBaseCommit: string | undefined;
     let worktreeMeta:
-      | { slug: string; path: string; branch: string; baseCommit?: string }
+      | {
+          slug: string;
+          path: string;
+          branch: string;
+          baseCommit?: string;
+          baseBranch?: string;
+        }
       | undefined;
     let worktreeBaseBranch: string | undefined;
     let worktreeBaseCommit: string | undefined;
@@ -3442,6 +3448,7 @@ export function registerSessionRoutes(
           path: wtResult.worktree.path,
           branch: wtResult.worktree.branch,
           baseCommit: worktreeBaseCommit,
+          baseBranch: worktreeBaseBranch,
         };
         // Worktree sessions must be independent — never coalesce onto an
         // existing single-scope session that lives in the main checkout.
@@ -4572,7 +4579,11 @@ export function registerSessionRoutes(
                       slug: oldSidecar.slug,
                       path: realTarget,
                       branch: oldSidecar.worktreeBranch,
-                      baseCommit: oldSidecar.originalHeadCommit || undefined,
+                      baseCommit:
+                        oldSidecar.worktreeBase ||
+                        oldSidecar.originalHeadCommit ||
+                        undefined,
+                      baseBranch: oldSidecar.originalBranch || undefined,
                     },
                     worktreeState: 'persisted-v1',
                     attached: false,
@@ -4624,7 +4635,10 @@ export function registerSessionRoutes(
                     path: realTarget,
                     branch: effectiveOldSidecar.worktreeBranch,
                     baseCommit:
-                      effectiveOldSidecar.originalHeadCommit || undefined,
+                      effectiveOldSidecar.worktreeBase ||
+                      effectiveOldSidecar.originalHeadCommit ||
+                      undefined,
+                    baseBranch: effectiveOldSidecar.originalBranch || undefined,
                   },
                 });
                 spawnedNew = { sessionId: spawned.sessionId };
@@ -4739,7 +4753,10 @@ export function registerSessionRoutes(
                   path: realTarget,
                   branch: effectiveOldSidecar.worktreeBranch,
                   baseCommit:
-                    effectiveOldSidecar.originalHeadCommit || undefined,
+                    effectiveOldSidecar.worktreeBase ||
+                    effectiveOldSidecar.originalHeadCommit ||
+                    undefined,
+                  baseBranch: effectiveOldSidecar.originalBranch || undefined,
                 };
                 runtime.bridge.setSessionWorktree(
                   spawned.sessionId,
@@ -5012,18 +5029,24 @@ export function registerSessionRoutes(
               ...sidecar,
               worktreeBranch: name,
             });
-            runtime.bridge.setSessionWorktree(storageSessionId, {
+            // Branching the checkout must not drop the session's start
+            // commit/base branch: the change overview still scopes its window
+            // to them, so carry them onto the live meta and the response.
+            const branchedWorktree = {
               slug: sidecar.slug,
               path: realTarget,
               branch: name,
-            });
+              baseCommit:
+                sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+              baseBranch: sidecar.originalBranch || undefined,
+            };
+            runtime.bridge.setSessionWorktree(
+              storageSessionId,
+              branchedWorktree,
+            );
             res.status(200).json({
               sessionId: storageSessionId,
-              worktree: {
-                slug: sidecar.slug,
-                path: realTarget,
-                branch: name,
-              },
+              worktree: branchedWorktree,
             });
           } finally {
             releaseOwnership();

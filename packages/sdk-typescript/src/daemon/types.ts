@@ -1452,6 +1452,12 @@ export interface DaemonWorktreeInfo {
    * fallback scopes its window to `<baseCommit>..HEAD`.
    */
   baseCommit?: string;
+  /**
+   * The branch the worktree was created from (its upstream base). The commit
+   * fallback excludes commits reachable from it so integrating upstream does
+   * not re-list pre-session work. Absent when unknown.
+   */
+  baseBranch?: string;
 }
 
 /** Result of `POST /session/:id/worktree-branch` ("Create branch here"). */
@@ -1474,8 +1480,11 @@ export interface DaemonBranchInfo {
   baseBranch: string;
   /**
    * The HEAD the branch was created from — the session's start commit.
-   * Immutable; absent on branches persisted before this field. The commit
-   * fallback scopes its window to `<baseCommit>..HEAD`.
+   * Immutable; the commit fallback scopes its window to `<baseCommit>..HEAD`.
+   * Live-only: branch metadata is not yet restored across a daemon restart,
+   * so this (and `baseBranch`) are absent on a restored branch session and the
+   * fallback suppresses until durable branch metadata lands. Worktree sessions
+   * carry the start commit durably on `worktree.baseCommit` instead.
    */
   baseCommit?: string;
 }
@@ -1877,8 +1886,10 @@ export interface DaemonSessionSummary {
    * The HEAD captured when the session was created — its immutable start
    * commit. Present for plain sessions (which have no branch/worktree meta);
    * branch/worktree sessions carry it on their respective meta instead. The
-   * commit fallback scopes its window to `<baseCommit>..HEAD`. Absent on
-   * sessions persisted before this field or whose creation read failed.
+   * commit fallback scopes its window to `<baseCommit>..HEAD`. Live-only for
+   * plain sessions (not restored across a daemon restart); absent when the
+   * creation read failed. Worktree sessions carry it durably on
+   * `worktree.baseCommit`.
    */
   baseCommit?: string;
   /** Present when GitHub PRs have been bound to the session (last = latest). */

@@ -412,6 +412,7 @@ describe('POST /session/:id/worktree-reset', () => {
       path: fixture.realTarget,
       branch: fixture.worktreeBranch,
       baseCommit: 'abc123',
+      baseBranch: 'main',
     });
     expect(res.body.worktreeState).toBe('persisted-v1');
 
@@ -426,6 +427,7 @@ describe('POST /session/:id/worktree-reset', () => {
           path: fixture.realTarget,
           branch: fixture.worktreeBranch,
           baseCommit: 'abc123',
+          baseBranch: 'main',
         },
       }),
     );
@@ -438,6 +440,7 @@ describe('POST /session/:id/worktree-reset', () => {
       path: fixture.realTarget,
       branch: fixture.worktreeBranch,
       baseCommit: 'abc123',
+      baseBranch: 'main',
     });
     expect(fixture.fake.clearSessionWorktree).toHaveBeenCalledWith(oldId);
     expect(fixture.fake.severSessionClients).toHaveBeenCalledWith(oldId);
@@ -670,6 +673,7 @@ describe('POST /session/:id/worktree-reset', () => {
       path: fixture.realTarget,
       branch: fixture.worktreeBranch,
       baseCommit: 'abc123',
+      baseBranch: 'main',
     });
     expect(res.body.worktreeState).toBe('persisted-v1');
     expect(res.body.attached).toBe(false);
@@ -1194,6 +1198,7 @@ describe('POST /session/:id/worktree-reset', () => {
       path: fixture.realTarget,
       branch: fixture.worktreeBranch,
       baseCommit: 'abc123',
+      baseBranch: 'main',
     });
     // The checkout belongs to the replacement now, so the sidecar links stay
     // and the replacement is neither orphan-reaped nor replaced again.
@@ -1637,6 +1642,7 @@ describe('POST /session/:id/load worktree classifications', () => {
       path: fixture.realTarget,
       branch: fixture.worktreeBranch,
       baseCommit: 'abc123',
+      baseBranch: 'main',
     });
     expect(res.body.worktreeState).toBe('persisted-v1');
     expect(res.body.currentCwd).toBe(fixture.realTarget);
@@ -1649,6 +1655,7 @@ describe('POST /session/:id/load worktree classifications', () => {
       path: fixture.realTarget,
       branch: fixture.worktreeBranch,
       baseCommit: 'abc123',
+      baseBranch: 'main',
     });
     expect(fixture.fake.killSession).not.toHaveBeenCalled();
   });

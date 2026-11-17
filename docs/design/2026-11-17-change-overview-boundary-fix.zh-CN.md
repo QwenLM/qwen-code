@@ -56,16 +56,24 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
 ### 层 1——持久化会话起点 commit（cli + SDK）
 
 - `DaemonBranchInfo` 增 `baseCommit?: string`；`DaemonWorktreeInfo` 增
-  `baseCommit?: string`；`DaemonSessionSummary` 增顶层 `baseCommit?: string`
-  供普通会话使用。
+  `baseCommit?: string` 与 `baseBranch?: string`；`DaemonSessionSummary` 增顶层
+  `baseCommit?: string` 供普通会话使用。
 - 分支会话：把已解析的 `baseCommit` 随 `branchMeta` 持久化并投影到摘要。
+  仅 live——分支元数据尚未在 daemon 重启后恢复（恢复的分支会话抑制兜底，待
+  durable 分支元数据落地）。
 - worktree 会话：在 `createUserWorktree` 前解析 `getHeadCommit(workspaceCwd)`
   （worktree 创建所自的基线顶端），持久化到 `worktreeMeta` **并 durable** 写入
-  worktree sidecar 的 `originalHeadCommit`；`session-restore.ts` 两处重建与
-  `enrichWorktreeSidecars` 都读回，日志式 branch-worktree 与 worktree-reset
-  流程也携带，故 daemon 重启后仍能定界窗口。
+  worktree sidecar（`worktreeBase`，legacy sidecar 回退 `originalHeadCommit`）。
+  `session-restore.ts` 两处重建与 `enrichWorktreeSidecars` 都读
+  `worktreeBase || originalHeadCommit`（worktree 自身的 base，而非源检出的
+  HEAD——从兄弟 managed worktree 创建时二者不同）；日志式 branch-worktree、
+  worktree-reset 与「在此创建分支」（`worktree-branch`）流程都携带
+  `baseCommit`/`baseBranch`，故 daemon 重启后仍能定界窗口。`baseBranch`
+  （worktree 创建所自的分支，sidecar `originalBranch`）被投影，使 hook 能排除
+  上游整合。
 - 普通会话：创建时捕获 `getHeadCommit(workspaceCwd)`（会话起始的 HEAD），投影
-  为摘要顶层 `baseCommit`；读取失败保持 `undefined`（无边界）。hook 优先
+  为摘要顶层 `baseCommit`；读取失败保持 `undefined`（无边界）。仅 live（不在
+  daemon 重启后恢复）。hook 优先
   `branch.baseCommit ?? worktree.baseCommit ?? summary.baseCommit`。
 - status 路由水合与摘要投影转发新字段；无此字段的 legacy 会话保持 `undefined`。
 
@@ -74,13 +82,17 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
 - `fetchGitLog` 增 `excludeRefs?: string[]`。存在时修订列表在 range 后追加
   `--not <ref…>`，git 原生返回窗口减去从任一排除 ref 可达的提交。单次 git
   调用；无逐条目祖先调用。
-- 每个排除 ref 按单 ref 白名单校验（`isSafeLogRange` 字符集、无前导 `-`/`..`）；
-  不安全 ref 使整个排除集落入拒绝（`available:false`）结果，而非静默无范围
-  运行——与 range 守卫相同的 fail-closed 姿态。
+- 每个排除 ref 按单 ref 白名单校验（`isSafeSingleRef`：字符集、无前导 `-`/`^`、
+  无 `..`）；不安全 ref 使整个排除集落入拒绝（`available:false`）结果，而非
+  静默无范围运行——与 range 守卫相同的 fail-closed 姿态。前导 `^` 被拒，因为
+  git 的 `--not ^ref` 把双重否定异或成包含（扩大窗口）。hash 前缀搜索臂携带
+  `--not <refs>` 尾部，使排除在该臂同样生效。
 - log 路由增 additive `exclude` 查询参数（逗号分隔 ref）。缺省 → 行为不变。
-  新 capability tag `workspace_git_log_exclude_refs` 声明之；钉死基线
-  （server.test.ts、capability-parity.ts、集成信封）更新。
-- SDK `workspaceGitLog` 增可选 `excludeRefs` 参数，作为 `exclude` 转发。
+  重复键、空值或仅分隔符值（`,,,`）以 400 拒绝（fail closed），而非丢弃排除
+  无过滤运行。新 capability tag `workspace_git_log_exclude_refs` 声明之；钉死
+  基线（server.test.ts、capability-parity.ts、集成信封）更新。
+- SDK `workspaceGitLog` 增可选 `excludeRefs` 参数，作为 `exclude` 转发
+  （双客户端，有测试）。
 
 ### 层 3——hook 重写（web-shell）
 
@@ -89,10 +101,13 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   `<base>..HEAD`；否则**抑制**（永不再无范围遍历）。
 - exclude 能力存在且 PR head 已解析时，把每个绑定 PR `headSha` 作为
   `excludeRefs` 传入。可达性排除统一处理已合并、并行、不可比 head。
-- 基线分支（白名单安全的单 ref、非 `'HEAD'`）加入排除集。在会话树中整合上游
-  （`git pull`、rebase、合并基线）使 HEAD 到达起点 commit 不可达的提交；若不
-  排除会被重复列为松散工作。它们从基线分支可达而被减去，会话自身的提交（其
-  子代）存活。这只收窄窗口；记录的起点 commit 仍定界它。
+- 基线分支（`branch.baseBranch ?? worktree.baseBranch`，白名单安全的单 ref、
+  非 `'HEAD'`）加入排除集。worktree 会话无分支元数据，其基线分支携带在
+  `worktree.baseBranch`。在会话树中整合上游（`git pull`、rebase、合并基线）使
+  HEAD 到达起点 commit 不可达的提交；若不排除会被重复列为松散工作。它们从
+  基线分支可达而被减去，会话自身的提交（其子代）存活。这只收窄窗口；记录的
+  起点 commit 仍定界它。（仅祖先/merge-base 探针无效：上游线性推进后起点
+  commit 仍是 HEAD 的祖先。）
 - 保留守卫：任一产出 PR 单元未解析出 head 则抑制兜底（其提交无法被排除，
   故不得重新列出）。
 - capability 偏差：有绑定 PR 单元但**无** exclude 能力（新客户端对旧 daemon）

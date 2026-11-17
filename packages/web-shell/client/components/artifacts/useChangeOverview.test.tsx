@@ -192,6 +192,30 @@ describe('useChangeOverview', () => {
     );
   });
 
+  it('excludes the worktree base branch so upstream integration is not re-listed', async () => {
+    // A worktree session has no branch meta; its base branch is carried on
+    // worktree.baseBranch. Integrating upstream advances HEAD past the start
+    // commit, so the base branch must join the exclusion set or those upstream
+    // commits re-list as loose work.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
+      worktree: {
+        path: '/work/wt',
+        baseCommit: 'wtbase',
+        baseBranch: 'origin/main',
+      },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'wtbase..HEAD',
+      { sessionId: 's1', excludeRefs: ['head1', 'origin/main'] },
+    );
+  });
+
   it('excludes commits reachable from every bound PR head when supported', async () => {
     // Reachability exclusion (not a single-head boundary) drops each PR's own
     // commits, including for merged or incomparable heads.

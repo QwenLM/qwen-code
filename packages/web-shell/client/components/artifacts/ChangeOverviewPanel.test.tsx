@@ -572,6 +572,12 @@ describe('ChangeOverviewPanel', () => {
     expect(panel?.getAttribute('tabindex')).toBe('0');
   });
 
+  it('gives the tablist an accessible name', () => {
+    renderPanel();
+    const tablist = container.querySelector('[role="tablist"]');
+    expect(tablist?.getAttribute('aria-label')).toBeTruthy();
+  });
+
   it('does not advertise an orphan tabpanel when no tablist renders', () => {
     mock.state = { gitAvailable: false, loading: false, units: [] };
     renderPanel();

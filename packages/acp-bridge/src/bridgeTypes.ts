@@ -401,6 +401,7 @@ export interface BridgeSpawnRequest {
     path: string;
     branch: string;
     baseCommit?: string;
+    baseBranch?: string;
   };
   /** Branch metadata, set by the daemon route before spawn. */
   branch?: { name: string; baseBranch: string; baseCommit?: string };
@@ -552,6 +553,7 @@ export interface BridgeSession {
     path: string;
     branch: string;
     baseCommit?: string;
+    baseBranch?: string;
   };
   /** Set by the daemon route after durable worktree ownership is verified. */
   worktreeState?: 'persisted-v1';
@@ -994,6 +996,7 @@ export interface BridgeSessionExecutionSnapshot {
     path: string;
     branch: string;
     baseCommit?: string;
+    baseBranch?: string;
   };
 }
 
@@ -1321,6 +1324,7 @@ export interface BridgeSessionSummary {
     path: string;
     branch: string;
     baseCommit?: string;
+    baseBranch?: string;
   };
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string; baseCommit?: string };
@@ -2206,6 +2210,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
       path: string;
       branch: string;
       baseCommit?: string;
+      baseBranch?: string;
     },
   ): void;
 

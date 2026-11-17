@@ -15821,6 +15821,7 @@ describe('createServeApp', () => {
           path: worktreePath,
           branch: '',
           baseCommit,
+          baseBranch: 'main',
         });
         expect(res.body.worktreeState).toBe('persisted-v1');
         expect(bridge.calls[0]?.sessionScope).toBe('thread');
@@ -15900,6 +15901,7 @@ describe('createServeApp', () => {
           path: worktreePath,
           branch: 'worktree-my-task',
           baseCommit: 'wtbase123',
+          baseBranch: 'main',
         });
         expect(writeSidecar).toHaveBeenCalledWith(
           expect.stringMatching(/fake-0\.worktree\.json$/),
@@ -19208,6 +19210,7 @@ describe('createServeApp', () => {
           path: `${WS_BOUND}/.qwen/worktrees/my-task`,
           branch: 'worktree-my-task',
           baseCommit: 'abc123',
+          baseBranch: 'main',
         });
         expect(res.body.worktreeState).toBe('persisted-v1');
         expect(bridge.changeSessionCwdCalls).toHaveLength(1);
@@ -19215,6 +19218,51 @@ describe('createServeApp', () => {
           `${WS_BOUND}/.qwen/worktrees/my-task`,
         );
         expect(bridge.setSessionWorktreeCalls).toHaveLength(1);
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+        mockWt.readMarkerLenient = undefined;
+        mockWt.realpath = undefined;
+      }
+    });
+
+    it('restores the worktree base commit from worktreeBase, not originalHeadCommit', async () => {
+      // worktreeBase is the commit the worktree itself was created at;
+      // originalHeadCommit is the source checkout's HEAD, which differs when
+      // the worktree was created from a sibling managed worktree. The start
+      // commit must prefer worktreeBase.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readMarker = () =>
+        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'my-task',
+          worktreePath: `${WS_BOUND}/.qwen/worktrees/my-task`,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'sourcehead',
+          worktreeBase: 'worktreebase',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toMatchObject({
+          baseCommit: 'worktreebase',
+          baseBranch: 'main',
+        });
       } finally {
         mockWt.readSidecar = undefined;
         mockWt.readMarker = undefined;
@@ -19260,6 +19308,7 @@ describe('createServeApp', () => {
           path: `${WS_BOUND}/.qwen/worktrees/case-task`,
           branch: 'worktree-case-task',
           baseCommit: 'abc123',
+          baseBranch: 'main',
         });
         expect(bridge.changeSessionCwdCalls).toHaveLength(1);
       } finally {
@@ -19576,6 +19625,7 @@ describe('createServeApp', () => {
           path: worktreePath,
           branch: 'worktree-my-task',
           baseCommit: 'abc123',
+          baseBranch: 'main',
         });
         expect(res.body.worktreeState).toBeUndefined();
         expect(bridge.loadCalls[0]).not.toHaveProperty(
@@ -19639,6 +19689,7 @@ describe('createServeApp', () => {
           path: worktreePath,
           branch: 'worktree-my-task',
           baseCommit: 'abc123',
+          baseBranch: 'main',
         });
         expect(res.body.worktreeState).toBe('persisted-v1');
         expect(bridge.changeSessionCwdCalls).toHaveLength(0);
