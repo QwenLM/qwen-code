@@ -197,6 +197,7 @@ function isSessionAttachmentReference(
 
 const MAX_ATTACHMENT_CACHE_BYTES = 32 * 1024 * 1024;
 const MAX_ATTACHMENT_CACHE_ENTRIES = 128;
+const MAX_EARLY_PROMPT_TERMINALS = 256;
 
 function createStandaloneRestoredClient(
   client: DaemonClient,
@@ -333,6 +334,10 @@ export class DaemonSessionClient {
     number
   >();
   private nextAttachmentCacheSignalId = 0;
+  private readonly pendingPromptAdmissions = new Set<{
+    events: Map<string, DaemonEvent>;
+    overflow: boolean;
+  }>();
   private readonly _pendingPrompts = new Map<
     string,
     {
@@ -701,7 +706,13 @@ export class DaemonSessionClient {
       this.sessionId,
       this.promptLimit,
     );
+    const admission = {
+      events: new Map<string, DaemonEvent>(),
+      overflow: false,
+    };
+    this.pendingPromptAdmissions.add(admission);
     let accepted: NonBlockingPromptAccepted | PromptResult;
+    let terminalEvent: DaemonEvent | undefined;
     try {
       accepted = await this.withClientIdSelfHeal(() =>
         this.client.promptNonBlocking(
@@ -715,12 +726,19 @@ export class DaemonSessionClient {
         releaseAdmission();
         return accepted;
       }
-      if (!this.subscriptionActive) {
+      terminalEvent = admission.events.get(accepted.promptId);
+      if (!terminalEvent && admission.overflow) {
+        throw new Error('Too many prompt terminals before acknowledgement');
+      }
+      if (!terminalEvent && !this.subscriptionActive) {
         throw Error('SSE stream ended');
       }
     } catch (err) {
       releaseAdmission();
       throw err;
+    } finally {
+      this.pendingPromptAdmissions.delete(admission);
+      admission.events.clear();
     }
 
     return new Promise<PromptResult>((resolve, reject) => {
@@ -754,6 +772,7 @@ export class DaemonSessionClient {
         onAbort();
       } else {
         signal?.addEventListener('abort', onAbort, { once: true });
+        if (terminalEvent) this._dispatchTurnEvent(terminalEvent);
       }
     });
   }
@@ -1783,7 +1802,19 @@ export class DaemonSessionClient {
       ?.promptId;
     if (!promptId) return;
     const pending = this._pendingPrompts.get(promptId);
-    if (!pending) return;
+    if (!pending) {
+      // The daemon assigns promptId, so correlation starts after the POST
+      // acknowledges. Retain unmatched terminals only during that window.
+      for (const admission of this.pendingPromptAdmissions) {
+        if (admission.events.has(promptId)) continue;
+        if (admission.events.size >= MAX_EARLY_PROMPT_TERMINALS) {
+          admission.overflow = true;
+          continue;
+        }
+        admission.events.set(promptId, event);
+      }
+      return;
+    }
     this._pendingPrompts.delete(promptId);
     try {
       const result = matchTurnEvent(event, promptId);
