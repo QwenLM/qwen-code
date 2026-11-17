@@ -524,8 +524,6 @@ interface ArtifactPanelProps {
     sideTasks: readonly SideTaskListItem[],
   ) => void | Promise<void>;
   onSideTaskMenuOpen?: () => void;
-  /** Leave the panel for a session shown in a `session` tab. */
-  onOpenSession?: (sessionId: string, workspaceCwd: string) => void;
   onCreateSideTaskSession?: (
     tabId: string,
     parentSessionId: string,
@@ -728,7 +726,6 @@ export function ArtifactPanel({
   onArchiveSideTasks,
   onUnarchiveSideTasks,
   onSideTaskMenuOpen,
-  onOpenSession,
   onCreateSideTaskSession,
   onSideTaskCreated,
   onSideTaskTitleChange,
@@ -1755,7 +1752,6 @@ export function ArtifactPanel({
             sessionId={activeTab.sessionId}
             workspaceCwd={activeTab.workspaceCwd}
             title={activeTab.title}
-            onOpenSession={onOpenSession}
             onRightPanelOpen={onNestedRightPanelOpen}
             onArtifactsChange={onNestedArtifactsChange}
             onError={onError}

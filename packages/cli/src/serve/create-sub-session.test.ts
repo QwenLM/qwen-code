@@ -120,6 +120,8 @@ function makeFakeBridge(opts?: {
   sourceIds?: Readonly<Record<string, string>>;
   /** The id `resumeSession` reports for a requested spelling. */
   resumedAs?: Readonly<Record<string, string>>;
+  /** Live `displayName` by session. */
+  titles?: Readonly<Record<string, string>>;
 }) {
   const closedSessions = new Set<string>();
   const spawns: Array<{
@@ -135,6 +137,8 @@ function makeFakeBridge(opts?: {
     expectedApprovalMode?: ApprovalMode;
     approvalModeBeforeStart?: ApprovalMode;
   }> = [];
+  const promptMetas: unknown[] = [];
+  const externalRecords: Array<{ sessionId: string; request: unknown }> = [];
   const names: Array<{
     sessionId: string;
     displayName?: string;
@@ -230,7 +234,12 @@ function makeFakeBridge(opts?: {
         parentSessionId: opts?.restoredCallerParents?.[sessionId],
         sourceType: opts?.callerSourceTypes?.[sessionId],
         sourceId: opts?.sourceIds?.[sessionId],
+        displayName: opts?.titles?.[sessionId],
       };
+    },
+    appendExternalRecord: async (sessionId: string, request: unknown) => {
+      externalRecords.push({ sessionId, request });
+      return { sessionId, recordId: `record-${externalRecords.length}` };
     },
     hasSessionOrPendingRegistration: (sessionId: string) =>
       !closedSessions.has(sessionId),
@@ -334,7 +343,7 @@ function makeFakeBridge(opts?: {
     },
     sendPrompt: (
       sessionId: string,
-      req: { prompt: Array<{ type: string; text?: string }> },
+      req: { prompt: Array<{ type: string; text?: string }>; _meta?: unknown },
       _signal: unknown,
       ctx?: {
         promptId?: string;
@@ -353,6 +362,7 @@ function makeFakeBridge(opts?: {
         ctx?.dispatchSignal?.throwIfAborted();
         ctx?.assertCanDispatch?.();
         ctx?.onPromptWriteStarted?.();
+        promptMetas.push(req._meta);
         prompts.push({
           sessionId,
           promptId: ctx?.promptId ?? '',
@@ -465,6 +475,8 @@ function makeFakeBridge(opts?: {
     bridge: bridge as unknown as AcpSessionBridge,
     spawns,
     prompts,
+    promptMetas,
+    externalRecords,
     names,
     closes,
     relocations,
@@ -1621,31 +1633,115 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
-  it("sent mode: reports a person's send back to the caller in its own workspace", async () => {
+  it("records a person's send and its reply in the caller without a turn", async () => {
     const fake = makeFakeBridge({
-      events: (pid) => [chunk('done'), turnComplete(pid)],
+      events: (pid) => [chunk('done <b>'), turnComplete(pid)],
+      titles: { 'parent-1': 'Caller title' },
     });
-    // Without notifySentCompletion, only the tool's own launches go unreported.
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
     });
     const launched = await launcher.launchForPerson({
       callerSessionId: 'parent-1',
+      prompt: 'research <it>',
+    });
+    await vi.waitFor(() => expect(fake.externalRecords).toHaveLength(2));
+    const target = `session="${launched.sessionId}" workspace="${WS}"`;
+    expect(fake.externalRecords).toEqual([
+      {
+        sessionId: 'parent-1',
+        request: {
+          kind: 'agent_mention',
+          recordKey: `send:${launched.sessionId}`,
+          modelText: expect.stringMatching(
+            new RegExp(
+              `^<sent-message ${target}>The user sent this message to another session with /send\\. [^<]*\\nresearch &lt;it&gt;</sent-message>$`,
+            ),
+          ),
+          payload: {
+            displayText: 'research <it>',
+            mentionedAgentIds: [],
+            sentTo: {
+              sessionId: launched.sessionId,
+              workspaceCwd: WS,
+              title: 'research <it>',
+            },
+          },
+        },
+      },
+      {
+        sessionId: 'parent-1',
+        request: {
+          kind: 'agent_message',
+          recordKey: `send-reply:${launched.sessionId}`,
+          modelText: expect.stringMatching(
+            new RegExp(
+              `^<session-reply ${target} status="completed">[^<]*\\ndone &lt;b&gt;</session-reply>$`,
+            ),
+          ),
+          payload: {
+            displayText: 'done <b>',
+            author: {
+              agentId: `session:${launched.sessionId}`,
+              name: 'ws · research <it>',
+            },
+            runId: `send:${launched.sessionId}`,
+            status: 'completed',
+          },
+        },
+      },
+    ]);
+    // The person asked the target, not the caller's model.
+    expect(fake.notifications).toEqual([]);
+    // The target's transcript names who sent it, and its title has no glyph.
+    expect(fake.promptMetas).toEqual([
+      {
+        inputAnnotations: [
+          {
+            type: 'source',
+            sessionId: 'parent-1',
+            workspaceCwd: WS,
+            title: 'Caller title',
+          },
+        ],
+      },
+    ]);
+    expect(fake.names).toEqual([
+      expect.objectContaining({ displayName: 'research <it>' }),
+    ]);
+    launcher.stop();
+  });
+
+  it('marks a listed send as waiting while its target has a pending permission', async () => {
+    const fake = makeFakeBridge({
+      events: () => [
+        { v: 1, type: 'permission_request', data: { requestId: 'p1' } },
+      ],
+      blockAfterEvents: true,
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+    await launcher.launchForPerson({
+      callerSessionId: 'parent-1',
       prompt: 'research it',
     });
-    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
-    expect(fake.notifications[0]).toMatchObject({
-      sessionId: 'parent-1',
-      notification: { taskId: launched.sessionId, status: 'completed' },
-    });
-    expect(fake.notifications[0]!.notification.modelText).toContain(
-      "The user sent the message below to another session with /send on this session's page.",
+    await vi.waitFor(() =>
+      expect(launcher.listOutgoing('parent-1')[0]).toMatchObject({
+        status: 'running',
+        waitingForInput: true,
+      }),
     );
-    expect(fake.notifications[0]!.notification.modelText).toContain(
-      "That session's turn completed; its reply is the result.</summary><message>research it</message>",
-    );
+    expect(fake.workspaceEvents).toHaveLength(2);
     launcher.stop();
+    await vi.waitFor(() =>
+      expect(launcher.listOutgoing('parent-1')[0]).toMatchObject({
+        status: 'cancelled',
+        waitingForInput: false,
+      }),
+    );
   });
 
   it("lists a reported send as the caller's task until its turn settles", async () => {
@@ -2591,11 +2687,12 @@ describe('sub-sessions in another workspace', () => {
         expectedApprovalMode: 'auto',
       }),
     ]);
-    await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
-    expect(a.notifications[0]).toMatchObject({
+    await vi.waitFor(() => expect(a.externalRecords).toHaveLength(2));
+    expect(a.externalRecords[1]).toMatchObject({
       sessionId: 'caller',
-      notification: { taskId: 'sub-1', status: 'completed' },
+      request: { kind: 'agent_message', payload: { status: 'completed' } },
     });
+    expect(a.notifications).toEqual([]);
   });
 
   it("lists a send to another workspace on the caller's launcher", async () => {
@@ -3695,8 +3792,8 @@ describe('following up a sub-session', () => {
         sourceType: 'side_task',
       }),
     ]);
-    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
-    expect(fake.notifications[0]).toMatchObject({ sessionId: 'caller' });
+    await vi.waitFor(() => expect(fake.externalRecords).toHaveLength(2));
+    expect(fake.externalRecords[1]).toMatchObject({ sessionId: 'caller' });
     await expect(
       launcher.launchForPerson({
         callerSessionId: 'caller',
@@ -4109,6 +4206,7 @@ describe('following up a sub-session', () => {
       restoredCallerParents: { kid: 'caller' },
       approvalModes: { kid: 'yolo' },
       resumable: ['kid'],
+      titles: { kid: 'Kid title' },
       events: (pid) => [chunkFor(pid, 'from b'), turnComplete(pid)],
     });
     const launcherB = createSubSessionLauncher({
@@ -4136,10 +4234,25 @@ describe('following up a sub-session', () => {
       sessionId: 'kid',
     });
     expect(sent).toMatchObject({ sessionId: 'kid', workspaceCwd: WS_B });
-    await vi.waitFor(() => expect(a.notifications).toHaveLength(1));
-    expect(a.notifications[0]!.notification.modelText).toContain(
-      'with /send on this session',
-    );
+    // The exchange is recorded in the caller, named by the target's title.
+    await vi.waitFor(() => expect(a.externalRecords).toHaveLength(2));
+    expect(a.externalRecords[1]).toMatchObject({
+      sessionId: 'caller',
+      request: {
+        kind: 'agent_message',
+        payload: {
+          displayText: 'from b',
+          author: { agentId: 'session:kid', name: 'ws-b · Kid title' },
+        },
+      },
+    });
+    expect(a.notifications).toEqual([]);
+    expect(b.externalRecords).toEqual([]);
+    expect(b.promptMetas[0]).toEqual({
+      inputAnnotations: [
+        { type: 'source', sessionId: 'caller', workspaceCwd: WS },
+      ],
+    });
     expect(b.prompts).toEqual([
       expect.objectContaining({
         sessionId: 'kid',

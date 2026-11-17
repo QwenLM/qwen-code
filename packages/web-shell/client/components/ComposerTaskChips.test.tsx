@@ -162,6 +162,29 @@ describe('ComposerTaskChips', () => {
     );
   });
 
+  it('says so when a session a message went to is waiting for an answer', () => {
+    const { onSelectTask } = render([
+      { ...sent('kid-1'), waitingForInput: true },
+    ]);
+    expect(chips().map((chip) => chip.textContent)).toEqual([
+      '1 session needs your answer',
+    ]);
+    expect(chips()[0]!.hasAttribute('data-waiting')).toBe(true);
+    act(() => chips()[0]!.click());
+    expect(onSelectTask).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'kid-1' }),
+    );
+  });
+
+  it('counts only the waiting sessions in the waiting label', () => {
+    render([sent('kid-1'), { ...sent('kid-2'), waitingForInput: true }]);
+    expect(chips().map((chip) => chip.textContent)).toEqual([
+      '1 session needs your answer',
+    ]);
+    expect(sent('kid-1').waitingForInput).toBeUndefined();
+    expect(chips()[0]!.hasAttribute('data-waiting')).toBe(true);
+  });
+
   it('keeps a pausing or paused workflow as unfinished work', () => {
     render([workflow('wf-1', 'pausing')]);
     expect(chips().map((chip) => chip.textContent)).toEqual(['1 workflow']);

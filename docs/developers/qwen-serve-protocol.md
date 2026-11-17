@@ -2875,12 +2875,13 @@ With `?includeSubSessions=true` (capability `session_sub_session_send`), the
 response also carries `subSessions`: the `sent` launches the daemon reports
 back to this session, from `POST /session/:id/sub-sessions` or from the
 model's `create_sub_session`. Each is `{ kind: "session", id, sessionId,
-workspaceCwd, label, status, startTime, endTime?, runtimeMs, byPerson }`,
-where `id` is the completion's task id, `sessionId` and `workspaceCwd` name
-the target, and `status` is `running` until the target's turn settles as
-`completed`, `failed`, or `cancelled`. The daemon keeps them in memory, at
-most 20 per session, so a restart forgets them. When one starts or settles it
-publishes `sub_session_task_changed` with `{ sessionId }` (the caller) on
+workspaceCwd, label, status, startTime, endTime?, runtimeMs, byPerson,
+waitingForInput }`, where `id` is the completion's task id, `sessionId` and
+`workspaceCwd` name the target, `status` is `running` until the target's turn
+settles as `completed`, `failed`, or `cancelled`, and `waitingForInput` is
+true while the target has a pending permission request or question. The
+daemon keeps them in memory, at most 20 per session, so a restart forgets
+them. When one starts, settles, or starts or stops waiting it publishes `sub_session_task_changed` with `{ sessionId }` (the caller) on
 every session in the caller's workspace; clients filter by `sessionId` and
 re-read this route.
 
@@ -4169,6 +4170,8 @@ curl -X POST http://127.0.0.1:4170/session/$SID/sub-sessions \
 The response carries `sessionId`, `workspaceCwd` when the session runs in another workspace, and `taskId` when the completion's task id is not the session id (a follow-up). Errors: `400` (`invalid_sub_session_prompt`, `invalid_sub_session_workspace`, `invalid_sub_session_target`), `409 sub_session_send_refused` with the launcher's reason (an untrusted or unknown workspace, an unknown session, `:id` itself as the target, a cap, or a caller that does not record its chat), `501 sub_session_send_unavailable` for a session whose runtime cannot start sub-sessions, and the usual owner-route errors (standalone sessions are refused).
 
 While the target runs, the send is listed in `GET /session/:id/tasks?includeSubSessions=true`.
+
+The exchange is written to `:id`'s conversation without starting a turn there. The message is an `agent_mention` record whose `_meta.qwenAgentMessage.sentTo` is `{ sessionId, workspaceCwd, title? }` (the target); when the target's turn settles, its reply is an `agent_message` record whose author is the target. Both enter `:id`'s model history at its next turn. The prompt the target receives carries `{ type: "source", sessionId, workspaceCwd, title? }` (the caller) among `_meta.inputAnnotations` on its `user_message_chunk`, live and on replay; the model's `create_sub_session` launches carry it too.
 
 ### `DELETE /session/:id`
 

@@ -11,6 +11,7 @@ import {
 } from 'react';
 import {
   BotIcon,
+  CircleAlertIcon,
   CirclePauseIcon,
   LoaderCircleIcon,
   MessagesSquareIcon,
@@ -79,6 +80,11 @@ function taskLabel(task: ComposerChipTask): string {
     case 'workflow':
       return task.label;
   }
+}
+
+/** A session the message went to is waiting on a permission or a question. */
+function isWaiting(task: ComposerChipTask): boolean {
+  return task.kind === 'session' && task.waitingForInput === true;
 }
 
 function isMoving(task: ComposerChipTask): boolean {
@@ -235,6 +241,8 @@ export const ComposerTaskChips = forwardRef<
   };
 
   const groupLabel = (group: ComposerTaskChipGroup) => {
+    const waiting = group.tasks.filter(isWaiting).length;
+    if (waiting > 0) return t('tasks.pill.sessionWaiting', { count: waiting });
     const [singular, plural] = LABEL_KEYS[group.kind];
     return t(group.tasks.length === 1 ? singular : plural, {
       count: group.tasks.length,
@@ -294,7 +302,13 @@ export const ComposerTaskChips = forwardRef<
               <span className={styles.rowLabel} title={taskLabel(task)}>
                 {taskLabel(task)}
               </span>
-              <TaskElapsed task={task} now={now} />
+              {isWaiting(task) ? (
+                <span className={styles.waitingTag}>
+                  {t('tasks.waitingForInput')}
+                </span>
+              ) : (
+                <TaskElapsed task={task} now={now} />
+              )}
             </button>
           ))}
         </div>
@@ -306,6 +320,7 @@ export const ComposerTaskChips = forwardRef<
       >
         {groups.map((group, index) => {
           const moving = group.tasks.some(isMoving);
+          const waiting = group.tasks.some(isWaiting);
           const multiple = group.tasks.length > 1;
           return (
             <button
@@ -317,6 +332,7 @@ export const ComposerTaskChips = forwardRef<
               type="button"
               className={styles.chip}
               data-kind={group.kind}
+              data-waiting={waiting ? '' : undefined}
               aria-expanded={multiple ? openGroup === group : undefined}
               aria-haspopup={multiple ? 'true' : undefined}
               title={
@@ -326,7 +342,9 @@ export const ComposerTaskChips = forwardRef<
               onKeyDown={(event) => handleChipKeyDown(event, index)}
             >
               <span className={styles.state} aria-hidden="true">
-                {moving ? (
+                {waiting ? (
+                  <CircleAlertIcon />
+                ) : moving ? (
                   <LoaderCircleIcon className={styles.spinning} />
                 ) : (
                   <CirclePauseIcon />

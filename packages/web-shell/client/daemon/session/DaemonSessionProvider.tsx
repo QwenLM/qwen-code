@@ -45,6 +45,8 @@ import {
   isUnrecognizedDiagnosticReason,
   matchTurnEvent,
   normalizeDaemonEvent,
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
   type CreateSessionRequest,
   type DaemonApprovalMode,
   type DaemonEvent,
@@ -4478,13 +4480,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 !activePromptSettled &&
                 !restoredPromptSettled &&
                 !hasSessionActivePrompt();
+              // A `/send` exchange is recorded here without a turn here.
+              const turnEvents = uiEvents.filter(
+                (e) => !isSentExchangeEvent(e),
+              );
               if (isObserver) {
-                const hasUserMsg = uiEvents.some(
+                const hasUserMsg = turnEvents.some(
                   (e) => e.type === 'user.text.delta',
                 );
                 if (hasUserMsg) {
                   setPromptStatus('waiting');
-                } else if (hasActiveGenerationSignal(uiEvents)) {
+                } else if (hasActiveGenerationSignal(turnEvents)) {
                   setPromptStatus((current) =>
                     current === 'idle' ? 'streaming' : current,
                   );
@@ -4513,7 +4519,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   assistantDoneFromTurnEvent(event, 'error'),
                 );
                 setPromptStatus('idle');
-              } else if (isObserver && hasActiveGenerationSignal(uiEvents)) {
+              } else if (isObserver && hasActiveGenerationSignal(turnEvents)) {
                 schedulePassiveAssistantDone(
                   store,
                   passiveAssistantDoneTimerRef,
@@ -6818,6 +6824,26 @@ export function useDaemonSessionNotices(): {
     );
   }
   return value;
+}
+
+/**
+ * The message a person sent to another session with `/send`, or that
+ * session's reply, as recorded in this one. Neither is a turn of this session.
+ */
+function isSentExchangeEvent(event: DaemonUiEvent): boolean {
+  if (
+    event.type !== 'user.text.delta' &&
+    event.type !== 'assistant.text.delta'
+  ) {
+    return false;
+  }
+  const agentMessage = parseQwenAgentMessageMeta(
+    event.meta?.[QWEN_AGENT_MESSAGE_META_KEY],
+  );
+  return (
+    agentMessage?.sentTo !== undefined ||
+    agentMessage?.author?.agentId.startsWith('session:') === true
+  );
 }
 
 function hasActiveGenerationSignal(

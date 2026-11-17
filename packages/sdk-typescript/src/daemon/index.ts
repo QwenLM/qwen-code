@@ -198,6 +198,7 @@ export type {
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonInputSourceAnnotation,
   DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
@@ -978,6 +979,7 @@ export {
 export type {
   QwenAgentMessageMeta,
   SessionAgentAuthor,
+  SessionMessageTarget,
   SessionAgentChangedFrame,
   SessionAgentEventFrame,
   SessionAgentPermissionPrompt,

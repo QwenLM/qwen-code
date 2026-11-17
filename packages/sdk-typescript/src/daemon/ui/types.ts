@@ -156,6 +156,18 @@ export interface DaemonInputReferenceAnnotation {
 
 export type DaemonInputAnnotation = DaemonInputReferenceAnnotation;
 
+/**
+ * The session that sent this message from another session (`/send`, or a
+ * sub-session launch). The daemon stamps it among `inputAnnotations`; it
+ * covers no text range, so it is not a {@link DaemonInputAnnotation}.
+ */
+export interface DaemonInputSourceAnnotation {
+  type: 'source';
+  sessionId: string;
+  workspaceCwd: string;
+  title?: string;
+}
+
 export interface DaemonTextDeltaMeta extends Record<string, unknown> {
   qwenDiscreteMessage?: boolean;
   inputAnnotations?: DaemonInputAnnotation[];

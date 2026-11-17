@@ -3942,6 +3942,11 @@ export interface DaemonSessionSubSessionTaskStatus {
   runtimeMs: number;
   /** A person sent it from the session page, not the session's model. */
   byPerson: boolean;
+  /**
+   * The target is waiting on a permission or a question. Absent from daemons
+   * that predate it.
+   */
+  waitingForInput?: boolean;
 }
 
 /**

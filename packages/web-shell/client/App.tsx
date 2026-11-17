@@ -23705,12 +23705,6 @@ export function App({
       ? unarchiveSideTasks
       : undefined,
     onSideTaskMenuOpen: refreshSideTaskCatalog,
-    onOpenSession: (sessionId: string, workspaceCwd: string) => {
-      showChat();
-      loadSidebarSession(sessionId, workspaceCwd).catch((error: unknown) => {
-        reportError(error, 'Failed to open session');
-      });
-    },
     onCreateSideTaskSession: createSideTaskSession,
     onSideTaskCreated: handleSideTaskCreated,
     onSideTaskTitleChange: handleSideTaskTitleChange,

@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { parseQwenAgentMessageMeta } from '../../src/daemon/session-agents.js';
 import {
   appendLocalUserTranscriptMessage,
   createDaemonToolPreview,
@@ -11472,5 +11473,30 @@ describe('daemonBlockToPlainText sanitizes tool preview content', () => {
     const plain = daemonBlockToPlainText(block, { maxFieldLength: 80 });
     expect(plain).not.toContain('[truncated]');
     expect(plain).toContain('B'.repeat(40));
+  });
+});
+
+describe('parseQwenAgentMessageMeta', () => {
+  it('keeps where a /send message went and drops a malformed target', () => {
+    expect(
+      parseQwenAgentMessageMeta({
+        kind: 'agent_mention',
+        sentTo: {
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          title: 'Kid',
+          extra: 1,
+        },
+      }),
+    ).toEqual({
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'kid', workspaceCwd: '/work/b', title: 'Kid' },
+    });
+    expect(
+      parseQwenAgentMessageMeta({
+        kind: 'agent_mention',
+        sentTo: { sessionId: 'kid' },
+      }),
+    ).toEqual({ kind: 'agent_mention' });
   });
 });

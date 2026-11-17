@@ -4,9 +4,7 @@ import {
   WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../../constants/sessions';
-import { useI18n } from '../../i18n';
 import { ChatPane } from '../ChatPane';
-import { Button } from '../ui/button';
 import type { TurnOutputOpenRequest } from './TurnOutputs';
 
 interface SessionPanelProps {
@@ -14,7 +12,6 @@ interface SessionPanelProps {
   sessionId: string;
   workspaceCwd: string;
   title: string;
-  onOpenSession?: (sessionId: string, workspaceCwd: string) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onArtifactsChange?: (
     sessionId: string,
@@ -26,36 +23,21 @@ interface SessionPanelProps {
 
 /**
  * Another session, live, beside this one: where a message sent with `/send`
- * runs. Read-only — replying means opening the session — but its approvals
- * still show, since nobody else may be watching it.
+ * runs. Read-only, but its approvals and questions still show, since nobody
+ * else may be watching it.
  */
 export function SessionPanel({
   tabId,
   sessionId,
   workspaceCwd,
   title,
-  onOpenSession,
   onRightPanelOpen,
   onArtifactsChange,
   onError,
   onImageIngestionNotice,
 }: SessionPanelProps) {
-  const { t } = useI18n();
   return (
     <div className="flex h-full min-h-0 flex-col" data-testid="session-panel">
-      {onOpenSession && (
-        <div className="flex items-center justify-end border-b px-3 py-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            data-testid="session-panel-open"
-            onClick={() => onOpenSession(sessionId, workspaceCwd)}
-          >
-            {t('sessionPanel.open')}
-          </Button>
-        </div>
-      )}
       <div className="min-h-0 flex-1">
         <DaemonSessionProvider
           sessionId={sessionId}

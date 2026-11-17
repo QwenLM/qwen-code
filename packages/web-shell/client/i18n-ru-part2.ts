@@ -297,7 +297,6 @@ export const RU_PART2: Record<
     'Добавьте сообщение после параметров: /send [--workspace <имя>] [--session-id <id>] <сообщение>',
   'send.missingValue': (v) => `Для ${v?.option ?? ''} нужно значение`,
   'send.duplicateOption': (v) => `${v?.option ?? ''} указан дважды`,
-  'sessionPanel.open': 'Открыть сеанс',
   'send.option.workspace':
     'Рабочее пространство для отправки (по умолчанию текущее)',
   'send.option.sessionId': 'Сеанс для отправки (по умолчанию новый)',

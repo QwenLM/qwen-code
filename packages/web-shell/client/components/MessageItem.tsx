@@ -232,6 +232,7 @@ export const MessageItem = memo(function MessageItem({
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
             author={message.author}
+            sentTo={message.agentMessage?.sentTo}
           />
         );
       case 'assistant':

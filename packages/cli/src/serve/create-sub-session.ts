@@ -36,6 +36,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { basename } from 'node:path';
 import {
   createDebugLogger,
   SessionService,
@@ -51,11 +52,15 @@ import {
   ApprovalMode,
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
-import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+  DAEMON_INPUT_ANNOTATIONS_META_KEY,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
   BridgeBackgroundNotification,
   BridgeSession,
+  BridgeSessionExternalRecordRequest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   CreateSubSessionInfo,
@@ -214,6 +219,8 @@ export interface OutgoingSubSessionTask {
   endTime?: number;
   /** A person sent it from the caller's page, not the caller's model. */
   byPerson: boolean;
+  /** The target is waiting on a permission or a question. */
+  waitingForInput: boolean;
 }
 
 export type OutgoingSubSessionStatus =
@@ -224,14 +231,95 @@ export type OutgoingSubSessionStatus =
 
 /** Records a reported launch on the caller's launcher. */
 interface OutgoingReport {
+  /** `message`: what a person sent, to show in the caller's conversation. */
   started(
     task: Pick<
       OutgoingSubSessionTask,
       'id' | 'sessionId' | 'workspaceCwd' | 'label' | 'byPerson'
     >,
+    message?: string,
   ): void;
-  settled(status: Exclude<OutgoingSubSessionStatus, 'running'>): void;
+  waiting(waitingForInput: boolean): void;
+  /** `reply`: the target's answer to a person's message, shown likewise. */
+  settled(
+    status: Exclude<OutgoingSubSessionStatus, 'running'>,
+    reply?: string,
+  ): void;
 }
+
+type SentExchangeTarget = Pick<
+  OutgoingSubSessionTask,
+  'id' | 'sessionId' | 'workspaceCwd' | 'label'
+>;
+
+function sentExchangeAttributes(target: SentExchangeTarget): string {
+  return (
+    `session="${escapeXml(target.sessionId)}" ` +
+    `workspace="${escapeXml(target.workspaceCwd)}"`
+  );
+}
+
+/** What a person sent with `/send`, as a record in the caller's conversation. */
+function sentMessageRecord(
+  target: SentExchangeTarget,
+  message: string,
+): BridgeSessionExternalRecordRequest {
+  const open =
+    `<sent-message ${sentExchangeAttributes(target)}>` +
+    'The user sent this message to another session with /send. It is not a request to you; that session will answer it.\n';
+  const close = '</sent-message>';
+  const body = escapeXmlWithinBudget(
+    message,
+    MAX_SENT_EXCHANGE_TEXT_CHARS - open.length - close.length,
+  );
+  return {
+    kind: 'agent_mention',
+    recordKey: `send:${target.id}`,
+    modelText: `${open}${body.text}${close}`,
+    payload: {
+      displayText: truncateCodePoints(message, MAX_SENT_EXCHANGE_TEXT_CHARS),
+      mentionedAgentIds: [],
+      sentTo: {
+        sessionId: target.sessionId,
+        workspaceCwd: target.workspaceCwd,
+        title: target.label,
+      },
+    },
+  };
+}
+
+/** The target's answer to it, likewise. Neither record starts a turn. */
+function sentReplyRecord(
+  target: SentExchangeTarget,
+  status: Exclude<OutgoingSubSessionStatus, 'running'>,
+  reply: string,
+): BridgeSessionExternalRecordRequest {
+  const open =
+    `<session-reply ${sentExchangeAttributes(target)} status="${status}">` +
+    "That session's reply to the message the user sent it with /send.\n";
+  const close = '</session-reply>';
+  const body = escapeXmlWithinBudget(
+    reply,
+    MAX_SENT_EXCHANGE_TEXT_CHARS - open.length - close.length,
+  );
+  return {
+    kind: 'agent_message',
+    recordKey: `send-reply:${target.id}`,
+    modelText: `${open}${body.text}${close}`,
+    payload: {
+      displayText: reply,
+      author: {
+        agentId: `session:${target.sessionId}`,
+        name: `${basename(target.workspaceCwd)} · ${target.label}`,
+      },
+      runId: `send:${target.id}`,
+      status,
+    },
+  };
+}
+
+/** Room for one side of a `/send` exchange in a record (the child's cap is 65,536). */
+const MAX_SENT_EXCHANGE_TEXT_CHARS = 60_000;
 
 /** Outgoing records kept per caller; the oldest settled ones go first. */
 export const MAX_OUTGOING_PER_CALLER = 20;
@@ -248,6 +336,41 @@ export interface RemoteSubSessionCaller {
   releaseCompletionSlot?: () => void;
   /** Records the launch on the caller's launcher. */
   report?: OutgoingReport;
+  /** Who sent it, as the target's transcript names it. */
+  source?: SubSessionPromptSource;
+}
+
+/** The sending session, stamped on the prompt the target receives. */
+interface SubSessionPromptSource {
+  type: 'source';
+  sessionId: string;
+  workspaceCwd: string;
+  title?: string;
+}
+
+function sessionTitle(
+  bridge: AcpSessionBridge,
+  sessionId: string,
+): string | undefined {
+  try {
+    return bridge.getSessionSummary(sessionId).displayName?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function promptSource(
+  bridge: AcpSessionBridge,
+  sessionId: string,
+  workspaceCwd: string,
+): SubSessionPromptSource {
+  const title = sessionTitle(bridge, sessionId);
+  return {
+    type: 'source',
+    sessionId,
+    workspaceCwd,
+    ...(title ? { title } : {}),
+  };
 }
 
 /** How a launcher finds another registered workspace's launcher. */
@@ -467,9 +590,6 @@ function truncateCodePoints(value: string, max: number): string {
   return `${codePoints.slice(0, Math.max(0, max - 1)).join('')}…`;
 }
 
-/** How much of a person's `/send` message the caller's notification repeats. */
-const MAX_PERSON_MESSAGE_CHARS = 2_000;
-
 function buildSentCompletionNotification(
   sessionId: string,
   label: string,
@@ -477,11 +597,6 @@ function buildSentCompletionNotification(
   stopReason: string,
   workspaceCwd?: string,
   taskId = sessionId,
-  /**
-   * The message the user sent from this session's page with `/send`. The
-   * caller's model never saw it, so the notification carries it.
-   */
-  personMessage?: string,
 ) {
   const status = sentCompletionStatus(stopReason);
   const boundedStopReason = truncateCodePoints(stopReason, 128);
@@ -505,10 +620,7 @@ function buildSentCompletionNotification(
     '<task-notification>',
     `<task-id>${escapeXml(modelSessionId)}</task-id>`,
     `<status>${status}</status>`,
-    personMessage !== undefined
-      ? `<summary>The user sent the message below to another session with /send on this session's page. /send does not add the message to this conversation, so it does not appear above. That session's turn ${escapeXml(statusText)}; its reply is the result.</summary>` +
-        `<message>${escapeXml(truncateCodePoints(personMessage, MAX_PERSON_MESSAGE_CHARS))}</message>`
-      : `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
+    `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
     `<session-link>${escapeXml(sessionUrl)}</session-link>`,
     '<result>',
   ].join('');
@@ -881,6 +993,8 @@ async function awaitFirstTurn(
     /** Count only chunks stamped with this prompt's ID. */
     requirePromptId?: boolean;
     onTimeout?: () => void;
+    /** Called when the session starts or stops waiting on a permission. */
+    onWaitingChange?: (waiting: boolean) => void;
   },
 ): Promise<{ result: string; stopReason: string }> {
   const ac = new AbortController();
@@ -924,12 +1038,29 @@ async function awaitFirstTurn(
     }
   };
 
+  const pendingPermissions = new Set<string>();
+  const trackPermission = (requestId: unknown, pending: boolean): void => {
+    if (!options?.onWaitingChange || typeof requestId !== 'string') return;
+    const before = pendingPermissions.size > 0;
+    if (pending) pendingPermissions.add(requestId);
+    else pendingPermissions.delete(requestId);
+    const after = pendingPermissions.size > 0;
+    if (before !== after) options.onWaitingChange(after);
+  };
+
   try {
     for await (const e of bridge.subscribeEvents(sessionId, {
       lastEventId,
       signal: composed,
     })) {
-      if (e.type === 'session_update') {
+      if (e.type === 'permission_request') {
+        trackPermission((e.data as { requestId?: unknown })?.requestId, true);
+      } else if (
+        e.type === 'permission_resolved' ||
+        e.type === 'permission_already_resolved'
+      ) {
+        trackPermission((e.data as { requestId?: unknown })?.requestId, false);
+      } else if (e.type === 'session_update') {
         const d = e.data as {
           update?: {
             sessionUpdate?: string;
@@ -1498,10 +1629,11 @@ export function createSubSessionLauncher(
         try {
           bridge.updateSessionMetadata(sessionId, {
             // A per-run scheduled task child is titled like its manual-run
-            // sibling (see the scheduled-task route): flat, no thread glyph.
+            // sibling (see the scheduled-task route), and a person's send
+            // like any session they start: flat, no thread glyph.
             displayName: subSessionName(
               info.name ?? info.prompt,
-              !isScheduledTaskRunSource(info),
+              !isScheduledTaskRunSource(info) && !byPerson,
             ),
             titleSource: 'auto',
           });
@@ -1528,11 +1660,22 @@ export function createSubSessionLauncher(
           promptAdmitted = true;
           markPromptAdmitted();
         };
+        // A scheduled run's caller is not who sent it.
+        const source = isScheduledTaskRunSource(info)
+          ? undefined
+          : remote
+            ? remote.source
+            : promptSource(bridge, info.callerSessionId, boundWorkspace);
         turn = bridge.sendPrompt(
           sessionId,
           {
             sessionId,
             prompt: [{ type: 'text', text: info.prompt }],
+            // Names the sending session above the message in the target's
+            // transcript.
+            ...(source
+              ? { _meta: { [DAEMON_INPUT_ANNOTATIONS_META_KEY]: [source] } }
+              : {}),
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
           dispatchSignal ?? (remote || guardedSent ? stopAc.signal : undefined),
           {
@@ -1651,13 +1794,25 @@ export function createSubSessionLauncher(
             : undefined;
         let settledStatus: Exclude<OutgoingSubSessionStatus, 'running'> =
           'cancelled';
-        report?.started({
-          id: completionTaskId,
-          sessionId,
-          workspaceCwd: boundWorkspace,
-          label: subSessionName(info.name ?? info.prompt, false),
-          byPerson,
-        });
+        // A person sending to an existing session knows it by its title.
+        const label =
+          (byPerson && reusing ? sessionTitle(bridge, sessionId) : undefined) ??
+          subSessionName(info.name ?? info.prompt, false);
+        // A person's message and its reply go into the caller's conversation
+        // as records, without a turn: the person asked the target, not the
+        // caller's model.
+        const notify = !byPerson && (notifySentCompletion || remote || reusing);
+        let reply: string | undefined;
+        report?.started(
+          {
+            id: completionTaskId,
+            sessionId,
+            workspaceCwd: boundWorkspace,
+            label,
+            byPerson,
+          },
+          byPerson ? info.prompt : undefined,
+        );
         // Hold the concurrency slot until the sub-session's turn finishes
         // (or the daemon shuts down via stop(), or a wall-clock ceiling is
         // reached). Without this the cap is a no-op for sent mode — the
@@ -1693,6 +1848,11 @@ export function createSubSessionLauncher(
                   drainSignal,
                   {
                     requirePromptId: reusing,
+                    ...(report
+                      ? {
+                          onWaitingChange: (waiting) => report.waiting(waiting),
+                        }
+                      : {}),
                     onTimeout() {
                       // Once the ACP write starts, the prompt may reach the
                       // child. Keep FIFO ownership until its RPC settles.
@@ -1718,32 +1878,32 @@ export function createSubSessionLauncher(
                 );
               }
               settledStatus = sentCompletionStatus(completion.stopReason);
-              if (notifySentCompletion || remote || reusing || byPerson) {
+              reply =
+                completion.result.trim() ||
+                `No text output (stopReason: ${completion.stopReason}).`;
+              if (notify) {
                 notification = buildSentCompletionNotification(
                   sessionId,
-                  subSessionName(info.name ?? info.prompt, false),
+                  label,
                   completion.result,
                   completion.stopReason,
                   remote ? boundWorkspace : undefined,
                   completionTaskId,
-                  byPerson ? info.prompt : undefined,
                 );
               }
             } catch (err) {
               if (stopAc.signal.aborted && !targetStopped()) return;
               settledStatus = targetStopped() ? 'cancelled' : 'failed';
-              if (!notifySentCompletion && !remote && !reusing && !byPerson) {
-                return;
-              }
               const message = err instanceof Error ? err.message : String(err);
+              reply = message;
+              if (!notify) return;
               notification = buildSentCompletionNotification(
                 sessionId,
-                subSessionName(info.name ?? info.prompt, false),
+                label,
                 message,
                 targetStopped() ? 'shutdown' : 'error',
                 remote ? boundWorkspace : undefined,
                 completionTaskId,
-                byPerson ? info.prompt : undefined,
               );
             } finally {
               if (remote) {
@@ -1781,7 +1941,7 @@ export function createSubSessionLauncher(
             // free the slot.
             releaseOnce();
             remote?.releaseCompletionSlot?.();
-            report?.settled(settledStatus);
+            report?.settled(settledStatus, byPerson ? reply : undefined);
           }
         })();
         return {
@@ -2009,9 +2169,27 @@ export function createSubSessionLauncher(
   const outgoingReport = (callerSessionId: string): OutgoingReport => {
     const key = normalizeSessionIdForLookup(callerSessionId);
     let record: OutgoingSubSessionTask | undefined;
+    // One after the other, so the reply never lands above its message.
+    let recorded: Promise<unknown> = Promise.resolve();
+    const appendRecord = (request: BridgeSessionExternalRecordRequest) => {
+      recorded = recorded
+        .then(() => getBridge()?.appendExternalRecord(callerSessionId, request))
+        .catch((error: unknown) => {
+          writeStderrLine(
+            `qwen serve: could not record a /send exchange in session ${callerSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+    };
     return {
-      started(task) {
-        record = { ...task, status: 'running', startTime: Date.now() };
+      started(task, message) {
+        if (message !== undefined)
+          appendRecord(sentMessageRecord(task, message));
+        record = {
+          ...task,
+          status: 'running',
+          startTime: Date.now(),
+          waitingForInput: false,
+        };
         const list = [...(outgoing.get(key) ?? []), record];
         while (list.length > MAX_OUTGOING_PER_CALLER) {
           const settled = list.findIndex((entry) => entry.status !== 'running');
@@ -2020,10 +2198,20 @@ export function createSubSessionLauncher(
         outgoing.set(key, list);
         outgoingChanged(callerSessionId);
       },
-      settled(status) {
+      waiting(waitingForInput) {
         if (!record || record.status !== 'running') return;
+        if (record.waitingForInput === waitingForInput) return;
+        record.waitingForInput = waitingForInput;
+        outgoingChanged(callerSessionId);
+      },
+      settled(status, reply) {
+        if (!record || record.status !== 'running') return;
+        if (reply !== undefined) {
+          appendRecord(sentReplyRecord(record, status, reply));
+        }
         record.status = status;
         record.endTime = Date.now();
+        record.waitingForInput = false;
         outgoingChanged(callerSessionId);
       },
     };
@@ -2106,6 +2294,7 @@ export function createSubSessionLauncher(
         },
         ...(releaseCompletionSlot ? { releaseCompletionSlot } : {}),
         report,
+        source: promptSource(bridge, info.callerSessionId, boundWorkspace),
       });
     } catch (error) {
       releaseCompletionSlot?.();

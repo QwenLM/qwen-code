@@ -216,11 +216,10 @@ Attachments are refused: the message is text.
 becomes the caller. The route uses the same owner check as `POST
 /session/:id/prompt` and hands the request to the launcher of the caller's
 workspace, which runs it like a `sent` launch from the tool: the same trust and
-cap checks, the same chat-recording requirement, and the same completion
-notification. It answers with `{ sessionId, workspaceCwd?,
-taskId? }`.
+cap checks and the same chat-recording requirement. It answers with
+`{ sessionId, workspaceCwd?, taskId? }`.
 
-Three things differ from the tool, because a person wrote the message and
+Five things differ from the tool, because a person wrote the message and
 chose the target. Each rests on the same point: the person could open the
 target session and type the same message there.
 
@@ -234,6 +233,10 @@ target session and type the same message there.
   depth limit does not apply either, so a sub-session's page can send too: it
   exists to stop a model delegating without end, and a person's send does
   not recurse.
+- The reply does not start a turn in the caller (see "The exchange in the
+  caller" below). The person asked the target, not the caller's model.
+- A new session's title has no thread glyph. The person started it, so it
+  reads like any session they start.
 
 Only the route can ask for these; they are not fields the ACP child can send,
 so a model cannot claim them. The tool keeps its rules, including for a
@@ -242,16 +245,47 @@ session a person created or sent to.
 **After sending.** The page does not move. While the target runs the turn,
 a "1 other session" chip shows above the composer, beside the chips for
 background agents and shells. Clicking it opens the target in a right-panel
-tab, live and read-only, with a button to open the session itself. The tab
-still shows the target's tool approvals and questions: the target keeps its
-own mode, and in an ask mode it may wait on one with nobody else watching.
-When the turn finishes the chip goes away, and the caller receives the
-completion notification and answers in a turn of its own, as for a `sent`
-launch from the tool. The caller's model never saw this task start: `/send` leaves nothing in
-the caller's conversation, and without that a model reads the result as
-unverified content that claims to come from it. So the notification says the
-user sent the message with `/send`, that `/send` does not add it to the
-conversation, and repeats the message (up to 2,000 characters).
+tab, live and read-only. The tab still shows the target's tool approvals and
+questions, and they can be answered there: the target keeps its own mode, and
+in an ask mode it may wait on one with nobody else watching. While it waits,
+the chip reads "1 session needs your answer" in the warning color, because
+the daemon's permission wait has no timeout by default and nothing else on
+the caller's page would say the target is blocked. When the turn finishes
+the chip goes away.
+
+**The exchange in the caller.** The caller's conversation shows both sides.
+When the send is accepted, the message appears as a row on the user's side,
+headed "To <workspace> · <session>". When the target's turn settles, its reply
+appears as a message headed "<workspace> · <session>". Neither starts a turn
+in the caller: a model that answers a reply addressed to the user only adds a
+comment on it (in testing it said the result needed no action, or doubted
+where it came from). Both go into the caller's history, so its model knows
+them at the user's next message.
+
+They are written through the daemon's external-record call
+(`appendExternalRecord`), which Agent Collaboration uses for a message from
+another party: it writes a durable record, shows it live, queues its model
+text for the next turn, and holds a record that arrives during a turn until
+the turn settles. The message is an `agent_mention` record with a new
+`sentTo` field (the target's id, workspace and title); the reply is an
+`agent_message` record whose author is the target, with the turn's status.
+The record keys are the completion's task id, so a repeat writes nothing.
+If the caller is no longer live when the reply arrives, the reply is not
+recorded there; it is still in the target.
+
+The model's own `sent` launches are unchanged: their completion is a
+notification that starts a turn, because the model started them to use the
+result.
+
+**The message in the target.** The prompt the target receives carries a
+`source` entry among its `inputAnnotations` (the caller's id, workspace and
+title at send time). Annotations are stored with the user record and come
+back on replay, so the target's transcript shows "From <workspace> ·
+<session>" above the message, live and after a reload. The model does not see
+it. The tool's launches carry it too; a scheduled run does not, since its
+caller is not who sent it. The entry is display data that any client of the
+daemon could also put on its own prompt, like the rest of the annotations;
+nothing reads it for authorization.
 
 **The chip's data.** The daemon, not the caller's child, reports these
 launches back, so the child's task list does not know them. The caller's
@@ -259,8 +293,11 @@ launcher keeps a record of every `sent` launch it reports back to a caller,
 a person's send and the model's cross-workspace or follow-up `sent` launches
 alike, from the launch until the target's turn settles (completed, failed, or
 cancelled when the daemon stops). `GET /session/:id/tasks?includeSubSessions=true`
-adds them as `subSessions` beside the child's tasks. When a record starts or
-settles, the daemon publishes `sub_session_task_changed` with the caller's id
+adds them as `subSessions` beside the child's tasks. A record names the target
+by its title when a person sent to an existing session, and carries
+`waitingForInput`, which the launcher sets from the target's permission
+request and resolution events while it follows the turn. When a record
+starts, settles, or starts or stops waiting, the daemon publishes `sub_session_task_changed` with the caller's id
 on the caller's workspace, and Web Shell re-reads the list; a slow poll backs
 the event up while one runs. So a send made through the API, or by the model,
 shows a chip too. Records live in daemon memory, at most 20 per caller with
@@ -280,7 +317,7 @@ loses a pending notification.
   only "Internal error", which the tool used to print as `[object Object]`.
 - `packages/cli/src/serve/create-sub-session.ts`: caller-side checks,
   handing off to the target launcher, the approval rule, notification
-  routing, and the follow-up path (lineage check, resume, client release,
+  routing, the records of a person's exchange, and the follow-up path (lineage check, resume, client release,
   task id, prompt-id matching).
 - `packages/cli/src/serve/run-qwen-serve.ts`: register each launcher by
   workspace and give launchers the resolver; expose the launcher lookup to
@@ -288,17 +325,24 @@ loses a pending notification.
 - `packages/cli/src/serve/routes/session.ts`, `capabilities.ts`: the
   `POST /session/:id/sub-sessions` route, its capability tag, and the
   `includeSubSessions` view of `GET /session/:id/tasks`.
+- `packages/core/src/agents/session-agents/contract.ts`,
+  `packages/acp-bridge/src/transcript-replay.ts`: the `sentTo` field of an
+  `agent_mention` record and its projection, live and on replay.
 - `packages/sdk-typescript/src/daemon/`: the client method, the
-  `subSessions` task type, and the `sub_session_task_changed` event.
+  `subSessions` task type, the `sub_session_task_changed` event, `sentTo`,
+  and the `source` annotation type.
 - `packages/web-shell/client/`: the `/send` command and its completion, the
-  composer chip, and the read-only session tab in the right panel.
+  composer chip and its waiting state, the read-only session tab in the right
+  panel, and the "To" and "From" lines on user messages.
 - User docs for the tool.
 
 ## Out of scope
 
 - Agent Collaboration's `@`-mentions across workspaces (#17419).
-- Relaying a target's `ask_user_question` or tool approvals to the caller.
-  They wait in the target session, where its owner answers them.
+- Relaying a target's `ask_user_question` or tool approvals to the caller's
+  model. They wait in the target session; a person answers them there or in
+  the Web Shell tab that follows it.
+- Replying from the right-panel tab, or opening the target from it.
 - Persisting in-flight `sent` launches across a daemon restart. A restart
   loses a pending notification, as it does today.
 
@@ -343,11 +387,20 @@ loses a pending notification.
   launches are listed on the caller's launcher until they settle, cancelled
   when the daemon stops, bounded per caller, and left out for a launch the
   tool reports itself; the tasks route adds them only when asked; `/send`
-  parsing and completion; the chip for a running send; a read-only pane keeps
-  approvals and drops the composer.
+  parsing and completion; the chip for a running send and for one whose target
+  waits for an answer; a read-only pane keeps approvals and drops the
+  composer; a person's send writes the message and the reply to the caller as
+  records and enqueues no notification, names the caller on the target's
+  prompt, and titles a new session without the glyph; `sentTo` survives
+  replay and the SDK parser, and a malformed one is dropped; the "To" and
+  "From" lines on a user message.
 - Step 3, end to end: from a Web Shell session in A, `/send` to a new session
-  in B: the page stays, a chip shows while B works, clicking it opens B's
-  reply in the right panel, and A answers the completion in its own turn;
-  `/send` to a session in B that A did not create and see its lineage
+  in B: the page stays, the message shows in A headed "To B", a chip shows
+  while B works, clicking it opens B in the right panel with the message
+  headed "From A", and B's reply then shows in A without A's model running;
+  A's model knows the exchange at the next message, and both rows survive a
+  reload; `/send` to a session in B that A did not create and see its lineage
   unchanged; send to a target in an ask mode and approve its tool call from
-  the tab; a send made through the API shows a chip in an open page.
+  the tab; a target that asks a question turns the chip to "needs your
+  answer" until it is answered in the tab; a send made through the API shows
+  a chip in an open page.

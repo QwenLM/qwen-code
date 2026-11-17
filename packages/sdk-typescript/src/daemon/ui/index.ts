@@ -88,6 +88,7 @@ export type {
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonInputSourceAnnotation,
   DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,

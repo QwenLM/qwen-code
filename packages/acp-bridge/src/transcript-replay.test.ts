@@ -375,6 +375,39 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
+  it('replays where a /send message went, dropping a malformed target', () => {
+    const mention = (id: string, sentTo: unknown) =>
+      updates(
+        createTranscriptReplayMachine(),
+        record(id, 'user', {
+          subtype: 'agent_mention',
+          message: { role: 'user', parts: [{ text: '<sent-message>…' }] },
+          systemPayload: {
+            displayText: 'look at this',
+            mentionedAgentIds: [],
+            sentTo,
+          },
+        }),
+      )[0]!._meta as { qwenAgentMessage: Record<string, unknown> };
+
+    expect(
+      mention('sent-1', {
+        sessionId: 'kid',
+        workspaceCwd: '/work/b',
+        title: 'Kid',
+        extra: 1,
+      }).qwenAgentMessage,
+    ).toEqual({
+      kind: 'agent_mention',
+      mentionedAgentIds: [],
+      sentTo: { sessionId: 'kid', workspaceCwd: '/work/b', title: 'Kid' },
+    });
+    expect(mention('sent-2', { sessionId: 'kid' }).qwenAgentMessage).toEqual({
+      kind: 'agent_mention',
+      mentionedAgentIds: [],
+    });
+  });
+
   it('keeps raw function responses out of the safe result preview', () => {
     const update = createTranscriptToolCallResultUpdate({
       toolName: 'read',
