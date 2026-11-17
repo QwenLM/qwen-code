@@ -550,8 +550,9 @@ describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () 
   // swept shapes produced at the segment bound. Each chunk must answer inside
   // its own 30s budget or that budget aborts it, so a completing send is under
   // 24 × 30s = 720s and an aggregate ceiling at or above 720s could never fire
-  // on a reachable segment. The rows below span that whole band, up to 29999ms
-  // per chunk, so any ceiling that could fire is inside the witness.
+  // on a reachable segment. The rows span that band up to 29999ms per chunk,
+  // where the last chunk starts at 689977ms; only a ceiling in the ~23ms
+  // window above that start escapes them.
   //
   // Every row must deliver all 24 chunks. A send that outlives the claim lease
   // is reconciled to unknown, but a late receipt moves unknown → partial →
