@@ -1,4 +1,6 @@
 import type { Message } from '../adapters/types.js';
+import type { PromptFile, PromptImage } from '../adapters/promptTypes.js';
+import type { ComposerSubmitMetadata } from '../hooks/useComposerCore.js';
 
 export type Admission = 'accepted' | 'rejected' | 'unknown';
 
@@ -68,6 +70,9 @@ export interface QuestionAnswer {
 
 export interface ComposerSubmit {
   readonly text: string;
+  readonly images?: readonly PromptImage[];
+  readonly files?: readonly PromptFile[];
+  readonly metadata?: ComposerSubmitMetadata;
 }
 
 export interface ModelSelectionController {

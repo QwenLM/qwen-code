@@ -111,8 +111,9 @@ export interface AdvertiseFeatureToggles {
  * toggle decision lives next to the feature key, so adding a new
  * conditional tag is **two coordinated changes** instead of four:
  *
- * 1. Register the tag in `SERVE_CAPABILITY_REGISTRY` above with its
- *    `since` protocol version (just like baseline tags).
+ * 1. Register the tag in `SERVE_CAPABILITY_REGISTRY` (defined in
+ *    `packages/sdk-typescript/src/daemon/capabilities.ts` and re-exported
+ *    here) with its `since` protocol version (just like baseline tags).
  * 2. Add an entry to THIS Map mapping the tag to a toggle predicate
  *    (extend `AdvertiseFeatureToggles` first if the predicate needs a
  *    new field to read).
