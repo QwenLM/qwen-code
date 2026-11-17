@@ -7954,6 +7954,7 @@ export class Config {
       // different image support must update them, or the vision-bridge gate and
       // image-stripping read the previous model's modalities.
       this.contentGeneratorConfig.modalities = config.modalities;
+      this.contentGeneratorConfig.imageDetail = config.imageDetail;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -7961,6 +7962,10 @@ export class Config {
       if ('modalities' in sources) {
         this.contentGeneratorConfigSources['modalities'] =
           sources['modalities'];
+      }
+      if ('imageDetail' in sources) {
+        this.contentGeneratorConfigSources['imageDetail'] =
+          sources['imageDetail'];
       }
       if ('samplingParams' in sources) {
         this.contentGeneratorConfigSources['samplingParams'] =

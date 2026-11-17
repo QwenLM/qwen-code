@@ -58,6 +58,9 @@ const DASHSCOPE_OUTPUT_TOKEN_CAPS: ReadonlyMap<string, number> = new Map([
   ['minimax-m2.5', 32_768],
 ]);
 
+/** DashScope cache breakpoint marker; qwen4 accepts an explicit `ttl`. */
+type DashScopeCacheControl = { type: 'ephemeral'; ttl?: '5m' | '1h' };
+
 export type DashScopeThinkingKnobSelection = {
   source: 'extra_body' | 'samplingParams' | 'reasoning';
   field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
@@ -842,6 +845,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
+   * Resolve the cache breakpoint marker for a wire model. The qwen4 generation
+   * accepts an explicit cache TTL; `cacheRetention:'1h'` requests the extended
+   * tier (`ttl:'1h'`, 2x input write cost), while the default omits `ttl` (the
+   * 5m spec default). Other models keep the plain ephemeral marker.
+   */
+  private resolveCacheControl(
+    model: string | undefined,
+  ): DashScopeCacheControl {
+    if (
+      this.resolveWireModel(model).startsWith('qwen4') &&
+      this.contentGeneratorConfig.cacheRetention === '1h'
+    ) {
+      return { type: 'ephemeral', ttl: '1h' };
+    }
+    return { type: 'ephemeral' };
+  }
+
+  /**
    * Add cache control flag to specified message(s) for DashScope providers.
    * Tool definitions get no marker: DashScope ignores `cache_control` on
    * tools, and the system marker already covers them (they render first).
@@ -852,6 +873,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     reattachBlockCount = 0,
   ): OpenAI.Chat.ChatCompletionMessageParam[] {
     const messages = request.messages;
+    const cacheMarker = this.resolveCacheControl(request.model);
 
     const systemIndex = messages.findIndex((msg) => msg.role === 'system');
     const lastIndex = messages.length - 1;
@@ -893,6 +915,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
                 isConversationAnchor && stableBlock
                   ? stableBlock.excludeTail
                   : 0,
+                cacheMarker,
               ),
             } as OpenAI.Chat.ChatCompletionMessageParam;
           });
@@ -948,12 +971,17 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private addCacheControlToContent(
     content: NonNullable<OpenAI.Chat.ChatCompletionMessageParam['content']>,
     excludeTail = 0,
+    cacheMarker: DashScopeCacheControl = { type: 'ephemeral' },
   ): ChatCompletionContentPartWithCache[] {
     // Convert content to array format if it's a string
     const contentArray = this.normalizeContentToArray(content);
 
     // Add cache control to the last text item or create one if needed
-    return this.addCacheControlToContentArray(contentArray, excludeTail);
+    return this.addCacheControlToContentArray(
+      contentArray,
+      excludeTail,
+      cacheMarker,
+    );
   }
 
   /**
@@ -981,6 +1009,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   private addCacheControlToContentArray(
     contentArray: ChatCompletionContentPartWithCache[],
     excludeTail = 0,
+    cacheMarker: DashScopeCacheControl = { type: 'ephemeral' },
   ): ChatCompletionContentPartWithCache[] {
     if (contentArray.length === 0) {
       return contentArray;
@@ -1004,7 +1033,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const lastItem = contentArray[targetIndex];
     contentArray[targetIndex] = {
       ...lastItem,
-      cache_control: { type: 'ephemeral' },
+      cache_control: cacheMarker,
     } as ChatCompletionContentPartTextWithCache;
 
     return contentArray;
