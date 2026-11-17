@@ -87,10 +87,10 @@ jobs:
       - name: 'Checkout blocklist'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          # A directory, not the file itself; see assign-pr-owner.yml. Cone
-          # mode adds the files directly under .github/, the blocklist among
-          # them.
-          sparse-checkout: '.github/scripts'
+          # All of .github/, not the file itself or a narrower subdirectory;
+          # see assign-pr-owner.yml for the reused-workspace mode hazard that
+          # would otherwise drop the blocklist under non-cone residue.
+          sparse-checkout: '.github'
           ref: '${{ github.event.repository.default_branch }}'
           persist-credentials: false
 

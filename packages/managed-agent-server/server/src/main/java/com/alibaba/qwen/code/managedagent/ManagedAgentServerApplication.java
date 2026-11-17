@@ -3,8 +3,8 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentConfiguration;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentWebConfiguration;
+import com.alibaba.qwen.code.managedagent.config.ManagedDataSourceDefaults;
 import com.alibaba.qwen.code.managedagent.config.ManagedLocalConfiguration;
-import com.alibaba.qwen.code.managedagent.config.MySqlStatementCache;
 import com.alibaba.qwen.code.managedagent.preflight.ManagedAgentPreflight;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.SpringBootConfiguration;
@@ -41,7 +41,7 @@ public class ManagedAgentServerApplication {
         // this method returns: the statement cache defaults must see the final URL
         // and connection properties.
         binder.bind("spring.datasource.druid", org.springframework.boot.context.properties.bind.Bindable.ofInstance(source));
-        MySqlStatementCache.fillDefaults(source);
+        ManagedDataSourceDefaults.applyMySqlDefaults(source);
         return source;
     }
 

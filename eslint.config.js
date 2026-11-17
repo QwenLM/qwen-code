@@ -58,6 +58,8 @@ export default tseslint.config(
     ignores: [
       'node_modules/*',
       'packages/**/dist/**',
+      // Built host bundle; the glob above needs a literal `dist` segment.
+      'packages/web-shell/dist-managed-host/**',
       'packages/web-templates/src/generated/**',
       // Generated UTS #39 confusables table (6.5k-entry literal): the
       // type-aware rules OOM the eslint heap on it, and generated data
@@ -508,6 +510,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
       'packages/managed-agent-server/verification/src/test/resources/**/*.mjs',
+      // The same CSI fixtures cold-archived under sdk-java keep the node globals.
+      'packages/sdk-java/managed-kubernetes-archive/verification/src/test/resources/**/*.mjs',
       // web-templates' export-html template build scripts also run with `node`.
       'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.

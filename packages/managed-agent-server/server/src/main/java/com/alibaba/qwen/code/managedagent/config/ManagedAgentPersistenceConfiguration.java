@@ -16,8 +16,6 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 
 import javax.sql.DataSource;
 
-import java.util.List;
-
 @Configuration(proxyBeanMethods = false)
 public class ManagedAgentPersistenceConfiguration {
     @Bean(defaultCandidate = false, destroyMethod = "close")
@@ -35,11 +33,7 @@ public class ManagedAgentPersistenceConfiguration {
         source.setMaxActive(environment.getProperty(prefix + "max-active", Integer.class, 20));
         source.setMaxWait(30_000);
         source.setValidationQuery("SELECT 1");
-        if (url.startsWith("jdbc:mysql:") || url.startsWith("jdbc:mariadb:")) {
-            source.setConnectionInitSqls(List.of("SET SESSION sql_mode ="
-                    + " CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'STRICT_TRANS_TABLES')"));
-        }
-        MySqlStatementCache.fillDefaults(source);
+        ManagedDataSourceDefaults.applyMySqlDefaults(source);
         return source;
     }
 

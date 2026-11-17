@@ -8,6 +8,8 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonBranchSessionRequest,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -33,6 +35,8 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSession,
+  DaemonSessionClient,
+  DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskRuntimeStatus,
@@ -41,6 +45,7 @@ import type {
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionArtifact,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -175,6 +180,19 @@ export interface DaemonConnectionState {
   loadingTranscript?: boolean;
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
+  /**
+   * Restored artifact snapshot embedded in the load response. Available before
+   * the replay renders so a session-level artifact entry can appear early;
+   * live updates still come from the gated artifact fetch.
+   */
+  restoredArtifacts?: DaemonSessionArtifact[];
+  /**
+   * Session the restoredArtifacts snapshot belongs to. The optimistic session
+   * switch moves sessionId before the new restore lands, so consumers must
+   * only use the snapshot when this matches the current sessionId — otherwise
+   * the previous session's artifacts leak under the new one.
+   */
+  restoredArtifactsSessionId?: string;
   error?: string;
   /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
   errorStatus?: number;
@@ -350,6 +368,7 @@ export type DaemonNoticeOperation =
   | 'create_session'
   | 'close_session'
   | 'rename_session'
+  | 'bind_session_pr'
   | 'release_session'
   | 'list_sessions'
   | 'load_context'
@@ -373,6 +392,8 @@ export type DaemonNoticeOperation =
   | 'generate_session_content'
   | 'btw_session'
   | 'branch_session'
+  | 'create_worktree_branch'
+  | 'handoff_worktree'
   | 'fork_session'
   | 'record_session'
   | 'stream'
@@ -561,6 +582,27 @@ export interface DaemonSessionActions {
     text: string,
     options?: SubmitPromptOptions,
   ): Promise<SubmitPromptResult>;
+  /**
+   * Admission-only dispatch to a session created for a first prompt whose
+   * submitter navigated away during creation. The client is not the
+   * provider's current session: nothing is written to the transcript store,
+   * prompt status, or connection. The turn runs on the daemon after the
+   * client detaches; a later loadSession attaches fresh.
+   */
+  sendDetachedPrompt(
+    session: DaemonSessionClient,
+    text: string,
+    options?: Pick<
+      SendPromptOptions,
+      | 'submittedPrompt'
+      | 'images'
+      | 'files'
+      | 'inputAnnotations'
+      | 'retry'
+      | 'onAdmissionStarted'
+      | 'onAdmitted'
+    >,
+  ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
   refreshModels(
@@ -632,16 +674,34 @@ export interface DaemonSessionActions {
    * `options.modelServiceId` is a standalone-only atomic create override.
    *
    * `options.sourceType` records immutable creator attribution.
+   *
+   * `options.keepOnNavigation` is for first-prompt creation: when the user
+   * navigates away while the detached create is in flight, return the created
+   * client without binding the connection instead of detaching it and
+   * throwing, so the caller can still dispatch the submitted prompt.
+   * `options.navigationOutcome` reports whether the connection was bound
+   * (`bound: false` only on the keepOnNavigation path).
    */
   createSession(options?: {
     workspaceCwd?: string;
     getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
+    startupConfig?: CreateSessionRequest['startupConfig'];
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };
     branch?: { name: string };
+    keepOnNavigation?: boolean;
+    navigationOutcome?: { bound: boolean };
+    /**
+     * Draft generation that started this creation, with a live reader. A
+     * later create resets the shared navigation markers, so the bind
+     * decision also compares generations: a new draft means the originating
+     * submission was superseded even when the view looks session-less again.
+     */
+    sourceVersion?: number;
+    getCurrentSourceVersion?: () => number;
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(options?: { dropSessionContext?: boolean }): Promise<void>;
@@ -662,6 +722,10 @@ export interface DaemonSessionActions {
     silent?: boolean;
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
+  /** Manually bind a GitHub PR to the current session (supplementary registration). */
+  bindSessionPr(
+    pr: Omit<DaemonSessionPrInfo, 'issues'>,
+  ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
   generateSessionContent(
     prompt: string,
@@ -808,6 +872,12 @@ export interface DaemonSessionActions {
     switchStarted: boolean;
     sourceWarnings?: string[];
   }>;
+  /** "Create branch here" on the session's detached managed worktree. */
+  createWorktreeBranch(name: string): Promise<DaemonWorktreeBranchResult>;
+  /** "Hand off" between the managed worktree and the local checkout. */
+  handoffWorktree(
+    to: 'local' | 'worktree',
+  ): Promise<DaemonWorktreeHandoffResult>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 
@@ -873,4 +943,5 @@ export interface PendingSessionLoad {
   reject: (error: unknown) => void;
   signal?: AbortSignal;
   replaySource?: 'configured' | 'memory';
+  reconcilePromptActivity?: boolean;
 }

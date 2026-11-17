@@ -233,12 +233,27 @@ export default defineConfig({
     // See packages/core/vitest.config.ts: raise the per-test ceiling above
     // vitest's 5s default so I/O-bound tests (e.g. the workspace registration
     // store's tempdir round-trip) don't blow it purely under CI contention.
-    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
-      ? 60_000
-      : 15_000,
-    hookTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
-      ? 60_000
-      : undefined,
+    // The macOS nightly hosts are as contended as the ECS pool, so they get
+    // the same ceiling (keyed on the runner, like hookTimeout below). Owning
+    // it here lets the SubscriptionDialog suite drop its runtime vi.setConfig,
+    // which would otherwise outrank the autofix gate's --testTimeout (R4-1).
+    testTimeout:
+      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ||
+      process.env['RUNNER_OS'] === 'macOS'
+        ? 60_000
+        : 15_000,
+    // The macOS nightly hosts are as contended as the ECS pool (3 cores,
+    // parallel shards): Session.test.ts's afterEach dispose exceeded the
+    // 10s default hook budget there (run 43562547824, "Hook timed out in
+    // 10000ms"). Give those hosts the same ceiling the pool already gets —
+    // keyed on the runner, not on process.platform, so a developer's Mac
+    // keeps vitest's 10s default. RUNNER_OS is the signal
+    // integration-tests/ready-prompt-budget.ts already reads.
+    hookTimeout:
+      process.env['RUNNER_NAME']?.startsWith('ecs-qwen-') ||
+      process.env['RUNNER_OS'] === 'macOS'
+        ? 60_000
+        : undefined,
     // ECS hosts run several jobs at once; leave capacity for neighboring jobs.
     maxWorkers: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
       ? '25%'

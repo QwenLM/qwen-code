@@ -27,6 +27,12 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
     process.cwd(),
     undefined,
     getSeparatedHookSettings(settings),
+    undefined,
+    undefined,
+    undefined,
+    false,
+    // This Config exists for one memory-import run and never uses LSP.
+    { lspDisabled: true },
   );
   if (!config.isTrustedFolder() || !config.isManagedMemoryAvailable())
     throw new Error(

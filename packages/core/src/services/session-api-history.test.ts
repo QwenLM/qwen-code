@@ -35,7 +35,10 @@ import {
   InMemoryImagePayloadStore,
   replaceImagePayloadsInPlace,
 } from './image-payload-references.js';
-import { getStartupContextLength } from '../core/environmentContext.js';
+import {
+  getStartupContextLength,
+  RETAINED_COMPACTION_TAIL_REMINDER,
+} from '../core/environmentContext.js';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../memory/request-context.js';
 import {
   countApiUserPrompts,
@@ -708,6 +711,82 @@ describe('Goal turn end history metadata', () => {
   });
 });
 
+describe('tool loop end history metadata', () => {
+  it.each([
+    ['tool_loop_end', 'stopped-call', 'clean'],
+    [undefined, 'stopped-call', 'interrupted_prompt'],
+    ['tool_loop_end', 'another-call', 'interrupted_prompt'],
+  ] as const)(
+    'classifies a tool result with subtype %s and call %s as %s',
+    (subtype, callId, expectedKind) => {
+      const base = {
+        sessionId: 'session',
+        timestamp: '2026-11-10T00:00:00.000Z',
+        cwd: '/workspace',
+        version: 'test',
+      };
+      const messages: ChatRecord[] = [
+        {
+          ...base,
+          uuid: 'prompt',
+          parentUuid: null,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Read a file' }] },
+        },
+        {
+          ...base,
+          uuid: 'call',
+          parentUuid: 'prompt',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'stopped-call', name: 'read_file' } },
+            ],
+          },
+        },
+        {
+          ...base,
+          uuid: 'result',
+          parentUuid: 'call',
+          type: 'tool_result',
+          subtype,
+          toolCallResult: {
+            callId,
+            status: 'cancelled',
+            executionStatus: 'not_started',
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'stopped-call',
+                  name: 'read_file',
+                  response: { error: 'Skipped after a tool loop' },
+                },
+              },
+            ],
+          },
+        },
+      ];
+      const restored = buildSessionHistoryFromConversation({ messages });
+      expect(restored.completedToolCallIds).toEqual(
+        expectedKind === 'clean' ? ['stopped-call'] : undefined,
+      );
+      expect(JSON.stringify(restored.apiHistory)).toBe(
+        JSON.stringify(messages.map((record) => record.message)),
+      );
+      expect(
+        buildSessionRecoveryPlanFromApiHistory({
+          sessionId: 'session',
+          ...restored,
+        }).kind,
+      ).toBe(expectedKind);
+    },
+  );
+});
+
 describe('trailingSystemNotifications provenance signal', () => {
   const envelope =
     '<task-notification><task-id>agent-1</task-id>' +
@@ -1346,9 +1425,37 @@ describe('prompt resolution across tool-loop continuations', () => {
     const toolLap = continuation();
     markApiHistoryPrompt(userPrompt, 'session########1');
     markApiHistoryPrompt(toolLap, 'session########1');
-    const history = [userPrompt, toolLap];
+    const modelReply: Content = { role: 'model', parts: [{ text: 'reply' }] };
+    markApiHistoryPrompt(modelReply, 'session########1');
+    const history = [userPrompt, modelReply, toolLap];
 
     expect(findApiHistoryPromptIndex(history, 'session########1')).toBe(0);
+  });
+
+  it('refuses a retained model owner as a rewind prompt after compaction', async () => {
+    const history = await composePostCompactHistory(
+      [],
+      '<state_snapshot>Earlier work.</state_snapshot>',
+    );
+    history.push(
+      { role: 'user', parts: [{ text: RETAINED_COMPACTION_TAIL_REMINDER }] },
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+        ],
+      },
+      continuation(),
+    );
+    markApiHistoryPrompt(history[3]!, 'session########1');
+    const prefix = getStartupContextLength(history, {
+      includeCompressed: true,
+    });
+    expect(prefix).toBe(3);
+    expect(findApiHistoryPromptIndex(history, 'session########1', prefix)).toBe(
+      -1,
+    );
+    expect(getApiHistoryPromptId(history[3]!)).toBe('session########1');
   });
 
   it('still refuses two prompt entries sharing one id', () => {

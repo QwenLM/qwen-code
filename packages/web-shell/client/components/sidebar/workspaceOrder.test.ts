@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
   moveWorkspace,
   orderWorkspaces,
+  reorderWorkspace,
   readWorkspaceOrder,
   writeWorkspaceOrder,
 } from './workspaceOrder';
@@ -101,5 +102,32 @@ describe('moveWorkspace', () => {
     expect(moveWorkspace(['/a', '/b'], '/a', -1)).toBeUndefined();
     expect(moveWorkspace(['/a', '/b'], '/b', 1)).toBeUndefined();
     expect(moveWorkspace(['/a', '/b'], '/missing', 1)).toBeUndefined();
+  });
+});
+
+describe('reorderWorkspace', () => {
+  it('inserts before or after a target in either direction', () => {
+    const order = ['/a', '/b', '/c', '/d'];
+    expect(reorderWorkspace(order, '/d', '/b', false)).toEqual([
+      '/a',
+      '/d',
+      '/b',
+      '/c',
+    ]);
+    expect(reorderWorkspace(order, '/a', '/c', true)).toEqual([
+      '/b',
+      '/c',
+      '/a',
+      '/d',
+    ]);
+    expect(order).toEqual(['/a', '/b', '/c', '/d']);
+  });
+
+  it('ignores self drops and workspaces absent from the current catalog', () => {
+    expect(reorderWorkspace(['/a', '/b'], '/a', '/a', true)).toBeUndefined();
+    expect(
+      reorderWorkspace(['/a', '/b'], '/gone', '/b', false),
+    ).toBeUndefined();
+    expect(reorderWorkspace(['/a', '/b'], '/a', '/gone', true)).toBeUndefined();
   });
 });

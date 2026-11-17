@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.session-store.enabled=true",
+        "qwen.managed-agent.client-files.enabled=true",
         "qwen.managed-agent.tool-publication.entry-concurrency=4"
 })
 @Import({SurfaceRegistryGateNegativeTest.ProbeController.class,

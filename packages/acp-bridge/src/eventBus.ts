@@ -32,9 +32,11 @@ export interface SessionReplaySnapshot {
   compactedTurns: BridgeEvent[];
   liveJournal: BridgeEvent[];
   lastEventId: number;
+  /** Publish-time summary/unverified-seed boundary; absent on summary reads. */
+  replayProjectionWatermark?: number;
   /**
-   * Present (and `true`) once the compaction engine threw during
-   * `ingest`/`seedReplayEvents` for this bus. The snapshot may be
+   * Present (and `true`) once publication retention or compaction failed
+   * for this bus. The snapshot may be
    * silently missing events from that point on; consumers should
    * prefer a full transcript reload over trusting it.
    */
@@ -449,6 +451,7 @@ export class EventBus {
    */
   readonly epoch: string = randomUUID();
   private compactionDegraded = false;
+  private projectionWatermark = 0;
   private readonly onCompactionError?: (err: unknown) => void;
   private readonly ring: Array<{ event: BridgeEvent; bytes: number }> = [];
   private ringBytes = 0;
@@ -478,7 +481,7 @@ export class EventBus {
   ): SessionReplaySnapshot | undefined {
     const snapshot = this.compactionEngine?.snapshot(liveReplayMode);
     if (!snapshot) return undefined;
-    return {
+    const result: SessionReplaySnapshot = {
       ...snapshot,
       compactedTurns: snapshot.compactedTurns.map((event) =>
         this.restoreLatestCommandSnapshot(event),
@@ -488,6 +491,12 @@ export class EventBus {
       ),
       ...(this.compactionDegraded ? { degraded: true as const } : {}),
     };
+    if (liveReplayMode === 'full') {
+      result.replayProjectionWatermark = this.projectionWatermark;
+    } else {
+      delete result.replayProjectionWatermark;
+    }
+    return result;
   }
 
   /**
@@ -533,6 +542,11 @@ export class EventBus {
   /** Most recent id ever assigned by `publish`. 0 if no events published. */
   get lastEventId(): number {
     return this.nextId - 1;
+  }
+
+  /** Same-epoch source boundary, including filtering that did not assign an ID. */
+  get replayProjectionWatermark(): number {
+    return this.projectionWatermark;
   }
 
   /** Snapshot of the live subscriber count. */
@@ -611,6 +625,8 @@ export class EventBus {
       };
       events.push(event);
     }
+    // Seeds can copy projected cached replay and assign it newer IDs.
+    this.projectionWatermark = this.lastEventId;
     this.clearRetention();
     try {
       const retainedEvents = events.map((event) =>
@@ -682,7 +698,10 @@ export class EventBus {
     };
     if (this.eventDetailMode === 'summary') {
       const projected = summarizeReplayEvent(event);
-      if (!projected) return undefined;
+      if (!projected) {
+        this.projectionWatermark = this.lastEventId;
+        return undefined;
+      }
       event = projected;
     }
     // Eager sizing doubles as the serializability gate (DAEMON-011): an
@@ -696,6 +715,7 @@ export class EventBus {
     const eventBytes = serializedBridgeEventByteLength(event);
     if (eventBytes === undefined) {
       logEventSizingFailed(event.type);
+      this.markCompactionDegraded(new Error('Event serialization failed'));
       return undefined;
     }
     let retained: BridgeEvent;
@@ -708,12 +728,16 @@ export class EventBus {
         retained === event
           ? eventBytes
           : serializedBridgeEventByteLength(retained);
-    } catch {
+    } catch (error) {
       logEventSizingFailed(event.type);
+      this.markCompactionDegraded(error);
       return undefined;
     }
     if (retainedBytes === undefined) {
       logEventSizingFailed(event.type);
+      this.markCompactionDegraded(
+        new Error('Retained event serialization failed'),
+      );
       return undefined;
     }
     if (commandSnapshot) {
@@ -721,6 +745,9 @@ export class EventBus {
         retained === event ? undefined : { event, bytes: eventBytes };
     }
     this.nextId += 1;
+    if (this.eventDetailMode === 'summary') {
+      this.projectionWatermark = this.lastEventId;
+    }
     this.ring.push({ event: retained, bytes: retainedBytes });
     this.ringBytes += retainedBytes;
     try {

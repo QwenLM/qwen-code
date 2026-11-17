@@ -134,4 +134,18 @@ public final class RuntimeObservation {
     public long getEpoch() {
         return epoch;
     }
+
+    /**
+     * Whether this observation names the same physical Runtime as the saved
+     * resource handle and lease. Identity only: the caller still judges the
+     * outcome, and a READY observation is attested separately.
+     */
+    public boolean matchesRuntime(RuntimeResourceHandle handle, RuntimeLease lease) {
+        return handle != null && lease != null
+                && handle.equals(this.handle)
+                && lease.getRuntimeInstanceId().equals(runtimeInstanceId)
+                && lease.getLeaseId().equals(leaseId)
+                && lease.getEpoch() == epoch
+                && lease.getEndpoint().equals(endpoint);
+    }
 }
