@@ -176,7 +176,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'capacityChoice.blocked.pendingSessionStarts': '等待會話啟動',
   'capacityChoice.blocked.acpConnections': '有 ACP 客戶端連線',
   'capacityChoice.blocked.memoryTasks': '記憶任務執行中',
-  'capacityChoice.blocked.channelWorkers': '渠道 worker 執行中',
+  'capacityChoice.blocked.channelWorkers': '頻道 worker 執行中',
   'capacityChoice.blocked.voiceSessions': '語音會話活躍',
   'capacityChoice.blocked.management_pending': '工作區管理操作待完成',
   'capacityChoice.blocked.scheduler_pending': '正在恢復定時任務會話',
@@ -542,18 +542,18 @@ export const ZH_TW: Record<string, MessageValue> = {
   'gitCommit.generating': '正在生成提交資訊…',
   'gitCommit.genFailed': '自動生成失敗 — 請手動輸入提交資訊',
   'gitCommit.prLogUnavailable': '無法載入所選目標分支的提交記錄。',
-  'gitCommit.prPushFirst': '請先將分支推送到遠端倉庫，再建立合併請求。',
+  'gitCommit.prPushFirst': '請先將分支推送到遠端倉庫，再建立拉取請求。',
   'gitCommit.commit': '提交',
-  'gitCommit.commitAndPush': '提交併推送',
-  'gitCommit.createPr': '建立合併請求',
-  'gitCommit.prTitlePlaceholder': '合併請求標題',
+  'gitCommit.commitAndPush': '提交並推送',
+  'gitCommit.createPr': '建立拉取請求',
+  'gitCommit.prTitlePlaceholder': '拉取請求標題',
   'gitCommit.prBodyPlaceholder': '描述（可選）',
   'gitCommit.prEdit': '編輯',
   'gitCommit.prPreview': '預覽',
   'gitCommit.prSubmit': '建立',
-  'gitCommit.prCreated': (v) => `合併請求 #${v?.number ?? ''} 已建立`,
+  'gitCommit.prCreated': (v) => `拉取請求 #${v?.number ?? ''} 已建立`,
   'gitCommit.commitSuccess': (v) => `已提交 ${v?.sha ?? ''}`,
-  'gitCommit.commitPushSuccess': (v) => `已提交併推送 ${v?.sha ?? ''}`,
+  'gitCommit.commitPushSuccess': (v) => `已提交並推送 ${v?.sha ?? ''}`,
   'gitCommit.commitSuccessPushFailed': (v) =>
     `已提交 ${v?.sha ?? ''} — 推送失敗：${v?.error ?? '未知錯誤'}`,
   'branchSelect.baseBranch': '目標分支',
@@ -678,7 +678,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'githubPrs.reviewApproved': '已批准',
   'githubPrs.reviewChanges': '要求修改',
   'githubPrs.reviewRequired': '需要審查',
-  'githubPrs.checksPassing': '檢查透過',
+  'githubPrs.checksPassing': '檢查通過',
   'githubPrs.checksFailing': '檢查失敗',
   'githubPrs.checksPending': '檢查進行中',
   'githubPrs.open': (v) => `在 GitHub 上開啟拉取請求 #${v?.number ?? ''}`,
@@ -749,8 +749,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'toolName.loop_wakeup': '迴圈喚醒',
   'toolName.create_sub_session': '建立子會話',
   'toolName.read_mcp_resource': '讀取 MCP 資源',
-  'toolName.artifact': '製品',
-  'toolName.record_artifact': '記錄製品',
+  'toolName.artifact': '產物',
+  'toolName.record_artifact': '記錄產物',
   'toolName.record_source': '記錄來源',
   'toolName.report_findings': '上報評審發現',
   'toolName.image_gen': '生成圖片',
@@ -954,7 +954,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'agent.manage.desc': '管理已有智慧體',
   'agent.modelLabel': '模型：',
   'agent.overriddenBadge': '（已被專案級智慧體覆蓋）',
-  'agent.readonly': '該智慧體是隻讀的。',
+  'agent.readonly': '該智慧體是只讀的。',
   'agent.select': '請選擇一個智慧體。',
   'agent.selectAction': '選擇操作',
   'agent.descriptionLabel': '描述：',
@@ -1489,11 +1489,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'workspaceHost.offlineHint':
     '無法連線這臺主機，當前顯示的是最近一次已知的專案。',
   'workspaceHost.unauthorizedHint':
-    '此主機儲存的憑據已被拒絕，請開啟該主機重新登入。',
+    '此主機儲存的憑證已被拒絕，請開啟該主機重新登入。',
   'daemon.connection.invalid': '請輸入有效的 HTTP 或 HTTPS origin。',
-  'daemon.connection.notReady': 'Daemon 未接受該連線，已儲存的憑據未被修改。',
+  'daemon.connection.notReady': 'Daemon 未接受該連線，已儲存的憑證未被修改。',
   'daemon.connection.authFailed':
-    'Daemon 拒絕了該 token，已儲存的憑據未被修改。',
+    'Daemon 拒絕了該 token，已儲存的憑證未被修改。',
   'daemon.connection.unreachable':
     '瀏覽器無法連線守護程序，可能是網路、證書或跨域問題。請檢視下方的遠端連線配置說明，已儲存的 token 未被修改。',
   'daemon.connection.policyBlocked':
@@ -1507,7 +1507,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'daemon.connection.setupHttps':
     'HTTPS 地址需要可信的 TLS 證書或 HTTPS 代理；不可信網路上請使用 HTTPS。',
   'daemon.connection.setupOrigins':
-    'HTTPS 頁面或自定義頁面域名，請在伺服器的遠端連線高階設定中新增上方顯示的頁面來源。',
+    'HTTPS 頁面或自定義頁面網域，請在伺服器的遠端連線高階設定中新增上方顯示的頁面來源。',
   'daemon.connection.existingService':
     '開關無需重啟即可生效；已有啟動參數或代理開放的入口仍由原配置獨立管理。',
   'daemon.connection.reloadUnavailable':
@@ -2101,11 +2101,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'codeReview.notLinked': '未連結',
   'codeReview.loadErrorTitle': '無法顯示程式碼審查結果',
   'codeReview.loading': '正在載入程式碼審查結果…',
-  'codeReview.artifactTruncated': '程式碼審查製品已截斷，無法驗證。',
+  'codeReview.artifactTruncated': '程式碼審查產物已截斷，無法驗證。',
   'codeReview.reportTruncated': 'Markdown 報告已截斷。',
   'codeReview.unavailable': (v) =>
-    `此程式碼審查已不再具備權威性，製品狀態為 ${v?.status ?? 'unknown'}。請重新生成審查結果。`,
-  'codeReview.workspaceRequired': '程式碼審查製品必須是可讀取的工作區檔案。',
+    `此程式碼審查已不再具備權威性，產物狀態為 ${v?.status ?? 'unknown'}。請重新生成審查結果。`,
+  'codeReview.workspaceRequired': '程式碼審查產物必須是可讀取的工作區檔案。',
   'sideTask.title': '側邊任務',
   'sideTask.description': '檢視或新增側邊任務',
   'sideTask.new': '新增',
@@ -2134,7 +2134,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'webPreview.live':
     '實時頁面：從歷史訊息開啟連結，也會顯示當前內容，不是當時儲存的版本。',
   'webPreview.invalidUrl':
-    '請使用獨立開發伺服器的 HTTP/HTTPS 地址，主機名或 IPv4 均可，且不含登入憑據。不能預覽 Web Shell 或 daemon 地址。',
+    '請使用獨立開發伺服器的 HTTP/HTTPS 地址，主機名或 IPv4 均可，且不含登入憑證。不能預覽 Web Shell 或 daemon 地址。',
   'terminal.title': '終端',
   'terminal.open': '開啟終端',
   'terminal.notice.exited': (v) => `程序已退出，退出碼 ${v?.exitCode ?? '?'}`,
@@ -2378,7 +2378,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.gitCloneUrl': '倉庫地址',
   'sidebar.gitCloneUrlPlaceholder': 'https://github.com/org/repo.git',
   'sidebar.gitCloneUrlHint':
-    '支援公開地址、SSH agent 地址，以及自帶 token 的地址：守護程序把 token 交給 Git，不會寫入克隆倉庫的配置；宿主上已配置的 Git 憑據不會被使用。',
+    '支援公開地址、SSH agent 地址，以及自帶 token 的地址：守護程序把 token 交給 Git，不會寫入克隆倉庫的配置；宿主上已配置的 Git 憑證不會被使用。',
   'sidebar.gitCloneTarget': '克隆到',
   'sidebar.gitCloneTargetPlaceholder': '/絕對路徑/新目錄',
   'sidebar.gitCloneTargetHint':
@@ -2394,6 +2394,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.gitCloneInvalidTarget': '請輸入絕對目標路徑。',
   'sidebar.gitCloneUnknown':
     '無法確認克隆結果。請先檢查工作區列表，再決定是否重新克隆。',
+  'sidebar.gitCloneJobGone':
+    '此克隆工作已不存在，無法確認其結果。請先檢查工作區列表或目標是否存在，再重新克隆。',
   'sidebar.gitCloneRecheck': '重新檢查',
   'sidebar.gitCloneBack': '返回',
   'sidebar.gitCloneRegisterRetry': (vars) =>
@@ -2572,9 +2574,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.activityUnknown': '後臺活動狀態未知',
   'sidebar.waitingForApproval': '等待批准',
   'sidebar.waitingForApprovalShort': '待批准',
-  'sidebar.sessionPr': (v) => `合併請求 #${v?.number ?? ''}`,
+  'sidebar.sessionPr': (v) => `拉取請求 #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
-    `合併請求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 個）`,
+    `拉取請求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 個）`,
   'sidebar.sessionPrStateMerged': '已合入',
   'sidebar.sessionPrStateClosed': '已關閉',
   'sidebar.sessionIssue': (v) => `議題 #${v?.number ?? ''}`,
@@ -4190,7 +4192,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'messageDelete.unavailable':
     '無法安全匹配此訊息對應的歷史記錄，請重新整理後重試。',
   'messageDelete.reloadFailed':
-    '訊息已刪除，但歷史過載失敗。請重新載入會話以重新整理其餘訊息。',
+    '訊息已刪除，但歷史重新載入失敗。請重新載入會話以重新整理其餘訊息。',
   'userMessage.editSubmit': '傳送',
   'userMessage.editSending': '傳送中…',
   'userMessage.editBusy': '請先等待當前輪次結束再編輯。',
@@ -4600,9 +4602,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'channels.editor.addTitle': (v) => `配置${v?.platform ?? '頻道'}`,
   'channels.editor.editTitle': (v) => `編輯${v?.platform ?? '頻道'}`,
   'channels.editor.addDescription': '將已註冊的工作區連線到已有的平臺應用。',
-  'channels.editor.editDescription': '更新公開配置，或明確更改已儲存的憑據。',
+  'channels.editor.editDescription': '更新公開配置，或明確更改已儲存的憑證。',
   'channels.editor.section.identity': '頻道標識',
-  'channels.editor.section.credentials': '應用憑據',
+  'channels.editor.section.credentials': '應用憑證',
   'channels.editor.section.connection': '連線',
   'channels.editor.section.routing': '通知與路由',
   'channels.editor.section.boundSessions': 'PR 繫結會話',
@@ -4641,7 +4643,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'channels.qrLogin.waiting': '正在生成二維碼…',
   'channels.qrLogin.scanHint': '在手機上開啟 QQ 掃描此二維碼。',
   'channels.qrLogin.imageAlt': 'QQ 機器人繫結二維碼',
-  'channels.qrLogin.bound': '已繫結機器人,渠道將使用新憑據。',
+  'channels.qrLogin.bound': '已繫結機器人,頻道將使用新憑證。',
   'channels.qrLogin.failed': '繫結失敗',
   'channels.qrLogin.expired': '二維碼已過期,請重新獲取。',
   'channels.qrLogin.cancelled': '已取消繫結。',
@@ -4678,7 +4680,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'channels.weixin.expired': '二維碼已過期，請重新整理重試。',
   'channels.weixin.error': '微信登入失敗，請重試。',
   'channels.weixin.credentialsError':
-    '微信已連線，但 daemon 無法儲存憑據。請確認其 home 目錄可寫後重試。',
+    '微信已連線，但 daemon 無法儲存憑證。請確認其 home 目錄可寫後重試。',
   'channels.weixin.unsupported':
     '當前 daemon 不支援微信登入。請升級 daemon，或在主機上執行「qwen channel configure-weixin」。',
   'channels.weixin.restartHint':
@@ -4716,7 +4718,7 @@ export const ZH_TW: Record<string, MessageValue> = {
     '多久向 GitHub 查一次新通知。留空為 60000（一分鐘）。穩態輪詢會被抬到端點的 X-Poll-Interval（當它更大時），這也會同時壓住 PR 監視的節奏，因此調小本值並不會讓檢測更快；預設值下該頭也是 60 秒。',
   'channels.editor.field.github.repositorySettings': '按倉庫設定',
   'channels.editor.field.github.repositorySettings.description':
-    '每個已允許的倉庫都繼承下面的渠道級設定，直到你在這裡覆蓋它。',
+    '每個已允許的倉庫都繼承下面的頻道級設定，直到你在這裡覆蓋它。',
   'channels.editor.field.github.requireMention': '需要 @',
   'channels.editor.field.github.requireMention.inheritOn': '繼承（需要 @）',
   'channels.editor.field.github.requireMention.inheritOff':
@@ -4735,11 +4737,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'channels.editor.field.github.repositorySpeakers.description':
     '可以在該倉庫發起任務的 GitHub 登入名。留空表示沒有人。',
   'channels.editor.field.github.repositorySpeakers.inherited':
-    '可以在該倉庫發言的 GitHub 登入名。留空則使用渠道級列表。',
+    '可以在該倉庫發言的 GitHub 登入名。留空則使用頻道級列表。',
   'channels.editor.field.gitlab.repositorySpeakers.description':
     '可以在該專案發起任務的 GitLab 使用者名稱。留空表示沒有人。',
   'channels.editor.field.gitlab.repositorySpeakers.inherited':
-    '可以在該專案發言的 GitLab 使用者名稱。留空則使用渠道級列表。',
+    '可以在該專案發言的 GitLab 使用者名稱。留空則使用頻道級列表。',
   'channels.editor.field.github.retainedRepositorySettings.title':
     '按倉庫設定仍然生效',
   'channels.editor.field.github.retainedRepositorySettings.description': (v) =>
@@ -4804,9 +4806,12 @@ export const ZH_TW: Record<string, MessageValue> = {
     '僅當 review/verify 繫結會話對該 PR 持有活躍監視（/autofix-pr 監視或 /verify-pr --watch）時才投遞事件。一次性的 /review 與 /verify-pr 會話保持繫結但不接收任何事件；沒有合格會話的事件私下退役，不做公開回復。需開啟「投遞到 PR 繫結會話」。監視狀態未知（檢測失敗）時照常投遞。',
   'channels.editor.field.github.requireBoundWatch.disabledHint':
     '開啟上方「投遞到 PR 繫結會話」後即可要求活躍監視。',
+  'channels.editor.field.github.prCommentWatch': 'PR 評論監視',
+  'channels.editor.field.github.prCommentWatch.description':
+    '輪詢已繫結 PR 上同帳號的對話與行內評審評論，並把每條新評論投遞給每個未釋出它的繫結會話。預設開啟；關閉即可停用。需開啟「投遞到 PR 繫結會話」。',
   'channels.editor.field.github.prWatchEvents': 'PR 狀態監視事件',
   'channels.editor.field.github.prWatchEvents.description':
-    '已棄用。PR 狀態躍遷現由 daemon 檢測：請在 daemon 設定裡配置 serve.sessionPrWatch。為相容保留一個 minor 版本：當該設定未配置且已開啟"投遞到 PR 繫結會話"時，本鍵按 host 作為別名，用於本渠道 web host 上的 PR。',
+    '已棄用。PR 狀態躍遷現由 daemon 檢測：請在 daemon 設定裡配置 serve.sessionPrWatch。為相容保留一個 minor 版本：當該設定未配置且已開啟"投遞到 PR 繫結會話"時，本鍵按 host 作為別名，用於本頻道 web host 上的 PR。',
   'channels.editor.field.github.prWatchEvents.disabledHint':
     '開啟上方「投遞到 PR 繫結會話」後即可選擇監視事件。',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
@@ -5065,7 +5070,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'channels.editor.secret.replace': '替換',
   'channels.editor.secret.clear': '清除',
   'channels.editor.secret.placeholder': (v) => `請輸入${v?.label ?? '金鑰'}`,
-  'channels.editor.secret.clearHint': '儲存後將移除此憑據。',
+  'channels.editor.secret.clearHint': '儲存後將移除此憑證。',
   'channels.editor.field.shared.outputMode': '輸出模式',
   'channels.editor.field.shared.outputMode.description':
     '選擇在整個任務完成後、每次完整回覆後，或每輪結束時傳送最後一條回覆。預設按輪輸出：主回覆獨立結束，後臺後續回覆單獨傳送。適用於卡片和普通訊息。',
@@ -5201,11 +5206,11 @@ export const ZH_TW: Record<string, MessageValue> = {
   'channels.editor.validation.invalidProjectPath':
     '專案需寫成路徑形式，例如 group/subgroup/project。',
   'channels.editor.validation.conflictingRepoAliases':
-    '該渠道把同一個倉庫以不同大小寫寫了兩次且設定不同（例如 Owner/repo 與 owner/repo）。請先在 settings.json 裡刪掉其中一條再儲存。',
+    '該頻道把同一個倉庫以不同大小寫寫了兩次且設定不同（例如 Owner/repo 與 owner/repo）。請先在 settings.json 裡刪掉其中一條再儲存。',
   'channels.editor.validation.conflictingProjectAliases':
-    '該渠道把同一個專案以不同大小寫寫了兩次且設定不同（例如 Group/Project 與 group/project）。請先在 settings.json 裡刪掉其中一條再儲存。',
+    '該頻道把同一個專案以不同大小寫寫了兩次且設定不同（例如 Group/Project 與 group/project）。請先在 settings.json 裡刪掉其中一條再儲存。',
   'channels.editor.validation.invalidGroupEntry': (v) =>
-    `該渠道把以下群組條目存成了非物件：${v?.repositories ?? ''}。只要它還在，daemon 就會拒絕每次儲存，而表單裡沒有對應的行。請在 settings.json 裡修正或刪除該條目，然後重新載入渠道。`,
+    `該頻道把以下群組條目存成了非物件：${v?.repositories ?? ''}。只要它還在，daemon 就會拒絕每次儲存，而表單裡沒有對應的行。請在 settings.json 裡修正或刪除該條目，然後重新載入頻道。`,
   'channels.editor.validation.invalidOption': '請移除不在允許列表中的值。',
   'channels.editor.validation.requiresBoundDeliveryForWatchGate':
     '需開啟「投遞到 PR 繫結會話」才能要求活躍監視。',
@@ -5425,7 +5430,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.liveSetup.endpoint': 'Realtime 接入地址',
   'settings.liveSetup.endpointUnchanged': '未修改，保留已儲存的接入地址',
   'settings.liveSetup.endpointHint':
-    '填寫 Key 所屬地域或專屬域名的 OpenAI 相容 baseUrl，清空後使用預設地址（北京）。',
+    '填寫 Key 所屬地域或專屬網域的 OpenAI 相容 baseUrl，清空後使用預設地址（北京）。',
   'settings.liveSetup.endpointFromRoute':
     '跟隨所選模型在 modelProviders 中路由的 baseUrl。',
   'settings.liveSetup.voice': '音色',
@@ -5558,7 +5563,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'collab.runtime.replaceDescription': (v) =>
     `使用一次性加入命令，用新主機替換 ${v?.name}。`,
   'collab.runtime.replaceEffects':
-    '新主機註冊後，舊憑據被撤銷，Agent 繫結遷移到新主機。舊主機上正在執行或取消的任務會失敗；已進入完成結算的結果會保留。',
+    '新主機註冊後，舊憑證被撤銷，Agent 繫結遷移到新主機。舊主機上正在執行或取消的任務會失敗；已進入完成結算的結果會保留。',
   'collab.runtime.replaceRecovery': (v) =>
     `正在恢復對 ${v?.name}（${v?.id}）的替換。連結過期不會取消待完成的替換，也不會回滾已遷移的繫結。命令過期後，在這裡生成新命令，再到替換主機上執行。`,
   'collab.runtime.refreshReplacement': '重新整理替換命令',
@@ -5584,7 +5589,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'collab.runtime.connected': (v) => `${v?.name} 已連線`,
   'collab.runtime.replaced': (v) => `${v?.oldName} 已由 ${v?.name} 替換`,
   'collab.runtime.replaceCompleted':
-    '舊主機憑據已撤銷，Agent 繫結已遷移。舊的活動任務已結算，已進入完成結算的結果已保留。',
+    '舊主機憑證已撤銷，Agent 繫結已遷移。舊的活動任務已結算，已進入完成結算的結果已保留。',
   'collab.runtime.offers': (v) => `提供 ${v?.programs}`,
   'collab.runtime.done': '完成',
   'collab.runtime.createAgentOn': (v) => `在 ${v?.name} 上新建 Agent`,
@@ -5718,7 +5723,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'collab.runtime.joinConnected': (v) =>
     `這臺電腦已作為 Runtime 加入 ${v?.server}。`,
   'collab.runtime.notSavedHere': (v) =>
-    `這臺電腦已加入，但沒能儲存這次連線，重啟或重新載入工作區後不會自動重連${v?.error ? `：${v.error}` : '。'}`,
+    `這臺電腦已加入，但沒能儲存這次連線，重啟或重新載入工作區後不會自動重連${v?.error ? `：${v.error}` : ''}。${v?.recorded === 'true' ? '再執行一次同樣的加入命令即可儲存。' : ''}`,
   'collab.runtime.notSavedThere': (v) =>
     `那臺電腦已連線，但沒能儲存這次連線，重啟或重新載入工作區後不會自動重連${v?.error ? `：${v.error}` : '。'}`,
   'collab.runtime.joinTimedOut': (v) =>
@@ -5885,7 +5890,7 @@ export const ZH_TW: Record<string, MessageValue> = {
     '在每條助手回覆前顯示 [HH:MM:SS] 時間戳。',
   'settings.label.review.sandbox': '沙箱隔離被評審程式碼：review',
   'settings.description.review.sandbox':
-    '在容器裡執行被評審倉庫自己的命令——帶安裝指令碼的 `npm ci`、構建、測試套件以及每個變異探針——而不是直接以你的身份執行。評審會執行它所評審的程式碼，而今天這些命令繼承評審程序的整個環境（在 CI 上包括模型和 GitHub 憑據）。“auto”在 docker 或 podman 可用時使用容器，兩者都不可用時直接執行；“required”拒絕在非沙箱環境執行這些命令，此時依賴執行的證據（構建/測試發現、變異判定、`Source: [probe]`）在本次評審中不可用，而不是終止評審；“off”是今天的行為並保持預設，因為毫無預兆地把構建放進容器會改變原生模組的編譯目標。僅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值會被忽略，倉庫無法關掉為約束它而存在的隔離。',
+    '在容器裡執行被評審倉庫自己的命令——帶安裝指令碼的 `npm ci`、構建、測試套件以及每個變異探針——而不是直接以你的身份執行。評審會執行它所評審的程式碼，而今天這些命令繼承評審程序的整個環境（在 CI 上包括模型和 GitHub 憑證）。“auto”在 docker 或 podman 可用時使用容器，兩者都不可用時直接執行；“required”拒絕在非沙箱環境執行這些命令，此時依賴執行的證據（構建/測試發現、變異判定、`Source: [probe]`）在本次評審中不可用，而不是終止評審；“off”是今天的行為並保持預設，因為毫無預兆地把構建放進容器會改變原生模組的編譯目標。僅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值會被忽略，倉庫無法關掉為約束它而存在的隔離。',
   'settings.option.review.sandbox.off': '關閉（直接執行被評審程式碼）',
   'settings.option.review.sandbox.auto': '自動（有可用容器時使用容器）',
   'settings.option.review.sandbox.required': '強制（絕不在沙箱外執行）',
@@ -6287,7 +6292,7 @@ export const ZH_TW: Record<string, MessageValue> = {
     '在下方宣告秘密設定名稱，在參數、環境變數、URL 或 header 中使用 ${NAME}；實際值只填入對應密碼框。',
   'managed.install.secretKeys': '秘密設定名稱，以逗號分隔',
   'managed.install.workspaceCredentials':
-    'Workspace 服務憑據可供此 Workspace 內經授權的執行使用。已儲存值不會回顯。',
+    'Workspace 服務憑證可供此 Workspace 內經授權的執行使用。已儲存值不會回顯。',
   'managed.install.keepSettings': '沿用當前選中的已儲存 settings revision',
   'managed.install.updateTarget': '新包或更新目標',
   'managed.install.install': '安裝到當前會話',
@@ -6299,7 +6304,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'managed.install.required.source':
     '請選擇或重新填寫原始輸入以繼續；其摘要必須與儲存的請求一致。',
   'managed.install.required.settings':
-    '請填寫完整憑據值以繼續。頁面重新整理後不會保留這些值。',
+    '請填寫完整憑證值以繼續。頁面重新整理後不會保留這些值。',
   'managed.install.stage.publish': '正在儲存包版本…',
   'managed.install.stage.settings': '包已儲存，正在準備 settings…',
   'managed.install.stage.apply': '包已儲存，正在應用到所選會話…',

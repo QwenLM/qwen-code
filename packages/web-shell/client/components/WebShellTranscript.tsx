@@ -69,7 +69,11 @@ export interface WebShellTranscriptProps {
     | 'zh-TW'
     | 'zh-tw'
     | 'zh-HK'
+    | 'zh-hk'
     | 'zh-Hant'
+    | 'zh-hant'
+    | 'zh-MO'
+    | 'zh-mo'
     | 'ru'
     | 'ru-ru';
   className?: string;

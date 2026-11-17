@@ -9,6 +9,7 @@ import {
   normalizeLanguage,
 } from './i18n';
 import type { WebShellLanguage } from './i18n';
+import { ZH_TW } from './i18n-zh-tw';
 import { CHANNEL_METHOD_PLATFORMS } from './components/channels/channel-platform';
 import * as ruPart1Stub from './i18n-ru-part1.transcript-stub';
 import * as ruPart2Stub from './i18n-ru-part2.transcript-stub';
@@ -769,8 +770,49 @@ describe('web-shell zh-TW locale', () => {
     ).toContain('週額度');
     expect(languageLabel('zh-TW')).toBe('繁體中文 [zh-TW]');
     expect(tw('language.invalid')).toContain('zh-TW');
-    for (const forbidden of ['服务器', '软件', '设置', '为了']) {
-      expect(tw('files.delete')).not.toContain(forbidden);
+  });
+
+  it('carries no Simplified-only vocabulary in any entry', () => {
+    for (const [key, value] of Object.entries(ZH_TW)) {
+      const text = typeof value === 'function' ? value({}) : value;
+      for (const forbidden of ['服务器', '软件', '设置', '为了']) {
+        expect(`${key}: ${text}`).not.toContain(forbidden);
+      }
     }
+  });
+
+  it('translates the three surfaces that would otherwise stay English', () => {
+    const tw = getTranslator('zh-TW');
+    const en = getTranslator('en');
+    for (const key of [
+      'sidebar.gitCloneJobGone',
+      'channels.editor.field.github.prCommentWatch',
+      'channels.editor.field.github.prCommentWatch.description',
+    ]) {
+      expect(tw(key)).not.toBe(en(key));
+    }
+  });
+
+  it('reports only the table truncation that happened', () => {
+    const tw = getTranslator('zh-TW');
+    const shape = {
+      visibleRows: 5,
+      totalRows: 10,
+      visibleColumns: 3,
+      totalColumns: 3,
+    };
+    expect(tw('echartsChart.tableNotice', { ...shape, omittedRows: 5 })).toBe(
+      '顯示 5/10 行',
+    );
+    expect(
+      tw('echartsChart.tableNotice', { ...shape, omittedColumns: 2 }),
+    ).toBe('顯示 3/3 列');
+    expect(
+      tw('echartsChart.tableNotice', {
+        ...shape,
+        omittedRows: 5,
+        omittedColumns: 2,
+      }),
+    ).toBe('顯示 5/10 行，3/3 列');
   });
 });

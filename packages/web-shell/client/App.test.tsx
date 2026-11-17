@@ -47632,6 +47632,7 @@ describe('App session callbacks', () => {
     ['/language ui en --project', 'en', 'workspace'],
     ['/language ui --global ru', 'ru', 'user'],
     ['/language ui ru --global', 'ru', 'user'],
+    ['/language ui zh-TW', 'zh-TW', 'user'],
   ])(
     'accepts UI language scope flags in %s',
     async (command, language, scope) => {

@@ -1509,7 +1509,11 @@ export interface WebShellProps {
     | 'zh-TW'
     | 'zh-tw'
     | 'zh-HK'
+    | 'zh-hk'
     | 'zh-Hant'
+    | 'zh-hant'
+    | 'zh-MO'
+    | 'zh-mo'
     | 'ru'
     | 'ru-ru';
   /** Called when `/language ui` changes the web-shell UI language. */

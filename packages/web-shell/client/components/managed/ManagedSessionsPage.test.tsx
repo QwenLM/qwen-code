@@ -1373,24 +1373,23 @@ describe('ManagedSessionsPage', () => {
   );
 
   it.each([
-    ['en', 'billing'],
-    ['zh-CN', '余额'],
-    ['zh-TW', '餘額'],
-    ['ru', 'баланс'],
+    ['en', 'model_payment_required', 'HTTP 402', 'billing'],
+    ['zh-CN', 'model_payment_required', 'HTTP 402', '余额'],
+    ['zh-TW', 'model_payment_required', 'HTTP 402', '餘額'],
+    ['ru', 'model_payment_required', 'HTTP 402', 'баланс'],
+    ['zh-CN', 'model_authentication_failed', 'HTTP 401', '鉴权'],
+    ['zh-TW', 'model_authentication_failed', 'HTTP 401', '鑑權'],
   ] as const)(
-    'explains a payment failure in %s without submitting another prompt',
-    async (language, guidance) => {
+    '%s: explains a %s failure without submitting another prompt',
+    async (language, code, status, guidance) => {
       mocks.client.getSession.mockResolvedValue(
         summary('s1', {
           phase: 'failed',
-          failure: {
-            code: 'model_payment_required',
-            message: 'model_payment_required',
-          },
+          failure: { code, message: code },
         }),
       );
       await render('s1', language);
-      expect(container.textContent).toContain('HTTP 402');
+      expect(container.textContent).toContain(status);
       expect(container.textContent).toContain(guidance);
       expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     },

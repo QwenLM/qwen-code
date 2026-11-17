@@ -308,7 +308,7 @@ const FAILURE_MESSAGES: Record<
   model_authentication_failed: [
     'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
     '模型接口鉴权失败（HTTP 401）。请检查供应商凭据配置。',
-    '模型介面鑑權失敗（HTTP 401）。請檢查供應商憑據配置。',
+    '模型介面鑑權失敗（HTTP 401）。請檢查供應商憑證配置。',
     'Ошибка аутентификации API модели (HTTP 401). Проверьте настроенные учётные данные поставщика.',
   ],
   model_access_denied: [

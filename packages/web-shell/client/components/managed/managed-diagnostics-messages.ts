@@ -526,7 +526,7 @@ const messages = {
   invalidResource: [
     'A saved resource could not be validated.',
     '部分已保存资源未通过校验。',
-    '部分已儲存資源未透過校驗。',
+    '部分已儲存資源未通過校驗。',
     'Сохранённый ресурс не удалось проверить.',
   ],
   resourceUnavailable: [
