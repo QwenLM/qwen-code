@@ -100,6 +100,7 @@ import { DaemonAvailabilityContext } from '../availability-context.js';
 
 interface MockSession {
   backgroundTurn?: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn;
+  restoredArtifacts?: import('@qwen-code/sdk/daemon').DaemonSessionArtifact[];
   sessionId: string;
   workspaceCwd: string;
   clientId: string;
@@ -8373,6 +8374,133 @@ describe('DaemonSessionProvider', () => {
 
     expect(states.some((s) => s.status === 'connected')).toBe(true);
     expect(states.every((s) => !s.catchingUp)).toBe(true);
+  });
+
+  it('commits the load-embedded artifact snapshot before the replay injects', async () => {
+    // The initial autoConnect session has an empty transcript; the load target
+    // carries the embedded snapshot plus a replay that must NOT be injected at
+    // the early commit. Ordering is the assertion: a test that only checks the
+    // settled connection state passes with the flushSync removed.
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-1', events: createIdleEvents() }),
+      createMockSession({
+        sessionId: 'session-2',
+        restoredArtifacts: [
+          {
+            id: 'a1',
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Early artifact',
+            url: 'https://example.com/early',
+            retention: 'restorable',
+            clientRetained: true,
+            createdAt: '2026-09-07T00:00:00.000Z',
+            updatedAt: '2026-09-07T00:00:00.000Z',
+          },
+        ],
+        replaySnapshot: createTextReplaySnapshot('replayed transcript'),
+        events: createIdleEvents(),
+      }),
+    );
+    const frames: Array<{
+      connection: DaemonConnectionState;
+      blocks: readonly DaemonTranscriptBlock[];
+    }> = [];
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      const connection = useDaemonConnection();
+      const blocks = useDaemonTranscriptBlocks();
+      frames.push({ connection, blocks });
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await requireActions(actions).loadSession('session-2', {
+        workspaceCwd: '/mock-workspace',
+      });
+      await flushPromises();
+    });
+
+    const early = frames.find(
+      (frame) => frame.connection.restoredArtifacts !== undefined,
+    );
+    expect(early).toBeTruthy();
+    expect(early!.connection.sessionId).toBe('session-2');
+    expect(early!.connection.restoredArtifactsSessionId).toBe('session-2');
+    // The replay has not injected yet at the early commit.
+    expect(
+      early!.blocks.some(
+        (block) =>
+          block.kind === 'assistant' && block.text === 'replayed transcript',
+      ),
+    ).toBe(false);
+    // …and it injects afterwards.
+    expect(frames[frames.length - 1]!.blocks).toMatchObject([
+      { kind: 'assistant', text: 'replayed transcript' },
+    ]);
+  });
+
+  it('does not early-commit the artifact key when the restore has no artifacts', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-1', events: createIdleEvents() }),
+      createMockSession({
+        sessionId: 'session-2',
+        replaySnapshot: createTextReplaySnapshot('replayed transcript'),
+        events: createIdleEvents(),
+      }),
+    );
+    const frames: Array<{
+      connection: DaemonConnectionState;
+      blocks: readonly DaemonTranscriptBlock[];
+    }> = [];
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      const connection = useDaemonConnection();
+      const blocks = useDaemonTranscriptBlocks();
+      frames.push({ connection, blocks });
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await requireActions(actions).loadSession('session-2', {
+        workspaceCwd: '/mock-workspace',
+      });
+      await flushPromises();
+    });
+
+    // With no embedded snapshot the early commit must not run: no recorded
+    // connection state ever carries restoredArtifacts.
+    expect(
+      frames.every((frame) => frame.connection.restoredArtifacts === undefined),
+    ).toBe(true);
+    expect(frames[frames.length - 1]!.blocks).toMatchObject([
+      { kind: 'assistant', text: 'replayed transcript' },
+    ]);
+    // Ordering, not field absence: the attach update legitimately sets the key
+    // alongside an undefined snapshot, but only AFTER the replay injects. With
+    // the guard relaxed to `true`, flushSync would commit sessionId + key for
+    // session-2 in its own synchronous render before the store is reset, i.e.
+    // a frame carrying both before the replayed transcript appears.
+    const replayIdx = frames.findIndex((frame) =>
+      frame.blocks.some(
+        (block) =>
+          block.kind === 'assistant' && block.text === 'replayed transcript',
+      ),
+    );
+    expect(replayIdx).toBeGreaterThan(-1);
+    expect(
+      frames
+        .slice(0, replayIdx)
+        .some(
+          (frame) =>
+            frame.connection.sessionId === 'session-2' &&
+            frame.connection.restoredArtifactsSessionId === 'session-2',
+        ),
+    ).toBe(false);
   });
 
   it('clears prompt state and transcript when reconnect attaches a different session', async () => {
@@ -27683,6 +27811,9 @@ describe('DaemonSessionProvider', () => {
           },
         });
         const h = await mountWorkflow(session);
+        await act(async () => {
+          await vi.waitFor(() => expect(context).toHaveBeenCalledTimes(2));
+        });
         const older = createDeferred<DaemonSessionContextStatus>();
         const policy = createDeferred<DaemonSessionContextStatus>();
         context
@@ -27692,13 +27823,12 @@ describe('DaemonSessionProvider', () => {
         await act(async () => {
           pending = h.getActions().getContext();
           reload.resolve();
-          await flushPromises();
+          await vi.waitFor(() => expect(context).toHaveBeenCalledTimes(4));
         });
         await act(async () => {
           terminal.resolve();
-          await flushPromises();
+          await vi.waitFor(() => expect(context).toHaveBeenCalledTimes(5));
         });
-        expect(context).toHaveBeenCalledTimes(5);
         await act(async () => {
           if (outcome === 'rejected') policy.reject(new Error('read failed'));
           else
@@ -27923,6 +28053,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     state: opts.state ?? {},
     hasActivePrompt: opts.hasActivePrompt ?? false,
     backgroundTurn: opts.backgroundTurn,
+    restoredArtifacts: opts.restoredArtifacts,
     historyHasMore: opts.historyHasMore ?? false,
     historyAnchorRecordId: opts.historyAnchorRecordId,
     replayDegraded: opts.replayDegraded ?? false,

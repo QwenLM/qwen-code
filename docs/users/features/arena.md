@@ -38,6 +38,8 @@ Use the `/arena` slash command to launch a session. Specify the models you want 
 
 If you omit `--models`, an interactive model selection dialog appears, letting you pick from your configured providers.
 
+Unavailable models remain unchecked and cannot be selected. Choose at least two available models before confirming the dialog.
+
 ### What happens when you start
 
 1. **Worktree setup**: Qwen Code creates isolated Git worktrees for each agent at `~/.qwen/arena/<session-id>/worktrees/<model-name>/`. Each worktree mirrors your current working directory state exactly — including staged changes, unstaged changes, and untracked files.

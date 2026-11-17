@@ -695,6 +695,20 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(readPackageJavascript()).toContain('Search loaded records');
   });
 
+  it('keeps the Russian Web Shell catalog in the interactive entry only', () => {
+    const transcript = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('Что вы хотите сделать?');
+    expect(interactive).toContain('Недельный лимит кредитов исчерпан');
+    expect(interactive).toContain('Вас @упомянули в комментарии');
+    expect(transcript).not.toContain('Что вы хотите сделать?');
+    expect(transcript).not.toContain('Недельный лимит кредитов исчерпан');
+    expect(transcript).not.toContain('Вас @упомянули в комментарии');
+  });
+
   it('still carries what a transcript actually renders', () => {
     const bundle = readTranscriptBundle();
     expect(bundle).toContain('react-markdown');

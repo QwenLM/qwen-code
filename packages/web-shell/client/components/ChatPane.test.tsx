@@ -89,6 +89,7 @@ const setModel = vi.fn(async () => ({}) as any);
 const setReasoningEffort = vi.fn(async () => {});
 const setWorkflowMode = vi.fn(async (_requested: boolean) => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const addArtifact = vi.fn(async () => ({}) as any);
 const getTasks = vi.fn();
 const getWorkflowTasks = vi.fn();
 const getGoal = vi.fn();
@@ -111,6 +112,7 @@ const daemonActions = {
   setReasoningEffort,
   setWorkflowMode,
   loadArtifacts,
+  addArtifact,
   getTasks,
   getWorkflowTasks,
   getGoal,
@@ -230,8 +232,14 @@ vi.mock('../hooks/useMessages', () => ({
   useMessagesFromBlocks: () => messagesState,
 }));
 
+let transcriptBlocksMock: any[] = [];
 vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptSnapshot: () => ({ blocks: [] }),
+  // Fresh array per call, like the previous inline literal: consumers memo
+  // on `blocks` identity, and the mocked extractPendingPermission reads a
+  // mutable test variable that must be re-read on every render.
+  useAnimationFrameTranscriptSnapshot: () => ({
+    blocks: transcriptBlocksMock.slice(),
+  }),
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
@@ -531,6 +539,9 @@ beforeEach(() => {
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
+  addArtifact.mockReset();
+  addArtifact.mockResolvedValue({} as any);
+  transcriptBlocksMock = [];
   getTasks.mockReset();
   getWorkflowTasks.mockReset();
   getGoal.mockReset();
@@ -1295,6 +1306,63 @@ describe('ChatPane', () => {
       resolveGoal?.({ snapshot: current });
     });
     expect(controlGoal).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the Goals-page affordance in the pane strip when wired', () => {
+    // Split-view panes reach the Goals page through this forward; deleting
+    // the `onOpenGoals={onOpenGoals}` line must turn this case red.
+    const onOpenGoals = vi.fn();
+    connectionState.goalState = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render({ onOpenGoals });
+
+    const openGoals = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] [data-testid="goal-open-goals"]',
+    );
+    if (!openGoals) throw new Error('goals-page affordance was not rendered');
+    act(() => openGoals.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
+  });
+
+  it('hides the Goals-page affordance in a pane without the Goals surface', () => {
+    connectionState.goalState = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render();
+
+    expect(
+      container!.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+    // The strip itself still renders — only the navigation affordance is
+    // absent, so the pane keeps its controls.
+    expect(
+      container!.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
   });
 
   it('builds the control request from the freshly fetched Goal', async () => {
@@ -4040,6 +4108,24 @@ describe('ChatPane', () => {
     expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
 
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    pendingPermission = {
+      id: 'perm-sub-session',
+      toolName: 'create_sub_session',
+      toolKind: 'other',
+      options: [{ id: 'allow-1', label: 'Allow once', kind: 'allow_once' }],
+      rawInput: { workspace: '/repos/b' },
+    };
+    render();
+    await act(async () => {
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo', { planMode: false });
+    expect(submitPermission).not.toHaveBeenCalled();
+  });
+
   it('resolves host at mention providers through a pane ChatEditor', () => {
     renderRealChatEditor = true;
     const atProviders = [
@@ -4473,6 +4559,7 @@ describe('pane approval mode allowlist', () => {
   });
 });
 
+<<<<<<< HEAD
 describe('ChatPane pane title single-click rename', () => {
   // The same Popover the app renders (imported from the radix-ui package).
   // It starts open and, by Radix design, a button-0 pointerdown + click
@@ -4936,5 +5023,45 @@ describe('ChatPane pane title single-click rename', () => {
     expect(findRenameInput()).not.toBeNull();
     act(() => probeRoot.unmount());
     probeHost.remove();
+  });
+});
+
+describe('pane reported-artifact registration (R6-1)', () => {
+  it('registers reported artifacts for the pane session under its own provider', async () => {
+    // Split panes and side tasks render ChatPane under their own
+    // DaemonSessionProvider, so App's single registration mount (main
+    // session only) must not be the only registration site.
+    connectionState.sessionId = 'sess-pane';
+    connectionState.capabilities = { features: ['session_artifacts'] };
+    transcriptBlocksMock = [
+      {
+        kind: 'assistant',
+        meta: {
+          source: 'slash_command',
+          sessionArtifacts: [
+            {
+              title: 'report',
+              workspacePath: 'report.html',
+              kind: 'html',
+              storage: 'workspace',
+            },
+          ],
+        },
+      },
+    ];
+    render();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(addArtifact).toHaveBeenCalledTimes(1);
+    expect(addArtifact).toHaveBeenCalledWith({
+      title: 'report',
+      workspacePath: 'report.html',
+      kind: 'html',
+      storage: 'workspace',
+    });
   });
 });
