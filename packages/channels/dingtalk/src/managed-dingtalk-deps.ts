@@ -21,13 +21,23 @@ import { isRetryableDingtalkStatus } from './interactive-card-client.js';
 import { ROBOT_MESSAGE_HOSTS } from './DingtalkAdapter.js';
 
 const WEBHOOK_TIMEOUT_MS = 30_000;
+// The control plane's claim lease, which this adapter cannot read: it is
+// operator-configurable (`claim-lease`, default 10m — application.yml and
+// ManagedAgentProperties under packages/managed-agent-server). A claim that
+// outlives it settles unknown and is never resent. Naming it records the
+// assumption the ceiling below derives from; a deployment that shortens the
+// lease reopens the race, and following the configured value needs control
+// plane plumbing (#17173).
+const CLAIM_LEASE_ASSUMED_MS = 600_000;
 // One aggregate ceiling for a whole ledger segment, layered on the per-chunk
 // budgets. Heading-dense markdown splits a 48 KiB segment into 24 chunks, so
-// per-chunk budgets alone let one send run 12 minutes — past the control
-// plane's 10-minute claim lease, which reconciles the claim to unknown while
-// the tail is still being delivered. Half the lease leaves room for the rest
-// of the claim; the in-flight chunk still gets its own full budget on top.
-const WEBHOOK_SEGMENT_TIMEOUT_MS = 300_000;
+// per-chunk budgets alone let one send run 12 minutes — past the lease, which
+// reconciles the claim to unknown while the tail is still being delivered.
+// Subtracting one chunk budget makes the ceiling refuse exactly the chunks
+// that would finish at or after the lease: a send that fits inside the lease
+// still delivers every chunk. An unknown segment is never resent, so cutting
+// one that would have finished in time loses its tail for good.
+const WEBHOOK_SEGMENT_TIMEOUT_MS = CLAIM_LEASE_ASSUMED_MS - WEBHOOK_TIMEOUT_MS;
 const RECONNECT_RETRY_MS = 5_000;
 // The SDK's connect() resolves when the WebSocket is *constructed*, not when it
 // opens, and getEndpoint() has no timeout. Bound the whole attempt so a blocked

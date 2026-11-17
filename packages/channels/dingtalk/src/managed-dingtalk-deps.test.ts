@@ -557,9 +557,10 @@ describe('managed DingTalk webhook segment ceiling (#17504 R1-1)', () => {
         text += `#### h${text.length}\n`;
       }
       const chunks = splitChunks(text);
-      expect(chunks.length).toBeGreaterThan(11);
+      expect(chunks.length).toBe(24);
       // Each chunk answers at 29s: no per-chunk timer ever fires, so only an
-      // aggregate ceiling can end this batch.
+      // aggregate ceiling can end this batch. 24 × 29s = 696s, past the 600s
+      // lease the ceiling is derived from.
       const fetchMock = vi.fn(
         (_url: string, init: { signal: AbortSignal }) =>
           new Promise<Response>((resolve, reject) => {
@@ -589,13 +590,13 @@ describe('managed DingTalk webhook segment ceiling (#17504 R1-1)', () => {
         definitive: false,
         message: expect.stringContaining('segment budget'),
       });
-      await vi.advanceTimersByTimeAsync(300_000);
-      // The ceiling is spent, but chunk 11 is still in flight and keeps its
+      await vi.advanceTimersByTimeAsync(570_000);
+      // The ceiling is spent, but chunk 20 is still in flight and keeps its
       // own budget: the ceiling ends the batch between chunks, not mid-request.
       expect(settled).toBe(false);
-      await vi.advanceTimersByTimeAsync(19_000); // 319s: chunk 11 lands, chunk 12 refused
+      await vi.advanceTimersByTimeAsync(10_000); // 580s: chunk 20 lands, chunk 21 refused
       await assertion;
-      expect(fetchMock).toHaveBeenCalledTimes(11);
+      expect(fetchMock).toHaveBeenCalledTimes(20);
       expect(fetchMock.mock.calls.length).toBeLessThan(chunks.length);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
@@ -636,4 +637,44 @@ describe('managed DingTalk webhook segment ceiling (#17504 R1-1)', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each([15_000, 20_000])(
+    'a 24-chunk segment at %i ms per chunk finishes inside the lease and delivers every chunk',
+    async (latency) => {
+      vi.useFakeTimers();
+      try {
+        let text = '';
+        while (text.length < 48 * 1024 - 200) {
+          text += `#### h${text.length}\n`;
+        }
+        const chunks = splitChunks(text);
+        expect(chunks.length).toBe(24);
+        const fetchMock = vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, latency));
+          return jsonResponse({ errcode: 0 });
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        const { sendWebhook } = createManagedDingtalkDeps();
+        let failure: unknown;
+        const sending = sendWebhook(WEBHOOK, text).then(
+          () => undefined,
+          (error) => {
+            failure = error;
+          },
+        );
+        // 360s and 480s: both inside the 600s lease, so the whole segment
+        // would have been delivered and accepted without any ceiling. An
+        // unknown segment is never resent, so a ceiling that cuts here loses
+        // the tail for good — the bound must sit at the lease, not below it.
+        expect(chunks.length * latency).toBeLessThan(600_000);
+        await vi.advanceTimersByTimeAsync(chunks.length * latency);
+        await sending;
+        expect(failure).toBeUndefined();
+        expect(fetchMock).toHaveBeenCalledTimes(chunks.length);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });
