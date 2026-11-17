@@ -119,29 +119,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     invalidateWorkspace: vi.fn(),
     refreshWorkspace: vi.fn(),
     renamed: vi.fn(),
-    toggleSessionPinned: (
-      workspaceCwd: string,
-      session: DaemonSessionSummary,
-      options: { pinned: boolean; pinnedAt?: string },
-    ) => {
-      const update = (candidate: DaemonSessionSummary) =>
-        candidate.sessionId === session.sessionId &&
-        candidate.workspaceCwd === workspaceCwd
-          ? {
-              ...candidate,
-              isPinned: options.pinned,
-              ...(options.pinnedAt ? { pinnedAt: options.pinnedAt } : {}),
-            }
-          : candidate;
-      active.sessions = active.sessions.map(update);
-      active.data = active.sessions;
-      activity.entries = activity.entries.map((entry) =>
-        entry.session.sessionId === session.sessionId &&
-        entry.session.workspaceCwd === workspaceCwd
-          ? { ...entry, session: update(entry.session) }
-          : entry,
-      );
-    },
+    toggleSessionPinned: vi.fn(),
   }),
   useSessionCatalogPolling: () => undefined,
   useSessionCatalogQuery: () => ({
@@ -355,6 +333,7 @@ beforeEach(() => {
   activity.hasMore = false;
   activity.retry.mockClear();
   onLoadSession.mockClear();
+  workspaceActions.updateSessionOrganization.mockReset().mockResolvedValue({});
   workspace.client.getWorkspaceOrder
     .mockReset()
     .mockResolvedValue({ cwds: [] });
@@ -481,6 +460,13 @@ describe('WebShellSidebar session grouping', () => {
   });
 
   it('applies original and optimistic pin state before date filtering', async () => {
+    const organizationWrites: Array<() => void> = [];
+    workspaceActions.updateSessionOrganization.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          organizationWrites.push(resolve);
+        }),
+    );
     localStorage.setItem(
       `web-shell:session-group-by:${window.location.origin}`,
       'activityDate',
@@ -492,6 +478,19 @@ describe('WebShellSidebar session grouping', () => {
     activity.entries = [candidate, originalPinned];
     active.sessions = [candidate.session, originalPinned.session];
     active.data = active.sessions;
+    const setCandidatePinned = (pinned: boolean) => {
+      const update = (session: DaemonSessionSummary) =>
+        session.sessionId === 'candidate'
+          ? { ...session, isPinned: pinned }
+          : session;
+      activity.entries = activity.entries.map((entry) => ({
+        ...entry,
+        session: update(entry.session),
+      }));
+      active.sessions = active.sessions.map(update);
+      active.data = active.sessions;
+      renderSidebar();
+    };
     renderSidebar();
     await flushSidebar();
     expect(
@@ -509,6 +508,10 @@ describe('WebShellSidebar session grouping', () => {
     expect(
       container.querySelector('section[aria-label="Today"]')?.textContent ?? '',
     ).not.toContain('candidate');
+    expect(organizationWrites).toHaveLength(1);
+    setCandidatePinned(true);
+    organizationWrites[0]!();
+    await flushSidebar();
 
     const unpin = Array.from(
       container.querySelectorAll<HTMLButtonElement>(
@@ -520,6 +523,13 @@ describe('WebShellSidebar session grouping', () => {
         ?.textContent?.includes('candidate'),
     )!;
     await act(async () => unpin.click());
+    await flushSidebar();
+    expect(
+      container.querySelector('section[aria-label="Today"]')?.textContent,
+    ).toContain('candidate');
+    expect(organizationWrites).toHaveLength(2);
+    setCandidatePinned(false);
+    organizationWrites[1]!();
     await flushSidebar();
     expect(
       container.querySelector('section[aria-label="Today"]')?.textContent,

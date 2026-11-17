@@ -80,6 +80,15 @@ describe('groupActivityDateSessions', () => {
     expect(groups[3]!.entries).toHaveLength(27);
   });
 
+  it('keeps future activity timestamps in Today', () => {
+    const groups = groupActivityDateSessions(
+      [entry('future', '/one', on(2))],
+      'updatedAt',
+      NOW.getTime(),
+    );
+    expect(groups.map((group) => group.id)).toEqual(['today']);
+  });
+
   it('uses creation time when it is newer than the update time', () => {
     const groups = groupActivityDateSessions(
       [entry('created', '/one', on(-40), { createdAt: on(0) })],

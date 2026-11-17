@@ -37,6 +37,9 @@ interface SessionCatalogHookOptions {
   enabled?: boolean;
   maxAgeMs?: number;
   pollIntervalMs?: number;
+}
+
+interface SessionCatalogQueriesOptions extends SessionCatalogHookOptions {
   pollQueries?: (query: SessionCatalogQuery, index: number) => boolean;
 }
 
@@ -123,7 +126,7 @@ export function useSessionCatalogQuery(
 export function useSessionCatalogQueries(
   client: DaemonClient,
   queries: readonly SessionCatalogQuery[],
-  options: SessionCatalogHookOptions = {},
+  options: SessionCatalogQueriesOptions = {},
 ): readonly SessionCatalogSnapshot[] {
   const {
     autoLoad = false,

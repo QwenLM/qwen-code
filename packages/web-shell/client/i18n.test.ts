@@ -634,6 +634,21 @@ describe('web-shell ru locale', () => {
     }
   });
 
+  it('localizes activity grouping options in Russian', () => {
+    const ru = getTranslator('ru');
+    const en = getTranslator('en');
+    for (const key of [
+      'sidebar.groupBy',
+      'sidebar.groupWorkspace',
+      'sidebar.groupActivityDate',
+      'sidebar.groupThisWeek',
+      'sidebar.groupLast30Days',
+      'sidebar.groupOlder',
+    ]) {
+      expect(ru(key)).not.toBe(en(key));
+    }
+  });
+
   it('pluralises turn counters the Russian way', () => {
     const t = getTranslator('ru');
     expect(t('goal.turns', { count: 1 })).toBe('1 ход');
