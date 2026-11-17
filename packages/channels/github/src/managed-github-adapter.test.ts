@@ -249,7 +249,12 @@ function fakeDeps(
 function delivery(
   deliveryId: string,
   segments: number,
-  replyContext: unknown = { owner: 'Owner', repo: 'Repo', issueNumber: 7 },
+  replyContext: unknown = {
+    owner: 'Owner',
+    repo: 'Repo',
+    issueNumber: 7,
+    senderId: 'alice',
+  },
 ): ManagedClaimedDelivery {
   return {
     deliveryId,
@@ -288,6 +293,7 @@ async function connectedAdapter(
   cwd = tempCwd(),
   config: Record<string, unknown> = CONFIG,
   hooks: { log?: (line: string) => void } = {},
+  rawConfig?: Record<string, unknown>,
 ) {
   const journal: string[] = [];
   const plane = fakeControlPlane(journal);
@@ -296,6 +302,7 @@ async function connectedAdapter(
     name: 'gh-1',
     cwd,
     config,
+    ...(rawConfig !== undefined ? { rawConfig } : {}),
     controlPlane: plane.controlPlane,
     deps: fake.deps,
     pollLoop: false,
@@ -358,7 +365,7 @@ function pendingEntry(
       subject: 'Issue title',
       text: '@bot-user please help',
       attachments: [],
-      replyContext: { owner: 'Owner', repo: 'Repo', issueNumber: 7 },
+      replyContext: { owner: 'Owner', repo: 'Repo', issueNumber: 7, senderId },
     },
     notificationThreadId: 'n-1',
     ...(held ? { held: true } : {}),
@@ -458,26 +465,33 @@ describe('managed GitHub adapter config', () => {
     ).toThrow(/requires repoFilterMode "allowlist"/);
   });
 
-  it('refuses a Legacy blocklist or off-mode repoFilter instead of inverting it', () => {
-    // The shared channel config also serves the Legacy channel: blocklist
-    // excludes the listed repos and 'off' ignores the list. Reading either
-    // as an allowlist would answer only in the repos the operator blocked.
+  it('starts off-mode as no filter and refuses only the invertible blocklist', () => {
+    // The plugin descriptor defaults repoFilterMode to 'off' and the Web Shell
+    // editor seeds 'off' on save, so an off-only config (the product default)
+    // must start as "no repository filtering" — there is no list to invert.
+    expect(
+      githubSettings({ token: 'ghp_x', repoFilterMode: 'off' }).repoFilter,
+    ).toBeUndefined();
+    expect(
+      githubSettings({
+        token: 'ghp_x',
+        repoFilter: ['org/parked'],
+        repoFilterMode: 'off',
+      }).repoFilter,
+    ).toBeUndefined();
+    // A blocklist with no list also filters nothing.
+    expect(
+      githubSettings({ token: 'ghp_x', repoFilterMode: 'blocklist' })
+        .repoFilter,
+    ).toBeUndefined();
+    // A blocklist WITH a list is the invertible shape: reading it as an
+    // allowlist would answer only in the repos the operator blocked.
     expect(() =>
       githubSettings({
         token: 'ghp_x',
         repoFilter: ['org/private'],
         repoFilterMode: 'blocklist',
       }),
-    ).toThrow(/only as an allowlist/);
-    expect(() =>
-      githubSettings({
-        token: 'ghp_x',
-        repoFilter: ['org/parked'],
-        repoFilterMode: 'off',
-      }),
-    ).toThrow(/only as an allowlist/);
-    expect(() =>
-      githubSettings({ token: 'ghp_x', repoFilterMode: 'off' }),
     ).toThrow(/only as an allowlist/);
     expect(
       githubSettings({
@@ -584,6 +598,7 @@ describe('managed GitHub adapter inbound', () => {
       owner: 'Owner',
       repo: 'Repo',
       issueNumber: 7,
+      senderId: 'alice',
     });
     // A re-listed notification admits nothing new.
     await adapter.tick();
@@ -609,6 +624,7 @@ describe('managed GitHub adapter inbound', () => {
       owner: 'Owner',
       repo: 'Repo',
       issueNumber: 9,
+      senderId: 'alice',
     });
     await adapter.disconnect();
   });
@@ -1458,7 +1474,12 @@ describe('managed GitHub adapter round-3 hardening', () => {
     const entry = pendingEntry('github:IC_cd', 'alice');
     entry.event.chatId = 'c/d';
     entry.event.scope.chatId = 'c/d';
-    entry.event.replyContext = { owner: 'c', repo: 'd', issueNumber: 5 };
+    entry.event.replyContext = {
+      owner: 'c',
+      repo: 'd',
+      issueNumber: 5,
+      senderId: 'alice',
+    };
     seedState(first.adapter, (state) => {
       state.pending = [entry];
     });
@@ -1560,11 +1581,15 @@ describe('managed GitHub adapter round-3 hardening', () => {
     await sleep(1_200);
     expect(polls()).toBe(1);
     await waitUntil(() => polls() >= 2, 3_000);
-    // One failed tick is logged and survived, not fatal.
-    fake.knobs.listNotificationsError = new Error('transient');
-    await waitUntil(() => polls() >= 3, 4_000);
-    fake.knobs.listNotificationsError = undefined;
-    await waitUntil(() => polls() >= 4, 4_000);
+    // A tick-rejecting failure is survived by the runLoop per-tick catch, not
+    // fatal. A 500 claim refusal is rethrown by pullOutbox (it is not a
+    // registration refusal), so tick() rejects; pollInbound still runs each
+    // tick, so polls keep advancing. A listNotifications error is caught
+    // inside pollInbound and never rejects the tick, so it cannot pin this.
+    plane.setRefuseClaim({ status: 500 });
+    await waitUntil(() => polls() >= 4, 8_000);
+    plane.setRefuseClaim(undefined);
+    await waitUntil(() => polls() >= 5, 4_000);
     await adapter.disconnect();
     const after = polls();
     await sleep(1_700);
@@ -1944,5 +1969,171 @@ describe('managed GitHub adapter persist-failure discipline (R1-5)', () => {
     await second.adapter.tick();
     expect(readState(second.adapter).pending).toHaveLength(0);
     await second.adapter.disconnect();
+  });
+});
+
+describe('managed GitHub adapter round-4 hardening', () => {
+  // parseChannelConfig always injects privatePolicy/senderPolicy (and a
+  // groupPolicy default) into the config the CLI hands the adapter, so these
+  // cases build that production shape and pass the pre-parse entry as
+  // rawConfig — the shape the round-3 config-only guard could never see.
+  const parsedShape = (
+    raw: Record<string, unknown>,
+  ): Record<string, unknown> => ({
+    ...raw,
+    // Mirror parseChannelConfig: privatePolicy is resolvePrivatePolicy(raw),
+    // senderPolicy/groupPolicy/dmPolicy collapse to their defaults.
+    privatePolicy:
+      raw['privatePolicy'] ??
+      (raw['dmPolicy'] === 'disabled'
+        ? 'disabled'
+        : (raw['senderPolicy'] ?? 'allowlist')),
+    senderPolicy: raw['senderPolicy'] ?? 'allowlist',
+    allowedUsers: raw['allowedUsers'] ?? [],
+    groupPolicy: raw['groupPolicy'] ?? 'disabled',
+    dmPolicy: raw['dmPolicy'] ?? 'open',
+  });
+
+  it('honors groupPolicy open on the production parse shape', async () => {
+    const raw = {
+      type: 'github',
+      token: 'ghp_test_token',
+      groupPolicy: 'open',
+    };
+    const { adapter, plane, fake } = await connectedAdapter(
+      tempCwd(),
+      parsedShape(raw),
+      {},
+      raw,
+    );
+    fake.knobs.notifications = [notification()];
+    fake.knobs.comments = [comment()];
+    await adapter.tick();
+    expect(plane.register[0]).toMatchObject({
+      policy: { senderPolicy: 'open' },
+    });
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.submit[0]!.senderId).toBe('alice');
+    await adapter.disconnect();
+  });
+
+  it('refuses an unknown groupPolicy on the production parse shape', async () => {
+    const raw = {
+      type: 'github',
+      token: 'ghp_test_token',
+      groupPolicy: 'bogus',
+    };
+    await expect(
+      connectedAdapter(tempCwd(), parsedShape(raw), {}, raw),
+    ).rejects.toThrow(/groupPolicy must be one of/);
+  });
+
+  it('keeps the injected groupPolicy disabled inert for an allowedUsers allowlist', async () => {
+    const raw = {
+      type: 'github',
+      token: 'ghp_test_token',
+      allowedUsers: ['alice'],
+    };
+    const { adapter, plane, fake } = await connectedAdapter(
+      tempCwd(),
+      parsedShape(raw),
+      {},
+      raw,
+    );
+    fake.knobs.notifications = [notification()];
+    fake.knobs.comments = [comment()];
+    await adapter.tick();
+    expect(plane.register[0]).toMatchObject({
+      policy: { senderPolicy: 'allowlist' },
+    });
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.submit[0]!.senderId).toBe('alice');
+    await adapter.disconnect();
+  });
+
+  it('lets an explicit raw managed policy win over an active groupPolicy', async () => {
+    const raw = {
+      type: 'github',
+      token: 'ghp_test_token',
+      senderPolicy: 'disabled',
+      groupPolicy: 'open',
+    };
+    const { adapter, plane, fake } = await connectedAdapter(
+      tempCwd(),
+      parsedShape(raw),
+      {},
+      raw,
+    );
+    fake.knobs.notifications = [notification()];
+    fake.knobs.comments = [comment()];
+    await adapter.tick();
+    expect(plane.register[0]).toMatchObject({
+      policy: { senderPolicy: 'disabled' },
+    });
+    expect(plane.submit).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('holds the window on a 401 read failure, never dropping the thread', async () => {
+    // A token revoked mid-run answers 401 on every comment read; that is a
+    // global, healable condition, so the thread must not be dropped as poison.
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.knobs.notifications = [notification()];
+    fake.knobs.commentsFor = () => {
+      throw Object.assign(new Error('401 Unauthorized'), { status: 401 });
+    };
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    expect(fake.markedRead).toEqual([]);
+    expect(readState(adapter).cursor.lastProcessedAt).toBeNull();
+    await adapter.disconnect();
+  });
+
+  it('holds the window on a 408 read failure, never dropping the thread', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.knobs.notifications = [notification()];
+    fake.knobs.commentsFor = () => {
+      throw Object.assign(new Error('408 Request Timeout'), { status: 408 });
+    };
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    expect(fake.markedRead).toEqual([]);
+    expect(readState(adapter).cursor.lastProcessedAt).toBeNull();
+    await adapter.disconnect();
+  });
+
+  it('rejects a delivery whose sender the current policy no longer allows', async () => {
+    // The send-time re-check (DingTalk/email parity): a sender excluded after
+    // admission must not receive the reply.
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.enqueue([
+      delivery('d-1', 1, {
+        owner: 'Owner',
+        repo: 'Repo',
+        issueNumber: 7,
+        senderId: 'mallory',
+      }),
+    ]);
+    await adapter.tick();
+    expect(fake.posted).toHaveLength(0);
+    expect(plane.receipts).toEqual([
+      { deliveryId: 'd-1', receipt: { outcome: 'rejected' } },
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('rejects a delivery whose repo the current allowlist excludes', async () => {
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      ...CONFIG,
+      repoFilter: ['a/b'],
+      repoFilterMode: 'allowlist',
+    });
+    plane.enqueue([delivery('d-1', 1)]); // Owner/Repo is not in the allowlist
+    await adapter.tick();
+    expect(fake.posted).toHaveLength(0);
+    expect(plane.receipts).toEqual([
+      { deliveryId: 'd-1', receipt: { outcome: 'rejected' } },
+    ]);
+    await adapter.disconnect();
   });
 });

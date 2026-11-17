@@ -39,6 +39,11 @@ export interface GithubReplyContext {
   owner: string;
   repo: string;
   issueNumber: number;
+  /**
+   * The admitted inbound sender, carried so send() can re-check the current
+   * sender policy before posting (the DingTalk/email send-time re-check).
+   */
+  senderId: string;
 }
 
 export interface GithubSettings {
@@ -116,6 +121,13 @@ export interface ManagedGithubAdapterOptions {
   readonly name: string;
   readonly cwd: string;
   readonly config: Readonly<Record<string, unknown>>;
+  /**
+   * The pre-parse channel entry. `config` is the parseChannelConfig result,
+   * which always injects privatePolicy/senderPolicy/groupPolicy defaults; the
+   * adapter judges an explicit policy choice on this raw entry instead. When
+   * absent (unit tests hand a raw shape as `config`), `config` is used.
+   */
+  readonly rawConfig?: Readonly<Record<string, unknown>>;
   readonly controlPlane: ManagedChannelControlPlane;
   readonly deps: ManagedGithubAdapterDeps;
   /** Off, the caller drives `tick()` itself (tests); on by default. */
@@ -188,28 +200,31 @@ export function githubSettings(
   const rawRepoFilter = config['repoFilter'];
   const repoFilterMode = config['repoFilterMode'];
   let repoFilter: string[] | undefined;
-  if (repoFilterMode !== undefined && repoFilterMode !== 'allowlist') {
-    // The shared channel config also serves the Legacy channel, whose
-    // blocklist excludes the listed repos and whose 'off' mode ignores the
-    // list. Reading either as an allowlist would silently invert the
-    // operator's intent — answering only in the repos they blocked.
+  // The plugin descriptor defaults repoFilterMode to 'off' and the Web Shell
+  // editor seeds 'off' on save, so 'off' — and a blocklist with no list — must
+  // start as "no repository filtering", not be refused. Only the invertible
+  // and fail-open shapes are refused.
+  if (repoFilterMode === 'blocklist' && rawRepoFilter !== undefined) {
+    // A blocklist excludes the listed repos; reading it as an allowlist would
+    // answer only in the repos the operator blocked. The managed path cannot
+    // carry a blocklist, so refuse the invertible shape rather than guess.
     throw new Error(
-      'The managed GitHub path supports repoFilter only as an allowlist; set repoFilterMode to "allowlist".',
+      "The managed GitHub path supports repoFilter only as an allowlist; a blocklist with a repoFilter list would invert the operator's intent.",
     );
   }
-  if (repoFilterMode === 'allowlist' && rawRepoFilter === undefined) {
-    // Declaring an allowlist without a list must not fail open to every repo.
+  if (rawRepoFilter !== undefined && repoFilterMode === undefined) {
+    // Legacy reads a list with no mode as "filter off"; promoting it to an
+    // active allowlist would answer only inside the parked repos. Require the
+    // explicit managed spelling instead of guessing.
     throw new Error(
-      'GitHub channel repoFilterMode "allowlist" requires a non-empty repoFilter array.',
+      'GitHub channel repoFilter requires repoFilterMode "allowlist" on the managed path.',
     );
   }
-  if (rawRepoFilter !== undefined) {
-    if (repoFilterMode === undefined) {
-      // Legacy reads a list with no mode as "filter off"; promoting it to an
-      // active allowlist would answer only inside the parked repos. Require
-      // the explicit managed spelling instead of guessing.
+  if (repoFilterMode === 'allowlist') {
+    if (rawRepoFilter === undefined) {
+      // Declaring an allowlist without a list must not fail open to every repo.
       throw new Error(
-        'GitHub channel repoFilter requires repoFilterMode "allowlist" on the managed path.',
+        'GitHub channel repoFilterMode "allowlist" requires a non-empty repoFilter array.',
       );
     }
     if (
@@ -232,6 +247,8 @@ export function githubSettings(
       (entry as string).trim().toLowerCase(),
     );
   }
+  // 'off' (the plugin/editor default) and a blocklist without a list leave
+  // repoFilter undefined — no repository filtering, nothing to invert.
   return {
     token: (token as string).trim(),
     baseUrl,
@@ -303,7 +320,11 @@ export class ManagedGithubAdapter {
   constructor(options: ManagedGithubAdapterOptions) {
     this.settings = githubSettings(options.config);
     const config = options.config;
-    const groupPolicy = config['groupPolicy'];
+    // parseChannelConfig always injects privatePolicy/senderPolicy/groupPolicy
+    // defaults into `config`, so an operator's explicit policy choice must be
+    // judged on the raw pre-parse entry, not the fully-defaulted parse result.
+    const raw = options.rawConfig ?? config;
+    const groupPolicy = raw['groupPolicy'];
     if (groupPolicy === 'pairing') {
       // Same "skip every comment while reporting running" hazard as
       // privatePolicy pairing: the managed policy shape has no pairing arm.
@@ -333,16 +354,18 @@ export class ManagedGithubAdapter {
       );
     }
     // The plugin's own schema documents groupPolicy as the GitHub admission
-    // gate. When no managed spelling (privatePolicy/senderPolicy) is present,
-    // honor an active groupPolicy instead of ignoring it: a channel configured
+    // gate. Honor an active groupPolicy when the operator did not explicitly
+    // choose a managed policy in the RAW entry: a channel configured
     // groupPolicy "open" must not resolve to an empty allowlist and silently
-    // consume every mention. But parseChannelConfig defaults EVERY channel's
-    // groupPolicy to "disabled" (config-utils.ts), so "disabled" must stay
-    // inert — keep the managed resolvePrivatePolicy result — rather than
-    // clobber an allowedUsers allowlist into admit-nothing.
+    // consume every mention. Absence is judged on `raw`, not `config` —
+    // parseChannelConfig injects privatePolicy/senderPolicy into config for
+    // every channel, so a config-based guard would be dead on the production
+    // path. groupPolicy "disabled" (the parse default when absent) stays inert
+    // — keep the managed resolvePrivatePolicy result — rather than clobber an
+    // allowedUsers allowlist into admit-nothing.
     if (
-      config['privatePolicy'] === undefined &&
-      config['senderPolicy'] === undefined &&
+      raw['privatePolicy'] === undefined &&
+      raw['senderPolicy'] === undefined &&
       groupPolicy !== undefined
     ) {
       if (groupPolicy === 'open' || groupPolicy === 'allowlist') {
@@ -641,6 +664,7 @@ export class ManagedGithubAdapter {
             owner: target.owner,
             repo: target.repo,
             issueNumber: target.issueNumber,
+            senderId,
           } satisfies GithubReplyContext,
         };
         const previousPending = state.pending;
@@ -963,13 +987,22 @@ export class ManagedGithubAdapter {
     const owner = context?.owner;
     const repo = context?.repo;
     const issueNumber = context?.issueNumber;
+    const chatId =
+      typeof owner === 'string' && typeof repo === 'string'
+        ? `${owner}/${repo}`.toLowerCase()
+        : '';
     if (
       typeof owner !== 'string' ||
       !owner ||
       typeof repo !== 'string' ||
       !repo ||
       !Number.isSafeInteger(issueNumber) ||
-      (issueNumber as number) < 1
+      (issueNumber as number) < 1 ||
+      // Re-check the current policy before posting, mirroring the DingTalk /
+      // email send-time re-check: a sender or repo the operator has since
+      // excluded must not receive the reply even though it was admitted.
+      !this.senderAllowed(context?.senderId ?? '') ||
+      !this.repoAllowed(chatId)
     ) {
       // One delivery's unreportable rejection receipt must never abort the
       // claimed batch: the deliveries behind it were already moved to sending

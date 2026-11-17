@@ -108,29 +108,37 @@ every claim before its side effect, and replays on restart instead of re-sending
   since dropping it would admit senders the operator excluded (or drop ones
   they allowed).
 - **`groupPolicy` is honored, not ignored.** The plugin's own schema documents
-  `groupPolicy` as the GitHub admission gate. When neither managed spelling
-  (`privatePolicy` / `senderPolicy`) is present, an active `groupPolicy`
-  (`open` / `allowlist`) maps onto `senderPolicy`; any other value except
-  `disabled` is refused. A channel configured `groupPolicy: "open"` must not
-  resolve to an empty allowlist and silently consume every mention.
-  **`disabled` stays inert:** `parseChannelConfig` defaults every channel's
-  `groupPolicy` to `disabled`, so it must keep the managed
-  `resolvePrivatePolicy` result rather than clobber an `allowedUsers`
-  allowlist into admit-nothing — the natural `allowedUsers`-only config still
-  admits its listed senders, and the injected default is not a refusal
-  trigger.
+  `groupPolicy` as the GitHub admission gate. When the operator did not
+  explicitly choose a managed policy (`privatePolicy` / `senderPolicy`) in the
+  **raw pre-parse entry**, an active `groupPolicy` (`open` / `allowlist`) maps
+  onto `senderPolicy`; any other value except `disabled` is refused. A channel
+  configured `groupPolicy: "open"` must not resolve to an empty allowlist and
+  silently consume every mention. **The choice is judged on the raw entry, not
+  the parse result:** `parseChannelConfig` always injects `privatePolicy` and
+  `senderPolicy` into the config the CLI hands the adapter, so a guard keyed on
+  their absence in that config would be dead on the production path. The
+  command therefore threads the pre-parse entry (`ParsedChannel.rawConfig`)
+  into the adapter. **`disabled` stays inert:** absent `groupPolicy` collapses
+  to `disabled` in the parse result, and it must keep the managed
+  `resolvePrivatePolicy` result rather than clobber an `allowedUsers` allowlist
+  into admit-nothing — the natural `allowedUsers`-only config still admits its
+  listed senders, and the injected default is not a refusal trigger. An
+  explicit raw managed policy still wins over an active `groupPolicy`.
 - **`repoFilter` is an explicit allowlist.** An optional `repoFilter`
   (lowercased `owner/repo` entries) filters which repositories may admit
-  events at all. It is supported only as an allowlist, and the mode must be
-  stated explicitly in both directions: `repoFilterMode: "allowlist"` without
-  a `repoFilter` array is refused, and a `repoFilter` array without
-  `repoFilterMode: "allowlist"` is refused. Any other `repoFilterMode`
-  (`blocklist` / `off`) is refused, not reinterpreted — reading a blocklist as
-  an allowlist would answer only in the repos the operator declared blocked.
-  The list must be non-empty and every entry must match the Legacy
-  `owner/repo` shape; an empty or malformed list would silently drop every
-  event while reporting running. Sender gating runs in the adapter, the same
-  layer as email's `senderAllowed`.
+  events at all. Filtering activates only for `repoFilterMode: "allowlist"`
+  with a list; that mode without a list is refused (it must not fail open to
+  every repo), and a list with no mode is refused (require the explicit
+  spelling rather than guess). **`off` starts as no filter:** the plugin
+  descriptor defaults `repoFilterMode` to `off` and the Web Shell editor seeds
+  `off` on save, so an `off` config — and a `blocklist` with no list — must
+  start as "no repository filtering", not be refused; there is no list to
+  invert. Only the invertible shape is refused: a `blocklist` **with** a list
+  (reading it as an allowlist would answer only in the repos the operator
+  blocked). The allowlist must be non-empty and every entry must match the
+  Legacy `owner/repo` shape; an empty or malformed list would silently drop
+  every event while reporting running. Sender gating runs in the adapter, the
+  same layer as email's `senderAllowed`.
 - **Poll floor.** The poll interval respects GitHub's `X-Poll-Interval` and
   rate-limit wait hints (`retry-after`, `x-ratelimit-reset`), capped at
   Node's 32-bit timer limit — the Legacy `MAX_TIMER_DELAY_MS` guard. An
@@ -205,8 +213,10 @@ Event mapping:
   over-long comment is admitted truncated, never refused whole. The clamp is
   copied from the DingTalk adapter, not email's raw-UTF-8 budget.
 - `attachments: []` — GitHub user-attachment staging is a follow-up.
-- `replyContext = { owner, repo, issueNumber }` — adapter-opaque, committed
-  with the input and echoed on claim; everything `issues.createComment` needs.
+- `replyContext = { owner, repo, issueNumber, senderId }` — adapter-opaque,
+  committed with the input and echoed on claim; everything
+  `issues.createComment` needs, plus the admitted sender so `send()` can
+  re-check the current sender policy before posting.
 
 ### Pending claims persist the full event
 
@@ -244,6 +254,11 @@ the rest of a delivery on any non-accepted segment.
   (PRs answer with conversation comments, never inline review comments — the
   Legacy send primitive). No provider-side chunking: the producer's 48 KiB
   byte cap is below GitHub's comment cap.
+- **Send-time policy re-check (DingTalk/email parity).** Before posting,
+  `send()` re-checks the current `senderAllowed(replyContext.senderId)` and
+  `repoAllowed(owner/repo)` alongside the reply-target shape; a sender or repo
+  the operator has excluded since admission is receipted `rejected` and not
+  posted, and the rest of the claimed batch still sends.
 - `providerMessageId = String(comment.id)` — GitHub returns a real platform
   id, a stronger receipt than email's minted Message-ID or DingTalk's UUID.
 - Failure classification in the deps: definitive no-write refusals (401/403
@@ -330,8 +345,13 @@ direct request would leave it empty).
 - `packages/channels/github/src/managed-github-adapter.ts`,
   `managed-github-deps.ts`, `managed-state.ts` (new) — the adapter, its
   production deps (Octokit assembly, proxy, retry/backoff, failure
-  classification) and its persisted state; exported from the package index;
-  collocated tests for each.
+  classification) and its persisted state. The adapter and deps are exported
+  from the package index; `managed-state.ts` is internal to the adapter (not
+  re-exported). Collocated tests for each.
+- `packages/cli/src/commands/channel/runtime.ts` — `ParsedChannel` carries the
+  pre-parse `rawConfig` so the adapter can tell an operator's explicit policy
+  choice from the defaults `parseChannelConfig` injects; `managed-github.ts`
+  threads it into the adapter.
 - This design doc and its Chinese version.
 - No Java, schema, OpenAPI, surface-capture or Web Shell generated-type change.
 

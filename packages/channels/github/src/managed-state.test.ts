@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +23,26 @@ import {
   validManagedGithubState,
   type ManagedGithubState,
 } from './managed-state.js';
+
+// Let one test force a real write failure inside store.save (after the temp
+// file is opened) so the save-failure catch/finally actually executes; every
+// other call passes through to the real fs.
+const fsControl = vi.hoisted(() => ({ failWrite: false }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    writeFileSync: ((...args: Parameters<typeof actual.writeFileSync>) => {
+      if (fsControl.failWrite) {
+        throw Object.assign(
+          new Error('ENOSPC: no space left on device, write'),
+          { code: 'ENOSPC' },
+        );
+      }
+      return actual.writeFileSync(...args);
+    }) as typeof actual.writeFileSync,
+  };
+});
 
 function event(eventId: string): ManagedInboundEvent {
   return {
@@ -256,6 +282,33 @@ describe('ManagedGithubStateStore', () => {
     store.save(freshState());
     expect(statSync(store.directory).mode & 0o777).toBe(0o700);
     expect(statSync(store.file).mode & 0o777).toBe(0o600);
+  });
+
+  it('preserves the fs error on cause and removes the half-written temp file', () => {
+    // Force the write to fail AFTER the temp file is opened, so the real
+    // save-failure catch ({ cause }) and finally (temp cleanup) both execute.
+    const store = new ManagedGithubStateStore(
+      'gh-1',
+      tempCwd(),
+      'https://api.github.com',
+    );
+    fsControl.failWrite = true;
+    let err: Error | undefined;
+    try {
+      store.save(freshState());
+    } catch (error) {
+      err = error as Error;
+    } finally {
+      fsControl.failWrite = false;
+    }
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/could not be saved/);
+    // The cause is the raw fs error, not a stringified message, so the
+    // adapter's persistErrorText can name the errno.
+    expect((err!.cause as NodeJS.ErrnoException).code).toBe('ENOSPC');
+    expect(
+      readdirSync(store.directory).filter((name) => name.endsWith('.tmp')),
+    ).toEqual([]);
   });
 
   it('keys the directory by name and endpoint, never by credential', () => {

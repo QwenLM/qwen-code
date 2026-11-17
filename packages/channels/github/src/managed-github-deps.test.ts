@@ -304,6 +304,9 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
   it('caps the poll floor at the 32-bit timer limit on every hint path', async () => {
     // Above 2^31-1 ms Node clamps the delay to ~1 ms, turning a rate-limit
     // cooldown into a retry storm; the Legacy channel caps the same hints.
+    // Each far-future hint is asserted at EXACTLY the cap, not merely below
+    // it: an upper bound alone would also pass if the hint were ignored and
+    // the floor stayed 0, so the exact value pins honoring AND capping.
     const retryAfter = await clientFor(() => ({
       status: 403,
       headers: { 'x-ratelimit-remaining': '0', 'retry-after': '10000000000' },
@@ -312,9 +315,7 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
     await retryAfter.client
       .postComment('Owner', 'Repo', 7, 'reply')
       .catch(() => undefined);
-    expect(retryAfter.client.pollIntervalFloorMs()).toBeLessThanOrEqual(
-      2_147_483_647,
-    );
+    expect(retryAfter.client.pollIntervalFloorMs()).toBe(2_147_483_647);
 
     const farReset = Math.floor(Date.now() / 1000) + 100_000_000;
     const reset = await clientFor(() => ({
@@ -328,9 +329,7 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
     await reset.client
       .postComment('Owner', 'Repo', 7, 'reply')
       .catch(() => undefined);
-    expect(reset.client.pollIntervalFloorMs()).toBeLessThanOrEqual(
-      2_147_483_647,
-    );
+    expect(reset.client.pollIntervalFloorMs()).toBe(2_147_483_647);
 
     const pollHeader = await clientFor(() => ({
       status: 200,
@@ -338,9 +337,7 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
       body: [],
     }));
     await pollHeader.client.listNotifications('2026-11-16T09:59:00Z');
-    expect(pollHeader.client.pollIntervalFloorMs()).toBeLessThanOrEqual(
-      2_147_483_647,
-    );
+    expect(pollHeader.client.pollIntervalFloorMs()).toBe(2_147_483_647);
   });
 
   it('routes GitHub traffic through the egress proxy, never direct', async () => {

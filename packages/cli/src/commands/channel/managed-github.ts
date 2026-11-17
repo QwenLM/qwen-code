@@ -39,6 +39,10 @@ export const managedGithubCommand = createManagedChannelCommand({
       name: channel.name,
       cwd: channel.config.cwd,
       config: channel.config,
+      // The pre-parse entry: parseChannelConfig injects policy defaults, so the
+      // adapter judges an explicit groupPolicy / managed-policy choice on the
+      // raw entry, not the fully-defaulted parse result.
+      rawConfig: channel.rawConfig,
       controlPlane,
       deps: createManagedGithubDeps(proxy),
     });

@@ -87,23 +87,29 @@ deps 注入、绝不驱动模型、每个 claim 先持久化再产生副作用�
   Legacy 的 per-repo `groups` 映射不搬：非空 `groups` 对象被拒绝而非静默丢弃，
   因为丢弃它会准入操作者排除的 sender（或丢掉其放行的 sender）。
 - **`groupPolicy` 被尊重而非忽略。** 插件自身 schema 把 `groupPolicy` 文档化
-  为 GitHub 准入门。当两个 managed 拼写（`privatePolicy` / `senderPolicy`）
-  都缺失时，主动的 `groupPolicy`（`open` / `allowlist`）映射到
-  `senderPolicy`；除 `disabled` 外的其它取值被拒绝。配置了
+  为 GitHub 准入门。当操作者未在**未解析的原始条目**里显式选择 managed policy
+  （`privatePolicy` / `senderPolicy`）时，主动的 `groupPolicy`（`open` /
+  `allowlist`）映射到 `senderPolicy`；除 `disabled` 外的其它取值被拒绝。配置了
   `groupPolicy: "open"` 的 channel 不得解析成空 allowlist 而静默消费每条
-  mention。**`disabled` 保持 inert：** `parseChannelConfig` 把每个 channel 的
-  `groupPolicy` 默认成 `disabled`，因此它必须保留 managed
+  mention。**判定依据是原始条目而非解析结果：** `parseChannelConfig` 总会向
+  CLI 交给 adapter 的 config 注入 `privatePolicy` 与 `senderPolicy`，若以它们在
+  该 config 中缺失作守卫，在生产路径上会是死代码。因此命令把未解析条目
+  （`ParsedChannel.rawConfig`）传入 adapter。**`disabled` 保持 inert：** 缺失的
+  `groupPolicy` 在解析结果里塌缩为 `disabled`，它必须保留 managed
   `resolvePrivatePolicy` 的结果，而不是把 `allowedUsers` allowlist 砸成
   「什么都不准入」——自然的「仅配 allowedUsers」配置仍准入其列出的 sender，
-  注入的默认值也不是拒绝触发器。
+  注入的默认值也不是拒绝触发器。显式的原始 managed policy 仍优先于主动
+  `groupPolicy`。
 - **`repoFilter` 是显式 allowlist。** 可选 `repoFilter`（小写 `owner/repo`
-  条目）过滤哪些仓库可准入事件。它仅支持 allowlist，且模式必须双向显式声明：
-  `repoFilterMode: "allowlist"` 而无 `repoFilter` 数组被拒绝；有 `repoFilter`
-  数组而无 `repoFilterMode: "allowlist"` 也被拒绝。其它 `repoFilterMode`
-  （`blocklist` / `off`）被拒绝而非重解释——把屏蔽名单读成 allowlist 会让
-  bot 只在操作者声明屏蔽的仓库回复。列表必须非空且每个条目符合 Legacy 的
-  `owner/repo` 形状；空表或畸形表会在报告 running 的同时静默丢弃全部事件。
-  sender 门在 adapter 侧执行，与 email 的 `senderAllowed` 同层。
+  条目）过滤哪些仓库可准入事件。仅当 `repoFilterMode: "allowlist"` 且带列表时
+  才启用过滤；该模式无列表被拒绝（不得 fail-open 到所有仓库），有列表无模式
+  也被拒绝（要求显式拼写而非猜测）。**`off` 以「不过滤」启动：** 插件描述符把
+  `repoFilterMode` 默认成 `off`，Web Shell 编辑器保存时 seed `off`，因此 `off`
+  配置——以及无列表的 `blocklist`——必须以「不做仓库过滤」启动而非被拒绝；
+  没有列表可反转。唯一被拒的是可反转形状：**带列表**的 `blocklist`（把它读成
+  allowlist 会让 bot 只在操作者声明屏蔽的仓库回复）。allowlist 必须非空且每个
+  条目符合 Legacy 的 `owner/repo` 形状；空表或畸形表会在报告 running 的同时
+  静默丢弃全部事件。sender 门在 adapter 侧执行，与 email 的 `senderAllowed` 同层。
 - **轮询下限。** 轮询间隔尊重 GitHub 的 `X-Poll-Interval` 与限流等待提示
   （`retry-after`、`x-ratelimit-reset`），并封顶于 Node 的 32 位定时器上限
   ——即 Legacy 的 `MAX_TIMER_DELAY_MS` 守卫。超过 2^31-1 ms 的无帽提示会被
@@ -160,8 +166,9 @@ deps 注入、绝不驱动模型、每个 claim 先持久化再产生副作用�
   JSON 序列化信封按码点边界切）。GitHub 正文可达 65,536 字符，超长评论截断
   准入而非整条拒绝。钳制抄 DingTalk adapter，不是 email 的裸 UTF-8 预算。
 - `attachments: []`——GitHub user-attachment staging 是后续项。
-- `replyContext = { owner, repo, issueNumber }`——adapter 不透明，随输入提交、
-  claim 时回传；含 `issues.createComment` 所需全部字段。
+- `replyContext = { owner, repo, issueNumber, senderId }`——adapter 不透明，
+  随输入提交、claim 时回传；含 `issues.createComment` 所需全部字段，外加被准入
+  的 sender，使 `send()` 能在发送前复检当前 sender policy。
 
 ### pending claim 持久化完整事件
 
@@ -191,6 +198,10 @@ stage），而不是重放陈旧准入。
 - 一段 = 一条 `POST /repos/{owner}/{repo}/issues/{issueNumber}/comments`
   （PR 也回会话评论，从不回 inline review comment——Legacy 的发送原语）。
   无 provider 侧切块：生产者 48 KiB 字节界低于 GitHub 评论上限。
+- **发送时 policy 复检（与 DingTalk/email 对齐）。** 发送前 `send()` 连同回复
+  目标形状一起复检当前 `senderAllowed(replyContext.senderId)` 与
+  `repoAllowed(owner/repo)`；准入后被操作者排除的 sender 或仓库被回执
+  `rejected` 而不发送，已领取批次的其余投递照常发送。
 - `providerMessageId = String(comment.id)`——GitHub 返回真实平台 id，回执强于
   email 的自铸 Message-ID 与 DingTalk 的 UUID。
 - deps 内失败分类：可证明未写入的确定性拒绝（401/403 权限、404、422 校验）→
@@ -257,8 +268,11 @@ CONNECT 日志点名目标 authority；直连请求会留下空日志）。
   `packages/cli/src/commands/channel.ts`——命令及注册。
 - `packages/channels/github/src/managed-github-adapter.ts`、
   `managed-github-deps.ts`、`managed-state.ts`（新）——adapter、生产 deps
-  （Octokit 装配、代理、重试/退避、失败分类）与持久化状态；从包 index 导出；
-  各自同址测试。
+  （Octokit 装配、代理、重试/退避、失败分类）与持久化状态。adapter 与 deps
+  从包 index 导出；`managed-state.ts` 为 adapter 内部（不再导出）。各自同址测试。
+- `packages/cli/src/commands/channel/runtime.ts`——`ParsedChannel` 携带未解析
+  的 `rawConfig`，使 adapter 能区分操作者的显式 policy 选择与 parseChannelConfig
+  注入的默认值；`managed-github.ts` 将其传入 adapter。
 - 本设计文档及其中文版。
 - Java、schema、OpenAPI、surface-capture、Web Shell 生成类型均零改动。
 
