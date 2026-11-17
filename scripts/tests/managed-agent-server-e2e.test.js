@@ -3529,9 +3529,17 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toMatch(/argument === '--loop-fire'/);
     expect(source).toMatch(/loopSkill,\s*loopFire,\s*\]\.filter\(Boolean\)/);
     expect(source).toMatch(/\|--loop-fire\]/);
+    // The default real-model scenario must stay off for the fire arm: the
+    // fire scenario is its own earlier branch, and dropping !loopFire here
+    // would run the default scenario under --loop-fire (R1-2).
+    expect(source).toMatch(/\} else if \(!loopSkill && !loopFire\) \{/);
     // The fire arm shares the files/4 profile but alone sets the 1s scan
-    // delay; the cadence stays the cron minimum (no clock shortcut).
-    expect(source).toMatch(/loopSkill \|\| loopFire/);
+    // delay; the cadence stays the cron minimum (no clock shortcut). The
+    // profile pin names the assignment itself — the bare ternary matches
+    // four other sites and would not see the profile entry dropped (R1-3).
+    expect(source).toMatch(
+      /loopSkill \|\| loopFire\s*\?\s*\{\s*QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:\s*'hosted-workspace-files\/4'/,
+    );
     expect(source).toMatch(
       /\.\.\.\(loopFire\s*\?\s*\{ QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY: '1s' \}/,
     );
@@ -3652,6 +3660,18 @@ describe('managed-agent-server e2e runner', () => {
       assertScheduledFireWitness(
         [firedRow],
         framing.replace(scheduleId, `asch_${'b'.repeat(32)}`),
+        scheduleId,
+      ),
+    ).toThrow(/not the fire's turn/);
+    // The trigger clause has its own direction: the minted-id case above
+    // throws through the Automation ID disjunct with the same message, so
+    // without this case deleting !wakeText.includes('Trigger: scheduled')
+    // would leave every direction green (R1-1). The framing spells the line
+    // verbatim as `Trigger: ${trigger}`.
+    expect(() =>
+      assertScheduledFireWitness(
+        [firedRow],
+        framing.replace('Trigger: scheduled', 'Trigger: manual'),
         scheduleId,
       ),
     ).toThrow(/not the fire's turn/);
