@@ -1293,9 +1293,11 @@ export interface BridgeSessionSummary {
   prs?: SessionPrInfo[];
   /**
    * Session artifact count, present when non-zero. Live entries carry the
-   * live public count; persisted summaries are enriched best-effort from the
-   * artifact summary sidecar with the restorable count. Absent means unknown
-   * (no sidecar / older daemon), not zero.
+   * live public count; there, absent means ZERO — the in-memory store is
+   * authoritative, and the list merge drops a stale sidecar-derived count
+   * when the live entry omits the field. Persisted summaries are enriched
+   * best-effort from the artifact summary sidecar with the restorable count;
+   * there, absent means unknown (no sidecar / older daemon), not zero.
    */
   artifactCount?: number;
 }

@@ -1809,9 +1809,11 @@ export interface DaemonSessionSummary {
   prs?: DaemonSessionPrInfo[];
   /**
    * Session artifact count, present when non-zero. Live sessions carry the
-   * live public count; cold sessions carry the restorable count hydrated
-   * best-effort from the artifact summary sidecar. Absent means unknown
-   * (older daemon or no sidecar yet), not zero.
+   * live public count; there, absent means ZERO — the in-memory store is
+   * authoritative, and the list merge drops a stale sidecar-derived count
+   * when the live entry omits the field. Cold sessions carry the restorable
+   * count hydrated best-effort from the artifact summary sidecar; there,
+   * absent means unknown (older daemon or no sidecar yet), not zero.
    */
   artifactCount?: number;
 }
