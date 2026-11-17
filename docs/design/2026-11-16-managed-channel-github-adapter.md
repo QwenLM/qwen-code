@@ -82,7 +82,11 @@ every claim before its side effect, and replays on restart instead of re-sending
   refused on the managed path: the gh CLI login is a machine-level identity
   that does not belong to a tenant-scoped deployment. `baseUrl` stays
   configurable (GitHub Enterprise and hermetic mock endpoints; default
-  `https://api.github.com`).
+  `https://api.github.com`). It must be an absolute `http(s)` URL with a host
+  — a bare `host:port/path` parses as a URL with a bogus scheme and empty
+  host, and would silently target nothing — and is normalized to
+  `origin + pathname` with trailing slashes stripped, so endpoint spellings
+  that differ only in case or a trailing slash key the same state directory.
 - **Account identity** is the bot login resolved from `GET /user` at connect;
   `accountGeneration` starts at 1 and has no epoch event (like DingTalk). A
   token swap to a different login surfaces as the control plane's
@@ -94,22 +98,51 @@ every claim before its side effect, and replays on restart instead of re-sending
 - **Policy** is the flat email-shaped `senderPolicy` (allowlist / open /
   disabled, default allowlist) over GitHub logins (lowercased), with
   `allowedUsers` as the allowlist source and `dispatchMode` from config
-  (default `followup`). `pairing` is refused explicitly, mirroring DingTalk.
-  The Legacy per-repo `groups` map is not carried over; an optional
-  `repoFilter` allowlist (lowercased `owner/repo` entries) filters which
-  repositories may admit events at all. The allowlist must be non-empty and
-  every entry must match the Legacy `owner/repo` shape — an empty or
-  malformed list would silently drop every event while reporting running.
-  A config carrying `repoFilter` together with a Legacy `repoFilterMode` of
-  `blocklist` or `off` is refused, not reinterpreted: reading a blocklist as
+  (default `followup`). The resolved policy comes from `resolvePrivatePolicy`
+  (`privatePolicy`, else a `disabled` `dmPolicy`, else `senderPolicy`, else
+  allowlist). `pairing` is refused explicitly — whether spelled as
+  `groupPolicy` or resolved from `privatePolicy` — because the managed shape
+  has no pairing arm and coercing it to an empty allowlist would skip every
+  comment while reporting running. The Legacy per-repo `groups` map is not
+  carried over: a non-empty `groups` object is refused, not silently dropped,
+  since dropping it would admit senders the operator excluded (or drop ones
+  they allowed).
+- **`groupPolicy` is honored, not ignored.** The plugin's own schema documents
+  `groupPolicy` as the GitHub admission gate. When neither managed spelling
+  (`privatePolicy` / `senderPolicy`) is present, an active `groupPolicy`
+  (`open` / `allowlist`) maps onto `senderPolicy`; any other value except
+  `disabled` is refused. A channel configured `groupPolicy: "open"` must not
+  resolve to an empty allowlist and silently consume every mention.
+  **`disabled` stays inert:** `parseChannelConfig` defaults every channel's
+  `groupPolicy` to `disabled`, so it must keep the managed
+  `resolvePrivatePolicy` result rather than clobber an `allowedUsers`
+  allowlist into admit-nothing — the natural `allowedUsers`-only config still
+  admits its listed senders, and the injected default is not a refusal
+  trigger.
+- **`repoFilter` is an explicit allowlist.** An optional `repoFilter`
+  (lowercased `owner/repo` entries) filters which repositories may admit
+  events at all. It is supported only as an allowlist, and the mode must be
+  stated explicitly in both directions: `repoFilterMode: "allowlist"` without
+  a `repoFilter` array is refused, and a `repoFilter` array without
+  `repoFilterMode: "allowlist"` is refused. Any other `repoFilterMode`
+  (`blocklist` / `off`) is refused, not reinterpreted — reading a blocklist as
   an allowlist would answer only in the repos the operator declared blocked.
-  Sender gating runs in the adapter, the same layer as email's
-  `senderAllowed`.
+  The list must be non-empty and every entry must match the Legacy
+  `owner/repo` shape; an empty or malformed list would silently drop every
+  event while reporting running. Sender gating runs in the adapter, the same
+  layer as email's `senderAllowed`.
 - **Poll floor.** The poll interval respects GitHub's `X-Poll-Interval` and
   rate-limit wait hints (`retry-after`, `x-ratelimit-reset`), capped at
   Node's 32-bit timer limit — the Legacy `MAX_TIMER_DELAY_MS` guard. An
   uncapped hint above 2^31-1 ms is clamped by Node to ~1 ms, turning a
-  rate-limit cooldown into an immediate retry storm.
+  rate-limit cooldown into an immediate retry storm. The two hint families
+  are stored as different quantities: `X-Poll-Interval` is a **duration**
+  floor, while a rate-limit hint is an **absolute cooldown deadline**
+  (`now + wait`). The effective floor is
+  `max(pollFloor, deadline - now, 0)`, so a cooldown expires as the clock
+  advances. Storing the rate-limit hint as a never-expiring duration would
+  let one skewed `x-ratelimit-reset` or bogus `retry-after` pin the tick loop
+  for weeks.
 
 ### Inbound pipeline (mentions only)
 
@@ -133,13 +166,27 @@ One poll tick:
    **and** its comment collection completed. A collection cut short by the
    32-claim cap leaves comments uncollected: the thread stays unread and the
    window holds, so the next poll collects the remainder instead of consuming
-   a notification whose mentions were never staged.
+   a notification whose mentions were never staged. **Poison escape:** a
+   thread whose comment read answers a definitive, unhealable refusal (a 4xx
+   other than 401/408/429 and not a rate-limit answer — a deleted or
+   inaccessible thread) would answer the same refusal forever and freeze the
+   watermark for the life of the channel. It is dropped visibly (its mentions
+   are unrecoverable), skipped for mark-read, and does **not** freeze the
+   window. Transient read failures (401/408/429, rate limits, 5xx, network)
+   still freeze the window, because dropping threads on a shared or retryable
+   problem would consume notifications while the real issue is global. 429 is
+   excluded by status alone — GitHub or a proxy may send it without
+   `retry-after` or budget headers — mirroring the Legacy
+   `classifyThreadFailure` "shared" arm.
 7. Advance the cursor watermark only after the window's threads are marked
    read (persist). A failed mark-read freezes the window; the next poll
-   re-lists it and dedupe absorbs the overlap. An unparseable `updated_at`
-   also freezes the window: persisting it would throw RangeError on every
+   re-lists it and dedupe absorbs the overlap. The watermark is a single
+   shared value for the whole window, so **any** notification with an
+   unparseable `updated_at` — even a sibling that was filtered out or dropped
+   — holds the entire window: persisting it would throw RangeError on every
    later tick's `since` computation and fail `load()` on restart, while
-   outbound keeps moving.
+   outbound keeps moving. A local flag gates the persist; the outer
+   completeness check alone is not sufficient.
 
 Event mapping:
 
@@ -178,6 +225,13 @@ for any re-submission. The ring (bounded, tail-truncated) is a work-saving
 filter; the Legacy second-boundary `boundaryComments` machinery is not needed
 because a re-listed same-second comment is an idempotent replay, not a second
 input.
+
+Re-driving re-checks the **current** policy, not the policy at staging time:
+each persisted pending event is tested against both `senderAllowed` and
+`repoAllowed` before submission. A claim staged under a wider sender policy or
+repo allowlist must not drive a Session — or post into a repo — that the
+operator has since excluded. A refused claim drops visibly (recorded in the
+dispatched ring so it is not re-staged) rather than replaying stale admission.
 
 ### Outbound delivery and receipts
 
@@ -297,11 +351,24 @@ direct request would leave it empty).
   the claim cap cut short is never marked read even when its staged claims
   all settle in the same tick; the instance-scoped stall, the
   registration-refusal re-register and the ownership-loss refusal each red
-  their case.
+  their case. Round-3 hardening witnesses: an active `groupPolicy`
+  (open/allowlist) maps onto the sender policy while the parse-default
+  `disabled` stays inert and still admits an `allowedUsers` allowlist (and
+  `pairing` / non-empty `groups` are refused);
+  both `repoFilter` quadrants (mode-without-list, list-without-mode) are
+  refused; a non-absolute or non-`http(s)` `baseUrl` is refused and endpoint
+  spellings normalize; a definitively unreadable thread is dropped without
+  freezing the window while a transient read failure still freezes it; an
+  unparseable `updated_at` on any window sibling holds the shared watermark;
+  a re-driven claim is dropped when the narrowed repo allowlist now excludes
+  its repo; each ledger is accepted at its exact cap; and the real-timer tick
+  loop honors a poll floor above the configured interval.
 - Deps witnesses against a local fake GitHub HTTP endpoint (real Octokit):
   pagination, `since` window, failure classification (401/404/422 definitive,
   rate-limit/5xx/network ambiguous), proxy traversal (the CONNECT tunnel goes
-  through the proxy) and dispatcher teardown on disconnect.
+  through the proxy) and dispatcher teardown on disconnect; a rate-limit
+  cooldown expires as the clock advances while the `X-Poll-Interval` duration
+  floor is clock-independent.
 - The real-control-plane leg (register → inbound → Session turn → claim →
   receipt against a running Java server) and a GitHub fault-gate driver
   variant are follow-ups, not merge gates, mirroring the DingTalk slice's
@@ -318,5 +385,13 @@ direct request would leave it empty).
 4. One segment = one comment; `providerMessageId` is the real comment id;
    rate-limit is transient (`unknown`), not terminal.
 5. Flat sender policy plus an optional repo allowlist (non-empty, Legacy
-   `owner/repo` shape; Legacy `blocklist`/`off` mode configs refused, not
-   reinterpreted); pairing refused; no sentinel or reaction surfaces in v1.
+   `owner/repo` shape; the allowlist mode must be stated explicitly in both
+   directions, and `blocklist`/`off` configs are refused, not reinterpreted).
+   An active `groupPolicy` (open/allowlist) is honored when no managed policy
+   spelling is present, while the parse-default `disabled` stays inert;
+   `pairing` and non-empty per-repo `groups` are refused. No sentinel or
+   reaction surfaces in v1.
+6. The poll floor splits a duration (`X-Poll-Interval`) from an absolute
+   rate-limit cooldown deadline, so a skewed hint cannot pin the loop; a
+   definitively unreadable thread escapes the window instead of freezing it
+   forever, and any unparseable window sibling holds the shared watermark.

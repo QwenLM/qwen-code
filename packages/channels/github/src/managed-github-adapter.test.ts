@@ -22,7 +22,10 @@ import {
   type ManagedGithubAdapterDeps,
   type ManagedGithubClient,
 } from './managed-github-adapter.js';
-import { MANAGED_GITHUB_PENDING_LIMIT } from './managed-state.js';
+import {
+  MANAGED_GITHUB_PENDING_LIMIT,
+  type ManagedGithubState,
+} from './managed-state.js';
 
 const CONFIG = {
   type: 'github',
@@ -161,6 +164,7 @@ function fakeDeps(
       | undefined,
     listCommentsError: undefined as Error | undefined,
     listCommentsDelay: undefined as (() => Promise<void>) | undefined,
+    listNotificationsError: undefined as Error | undefined,
     markReadError: undefined as Error | undefined,
     sendBehavior: 'ok' as 'ok' | 'definitive' | 'transient',
     pollFloor: 0,
@@ -182,6 +186,7 @@ function fakeDeps(
     listNotifications: async (since) => {
       journal.push('listNotifications');
       sinceSeen.push(since);
+      if (knobs.listNotificationsError) throw knobs.listNotificationsError;
       return knobs.notifications;
     },
     listComments: async (_owner, _repo, issueNumber) => {
@@ -298,12 +303,10 @@ async function connectedAdapter(
   return { adapter, plane, fake, journal };
 }
 
-function readState(adapter: ManagedGithubAdapter): {
-  cursor: { lastProcessedAt: string | null; dispatchedComments: string[] };
-  pending: Array<{ eventId: string; held?: boolean }>;
-  outbound: Array<{ deliveryId: string; ordinal: number; receipt?: unknown }>;
-} {
-  return JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+function readState(adapter: ManagedGithubAdapter): ManagedGithubState {
+  return JSON.parse(
+    readFileSync(adapter.stateFile, 'utf8'),
+  ) as ManagedGithubState;
 }
 
 function seedState(
@@ -411,19 +414,47 @@ describe('managed GitHub adapter config', () => {
 
   it('lowercases the repoFilter allowlist and refuses a malformed one', () => {
     expect(
-      githubSettings({ token: 'ghp_x', repoFilter: ['Owner/Repo'] }).repoFilter,
+      githubSettings({
+        token: 'ghp_x',
+        repoFilter: ['Owner/Repo'],
+        repoFilterMode: 'allowlist',
+      }).repoFilter,
     ).toEqual(['owner/repo']);
     expect(() =>
-      githubSettings({ token: 'ghp_x', repoFilter: 'owner/repo' }),
+      githubSettings({
+        token: 'ghp_x',
+        repoFilter: 'owner/repo',
+        repoFilterMode: 'allowlist',
+      }),
     ).toThrow(/repoFilter must be a non-empty array/);
     // An empty allowlist would silently drop every event while reporting
     // running; the Legacy validator refuses it for the same reason.
-    expect(() => githubSettings({ token: 'ghp_x', repoFilter: [] })).toThrow(
-      /repoFilter must be a non-empty array/,
-    );
     expect(() =>
-      githubSettings({ token: 'ghp_x', repoFilter: ['myrepo'] }),
+      githubSettings({
+        token: 'ghp_x',
+        repoFilter: [],
+        repoFilterMode: 'allowlist',
+      }),
     ).toThrow(/repoFilter must be a non-empty array/);
+    expect(() =>
+      githubSettings({
+        token: 'ghp_x',
+        repoFilter: ['myrepo'],
+        repoFilterMode: 'allowlist',
+      }),
+    ).toThrow(/repoFilter must be a non-empty array/);
+  });
+
+  it('validates both repoFilter quadrants: mode needs a list, a list needs a mode', () => {
+    // Declaring an allowlist without a list must not fail open to every repo.
+    expect(() =>
+      githubSettings({ token: 'ghp_x', repoFilterMode: 'allowlist' }),
+    ).toThrow(/requires a non-empty repoFilter array/);
+    // Legacy reads a list with no mode as "filter off"; promoting it to an
+    // active allowlist would answer only inside the parked repos.
+    expect(() =>
+      githubSettings({ token: 'ghp_x', repoFilter: ['octo/noisy-repo'] }),
+    ).toThrow(/requires repoFilterMode "allowlist"/);
   });
 
   it('refuses a Legacy blocklist or off-mode repoFilter instead of inverting it', () => {
@@ -444,6 +475,9 @@ describe('managed GitHub adapter config', () => {
         repoFilterMode: 'off',
       }),
     ).toThrow(/only as an allowlist/);
+    expect(() =>
+      githubSettings({ token: 'ghp_x', repoFilterMode: 'off' }),
+    ).toThrow(/only as an allowlist/);
     expect(
       githubSettings({
         token: 'ghp_x',
@@ -451,10 +485,31 @@ describe('managed GitHub adapter config', () => {
         repoFilterMode: 'allowlist',
       }).repoFilter,
     ).toEqual(['org/repo']);
-    // A parked list without repoFilter stays inert (no mode to invert).
-    expect(
-      githubSettings({ token: 'ghp_x', repoFilterMode: 'off' }).repoFilter,
-    ).toBeUndefined();
+  });
+
+  it('requires an absolute http(s) baseUrl and normalizes endpoint spellings', () => {
+    // WHATWG parses a scheme-less host:port/path with an empty hostname; it
+    // must not pass validation and fail later as "unknown scheme".
+    expect(() =>
+      githubSettings({
+        token: 'ghp_x',
+        baseUrl: 'ghe.example.com:8443/api/v3',
+      }),
+    ).toThrow(/absolute http\(s\) URL with a host/);
+    expect(() =>
+      githubSettings({ token: 'ghp_x', baseUrl: 'ftp://ghe.example.com' }),
+    ).toThrow(/absolute http\(s\) URL with a host/);
+    // Trailing slash and host case are one endpoint, one state directory.
+    const a = githubSettings({
+      token: 'ghp_x',
+      baseUrl: 'https://GHE.example.com/api/v3/',
+    }).baseUrl;
+    const b = githubSettings({
+      token: 'ghp_x',
+      baseUrl: 'https://ghe.example.com/api/v3',
+    }).baseUrl;
+    expect(a).toBe(b);
+    expect(a).toBe('https://ghe.example.com/api/v3');
   });
 
   it('preserves a valid pollInterval and accepts steer/disabled/baseUrl validation', () => {
@@ -621,6 +676,7 @@ describe('managed GitHub adapter inbound', () => {
     const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
       ...CONFIG,
       repoFilter: ['other/repo'],
+      repoFilterMode: 'allowlist',
     });
     fake.knobs.notifications = [notification()];
     fake.knobs.comments = [comment()];
@@ -1221,7 +1277,10 @@ describe('managed GitHub adapter adversarial hardening', () => {
       comment({
         id: 2,
         node_id: 'IC_team',
-        body: 'ping @bot-user/team please',
+        // The armed identity prefix makes the assertion depend on the '/'
+        // lookahead: with a foreign login the matcher would fail before the
+        // lookahead is ever consulted and the guard would ship unverified.
+        body: 'ping @bot.user+ci/team please',
       }),
     ];
     await adapter.tick();
@@ -1261,6 +1320,255 @@ describe('managed GitHub adapter adversarial hardening', () => {
     );
     await adapter.disconnect();
   });
+});
+
+describe('managed GitHub adapter round-3 hardening', () => {
+  it('honors groupPolicy open when no managed spelling is present', async () => {
+    // The plugin schema documents groupPolicy as the GitHub admission gate;
+    // ignoring it resolved to an empty allowlist that consumed every mention.
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      type: 'github',
+      token: 'ghp_test_token',
+      groupPolicy: 'open',
+    });
+    fake.knobs.notifications = [notification()];
+    fake.knobs.comments = [comment()];
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.submit[0]!.senderId).toBe('alice');
+    expect(plane.register[0]).toMatchObject({
+      policy: { senderPolicy: 'open' },
+    });
+    await adapter.disconnect();
+  });
+
+  it('keeps the parse-default groupPolicy disabled from clobbering allowedUsers', async () => {
+    // parseChannelConfig injects groupPolicy:'disabled' into EVERY channel
+    // config (config-utils.ts). Honoring that default as an admit-nothing
+    // policy would silently disable the natural allowedUsers-only config —
+    // the R1-1 control arm. 'disabled' must stay inert: the managed
+    // resolvePrivatePolicy allowlist still admits allowedUsers.
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      type: 'github',
+      token: 'ghp_test_token',
+      groupPolicy: 'disabled',
+      allowedUsers: ['alice'],
+    });
+    fake.knobs.notifications = [notification()];
+    fake.knobs.comments = [comment()];
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.submit[0]!.senderId).toBe('alice');
+    expect(plane.register[0]).toMatchObject({
+      policy: { senderPolicy: 'allowlist' },
+    });
+    await adapter.disconnect();
+  });
+
+  it('treats a bare parse-default groupPolicy disabled as inert, not a refusal', async () => {
+    // No allowedUsers: the managed allowlist default admits nothing, but the
+    // constructor must not throw on the universal parse-default.
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      type: 'github',
+      token: 'ghp_test_token',
+      groupPolicy: 'disabled',
+    });
+    fake.knobs.notifications = [notification()];
+    fake.knobs.comments = [comment()];
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    expect(plane.register[0]).toMatchObject({
+      policy: { senderPolicy: 'allowlist' },
+    });
+    await adapter.disconnect();
+  });
+
+  it('honors groupPolicy allowlist and refuses an unknown value', async () => {
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      type: 'github',
+      token: 'ghp_test_token',
+      groupPolicy: 'allowlist',
+      allowedUsers: ['alice'],
+    });
+    fake.knobs.notifications = [notification()];
+    fake.knobs.comments = [comment()];
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.register[0]).toMatchObject({
+      policy: { senderPolicy: 'allowlist' },
+    });
+    await adapter.disconnect();
+    await expect(
+      connectedAdapter(tempCwd(), {
+        type: 'github',
+        token: 'ghp_test_token',
+        groupPolicy: 'bogus',
+      }),
+    ).rejects.toThrow(/groupPolicy must be one of/);
+  });
+
+  it('lets an explicit managed spelling win over groupPolicy', async () => {
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      ...CONFIG,
+      privatePolicy: 'open',
+      groupPolicy: 'disabled',
+    });
+    fake.knobs.notifications = [notification()];
+    fake.knobs.comments = [comment({ user: { login: 'Bob' } })];
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('refuses groupPolicy pairing and per-repo groups', async () => {
+    await expect(
+      connectedAdapter(tempCwd(), { ...CONFIG, groupPolicy: 'pairing' }),
+    ).rejects.toThrow(/groupPolicy "pairing"/);
+    await expect(
+      connectedAdapter(tempCwd(), {
+        ...CONFIG,
+        groups: { 'owner/repo': { allowedUsers: ['alice'] } },
+      }),
+    ).rejects.toThrow(/per-repo "groups"/);
+  });
+
+  it('holds the watermark when an unparseable sibling shares the window', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.knobs.notifications = [
+      notification({ id: 'n-bad', updated_at: 'not-a-date' }),
+      notification({ id: 'n-ok' }),
+    ];
+    fake.knobs.comments = [comment()];
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    // The parseable sibling must not push the watermark past the bad one.
+    expect(readState(adapter).cursor.lastProcessedAt).toBeNull();
+    await adapter.disconnect();
+  });
+
+  it('drops a re-driven claim whose repo the narrowed allowlist excludes', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd, {
+      ...CONFIG,
+      repoFilter: ['a/b', 'c/d'],
+      repoFilterMode: 'allowlist',
+    });
+    await first.adapter.disconnect();
+    const entry = pendingEntry('github:IC_cd', 'alice');
+    entry.event.chatId = 'c/d';
+    entry.event.scope.chatId = 'c/d';
+    entry.event.replyContext = { owner: 'c', repo: 'd', issueNumber: 5 };
+    seedState(first.adapter, (state) => {
+      state.pending = [entry];
+    });
+    const second = await connectedAdapter(cwd, {
+      ...CONFIG,
+      repoFilter: ['a/b'],
+      repoFilterMode: 'allowlist',
+    });
+    await second.adapter.tick();
+    expect(second.plane.submit).toHaveLength(0);
+    expect(readState(second.adapter).pending).toHaveLength(0);
+    await second.adapter.disconnect();
+  });
+
+  it('drops a permanently unreadable thread and lets the window complete', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.knobs.notifications = [
+      notification(),
+      notification({
+        id: 'n-2',
+        subject: {
+          title: 'Other',
+          url: 'https://api.github.com/repos/Owner/Repo/issues/8',
+          type: 'Issue',
+        },
+      }),
+    ];
+    fake.knobs.commentsFor = (issueNumber) => {
+      if (issueNumber === 7) {
+        throw Object.assign(new Error('404 Not Found'), { status: 404 });
+      }
+      return [comment()];
+    };
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    expect(fake.markedRead).toEqual(['n-2']);
+    expect(readState(adapter).cursor.lastProcessedAt).toBe(
+      '2026-11-16T10:00:00Z',
+    );
+    // A transient (5xx) read failure still freezes the window.
+    fake.knobs.commentsFor = (issueNumber) => {
+      if (issueNumber === 7) {
+        throw Object.assign(new Error('503 Service Unavailable'), {
+          status: 503,
+        });
+      }
+      return [];
+    };
+    fake.knobs.notifications = [
+      notification({ id: 'n-3', updated_at: '2026-11-16T11:00:00Z' }),
+    ];
+    await adapter.tick();
+    expect(readState(adapter).cursor.lastProcessedAt).toBe(
+      '2026-11-16T10:00:00Z',
+    );
+    await adapter.disconnect();
+  });
+
+  it('holds the window on a bare 429 read failure instead of dropping the thread', async () => {
+    // 429 is a rate limit by status alone — no retry-after or budget headers
+    // here. The Legacy classifyThreadFailure treats it as shared: hold the
+    // window, never drop the thread and consume its notifications.
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.knobs.notifications = [notification()];
+    fake.knobs.commentsFor = () => {
+      throw Object.assign(new Error('429 Too Many Requests'), { status: 429 });
+    };
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    expect(fake.markedRead).toEqual([]);
+    expect(readState(adapter).cursor.lastProcessedAt).toBeNull();
+    await adapter.disconnect();
+  });
+
+  it('paces ticks by the client poll floor and survives a failed tick', async () => {
+    // Real timers: the adapter's delay comes from node:timers/promises,
+    // which vitest's fake timers do not intercept. The floor (1.5 s) is
+    // above the configured interval (1 s), so dropping the floor from the
+    // delay reddens the pacing assertion; deleting the per-tick catch
+    // reddens the survival assertion.
+    const sleep = (ms: number) =>
+      new Promise((resolve) => setTimeout(resolve, ms));
+    const journal: string[] = [];
+    const plane = fakeControlPlane(journal);
+    const fake = fakeDeps(journal);
+    fake.knobs.pollFloor = 1_500;
+    const adapter = new ManagedGithubAdapter({
+      name: 'gh-1',
+      cwd: tempCwd(),
+      config: { ...CONFIG, pollInterval: 1_000 },
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      // pollLoop defaults to true: the loop itself is under test.
+    });
+    await adapter.connect();
+    const polls = () =>
+      journal.filter((line) => line === 'listNotifications').length;
+    await waitUntil(() => polls() >= 1);
+    await sleep(1_200);
+    expect(polls()).toBe(1);
+    await waitUntil(() => polls() >= 2, 3_000);
+    // One failed tick is logged and survived, not fatal.
+    fake.knobs.listNotificationsError = new Error('transient');
+    await waitUntil(() => polls() >= 3, 4_000);
+    fake.knobs.listNotificationsError = undefined;
+    await waitUntil(() => polls() >= 4, 4_000);
+    await adapter.disconnect();
+    const after = polls();
+    await sleep(1_700);
+    expect(polls()).toBe(after);
+  }, 20_000);
 });
 
 describe('managed GitHub adapter outbound', () => {

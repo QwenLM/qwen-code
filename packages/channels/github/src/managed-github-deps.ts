@@ -95,6 +95,30 @@ function isDefinitiveSendRefusal(err: unknown): boolean {
   return false;
 }
 
+/**
+ * Per-thread read verdicts a retry cannot heal: the thread is gone or the
+ * token lost access (the Legacy classifyThreadFailure "permanent" arm).
+ * 401/408/429 and rate-limit answers stay transient — they are shared or
+ * retryable, and dropping threads on them would consume notifications while
+ * the real problem is global.
+ */
+export function isDefinitiveGithubReadFailure(err: unknown): boolean {
+  const status = (err as GithubRequestError).status;
+  return (
+    typeof status === 'number' &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 401 &&
+    status !== 408 &&
+    // 429 is a rate limit by status alone: GitHub (or a proxy in front of it)
+    // may send it without retry-after or budget headers. The Legacy
+    // classifyThreadFailure treats it as shared unconditionally; dropping a
+    // thread on a bare 429 would consume notifications during a global limit.
+    status !== 429 &&
+    !isRateLimitAnswer(err)
+  );
+}
+
 function sendFailure(message: string, definitive: boolean): GithubSendFailure {
   const failure = new Error(message) as GithubSendFailure;
   failure.definitive = definitive;
@@ -131,16 +155,23 @@ async function createClient(
         }
       : {}),
   });
-  let floorMs = 0;
+  // Two separate quantities, as in the Legacy channel: a duration floor from
+  // X-Poll-Interval, and an absolute cooldown deadline from rate-limit hints.
+  // Storing the hint as a never-expiring duration would let one skewed
+  // x-ratelimit-reset or bogus retry-after pin the tick loop for weeks.
+  let pollFloorMs = 0;
+  let waitUntilMs = 0;
   octokit.hook.wrap('request', async (request, options) => {
     try {
       const response = await request(options);
       const poll = Number(response.headers['x-poll-interval']);
-      if (Number.isFinite(poll) && poll > 0) floorMs = poll * 1000;
+      if (Number.isFinite(poll) && poll > 0) pollFloorMs = poll * 1000;
       return response;
     } catch (error) {
       const wait = rateLimitWaitHintMs(error);
-      if (wait !== undefined) floorMs = Math.max(floorMs, wait);
+      if (wait !== undefined) {
+        waitUntilMs = Math.max(waitUntilMs, Date.now() + wait);
+      }
       throw error;
     }
   });
@@ -214,7 +245,11 @@ async function createClient(
         );
       }
     },
-    pollIntervalFloorMs: () => Math.min(floorMs, MAX_TIMER_DELAY_MS),
+    pollIntervalFloorMs: () =>
+      Math.min(
+        Math.max(pollFloorMs, waitUntilMs - Date.now(), 0),
+        MAX_TIMER_DELAY_MS,
+      ),
     disconnect: () => {
       dispatcher?.destroy();
     },

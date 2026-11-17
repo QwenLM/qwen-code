@@ -67,7 +67,10 @@ deps 注入、绝不驱动模型、每个 claim 先持久化再产生副作用�
 - **认证仅 token。**`token` 必填（secret 配置字段，凭据规则镜像 DingTalk：
   非空、拒绝 CR/LF/NUL）。managed 路径拒绝 `useLocalGh`：gh CLI 登录态是机器级
   身份，不属于租户化部署。`baseUrl` 保持可配（GitHub Enterprise 与封闭 mock
-  端点；默认 `https://api.github.com`）。
+  端点；默认 `https://api.github.com`）。它必须是带 host 的绝对 `http(s)`
+  URL——裸 `host:port/path` 会被解析成带畸形 scheme、空 host 的 URL，从而
+  静默指向虚无——并归一化为 `origin + pathname`、剥掉尾部斜杠，使仅大小写
+  或尾斜杠不同的端点写法键控同一状态目录。
 - **账号身份**是 connect 时 `GET /user` 解析的 bot login；`accountGeneration`
   初值 1，无 epoch 事件（与 DingTalk 相同）。换 token 到不同 login 会以控制面
   `channel_identity_conflict` 注册拒绝可见地 surfaced。
@@ -76,18 +79,39 @@ deps 注入、绝不驱动模型、每个 claim 先持久化再产生副作用�
   subject URL 提取。一个 repo + issue/PR 号 = 一条路由 = 一个 Session。
 - **Policy** 是 email 形状的平铺 `senderPolicy`（allowlist / open / disabled，
   默认 allowlist），作用于小写 GitHub login；`allowedUsers` 是 allowlist 来源，
-  `dispatchMode` 来自配置（默认 `followup`）。`pairing` 显式拒绝，镜像
-  DingTalk。Legacy 的 per-repo `groups` 映射不搬；可选 `repoFilter` allowlist
-  （小写 `owner/repo` 条目）过滤哪些仓库可准入事件。allowlist 必须非空且
-  每个条目符合 Legacy 的 `owner/repo` 形状——空表或畸形表会在报告 running
-  的同时静默丢弃全部事件。携带 `repoFilter` 且 Legacy `repoFilterMode` 为
-  `blocklist` 或 `off` 的配置被拒绝而非重解释：把屏蔽名单读成 allowlist
-  会让 bot 只在操作者声明屏蔽的仓库回复。sender 门在 adapter 侧执行，与
-  email 的 `senderAllowed` 同层。
+  `dispatchMode` 来自配置（默认 `followup`）。解析出的 policy 来自
+  `resolvePrivatePolicy`（`privatePolicy`，否则 `disabled` 的 `dmPolicy`，
+  否则 `senderPolicy`，否则 allowlist）。`pairing` 显式拒绝——无论拼作
+  `groupPolicy` 还是从 `privatePolicy` 解析而来——因为 managed 形状没有
+  pairing 分支，把它强转成空 allowlist 会在报告 running 的同时跳过全部评论。
+  Legacy 的 per-repo `groups` 映射不搬：非空 `groups` 对象被拒绝而非静默丢弃，
+  因为丢弃它会准入操作者排除的 sender（或丢掉其放行的 sender）。
+- **`groupPolicy` 被尊重而非忽略。** 插件自身 schema 把 `groupPolicy` 文档化
+  为 GitHub 准入门。当两个 managed 拼写（`privatePolicy` / `senderPolicy`）
+  都缺失时，主动的 `groupPolicy`（`open` / `allowlist`）映射到
+  `senderPolicy`；除 `disabled` 外的其它取值被拒绝。配置了
+  `groupPolicy: "open"` 的 channel 不得解析成空 allowlist 而静默消费每条
+  mention。**`disabled` 保持 inert：** `parseChannelConfig` 把每个 channel 的
+  `groupPolicy` 默认成 `disabled`，因此它必须保留 managed
+  `resolvePrivatePolicy` 的结果，而不是把 `allowedUsers` allowlist 砸成
+  「什么都不准入」——自然的「仅配 allowedUsers」配置仍准入其列出的 sender，
+  注入的默认值也不是拒绝触发器。
+- **`repoFilter` 是显式 allowlist。** 可选 `repoFilter`（小写 `owner/repo`
+  条目）过滤哪些仓库可准入事件。它仅支持 allowlist，且模式必须双向显式声明：
+  `repoFilterMode: "allowlist"` 而无 `repoFilter` 数组被拒绝；有 `repoFilter`
+  数组而无 `repoFilterMode: "allowlist"` 也被拒绝。其它 `repoFilterMode`
+  （`blocklist` / `off`）被拒绝而非重解释——把屏蔽名单读成 allowlist 会让
+  bot 只在操作者声明屏蔽的仓库回复。列表必须非空且每个条目符合 Legacy 的
+  `owner/repo` 形状；空表或畸形表会在报告 running 的同时静默丢弃全部事件。
+  sender 门在 adapter 侧执行，与 email 的 `senderAllowed` 同层。
 - **轮询下限。** 轮询间隔尊重 GitHub 的 `X-Poll-Interval` 与限流等待提示
   （`retry-after`、`x-ratelimit-reset`），并封顶于 Node 的 32 位定时器上限
   ——即 Legacy 的 `MAX_TIMER_DELAY_MS` 守卫。超过 2^31-1 ms 的无帽提示会被
-  Node 钳成约 1 ms，把限流冷却变成立即重试风暴。
+  Node 钳成约 1 ms，把限流冷却变成立即重试风暴。两类提示存为不同量：
+  `X-Poll-Interval` 是**时长**下限，而限流提示是**绝对冷却截止时间**
+  （`now + wait`）。有效下限为 `max(pollFloor, deadline - now, 0)`，因此冷却
+  随时钟前进而过期。把限流提示存成永不过期的时长，会让一个偏斜的
+  `x-ratelimit-reset` 或伪造的 `retry-after` 把 tick 循环钉死数周。
 
 ### 入站管线（仅 mention）
 
@@ -107,11 +131,21 @@ deps 注入、绝不驱动模型、每个 claim 先持久化再产生副作用�
    pending（持久化）。
 6. 一个通知线程的全部事件提交后**且**其评论收集完整完成，才 mark read。
    被 32 条 claim 上限截断的收集留有未收集评论：该线程保持未读、窗口冻结，
-   下轮收集剩余部分，而不是消费一个 mention 从未 stage 的通知。
+   下轮收集剩余部分，而不是消费一个 mention 从未 stage 的通知。**poison
+   逃逸：** 评论读取返回确定性、不可修复拒绝的线程（除 401/408/429 且非
+   限流应答之外的 4xx——已删除或不可访问的线程）会永远返回同一拒绝，把水位
+   冻结到 channel 生命周期结束。它被可见地丢弃（其 mention 不可恢复）、跳过
+   mark-read，且**不**冻结窗口。瞬态读取失败（401/408/429、限流、5xx、网络）
+   仍冻结窗口，因为在共享或可重试问题上丢弃线程，会在真正问题是全局性时
+   消费掉通知。429 仅凭状态码即被排除——GitHub 或其前置代理可能不带
+   `retry-after` 或预算头就返回它——镜像 Legacy `classifyThreadFailure` 的
+   「shared」分支。
 7. 窗口内线程全部 mark read 后才推进游标水位（持久化）。mark-read 失败冻结
-   窗口；下轮重列，去重吸收重叠。不可解析的 `updated_at` 同样冻结窗口：
-   持久化它会让后续每个 tick 的 `since` 计算抛 RangeError、重启时 `load()`
-   拒绝，而出站继续运行。
+   窗口；下轮重列，去重吸收重叠。水位是整个窗口的单一共享值，因此**任何**
+   带不可解析 `updated_at` 的通知——哪怕是被过滤掉或被丢弃的兄弟——都冻结
+   整个窗口：持久化它会让后续每个 tick 的 `since` 计算抛 RangeError、重启时
+   `load()` 拒绝，而出站继续运行。持久化由一个局部标志门控；仅靠外层完整性
+   检查并不足够。
 
 事件映射：
 
@@ -141,6 +175,12 @@ deps 注入、绝不驱动模型、每个 claim 先持久化再产生副作用�
 对重复列举的正确性不依赖 dispatched 环：控制面 `platformEventId` 幂等对任何
 重提交回放同一 `inputId`。环（有界、尾截断）只是省工过滤器；Legacy 的秒边界
 `boundaryComments` 机制不需要——重列的同秒评论是幂等重放，不是第二个输入。
+
+重驱复检的是**当前** policy，而非 stage 时刻的 policy：每条已持久化的 pending
+事件在提交前都同时过 `senderAllowed` 与 `repoAllowed`。在更宽 sender policy 或
+repo allowlist 下 stage 的 claim，不得驱动一个 Session——或发进一个仓库——
+而操作者此后已将其排除。被拒的 claim 可见地丢弃（记入 dispatched 环以免重新
+stage），而不是重放陈旧准入。
 
 ### 出站投递与回执
 
@@ -236,10 +276,18 @@ CONNECT 日志点名目标 authority；直连请求会留下空日志）。
   pending 重驱；mark-read 仅在准入后发生、mark-read 失败冻结水位；收集被
   claim 上限截断的线程即使其已 stage 的 claim 同 tick 全部结算也绝不
   mark read；instance-scoped 停摆、registration-refusal 重注册、
-  ownership-loss 拒绝各自红其用例。
+  ownership-loss 拒绝各自红其用例。round-3 硬化见证：主动 `groupPolicy`
+  （open/allowlist）映射到 sender policy，而 parse 默认 `disabled` 保持
+  inert、仍准入 `allowedUsers` allowlist（`pairing` / 非空 `groups` 被拒绝）；
+  `repoFilter` 两个象限（有模式无列表、有列表无模式）均被拒绝；非绝对或非
+  `http(s)` 的 `baseUrl` 被拒绝且端点写法归一化；确定性不可读线程被丢弃而
+  不冻结窗口，瞬态读取失败仍冻结；任何窗口兄弟的不可解析 `updated_at` 冻结
+  共享水位；收窄后的 repo allowlist 排除某仓库时其重驱 claim 被丢弃；每个
+  台账在恰好上限处被接受；真实定时器 tick 循环尊重高于配置间隔的轮询下限。
 - deps 见证对本地 fake GitHub HTTP 端点（真实 Octokit）：分页、`since` 窗口、
   失败分类（401/404/422 确定性，限流/5xx/网络含糊）、代理遍历（CONNECT
-  隧道经代理转发）与 disconnect 时 dispatcher 销毁。
+  隧道经代理转发）与 disconnect 时 dispatcher 销毁；限流冷却随时钟前进而
+  过期，而 `X-Poll-Interval` 时长下限与时钟无关。
 - 真实控制面链路（对运行中的 Java server 走 register → inbound → Session
   轮次 → claim → receipt）与 GitHub fault-gate driver 变体是后续项，不是合并
   门，镜像 DingTalk 切片的 live-tenant smoke 姿态。
@@ -254,5 +302,10 @@ CONNECT 日志点名目标 authority；直连请求会留下空日志）。
 4. 一段 = 一条评论；`providerMessageId` 是真实评论 id；限流是瞬态
    （`unknown`）而非终态。
 5. 平铺 sender policy 加可选 repo allowlist（非空、Legacy `owner/repo` 形状；
-   Legacy `blocklist`/`off` mode 配置拒绝而非重解释）；拒绝 pairing；v1 无
-   哨兵与 reaction 面。
+   allowlist 模式必须双向显式声明，`blocklist`/`off` 配置拒绝而非重解释）。
+   无 managed policy 拼写时尊重主动 `groupPolicy`（open/allowlist），parse 默认
+   `disabled` 保持 inert；拒绝 `pairing` 与非空 per-repo `groups`。v1 无哨兵
+   与 reaction 面。
+6. 轮询下限把时长（`X-Poll-Interval`）与绝对限流冷却截止时间分开，偏斜提示
+   无法钉死循环；确定性不可读线程逃逸窗口而非永久冻结它，任何不可解析的
+   窗口兄弟冻结共享水位。

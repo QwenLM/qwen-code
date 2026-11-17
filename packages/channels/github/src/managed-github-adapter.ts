@@ -21,6 +21,7 @@ import {
   ManagedGithubStateStore,
 } from './managed-state.js';
 import type { ManagedGithubState, ManagedReceipt } from './managed-state.js';
+import { isDefinitiveGithubReadFailure } from './managed-github-deps.js';
 import { testBotMention } from './mention.js';
 
 export type { ManagedReceipt } from './managed-state.js';
@@ -157,15 +158,27 @@ export function githubSettings(
   if (!validCredential(token))
     throw new Error('GitHub channel requires a token.');
   const rawBaseUrl = config['baseUrl'];
-  const baseUrl =
+  const baseUrlRaw =
     typeof rawBaseUrl === 'string' && rawBaseUrl.trim()
       ? rawBaseUrl.trim()
       : 'https://api.github.com';
+  let parsedBase: URL;
   try {
-    new URL(baseUrl);
+    parsedBase = new URL(baseUrlRaw);
   } catch {
     throw new Error('GitHub channel baseUrl is not a valid URL.');
   }
+  // WHATWG parses a scheme-less "host:port/path" with an empty hostname and a
+  // bogus protocol; it would fail identity resolution as "unknown scheme"
+  // behind the token-pointing message. Require an absolute http(s) URL.
+  if (!/^https?:$/.test(parsedBase.protocol) || !parsedBase.hostname) {
+    throw new Error(
+      'GitHub channel baseUrl must be an absolute http(s) URL with a host.',
+    );
+  }
+  // Normalize before the state-directory hash: trailing slash and host case
+  // are the same endpoint and must key one state directory, not two owners.
+  const baseUrl = `${parsedBase.origin}${parsedBase.pathname.replace(/\/+$/, '')}`;
   const rawInterval = config['pollInterval'];
   const pollInterval = Number(rawInterval ?? DEFAULT_POLL_INTERVAL);
   const intervalAccepted =
@@ -173,16 +186,30 @@ export function githubSettings(
     pollInterval >= MIN_POLL_INTERVAL &&
     pollInterval <= MAX_POLL_INTERVAL;
   const rawRepoFilter = config['repoFilter'];
+  const repoFilterMode = config['repoFilterMode'];
   let repoFilter: string[] | undefined;
+  if (repoFilterMode !== undefined && repoFilterMode !== 'allowlist') {
+    // The shared channel config also serves the Legacy channel, whose
+    // blocklist excludes the listed repos and whose 'off' mode ignores the
+    // list. Reading either as an allowlist would silently invert the
+    // operator's intent — answering only in the repos they blocked.
+    throw new Error(
+      'The managed GitHub path supports repoFilter only as an allowlist; set repoFilterMode to "allowlist".',
+    );
+  }
+  if (repoFilterMode === 'allowlist' && rawRepoFilter === undefined) {
+    // Declaring an allowlist without a list must not fail open to every repo.
+    throw new Error(
+      'GitHub channel repoFilterMode "allowlist" requires a non-empty repoFilter array.',
+    );
+  }
   if (rawRepoFilter !== undefined) {
-    const mode = config['repoFilterMode'];
-    if (mode !== undefined && mode !== 'allowlist') {
-      // The shared channel config also serves the Legacy channel, whose
-      // blocklist excludes the listed repos and whose 'off' mode ignores the
-      // list. Reading either as an allowlist would silently invert the
-      // operator's intent — answering only in the repos they blocked.
+    if (repoFilterMode === undefined) {
+      // Legacy reads a list with no mode as "filter off"; promoting it to an
+      // active allowlist would answer only inside the parked repos. Require
+      // the explicit managed spelling instead of guessing.
       throw new Error(
-        'The managed GitHub path supports repoFilter only as an allowlist; remove repoFilterMode or set it to "allowlist".',
+        'GitHub channel repoFilter requires repoFilterMode "allowlist" on the managed path.',
       );
     }
     if (
@@ -274,7 +301,29 @@ export class ManagedGithubAdapter {
 
   constructor(options: ManagedGithubAdapterOptions) {
     this.settings = githubSettings(options.config);
-    const senderPolicy = resolvePrivatePolicy(options.config);
+    const config = options.config;
+    const groupPolicy = config['groupPolicy'];
+    if (groupPolicy === 'pairing') {
+      // Same "skip every comment while reporting running" hazard as
+      // privatePolicy pairing: the managed policy shape has no pairing arm.
+      throw new Error(
+        'The managed GitHub path does not support groupPolicy "pairing"; use allowedUsers or groupPolicy "open"/"disabled".',
+      );
+    }
+    const groups = config['groups'];
+    if (
+      groups &&
+      typeof groups === 'object' &&
+      Object.keys(groups).length > 0
+    ) {
+      // Per-repo sender lists cannot be represented by the flat managed
+      // policy; silently dropping them would admit senders the operator
+      // excluded (or drop ones they allowed).
+      throw new Error(
+        'The managed GitHub path does not support per-repo "groups"; configure allowedUsers instead.',
+      );
+    }
+    let senderPolicy = resolvePrivatePolicy(config);
     if (senderPolicy === 'pairing') {
       // The managed policy shape has no pairing arm; silently coercing it to
       // an empty allowlist would skip every comment while reporting running.
@@ -282,7 +331,28 @@ export class ManagedGithubAdapter {
         'The managed GitHub path does not support privatePolicy "pairing"; use allowedUsers, open, or disabled.',
       );
     }
-    const allowed = options.config['allowedUsers'];
+    // The plugin's own schema documents groupPolicy as the GitHub admission
+    // gate. When no managed spelling (privatePolicy/senderPolicy) is present,
+    // honor an active groupPolicy instead of ignoring it: a channel configured
+    // groupPolicy "open" must not resolve to an empty allowlist and silently
+    // consume every mention. But parseChannelConfig defaults EVERY channel's
+    // groupPolicy to "disabled" (config-utils.ts), so "disabled" must stay
+    // inert — keep the managed resolvePrivatePolicy result — rather than
+    // clobber an allowedUsers allowlist into admit-nothing.
+    if (
+      config['privatePolicy'] === undefined &&
+      config['senderPolicy'] === undefined &&
+      groupPolicy !== undefined
+    ) {
+      if (groupPolicy === 'open' || groupPolicy === 'allowlist') {
+        senderPolicy = groupPolicy;
+      } else if (groupPolicy !== 'disabled') {
+        throw new Error(
+          'GitHub channel groupPolicy must be one of: allowlist, open, disabled.',
+        );
+      }
+    }
+    const allowed = config['allowedUsers'];
     this.policy = {
       adapter: 'github',
       senderPolicy:
@@ -294,8 +364,7 @@ export class ManagedGithubAdapter {
             .filter((entry): entry is string => typeof entry === 'string')
             .map((entry) => entry.trim().toLowerCase())
         : [],
-      dispatchMode:
-        options.config['dispatchMode'] === 'steer' ? 'steer' : 'followup',
+      dispatchMode: config['dispatchMode'] === 'steer' ? 'steer' : 'followup',
     };
     this.store = new ManagedGithubStateStore(
       options.name,
@@ -478,6 +547,7 @@ export class ManagedGithubAdapter {
     // read only when every comment it produced was fully collected.
     let windowComplete = true;
     const processedThreads = new Set<string>();
+    const droppedThreads = new Set<string>();
     for (const notification of kept) {
       if (!this.running) return;
       if (state.pending.length >= MANAGED_GITHUB_PENDING_LIMIT) break;
@@ -491,6 +561,17 @@ export class ManagedGithubAdapter {
           since,
         );
       } catch (error) {
+        if (isDefinitiveGithubReadFailure(error)) {
+          // Poison escape: a deleted or inaccessible thread answers the same
+          // refusal forever; without this it freezes the watermark for the
+          // life of the channel. Drop it visibly — its mentions are
+          // unrecoverable — and skip its mark-read (which would also fail).
+          droppedThreads.add(notification.id);
+          this.log(
+            `Managed GitHub drops unreadable thread ${target.chatId}#${target.issueNumber}: ${String(error)}`,
+          );
+          continue;
+        }
         windowComplete = false;
         this.log(
           `Managed GitHub could not read comments for ${target.chatId}#${target.issueNumber}: ${String(error)}`,
@@ -580,6 +661,7 @@ export class ManagedGithubAdapter {
     );
     for (const notification of kept) {
       if (!this.running) return;
+      if (droppedThreads.has(notification.id)) continue;
       if (!processedThreads.has(notification.id)) {
         windowComplete = false;
         continue;
@@ -599,13 +681,16 @@ export class ManagedGithubAdapter {
     }
     if (windowComplete && notifications.length > 0) {
       let watermark = state.cursor.lastProcessedAt;
+      // The outer windowComplete was already evaluated to enter this block;
+      // a local flag is what actually gates the persist below.
+      let unparseable = false;
       for (const notification of notifications) {
         const updated = Date.parse(notification.updated_at);
         if (Number.isNaN(updated)) {
           // Persisting an unparseable watermark would throw RangeError on
           // every later tick's since computation and fail load() on restart.
           // Hold the window instead; outbound keeps moving.
-          windowComplete = false;
+          unparseable = true;
           this.log(
             `Managed GitHub notification ${notification.id} has an unparseable updated_at; the window holds.`,
           );
@@ -615,7 +700,11 @@ export class ManagedGithubAdapter {
           watermark = notification.updated_at;
         }
       }
-      if (watermark && watermark !== state.cursor.lastProcessedAt) {
+      if (
+        !unparseable &&
+        watermark &&
+        watermark !== state.cursor.lastProcessedAt
+      ) {
         state.cursor.lastProcessedAt = watermark;
         this.persist();
       }
@@ -733,11 +822,17 @@ export class ManagedGithubAdapter {
     );
     for (const entry of ordered) {
       if (!this.running) return;
-      if (!this.senderAllowed(entry.event.senderId)) {
+      if (
+        !this.senderAllowed(entry.event.senderId) ||
+        !this.repoAllowed(entry.event.chatId)
+      ) {
         // The policy moved on since the claim: the persisted event drops
         // visibly rather than drive a Session the current policy forbids.
+        // The repo allowlist gets the same re-check as the sender policy —
+        // a claim staged under a wider filter must not post into a repo the
+        // operator has since excluded.
         this.log(
-          `Managed GitHub event ${entry.eventId} is refused by the current sender policy; its claim drops.`,
+          `Managed GitHub event ${entry.eventId} is refused by the current sender policy or repo allowlist; its claim drops.`,
         );
         state.pending = state.pending.filter(
           (p) => p.eventId !== entry.eventId,

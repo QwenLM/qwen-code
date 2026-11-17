@@ -170,6 +170,30 @@ describe('validManagedGithubState', () => {
     ).toBe(false);
   });
 
+  it('accepts each ledger at its exact cap (the adapter steady state)', () => {
+    // The adapter trims each ledger to exactly its cap before persisting;
+    // tightening any validator bound from <= to < would make load() reject
+    // the adapter's own steady-state file and refuse to start.
+    const state = freshState();
+    state.cursor.dispatchedComments = Array.from(
+      { length: DISPATCHED_COMMENTS_LIMIT },
+      (_, i) => `IC_${i}`,
+    );
+    state.pending = Array.from(
+      { length: MANAGED_GITHUB_PENDING_LIMIT },
+      (_, i) => ({
+        eventId: `github:IC_${i}`,
+        event: event(`github:IC_${i}`),
+        notificationThreadId: 'n-1',
+      }),
+    );
+    state.outbound = Array.from({ length: MANAGED_OUTBOUND_LIMIT }, (_, i) => ({
+      deliveryId: `d-${i}`,
+      ordinal: i,
+    }));
+    expect(validManagedGithubState(state)).toBe(true);
+  });
+
   it('rejects a bad version or generation', () => {
     expect(validManagedGithubState({ ...freshState(), version: 2 })).toBe(
       false,

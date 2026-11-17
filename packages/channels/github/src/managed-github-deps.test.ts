@@ -278,7 +278,9 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
       expect(failure).toBeInstanceOf(Error);
       expect(failure.definitive).toBe(definitive);
       if (headers['retry-after'] === '30') {
-        expect(client.pollIntervalFloorMs()).toBeGreaterThanOrEqual(30_000);
+        // The cooldown is an absolute deadline; a few ms elapse between the
+        // request and the assertion.
+        expect(client.pollIntervalFloorMs()).toBeGreaterThanOrEqual(29_000);
       }
     },
   );
@@ -446,6 +448,40 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
     await expect(client.markThreadRead('not-numeric')).rejects.toThrow(
       /not numeric/,
     );
+  });
+
+  it('lets a rate-limit cooldown expire instead of pinning the loop', async () => {
+    // The hint is an absolute deadline, not a never-expiring duration: one
+    // skewed reset or bogus retry-after must not silence polling for weeks.
+    const { client } = await clientFor(() => ({
+      status: 403,
+      headers: { 'x-ratelimit-remaining': '0', 'retry-after': '3600' },
+      body: { message: 'rate limited' },
+    }));
+    await client
+      .postComment('Owner', 'Repo', 7, 'reply')
+      .catch(() => undefined);
+    expect(client.pollIntervalFloorMs()).toBeGreaterThanOrEqual(3_599_000);
+    const realNow = Date.now();
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(realNow + 3_600_001);
+    try {
+      expect(client.pollIntervalFloorMs()).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+    // The X-Poll-Interval duration floor is independent of the clock.
+    const polled = await clientFor(() => ({
+      status: 200,
+      headers: { 'x-poll-interval': '60' },
+      body: [],
+    }));
+    await polled.client.listNotifications('2026-11-16T09:59:00Z');
+    const spy2 = vi.spyOn(Date, 'now').mockReturnValue(realNow + 86_400_000);
+    try {
+      expect(polled.client.pollIntervalFloorMs()).toBe(60_000);
+    } finally {
+      spy2.mockRestore();
+    }
   });
 
   it('serializes managed instances of one state directory with a lock', async () => {
