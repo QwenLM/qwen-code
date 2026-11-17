@@ -20,7 +20,12 @@ interface CreateHealthRoutesDeps {
     'hostname' | 'requireAuth' | 'maxConnections' | 'maxSseConnections'
   >;
   workspaceRegistry: WorkspaceRegistry;
-  getActiveSseCount: () => number;
+  /**
+   * Aggregate long-lived stream occupancy (every surface, issue #17554) —
+   * the same scope as the admission cap paired below, so a probe sees
+   * ACP/generation saturation against the cap that refuses it.
+   */
+  getConnectedClients: () => number;
   getRateLimiter: () => RateLimiterInstance | undefined;
 }
 
@@ -30,7 +35,7 @@ interface HealthRoutes {
 }
 
 export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
-  const { opts, workspaceRegistry, getActiveSseCount, getRateLimiter } = deps;
+  const { opts, workspaceRegistry, getConnectedClients, getRateLimiter } = deps;
 
   // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
   // the canonical liveness-probe case (k8s/Compose probes don't
@@ -137,7 +142,7 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
         // its own freshness floor. `oldestReportAt` is the oldest *covered*
         // report, so this never disagrees with the grade above.
         activeWorkStaleMs: oldestReportAt === null ? 0 : now - oldestReportAt,
-        connectedClients: getActiveSseCount(),
+        connectedClients: getConnectedClients(),
         // Effective SSE admission cap paired with the live occupancy above
         // so a probe can see saturation approaching (null = unlimited).
         connectedClientsMax: sseMaxConnections(

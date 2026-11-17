@@ -33,7 +33,7 @@ function makeApp(workspaceRegistry: WorkspaceRegistry) {
   const { register } = createHealthRoutes({
     opts: { hostname: '127.0.0.1', requireAuth: false },
     workspaceRegistry,
-    getActiveSseCount: () => 0,
+    getConnectedClients: () => 0,
     getRateLimiter: () => undefined,
   });
   register(app);

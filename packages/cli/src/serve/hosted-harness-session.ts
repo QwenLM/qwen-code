@@ -230,6 +230,9 @@ import {
   sanitizeDaemonLogLine,
   writeStderrLineSafe,
 } from '../utils/stdioHelpers.js';
+import type { DaemonLogger } from './daemon-logger.js';
+import type { SseAdmissionCaps } from './daemon-status.js';
+import { checkSseAdmission, countSseStream } from './sse-occupancy.js';
 import { markAccessLogError } from './server/access-log.js';
 import {
   HostedModelUnavailableError,
@@ -4576,6 +4579,10 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
+  deps?: {
+    sseAdmissionCaps?: SseAdmissionCaps;
+    daemonLog?: DaemonLogger;
+  },
 ): {
   owns: (id: string) => boolean;
   accepting: () => boolean;
@@ -13255,6 +13262,19 @@ export function registerHostedHarnessSessionRoutes(
       after > session.managed.authority.committedSequence
     )
       return error(res, 400, 'invalid_event_cursor');
+    if (
+      !checkSseAdmission({
+        surface: 'hostedEvents',
+        req,
+        res,
+        caps: deps?.sseAdmissionCaps,
+        daemonLog: deps?.daemonLog,
+        logContext: { sessionId: req.params['id'] },
+      })
+    ) {
+      return;
+    }
+    countSseStream('hostedEvents', req, res);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-store');
     // Disable proxy buffering (nginx): the keepalives below exist to put

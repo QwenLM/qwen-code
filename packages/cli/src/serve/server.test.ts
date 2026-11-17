@@ -7,7 +7,11 @@
 import { existsSync, realpathSync, promises as fsp } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
-import { createServer, type ServerResponse } from 'node:http';
+import {
+  createServer,
+  request as httpRequest,
+  type ServerResponse,
+} from 'node:http';
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
@@ -243,7 +247,13 @@ import {
   LIVE_HOST_PROTOCOL_VERSION,
 } from './live/types.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
-import { getActiveSseCount } from './routes/sse-events.js';
+import express from 'express';
+import {
+  getActiveSseCount,
+  registerSseEventsRoutes,
+} from './routes/sse-events.js';
+import { resolveSseAdmissionCaps } from './daemon-status.js';
+import { getSseOccupancy } from './sse-occupancy.js';
 import { EventBus } from '@qwen-code/acp-bridge/eventBus';
 import { TEST_TLS_CERT, TEST_TLS_KEY } from './test-tls-cert.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
@@ -29134,6 +29144,100 @@ describe('createServeApp', () => {
       expect(unsupported.body.code).toBe('btw_stream_not_supported');
     });
 
+    it('counts the BTW stream in the shared occupancy and refuses at the cap', async () => {
+      let finish!: () => void;
+      const park = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const bridge = streamingBridge();
+      bridge.generateSessionBtwStream = vi.fn(async function* () {
+        yield {
+          type: 'delta' as const,
+          requestId: 'upstream',
+          seq: 0,
+          text: 'partial',
+        };
+        await park;
+        yield {
+          type: 'done' as const,
+          requestId: 'upstream',
+          model: 'main',
+          modelSource: 'main' as const,
+        };
+      });
+      let port = baseOpts.port;
+      const app = createServeApp(
+        {
+          ...baseOpts,
+          token: 'btw-cap-token',
+          maxConnections: 10,
+          maxSseConnections: 1,
+        },
+        () => port,
+        { bridge },
+      );
+      const server = createServer(app);
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+      port = (server.address() as AddressInfo).port;
+      const before = getSseOccupancy();
+      const controller = new AbortController();
+      const submit = (requestId: string) =>
+        fetch(`http://127.0.0.1:${port}/session/session-A/btw/stream`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Host: `127.0.0.1:${port}`,
+            Authorization: 'Bearer btw-cap-token',
+            'X-Qwen-Client-Id': 'client-1',
+          },
+          body: JSON.stringify({ question: 'Why?', requestId }),
+          signal: controller.signal,
+        });
+      try {
+        const first = await submit('request-cap');
+        expect(first.status).toBe(200);
+        expect(first.headers.get('content-type')).toContain(
+          'text/event-stream',
+        );
+        await vi.waitFor(
+          () => {
+            expect(getSseOccupancy().bySurface.artifactLibrary).toBe(
+              before.bySurface.artifactLibrary + 1,
+            );
+          },
+          { timeout: 5_000 },
+        );
+
+        // The parked stream holds the only admission slot; a second BTW
+        // stream must get the shared explicit refusal, not a silent stall.
+        const second = await submit('request-cap-2');
+        expect(second.status).toBe(503);
+        expect(second.headers.get('retry-after')).toBe('5');
+        expect(await second.json()).toEqual({
+          error:
+            'Daemon SSE connection limit reached (1/1). ' +
+            'Retry after the Retry-After interval.',
+          code: 'sse_connection_limit_exceeded',
+          limit: 1,
+          active: 1,
+          scope: 'daemon',
+        });
+      } finally {
+        finish();
+        controller.abort();
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().total).toBe(before.total);
+        },
+        { timeout: 5_000 },
+      );
+    });
+
     it('rejects invalid streaming cancellation IDs without requiring a question', async () => {
       const bridge = streamingBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -50939,4 +51043,623 @@ describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () 
     await first.body!.cancel();
     await second.body!.cancel();
   });
+});
+
+describe('Unified SSE admission/occupancy (issue #17554)', () => {
+  let handle: RunHandle | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+  });
+
+  function parkedBridge() {
+    const bridge = fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        await new Promise(() => {});
+      },
+      async *generateSessionContentImpl() {
+        yield {
+          type: 'started',
+          requestId: 'req-uni',
+          model: 'qwen-plus',
+          modelSource: 'fast',
+        };
+        await new Promise(() => {});
+      },
+    });
+    bridge.generateWorkspaceContent = async function* () {
+      yield {
+        type: 'started',
+        requestId: 'req-uni-ws',
+        model: 'qwen-plus',
+        modelSource: 'fast',
+      };
+      await new Promise(() => {});
+    };
+    return bridge;
+  }
+
+  async function statusOf(port: number) {
+    return (await (
+      await fetch(`http://127.0.0.1:${port}/daemon/status?detail=full`)
+    ).json()) as {
+      limits: {
+        maxSseConnections: number | null;
+        maxSseConnectionsPerListener: Record<string, number | null>;
+      };
+      runtime: {
+        transport: {
+          restSseActive: number;
+          streamOccupancy: {
+            total: number;
+            bySurface: Record<string, number>;
+            byListener: Record<string, number>;
+          };
+        };
+      };
+    };
+  }
+
+  async function openInitializedWs(port: number): Promise<WebSocket> {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`);
+    await new Promise<void>((resolve, reject) => {
+      ws.on('error', reject);
+      ws.on('open', () =>
+        ws.send(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: { protocolVersion: 1 },
+          }),
+        ),
+      );
+      ws.on('message', (raw) => {
+        const msg = JSON.parse(String(raw)) as {
+          id?: number;
+          result?: unknown;
+        };
+        if (msg.id === 1 && msg.result) resolve();
+      });
+    });
+    return ws;
+  }
+
+  /** Raw upgrade probe: resolves the HTTP status the upgrade received. */
+  function wsUpgradeProbe(
+    port: number,
+  ): Promise<{ status: number; retryAfter: string | undefined }> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({
+        hostname: '127.0.0.1',
+        port,
+        path: '/acp',
+        headers: {
+          Connection: 'Upgrade',
+          Upgrade: 'websocket',
+          'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+          'Sec-WebSocket-Version': '13',
+        },
+      });
+      req.on('upgrade', (_res, socket) => {
+        socket.destroy();
+        resolve({ status: 101, retryAfter: undefined });
+      });
+      req.on('response', (res) => {
+        res.resume();
+        resolve({
+          status: res.statusCode ?? 0,
+          retryAfter: res.headers['retry-after'],
+        });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  async function acpInitialize(port: number): Promise<string> {
+    const res = await fetch(`http://127.0.0.1:${port}/acp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }),
+    });
+    expect(res.status).toBe(200);
+    const connId = res.headers.get('acp-connection-id');
+    expect(connId).toBeTruthy();
+    await res.json();
+    return connId!;
+  }
+
+  it('counts every stream surface in the shared occupancy and releases on close', async () => {
+    const before = getSseOccupancy();
+    const beforeRest = getActiveSseCount();
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const rest = await fetch(
+      `http://127.0.0.1:${port}/session/sess-uni/events`,
+    );
+    expect(rest.status).toBe(200);
+    const generation = await fetch(
+      `http://127.0.0.1:${port}/session/sess-uni/generate`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'hello' }),
+      },
+    );
+    expect(generation.status).toBe(200);
+    const workspaceGeneration = await fetch(
+      `http://127.0.0.1:${port}/workspace/generate`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'hello' }),
+      },
+    );
+    expect(workspaceGeneration.status).toBe(200);
+    const connId = await acpInitialize(port);
+    const acpSse = await fetch(`http://127.0.0.1:${port}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+      },
+    });
+    expect(acpSse.status).toBe(200);
+    const ws = await openInitializedWs(port);
+
+    const status = await statusOf(port);
+    const occupancy = status.runtime.transport.streamOccupancy;
+    expect(occupancy.total).toBe(before.total + 5);
+    expect(occupancy.bySurface['restEvents']).toBe(
+      before.bySurface.restEvents + 1,
+    );
+    expect(occupancy.bySurface['generation']).toBe(
+      before.bySurface.generation + 2,
+    );
+    expect(occupancy.bySurface['acpSse']).toBe(before.bySurface.acpSse + 1);
+    expect(occupancy.bySurface['acpWs']).toBe(before.bySurface.acpWs + 1);
+    expect(occupancy.byListener['primary']).toBe(before.byListener.primary + 5);
+    // restSseActive keeps its REST-only semantics.
+    expect(status.runtime.transport.restSseActive).toBe(beforeRest + 1);
+    expect(getActiveSseCount()).toBe(beforeRest + 1);
+    // Deep health pairs the aggregate occupancy with the aggregate cap.
+    const deep = (await (
+      await fetch(`http://127.0.0.1:${port}/health?deep=1`)
+    ).json()) as { connectedClients: number; connectedClientsMax: number };
+    expect(deep.connectedClients).toBe(occupancy.total);
+    expect(deep.connectedClientsMax).toBe(204);
+
+    await rest.body!.cancel();
+    await generation.body!.cancel();
+    await workspaceGeneration.body!.cancel();
+    await acpSse.body!.cancel();
+    ws.close();
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
+    expect(getActiveSseCount()).toBe(beforeRest);
+  }, 20_000);
+
+  it('refuses every surface at the aggregate cap while short requests keep serving', async () => {
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 12,
+        maxSseConnections: 6,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const streams: Response[] = [];
+    for (let i = 0; i < 6; i++) {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/session/sess-uni-cap-${i}/events`,
+      );
+      expect(res.status).toBe(200);
+      streams.push(res);
+    }
+
+    const generation = await fetch(
+      `http://127.0.0.1:${port}/session/sess-uni-cap-x/generate`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'hello' }),
+      },
+    );
+    expect(generation.status).toBe(503);
+    expect(generation.headers.get('retry-after')).toBe('5');
+    expect(await generation.json()).toEqual({
+      error:
+        'Daemon SSE connection limit reached (6/6). ' +
+        'Retry after the Retry-After interval.',
+      code: 'sse_connection_limit_exceeded',
+      limit: 6,
+      active: 6,
+      scope: 'daemon',
+    });
+
+    const workspaceGeneration = await fetch(
+      `http://127.0.0.1:${port}/workspace/generate`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'hello' }),
+      },
+    );
+    expect(workspaceGeneration.status).toBe(503);
+    expect(((await workspaceGeneration.json()) as { code: string }).code).toBe(
+      'sse_connection_limit_exceeded',
+    );
+
+    const connId = await acpInitialize(port);
+    const acpSse = await fetch(`http://127.0.0.1:${port}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+      },
+    });
+    expect(acpSse.status).toBe(503);
+    expect(((await acpSse.json()) as { code: string }).code).toBe(
+      'sse_connection_limit_exceeded',
+    );
+
+    // WS: refused BEFORE the upgrade — an HTTP 503, not a 101 then close.
+    const wsRefusal = await wsUpgradeProbe(port);
+    expect(wsRefusal.status).toBe(503);
+    expect(wsRefusal.retryAfter).toBe('5');
+
+    // The whole point of the cap: diagnostics stay alive at saturation.
+    expect((await fetch(`http://127.0.0.1:${port}/health`)).status).toBe(200);
+    expect((await fetch(`http://127.0.0.1:${port}/capabilities`)).status).toBe(
+      200,
+    );
+
+    // Freeing one slot readmits the next stream — on ANY surface.
+    await streams[0]!.body!.cancel();
+    await vi.waitFor(
+      async () => {
+        const probe = await wsUpgradeProbe(port);
+        expect(probe.status).toBe(101);
+      },
+      { timeout: 5_000 },
+    );
+    for (const stream of streams.slice(1)) await stream.body!.cancel();
+  }, 20_000);
+
+  it('clamps the pairing listener independently of the primary listener', async () => {
+    // Drive the REAL Local Control listener (pairing credential included)
+    // with the LAN selection pinned to loopback so the test is deterministic
+    // on hosts without a usable LAN interface.
+    const lanInterfaces = await import('./local-control/lan-interfaces.js');
+    const candidate = { interfaceName: 'en0', address: '127.0.0.1' };
+    const selectSpy = vi
+      .spyOn(lanInterfaces, 'selectLanAddress')
+      .mockReturnValue(candidate);
+    const listSpy = vi
+      .spyOn(lanInterfaces, 'listLanCandidates')
+      .mockReturnValue([candidate]);
+    const { sleepInhibitor } = await import('@qwen-code/qwen-code-core');
+    const sleepSpy = vi
+      .spyOn(sleepInhibitor, 'acquire')
+      .mockReturnValue({ release: vi.fn() } as never);
+    let service: ReturnType<RunHandle['getLocalControl']> | undefined;
+    try {
+      handle = await runQwenServe(
+        { ...baseOpts, port: 0, maxConnections: 256 },
+        { bridge: parkedBridge() },
+      );
+      await handle.runtimeReady;
+      service = handle.getLocalControl();
+      expect(service).toBeDefined();
+      const lanStatus = await service!.enable();
+      expect(lanStatus.active).toBe(true);
+      const pairingSecret = decodeURIComponent(
+        new URL(lanStatus.url!).hash.match(/token=([^&]+)/)![1]!,
+      );
+      const lanBase = `http://${lanStatus.address}:${lanStatus.port}`;
+      const lanAuth = { Authorization: `Bearer ${pairingSecret}` };
+      const primaryPort = (handle.server.address() as AddressInfo).port;
+      const before = getSseOccupancy();
+
+      // 51 = floor(64 × 0.8): the pairing listener's own headroom clamp.
+      const lanStreams: Response[] = [];
+      for (let i = 0; i < 51; i++) {
+        const res = await fetch(`${lanBase}/session/sess-lan-${i}/events`, {
+          headers: lanAuth,
+        });
+        expect(res.status).toBe(200);
+        lanStreams.push(res);
+      }
+      const overflow = await fetch(
+        `${lanBase}/session/sess-lan-overflow/events`,
+        { headers: lanAuth },
+      );
+      expect(overflow.status).toBe(503);
+      expect(overflow.headers.get('retry-after')).toBe('5');
+      expect(await overflow.json()).toEqual({
+        error:
+          'Daemon SSE connection limit reached (51/51). ' +
+          'Retry after the Retry-After interval.',
+        code: 'sse_connection_limit_exceeded',
+        limit: 51,
+        active: 51,
+        scope: 'listener',
+        listener: 'local-control',
+      });
+
+      // The primary listener still admits: its clamp is independent and the
+      // aggregate (204) is far from reached.
+      const primaryStream = await fetch(
+        `http://127.0.0.1:${primaryPort}/session/sess-primary/events`,
+      );
+      expect(primaryStream.status).toBe(200);
+
+      const status = await statusOf(primaryPort);
+      expect(status.limits.maxSseConnectionsPerListener).toEqual({
+        primary: 204,
+        'local-control': 51,
+        'remote-access': 51,
+      });
+      expect(status.runtime.transport.streamOccupancy.byListener).toEqual({
+        primary: before.byListener.primary + 1,
+        'local-control': before.byListener['local-control'] + 51,
+        'remote-access': before.byListener['remote-access'],
+      });
+      // LAN short requests keep their headroom while the SSE fleet is clamped.
+      expect(
+        (await fetch(`${lanBase}/health`, { headers: lanAuth })).status,
+      ).toBe(200);
+
+      for (const stream of lanStreams) await stream.body!.cancel();
+      await primaryStream.body!.cancel();
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().total).toBe(before.total);
+        },
+        { timeout: 5_000 },
+      );
+    } finally {
+      await service?.disable().catch(() => {});
+      selectSpy.mockRestore();
+      listSpy.mockRestore();
+      sleepSpy.mockRestore();
+    }
+  }, 30_000);
+
+  it('releases the slot when a client aborts inside the subscription handshake window', async () => {
+    // The REST route counts late (after the async subscription handshake).
+    // A client abort inside that window fires res 'close' BEFORE the route's
+    // finalize listeners register; without the occupancy module's
+    // destroyed-guard/close-hook backstop the shared slot leaks permanently
+    // and every surface inherits the phantom occupancy (review R1-2).
+    // Gate the virtual-subagent runtime resolution — a real await window
+    // spanning event-loop iterations, unlike the microtask-only normal path.
+    let releaseHandshake!: () => void;
+    const handshake = new Promise<void>((resolve) => {
+      releaseHandshake = resolve;
+    });
+    let handshakeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      handshakeStarted = resolve;
+    });
+    const bridge = fakeBridge();
+    const runtime = { trusted: true, bridge } as unknown as WorkspaceRuntime;
+    const app = express();
+    registerSseEventsRoutes(app, {
+      bridge,
+      workspaceRegistry: { list: () => [runtime] } as never,
+      admissionCaps: resolveSseAdmissionCaps({
+        maxConnections: 10,
+        maxSseConnections: 1,
+      }),
+      sendBridgeError: vi.fn() as never,
+      virtualSubagentSessions: {
+        subscribe: async () =>
+          // eslint-disable-next-line require-yield
+          (async function* () {
+            await new Promise(() => {});
+          })(),
+      } as never,
+      resolveSubagentSessionRuntime: (async () => {
+        handshakeStarted();
+        await handshake;
+        return runtime;
+      }) as never,
+    });
+    const server = createServer(app);
+    let serverSocket: import('node:net').Socket | undefined;
+    server.on('connection', (socket) => {
+      serverSocket = socket;
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    const virtualId = createVirtualSubagentSessionId('parent-1', 'agent-1');
+    const before = getSseOccupancy();
+    const beforeRest = getActiveSseCount();
+    const controller = new AbortController();
+    const pending = fetch(
+      `http://127.0.0.1:${port}/session/${virtualId}/events`,
+      { signal: controller.signal },
+    );
+    await started;
+    controller.abort();
+    await pending.catch(() => {});
+    // Let the SERVER observe the disconnect (res 'close' emitted) while the
+    // route is still parked in the gated handshake — before its finalize
+    // listeners register. Only then resolve the handshake onto the dead
+    // socket; the late count must not leak the slot.
+    await vi.waitFor(
+      () => {
+        expect(serverSocket?.destroyed).toBe(true);
+      },
+      { timeout: 5_000 },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    releaseHandshake();
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
+    expect(getActiveSseCount()).toBe(beforeRest);
+    // No phantom occupancy: a fresh client is admitted, not permanently 503.
+    const next = await fetch(
+      `http://127.0.0.1:${port}/session/${createVirtualSubagentSessionId('parent-1', 'agent-2')}/events`,
+    );
+    expect(next.status).toBe(200);
+    await next.body!.cancel();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
+  }, 20_000);
+
+  it('counts session-scoped ACP SSE streams and releases them on close', async () => {
+    // The session-scoped GET /acp branch (Acp-Session-Id header) is the
+    // stream clients use during turns; its count must not be invisible
+    // (review R1-5).
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const connId = await acpInitialize(port);
+    // The session/new reply rides the connection SSE stream (POST acks 202).
+    const connStream = await fetch(`http://127.0.0.1:${port}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+      },
+    });
+    expect(connStream.status).toBe(200);
+    const created = await fetch(`http://127.0.0.1:${port}/acp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'acp-connection-id': connId,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/new',
+        params: {},
+      }),
+    });
+    expect(created.status).toBe(202);
+    const reader = connStream.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let sessionId: string | undefined;
+    while (!sessionId) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      for (const frame of buffer.split('\n\n')) {
+        const dataLine = frame
+          .split('\n')
+          .find((line) => line.startsWith('data: '));
+        if (!dataLine) continue;
+        const msg = JSON.parse(dataLine.slice(6)) as {
+          id?: number;
+          result?: { sessionId?: string };
+        };
+        if (msg.id === 2 && msg.result?.sessionId) {
+          sessionId = msg.result.sessionId;
+        }
+      }
+    }
+    expect(sessionId).toBeTruthy();
+    // Baseline with the connection stream already open: the delta below
+    // isolates the session-scoped branch's count.
+    const before = getSseOccupancy();
+    const stream = await fetch(`http://127.0.0.1:${port}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': sessionId!,
+      },
+    });
+    expect(stream.status).toBe(200);
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().bySurface.acpSse).toBe(
+          before.bySurface.acpSse + 1,
+        );
+      },
+      { timeout: 5_000 },
+    );
+    await stream.body!.cancel();
+    await reader.cancel();
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total - 1);
+      },
+      { timeout: 5_000 },
+    );
+  }, 20_000);
+
+  it('reports the explicit override per listener and disables all clamps on the sentinels', async () => {
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+        maxSseConnections: 5,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const status = await statusOf(port);
+    expect(status.limits.maxSseConnections).toBe(5);
+    expect(status.limits.maxSseConnectionsPerListener).toEqual({
+      primary: 5,
+      'local-control': 51,
+      'remote-access': 51,
+    });
+    const deep = (await (
+      await fetch(`http://127.0.0.1:${port}/health?deep=1`)
+    ).json()) as { connectedClientsMax: number | null };
+    expect(deep.connectedClientsMax).toBe(5);
+    await handle.close();
+    handle = undefined;
+
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 0,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port2 = (handle.server.address() as { port: number }).port;
+    const status2 = await statusOf(port2);
+    expect(status2.limits.maxSseConnections).toBeNull();
+    expect(status2.limits.maxSseConnectionsPerListener).toEqual({
+      primary: null,
+      'local-control': null,
+      'remote-access': null,
+    });
+  }, 20_000);
 });

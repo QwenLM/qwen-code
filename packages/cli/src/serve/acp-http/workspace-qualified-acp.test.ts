@@ -31,6 +31,8 @@ import { createSessionOrganizationService } from '../session-organization-helper
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
+import { resolveSseAdmissionCaps } from '../daemon-status.js';
+import { countSseStream, getSseOccupancy } from '../sse-occupancy.js';
 
 const setupGithubMock = vi.hoisted(() => vi.fn());
 
@@ -2143,5 +2145,123 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       ws.on('error', reject);
     });
     expect(cdpRegistry.hasActive()).toBe(false);
+  });
+});
+
+describe('extra WS routes under SSE admission saturation (issue #17554)', () => {
+  let server: Server;
+  let handle: AcpHttpHandle | undefined;
+  let port: number;
+
+  beforeEach(async () => {
+    const bridge = makeBridge();
+    const app = express();
+    app.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    handle = mountAcpHttp(app, bridge, {
+      boundWorkspace: '/ws',
+      workspace: {} as unknown as DaemonWorkspaceService,
+      enabled: true,
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => [bridge],
+        getPersistenceTargets: () => [],
+        getBridgeWorkspaceId: () => 'ws',
+      }),
+      workspaceRememberLane: new WorkspaceRememberTaskLane(bridge),
+      sseAdmissionCaps: resolveSseAdmissionCaps({
+        maxConnections: 10,
+        maxSseConnections: 1,
+      }),
+      extraWsRoutes: [
+        {
+          path: '/test-extra',
+          onConnection: (ws) => {
+            ws.send('extra-ready');
+            ws.close(1000, 'done');
+          },
+        },
+      ],
+    });
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, '127.0.0.1', () => {
+        port = (server.address() as AddressInfo).port;
+        handle?.attachServer(server);
+        resolve();
+      });
+    });
+  });
+
+  afterEach(async () => {
+    handle?.dispose();
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  it('admits extra WS upgrades at saturation while ACP upgrades are refused', async () => {
+    // Extra WS surfaces (voice etc.) keep their own gates — the shared SSE
+    // cap must neither refuse nor count them (design non-goal, review R1-7).
+    const before = getSseOccupancy();
+    const release = countSseStream('restEvents', { socket: {} } as never);
+    try {
+      // Positive control: the ACP upgrade gate is live in this mount.
+      const acpStatus = await new Promise<number>((resolve, reject) => {
+        let settled = false;
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`, {
+          handshakeTimeout: 2000,
+        });
+        ws.on('unexpected-response', (_req, res) => {
+          if (settled) return;
+          settled = true;
+          ws.terminate();
+          resolve(res.statusCode ?? 0);
+        });
+        ws.on('open', () => {
+          if (settled) return;
+          settled = true;
+          ws.terminate();
+          reject(new Error('ACP upgrade admitted at saturation'));
+        });
+        ws.on('error', (err) => {
+          if (!settled) {
+            settled = true;
+            reject(err);
+          }
+        });
+      });
+      expect(acpStatus).toBe(503);
+
+      // The extra route upgrades (101) and speaks its own protocol.
+      const extraMessage = await new Promise<string>((resolve, reject) => {
+        let settled = false;
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/test-extra`, {
+          handshakeTimeout: 2000,
+        });
+        ws.on('message', (data) => {
+          if (settled) return;
+          settled = true;
+          ws.close();
+          resolve(String(data));
+        });
+        ws.on('unexpected-response', (_req, res) => {
+          if (settled) return;
+          settled = true;
+          ws.terminate();
+          reject(new Error(`extra route refused: ${res.statusCode}`));
+        });
+        ws.on('error', (err) => {
+          if (!settled) {
+            settled = true;
+            reject(err);
+          }
+        });
+      });
+      expect(extraMessage).toBe('extra-ready');
+      // Only the synthetic stream counts; the extra upgrade added nothing.
+      expect(getSseOccupancy().total).toBe(before.total + 1);
+    } finally {
+      release();
+    }
   });
 });
