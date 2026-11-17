@@ -358,7 +358,10 @@ class Session {
     }
 
     this.config.getBackgroundTaskRegistry().setRegisterCallback((entry) => {
-      if (this.isShuttingDown || this.sessionAbortController.signal.aborted) {
+      if (
+        this.drainNotifications === null &&
+        (this.isShuttingDown || this.sessionAbortController.signal.aborted)
+      ) {
         return;
       }
       this.enqueueTaskStarted({
@@ -1121,7 +1124,13 @@ class Session {
   }
 
   private flushDrainNotifications(): void {
-    const notifications = this.drainNotifications ?? [];
+    for (const started of this.taskStartedQueue.splice(0)) {
+      this.outputAdapter.emitSystemMessage('task_started', started);
+    }
+    const notifications = [
+      ...this.taskNotificationQueue.splice(0),
+      ...(this.drainNotifications ?? []),
+    ];
     this.drainNotifications = null;
     for (const item of notifications) {
       if (

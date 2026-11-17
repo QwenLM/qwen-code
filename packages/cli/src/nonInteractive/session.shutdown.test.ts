@@ -50,9 +50,19 @@ describe('Session shutdown background notifications', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
-  it.each(['eof', 'sigterm', 'stream-error'] as const)(
-    '%s pairs a real background cancellation once without another model turn',
-    async (route) => {
+  it.each([
+    { route: 'eof', phase: 'after-turn', completed: false },
+    { route: 'sigterm', phase: 'after-turn', completed: false },
+    { route: 'stream-error', phase: 'after-turn', completed: false },
+    { route: 'sigterm', phase: 'in-flight', completed: false },
+    { route: 'sigterm', phase: 'in-flight', completed: true },
+    { route: 'stream-error', phase: 'in-flight', completed: false },
+    { route: 'stream-error', phase: 'in-flight', completed: true },
+    { route: 'sigterm', phase: 'during-shutdown', completed: false },
+    { route: 'stream-error', phase: 'during-shutdown', completed: false },
+  ] as const)(
+    '$route pairs a $phase background task (completed=$completed) without another model turn',
+    async ({ route, phase, completed }) => {
       const registry = new BackgroundTaskRegistry();
       const output = {
         emitResult: vi.fn(),
@@ -86,7 +96,21 @@ describe('Session shutdown background notifications', () => {
       vi.mocked(StreamJsonOutputAdapter).mockImplementation(
         () => output as unknown as StreamJsonOutputAdapter,
       );
-      turn.mockImplementationOnce(async () => {
+      let markTurnEntered!: () => void;
+      const turnEntered = new Promise<void>((resolve) => {
+        markTurnEntered = resolve;
+      });
+      turn.mockImplementationOnce(async (...args: unknown[]) => {
+        const { abortController } = args[4] as {
+          abortController: AbortController;
+        };
+        const aborted = new Promise<void>((resolve) => {
+          abortController.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+        markTurnEntered();
+        if (phase === 'during-shutdown') await aborted;
         registry.register({
           agentId: 'bg_shutdown',
           toolUseId: 'tu_shutdown',
@@ -98,6 +122,8 @@ describe('Session shutdown background notifications', () => {
           isBackgrounded: true,
           outputFile: '',
         });
+        if (completed) registry.complete('bg_shutdown', 'completed in turn');
+        if (phase === 'in-flight') await aborted;
       });
       const reader = {
         async *read(): AsyncGenerator<CLIControlRequest | CLIUserMessage> {
@@ -112,13 +138,25 @@ describe('Session shutdown background notifications', () => {
             message: { role: 'user', content: 'start background task' },
             parent_tool_use_id: null,
           };
-          await vi.waitFor(() =>
-            expect(output.emitSystemMessage).toHaveBeenCalledWith(
-              'task_started',
-              expect.objectContaining({ task_id: 'bg_shutdown' }),
-            ),
-          );
-          if (route === 'sigterm') process.emit('SIGTERM', 'SIGTERM');
+          if (phase === 'after-turn') {
+            await vi.waitFor(() =>
+              expect(output.emitSystemMessage).toHaveBeenCalledWith(
+                'task_started',
+                expect.objectContaining({ task_id: 'bg_shutdown' }),
+              ),
+            );
+          } else {
+            await turnEntered;
+          }
+          if (route === 'sigterm') {
+            process.emit('SIGTERM', 'SIGTERM');
+            yield {
+              type: 'user',
+              session_id: 'shutdown-test',
+              message: { role: 'user', content: 'must not run after SIGTERM' },
+              parent_tool_use_id: null,
+            };
+          }
           if (route === 'stream-error') throw new Error('input stream failed');
         },
       };
@@ -129,15 +167,20 @@ describe('Session shutdown background notifications', () => {
       if (route === 'stream-error')
         await expect(session).rejects.toThrow('input stream failed');
       else await session;
-      const notifications = output.emitSystemMessage.mock.calls.filter(
+      const frames = output.emitSystemMessage.mock.calls.filter(
         ([subtype, data]) =>
-          subtype === 'task_notification' && data.task_id === 'bg_shutdown',
+          ['task_started', 'task_notification'].includes(subtype) &&
+          data.task_id === 'bg_shutdown',
       );
-      expect(registry.get('bg_shutdown')?.status).toBe('cancelled');
+      const expectedStatus = completed ? 'completed' : 'cancelled';
+      expect(registry.get('bg_shutdown')?.status).toBe(expectedStatus);
       expect(registry.hasUnfinalizedTasks()).toBe(false);
       expect(turn).toHaveBeenCalledTimes(1);
-      expect(notifications).toHaveLength(1);
-      expect(notifications[0][1].status).toBe('cancelled');
+      expect(frames.map(([subtype]) => subtype)).toEqual([
+        'task_started',
+        'task_notification',
+      ]);
+      expect(frames[1][1].status).toBe(expectedStatus);
     },
   );
 });

@@ -234,6 +234,7 @@ function streamFrames(stdout: string, dir: string): unknown[] {
               type: 'result',
               subtype: frame['subtype'],
               is_error: frame['is_error'],
+              error: frame['error'],
               result: frame['result'],
               num_turns: frame['num_turns'],
             },
@@ -745,6 +746,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'session turn cap',
       messages: [message('first question'), message('second question')],
       args: ['--input-format', 'stream-json', '--max-session-turns', '1'],
+      mainRounds: 2,
       reply: (messages) => ({ content: `answer ${userTurns(messages)}` }),
     };
 
@@ -752,32 +754,32 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const results = (frames: unknown[]) =>
       frames.filter((frame) => (frame as JsonObject)['type'] === 'result');
 
-    // The current loop reports the second message as a success that repeats
-    // the first answer, without asking the model.
     expect(current.exitCode).toBe(0);
     expect(current.requests).toHaveLength(1);
     expect(results(current.frames)).toMatchObject([
       { is_error: false, result: 'answer 1' },
-      { is_error: false, result: 'answer 1' },
+      {
+        is_error: true,
+        error: {
+          message: expect.stringContaining('Reached max session turns'),
+        },
+      },
     ]);
-    // The shared loop ends the run at the limit the way headless reports its
-    // own limit: the error on stderr and exit code 53.
-    expect(shared.exitCode).toBe(53);
-    expect(shared.requests).toHaveLength(1);
-    expect(results(shared.frames)).toMatchObject([
-      { is_error: false, result: 'answer 1' },
-    ]);
-    expect(shared.stderr).toContain('Reached max session turns');
+    expect(shared.exitCode).toBe(current.exitCode);
+    expect(shared.requests).toEqual(current.requests);
+    expect(shared.frames).toEqual(current.frames);
     expect(kernel.exitCode).toBe(shared.exitCode);
     expect(kernel.requests).toEqual(shared.requests);
     expect(kernel.frames).toEqual(shared.frames);
-    expect(kernel.stderr).toContain('Reached max session turns');
   }, 240_000);
 
   it('asks for approval of a whole batch before the tool budget stops it', async () => {
     const scenario: Scenario = {
       name: 'approvals at the tool budget edge',
-      messages: [message('Write both files.')],
+      messages: [
+        message('Write both files.'),
+        message('Describe the outcome.'),
+      ],
       args: ['--input-format', 'stream-json', '--max-tool-calls', '1'],
       approve: true,
       reply: (messages, dir) =>
@@ -796,7 +798,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
                 ),
               ],
             }
-          : { content: 'Both written.' },
+          : { content: 'Turn accepted after budget failure.' },
     };
 
     const { current, shared, kernel } = await arms(scenario);
@@ -805,8 +807,19 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         (frame) => (frame as JsonObject)['type'] !== 'control_request',
       );
 
-    expect(current.exitCode).toBe(55);
-    expect(shared.exitCode).toBe(55);
+    expect(current.exitCode).toBe(0);
+    expect(shared.exitCode).toBe(0);
+    expect(
+      output(current.frames).filter(
+        (frame) => (frame as JsonObject)['type'] === 'result',
+      ),
+    ).toMatchObject([
+      {
+        is_error: true,
+        error: { message: expect.stringContaining('--max-tool-calls') },
+      },
+      { is_error: false, result: 'Turn accepted after budget failure.' },
+    ]);
     expect(shared.requests).toEqual(current.requests);
     expect(output(shared.frames)).toEqual(output(current.frames));
     // The current loop asks for each call right before it runs, so the call

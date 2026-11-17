@@ -2325,7 +2325,7 @@ describe('runNonInteractive', () => {
   });
 
   describe.each(terminalLoops)(
-    'terminal failures on $loop',
+    'caller-owned terminal routes on $loop',
     ({ shared, eventBus }) => {
       beforeEach(() => {
         if (shared) useSharedLoopWithModToolHooks();
