@@ -73,6 +73,180 @@ function types(transitions: Array<{ type: string }>): string[] {
   return transitions.map((t) => t.type);
 }
 
+describe('detectPrTransitions language', () => {
+  const previous: PrWatchState = {
+    pr: identity,
+    observedAt: T0,
+    state: 'open',
+    headSha: 'a'.repeat(40),
+    checks: 'passing',
+    mergeable: 'mergeable',
+    ciFired: [],
+    pending: [],
+    delivered: [],
+  };
+  const firing = obs({
+    headSha: 'b'.repeat(40),
+    checks: 'failing',
+    mergeable: 'conflicting',
+    failingChecks: ['build', 'test'],
+  });
+
+  it('renders each summary in zh and leaves en byte-identical', () => {
+    const absent = detectPrTransitions(identity, previous, firing, T0);
+    const en = detectPrTransitions(
+      identity,
+      previous,
+      firing,
+      T0,
+      undefined,
+      'en',
+    );
+    const zh = detectPrTransitions(
+      identity,
+      previous,
+      firing,
+      T0,
+      undefined,
+      'zh',
+    );
+    expect(absent.transitions.map((t) => t.summary)).toEqual(
+      en.transitions.map((t) => t.summary),
+    );
+    expect(en.transitions.map((t) => t.summary)).toEqual([
+      `head changed ${'a'.repeat(40)} → ${'b'.repeat(40)}`,
+      'CI failing: build, test',
+      'merge conflict detected',
+    ]);
+    expect(zh.transitions.map((t) => t.summary)).toEqual([
+      `head 变更 ${'a'.repeat(40)} → ${'b'.repeat(40)}`,
+      'CI 失败：build, test',
+      '检测到合并冲突',
+    ]);
+  });
+
+  it('keeps every transition key language-independent', () => {
+    const en = detectPrTransitions(
+      identity,
+      previous,
+      firing,
+      T0,
+      undefined,
+      'en',
+    );
+    const zh = detectPrTransitions(
+      identity,
+      previous,
+      firing,
+      T0,
+      undefined,
+      'zh',
+    );
+    expect(zh.transitions.map((t) => t.key)).toEqual(
+      en.transitions.map((t) => t.key),
+    );
+    // Everything except the localized prose must be identical: the stored
+    // summary is the only field the language is allowed to change.
+    const strip = (state: PrWatchState) => ({
+      ...state,
+      pending: (state.pending ?? []).map(
+        ({ summary: _summary, ...rest }) => rest,
+      ),
+    });
+    expect(strip(zh.state)).toEqual(strip(en.state));
+  });
+
+  it('renders the bare CI summary per language when no check names are known', () => {
+    const noNames = obs({
+      headSha: 'b'.repeat(40),
+      checks: 'failing',
+      mergeable: 'mergeable',
+    });
+    const en = detectPrTransitions(
+      identity,
+      previous,
+      noNames,
+      T0,
+      undefined,
+      'en',
+    );
+    const zh = detectPrTransitions(
+      identity,
+      previous,
+      noNames,
+      T0,
+      undefined,
+      'zh',
+    );
+    expect(en.transitions.map((t) => t.summary)).toContain('CI failing');
+    expect(zh.transitions.map((t) => t.summary)).toContain('CI 失败');
+  });
+
+  it('localizes the state_change prose and keeps the token bytes', () => {
+    const merged = obs({ state: 'merged', headSha: 'a'.repeat(40) });
+    const closed = obs({ state: 'closed', headSha: 'a'.repeat(40) });
+    const enM = detectPrTransitions(
+      identity,
+      previous,
+      merged,
+      T0,
+      undefined,
+      'en',
+    );
+    const zhM = detectPrTransitions(
+      identity,
+      previous,
+      merged,
+      T0,
+      undefined,
+      'zh',
+    );
+    const enC = detectPrTransitions(
+      identity,
+      previous,
+      closed,
+      T0,
+      undefined,
+      'en',
+    );
+    const zhC = detectPrTransitions(
+      identity,
+      previous,
+      closed,
+      T0,
+      undefined,
+      'zh',
+    );
+    expect(enM.transitions.map((t) => t.summary)).toEqual(['PR merged']);
+    expect(zhM.transitions.map((t) => t.summary)).toEqual(['PR 已合并']);
+    expect(enC.transitions.map((t) => t.summary)).toEqual(['PR closed']);
+    expect(zhC.transitions.map((t) => t.summary)).toEqual(['PR 已关闭']);
+    // The key still uses the raw state pair, never the localized prose.
+    expect(zhM.transitions.map((t) => t.key)).toEqual(
+      enM.transitions.map((t) => t.key),
+    );
+  });
+
+  it('does not claim the head advanced when it moved back', () => {
+    // head_change fires on any inequality, including a force-push rewind.
+    const rewound = obs({ headSha: 'a'.repeat(40) });
+    const ahead = { ...previous, headSha: 'b'.repeat(40) };
+    const zh = detectPrTransitions(
+      identity,
+      ahead,
+      rewound,
+      T0,
+      undefined,
+      'zh',
+    );
+    const summary = zh.transitions.find(
+      (t) => t.type === 'head_change',
+    )?.summary;
+    expect(summary).toContain('head 变更');
+    expect(summary).not.toContain('前进');
+  });
+});
+
 describe('detectPrTransitions', () => {
   it('initialises a first observation silently even when failing and conflicting', () => {
     const { state, transitions } = detectPrTransitions(

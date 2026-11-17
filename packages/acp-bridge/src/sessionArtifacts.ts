@@ -320,6 +320,16 @@ export class SessionArtifactStore {
     this.realWorkspaceCwdPromise = undefined;
   }
 
+  // Synchronous public projection shared by list() and listRestored(). It must
+  // stay plain (no enqueue): listRestored() calls it from inside its own
+  // enqueue, and a nested enqueue would queue behind the outer one and never
+  // resolve.
+  private snapshotPublicArtifacts(): DaemonSessionArtifact[] {
+    return Array.from(this.artifacts.values())
+      .sort((a, b) => a.insertSeq - b.insertSeq)
+      .map(toPublicArtifact);
+  }
+
   async list(): Promise<SessionArtifactsEnvelope> {
     return this.enqueue(async () => {
       await this.refreshWorkspaceStatuses();
@@ -327,9 +337,7 @@ export class SessionArtifactStore {
       return {
         v: 1,
         sessionId: this.sessionId,
-        artifacts: Array.from(this.artifacts.values())
-          .sort((a, b) => a.insertSeq - b.insertSeq)
-          .map(toPublicArtifact),
+        artifacts: this.snapshotPublicArtifacts(),
         generatedAt: new Date().toISOString(),
         limits: { maxArtifacts: this.maxArtifacts },
         ...(this.lastRestoreWarnings.length > 0
@@ -340,6 +348,13 @@ export class SessionArtifactStore {
           : {}),
       };
     });
+  }
+
+  // Restored-snapshot read for the load/resume response. Skips the workspace
+  // status refresh so it adds no stat/hash latency to session restore; the
+  // client's normal gated list() refreshes status shortly after.
+  async listRestored(): Promise<DaemonSessionArtifact[]> {
+    return this.enqueue(async () => this.snapshotPublicArtifacts());
   }
 
   async get(artifactId: string): Promise<DaemonSessionArtifact | undefined> {

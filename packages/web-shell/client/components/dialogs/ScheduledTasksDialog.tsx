@@ -15,7 +15,6 @@ import {
 import { createPortal } from 'react-dom';
 import {
   Clock3Icon,
-  FolderIcon,
   HourglassIcon,
   MessageSquarePlusIcon,
   MessagesSquareIcon,
@@ -49,6 +48,7 @@ import { cssUrlValue } from '../../utils/cssUrlVar';
 import { formatClockTime } from '../../utils/formatDateTime';
 import { getModelDisplayName } from '../../utils/modelDisplay';
 import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
+import { WorkspacePill } from '../WorkspacePill';
 import { DialogShell } from './DialogShell';
 import {
   ScheduledTaskDeliveryFields,
@@ -224,14 +224,7 @@ function renderWorkspacePill(
   candidates: readonly DaemonWorkspaceCapability[],
 ) {
   return (
-    <span className={styles.workspacePill} title={cwd}>
-      <span className={styles.workspaceIcon} aria-hidden="true">
-        <FolderIcon />
-      </span>
-      <span className={styles.workspaceName}>
-        {workspaceLabelForCwd(cwd, candidates)}
-      </span>
-    </span>
+    <WorkspacePill cwd={cwd} label={workspaceLabelForCwd(cwd, candidates)} />
   );
 }
 

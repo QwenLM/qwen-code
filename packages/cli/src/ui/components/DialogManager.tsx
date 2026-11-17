@@ -104,6 +104,7 @@ export const DialogManager = ({
         branch={uiState.activeWorktree.branch}
         worktreePath={uiState.activeWorktree.path}
         originalHeadCommit={uiState.activeWorktree.originalHeadCommit}
+        worktreeBase={uiState.activeWorktree.worktreeBase}
         onKeep={() => void uiActions.handleWorktreeExit('keep')}
         onRemove={() => void uiActions.handleWorktreeExit('remove')}
         onCancel={() => void uiActions.handleWorktreeExit('cancel')}

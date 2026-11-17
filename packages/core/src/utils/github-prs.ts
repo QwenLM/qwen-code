@@ -788,6 +788,197 @@ export async function fetchGitHubPullRequestView(
   }
 }
 
+// ── PR changed files ───────────────────────────────────────
+
+const GH_PR_FILES_FIELDS = 'files,additions,deletions,headRefOid,changedFiles';
+
+/** Upper bound on the per-file rows a PR files result reports. */
+export const GITHUB_PR_FILES_MAX = 300;
+
+export interface GitHubPullRequestFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface GitHubPullRequestFiles {
+  files: GitHubPullRequestFile[];
+  /**
+   * Changed files absent from `files`. `gh` itself truncates the `files` array
+   * (100 rows on current CLI) below this helper's {@link GITHUB_PR_FILES_MAX}
+   * cap, so the count is derived from `changedFiles` (the PR-wide total) rather
+   * than from the code cap alone.
+   */
+  hiddenCount: number;
+  /** PR-wide totals (cover hidden rows too), for the scale header. */
+  additions: number;
+  deletions: number;
+  /** `headRefOid`: the PR head commit, used to scope commit fallback. */
+  headSha: string;
+}
+
+export type FetchGitHubPullRequestFilesResult =
+  | { kind: 'ok'; files: GitHubPullRequestFiles }
+  | { kind: 'not_a_repo' }
+  | { kind: 'cli_unavailable' }
+  | {
+      kind: 'failed';
+      message: string;
+      gitRoot: string;
+      /** See {@link FetchGitHubPullRequestsResult} — the fallback gh binary. */
+      binary?: string;
+      /**
+       * Machine-readable caller-error classification, so the route maps a bad
+       * slug to 400 without matching the human-readable prose (which a reword
+       * would silently break). Mirrors the view helper's `reason`.
+       */
+      reason?: 'invalid_repo';
+    };
+
+interface GhPrFileEntry {
+  path?: unknown;
+  additions?: unknown;
+  deletions?: unknown;
+}
+
+function nonNegativeNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : 0;
+}
+
+/** Exported for tests — the exec wrapper stays thin on purpose. */
+export function parseGhPrFiles(stdout: string): GitHubPullRequestFiles {
+  const parsed: unknown = JSON.parse(stdout);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('unexpected gh output: expected a JSON object');
+  }
+  const entry = parsed as {
+    files?: unknown;
+    additions?: unknown;
+    deletions?: unknown;
+    headRefOid?: unknown;
+    changedFiles?: unknown;
+  };
+  if (!Array.isArray(entry.files)) {
+    throw new Error('unexpected gh output: expected a files array');
+  }
+  const all: GitHubPullRequestFile[] = [];
+  for (const item of entry.files as GhPrFileEntry[]) {
+    if (item === null || typeof item !== 'object') continue;
+    if (typeof item.path !== 'string' || item.path === '') continue;
+    all.push({
+      path: item.path,
+      additions: nonNegativeNumber(item.additions),
+      deletions: nonNegativeNumber(item.deletions),
+    });
+  }
+  const files = all.slice(0, GITHUB_PR_FILES_MAX);
+  // Prefer gh's PR-wide totals so the scale header stays accurate even when
+  // the per-file list is capped; fall back to summing the parsed rows.
+  const additions =
+    typeof entry.additions === 'number'
+      ? nonNegativeNumber(entry.additions)
+      : all.reduce((sum, file) => sum + file.additions, 0);
+  const deletions =
+    typeof entry.deletions === 'number'
+      ? nonNegativeNumber(entry.deletions)
+      : all.reduce((sum, file) => sum + file.deletions, 0);
+  // `gh` truncates `files` well below the code cap, so the hidden count must
+  // come from the PR-wide `changedFiles` total, not from the parsed row count.
+  const totalCount =
+    typeof entry.changedFiles === 'number'
+      ? nonNegativeNumber(entry.changedFiles)
+      : all.length;
+  return {
+    files,
+    hiddenCount: Math.max(0, totalCount - files.length),
+    additions,
+    deletions,
+    headSha: typeof entry.headRefOid === 'string' ? entry.headRefOid : '',
+  };
+}
+
+/**
+ * Fetch a pull request's changed-file list and scale via
+ * `gh pr view <number> --json files,…,changedFiles`. By default the number is
+ * resolved in the repository containing `cwd` (the session's git cwd). A bound
+ * PR may belong to a different repository than the session's checkout, so
+ * callers pass its `owner/repo` as `repo` to resolve the number there instead
+ * of silently reading a same-numbered local PR. Returns a discriminated union
+ * mirroring the sibling PR helpers so route layers can map each failure mode to
+ * a distinct wire code.
+ */
+export async function fetchGitHubPullRequestFiles(
+  cwd: string,
+  number: number,
+  env?: Readonly<Record<string, string | undefined>>,
+  repo?: string,
+): Promise<FetchGitHubPullRequestFilesResult> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return { kind: 'not_a_repo' };
+  if (!Number.isInteger(number) || number <= 0) {
+    return {
+      kind: 'failed',
+      message: 'invalid pull request number',
+      gitRoot,
+    };
+  }
+  // `repo` reaches `gh --repo` argv in its documented [HOST/]OWNER/REPO form.
+  // A bound PR on an Enterprise host must keep that host: a bare owner/repo
+  // would resolve on github.com (or GH_HOST) and could answer with a foreign
+  // same-numbered PR. Accept a plain owner/repo or a bare dotted hostname
+  // (optionally :port) prefix — never a URL, whitespace, or a leading '-'
+  // (mirroring isSafeLogRange) so a crafted value can never introduce flags.
+  // The host must be dotted or carry a port so `owner/repo/extra` can never
+  // pass as host-qualified.
+  if (
+    repo !== undefined &&
+    (repo.startsWith('-') ||
+      !(
+        /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
+        /^(?:(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?::\d+)?|[A-Za-z0-9-]+:\d+)\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(
+          repo,
+        )
+      ))
+  ) {
+    return {
+      kind: 'failed',
+      message: 'invalid pull request repository',
+      reason: 'invalid_repo',
+      gitRoot,
+    };
+  }
+
+  const args = ['pr', 'view', String(number), '--json', GH_PR_FILES_FIELDS];
+  if (repo !== undefined) args.push('--repo', repo);
+
+  let stdout: string;
+  try {
+    stdout = await runGh(args, gitRoot, env);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { kind: 'cli_unavailable' };
+    }
+    return {
+      kind: 'failed',
+      message: ghErrorMessage(error, 'gh pr view'),
+      gitRoot,
+      ...fallbackBinaryField(ghEnv(env), gitRoot),
+    };
+  }
+
+  try {
+    return { kind: 'ok', files: parseGhPrFiles(stdout) };
+  } catch (error) {
+    return {
+      kind: 'failed',
+      message: ghErrorMessage(error, 'gh pr view'),
+      gitRoot,
+    };
+  }
+}
+
 // ── Create PR ──────────────────────────────────────────────
 
 export interface CreateGitHubPullRequestOptions {

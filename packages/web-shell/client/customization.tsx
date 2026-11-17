@@ -201,6 +201,7 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
+  | 'artifacts'
   | 'tokenUsage'
   | 'contextUsage';
 
@@ -217,7 +218,8 @@ export type WebShellRightPanelItem =
   | 'sideTask'
   | 'terminal'
   | 'webPreview'
-  | 'trajectory';
+  | 'trajectory'
+  | 'changeOverview';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
@@ -264,6 +266,14 @@ export interface ChatHeaderRenderInfo {
   onOpenTokenUsage?: () => void;
   /** Opens context usage for the current session, when available. */
   onOpenContextUsage?: () => void;
+  /**
+   * Number of session artifacts. Published together with `onOpenArtifacts`
+   * only when the artifacts section can actually be opened, so a count never
+   * appears without a way to act on it.
+   */
+  artifactCount?: number;
+  /** Opens the environment panel's artifacts section, when available. */
+  onOpenArtifacts?: () => void;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
 }
