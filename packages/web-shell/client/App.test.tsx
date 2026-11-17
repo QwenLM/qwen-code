@@ -17771,16 +17771,24 @@ describe('App session callbacks', () => {
   });
 
   it('keeps the legacy pre-session Voice fallback out of git status', async () => {
+    // A legacy single-project daemon (no workspaces catalog): R3-1
+    // resolves the session-less draft to the daemon home, so the chip
+    // fetches that workspace's git status — and never the stale
+    // connection cwd.
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {
       workspaceCwd: '/workspace',
       features: ['voice_transcribe'],
     } as typeof mockWorkspace.capabilities;
     const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
-    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
-      workspaceGit,
-      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
-    }));
+    const fetchedWorkspaces: string[] = [];
+    mockWorkspace.client.workspaceByCwd.mockImplementation((cwd: string) => {
+      fetchedWorkspaces.push(cwd);
+      return {
+        workspaceGit,
+        workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      };
+    });
 
     renderApp();
     await flush();
@@ -17790,7 +17798,8 @@ describe('App session callbacks', () => {
       cwd: '/workspace',
       streamPath: 'voice/stream',
     });
-    expect(workspaceGit).not.toHaveBeenCalled();
+    expect(fetchedWorkspaces).toContain('/workspace');
+    expect(fetchedWorkspaces).not.toContain('/tmp/project');
   });
 
   it('uses qualified voice status and workspace settings for secondary Voice models', async () => {
@@ -24677,6 +24686,142 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('resolves a legacy single-project draft to the daemon cwd when no workspaces catalog exists', async () => {
+    // R3-1: a daemon exposing only capabilities.workspaceCwd (no workspaces
+    // array) still names its own cwd as the draft target — the chip, the
+    // first prompt, and the session catalog all agree on it instead of
+    // degrading while the session would be created via the connection
+    // fallback without a catalog entry.
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/proj';
+    mockConnection.sessionContext = { kind: 'workspace', cwd: '/proj' };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/proj',
+    } as typeof mockWorkspace.capabilities;
+    // Keep the chip poll from ever resolving so only the mirror effect can
+    // paint the chip here (same harness note as the cold-draft test above).
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      getSessionToolCalls: mockWorkspace.client.getSessionToolCalls,
+      getSessionTurnIndexPage: mockWorkspace.client.getSessionTurnIndexPage,
+      workspaceGit: vi.fn(() => new Promise(() => {})),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        available: true,
+        pullRequests: [],
+      }),
+    }));
+    const { rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      mockConnection.gitStatus = {
+        v: 2,
+        workspaceCwd: '/proj',
+        branch: 'proj-branch',
+      };
+    });
+    rerender();
+    await flush();
+
+    // The chip adopts daemon git-status pushes only for the workspace the
+    // draft resolves to.
+    expect(testState.latestChatEditorProps?.gitStatus?.branch).toBe(
+      'proj-branch',
+    );
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('legacy daemon prompt');
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/proj',
+        sessionContext: { kind: 'workspace', cwd: '/proj' },
+      }),
+    );
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(sessionCatalogController.sessionCreated).toHaveBeenCalled();
+      });
+    });
+    expect(sessionCatalogController.sessionCreated).toHaveBeenCalledWith(
+      '/proj',
+      'session-1',
+    );
+  });
+
+  it('loads the new-session skills catalog from the workspace a cold draft starts in', async () => {
+    // R3-6: a terminated session left the connection on the secondary
+    // workspace; the draft starts in the primary the picker displays, so
+    // the composer's skills catalog must be fetched for the primary — a
+    // catalog fetched from the leftover would list skills the new session
+    // will not have (/<skill> would go out as literal prompt text).
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/secondary',
+    };
+    mockWorkspace.capabilities = {
+      features: ['workspace_skills_config_runtime'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const skillsRequests: string[] = [];
+    const recordedSkillsStatus = {
+      initialized: true,
+      skills: [{ name: 'configured', description: 'Config', status: 'ok' }],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceConfigSkills: vi.fn(async () => {
+        skillsRequests.push(cwd);
+        return recordedSkillsStatus;
+      }),
+      ensureRuntime: vi.fn().mockResolvedValue({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 4,
+        capabilities: {
+          skills: { state: 'ready', revision: 0, runtimeEpoch: 4 },
+        },
+      }),
+      runtimeStatus: vi.fn().mockResolvedValue(recordedSkillsStatus),
+      workspaceRuntimeSkills: vi.fn().mockResolvedValue(recordedSkillsStatus),
+    }));
+
+    renderApp();
+    await flush();
+    await openComposerSkills();
+
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'configured', description: 'Config' },
+    ]);
+    // The catalog was fetched for the draft's start workspace and never
+    // for the leftover connection workspace.
+    expect(skillsRequests).toContain('/tmp/project');
+    expect(skillsRequests).not.toContain('/work/secondary');
+  });
+
   it('scopes the agents panel to the workspace a cold draft starts in, not the leftover connection workspace', async () => {
     // A terminated session left the connection on the secondary workspace
     // with no session id; the draft starts in the primary it displays, so
@@ -26567,13 +26712,29 @@ describe('App session callbacks', () => {
   });
 
   it('does not preheat the primary runtime while reading another workspace catalog', async () => {
+    // With a workspaces catalog the session-less draft starts in the
+    // picked workspace (R3-6), so reading that other workspace's catalog
+    // must not preheat the primary runtime.
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {
       workspaceCwd: '/different-primary',
       features: ['workspace_acp_preheat'],
-    };
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/different-primary',
+          primary: true,
+          trusted: true,
+        },
+        { id: 'other', cwd: '/tmp/project', primary: false, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
     mockWorkspace.client.workspaceAcpPreheat.mockClear();
     renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/tmp/project');
+    });
     await flush();
     await openComposerSkills();
     expect(mockWorkspace.client.workspaceAcpPreheat).not.toHaveBeenCalled();

@@ -350,6 +350,7 @@ function renderSidebar(
     activePage?: Parameters<typeof WebShellSidebar>[0]['activePage'];
     primaryNav?: Parameters<typeof WebShellSidebar>[0]['primaryNav'];
     selectedWorkspaceCwd?: string;
+    draftWorkspaceCwd?: string;
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
     onOpenGoals?: () => void;
@@ -439,6 +440,7 @@ function renderSidebar(
           onStandaloneNotice={overrides.onStandaloneNotice}
           onError={overrides.onError ?? (() => {})}
           selectedWorkspaceCwd={overrides.selectedWorkspaceCwd}
+          draftWorkspaceCwd={overrides.draftWorkspaceCwd}
           onSelectWorkspace={overrides.onSelectWorkspace}
           onOpenAddWorkspace={overrides.onOpenAddWorkspace}
           onOpenWorkspacesOverview={overrides.onOpenWorkspacesOverview}
@@ -4394,11 +4396,58 @@ describe('WebShellSidebar workspace removal', () => {
     expect(workspace.refreshCapabilities).toHaveBeenCalled();
   });
 
-  it('resets a cold draft when the workspace it is connected to is removed', async () => {
-    // A terminated session left the connection on the secondary workspace.
-    // The cold draft never writes the selection (the #16992 fix), so the
-    // removed cwd is only visible through the connection state — the reset
-    // must fire from there or the next prompt targets the removed cwd.
+  it('resets a cold draft when the workspace it targets is removed', async () => {
+    // A terminated session left the connection on a workspace the cold draft
+    // resolves as its own start workspace (the legacy single-workspace
+    // shape: the leftover is the draft's maintenance target). The cold
+    // draft never writes the selection (the #16992 fix), so the reset must
+    // fire from the resolved target or the next prompt targets the removed
+    // cwd.
+    connection.sessionId = null;
+    connection.sessionContext = { kind: 'workspace', cwd: '/tmp/other' };
+    connection.workspaceCwd = '/tmp/other';
+    const onSelectWorkspace = vi.fn();
+    renderSidebar({ draftWorkspaceCwd: '/tmp/other', onSelectWorkspace });
+
+    openRemoval('/tmp/other');
+
+    await act(async () => click(dialogButton('Remove workspace')));
+
+    expect(workspaceActions.removeWorkspace).toHaveBeenCalledWith('secondary', {
+      force: false,
+    });
+    expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
+  });
+
+  it('does not reset a cold draft targeting the primary when the leftover connection workspace is removed', async () => {
+    // A terminated session left the connection on the secondary workspace
+    // while the cold draft resolves to the trusted primary: removing the
+    // leftover must not reset the draft (the reset rewrites
+    // pendingSessionContext and bumps the composer version, an uninvited
+    // reset that reverts a subscription-model pick — R1-2 consequence).
+    connection.sessionId = null;
+    connection.sessionContext = { kind: 'workspace', cwd: '/tmp/other' };
+    connection.workspaceCwd = '/tmp/other';
+    const onSelectWorkspace = vi.fn();
+    renderSidebar({ draftWorkspaceCwd: '/tmp/project', onSelectWorkspace });
+
+    openRemoval('/tmp/other');
+
+    await act(async () => click(dialogButton('Remove workspace')));
+
+    expect(workspaceActions.removeWorkspace).toHaveBeenCalledWith('secondary', {
+      force: false,
+    });
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('does not reset a projectless draft when the leftover connection workspace is removed', async () => {
+    // A terminated session left the connection on the secondary workspace
+    // while the user explicitly picked "No workspace" (standalone): both
+    // states read selectedWorkspaceCwd === undefined, and the draft has no
+    // resolved start workspace. Removing the leftover must not reset it —
+    // the reset would re-point the draft to the primary, a repo the user
+    // explicitly declined (R1-2).
     connection.sessionId = null;
     connection.sessionContext = { kind: 'workspace', cwd: '/tmp/other' };
     connection.workspaceCwd = '/tmp/other';
@@ -4412,7 +4461,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(workspaceActions.removeWorkspace).toHaveBeenCalledWith('secondary', {
       force: false,
     });
-    expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
   });
 
   it('removing the leftover connection workspace must not clear a different draft pick', async () => {
