@@ -256,5 +256,70 @@ describe('useReverseSearchCompletion', () => {
       expect(result.current.suggestions).toEqual([]);
       expect(result.current.showSuggestions).toBe(false);
     });
+
+    it('recomputes matches when the history source is replaced', () => {
+      const { result, rerender } = renderHook(
+        ({ history }) =>
+          useReverseSearchCompletion(
+            useTextBufferForTest('echo'),
+            history,
+            true,
+          ),
+        { initialProps: { history: ['echo first'] } },
+      );
+
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'echo first',
+      ]);
+
+      rerender({ history: ['echo newest', 'echo first'] });
+
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'echo newest',
+        'echo first',
+      ]);
+    });
+
+    it('does not retain matches removed from the history source', () => {
+      const { result, rerender } = renderHook(
+        ({ history }) =>
+          useReverseSearchCompletion(
+            useTextBufferForTest('echo'),
+            history,
+            true,
+          ),
+        { initialProps: { history: ['echo current', 'echo stale'] } },
+      );
+
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'echo current',
+        'echo stale',
+      ]);
+
+      rerender({ history: ['echo current'] });
+
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'echo current',
+      ]);
+    });
+
+    it('preserves the order of the replaced history source', () => {
+      const { result, rerender } = renderHook(
+        ({ history }) =>
+          useReverseSearchCompletion(
+            useTextBufferForTest('echo'),
+            history,
+            true,
+          ),
+        { initialProps: { history: ['echo first', 'echo second'] } },
+      );
+
+      rerender({ history: ['echo second', 'echo first'] });
+
+      expect(result.current.suggestions.map((s) => s.value)).toEqual([
+        'echo second',
+        'echo first',
+      ]);
+    });
   });
 });
