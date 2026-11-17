@@ -8,4 +8,7 @@ public final class LocalWorktreeFiles implements WorktreeFiles {
     public void requireRoot(Plan plan) { SessionWorktreeGit.requireRoot(plan); }
     public String currentBranch(String verifiedIdentity) { return SessionWorktreeGit.currentBranch(verifiedIdentity); }
     public String identity(Path path) { return SessionWorktreeGit.identity(path); }
+    public java.util.Map<String, String> reattest(Plan plan, String savedIdentity, String volumeUuid) {
+        return SessionWorktreeGit.reattest(plan, savedIdentity, volumeUuid);
+    }
 }

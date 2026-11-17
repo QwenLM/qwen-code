@@ -74,9 +74,12 @@ turns a recovered state into an unclassified error.
 
 The stash entry is identified by provenance and SHA, never by position:
 the listing is compared before and after the push and the entry chosen is
-the new one carrying the auto-stash message (a terminal push landing in
-between sits above it and is left alone; if that re-listing fails, the
-refusal points at the entry by its message); the restore is `git stash
+the new one whose subject ends with the auto-stash label plus a
+per-request nonce — so a concurrent request's entry can never be adopted
+even when this request's own push was a no-op, and multiple candidates
+fail closed (a terminal push landing in between sits above it and is left
+alone; if that re-listing fails, the refusal points at the entry by its
+labelled subject); the restore is `git stash
 apply <sha>`; the drop names the slot resolved right before it and then
 checks the SHA git reports as dropped — git has no identity-addressed
 drop — and if the slots shifted under it, the other entry is `git stash
