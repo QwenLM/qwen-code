@@ -70,9 +70,6 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   >({});
   const customInputValuesRef = useRef<Record<number, string>>({});
   const advanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Mirrors advanceTimerRef for rendering: the free-text input needs a render
-  // to stop taking keys while an advance is pending.
-  const [advancePending, setAdvancePending] = useState(false);
   const confirmedRef = useRef(false);
   useEffect(
     () => () => {
@@ -188,10 +185,8 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         answers: { [currentQuestionIndex]: value },
       });
     } else if (currentQuestionIndex < totalTabs - 1) {
-      setAdvancePending(true);
       advanceTimerRef.current = setTimeout(() => {
         advanceTimerRef.current = null;
-        setAdvancePending(false);
         setCurrentQuestionIndex((prev) => Math.min(prev + 1, totalTabs - 1));
         setSelectedIndex(0);
       }, 150);
@@ -202,7 +197,6 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     if (advanceTimerRef.current !== null) {
       clearTimeout(advanceTimerRef.current);
       advanceTimerRef.current = null;
-      setAdvancePending(false);
     }
   };
 
@@ -573,6 +567,13 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                 value={currentCustomInputValue}
                 initialCursorOffset={currentCustomInputValue.length}
                 onChange={(value: string) => {
+                  // A multi-select answer is rebuilt from the typed value at
+                  // submit, so typing or pasting while its advance is pending
+                  // would change an answer already recorded. Checked here, not
+                  // through a render, so a key in the same read as the
+                  // committing Enter is dropped too. A single-select answer is
+                  // kept as recorded, so its field stays editable.
+                  if (isMultiSelect && advanceTimerRef.current !== null) return;
                   const oldValue =
                     customInputValuesRef.current[currentQuestionIndex] ??
                     customInputValues[currentQuestionIndex] ??
@@ -594,9 +595,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                 }}
                 onSubmit={handleCustomInputSubmit}
                 placeholder={t('Type something...')}
-                // Only a multi-select answer is rebuilt from the typed value,
-                // so only that field is frozen while its advance is pending.
-                isActive={isFocused && !(isMultiSelect && advancePending)}
+                isActive={isFocused}
                 inputWidth={50}
               />
             </Box>
