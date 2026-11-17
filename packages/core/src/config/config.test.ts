@@ -7394,28 +7394,34 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to on for headless and off for every other surface', () => {
+      it('defaults to on for headless and the Ink TUI and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(
-            surface === 'headless',
+            surface === 'headless' || surface === 'ink',
           );
         }
       });
 
-      it('keeps headless on the procedural path when the setting is false', () => {
-        expect(
-          makeConfig({
-            eventBusAgentLoopEnabled: false,
-          }).isEventBusAgentLoopEnabled('headless'),
-        ).toBe(false);
-      });
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on the procedural path when the setting is false',
+        (surface) => {
+          expect(
+            makeConfig({
+              eventBusAgentLoopEnabled: false,
+            }).isEventBusAgentLoopEnabled(surface),
+          ).toBe(false);
+        },
+      );
 
-      it('keeps headless on the procedural path when the environment turns it off', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless=0');
-        expect(makeConfig().isEventBusAgentLoopEnabled('headless')).toBe(false);
-        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
-        expect(makeConfig().isEventBusAgentLoopEnabled('headless')).toBe(false);
-      });
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on the procedural path when the environment turns it off',
+        (surface) => {
+          vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', `${surface}=0`);
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+          vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+        },
+      );
 
       it('honors the constructor parameter', () => {
         expect(
@@ -7588,10 +7594,10 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to the kernel for headless, shared for Ink and AgentCore, and legacy elsewhere', () => {
+      it('defaults to the kernel for headless and Ink, shared for AgentCore, and legacy elsewhere', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().getAgentLoopPath(surface)).toBe(
-            surface === 'headless'
+            surface === 'headless' || surface === 'ink'
               ? 'kernel'
               : ON_BY_DEFAULT.has(surface)
                 ? 'shared'
@@ -7635,10 +7641,13 @@ describe('Server Config (config.ts)', () => {
         expect(config.getAgentLoopPath('acp')).toBe('legacy');
       });
 
-      it('keeps headless on the shared loop when the kernel is turned off', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless=0');
-        expect(makeConfig().getAgentLoopPath('headless')).toBe('shared');
-      });
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on the shared loop when the kernel is turned off',
+        (surface) => {
+          vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', `${surface}=0`);
+          expect(makeConfig().getAgentLoopPath(surface)).toBe('shared');
+        },
+      );
 
       it('caps speculation and hosted at shared even with both switches on', () => {
         // runSpeculationModelRound and the Hosted Harness model round only call
