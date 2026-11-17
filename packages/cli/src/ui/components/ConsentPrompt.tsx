@@ -11,11 +11,13 @@ import { MarkdownDisplay } from '../utils/MarkdownDisplay.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { t } from '../../i18n/index.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { useKeypress } from '../hooks/useKeypress.js';
 
 type ConsentPromptProps = {
   // If a simple string is given, it will render using markdown by default.
   prompt: ReactNode;
   onConfirm: (value: boolean) => void;
+  dismissOnEscape?: boolean;
   terminalWidth: number;
   availableTerminalHeight?: number;
 };
@@ -24,7 +26,19 @@ type ConsentPromptProps = {
 const CONSENT_PROMPT_CHROME_ROWS = 7;
 
 export const ConsentPrompt = (props: ConsentPromptProps) => {
-  const { prompt, onConfirm, terminalWidth, availableTerminalHeight } = props;
+  const {
+    prompt,
+    onConfirm,
+    dismissOnEscape = false,
+    terminalWidth,
+    availableTerminalHeight,
+  } = props;
+  useKeypress(
+    (key) => {
+      if (key.name === 'escape') onConfirm(false);
+    },
+    { isActive: dismissOnEscape },
+  );
   const constrainedHeight = clampDialogHeight(availableTerminalHeight);
   const availablePromptRows =
     constrainedHeight === undefined

@@ -2398,10 +2398,43 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       return { ...attached, flowId: event!.data.flowId, calls };
     }
 
-    it.each([null, 'session-a'])(
-      'activates subscription through its captured owner (session: %s)',
-      async (sessionId) => {
+    it.each([
+      [null, false],
+      ['session-a', false],
+      [null, true],
+      ['session-a', true],
+    ] as const)(
+      'activates through its captured owner (session: %s, project override: %s)',
+      async (sessionId, projectOverride) => {
         const attached = await openSidebar(sessionId);
+        if (projectOverride) {
+          attached.calls.providers.mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace-a',
+            initialized: true,
+            current: {
+              authType: 'openai',
+              modelId: 'fixture-openai(openai)',
+            },
+            providers: [
+              {
+                kind: 'model_provider',
+                status: 'ok',
+                authType: 'openai',
+                current: true,
+                models: [
+                  {
+                    modelId: 'fixture-openai(openai)',
+                    baseModelId: 'fixture-openai',
+                    name: 'Fixture OpenAI',
+                    isCurrent: true,
+                    isRuntime: false,
+                  },
+                ],
+              },
+            ],
+          });
+        }
         expect(subscriptionMocks.run).not.toHaveBeenCalled();
         await attached.messageHandler?.({
           type: 'qwenSubscriptionActivate',
@@ -2415,22 +2448,26 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         );
         expect(attached.calls.activate).toHaveBeenCalledWith({
           signal: expect.any(AbortSignal),
+          settingsScope: 'user',
         });
         if (sessionId) {
           expect(attached.calls.setModel).toHaveBeenCalledExactlyOnceWith(
             sessionId,
             'qwen3.8-max(qwen-subscription)',
+            undefined,
+            { persistDefault: false },
           );
         } else {
           expect(attached.calls.setModel).not.toHaveBeenCalled();
         }
-        expect(attached.calls.providers).toHaveBeenCalledOnce();
+        expect(attached.calls.providers).not.toHaveBeenCalled();
         expect(attached.postMessage).toHaveBeenCalledWith({
           type: 'qwenSubscriptionActivationResult',
           data: {
             flowId: attached.flowId,
             requestId: 'request',
             modelId: 'qwen3.8-max',
+            draft: !sessionId,
           },
         });
         expect(attached.postMessage).not.toHaveBeenCalledWith(

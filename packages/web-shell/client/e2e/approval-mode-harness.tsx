@@ -3,9 +3,9 @@ import ReactDOM from 'react-dom/client';
 import type { WebShellProps } from '../App';
 import '../styles/standalone.css';
 
+const params = new URLSearchParams(window.location.search);
 const indexEntry = '../index.tsx';
 const { WebShellWithProviders } = await import(/* @vite-ignore */ indexEntry);
-const params = new URLSearchParams(window.location.search);
 const splitSessionIds = params.get('split')?.split(',');
 document.documentElement.classList.add('theme-dark', 'dark');
 

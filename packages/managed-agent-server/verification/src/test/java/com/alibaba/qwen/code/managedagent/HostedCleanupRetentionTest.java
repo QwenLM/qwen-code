@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedRuntimeRetentionGuard;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.managedagent.persistence.StoreLockTrace;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -248,7 +249,7 @@ class HostedCleanupRetentionTest {
     void cleanupAfterAnotherEventAcquiresPlacementBeforeItsSessionRoot() {
         assertCleanupPlacement(records -> {
             String[] lines = records.split("\n");
-            var cleanup = (ObjectNode) com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(lines[0]);
+            var cleanup = (ObjectNode) ManagedExtensionRecordStore.parse(lines[0]);
             var preceding = cleanup.deepCopy();
             var event = (ObjectNode) preceding.path("managedSession");
             event.put("kind", "operation.replayed").put("eventId", "preceding-event");

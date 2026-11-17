@@ -135,6 +135,7 @@ import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceSubscriptionRoutes } from './routes/workspace-subscription.js';
 import { registerSubscriptionAuthRoutes } from './routes/subscription-auth.js';
+import { registerWeixinAuthRoutes } from './routes/weixin-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import {
@@ -158,10 +159,12 @@ import { registerSessionRoutes } from './routes/session.js';
 import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
 import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
 import { registerSessionPrBindingsRoutes } from './routes/session-pr-bindings.js';
+import { registerSessionPostedCommentsRoutes } from './routes/session-posted-comments.js';
 import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
 import {
   createRequestedSessionIdAdmission,
   requestedSessionIdPersistenceExists,
+  type RequestedSessionIdAdmission,
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
@@ -173,7 +176,10 @@ import {
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
-import { registerGoalsRoutes } from './routes/goals.js';
+import {
+  registerGoalsRoutes,
+  registerWorkspaceQualifiedGoalsRoutes,
+} from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
 import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
 import {
@@ -213,6 +219,11 @@ import {
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { registerHostedSideQueryRoutes } from './hosted-side-query.js';
+import {
+  registerHostedPackagePreparation,
+  HOSTED_PACKAGE_PREPARATION_PREFIX,
+} from './hosted-package-preparation.js';
 import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
@@ -369,6 +380,7 @@ import {
   registerWorkspaceQualifiedSkillsRoutes,
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
+import { SkillInstallAttemptStore } from './skill-install-attempts.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
 import {
   AGENT_HOST_RATE_LIMIT,
@@ -698,6 +710,14 @@ export interface ServeAppDeps {
   ) => Promise<void>;
   persistDisabledSkills?: DaemonWorkspaceServiceDeps['persistDisabledSkills'];
   persistDisabledSkillsBatch?: DaemonWorkspaceServiceDeps['persistDisabledSkillsBatch'];
+  persistUserSkillsActivation?: (
+    workspace: string,
+    skillNames: readonly string[],
+    activation: import('../config/skill-settings.js').UserSkillActivation,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    import('./workspace-service/types.js').PersistUserSkillsActivationResult
+  >;
   contextFilename?: string;
   persistSetting?: (
     workspace: string,
@@ -708,11 +728,7 @@ export interface ServeAppDeps {
   ) => Promise<void | import('../config/settings.js').LoadedSettings>;
   persistSettings?: (
     workspace: string,
-    writes: Array<{
-      scope: import('../config/settings.js').SettingScope;
-      key: string;
-      value: unknown;
-    }>,
+    writes: import('./workspace-service/types.js').WorkspaceSettingsWrites,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
   updateModelContextWindow?: import('./routes/workspace-models.js').WorkspaceModelsRouteDeps['updateModelContextWindow'];
@@ -1185,6 +1201,8 @@ export function createServeApp(
       opts,
       boundWorkspace,
       persistSettingAvailable: deps.persistSetting !== undefined,
+      userSkillActivationAvailable:
+        deps.persistUserSkillsActivation !== undefined,
       sessionArtifactsPersistenceAvailable:
         deps.sessionArtifactsPersistenceAvailable !== false,
       sessionGenerationAvailable: () => {
@@ -1410,6 +1428,7 @@ export function createServeApp(
         : {}),
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
+      eventRingMaxBytes: opts.eventRingMaxBytes,
       compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
       maxJournalEvents: opts.maxJournalEvents,
       maxJournalBytes: opts.maxJournalBytes,
@@ -2366,6 +2385,9 @@ export function createServeApp(
         req.path === '/health' ||
         req.path === '/capabilities' ||
         req.path === '/session' ||
+        req.path === '/side-queries' ||
+        req.path.startsWith('/side-queries/') ||
+        req.path.startsWith(`${HOSTED_PACKAGE_PREPARATION_PREFIX}/`) ||
         (poolEnabled && req.path.startsWith('/internal/hosted-harness/v1/')) ||
         req.path.startsWith('/session/')
       )
@@ -2596,6 +2618,7 @@ export function createServeApp(
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
   let stopHostedCsiSessions: (() => Promise<void>) | undefined;
+  let stopHostedPackagePreparation: (() => Promise<void>) | undefined;
   if (hostedHarness) {
     const broker =
       opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
@@ -2621,6 +2644,12 @@ export function createServeApp(
       primaryBoundWorkspace,
       broker,
     );
+    stopHostedPackagePreparation = registerHostedPackagePreparation(
+      app,
+      hostedHarness,
+      ordinary,
+    );
+    registerHostedSideQueryRoutes(app, hostedHarness, ordinary);
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
       else res.sendStatus(404);
@@ -3009,6 +3038,7 @@ export function createServeApp(
     workspaceRegistry,
     gitState: workspaceGitState,
     sendBridgeError,
+    daemonEnv: daemonEnvAtBoot,
   });
   registerWorkspaceLocalOpenRoutes(app, {
     workspaceRegistry,
@@ -3071,6 +3101,13 @@ export function createServeApp(
   // Read-only reverse lookup (PR bindings → sessions) for channel workers
   // that deliver GitHub events into the session following a PR.
   registerSessionPrBindingsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  // Read-only authorship lookup (which comments a session posted) for the
+  // bound PR comment watch, so a bound session receives every other author's
+  // comments but not its own.
+  registerSessionPostedCommentsRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
   });
@@ -3563,8 +3600,10 @@ export function createServeApp(
 
   registerWorkspaceSubscriptionRoutes(app, {
     workspaceRegistry,
+    qwenCodeVersion: deps.qwenCodeVersion,
     mutate,
     persistSettings: deps.persistSettings,
+    syncModelProvidersRuntime,
     sendBridgeError,
   });
   const stopSubscriptionAuth = registerSubscriptionAuthRoutes(
@@ -3593,6 +3632,9 @@ export function createServeApp(
   );
   app.locals['stopSubscriptionAuth'] = stopSubscriptionAuth;
 
+  const stopWeixinAuth = registerWeixinAuthRoutes(app, mutate);
+  app.locals['stopWeixinAuth'] = stopWeixinAuth;
+
   registerWorkspaceAuthRoutes(app, {
     mutate,
     deviceFlowRegistry,
@@ -3618,6 +3660,15 @@ export function createServeApp(
     workspaceRegistry,
     archiveCoordinator,
     requestedSessionIdAdmission,
+    // Late-bound: the refresh timer is started before this app exists, so the
+    // serve root installs the hook on locals and it is read per restore.
+    onSessionRestored: ({ workspaceCwd, sessionId }) => {
+      (
+        app.locals as {
+          prWatchDrainNow?: (cwd: string, sessionId?: string) => void;
+        }
+      ).prWatchDrainNow?.(workspaceCwd, sessionId);
+    },
     mutate,
     sendBridgeError,
     daemonLog,
@@ -3641,6 +3692,27 @@ export function createServeApp(
         }
       : {}),
   });
+  // The PR watch's in-process wake shares this instance with the routes: a
+  // second tracker would not see these reservations and could restore over one.
+  (
+    app.locals as {
+      requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+    }
+  ).requestedSessionIdAdmission = requestedSessionIdAdmission;
+  // Same reason: a live-conversation restore throws without this, so the wake
+  // would report every session in such a workspace unavailable.
+  if (liveConversationWorkspaceForRoutes) {
+    (
+      app.locals as {
+        materializeLiveConversationDirectory?: (
+          sessionId: string,
+        ) => Promise<string>;
+      }
+    ).materializeLiveConversationDirectory = (sessionId: string) =>
+      liveConversationWorkspaceForRoutes.materializeConversationDirectory(
+        sessionId,
+      );
+  }
 
   if (standaloneSessionService) {
     registerStandaloneSessionRoutes(app, {
@@ -3778,7 +3850,10 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
   });
+  const archiveInstalls = new SkillInstallAttemptStore();
   registerWorkspaceSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
     workspaceRuntime: primaryRuntime,
     workspaceRegistry,
     mutate,
@@ -3786,7 +3861,18 @@ export function createServeApp(
     sendBridgeError,
     getSkillsConfigStatus,
     invalidateSkillsConfigStatus,
-    installSkillConfig: (workspaceCwd, request) =>
+    ...(deps.persistUserSkillsActivation
+      ? {
+          persistUserSkillsActivation: (skillNames, activation) =>
+            deps.persistUserSkillsActivation!(
+              primaryBoundWorkspace,
+              skillNames,
+              activation,
+              capturePrimaryGenerationAssertion(),
+            ),
+        }
+      : {}),
+    installSkillConfig: (workspaceCwd, request, options) =>
       installWorkspaceSkill(
         workspaceCwd,
         request,
@@ -3795,6 +3881,7 @@ export function createServeApp(
           daemonEnvAtBoot['GH_TOKEN'] ??
           daemonEnvAtBoot['GITHUB_TOKEN'],
         capturePrimaryGenerationAssertion(),
+        options,
       ),
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
       deleteWorkspaceSkill(
@@ -3808,6 +3895,8 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
+    archiveInstalls,
+    getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
     getSkillsSnapshot: (workspaceCwd) =>
       trustedSkillsConfigStatus.snapshot(workspaceCwd),
     workspaceRegistry,
@@ -3851,6 +3940,12 @@ export function createServeApp(
     bridge: primaryBridge,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  // The qualified listing lets a multi-workspace Web Shell aggregate every
+  // registered project's goals, not just the primary's.
+  registerWorkspaceQualifiedGoalsRoutes(app, {
+    workspaceRegistry,
+    conversationRuntimeActivity,
   });
 
   // The primary workspace's /autofix-pr watches, read from the clone's files
@@ -4389,6 +4484,8 @@ export function createServeApp(
     ]);
   };
   serveAppLifecycle.addAppDrain(disposeSkillsConfigStatus);
+  if (stopHostedPackagePreparation)
+    serveAppLifecycle.addAppDrain(stopHostedPackagePreparation);
   if (!deps.serveAppLifecycle)
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
@@ -4427,6 +4524,7 @@ export function createServeApp(
       stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(locals.stopHostedMountHandbacks);
       stopAppResource(stopSubscriptionAuth);
+      stopAppResource(stopWeixinAuth);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());

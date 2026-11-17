@@ -8,7 +8,7 @@ import express from 'express';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import type { UsageSummaryRecord } from '@qwen-code/qwen-code-core';
 import { registerUsageStatsRoutes } from './usage-stats.js';
@@ -230,5 +230,199 @@ describe('usage-stats route (real loader against seeded history)', () => {
     expect(res.body.summary.totalTokens).toBe(1200);
     expect(res.body.summary.sessions).toBe(1);
     expect(res.body.summary.cacheReadRate).toBeCloseTo(0.9, 6);
+  });
+
+  it('replays a never-persisted transcript through the real route, read-only', async () => {
+    // A daemon / Web Shell session that only exists as a transcript (no
+    // usage_record.jsonl entry). The real loader must replay it and the route
+    // must serve its totals without writing anything back to ~/.qwen.
+    const now = Date.now();
+    const chats = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'replay-proj',
+      'chats',
+    );
+    fs.mkdirSync(chats, { recursive: true });
+    const sessionId = 'sess-replay';
+    // Spread the stamps across the elapsed part of today, clamped to local
+    // midnight, so they sit inside [local midnight, now] in every timezone and
+    // even in the first seconds after local midnight (a fixed "now - 60s"
+    // offset would fall before local midnight there). at(3) stays `now`.
+    const localMidnight = new Date(now).setHours(0, 0, 0, 0);
+    const from = Math.max(localMidnight, now - 3 * 60_000);
+    const at = (m: number) =>
+      new Date(from + Math.floor(((now - from) * (m + 1)) / 4)).toISOString();
+    const base = { sessionId, cwd: '/replay/proj' };
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: at(0),
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: at(1),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': at(1),
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1000,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+      {
+        ...base,
+        uuid: 'u3',
+        parentUuid: 'u2',
+        timestamp: at(2),
+        type: 'assistant',
+        message: { role: 'assistant', content: 'ok' },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(chats, `${sessionId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+
+    // cacheTtlMs: 0 forces the second GET to run the loader again; the default
+    // 60s route cache would answer it from the first load's records and compare
+    // a value with itself, never exercising the warm path.
+    const app = mount({ cacheTtlMs: 0 }); // real loadUsageHistoryWithLive
+    const cold = await request(app).get('/usage/dashboard?range=today');
+    expect(cold.status).toBe(200);
+    expect(cold.body.summary.totalTokens).toBe(1000);
+    expect(cold.body.summary.sessions).toBe(1);
+
+    // Grow the transcript, then reload: the warm path must rescan the changed
+    // file and report the new total, not serve the stale first-load records.
+    fs.appendFileSync(
+      path.join(chats, `${sessionId}.jsonl`),
+      JSON.stringify({
+        ...base,
+        uuid: 'u4',
+        parentUuid: 'u3',
+        timestamp: at(3),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': at(3),
+            response_id: 'r2',
+            model: 'qwen-max',
+            duration_ms: 500,
+            input_token_count: 300,
+            output_token_count: 150,
+            cached_content_token_count: 0,
+            thoughts_token_count: 50,
+            total_token_count: 500,
+            prompt_id: 'p2',
+          },
+        },
+      }) + '\n',
+    );
+    const warm = await request(app).get('/usage/dashboard?range=today');
+    expect(warm.body.summary.totalTokens).toBe(1500);
+    expect(warm.body.summary.sessions).toBe(1);
+
+    expect(
+      fs.existsSync(path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl')),
+    ).toBe(false);
+  });
+
+  it('replays a transcript in the first seconds after local midnight', async () => {
+    // Pin the clock at local 00:00:30 so the `today` window is only 30s wide.
+    // A fixed "now - 60s" fixture would fall before local midnight and be
+    // filtered out; the elapsed-day span must keep the stamps inside the window.
+    // Fake only Date so supertest's real timers keep working.
+    const localMidnight = new Date().setHours(0, 0, 0, 0);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(localMidnight + 30_000);
+    try {
+      const now = Date.now();
+      const chats = path.join(
+        process.env['QWEN_HOME']!,
+        'projects',
+        'midnight-proj',
+        'chats',
+      );
+      fs.mkdirSync(chats, { recursive: true });
+      const sessionId = 'sess-midnight';
+      const from = Math.max(
+        new Date(now).setHours(0, 0, 0, 0),
+        now - 3 * 60_000,
+      );
+      const at = (m: number) =>
+        new Date(from + Math.floor(((now - from) * (m + 1)) / 4)).toISOString();
+      const base = { sessionId, cwd: '/midnight/proj' };
+      const records = [
+        {
+          ...base,
+          uuid: 'u1',
+          parentUuid: null,
+          timestamp: at(0),
+          type: 'user',
+          message: { role: 'user', content: 'hi' },
+        },
+        {
+          ...base,
+          uuid: 'u2',
+          parentUuid: 'u1',
+          timestamp: at(1),
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'qwen-code.api_response',
+              'event.timestamp': at(1),
+              response_id: 'r1',
+              model: 'qwen-max',
+              duration_ms: 1000,
+              input_token_count: 600,
+              output_token_count: 300,
+              cached_content_token_count: 0,
+              thoughts_token_count: 100,
+              total_token_count: 1000,
+              prompt_id: 'p1',
+            },
+          },
+        },
+        {
+          ...base,
+          uuid: 'u3',
+          parentUuid: 'u2',
+          timestamp: at(2),
+          type: 'assistant',
+          message: { role: 'assistant', content: 'ok' },
+        },
+      ];
+      fs.writeFileSync(
+        path.join(chats, `${sessionId}.jsonl`),
+        records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      );
+      const app = mount({ cacheTtlMs: 0 });
+      const res = await request(app).get('/usage/dashboard?range=today');
+      expect(res.status).toBe(200);
+      expect(res.body.summary.totalTokens).toBe(1000);
+      expect(res.body.summary.sessions).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

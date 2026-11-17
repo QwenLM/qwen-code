@@ -16,6 +16,7 @@ import {
   type IQwenOAuth2Client,
   type QwenCredentials,
 } from '@qwen-code/qwen-code-core';
+import { withQwenChatTracking } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   brandSecret,
@@ -118,8 +119,11 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       deviceCode: brandSecret(auth.device_code),
       pkceVerifier: brandSecret(code_verifier),
       userCode: auth.user_code,
-      verificationUri: auth.verification_uri,
-      verificationUriComplete: auth.verification_uri_complete,
+      verificationUri: withQwenChatTracking(auth.verification_uri, 'cli'),
+      verificationUriComplete: withQwenChatTracking(
+        auth.verification_uri_complete,
+        'cli',
+      ),
       expiresIn: auth.expires_in,
       // Qwen IdP doesn't return `interval`; registry falls back to the
       // RFC 8628 default (5s) when this is undefined.

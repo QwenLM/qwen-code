@@ -53,6 +53,15 @@ describe('conditional serve capability documentation', () => {
   });
 });
 
+it('advertises User Skill activation only when persistence is available', () => {
+  expect(getAdvertisedServeFeatures()).not.toContain('user_skill_activation');
+  expect(
+    getAdvertisedServeFeatures(undefined, {
+      userSkillActivationAvailable: true,
+    }),
+  ).toContain('user_skill_activation');
+});
+
 it('advertises runtime stop only with its complete management predicate', () => {
   expect(getAdvertisedServeFeatures()).not.toContain('workspace_runtime_stop');
   expect(
@@ -63,6 +72,15 @@ it('advertises runtime stop only with its complete management predicate', () => 
       workspaceRuntimeStopAvailable: true,
     }),
   ).toContain('workspace_runtime_stop');
+});
+
+it('advertises workspace order only with persistent workspace storage', () => {
+  expect(getAdvertisedServeFeatures()).not.toContain('workspace_order');
+  expect(
+    getAdvertisedServeFeatures(undefined, {
+      persistentWorkspaceRegistrationAvailable: true,
+    }),
+  ).toContain('workspace_order');
 });
 
 it('advertises batched session catalogs for single and multiple workspaces', () => {

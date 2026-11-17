@@ -21,6 +21,7 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { sendBridgeError } from './server/error-response.js';
+import { SkillInstallAttemptStore } from './skill-install-attempts.js';
 
 vi.mock('chokidar', async (importOriginal) => {
   const actual = await importOriginal<typeof import('chokidar')>();
@@ -90,6 +91,7 @@ it('discovers externally created Skills through both config routes without a chi
   const registry = createWorkspaceRegistry([runtime]);
   const app = express();
   const deps = {
+    archiveInstalls: new SkillInstallAttemptStore(),
     workspaceRegistry: registry,
     getSkillsConfigStatus: (cwd: string) => provider(cwd),
     invalidateSkillsConfigStatus: (cwd: string) => provider.invalidate?.(cwd),

@@ -59,9 +59,9 @@ describe('AskUserQuestionTool', () => {
     questions: Question[],
     outcome: ToolConfirmationOutcome,
     answers?: Record<string, string>,
+    signal: AbortSignal = new AbortController().signal,
   ) => {
     const invocation = tool.build({ questions });
-    const signal = new AbortController().signal;
     const confirmation = await invocation.getConfirmationDetails(signal);
     await confirmation.onConfirm(outcome, answers && { answers });
     return invocation.execute(signal);
@@ -302,6 +302,22 @@ describe('AskUserQuestionTool', () => {
         ToolConfirmationOutcome.Cancel,
       );
       expect(result.llmContent).toContain('declined to answer');
+      // A decline is a completed decision, not interrupted work.
+      expect(result.interruptedBeforeCompletion).toBeUndefined();
+    });
+
+    it('marks the unanswered questions as interrupted when the turn is aborted', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const result = await answerAndRun(
+        [testQuestion({ multiSelect: false })],
+        ToolConfirmationOutcome.Cancel,
+        undefined,
+        controller.signal,
+      );
+      expect(result.llmContent).toContain('declined to answer');
+      expect(result.interruptedBeforeCompletion).toBe(true);
     });
 
     it('should return formatted answers when user provides them', async () => {

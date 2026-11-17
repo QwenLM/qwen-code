@@ -43,6 +43,7 @@ qwen:
       cache-directory: '${QWEN_MANAGED_AGENT_EXTENSION_CACHE_DIRECTORY:}'
       cgroup-root: '${QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT:}'
     agent-revision: '${QWEN_MANAGED_AGENT_REVISION:1}'
+    side-queries-enabled: '${QWEN_MANAGED_AGENT_SIDE_QUERIES_ENABLED:false}'
     definition-models: '${QWEN_MANAGED_AGENT_DEFINITION_MODELS:}'
     definition-tool-profiles: '${QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:hosted-workspace-files/1}'
     trusted-actor-header: '${QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER:}'
@@ -63,11 +64,14 @@ qwen:
       writer-lease-duration: '${QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION:60s}'
       binding-key: '${QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY:}'
       allow-insecure-http: '${QWEN_MANAGED_AGENT_SESSION_STORE_ALLOW_INSECURE_HTTP:false}'
+    object-storage:
+      # The generic object store backs tool publication and session resources alike;
+      # it follows tool publication unless explicitly enabled for resources-only use.
+      enabled: '${QWEN_MANAGED_AGENT_OBJECT_STORAGE_ENABLED:${qwen.managed-agent.tool-publication.enabled:false}}'
     tool-publication:
       enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED:false}'
       gc-enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED:false}'
       deletion-grace: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE:24h}'
-      async-verification-enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ASYNC_VERIFICATION_ENABLED:false}'
       verification-concurrency: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_VERIFICATION_CONCURRENCY:2}'
     harness:
       enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
@@ -90,7 +94,7 @@ qwen:
     artifacts:
       read-revalidation-interval: '5s'
     automation:
-      enabled: '${QWEN_MANAGED_AGENT_AUTOMATION_ENABLED:false}'
+      enabled: '${QWEN_MANAGED_AGENT_AUTOMATION_ENABLED:true}'
       scan-delay: '${QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY:10s}'
       lease: '${QWEN_MANAGED_AGENT_AUTOMATION_LEASE:60s}'
       late-tolerance: '${QWEN_MANAGED_AGENT_AUTOMATION_LATE_TOLERANCE:5m}'
@@ -135,6 +139,7 @@ qwen:
       token: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN:}'
       provisioner: '${QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER:local-process}'
       v3-result-window: '${QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW:30m}'
+      tool-measurements: '${QWEN_MANAGED_AGENT_RUNTIME_TOOL_MEASUREMENTS:false}'
       workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID:}'
       workspace-creation-root: '${QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT:}'
       local-directory-import-enabled: '${QWEN_MANAGED_AGENT_LOCAL_DIRECTORY_IMPORT_ENABLED:false}'

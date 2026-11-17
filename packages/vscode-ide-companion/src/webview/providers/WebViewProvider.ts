@@ -1450,7 +1450,10 @@ export class WebViewProvider {
       if (this.authState === true) {
         this.sendMessageToWebView({
           type: 'authSuccess',
-          data: { message: 'Provider configured successfully!' },
+          data: {
+            message: 'Provider configured successfully!',
+            ...(plan.modelSelection ? { chatProviderConfigured: true } : {}),
+          },
         });
       } else {
         // Auth failed against the live backend — roll the bad credentials
@@ -1947,6 +1950,7 @@ export class WebViewProvider {
             .workspaceByCwd(owner.workspaceCwd)
             .activateSubscription({
               signal,
+              settingsScope: 'user',
             });
           assertOwner();
           if (result.runtimeSync.status === 'failed')
@@ -1955,21 +1959,10 @@ export class WebViewProvider {
             await owner.client.setSessionModel(
               owner.sessionId,
               `${result.modelId}(qwen-subscription)`,
+              undefined,
+              { persistDefault: false },
             );
             assertOwner();
-          }
-          const providers = await owner.client
-            .workspaceByCwd(owner.workspaceCwd)
-            .workspaceProviders();
-          assertOwner();
-          if (
-            !providers.initialized ||
-            providers.current?.authType !== 'qwen-subscription' ||
-            ![result.modelId, `${result.modelId}(qwen-subscription)`].includes(
-              providers.current.modelId ?? '',
-            )
-          ) {
-            throw new Error('Subscription runtime activation failed.');
           }
           this.sendMessageToWebView({
             type: 'qwenSubscriptionActivationResult',
@@ -1977,6 +1970,7 @@ export class WebViewProvider {
               flowId: flow.id,
               requestId: data.requestId,
               modelId: result.modelId,
+              draft: !owner.sessionId,
             },
           });
         } catch (error) {
@@ -2254,7 +2248,10 @@ export class WebViewProvider {
           return true;
         }
         this.subscriptionRuntime = {
-          client: new DaemonClient(runtime),
+          client: new DaemonClient({
+            ...runtime,
+            subscriptionPaywallScene: 'plugin',
+          }),
           workspaceCwd: canonicalWorkspaceCwd,
           sessionId: restoredSessionId,
         };

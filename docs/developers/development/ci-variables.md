@@ -31,12 +31,14 @@ this page in the same change.
 
 ## Variables
 
-| Variable                                 | Default | Used in                 | Controls                                                                                  |
-| ---------------------------------------- | ------- | ----------------------- | ----------------------------------------------------------------------------------------- |
-| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                |
-| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                         |
-| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                          |
-| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners |
+| Variable                                 | Default | Used in                 | Controls                                                                                          |
+| ---------------------------------------- | ------- | ----------------------- | ------------------------------------------------------------------------------------------------- |
+| `QWEN_CI_VITEST_RETRY`                   | `2`     | `ci.yml`                | Retry count for the main CI workspace and script test step                                        |
+| `QWEN_CI_HOST_LOAD_MAX_RATIO`            | `2.0`   | `ci.yml`                | Load-per-CPU ceiling at or above which a self-hosted Linux host is refused before the unit suites |
+| `QWEN_CI_RPC_RETRY`                      | `1`     | `ci.yml`                | Re-runs of an all-green workspace suite that failed only on Vitest's worker RPC timeout           |
+| `QWEN_RELEASE_VITEST_RETRY`              | `2`     | `release.yml`           | Retry count for the release workspace test shards                                                 |
+| `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` | `45`    | `release.yml`           | Job timeout of each release workspace test shard                                                  |
+| `QWEN_CI_VITEST_MAX_WORKERS`             | `4`     | `ci.yml`, `release.yml` | Worker cap for main CI unit tests and release workspace/quality tests on reserved runners         |
 
 ### Retry counts
 
@@ -56,6 +58,105 @@ the `--retry` flag entirely instead of passing `--retry=0` (a command-line
 `--retry=0` outranks a workspace's own Vitest config and would disable a
 deliberate retry policy).
 
+### Worker RPC timeouts on a contended host
+
+`QWEN_CI_RPC_RETRY` is a different lever from `--retry`: it re-runs a whole
+workspace suite, and only when that suite's own report shows no failed test and
+Vitest's worker-to-main RPC budget (`Timeout calling "onTaskUpdate"`) was the
+only unhandled error. On this pool that shape is host contention rather than a
+regression — main runs 43018456551 and 43016357976 both went red with 902 of 902
+tests passing in `packages/channels/github`. The first attempt keeps npm's own
+batched call; only the workspaces npm names as failed are re-run, each alone.
+
+The release lane already grants this same pass on its own shards
+(`.github/scripts/run-release-workspace-tests.sh`), and the evidence rules are
+the ones `scripts/tests/release-workflow.test.js` pins there: the run must have
+reached a passing tally, it must not have been killed by a signal, and Vitest's
+own count of unhandled errors must equal how many transport timeouts the report
+contains. A count, not the crash header — the header is producer-chosen, so any
+pattern over headers is incomplete. The `Errors` figure is a sum over the whole
+report, while the transport figure counts only inside Vitest's `Unhandled
+Errors` sections — a test's console output is echoed at column 0 too, so a
+printed copy must not move it — and inside those sections it matches the error's
+own header line (a column-zero `Error: [vitest-worker]: Timeout calling`), never
+a message, stack or code frame that merely quotes the prefix. One attempt's
+green tally therefore cannot cover a later attempt's crash.
+
+The Linux lanes deliberately keep unhandled errors fatal
+(`scripts/tests/unit-vitest-configs.test.ts`, #10438), so this does not ignore
+them: any failed test, any second unhandled error, or a process that died before
+reporting declines the retry. A stall that outlives both attempts still fails.
+Set `0` to make the first failure stand.
+
+**The count is the only bound.** A re-run has no time condition: an earlier
+revision of this lane skipped a re-run once less than half the test step's
+budget remained, and that guard was removed rather than repaired. It refused a
+re-run at 74% of the budget because it added the batch's elapsed time twice, and
+a correct version is not available from inside the lane script — the step starts
+before the script does (`chown -R`, `mktemp`, the disk sampler), so the script's
+own `SECONDS` is not the step's clock, and passing the step's start in from the
+workflow would be more new surface than the one truncation it would avoid. The
+accepted cost: a re-run issued late enough can be killed by the step's
+`timeout-minutes: 45`. When that happens the job fails and the first attempt's
+log is still there, because the first attempt is teed to a file — a truncation
+that keeps the evidence, rather than a refusal that throws away a retry while a
+quarter of the budget is unused.
+
+### Host load admission
+
+`QWEN_CI_HOST_LOAD_MAX_RATIO` is the load-per-CPU ceiling of the
+`Host load gate (self-hosted)` step in the unit-test shards. The gate samples
+the five-minute load average from `/proc/loadavg` against `nproc`, waits up to
+six samples ten seconds apart, and admits the job as soon as one sample clears
+the ceiling. A host still at or above it fails the step before the suites start.
+
+The gate cannot move a job: GitHub has already placed it, and only a re-run
+lands it on another host. What it changes is when the job fails. The disk floor
+gate beside it admits on free bytes and inodes, which say nothing about CPU
+contention; on 2026-11-11 the hk1 pool ran 64-CPU hosts at load 53-98 with 28-140
+concurrent Vitest processes, and that occupancy is what expires the 60-second
+test budgets, Vitest's worker-to-main RPC budget, and the test step's whole
+45-minute budget. Refusing costs the install already spent and returns that
+budget, with a message that says to re-run instead of a test failure no branch
+authored.
+
+**The gate is a backstop, not a predictor.** The default `2.0` is calibrated
+against the five-minute load per CPU of the shards that failed on 2026-11-11 and
+of four shards that passed on the same pool in the same hour:
+
+| Shard | Host   | At entry | Median | Peak | Outcome                |
+| ----- | ------ | -------- | ------ | ---- | ---------------------- |
+| 2/2   | hk1-4  | 1.34     | 1.43   | 1.54 | worker RPC timeout     |
+| 2/2   | hk1-30 | 1.45     | 1.42   | 1.54 | worker RPC timeout     |
+| 2/2   | hk1-29 | 0.85     | 1.42   | 1.54 | 45-minute step timeout |
+| 1/2   | hk1-7  | 0.94     | 1.40   | 1.49 | passed                 |
+| 2/2   | hk5-27 | 1.03     | 1.03   | 1.19 | passed                 |
+| 1/2   | hk2-32 | 0.75     | 0.97   | 1.18 | passed                 |
+| 1/2   | hk3-28 | 0.48     | 0.67   | 0.87 | passed                 |
+
+The bands overlap. A host that passed reached 1.49, while a host that failed
+started at 0.85 — occupancy grew during the run, and only two of the three
+failing hosts were already contended when their suites began. No entry-time
+threshold separates them, so a ceiling tight enough to catch the contended two
+would also refuse hosts that demonstrably pass. `2.0` sits above every reading
+measured on a host that completed its suites: it refuses a host none of these
+samples survived, and would not have fired on any incident in the table.
+Tightening it should be expected to produce false refusals; raising it much
+further makes the gate inert.
+
+The RPC flake in that table is a different problem and this gate is not its fix:
+deciding it needs the suite's own report, which does not exist before the suites
+run. #16945 adds a lane-level re-run for exactly that shape — an all-green report
+whose only unhandled error was the worker RPC timeout. The two are independent
+and can be tuned or disabled separately.
+
+The ceiling is a ratio, not an absolute load, because the pool mixes host sizes.
+Set `off` to admit every host while the fleet is being resized. The gate runs
+only on self-hosted Linux; GitHub-hosted and macOS lanes are unaffected, and an
+unreadable CPU count or load average, or a missing `awk`, admits the job with a
+warning rather than blocking a lane. A malformed threshold fails as the
+configuration error it is instead of silently disabling the gate.
+
 ### Workspace test timeout
 
 `QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES` sets the job-level
@@ -73,8 +174,8 @@ The variable is exported only by the main CI workspace-test step and the
 release `workspace_tests` and `quality_scripts` steps; other
 integration tests running Vitest that land on the same reserved pool in the CI
 and release workflows do not consume it; they use their own Vitest limits.
-The web-shell E2E smoke is pinned to `ubuntu-latest`, so the cap cannot apply
-to it. On GitHub-hosted runners
+The web-shell E2E smoke runs on the ARM64 pool with its own two Playwright
+workers, so the cap does not apply to it. On GitHub-hosted runners
 the variable is ignored and Vitest uses its own defaults.
 
 Each Vitest run applies the cap on its own. The main CI workspace-test step
@@ -84,19 +185,37 @@ workspaces' suites and `npm run test:scripts:unit` at half the cap, at least 1,
 so at its peak the step runs the cap plus that half. On GitHub-hosted runners
 the side lane's Vitest runs use 2 workers.
 
-The step runs in eight shards (`Linux unit tests (shard N/8)`), each passing
-`--shard=N/8` to every one of those Vitest runs. The shards apply the cap on
-their own too, so the pool sees up to eight such steps at once. They install
+The step runs in two shards (`Linux unit tests (shard N/2)`), each passing
+`--shard=N/2` to every one of those Vitest runs. The shards apply the cap on
+their own too, so the pool sees up to two such steps at once. They install
 without the `prepare` build and unpack the tree `test_build` built once.
 `Test (ubuntu-latest, Node 22.x)` passes only when the build and every shard
 pass.
 
-`test_build` and the web-shell smoke shards build through
-`scripts/ci-build-cache.mjs`. A pull request restores the newest cached
-build and rebuilds only the workspaces whose inputs changed: a workspace's
-tracked files other than tests, the root files, `patches/` and `scripts/`
-outside `scripts/tests/`, and the workspaces it depends on. A push to `main`
-always builds from scratch and saves that build.
+`test_build` is the only job that builds. It builds through
+`scripts/ci-build-cache.mjs`: a pull request restores the build its base
+commit's `main` push saved (`key --at <base>`), falling back to the newest
+cached build, and rebuilds only the workspaces whose inputs changed: a
+workspace's tracked files other than tests, the root files, `patches/` and
+`scripts/` outside `scripts/tests/`, and the workspaces it depends on. A push
+to `main` always builds from scratch and saves that build. The cache key
+carries no CPU architecture: the x64-labelled pool includes ARM64 hosts, and
+the only architecture-specific output, the bundle's opentui native library,
+is recopied for the host after every restore and unpack
+(`ci-build-cache.mjs host-assets`).
+
+The unit-test shards, the two `Integration Tests (no-AK, shard N/2)` shards
+and the two web-shell smoke shards all unpack that one tree. `test_build`
+also runs the checks that read it, the serve fast-path bundle closure, the
+core subpath exports and the settings-schema freshness check, which
+`Lint & Static` used to build for.
+`Integration Tests (no-AK, No Sandbox)` passes only when the build and every
+integration shard pass. A draft pull request skips the integration shards and
+the browser smoke; marking it ready for review starts the run that includes
+them. A change confined to `packages/managed-agent-server/` or
+`packages/sdk-java/` (except the files TypeScript suites read) classifies as
+`java_only`: `Lint & Static` runs its payload plus the `scripts/tests` suites
+that name those trees, and the TypeScript build and test lanes skip.
 
 ### Related variables outside test execution
 

@@ -17,6 +17,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.failed;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.invalid;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
@@ -354,6 +355,55 @@ final class RuntimeExecutionRecovery {
                     .exceptionally(failure -> null));
         }
         return chain;
+    }
+
+    /**
+     * The mount handback's guarded second half, after the observe-only sweep:
+     * re-check the claim under the lock, refuse while any operation is active
+     * (the swept background rows excluded), then re-read WITHOUT the exclusion
+     * so a background row the sweep could not prove stopped keeps the mount
+     * instead of being handed back over a running writer (#13800
+     * observe-and-hold). A settled execution whose capture never proved its
+     * writer stopped keeps the mount for good. Kept beside the sweep so the
+     * broker facade stays under its size ratchet.
+     */
+    CompletionStage<Boolean> releaseMountAfterSweep(SessionContext context,
+            String claimId, String runtimeId) {
+        context.lock();
+        try {
+            if (!claimId.equals(context.mountClaim())) {
+                throw conflict("runtime_session_conflict",
+                        "Mount claim was superseded by a later acquire");
+            }
+            if (context.hasActiveControl()
+                    || executionRepository.hasActiveByRuntimeSession(
+                            context.binding().getBindingId(),
+                            context.binding().getGeneration(), runtimeId,
+                            new java.util.HashSet<>(context.backgroundProcesses()))) {
+                throw conflict("runtime_session_busy",
+                        "Runtime Session has an active operation");
+            }
+            // The observation settles only provable exits; a background row
+            // still live or unproven keeps the mount. Re-read without the
+            // exclusion so a row the sweep could not settle is never handed
+            // back over.
+            if (executionRepository.hasActiveByRuntimeSession(
+                    context.binding().getBindingId(),
+                    context.binding().getGeneration(), runtimeId)) {
+                throw conflict("runtime_session_busy",
+                        "Runtime Session has an active background process");
+            }
+            if (executionRepository.hasUnprovenCaptureByRuntimeSession(
+                    context.binding().getBindingId(),
+                    context.binding().getGeneration(), runtimeId)) {
+                throw conflict("workspace_writer_unproven",
+                        "A settled execution never proved its writer stopped");
+            }
+            return safeStage(() -> transport.releaseMount(context.lease(),
+                    context.session())).toCompletableFuture();
+        } finally {
+            context.unlock();
+        }
     }
 
     /**

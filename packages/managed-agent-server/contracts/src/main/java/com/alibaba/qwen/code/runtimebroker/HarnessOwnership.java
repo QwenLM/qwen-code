@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
+
 /**
  * Says who owns the Harness fences on a Runtime binding. A Session-isolated
  * binding belongs to the Harness Session its isolation key names; a
@@ -15,7 +17,7 @@ public final class HarnessOwnership {
         return request != null
                 && "workspace".equals(request.getScope().getIsolationClass())
                 && request.isManagedContext()
-                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(request.getProvisionerKind())
+                && RuntimeProviderKinds.LOCAL_PROCESS.equals(request.getProvisionerKind())
                 && WorkspaceExecutionProfile.admitsCapabilityDigest(request.getScope().getCapabilityDigest());
     }
 }

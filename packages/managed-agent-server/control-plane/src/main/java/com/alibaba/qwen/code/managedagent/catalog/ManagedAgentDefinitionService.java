@@ -82,13 +82,13 @@ public class ManagedAgentDefinitionService {
         DefinitionRevision found;
         if (revision == null) {
             found = store.latest(tenantId, agentId).orElseThrow(
-                    com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore::notFound);
+                    ManagedAgentDefinitionStore::notFound);
         } else {
             if (!REVISION.matcher(revision).matches()) {
-                throw com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore.notFound();
+                throw ManagedAgentDefinitionStore.notFound();
             }
             found = store.find(tenantId, agentId, Long.parseLong(revision))
-                    .orElseThrow(com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore::notFound);
+                    .orElseThrow(ManagedAgentDefinitionStore::notFound);
         }
         return publicDefinition(found);
     }
@@ -165,7 +165,7 @@ public class ManagedAgentDefinitionService {
 
     private static void requireAgentId(String agentId) {
         if (agentId == null || !AGENT_ID.matcher(agentId).matches()) {
-            throw com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore.notFound();
+            throw ManagedAgentDefinitionStore.notFound();
         }
     }
 

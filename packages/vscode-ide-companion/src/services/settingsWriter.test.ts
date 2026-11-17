@@ -35,6 +35,7 @@ import {
   getModelsForProviderProtocol,
   ModelRegistry,
   type ModelProvidersConfig,
+  CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_GLOBAL_BASE_URL,
   type ProviderInstallPlan,
 } from '@qwen-code/qwen-code-core';
@@ -257,6 +258,94 @@ describe('settingsWriter', () => {
       region: 'global',
       baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
     });
+    // model.baseUrl must follow the selected region, not the China default.
+    expect(settings.model).toMatchObject({
+      baseUrl: CODING_PLAN_GLOBAL_BASE_URL,
+    });
+  });
+
+  type ModelSettings = {
+    name?: string;
+    baseUrl?: string;
+    reasoningEffort?: string;
+    maxSessionTurns?: number;
+  };
+
+  const writeCliManagedModelSettings = () => {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        model: {
+          name: 'cli-model',
+          baseUrl: 'https://old.example/v1',
+          reasoningEffort: 'high',
+          maxSessionTurns: 40,
+        },
+      }),
+    );
+  };
+
+  const readModelSettings = () =>
+    (
+      JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+        model: ModelSettings;
+      }
+    ).model;
+
+  it('preserves sibling model settings when writing a Coding Plan', () => {
+    writeCliManagedModelSettings();
+
+    writeCodingPlanConfig('china', 'coding-plan-key');
+
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as {
+      model: ModelSettings;
+      modelProviders: Record<string, Array<{ id: string; baseUrl: string }>>;
+    };
+
+    // Only name and its paired baseUrl change; the CLI-owned keys survive.
+    expect(settings.model).toEqual({
+      name: settings.modelProviders[AuthType.USE_OPENAI]?.[0]?.id,
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      reasoningEffort: 'high',
+      maxSessionTurns: 40,
+    });
+  });
+
+  it('preserves sibling model settings when writing api-key providers', () => {
+    writeCliManagedModelSettings();
+
+    // A non-default URL so the assertion below can only pass by reading the
+    // map — the fallback literal would satisfy it otherwise.
+    writeModelProvidersConfig({
+      apiKey: 'manual-key',
+      modelProviders: { 'gpt-4o': 'https://gateway.example/v1' },
+      activeModel: 'gpt-4o',
+    });
+
+    expect(readModelSettings()).toEqual({
+      name: 'gpt-4o',
+      baseUrl: 'https://gateway.example/v1',
+      reasoningEffort: 'high',
+      maxSessionTurns: 40,
+    });
+  });
+
+  it('falls back to the default baseUrl when the active model is absent from the map', () => {
+    writeCliManagedModelSettings();
+
+    writeModelProvidersConfig({
+      apiKey: 'manual-key',
+      modelProviders: { 'qwen3.5-plus': 'https://dashscope.example/v1' },
+      activeModel: 'gpt-4o',
+    });
+
+    expect(readModelSettings()).toEqual({
+      name: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1',
+      reasoningEffort: 'high',
+      maxSessionTurns: 40,
+    });
   });
 
   it('clears stale coding plan metadata when writing api-key providers', () => {
@@ -282,7 +371,10 @@ describe('settingsWriter', () => {
     expect(env.OPENAI_API_KEY).toBe('manual-key');
     expect(env[CODING_PLAN_ENV_KEY]).toBeUndefined();
     expect(settings.codingPlan).toBeUndefined();
-    expect(settings.model).toEqual({ name: 'gpt-4o' });
+    expect(settings.model).toEqual({
+      name: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1',
+    });
     // The new entry must be present
     expect(openaiModels[0]).toEqual({
       id: 'gpt-4o',
@@ -383,6 +475,50 @@ describe('settingsWriter', () => {
       expect(written.modelProviders[AuthType.USE_OPENAI]).toEqual([
         { id: 'gpt-4o', envKey: 'TEST_API_KEY' },
       ]);
+    });
+
+    it('writes a custom baseUrl while preserving sibling model settings', async () => {
+      writeCliManagedModelSettings();
+
+      // Non-default endpoint: only the plan's baseUrl can produce this value.
+      const baseUrl = 'https://gateway.example/v1';
+      const plan = buildInstallPlan(customProvider, {
+        protocol: AuthType.USE_OPENAI,
+        baseUrl,
+        modelIds: ['gpt-4o'],
+        apiKey: 'manual-key',
+      });
+
+      await applyProviderInstallPlanToFile(plan);
+
+      expect(readModelSettings()).toEqual({
+        name: 'gpt-4o',
+        baseUrl,
+        reasoningEffort: 'high',
+        maxSessionTurns: 40,
+      });
+    });
+
+    it('clears a stale model.baseUrl when the plan selects by model id only', async () => {
+      writeCliManagedModelSettings();
+
+      // Subscription installs select by model id alone, so no baseUrl flows
+      // through the plan. The empty-string tombstone must survive JSON
+      // serialization — dropping the key would leave the stale URL in place.
+      const plan: ProviderInstallPlan = {
+        providerId: 'test',
+        authType: AuthType.USE_OPENAI,
+        modelSelection: { modelId: 'gpt-4o' },
+      };
+
+      await applyProviderInstallPlanToFile(plan);
+
+      expect(readModelSettings()).toEqual({
+        name: 'gpt-4o',
+        baseUrl: '',
+        reasoningEffort: 'high',
+        maxSessionTurns: 40,
+      });
     });
 
     it('strips a runtime snapshot prefix before persisting model.name', async () => {

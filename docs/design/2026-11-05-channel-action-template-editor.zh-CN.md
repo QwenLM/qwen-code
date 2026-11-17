@@ -17,7 +17,7 @@ label + 单行输入框」。GitHub 渠道的 `boundSessionActions` 字段在描
    `min(66vh, 650px)`。
 2. **没有说明。** 字段只有一段密集文字（键语法、角色路由、7 个模板变量挤在
    一起）；每个键本身没有解释；单行 `Input` 也装不下最长 2,000 码点的指令
-   模板（adapter 的 `BOUND_ACTION_TEMPLATE_MAX_CODE_POINTS`）。
+   模板（channel-base 的 `BOUND_ACTION_TEMPLATE_MAX_CODE_POINTS`）。
 3. **不支持全屏。** `ChannelEditorDialog` 固定 `sm:max-w-xl`（约 576px），
    没有展开能力，而其它界面（DialogShell、artifact 面板）已有全屏。
 

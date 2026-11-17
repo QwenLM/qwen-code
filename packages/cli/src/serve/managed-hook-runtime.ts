@@ -53,6 +53,8 @@ export interface ManagedHookDefinition
     | {
         readonly type: 'function';
         readonly name?: string;
+        readonly description?: string;
+        readonly statusMessage?: string;
         readonly timeout: number;
       };
   readonly handler?: RegisteredHandlerRef & {
@@ -415,13 +417,26 @@ function parseManifest(value: unknown): ManagedHookManifest {
         (hook['matcher'] !== undefined &&
           typeof hook['matcher'] !== 'string') ||
         (config['name'] !== undefined && typeof config['name'] !== 'string') ||
+        (config['description'] !== undefined &&
+          typeof config['description'] !== 'string') ||
+        (config['statusMessage'] !== undefined &&
+          typeof config['statusMessage'] !== 'string') ||
         (config['timeout'] !== undefined &&
           (!positive(config['timeout']) || Number(config['timeout']) > 600_000))
       )
         throw new ManagedHookError('managed_hook_manifest_invalid');
       ids.add(hook['hookId'] as string);
       if (config['type'] === 'command') {
-        closed(config, ['type', 'name', 'command', 'timeout', 'env', 'shell']);
+        closed(config, [
+          'type',
+          'name',
+          'description',
+          'statusMessage',
+          'command',
+          'timeout',
+          'env',
+          'shell',
+        ]);
         if (
           typeof config['command'] !== 'string' ||
           !config['command'] ||
@@ -434,6 +449,9 @@ function parseManifest(value: unknown): ManagedHookManifest {
         closed(config, [
           'type',
           'name',
+          'description',
+          'statusMessage',
+          'if',
           'url',
           'headers',
           'allowedEnvVars',
@@ -444,6 +462,7 @@ function parseManifest(value: unknown): ManagedHookManifest {
           !['http:', 'https:'].includes(url.protocol) ||
           url.username ||
           url.password ||
+          (config['if'] !== undefined && typeof config['if'] !== 'string') ||
           (config['allowedEnvVars'] !== undefined &&
             (!Array.isArray(config['allowedEnvVars']) ||
               !config['allowedEnvVars'].every(
@@ -452,7 +471,15 @@ function parseManifest(value: unknown): ManagedHookManifest {
         )
           throw new ManagedHookError('managed_hook_manifest_invalid');
       } else if (config['type'] === 'prompt') {
-        closed(config, ['type', 'name', 'prompt', 'model', 'timeout']);
+        closed(config, [
+          'type',
+          'name',
+          'description',
+          'statusMessage',
+          'prompt',
+          'model',
+          'timeout',
+        ]);
         if (
           typeof config['prompt'] !== 'string' ||
           !config['prompt'] ||
@@ -460,7 +487,13 @@ function parseManifest(value: unknown): ManagedHookManifest {
         )
           throw new ManagedHookError('managed_hook_manifest_invalid');
       } else if (config['type'] === 'function') {
-        closed(config, ['type', 'name', 'timeout']);
+        closed(config, [
+          'type',
+          'name',
+          'description',
+          'statusMessage',
+          'timeout',
+        ]);
         const handler = object(hook['handler']);
         closed(handler, [
           'handlerId',

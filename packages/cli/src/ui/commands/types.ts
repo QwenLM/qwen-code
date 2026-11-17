@@ -82,7 +82,7 @@ export interface CommandContext {
     /** Adds a new item to the history display. */
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
-    clear: () => void;
+    clear: (sessionId?: string) => void;
     /** Clears transient assistant output before replacing conversation history. */
     clearPendingState?: () => void;
     /**
@@ -137,6 +137,11 @@ export interface CommandContext {
   overwriteConfirmed?: boolean;
   /** Abort signal for cancelling long-running slash command operations via ESC. */
   abortSignal?: AbortSignal;
+  /**
+   * Protects a state change until dispatch settles. Returns false if the
+   * command can no longer commit.
+   */
+  beginCommit?: () => boolean;
 }
 
 /**

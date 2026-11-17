@@ -1,5 +1,13 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { DaemonTransportClosedError } from '@qwen-code/sdk/daemon';
+import {
+  DaemonTransportClosedError,
+  type DaemonTransport,
+} from '@qwen-code/sdk/daemon';
+import {
+  AcpWsTransport,
+  AutoReconnectTransport,
+  RestSseTransport,
+} from '@qwen-code/sdk/daemon/transports';
 import {
   DaemonAvailability,
   DaemonUnavailableError,
@@ -268,6 +276,56 @@ it('closes the gate when a custom transport fetch rejects with TypeError', async
   expect(connection.getSnapshot()).toBe('unavailable');
   expect(connection.getGeneration()).toBe(1);
 });
+
+it.each([
+  ['acp-ws', false, 'rest', true],
+  ['rest', true, 'acp-ws', false],
+] as const)(
+  'updates the Web Shell client metadata from %s (replay %s) to %s (replay %s)',
+  async (initialType, initialReplay, replacementType, replacementReplay) => {
+    const native = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => health());
+    const connection = connectionWith(native);
+    const initial =
+      initialType === 'acp-ws'
+        ? new AcpWsTransport('wss://daemon/acp', undefined, native)
+        : new RestSseTransport('https://daemon', undefined, native);
+    initial.dispose();
+    const replacement: DaemonTransport = {
+      type: replacementType,
+      supportsReplay: replacementReplay,
+      connected: true,
+      fetch: native,
+      subscribeEvents: vi.fn(async function* () {}),
+      dispose: vi.fn(),
+    };
+    const reconnecting = new AutoReconnectTransport({
+      baseUrl: 'https://daemon',
+      initial,
+      factory: async () => replacement,
+    });
+    const client = createDaemonClient(
+      { baseUrl: 'https://daemon', transport: reconnecting },
+      connection,
+    );
+
+    try {
+      expect(client.transport.type).toBe(initialType);
+      expect(client.transport.supportsReplay).toBe(initialReplay);
+
+      await expect(client.health()).resolves.toEqual({ status: 'ok' });
+
+      expect(reconnecting.type).toBe(replacementType);
+      expect(reconnecting.supportsReplay).toBe(replacementReplay);
+      expect(client.transport.type).toBe(replacementType);
+      expect(client.transport.supportsReplay).toBe(replacementReplay);
+      expect(connection.getSnapshot()).toBe('available');
+    } finally {
+      client.transport.dispose();
+    }
+  },
+);
 
 it('ignores pre-outage request failures that arrive after a successful recovery', async () => {
   let rejectOld!: (error: unknown) => void;

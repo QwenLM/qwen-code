@@ -24,7 +24,10 @@ import type {
 import { HOSTED_STORE_PREFIX } from '../scratch-dir.js';
 
 // An HTTP transport fixture, not a substitute for the Spring/MySQL slice.
-export async function startHostedSessionStore(sessionId: string) {
+export async function startHostedSessionStore(
+  sessionId: string,
+  options: { supportedStorageVersion?: 2 | 4 } = {},
+) {
   const root = await mkdtemp(path.join(tmpdir(), HOSTED_STORE_PREFIX));
   const sessionKey = {
     tenantId: 'tenant',
@@ -60,6 +63,7 @@ export async function startHostedSessionStore(sessionId: string) {
   let writerId: string | undefined;
   let writerGeneration = 0;
   let seals = 0;
+  let storageVersion = 1;
   const scan = () =>
     LocalJsonlManagedSessionJournalStore.read({
       transcriptPath,
@@ -123,9 +127,7 @@ export async function startHostedSessionStore(sessionId: string) {
         json({
           ...head,
           leaseUntil: Date.now() + Number(body.leaseMillis),
-          // Matches ManagedSessionReaderVersion.SUPPORTED on the Java store:
-          // the Harness writes Hosted recovery records at storage version 2.
-          supportedStorageVersion: 2,
+          supportedStorageVersion: options.supportedStorageVersion ?? 2,
         });
       } else if (route === '/user-messages:claim') {
         assert.equal(req.method, 'POST');
@@ -139,11 +141,17 @@ export async function startHostedSessionStore(sessionId: string) {
         assert.equal(body.writerId, writerId);
         assert.equal(body.writerGeneration, writerGeneration);
         json({ authorized: true });
+      } else if (route === '/approval:query') {
+        assert.equal(req.method, 'POST');
+        assert(handle);
+        assert.equal(body.writerId, writerId);
+        assert.equal(body.writerGeneration, writerGeneration);
+        json({ mode: 'default', revision: 0 });
       } else if (route === '/restore') {
         json({
           ...head,
           state: 'ACTIVE',
-          storageVersion: 1,
+          storageVersion,
           latestCheckpointResourceId: null,
           compactedThroughRevision: 0,
           recoveryStatus: 'READY',
@@ -194,6 +202,23 @@ export async function startHostedSessionStore(sessionId: string) {
           byteLength: bytes.length,
           recordEncoding: 'identity',
         });
+        if (options.supportedStorageVersion === 4) {
+          const kinds = (body.resources as ManagedSessionDurableRef[]).map(
+            (resource) => resource.kind,
+          );
+          if (kinds.includes('managed-execution-diagnostics'))
+            storageVersion = 4;
+          else if (
+            kinds.some((kind) =>
+              [
+                'managed-hosted-model-usage-v2',
+                'managed-hook-model-usage-v2',
+                'managed-session-model-stats',
+              ].includes(kind),
+            )
+          )
+            storageVersion = Math.max(storageVersion, 3);
+        }
         json({
           ...body,
           journalRevision: transactions.length,
