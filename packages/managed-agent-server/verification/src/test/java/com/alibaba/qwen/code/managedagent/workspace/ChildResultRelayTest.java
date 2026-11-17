@@ -2132,7 +2132,9 @@ class ChildResultRelayTest {
                         .containsEntry("started", false));
         verify(childWorkspaces).requestFinish(TENANT, PARENT, RUN,
                 JdbcChildWorkspaceStore.DISCARD);
-        // Any other refusal is retried as before.
+        // child_parent_unavailable settles immediately: the parent's profile
+        // cannot admit a child, so retrying would defer the refusal until the
+        // parent's Turn deadline.
         harness.operations.clear();
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 0, 0, null, now, now));
@@ -2140,8 +2142,11 @@ class ChildResultRelayTest {
                 .createChildSession(TENANT, PARENT, RUN, "audit the diff",
                         "review", true);
         relay.scan();
-        assertThat(harness.operations).isEmpty();
-        assertThat(row.get().attempts()).isEqualTo(1);
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations).singleElement()
+                .satisfies(fail -> assertThat(fail)
+                        .containsEntry("stopReason", "creation_failed")
+                        .containsEntry("started", false));
     }
 
     @Test

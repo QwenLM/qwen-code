@@ -4,6 +4,7 @@
 packages:
   - 'packages/*'
   - 'packages/cua-driver/typescript'
+  - 'packages/channels/aone'
   - 'packages/channels/base'
   - 'packages/channels/dingtalk'
   - 'packages/channels/dws'

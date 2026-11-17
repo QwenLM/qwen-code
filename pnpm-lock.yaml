@@ -43,7 +43,7 @@ overrides:
   readdir-glob@1: 4.0.0
   openapi-typescript>supports-color: 7.2.0
 
-pnpmfileChecksum: sha256-Lgq9+Umhj29zt4DsOS07IWy2SiC4vU8DWrLrqATC1fs=
+pnpmfileChecksum: sha256-SiA16Bb0bSLZDhJgrl1m/iYpL/RmOk0h1D5/8BGe0e0=
 
 importers:
 
@@ -448,6 +448,19 @@ importers:
       zod:
         specifier: ^4.6.6
         version: 4.6.6
+
+  packages/channels/aone:
+    dependencies:
+      '@qwen-code/channel-base':
+        specifier: workspace:*
+        version: link:../base
+      zod:
+        specifier: ^4.6.6
+        version: 4.6.6
+    devDependencies:
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
 
   packages/channels/base:
     dependencies:
@@ -4677,6 +4690,7 @@ packages:
   '@secretlint/secretlint-rule-preset-recommend@10.2.2':
     resolution: {integrity: sha512-K3jPqjva8bQndDKJqctnGfwuAxU2n9XNCPtbXVI5JvC7FnQiNg/yWlQPbMUlBXtBoBGFYp08A94m6fvtc9v+zA==}
     engines: {node: '>=20.0.0'}
+    deprecated: Built into secretlint v14 and later. Remove this package; the rule id still works. https://github.com/secretlint/secretlint/blob/HEAD/docs/rules/preset-recommend.md
 
   '@secretlint/source-creator@10.2.2':
     resolution: {integrity: sha512-h6I87xJfwfUTgQ7irWq7UTdq/Bm1RuQ/fYhA3dtTIAop5BwSFmZyrchph4WcoEvbN460BWKmk4RYSvPElIIvxw==}
