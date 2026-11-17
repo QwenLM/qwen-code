@@ -186,6 +186,14 @@ deps 注入、绝不驱动模型、每个 claim 先持久化再产生副作用�
 `HttpManagedChannelControlPlane`，镜像 `managed-dingtalk`（含出口代理解析）。
 它是实验性、显式选择的入口：`qwen channel start` 永不选它，它不驱动模型。
 
+出口代理被**应用**而不只是解析：`@octokit/request` v9 是 fetch 时代产物，
+从不读 Legacy 的 `request.agent` 选项（Legacy channel 能用，仅因其启动器
+安装了进程级 undici dispatcher）。因此 deps 构造每客户端一个
+`undici.EnvHttpProxyAgent`，走被尊重的 `request.fetch` 钩子，并在
+`disconnect()` 时销毁。代理范围仅限 GitHub 流量；控制面 HTTP 保持直连——
+与 DingTalk deps 的决定一致。代理遍历见证证明请求经代理隧道转发（代理的
+CONNECT 日志点名目标 authority；直连请求会留下空日志）。
+
 ## 涉及文件
 
 - `packages/channels/base/src/managed-channel.ts`——联合扩为三 provider；
@@ -230,7 +238,8 @@ deps 注入、绝不驱动模型、每个 claim 先持久化再产生副作用�
   mark read；instance-scoped 停摆、registration-refusal 重注册、
   ownership-loss 拒绝各自红其用例。
 - deps 见证对本地 fake GitHub HTTP 端点（真实 Octokit）：分页、`since` 窗口、
-  失败分类（401/404/422 确定性，限流/5xx/网络含糊）、代理装配。
+  失败分类（401/404/422 确定性，限流/5xx/网络含糊）、代理遍历（CONNECT
+  隧道经代理转发）与 disconnect 时 dispatcher 销毁。
 - 真实控制面链路（对运行中的 Java server 走 register → inbound → Session
   轮次 → claim → receipt）与 GitHub fault-gate driver 变体是后续项，不是合并
   门，镜像 DingTalk 切片的 live-tenant smoke 姿态。

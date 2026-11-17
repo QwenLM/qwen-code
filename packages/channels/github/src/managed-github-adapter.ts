@@ -100,7 +100,9 @@ export interface ManagedGithubClient {
 }
 
 export interface ManagedGithubAdapterDeps {
-  readonly createClient: (settings: GithubSettings) => ManagedGithubClient;
+  readonly createClient: (
+    settings: GithubSettings,
+  ) => Promise<ManagedGithubClient>;
   readonly lock: (
     directory: string,
     onCompromised: () => void,
@@ -359,7 +361,7 @@ export class ManagedGithubAdapter {
       this.running = true;
       this.loggedNoClaimSlot = false;
       this.registeredGeneration = undefined;
-      this.client = this.deps.createClient(this.settings);
+      this.client = await this.deps.createClient(this.settings);
       // The first identity failure must surface: a bad token creates no
       // usable client, and swallowing it would report a healthy start that
       // is permanently deaf. The deps redact the credential from the error.

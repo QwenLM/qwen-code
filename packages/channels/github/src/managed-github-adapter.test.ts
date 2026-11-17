@@ -213,7 +213,7 @@ function fakeDeps(
     disconnect: () => {},
   };
   const deps: ManagedGithubAdapterDeps = {
-    createClient: () => client,
+    createClient: async () => client,
     // Model proper-lockfile's mutual exclusion (retries:0): a held directory
     // rejects a second owner, and only the returned release function frees
     // it — so a connect failure path that forgets to release is observable.
@@ -580,7 +580,13 @@ describe('managed GitHub adapter inbound', () => {
   });
 
   it('ignores own comments and comments without a bot mention', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
+    // Admit the bot login in the allowlist so the own-comment guard is the
+    // ONLY thing rejecting IC_own — with alice-only, the sender policy would
+    // reject Bot-User too and the guard could be deleted without reddening.
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      ...CONFIG,
+      allowedUsers: ['alice', 'bot-user'],
+    });
     fake.knobs.notifications = [notification()];
     fake.knobs.comments = [
       comment({ id: 1, node_id: 'IC_own', user: { login: 'Bot-User' } }),

@@ -5,10 +5,11 @@
  */
 
 import { createServer, type IncomingMessage } from 'node:http';
+import { connect as netConnect } from 'node:net';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createManagedGithubDeps } from './managed-github-deps.js';
 import type {
   GithubSendFailure,
@@ -74,6 +75,7 @@ async function fakeGithub(
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 
@@ -87,7 +89,10 @@ async function clientFor(
   const github = await fakeGithub(handler);
   cleanups.push(github.close);
   const deps = createManagedGithubDeps();
-  const client = deps.createClient({ ...SETTINGS, baseUrl: github.baseUrl });
+  const client = await deps.createClient({
+    ...SETTINGS,
+    baseUrl: github.baseUrl,
+  });
   cleanups.push(async () => client.disconnect());
   return { client, github };
 }
@@ -281,7 +286,7 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
   it('classifies a network failure as ambiguous', async () => {
     const github = await fakeGithub(() => ({ status: 200, body: {} }));
     const deps = createManagedGithubDeps();
-    const client = deps.createClient({
+    const client = await deps.createClient({
       ...SETTINGS,
       baseUrl: github.baseUrl,
     });
@@ -333,6 +338,113 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
     await pollHeader.client.listNotifications('2026-11-16T09:59:00Z');
     expect(pollHeader.client.pollIntervalFloorMs()).toBeLessThanOrEqual(
       2_147_483_647,
+    );
+  });
+
+  it('routes GitHub traffic through the egress proxy, never direct', async () => {
+    // @octokit/request v9 reads request.fetch, not the pre-fetch request.agent
+    // option — an inert agent would go direct and fail in a proxy-only
+    // deployment. Prove the wire path: undici's EnvHttpProxyAgent tunnels via
+    // CONNECT, so the proxy must observe the tunnel to the target authority
+    // and the target answers through it. NO_PROXY is stubbed because the host
+    // exempts loopback.
+    vi.stubEnv('NO_PROXY', '');
+    vi.stubEnv('no_proxy', '');
+    const target = await fakeGithub(() => ({
+      status: 200,
+      body: { login: 'tunneled-bot' },
+    }));
+    const targetPort = Number(new URL(target.baseUrl).port);
+    const connects: string[] = [];
+    const proxyServer = createServer((_req, res) => {
+      res.writeHead(400);
+      res.end();
+    });
+    proxyServer.on('connect', (req, clientSocket, head) => {
+      connects.push(req.url ?? '');
+      const [host, port] = (req.url ?? '').split(':');
+      const upstream = netConnect(Number(port), host, () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        upstream.write(head);
+        upstream.pipe(clientSocket);
+        clientSocket.pipe(upstream);
+      });
+      upstream.on('error', () => clientSocket.destroy());
+      clientSocket.on('error', () => upstream.destroy());
+    });
+    const proxyPort = await new Promise<number>((resolve) =>
+      proxyServer.listen(0, '127.0.0.1', () =>
+        resolve((proxyServer.address() as { port: number }).port),
+      ),
+    );
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          proxyServer.close(() => resolve());
+          proxyServer.closeAllConnections();
+        }),
+    );
+    const deps = createManagedGithubDeps(`http://127.0.0.1:${proxyPort}`);
+    const client = await deps.createClient({
+      ...SETTINGS,
+      baseUrl: target.baseUrl,
+    });
+    cleanups.push(async () => client.disconnect());
+    expect(await client.resolveIdentity()).toBe('tunneled-bot');
+    // The tunnel went through the proxy to the target authority; a direct
+    // request would have left the proxy's CONNECT log empty.
+    expect(connects).toEqual([`127.0.0.1:${targetPort}`]);
+    expect(target.requests).toHaveLength(1);
+  });
+
+  it('destroys the proxy dispatcher on disconnect', async () => {
+    vi.stubEnv('NO_PROXY', '');
+    vi.stubEnv('no_proxy', '');
+    const target = await fakeGithub(() => ({
+      status: 200,
+      body: { login: 'tunneled-bot' },
+    }));
+    const proxyServer = createServer((_req, res) => {
+      res.writeHead(400);
+      res.end();
+    });
+    proxyServer.on('connect', (req, clientSocket, head) => {
+      const [host, port] = (req.url ?? '').split(':');
+      const upstream = netConnect(Number(port), host, () => {
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        upstream.write(head);
+        upstream.pipe(clientSocket);
+        clientSocket.pipe(upstream);
+      });
+      upstream.on('error', () => clientSocket.destroy());
+      clientSocket.on('error', () => upstream.destroy());
+    });
+    const proxyPort = await new Promise<number>((resolve) =>
+      proxyServer.listen(0, '127.0.0.1', () =>
+        resolve((proxyServer.address() as { port: number }).port),
+      ),
+    );
+    cleanups.push(
+      () =>
+        new Promise<void>((resolve) => {
+          proxyServer.close(() => resolve());
+          proxyServer.closeAllConnections();
+        }),
+    );
+    const deps = createManagedGithubDeps(`http://127.0.0.1:${proxyPort}`);
+    const client = await deps.createClient({
+      ...SETTINGS,
+      baseUrl: target.baseUrl,
+    });
+    expect(await client.resolveIdentity()).toBe('tunneled-bot');
+    client.disconnect();
+    await expect(client.resolveIdentity()).rejects.toThrow();
+  });
+
+  it('refuses a non-numeric notification thread id loudly', async () => {
+    const { client } = await clientFor(() => ({ status: 205 }));
+    await expect(client.markThreadRead('not-numeric')).rejects.toThrow(
+      /not numeric/,
     );
   });
 

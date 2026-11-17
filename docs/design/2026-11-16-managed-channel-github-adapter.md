@@ -235,6 +235,16 @@ mirroring `managed-dingtalk` (including the egress-proxy resolution). It is an
 experimental, explicitly selected entry: `qwen channel start` never picks it,
 and it drives no model.
 
+The egress proxy is **applied**, not just resolved: `@octokit/request` v9 is
+fetch-era and never reads the Legacy `request.agent` option (the Legacy
+channel works only because its launcher installs a process-wide undici
+dispatcher). The deps therefore build a per-client `undici.EnvHttpProxyAgent`
+and ride the honoured `request.fetch` hook, destroyed on `disconnect()`. The
+proxy is scoped to GitHub traffic; control-plane HTTP stays direct — the
+DingTalk deps' decision. A proxy-traversal witness proves the request tunnels
+through the proxy (the proxy's CONNECT log names the target authority; a
+direct request would leave it empty).
+
 ## Files affected
 
 - `packages/channels/base/src/managed-channel.ts` — union widened to three
@@ -290,7 +300,8 @@ and it drives no model.
   their case.
 - Deps witnesses against a local fake GitHub HTTP endpoint (real Octokit):
   pagination, `since` window, failure classification (401/404/422 definitive,
-  rate-limit/5xx/network ambiguous), proxy assembly.
+  rate-limit/5xx/network ambiguous), proxy traversal (the CONNECT tunnel goes
+  through the proxy) and dispatcher teardown on disconnect.
 - The real-control-plane leg (register → inbound → Session turn → claim →
   receipt against a running Java server) and a GitHub fault-gate driver
   variant are follow-ups, not merge gates, mirroring the DingTalk slice's

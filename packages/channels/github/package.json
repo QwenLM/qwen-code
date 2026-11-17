@@ -32,7 +32,8 @@
     "@octokit/rest": "^21.1.1",
     "@qwen-code/channel-base": "0.27.4",
     "https-proxy-agent": "^7.0.6",
-    "proper-lockfile": "^4.1.2"
+    "proper-lockfile": "^4.1.2",
+    "undici": "^7.30.2"
   },
   "devDependencies": {
     "@types/proper-lockfile": "^4.1.4",

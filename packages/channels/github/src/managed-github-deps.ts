@@ -5,7 +5,6 @@
  */
 
 import { Octokit } from '@octokit/rest';
-import { HttpsProxyAgent } from 'https-proxy-agent';
 import type {
   ManagedGithubAdapterDeps,
   ManagedGithubClient,
@@ -14,11 +13,16 @@ import type {
 } from './managed-github-adapter.js';
 
 // H5f of #12827: the production dependencies of the managed GitHub adapter.
-// The Octokit assembly mirrors the Legacy channel's (token auth, configurable
-// baseUrl, egress proxy); the send-failure classification mirrors the Legacy
-// publication audit's at-most-once semantics on the managed receipt vocabulary:
-// a provably-unwritten definitive refusal is `rejected`, everything ambiguous
-// (rate limits, 5xx, network) is `unknown` for the lease reconciler to settle.
+// Token auth and configurable baseUrl mirror the Legacy channel; the egress
+// proxy does NOT mirror the Legacy `request.agent` line — @octokit/request v9
+// is fetch-era and never reads that option (the Legacy channel is saved only
+// by its launcher's global dispatcher). Instead a per-client undici dispatcher
+// rides the honoured `request.fetch` hook, scoped to GitHub traffic so the
+// control-plane HTTP stays direct — the DingTalk deps' decision. The
+// send-failure classification mirrors the Legacy publication audit's
+// at-most-once semantics on the managed receipt vocabulary: a provably-unwritten
+// definitive refusal is `rejected`, everything ambiguous (rate limits, 5xx,
+// network) is `unknown` for the lease reconciler to settle.
 
 const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
 // Mirror the Legacy guard (GithubAdapter.ts MAX_TIMER_DELAY_MS): a hint above
@@ -97,15 +101,35 @@ function sendFailure(message: string, definitive: boolean): GithubSendFailure {
   return failure;
 }
 
-function createClient(
+async function createClient(
   settings: GithubSettings,
   proxy?: string,
-): ManagedGithubClient {
-  const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
+): Promise<ManagedGithubClient> {
+  let dispatcher: import('undici').Dispatcher | undefined;
+  if (proxy) {
+    // Read the constructor off the default namespace: in the bundled CLI a
+    // dynamic import of the CJS undici package is default-only, so a named
+    // destructure would bind undefined (the DingTalk deps use this shape).
+    const { default: undici } = await import('undici');
+    dispatcher = new undici.EnvHttpProxyAgent({
+      httpProxy: proxy,
+      httpsProxy: proxy,
+    });
+  }
   const octokit = new Octokit({
     auth: settings.token,
     baseUrl: settings.baseUrl,
-    ...(agent ? { request: { agent } } : {}),
+    ...(dispatcher
+      ? {
+          request: {
+            fetch: (url: Parameters<typeof fetch>[0], init?: RequestInit) =>
+              fetch(url, {
+                ...init,
+                dispatcher,
+              } as RequestInit),
+          },
+        }
+      : {}),
   });
   let floorMs = 0;
   octokit.hook.wrap('request', async (request, options) => {
@@ -164,9 +188,14 @@ function createClient(
       }));
     },
     markThreadRead: async (threadId) => {
-      await octokit.rest.activity.markThreadAsRead({
-        thread_id: Number(threadId),
-      });
+      const id = Number(threadId);
+      if (!Number.isSafeInteger(id)) {
+        // Fail loudly rather than putting NaN in the URL.
+        throw new Error(
+          `GitHub notification thread id is not numeric: ${threadId}`,
+        );
+      }
+      await octokit.rest.activity.markThreadAsRead({ thread_id: id });
     },
     postComment: async (owner, repo, issueNumber, body) => {
       try {
@@ -187,7 +216,7 @@ function createClient(
     },
     pollIntervalFloorMs: () => Math.min(floorMs, MAX_TIMER_DELAY_MS),
     disconnect: () => {
-      agent?.destroy();
+      dispatcher?.destroy();
     },
   };
 }
