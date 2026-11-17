@@ -8,6 +8,8 @@ import fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import path from 'node:path';
 import {
+  buildWorktreeSnapshotMeta,
+  captureWorktreeSnapshot,
   GitWorktreeService,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
@@ -439,8 +441,31 @@ export async function executeWorktreeCleanup(
   // Absent carriedPaths (legacy sidecars, no-carry creations) keeps the gate
   // behaving exactly as before.
   if (await worktreeHasWork(plan.lockKey, sidecar.carriedPaths)) {
-    logWorktreeCleanupPreserve(sessionId, 'checkout has uncommitted work');
-    return;
+    // P6 U3: a managed session worktree with genuine work is snapshotted then
+    // deleted instead of preserved forever — the archive preserves the work
+    // and reopening the chat offers restore (D7). A capture failure falls
+    // back to the conservative preserve: never delete without a durable
+    // snapshot. Tool/agent worktrees are not cleaned here, so their refusal
+    // semantics are unchanged.
+    try {
+      const meta = await buildWorktreeSnapshotMeta(plan.lockKey, {
+        sessionId,
+        slug: sidecar.slug,
+        baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
+        branch: sidecar.worktreeBranch,
+      });
+      await captureWorktreeSnapshot({
+        worktreePath: plan.lockKey,
+        snapshotDir: path.dirname(plan.sidecarPath),
+        meta,
+      });
+    } catch (error) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        `snapshot failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
   }
   // originalCwd is the root the creating worktree service used; the
   // sidecar contract reserves it for exactly this resolution, and the

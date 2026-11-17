@@ -90,13 +90,21 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     };
   }
 
-  it('preserves a checkout whose only content is git-ignored', async () => {
+  it('snapshots then deletes a checkout whose only content is git-ignored (P6 U3)', async () => {
     const plan = await planFor('agent-aabbccd');
     fs.writeFileSync(path.join(plan.lockKey, 'secret.env'), 'AWS_KEY=x\n');
 
     await executeWorktreeCleanup(plan);
 
-    expect(fs.existsSync(path.join(plan.lockKey, 'secret.env'))).toBe(true);
+    // P6: the ignored work is preserved in a snapshot, then the checkout is
+    // deleted (snapshot-then-delete replaces the old permanent preserve).
+    expect(fs.existsSync(plan.lockKey)).toBe(false);
+    const snapBase = path.join(
+      repoParent,
+      'session-agent-aabbccd.worktree-snapshot',
+    );
+    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+    expect(fs.existsSync(`${snapBase}.json`)).toBe(true);
   });
 
   it('still removes a checkout holding only disposable build output', async () => {
@@ -210,14 +218,37 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(fs.existsSync(plan.lockKey)).toBe(false);
   });
 
-  it('preserves a carried-only checkout when the sidecar records no overlay (R9-6 legacy S8)', async () => {
-    // The pre-fix shape: a legacy sidecar names no carriedPaths, so the
-    // carried copy reads as the session's own work and the checkout is
-    // stranded. Back-compat — absent overlay keeps the old behavior.
+  it('snapshots then deletes a carried-only checkout with no recorded overlay (R9-6 legacy + P6 U3)', async () => {
+    // A legacy sidecar names no carriedPaths, so the carried copy reads as
+    // the session's own work (the R9-6 exemption does not apply). P6 U3 then
+    // snapshots that work and deletes the checkout instead of stranding it.
     const plan = await carriedPlan('carried-legacy', false);
 
     await executeWorktreeCleanup(plan);
 
+    expect(fs.existsSync(plan.lockKey)).toBe(false);
+    const snapBase = path.join(
+      repoParent,
+      'session-carried-legacy.worktree-snapshot',
+    );
+    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+  });
+
+  it('preserves a dirty checkout when the snapshot capture fails (P6 U3 fail-closed)', async () => {
+    // A worktree with genuine work whose git state cannot be read for the
+    // snapshot meta: capture rejects, so the checkout must be preserved —
+    // never delete without a durable snapshot. Removing the worktree's .git
+    // makes rev-parse fail while the directory still holds work.
+    const plan = await planFor('snapfail');
+    fs.writeFileSync(path.join(plan.lockKey, 'work.txt'), 'mine\n');
+    fs.rmSync(path.join(plan.lockKey, '.git'), {
+      recursive: true,
+      force: true,
+    });
+
+    await executeWorktreeCleanup(plan);
+
     expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.existsSync(path.join(plan.lockKey, 'work.txt'))).toBe(true);
   });
 });

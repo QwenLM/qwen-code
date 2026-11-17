@@ -22,6 +22,7 @@ import {
   DISPOSABLE_IGNORED_ROOTS,
   WORKTREE_SESSION_FILE,
 } from './gitWorktreeService.js';
+import { runGit } from '../utils/git-branches.js';
 
 export const WORKTREE_SNAPSHOT_SCHEMA_VERSION = 1;
 
@@ -79,6 +80,40 @@ async function atomicWriteFile(
     await fs.rm(tmp, { force: true }).catch(() => {});
     throw error;
   }
+}
+
+/**
+ * Read the worktree's HEAD and dirty-state summary to build a snapshot meta
+ * header (P6 U3). The session marker is excluded from the counts (it is
+ * daemon bookkeeping, not work, and is excluded from the archive too).
+ * Rejects if the worktree's git state cannot be read — the caller must not
+ * snapshot-and-delete a worktree it cannot describe.
+ */
+export async function buildWorktreeSnapshotMeta(
+  worktreePath: string,
+  info: {
+    sessionId: string;
+    slug: string;
+    baseCommit: string;
+    branch: string;
+  },
+): Promise<Omit<WorktreeSnapshotMeta, 'version' | 'createdAt'>> {
+  const headCommit = (await runGit(worktreePath, ['rev-parse', 'HEAD'])).trim();
+  const status = await runGit(worktreePath, [
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  ]);
+  let tracked = 0;
+  let untracked = 0;
+  for (const line of status.split('\n')) {
+    if (line.trim().length === 0) continue;
+    const entry = line.slice(3);
+    if (entry === WORKTREE_SESSION_FILE) continue;
+    if (line.startsWith('??')) untracked += 1;
+    else tracked += 1;
+  }
+  return { ...info, headCommit, dirty: { tracked, untracked } };
 }
 
 /**

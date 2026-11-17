@@ -13,6 +13,7 @@ import {
   captureWorktreeSnapshot,
   readWorktreeSnapshotMeta,
   restoreWorktreeSnapshot,
+  buildWorktreeSnapshotMeta,
   WORKTREE_SNAPSHOT_SCHEMA_VERSION,
 } from './worktree-snapshot-service.js';
 import { WORKTREE_SESSION_FILE } from './gitWorktreeService.js';
@@ -153,5 +154,25 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     await expect(
       fs.readFile(path.join(restored, 'committed.txt'), 'utf8'),
     ).resolves.toBe('base\n');
+  });
+
+  it('builds a meta header from HEAD and dirty counts, excluding the marker (P6 U3)', async () => {
+    await fs.writeFile(path.join(worktree, 'committed.txt'), 'dirty\n');
+    await fs.writeFile(path.join(worktree, 'untracked.txt'), 'new\n');
+    await fs.writeFile(path.join(worktree, WORKTREE_SESSION_FILE), 'marker\n');
+    const head = git(worktree, 'rev-parse', 'HEAD');
+
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-meta',
+      slug: 'meta',
+      baseCommit: head,
+      branch: 'main',
+    });
+
+    expect(m.headCommit).toBe(head);
+    expect(m.baseCommit).toBe(head);
+    expect(m.branch).toBe('main');
+    // One tracked edit + one untracked file; the marker is not counted.
+    expect(m.dirty).toEqual({ tracked: 1, untracked: 1 });
   });
 });
