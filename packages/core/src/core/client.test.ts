@@ -72,6 +72,7 @@ import {
 import { HookSystem } from '../hooks/hookSystem.js';
 import { AsyncHookRegistry } from '../hooks/asyncHookRegistry.js';
 import { ASYNC_HOOK_CONTEXT_OPEN } from '../hooks/async-hook-context.js';
+import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
 import {
   getHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -1514,6 +1515,54 @@ describe('Gemini Client (client.ts)', () => {
         type: SendMessageType.UserQuery,
       });
       expect(getLastTurnRequestText()).not.toContain(ASYNC_HOOK_CONTEXT_OPEN);
+    });
+
+    it('splices async ahead of the trailing sync receipt on a co-occurrence turn', async () => {
+      installAsyncOutput('async co-occurrence');
+      await run([{ text: 'hello' }], 'prompt-async-co', {
+        type: SendMessageType.UserQuery,
+        promptContext: ['sync receipt context'],
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      const last = parts[parts.length - 1];
+      const secondLast = parts[parts.length - 2];
+      // The sync receipt must stay the entry's last part (the resume receipt,
+      // projection strip and title strip read only that slot); the async block
+      // sits immediately before it, not after.
+      expect(typeof last).toBe('object');
+      expect(isUserPromptSubmitContextPartText((last as Part).text ?? '')).toBe(
+        true,
+      );
+      expect((last as Part).text).toContain('sync receipt context');
+      expect(typeof secondLast).toBe('object');
+      expect((secondLast as Part).text).toContain(ASYNC_HOOK_CONTEXT_OPEN);
+      expect((secondLast as Part).text).toContain('async co-occurrence');
+    });
+
+    it('delivers async output after the functionResponse parts on a ToolResult turn', async () => {
+      installAsyncOutput('async tool result');
+      const toolResult = fnResponse('read_file', { ok: true }, 'call-1');
+      await run([toolResult], 'prompt-async-tr', {
+        type: SendMessageType.ToolResult,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      const isFnResponse = (part: string | Part) =>
+        typeof part === 'object' && part !== null && 'functionResponse' in part;
+      const fnResponseIndex = parts.findIndex(isFnResponse);
+      expect(fnResponseIndex).toBeGreaterThanOrEqual(0);
+      // The functionResponse part is carried through unchanged.
+      expect(parts[fnResponseIndex]).toEqual(toolResult);
+      // The tagged block is appended after the tool result, not before it.
+      const asyncIndex = parts.findIndex(
+        (part) =>
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          typeof part.text === 'string' &&
+          part.text.includes(ASYNC_HOOK_CONTEXT_OPEN),
+      );
+      expect(asyncIndex).toBeGreaterThan(fnResponseIndex);
+      expect((parts[asyncIndex] as Part).text).toContain('async tool result');
     });
   });
 

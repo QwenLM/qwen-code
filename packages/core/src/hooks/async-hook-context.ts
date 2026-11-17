@@ -22,6 +22,28 @@ export function wrapAsyncHookContext(context: string): string {
 }
 
 /**
+ * Whether `text` is a complete async-hook-context envelope. The wire-order
+ * classifier (`isInjectedPromptContext`) uses this to recognize the block as
+ * injected context rather than the caller's own text, so it is hoisted ahead
+ * of the user's instruction like the other injected blocks. Mirrors
+ * `isUserPromptSubmitContextPartText`: the body must not carry another tag,
+ * which `formatAsyncHookOutput` guarantees by escaping `<`/`>`.
+ */
+export function isAsyncHookContextPartText(text: string): boolean {
+  const trimmed = text.trim();
+  const prefix = `${ASYNC_HOOK_CONTEXT_OPEN}\n`;
+  const suffix = `\n${ASYNC_HOOK_CONTEXT_CLOSE}`;
+  if (!trimmed.startsWith(prefix) || !trimmed.endsWith(suffix)) {
+    return false;
+  }
+  const body = trimmed.slice(prefix.length, -suffix.length);
+  return (
+    !body.includes(ASYNC_HOOK_CONTEXT_OPEN) &&
+    !body.includes(ASYNC_HOOK_CONTEXT_CLOSE)
+  );
+}
+
+/**
  * Render pending async output as model-facing text: the additional contexts
  * verbatim, then the notification messages labeled by type and hook. `<`/`>`
  * are escaped so hook output cannot forge the closing tag. Returns null when

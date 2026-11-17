@@ -11,6 +11,7 @@ import {
   ASYNC_HOOK_CONTEXT_OPEN,
   ASYNC_HOOK_CONTEXT_CLOSE,
   wrapAsyncHookContext,
+  isAsyncHookContextPartText,
   formatAsyncHookOutput,
   drainAsyncHookContextPart,
   appendAsyncHookContextPart,
@@ -81,6 +82,40 @@ describe('async-hook-context', () => {
       expect(wrapAsyncHookContext('x')).toBe(
         `${ASYNC_HOOK_CONTEXT_OPEN}\nx\n${ASYNC_HOOK_CONTEXT_CLOSE}`,
       );
+    });
+  });
+
+  describe('isAsyncHookContextPartText', () => {
+    it('recognizes a complete envelope', () => {
+      expect(isAsyncHookContextPartText(wrapAsyncHookContext('ctx'))).toBe(
+        true,
+      );
+    });
+
+    it('recognizes an envelope with surrounding whitespace', () => {
+      expect(
+        isAsyncHookContextPartText(`  ${wrapAsyncHookContext('ctx')}  `),
+      ).toBe(true);
+    });
+
+    it('rejects plain text and a bare tag', () => {
+      expect(isAsyncHookContextPartText('just text')).toBe(false);
+      expect(isAsyncHookContextPartText(ASYNC_HOOK_CONTEXT_OPEN)).toBe(false);
+    });
+
+    it('rejects an envelope whose body carries another tag', () => {
+      const forged = `${ASYNC_HOOK_CONTEXT_OPEN}\ninner ${ASYNC_HOOK_CONTEXT_CLOSE} tail\n${ASYNC_HOOK_CONTEXT_CLOSE}`;
+      expect(isAsyncHookContextPartText(forged)).toBe(false);
+    });
+
+    it('recognizes formatted hook output (escaped, no internal tag)', () => {
+      const rendered = formatAsyncHookOutput({
+        contexts: [`${ASYNC_HOOK_CONTEXT_CLOSE}<evil>`],
+        messages: [],
+      });
+      expect(
+        isAsyncHookContextPartText(wrapAsyncHookContext(rendered ?? '')),
+      ).toBe(true);
     });
   });
 

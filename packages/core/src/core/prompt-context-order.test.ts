@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import type { Content, Part } from '@google/genai';
 import { movePromptContextAheadOfUserText } from './prompt-context-order.js';
 import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
+import { wrapAsyncHookContext } from '../hooks/async-hook-context.js';
 import { REATTACH_BOUNDARY_METADATA } from '../services/image-payload-references.js';
 import { fnResponse } from '../test-utils/model-fixtures.js';
 
@@ -17,6 +18,9 @@ const reminder = (text = 'active todo'): Part => ({
 });
 const hook = (text = 'hook context'): Part =>
   createUserPromptSubmitContextPart(text);
+const asyncHook = (text = 'async hook output'): Part => ({
+  text: wrapAsyncHookContext(text),
+});
 
 describe('movePromptContextAheadOfUserText', () => {
   it('moves the injected run trailing the caller text ahead of it', () => {
@@ -27,6 +31,31 @@ describe('movePromptContextAheadOfUserText', () => {
 
     expect(movePromptContextAheadOfUserText([content])).toEqual([
       { role: 'user', parts: [reminder(), hook(), own('do the thing')] },
+    ]);
+  });
+
+  it('hoists a trailing async hook block ahead of the caller text', () => {
+    const content: Content = {
+      role: 'user',
+      parts: [own('do the thing'), asyncHook()],
+    };
+
+    expect(movePromptContextAheadOfUserText([content])).toEqual([
+      { role: 'user', parts: [asyncHook(), own('do the thing')] },
+    ]);
+  });
+
+  it('hoists async + sync injected blocks ahead of the caller text, keeping their order', () => {
+    // The co-occurrence stored shape: the client splices async ahead of the
+    // trailing sync receipt, so the entry is [own, async, sync]. The wire
+    // copy must end in the user's instruction, not in hook output.
+    const content: Content = {
+      role: 'user',
+      parts: [own('do the thing'), asyncHook(), hook()],
+    };
+
+    expect(movePromptContextAheadOfUserText([content])).toEqual([
+      { role: 'user', parts: [asyncHook(), hook(), own('do the thing')] },
     ]);
   });
 
