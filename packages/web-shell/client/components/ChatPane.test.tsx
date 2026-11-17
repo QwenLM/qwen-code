@@ -1715,6 +1715,30 @@ describe('ChatPane', () => {
     );
   });
 
+  it('read-only allows tool approvals and hides queue mutations', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    queuedPromptsMock = [
+      {
+        id: 1,
+        text: 'queued next',
+        midTurnState: 'queued',
+        midTurnMessageId: '1',
+      },
+    ];
+    render({ readOnly: true });
+    expect(latestChatEditorProps).toBeUndefined();
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(testid('pane-queue')).toBeNull();
+  });
+
+  it('read-only keeps the stopped status without offering resume', () => {
+    connectionState.runtimeStopped = true;
+    render({ readOnly: true });
+    const stopped = testid('workspace-runtime-stopped');
+    expect(stopped).not.toBeNull();
+    expect(stopped?.querySelector('button')).toBeNull();
+  });
+
   it('opens a pane monitor in the shared right panel', async () => {
     connectionState.capabilities = {
       features: ['session_monitor_tool_correlation'],
