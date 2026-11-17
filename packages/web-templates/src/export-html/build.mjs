@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_137_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_141_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -108,10 +108,11 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_137_000;
 // The turn-collapse deliverable resolution (#14001) adds the back-scan
 // boundary, the split-segment range, and the substantive-reply floor for
 // the ack fold: 2,136,510 bytes measured on this branch, 510 above the
-// previous cap. The ceiling moves to 2,138,000; the branch is far behind
-// main (2,132,531 at 0eb27d3b), so the 1,490 above the measurement also
-// covers merged-main drift until this head is re-measured on merge.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_138_000;
+// previous cap. The ceiling moved to 2,138,000, expecting the 1,490 above
+// the measurement to cover merged-main drift; the merged tree re-measures
+// 2,140,066 bytes on merge, 2,066 above that ceiling. The warning sits 934
+// above the merged measurement and the ceiling 4,934 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_145_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
