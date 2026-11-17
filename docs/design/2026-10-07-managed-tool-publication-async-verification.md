@@ -4,6 +4,10 @@
 
 Status: implementation for issue [#13242](https://github.com/QwenLM/qwen-code/issues/13242).
 
+The admission flag, the capability header and the synchronous mode were later
+removed; asynchronous admission is the only producer mode. See the
+[single verification mode](2026-11-10-managed-tool-publication-single-verification-mode.md).
+
 ## Problem and scope
 
 Publication uploads read their stored bytes back on the HTTP thread. Seal,

@@ -10,8 +10,10 @@ import { promises as fs } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createSettleTimeout } from '../test-utils/settle-timeout.js';
 
 const api = pathToFileURL(
   createRequire(import.meta.url).resolve('tsx/esm/api'),
@@ -109,6 +111,35 @@ describe('Managed Workspace upload bootstrap processes', () => {
     return { child, finished };
   }
 
+  // The child must boot Node, register the tsx loader and import the
+  // bootstrap before it reaches the unlink hook. A fixed iteration count
+  // races that real I/O under CI contention (#16580), so poll against a
+  // wall-clock deadline instead. Capture the budget once: the helper's
+  // second argument caps the magnitude it returns, not elapsed time, so
+  // re-reading it as a predicate would let the cap go inert and poll to the
+  // lane ceiling. The helper already reserves the reporting second, and a
+  // disabled test timeout still yields the finite cap here.
+  async function waitForCleanupMarker(
+    entered: string,
+    testTimeoutMs: number,
+    capMs = 30_000,
+  ) {
+    const cleanupBudgetMs = createSettleTimeout(testTimeoutMs, capMs)();
+    const cleanupDeadline = performance.now() + cleanupBudgetMs;
+    for (;;) {
+      if (
+        await fs.access(entered).then(
+          () => true,
+          () => false,
+        )
+      )
+        return;
+      if (performance.now() >= cleanupDeadline)
+        throw new Error('Original upload did not reach cleanup.');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
   it('advertises the upload handshake separately from read access', async () => {
     const response = await launch('', ['--help']).finished;
     expect(response).toEqual({
@@ -172,7 +203,9 @@ describe('Managed Workspace upload bootstrap processes', () => {
     expect(await fs.readdir(root)).toEqual([]);
   });
 
-  it('keeps a live writer pending and recovers the original path after its process dies', async () => {
+  it('keeps a live writer pending and recovers the original path after its process dies', async ({
+    task,
+  }) => {
     const bytes = Buffer.from([0, 0xff, 0x80, 10]);
     const info = metadata(bytes);
     const entered = path.join(temporary, 'before-cleanup');
@@ -190,18 +223,7 @@ describe('Managed Workspace upload bootstrap processes', () => {
       paused,
     );
     const stopped = original.finished.catch(() => undefined);
-    for (let attempt = 0; ; attempt++) {
-      if (
-        await fs.access(entered).then(
-          () => true,
-          () => false,
-        )
-      )
-        break;
-      if (attempt >= 100)
-        throw new Error('Original upload did not reach cleanup.');
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await waitForCleanupMarker(entered, task.timeout);
     const status = JSON.stringify({
       ...envelope,
       files: { ...info, operation: 'upload-status' },
@@ -219,4 +241,48 @@ describe('Managed Workspace upload bootstrap processes', () => {
     expect(await fs.readFile(path.join(root, info.path))).toEqual(bytes);
     expect(await fs.readdir(root)).toEqual([info.path]);
   });
+
+  it(
+    'reports the descriptive cleanup error before the runner timeout',
+    { timeout: 3_000 },
+    async ({ task }) => {
+      // Park a child that never writes the marker so the poll must exhaust
+      // its budget. This ceiling is deliberately small: deriving the budget
+      // from `task.timeout` leaves a second to report, while ignoring it
+      // would let the runner timeout fire first and lose the descriptive
+      // error that #16580's lane depends on.
+      const parked = path.join(temporary, 'parked.mjs');
+      await fs.writeFile(
+        parked,
+        'await new Promise(()=>setInterval(()=>{},1000));\n',
+      );
+      const child = launch('', [], parked);
+      child.finished.catch(() => undefined);
+      await expect(
+        waitForCleanupMarker(
+          path.join(temporary, 'never-written'),
+          task.timeout,
+        ),
+      ).rejects.toThrow('Original upload did not reach cleanup.');
+    },
+  );
+
+  it(
+    'caps the cleanup poll at the budget rather than the lane ceiling',
+    { timeout: 5_000 },
+    async ({ task }) => {
+      // A cap below the ceiling separates a captured budget from re-reading
+      // the helper as a predicate: the predicate stays above its floor until
+      // the ceiling, so the throw would land near 4s instead of near 1s.
+      const startedAt = performance.now();
+      await expect(
+        waitForCleanupMarker(
+          path.join(temporary, 'never-written'),
+          task.timeout,
+          1_000,
+        ),
+      ).rejects.toThrow('Original upload did not reach cleanup.');
+      expect(performance.now() - startedAt).toBeLessThan(2_500);
+    },
+  );
 });

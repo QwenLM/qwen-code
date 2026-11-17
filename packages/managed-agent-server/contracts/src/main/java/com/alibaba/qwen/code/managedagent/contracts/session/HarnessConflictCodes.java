@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.contracts.session;
 
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * The Harness 409 codes that heal on their own: a fenced predecessor's
@@ -21,6 +22,21 @@ public final class HarnessConflictCodes {
 
     public static boolean isTransient(String code) {
         return code != null && TRANSIENT.contains(code);
+    }
+
+    // Tolerates whitespace around the colon and still matches a body
+    // truncated mid-JSON, where a full parse would fail. Error codes are
+    // plain identifiers, so the value never carries an escaped quote.
+    private static final Pattern BODY_CODE = Pattern.compile(
+            "\"code\"\\s*:\\s*\"([^\"]*)\"");
+
+    /** The first {@code code} field named in a Harness error body, or null. */
+    public static String bodyCode(String body) {
+        if (body == null) {
+            return null;
+        }
+        var matcher = BODY_CODE.matcher(body);
+        return matcher.find() ? matcher.group(1) : null;
     }
 
     private HarnessConflictCodes() {

@@ -16,6 +16,7 @@ const {
   startSpeculationMock,
   acceptSpeculationMock,
   logSpeculationMock,
+  prepareFileWatchersForProcessExitMock,
 } = vi.hoisted(() => ({
   writeTerminalTitleSpy: vi.fn(),
   useWakeRepaintMock: vi.fn(),
@@ -32,10 +33,25 @@ const {
   startSpeculationMock: vi.fn(),
   acceptSpeculationMock: vi.fn(),
   logSpeculationMock: vi.fn(),
+  prepareFileWatchersForProcessExitMock: vi.fn(),
   buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
     vi.fn(() => deps),
   ),
 }));
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js')
+      >();
+    return {
+      ...actual,
+      prepareFileWatchersForProcessExit: prepareFileWatchersForProcessExitMock,
+    };
+  },
+);
 
 vi.mock('./hooks/use-wake-repaint.js', () => ({
   useWakeRepaint: useWakeRepaintMock,
@@ -97,7 +113,8 @@ import { renderHook } from '@testing-library/react';
 import * as interactiveMods from '../services/interactive-mod-session.js';
 import { ModSession } from '../services/mod-session.js';
 import { CommandService } from '../services/CommandService.js';
-import { registerCleanup } from '../utils/cleanup.js';
+import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import * as processUtils from '../utils/processUtils.js';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
@@ -877,6 +894,9 @@ describe('AppContainer State Management', () => {
   const mockedUseSettingsCommand = useSettingsCommand as Mock;
   const mockedUseModelCommand = useModelCommand as Mock;
   const mockedUseSlashCommandProcessor = useSlashCommandProcessor as Mock;
+  const mockIsCommandCancellationBlocked = vi.fn(() => false);
+  const mockIsCommandCommitting = vi.fn(() => false);
+  const mockCancelSlashCommand = vi.fn(() => false);
   const mockedUseLlmStream = useLlmStream as Mock;
   const mockedUseVim = useVim as Mock;
   const mockedUseFolderTrust = useFolderTrust as Mock;
@@ -915,6 +935,9 @@ describe('AppContainer State Management', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsCommandCancellationBlocked.mockReturnValue(false);
+    mockIsCommandCommitting.mockReturnValue(false);
+    mockCancelSlashCommand.mockReturnValue(false);
     restoreCiEnv = clearCiEnv();
     vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
@@ -1005,6 +1028,9 @@ describe('AppContainer State Management', () => {
       closeModelDialog: vi.fn(),
     });
     mockedUseSlashCommandProcessor.mockReturnValue({
+      isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+      isCommandCommitting: mockIsCommandCommitting,
+      cancelSlashCommand: mockCancelSlashCommand,
       handleSlashCommand: vi.fn(),
       slashCommands: [],
       pendingHistoryItems: [],
@@ -1921,49 +1947,85 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Basic Rendering', () => {
-    it('continues quitting when cancelling the active request fails', () => {
-      vi.useFakeTimers();
-      const cancelOngoingRequest = vi.fn(() => {
-        throw new Error('cancel failed');
-      });
-      const requestShutdown = vi.fn();
-      mockedUseLlmStream.mockReturnValue({
-        streamingState: StreamingState.Responding,
-        submitQuery: vi.fn(),
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest,
-        retryLastPrompt: vi.fn(),
-        streamingResponseLengthRef: { current: 0 },
-        isReceivingContent: false,
-      });
-      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
-        initialize: vi.fn().mockResolvedValue(undefined),
-        setTools: vi.fn().mockResolvedValue(undefined),
-        isInitialized: vi.fn().mockReturnValue(false),
-        requestShutdown,
-      } as unknown as LlmClient);
+    it.each([false, true])(
+      'prepares watchers before quitting when cancellation throws: %s',
+      async (cancelThrows) => {
+        vi.useFakeTimers();
+        const order: string[] = [];
+        prepareFileWatchersForProcessExitMock.mockImplementation(() => {
+          order.push('watchers');
+        });
+        const cancelOngoingRequest = vi.fn(() => {
+          order.push('cancel');
+          if (cancelThrows) throw new Error('cancel failed');
+        });
+        const requestShutdown = vi.fn(() => {
+          order.push('shutdown');
+        });
+        vi.mocked(runExitCleanup).mockImplementation(async () => {
+          order.push('cleanup');
+        });
+        const exit = vi
+          .spyOn(processUtils, 'exitCleanly')
+          .mockImplementation(async () => {
+            order.push('exit');
+            return undefined as never;
+          });
+        mockedUseLlmStream.mockReturnValue({
+          streamingState: StreamingState.Responding,
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest,
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        });
+        vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+          initialize: vi.fn().mockResolvedValue(undefined),
+          setTools: vi.fn().mockResolvedValue(undefined),
+          isInitialized: vi.fn().mockReturnValue(false),
+          requestShutdown,
+        } as unknown as LlmClient);
 
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
 
-      const slashCommandActions = mockedUseSlashCommandProcessor.mock.calls.at(
-        -1,
-      )?.[12] as { quit: (messages: HistoryItem[]) => void };
-      const timerCount = vi.getTimerCount();
-      expect(() => slashCommandActions.quit([])).not.toThrow();
+        const slashCommandActions =
+          mockedUseSlashCommandProcessor.mock.calls.at(-1)?.[11] as {
+            quit: (messages: HistoryItem[]) => void;
+          };
+        try {
+          act(() => slashCommandActions.quit([]));
 
-      expect(cancelOngoingRequest).toHaveBeenCalledOnce();
-      expect(requestShutdown).toHaveBeenCalledOnce();
-      expect(vi.getTimerCount()).toBe(timerCount + 1);
-    });
+          expect(order).toEqual(['watchers', 'cancel', 'shutdown']);
+          expect(cancelOngoingRequest).toHaveBeenCalledOnce();
+          expect(requestShutdown).toHaveBeenCalledOnce();
+          await vi.advanceTimersByTimeAsync(99);
+          expect(vi.mocked(runExitCleanup)).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(order).toEqual([
+            'watchers',
+            'cancel',
+            'shutdown',
+            'cleanup',
+            'exit',
+          ]);
+          expect(exit).toHaveBeenCalledExactlyOnceWith(0);
+        } finally {
+          exit.mockRestore();
+          prepareFileWatchersForProcessExitMock.mockReset();
+          vi.mocked(runExitCleanup).mockReset();
+        }
+      },
+    );
 
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {
       const addItem = vi.fn();
@@ -2463,6 +2525,9 @@ describe('AppContainer State Management', () => {
       const submitQuery = vi.fn();
       const addMessage = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
+        isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand,
         slashCommands,
         pendingHistoryItems: [],
@@ -3000,6 +3065,9 @@ describe('AppContainer State Management', () => {
         ) => {
           slashRefreshStatic = refreshStatic;
           return {
+            isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+            isCommandCommitting: mockIsCommandCommitting,
+            cancelSlashCommand: mockCancelSlashCommand,
             handleSlashCommand: vi.fn(),
             slashCommands: [],
             pendingHistoryItems: [],
@@ -5385,6 +5453,9 @@ describe('AppContainer State Management', () => {
         const mockQueueMessage = vi.fn();
 
         mockedUseSlashCommandProcessor.mockReturnValue({
+          isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+          isCommandCommitting: mockIsCommandCommitting,
+          cancelSlashCommand: mockCancelSlashCommand,
           handleSlashCommand: mockHandleSlashCommand,
           slashCommands: [],
           pendingHistoryItems: [],
@@ -5425,6 +5496,9 @@ describe('AppContainer State Management', () => {
         const mockHandleSlashCommand = vi.fn();
         const mockQueueMessage = vi.fn();
         mockedUseSlashCommandProcessor.mockReturnValue({
+          isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+          isCommandCommitting: mockIsCommandCommitting,
+          cancelSlashCommand: mockCancelSlashCommand,
           handleSlashCommand: mockHandleSlashCommand,
           slashCommands: [],
           pendingHistoryItems: [],
@@ -5606,6 +5680,101 @@ describe('AppContainer State Management', () => {
         expect(cancelSpy).not.toHaveBeenCalled();
       },
     );
+
+    it('keeps interrupt keys from cancelling or arming quit during a command commit', () => {
+      const cancelOngoingRequest = vi.fn();
+      const handleSlashCommand = vi.fn();
+      mockIsCommandCancellationBlocked.mockReturnValue(true);
+      mockIsCommandCommitting.mockReturnValue(true);
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.Responding,
+        cancelOngoingRequest,
+      });
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        ...mockedUseSlashCommandProcessor(),
+        handleSlashCommand,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const ctrlC = { ...escKey, name: 'c', ctrl: true, sequence: '\u0003' };
+      const ctrlD = { ...escKey, name: 'd', ctrl: true, sequence: '\u0004' };
+      for (const key of [escKey, ctrlC, ctrlC, ctrlD, ctrlD]) {
+        act(() => getGlobalKeypress()!(key));
+      }
+      expect(cancelOngoingRequest).not.toHaveBeenCalled();
+      expect(handleSlashCommand).not.toHaveBeenCalled();
+
+      mockIsCommandCancellationBlocked.mockReturnValue(false);
+      mockIsCommandCommitting.mockReturnValue(false);
+      act(() => getGlobalKeypress()!(ctrlC));
+      expect(cancelOngoingRequest).toHaveBeenCalledOnce();
+      expect(handleSlashCommand).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['c', '\u0003'],
+      ['d', '\u0004'],
+    ])(
+      'allows double Ctrl+%s to quit a non-cancellable action outside a commit',
+      (name, sequence) => {
+        const handleSlashCommand = vi.fn();
+        mockIsCommandCancellationBlocked.mockReturnValue(true);
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState: StreamingState.Responding,
+        });
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          ...mockedUseSlashCommandProcessor(),
+          handleSlashCommand,
+        });
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        const key = { ...escKey, name, ctrl: true, sequence };
+        act(() => getGlobalKeypress()!(key));
+        expect(handleSlashCommand).not.toHaveBeenCalled();
+        act(() => getGlobalKeypress()!(key));
+        expect(handleSlashCommand).toHaveBeenCalledExactlyOnceWith('/quit');
+      },
+    );
+
+    it('keeps the MCP shortcut from replacing a slash command awaiting consent', () => {
+      const handleSlashCommand = vi.fn();
+      mockConfig.getMcpServers = vi.fn(() => ({
+        fixture: { command: 'fixture' },
+      }));
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        ...mockedUseSlashCommandProcessor(),
+        handleSlashCommand,
+        confirmationRequest: { prompt: 'Move?', onConfirm: vi.fn() },
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const ctrlT = { ...escKey, name: 't', ctrl: true, sequence: '\u0014' };
+      act(() => getGlobalKeypress()!(ctrlT));
+      expect(handleSlashCommand).not.toHaveBeenCalled();
+    });
 
     it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {
       // Positive counterpart to the vim-INSERT guard above: while the agent
@@ -8299,6 +8468,7 @@ describe('AppContainer State Management', () => {
         expect.arrayContaining([
           expect.objectContaining({ display: { kind: 'collapse-summary' } }),
         ]),
+        mockConfig.getSessionId(),
       );
       expect(historyManager.history.at(-1)).toMatchObject({
         type: 'info',
@@ -8814,6 +8984,9 @@ describe('AppContainer State Management', () => {
 
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
+        isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -8842,6 +9015,9 @@ describe('AppContainer State Management', () => {
 
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
+        isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -8862,6 +9038,65 @@ describe('AppContainer State Management', () => {
       expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/quit');
     });
 
+    it.each([
+      { name: 'c', sequence: '\x03', elapsed: 750, shouldQuit: true },
+      { name: 'd', sequence: '\x04', elapsed: 750, shouldQuit: true },
+      { name: 'c', sequence: '\x03', elapsed: 1001, shouldQuit: false },
+      { name: 'd', sequence: '\x04', elapsed: 1001, shouldQuit: false },
+    ])(
+      'uses the normal auth-dialog exit window for Ctrl+$name at $elapsed ms',
+      async ({ name, sequence, elapsed, shouldQuit }) => {
+        vi.useFakeTimers();
+        const auth = mockedUseAuthCommand();
+        mockedUseAuthCommand.mockReturnValue({
+          ...auth,
+          isAuthDialogOpen: true,
+          state: { ...auth.state, isAuthDialogOpen: true },
+        });
+        const handleSlashCommand = vi.fn();
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          ...mockedUseSlashCommandProcessor(),
+          handleSlashCommand,
+        });
+        mockedUseTextBuffer.mockReturnValue({ text: '', setText: vi.fn() });
+        const key: Key = {
+          name,
+          sequence,
+          ctrl: true,
+          meta: false,
+          shift: false,
+          paste: false,
+        };
+
+        try {
+          await act(async () => {
+            render(
+              <AppContainer
+                config={mockConfig}
+                settings={mockSettings}
+                version="1.0.0"
+                initializationResult={mockInitResult}
+              />,
+            );
+          });
+          await act(async () => getGlobalKeypress()!(key));
+          expect(handleSlashCommand).not.toHaveBeenCalledWith('/quit');
+          await act(async () => {
+            vi.advanceTimersByTime(elapsed);
+          });
+          await act(async () => getGlobalKeypress()!(key));
+          expect(
+            handleSlashCommand.mock.calls.filter(
+              ([command]) => command === '/quit',
+            ),
+          ).toHaveLength(shouldQuit ? 1 : 0);
+        } finally {
+          vi.clearAllTimers();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('should require double Ctrl+C to exit when dialogs are open', () => {
       vi.useFakeTimers();
 
@@ -8874,6 +9109,9 @@ describe('AppContainer State Management', () => {
 
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
+        isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -8914,6 +9152,9 @@ describe('AppContainer State Management', () => {
 
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
+        isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -8934,11 +9175,62 @@ describe('AppContainer State Management', () => {
       expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/quit');
     });
 
+    it('cancels a btw request shown behind a browsed answer on Ctrl+C', () => {
+      const cancelBtw = vi.fn();
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
+        handleSlashCommand: vi.fn(),
+        slashCommands: [],
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+        btwItem: {
+          id: 1,
+          type: MessageType.BTW,
+          btw: {
+            question: 'older question',
+            answer: 'older answer',
+            isPending: false,
+            ownRequestPending: true,
+          },
+        },
+        cancelBtw,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const handleKeypress = getGlobalKeypress();
+      expect(handleKeypress).toBeDefined();
+      handleKeypress!({
+        name: 'c',
+        ctrl: true,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\x03',
+      });
+
+      expect(cancelBtw).toHaveBeenCalledTimes(1);
+    });
+
     it('should reset Ctrl+C state after timeout', () => {
       vi.useFakeTimers();
 
       const mockHandleSlashCommand = vi.fn();
       mockedUseSlashCommandProcessor.mockReturnValue({
+        isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: mockHandleSlashCommand,
         slashCommands: [],
         pendingHistoryItems: [],
@@ -10174,7 +10466,7 @@ describe('AppContainer State Management', () => {
       renderRewindHarness();
       const actions = mockedUseSlashCommandProcessor.mock.calls.at(
         -1,
-      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      )?.[11] as Parameters<typeof useSlashCommandProcessor>[11];
       act(() => actions.openRewindSelector('slash-command'));
       expect(capturedUIState.isRewindSelectorOpen).toBe(true);
     });
@@ -10215,7 +10507,7 @@ describe('AppContainer State Management', () => {
       renderRewindHarness();
       const actions = mockedUseSlashCommandProcessor.mock.calls.at(
         -1,
-      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      )?.[11] as Parameters<typeof useSlashCommandProcessor>[11];
       act(() => actions.openRewindSelector('slash-command'));
       expect(capturedUIState.isRewindSelectorOpen).toBe(false);
     });
@@ -10239,7 +10531,7 @@ describe('AppContainer State Management', () => {
         );
         const actions = mockedUseSlashCommandProcessor.mock.calls.at(
           -1,
-        )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+        )?.[11] as Parameters<typeof useSlashCommandProcessor>[11];
         act(() => actions.openRewindSelector('slash-command'));
         expect(capturedUIState.isRewindSelectorOpen).toBe(false);
         if (blockedBy === 'ide')
@@ -10742,6 +11034,9 @@ describe('AppContainer State Management', () => {
 
     it('consumes the latch on a model-invocable slash command (skills)', () => {
       mockedUseSlashCommandProcessor.mockReturnValue({
+        isCommandCancellationBlocked: mockIsCommandCancellationBlocked,
+        isCommandCommitting: mockIsCommandCommitting,
+        cancelSlashCommand: mockCancelSlashCommand,
         handleSlashCommand: vi.fn(),
         slashCommands: [
           {

@@ -56,6 +56,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  session_last_user_prompt_sort: { since: 'v1' },
   session_catalog_batch: { since: 'v1' },
   // Aggregate persisted session counts via
   // `GET /workspace/:id/session-info` (and the plural
@@ -94,6 +95,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_artifact_library: { since: 'v1' },
   workspace_artifact_library_stream: { since: 'v1' },
   session_sources: { since: 'v1' },
+  generated_ui_state: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -309,11 +311,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // release lookup, workflow download, and `.gitignore` update logic.
   workspace_github_setup: { since: 'v1' },
   // `GET /workspaces/:workspace/github/prs` lists the open pull requests
-  // of the workspace's GitHub remote via the `gh` CLI (read-only). The
-  // tag means the route contract exists; runtime availability of `gh`
-  // and its auth is reported per-request through the
-  // `github_cli_unavailable` / `github_prs_failed` error codes.
+  // of the workspace's GitHub remote via the `gh` CLI (read-only). The tag
+  // means the route contract exists; runtime availability of `gh` and its
+  // auth is reported per-request through the `github_cli_unavailable` /
+  // `github_prs_failed` error codes.
   workspace_github_prs: { since: 'v1' },
+  // `GET /workspaces/:workspace/github/prs/:number/files` returns one PR's
+  // changed-file list and +/- scale for the delivery-unit change overview
+  // (read-only). A separate tag so a client that preflighted
+  // `workspace_github_prs` can tell whether the files route exists rather
+  // than probing it optimistically; runtime `gh` availability is reported
+  // per-request through `github_cli_unavailable` / `github_pr_files_failed`.
+  workspace_github_pr_files: { since: 'v1' },
   // `GET /workspaces/:workspace/git/worktrees` lists every worktree of the
   // workspace's repository, `GET .../git/worktrees/status?path=` reads one
   // listed worktree's working-tree counters, and
@@ -347,6 +356,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // admin directory and with it that worktree's HEAD, reflog and any
   // submodule repository.
   workspace_git_worktrees: { since: 'v1' },
+  // Read-only, bounded Git ignore classification for per-turn file summaries.
+  workspace_git_check_ignore: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
@@ -489,6 +500,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   multi_workspace_session_shell: { since: 'v1' },
   dynamic_workspace_registration: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
+  workspace_order: { since: 'v1' },
   // Optional presentation-only names and updates to those names for workspace
   // runtimes. Workspace ids and canonical paths remain the routing identities.
   workspace_display_name: { since: 'v1' },
@@ -584,6 +596,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // restore surface reports the superseded / interrupted / missing-marker
   // classifications as typed 409s.
   session_worktree_reset_v1: { since: 'v1' },
+  // "Create branch here": `POST /session/:id/worktree-branch` turns a
+  // detached managed worktree into a named branch at its current HEAD.
+  session_worktree_branch_v1: { since: 'v1' },
+  // "Hand off": `POST /session/:id/worktree-handoff` moves the same session
+  // between its managed worktree and the local checkout, carrying the work.
+  session_worktree_handoff_v1: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and
@@ -826,6 +844,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
   ],
   [
+    'generated_ui_state',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
     'session_generation',
     (toggles) => toggles.sessionGenerationAvailable === true,
   ],
@@ -881,6 +903,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   [
     'persistent_workspace_registration',
+    (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
+  ],
+  [
+    'workspace_order',
     (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
   ],
   [

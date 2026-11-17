@@ -47,6 +47,7 @@ The daemon additionally requires:
 - The turn ended cleanly, meaning its stop reason is `end_turn` — a cancelled, refused, or truncated turn gets no suggestion
 - Automatic turns are not being held by the todo stop guard, and no queued prompt is waiting to run
 - The most recent entry in the conversation history is a model response
+- A channel did not send the turn: a channel's turn, including one it delivers to a session bound to a pull request, gets none
 
 Because daemon-side generation happens for every client attached to the session, it also happens for clients that cannot render the result. Such a client — a headless or SDK consumer of a daemon session, which is not the CLI's own non-interactive mode above — should set `ui.enableFollowupSuggestions` to `false` to avoid paying the per-turn LLM cost for output it discards.
 

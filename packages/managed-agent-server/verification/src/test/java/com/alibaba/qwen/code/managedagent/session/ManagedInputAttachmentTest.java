@@ -5,9 +5,9 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -41,7 +41,7 @@ class ManagedInputAttachmentTest {
         source.setURL("jdbc:h2:mem:input-attachments-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         ManagedSchema.initialize(source);
-        var registry = mock(ManagedWorkspaceRegistry.class);
+        var registry = mock(JdbcManagedWorkspaceRegistry.class);
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(new ManagedSchemaJdbcTemplate(source), new ObjectMapper(),
                 Clock.systemUTC(), events -> {}, registry, new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var harness = mock(HarnessConnector.class);

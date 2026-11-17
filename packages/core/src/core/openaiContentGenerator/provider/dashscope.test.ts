@@ -1615,6 +1615,22 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result.messages[1].content).toBe('Hello!');
     });
 
+    it.each([true, false])(
+      'uses the isolated route cache control setting (%s)',
+      (enableCacheControl) => {
+        vi.mocked(mockCliConfig.getContentGeneratorConfig).mockReturnValue({
+          model: 'qwen-max',
+          enableCacheControl: !enableCacheControl,
+        });
+        const isolated = gen({ isolatedRoute: true, enableCacheControl });
+        const system = 'You are a helpful assistant.';
+        const result = isolated.buildRequest(baseRequest, 'test-prompt-id');
+        expect(result.messages[0].content).toEqual(
+          enableCacheControl ? [cachedText(system)] : system,
+        );
+      },
+    );
+
     it('should handle messages with array content for streaming requests', () => {
       // stream: true triggers cache control on the last message.
       const result = send(

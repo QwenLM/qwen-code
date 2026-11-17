@@ -59,8 +59,8 @@ public final class WorkspaceMaintenanceLinuxAcceptanceMain {
         properties.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true);
         properties.getRuntimeBroker().setWorkspaceMounts(List.of(new WorkspaceMount(tenant, "storage", root.toString())));
         var guard = new WorkspaceStorageGuard(jdbc, manager, properties, new com.alibaba.qwen.code.runtimebroker.provisioning.NativeStorageIdentityReader());
-        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager, guard));
-        var children = new ChildWorkspaceStore(jdbc, manager);
+        var authority = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager, guard));
+        var children = new JdbcChildWorkspaceStore(jdbc, manager);
         var recovery = new WorkspaceMaintenanceRecovery(jdbc, manager, guard);
         var binding = new ContextBinding(tenant, "workspace", 1, "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         if ("stage".equals(args[0])) {
@@ -70,7 +70,7 @@ public final class WorkspaceMaintenanceLinuxAcceptanceMain {
                     tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')",
                     tenant, "native-actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
             String parent = transactions.execute(ignored -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                     .tenantId(tenant)
                     .actorId("native-actor")

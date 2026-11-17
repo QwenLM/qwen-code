@@ -20,6 +20,7 @@ import {
   createAbortController,
   createChildAbortController,
 } from '../../utils/abortController.js';
+import { isBackgroundWorkflowBlocked } from '../../utils/invocation-context.js';
 import {
   getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
@@ -155,6 +156,49 @@ async function resolveResumeName(
 export type WorkflowRunSettlement =
   | { ok: true; outcome: WorkflowRunOutcome }
   | { ok: false; message: string; details?: WorkflowExecutionError };
+
+/**
+ * Whether this host can take a model-requested background run: one that
+ * returns before it settles and reports back through the conversation.
+ * The interactive TUI and ACP sessions (Web Shell, IDE clients) each feed
+ * the run's completion into the session's notification queue; a headless
+ * run has nothing to deliver it to, so it stays in the foreground.
+ *
+ * The Qwen Session Agent adapter only reads the original prompt, so
+ * it cannot deliver a detached workflow's completion.
+ *
+ * An ACP session also needs its workflow controls: workflows still
+ * enabled (a settings reload can turn them off without unregistering this
+ * tool), not bare mode, and a trusted workspace. Without them the client
+ * hides a session's workflow runs and refuses to cancel them, so a
+ * background run could be neither seen nor stopped. Trust is the resolved
+ * workspace decision (`isTrustedFolder`), the one the serve layer applies
+ * to the tasks view and cancel; a mock or host that cannot answer counts
+ * as off. A Channel turn that cannot deliver a background result
+ * (`isBackgroundWorkflowBlocked`) keeps its workflows in the foreground.
+ */
+export function hostSupportsBackgroundWorkflows(
+  config: Pick<
+    Config,
+    | 'isInteractive'
+    | 'getExperimentalZedIntegration'
+    | 'isSessionAgentSession'
+    | 'isWorkflowsEnabled'
+    | 'getBareMode'
+    | 'isTrustedFolder'
+  >,
+): boolean {
+  if (config.getExperimentalZedIntegration?.() === true) {
+    return (
+      config.isSessionAgentSession?.() !== true &&
+      config.isWorkflowsEnabled?.() === true &&
+      config.getBareMode?.() !== true &&
+      config.isTrustedFolder?.() === true &&
+      !isBackgroundWorkflowBlocked()
+    );
+  }
+  return config.isInteractive?.() === true;
+}
 
 export class WorkflowRunHandle {
   readonly completion: Promise<WorkflowRunSettlement>;
@@ -331,7 +375,9 @@ export class WorkflowRunner {
         ? createAbortController()
         : createChildAbortController(options.signal);
     const controller = registry
-      ? registry.reserveStart(runId, createController)
+      ? registry.reserveStart(runId, createController, {
+          background: runInBackground,
+        })
       : createController();
     const releasePersistenceActivity = markWorkflowRunPersistenceActive(
       config,
@@ -574,9 +620,7 @@ export class WorkflowRunner {
         isBackgrounded: runInBackground,
         notifyOnCompletion: options.notifyOnCompletion,
         resumeInBackground:
-          runInBackground &&
-          config.isInteractive?.() === true &&
-          config.getExperimentalZedIntegration?.() !== true,
+          runInBackground && hostSupportsBackgroundWorkflows(config),
       };
       // A resume's checkpoint is not best-effort. `retry` from history
       // refuses a run whose checkpoint is still on disk, reading it as a

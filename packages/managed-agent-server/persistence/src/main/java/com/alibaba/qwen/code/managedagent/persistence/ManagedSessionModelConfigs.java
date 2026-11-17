@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellModelOption;
 import com.alibaba.qwen.code.managedagent.model.SessionModelConfig;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -8,10 +9,15 @@ import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+
+import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
+import java.util.List;
 
 @Repository
 public class ManagedSessionModelConfigs {
@@ -27,6 +33,21 @@ public class ManagedSessionModelConfigs {
         this.json = json;
         this.secrets = secrets;
         this.settings = settings;
+    }
+
+    static List<WebShellModelOption> catalog(ManagedAgentSettings settings) {
+        var modelIds = new HashSet<String>();
+        return settings.getModelCatalog().stream().map(option -> {
+            String id = option.getModelId();
+            String label = option.getLabel() == null ? id : option.getLabel();
+            if (StringUtils.isBlank(id) || id.getBytes(StandardCharsets.UTF_8).length > 512
+                    || id.chars().anyMatch(Character::isISOControl) || !modelIds.add(id)
+                    || StringUtils.isBlank(label) || label.length() > 512
+                    || label.chars().anyMatch(Character::isISOControl)) {
+                throw new IllegalArgumentException("Invalid or duplicate Managed model catalog entry");
+            }
+            return new WebShellModelOption(id, label);
+        }).toList();
     }
 
     public void requireAdmission(SessionModelConfig config) {

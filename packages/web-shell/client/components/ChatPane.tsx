@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from '../utils/random-uuid.js';
+import { useWorkspaceFileChanges } from './artifacts/useWorkspaceFileChanges';
 import { useModelRefresh } from '../hooks/useModelRefresh';
 import { useSubscriptionLogout } from '../hooks/useSubscriptionLogout';
 import { CapacityRecoveryDialog } from './workspaces/CapacityRecoveryDialog';
@@ -56,8 +58,10 @@ import {
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
+import { ReportedArtifactRegistration } from './ReportedArtifactRegistration';
 import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
+import { isNamedSubSessionApproval } from '../adapters/toolClassification';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 import type {
@@ -201,6 +205,7 @@ export interface ChatPaneProps {
   title?: string;
   /** Session-list metadata for the shared title details. */
   sessionSummary?: DaemonSessionSummary;
+  showSessionDetails?: boolean;
   /** Last interacted pane, independent of whether its session is running. */
   isActive?: boolean;
   /** Must be referentially stable; reports pending state and unmount cleanup. */
@@ -288,6 +293,7 @@ export interface ChatPaneProps {
 export function ChatPane({
   title,
   sessionSummary,
+  showSessionDetails = true,
   isActive = false,
   onApprovalChange,
   workspaceCwd,
@@ -423,7 +429,7 @@ export function ChatPane({
     connection.sessionId,
     connectionGoalComplete,
   ]);
-  const { artifacts } = useSessionArtifacts();
+  const { artifacts, hydrated, refresh } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
     (tool: ACPToolCall, parentSessionId = connection.sessionId) => {
       if (
@@ -648,7 +654,7 @@ export function ChatPane({
       store.dispatch([
         {
           type: 'status',
-          promptId: `local-command:${crypto.randomUUID()}`,
+          promptId: `local-command:${randomUUID()}`,
           text: message,
         },
       ]),
@@ -720,14 +726,18 @@ export function ChatPane({
       getArtifactsByTurn(messages, artifacts, connection.workspaceCwd || ''),
     [messages, artifacts, connection.workspaceCwd],
   );
-  const fileChangesByTurn = useMemo(
-    () =>
-      getFileChangesByTurn(
-        messages,
-        artifactsByTurn,
-        connection.workspaceCwd || '',
-      ),
-    [messages, artifactsByTurn, connection.workspaceCwd],
+  const fileChangesByTurn = useWorkspaceFileChanges(
+    messages,
+    artifactsByTurn,
+    connection.workspaceCwd ||
+      connection.standaloneSession?.projectlessOutputDirectory ||
+      '',
+    connection.sessionId,
+    connection.workspaceCwd && sessionSummary
+      ? (sessionSummary.worktree?.path ?? connection.workspaceCwd)
+      : connection.workspaceCwd
+        ? undefined
+        : null,
   );
   const scheduledTasksByTurn = useMemo(
     () => getScheduledTasksByTurn(messages),
@@ -961,6 +971,7 @@ export function ChatPane({
           !enabled &&
           approval &&
           !isExitPlanApprovalRequest(approval) &&
+          !isNamedSubSessionApproval(approval) &&
           (modeId === 'yolo' ||
             (modeId === 'auto-edit' && approval.toolKind === 'edit'))
         ) {
@@ -1122,7 +1133,7 @@ export function ChatPane({
             ? operation.objective
             : undefined;
         store.appendLocalUserMessage(text, undefined, {
-          localCommandId: `local-command:${crypto.randomUUID()}`,
+          localCommandId: `local-command:${randomUUID()}`,
         });
         void controlGoal(action, objective).catch((error: unknown) => {
           reportError(error, `Failed to ${operation.kind} /goal`);
@@ -1381,17 +1392,45 @@ export function ChatPane({
       );
   }, [actions, reportError]);
 
+  const reviewSourceRef = useRef({ messages, artifactsByTurn });
+  reviewSourceRef.current = { messages, artifactsByTurn };
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (!onRightPanelOpen) return;
+      const source = reviewSourceRef.current;
       onRightPanelOpen({
         ...request,
+        ...(request.kind === 'review'
+          ? {
+              unfilteredChanges:
+                getFileChangesByTurn(
+                  source.messages,
+                  source.artifactsByTurn,
+                  connection.workspaceCwd ||
+                    connection.standaloneSession?.projectlessOutputDirectory ||
+                    '',
+                ).get(request.turnId) ?? request.changes,
+            }
+          : {}),
         sourceSessionId: connection.sessionId,
       });
     },
-    [connection.sessionId, onRightPanelOpen],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      connection.standaloneSession?.projectlessOutputDirectory,
+      onRightPanelOpen,
+    ],
   );
   const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
+  const modelPickerScope = useMemo(
+    () => ({
+      sessionId: connection.sessionId,
+      workspaceCwd: paneWorkspaceCwd,
+      daemonBaseUrl: workspace.baseUrl,
+    }),
+    [connection.sessionId, paneWorkspaceCwd, workspace.baseUrl],
+  );
   const previewSessionIdRef = useRef(connection.sessionId);
   previewSessionIdRef.current = connection.sessionId;
 
@@ -1534,7 +1573,7 @@ export function ChatPane({
       return;
     }
     const owner = sessionOwnerGuard.capture();
-    const localCommandId = `local-command:${crypto.randomUUID()}`;
+    const localCommandId = `local-command:${randomUUID()}`;
     beginLocalCommand(store, localCommandId);
     if (streamingStateRef.current === 'idle') {
       store.appendLocalUserMessage('/context', undefined, { localCommandId });
@@ -1714,6 +1753,14 @@ export function ChatPane({
       aria-current={isActive ? 'location' : undefined}
       aria-label={headerLabel}
     >
+      {/* Each pane runs under its own DaemonSessionProvider, so App's
+          registration mount only covers the main session; register this
+          pane's reported artifacts here. */}
+      <ReportedArtifactRegistration
+        registered={artifacts}
+        hydrated={hydrated}
+        refresh={refresh}
+      />
       {goalEditOpen && connection.goalState?.goal && (
         <GoalEditDialog
           objective={connection.goalState.goal.objective}
@@ -1746,7 +1793,7 @@ export function ChatPane({
               <span className={styles.workspaceTagText}>{workspaceLabel}</span>
             </span>
           )}
-          {sessionSummary && !hidden ? (
+          {showSessionDetails && sessionSummary && !hidden ? (
             <SessionDetailsTooltip
               session={{
                 ...sessionSummary,
@@ -2030,6 +2077,7 @@ export function ChatPane({
                   onPause={() => runGoalControl('pause')}
                   onResume={() => runGoalControl('resume')}
                   onClear={() => runGoalControl('clear')}
+                  onOpenGoals={onOpenGoals}
                 />
               )}
             </div>
@@ -2099,6 +2147,7 @@ export function ChatPane({
             currentModel={connection.currentModel ?? ''}
             modelRefresh={modelRefresh}
             availableModels={availableModels}
+            modelPickerScope={modelPickerScope}
             unavailableModels={unavailableModels}
             mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onSelectMode={handleSelectMode}

@@ -241,7 +241,10 @@ export async function runHostedWorkflowTurn(input: {
     undefined,
     undefined,
     true,
-    sessionModelConfig ? { modelConfiguration: sessionModelConfig } : undefined,
+    {
+      lspDisabled: true,
+      ...(sessionModelConfig ? { modelConfiguration: sessionModelConfig } : {}),
+    },
   );
   const model = sessionModelConfig
     ? { id: sessionModelConfig.model }
