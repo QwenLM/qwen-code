@@ -52,7 +52,7 @@ import {
   WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS,
 } from '../workspace-skills-refresh-policy.js';
 
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type LoadedSettings } from '../../config/settings.js';
 import {
   getProjectHooksApprovalState,
   getProjectHooksForApprovalFromRawWorkspace,
@@ -73,6 +73,7 @@ import { buildPermissionSettings } from '../../config/permission-settings.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
   buildWorkspaceVoiceStatus,
+  changedWorkspaceVoiceSettingsWrites,
   validateWorkspaceVoiceState,
   voiceSettingsScopeToWire,
   WorkspaceVoiceError,
@@ -1006,7 +1007,7 @@ export function createDaemonWorkspaceService(
 
       const settings = loadBoundSettings(Boolean(voiceEnv));
       validateWorkspaceVoiceState(settings, request, { env: voiceEnv });
-      const writes = buildWorkspaceVoiceSettingsWrites(settings, request, {
+      let writes = buildWorkspaceVoiceSettingsWrites(settings, request, {
         workspaceTrusted: isWorkspaceTrusted(),
         ...(voiceSettingsScope ? { scopeOverride: voiceSettingsScope } : {}),
       });
@@ -1024,8 +1025,16 @@ export function createDaemonWorkspaceService(
       };
 
       if (persistSettings) {
+        const planWrites = (fresh: LoadedSettings) => {
+          writes = changedWorkspaceVoiceSettingsWrites(fresh, writes);
+          return writes;
+        };
         try {
-          await persistSettings(boundWorkspace, writes, assertGenerationOpen);
+          await persistSettings(
+            boundWorkspace,
+            planWrites,
+            assertGenerationOpen,
+          );
         } catch (err) {
           if (err instanceof WorkspaceSettingsPartialPersistError) {
             assertActiveGeneration();

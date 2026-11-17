@@ -655,7 +655,7 @@ export interface DaemonWorkspaceServiceDeps {
 
   persistSettings?: (
     workspace: string,
-    writes: WorkspaceSettingsWrite[],
+    writes: WorkspaceSettingsWrites,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
 

@@ -13,6 +13,7 @@ import {
 import type { Settings } from '../config/settingsSchema.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
+  changedWorkspaceVoiceSettingsWrites,
   hasConfiguredBatchVoiceTranscriptionModel,
   listAvailableVoiceModels,
   transcribeWorkspaceVoiceAudio,
@@ -216,6 +217,61 @@ describe('voice service', () => {
     expect(() =>
       validateWorkspaceVoiceState(settings, { enabled: true }),
     ).toThrowError(WorkspaceVoiceError);
+  });
+
+  it('omits same-scope voice values while preserving changed settings', () => {
+    const settings = makeSettings({
+      user: {
+        voiceModel: 'qwen3-asr-flash',
+        general: {
+          voice: { enabled: false, mode: 'tap', language: 'english' },
+        },
+      },
+    });
+    const writes = buildWorkspaceVoiceSettingsWrites(settings, {
+      voiceModel: 'qwen3-asr-flash',
+      enabled: false,
+      mode: 'hold',
+      language: 'english',
+    });
+
+    expect(changedWorkspaceVoiceSettingsWrites(settings, writes)).toEqual([
+      { scope: SettingScope.User, key: 'general.voice.mode', value: 'hold' },
+    ]);
+  });
+
+  it('keeps explicit workspace overrides of identical inherited voice values', () => {
+    const settings = makeSettings({
+      user: { general: { voice: { enabled: false, mode: 'tap' } } },
+    });
+    const writes = buildWorkspaceVoiceSettingsWrites(
+      settings,
+      { enabled: false, mode: 'tap' },
+      { scopeOverride: SettingScope.Workspace },
+    );
+
+    expect(changedWorkspaceVoiceSettingsWrites(settings, writes)).toEqual(
+      writes,
+    );
+    expect(writes).toHaveLength(2);
+  });
+
+  it('compares raw voice values instead of environment-expanded settings', () => {
+    const settings = makeSettings({
+      user: { general: { voice: { language: '${VOICE_LANGUAGE}' } } },
+    });
+    settings.user.settings.general!.voice!.language = 'english';
+    const writes = buildWorkspaceVoiceSettingsWrites(settings, {
+      language: 'english',
+    });
+
+    expect(changedWorkspaceVoiceSettingsWrites(settings, writes)).toEqual([
+      {
+        scope: SettingScope.User,
+        key: 'general.voice.language',
+        value: 'english',
+      },
+    ]);
   });
 
   it('allows disabling voice without a configured voice model', () => {

@@ -12,6 +12,7 @@ import {
 import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.js';
 import { publicProviderBaseUrl } from '../utils/acpModelUtils.js';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
+import { getNestedProperty } from '../config/settingsUtils.js';
 import {
   isSelectableVoiceModel,
   resolveVoiceTransport,
@@ -141,6 +142,23 @@ export function buildWorkspaceVoiceSettingsWrites(
     });
   }
   return writes;
+}
+
+/** Compare raw target-scope values using settings read under the write lock. */
+export function changedWorkspaceVoiceSettingsWrites(
+  settings: LoadedSettings,
+  writes: WorkspaceVoiceSettingsWrite[],
+): WorkspaceVoiceSettingsWrite[] {
+  return writes.filter(
+    (write) =>
+      getNestedProperty(
+        settings.forScope(write.scope).originalSettings as Record<
+          string,
+          unknown
+        >,
+        write.key,
+      ) !== write.value,
+  );
 }
 
 export function createVoiceModelSource(

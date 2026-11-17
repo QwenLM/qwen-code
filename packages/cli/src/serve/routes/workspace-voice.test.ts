@@ -18,6 +18,7 @@ import express, {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import {
+  loadSettings,
   SettingScope,
   resetHomeEnvBootstrapForTesting,
 } from '../../config/settings.js';
@@ -29,7 +30,11 @@ import {
 import { createServeApp } from '../server.js';
 import type { ServeOptions } from '../types.js';
 import { registerWorkspaceVoiceRoutes } from './workspace-voice.js';
-import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
+import {
+  WorkspaceSettingsPartialPersistError,
+  type WorkspaceSettingsWrite,
+  type WorkspaceSettingsWrites,
+} from '../workspace-service/types.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
@@ -496,10 +501,125 @@ describe('workspace voice routes', () => {
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { initialMode: 'tap', lockedMode: 'tap', changed: false },
+    { initialMode: 'hold', lockedMode: 'tap', changed: false },
+    { initialMode: 'tap', lockedMode: 'hold', changed: true },
+  ])(
+    'POST compares voice settings after the lock ($initialMode -> $lockedMode)',
+    async ({ initialMode, lockedMode, changed }) => {
+      const settingsPath = path.join(h.home, 'settings.json');
+      await writeJson(settingsPath, {
+        general: { voice: { enabled: false, mode: initialMode } },
+      });
+      const committedScope = vi.fn();
+      const broadcastSettingsChanged = vi.fn();
+      const persistSettings = vi.fn(
+        async (workspace: string, requestedWrites: WorkspaceSettingsWrites) => {
+          // A queued settings writer may finish between the route's read and
+          // acquiring the persistence lock.
+          await writeJson(settingsPath, {
+            general: { voice: { enabled: false, mode: lockedMode } },
+          });
+          const fresh = loadSettings(workspace);
+          const writes =
+            typeof requestedWrites === 'function'
+              ? requestedWrites(fresh)
+              : requestedWrites;
+          fresh.setValues(writes, committedScope);
+        },
+      );
+      const app = express();
+      app.use(express.json());
+      registerWorkspaceVoiceRoutes(app, {
+        boundWorkspace: h.workspace,
+        mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+          next(),
+        safeBody: (req) => req.body as Record<string, unknown>,
+        persistSettings,
+        broadcastSettingsChanged,
+        parseAndValidateClientId: () => 'client-1',
+      });
+
+      const res = await request(app)
+        .post('/workspace/voice')
+        .send({ enabled: false, mode: 'tap' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ enabled: false, mode: 'tap' });
+      expect(committedScope).toHaveBeenCalledTimes(changed ? 1 : 0);
+      expect(broadcastSettingsChanged).toHaveBeenCalledTimes(changed ? 1 : 0);
+      if (changed) {
+        expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+          'general.voice.mode',
+          'tap',
+          'user',
+          'client-1',
+        );
+      }
+    },
+  );
+
+  it('POST persists an explicit scope override even when the inherited voice values match', async () => {
+    await writeJson(path.join(h.home, 'settings.json'), {
+      general: { voice: { enabled: false, mode: 'tap' } },
+    });
+    const committedScope = vi.fn();
+    const broadcastSettingsChanged = vi.fn();
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      scopeOverride: SettingScope.Workspace,
+      isWorkspaceTrusted: () => true,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: (req) => req.body as Record<string, unknown>,
+      persistSettings: async (workspace, requestedWrites) => {
+        const fresh = loadSettings(workspace);
+        const writes =
+          typeof requestedWrites === 'function'
+            ? requestedWrites(fresh)
+            : requestedWrites;
+        fresh.setValues(writes, committedScope);
+      },
+      broadcastSettingsChanged,
+      parseAndValidateClientId: () => 'client-1',
+    });
+
+    const res = await request(app)
+      .post('/workspace/voice')
+      .send({ enabled: false, mode: 'tap' });
+
+    expect(res.status).toBe(200);
+    expect(committedScope).toHaveBeenCalledExactlyOnceWith(
+      SettingScope.Workspace,
+    );
+    expect(broadcastSettingsChanged).toHaveBeenCalledTimes(2);
+    expect(
+      JSON.parse(
+        await fsp.readFile(
+          path.join(h.workspace, '.qwen/settings.json'),
+          'utf8',
+        ),
+      ),
+    ).toMatchObject({ general: { voice: { enabled: false, mode: 'tap' } } });
+  });
+
   it('POST broadcasts settings_changed for persisted voice settings', async () => {
     await writeVoiceModelSettings(h);
     const broadcastSettingsChanged = vi.fn();
-    const persistSettings = vi.fn(async () => {});
+    let committedWrites: WorkspaceSettingsWrite[] = [];
+    const persistSettings = vi.fn(
+      async (workspace: string, requestedWrites: WorkspaceSettingsWrites) => {
+        const fresh = loadSettings(workspace);
+        committedWrites =
+          typeof requestedWrites === 'function'
+            ? requestedWrites(fresh)
+            : requestedWrites;
+        fresh.setValues(committedWrites);
+      },
+    );
     const app = express();
     app.use(express.json({ limit: '10mb' }));
     registerWorkspaceVoiceRoutes(app, {
@@ -523,12 +643,11 @@ describe('workspace voice routes', () => {
 
     expect(res.status).toBe(200);
     expect(h.persistSetting).not.toHaveBeenCalled();
-    expect(persistSettings).toHaveBeenCalledWith(h.workspace, [
-      {
-        scope: SettingScope.User,
-        key: 'voiceModel',
-        value: 'qwen3-asr-flash',
-      },
+    expect(persistSettings).toHaveBeenCalledWith(
+      h.workspace,
+      expect.any(Function),
+    );
+    expect(committedWrites).toEqual([
       {
         scope: SettingScope.User,
         key: 'general.voice.mode',
@@ -539,37 +658,19 @@ describe('workspace voice routes', () => {
         key: 'general.voice.language',
         value: 'english',
       },
-      {
-        scope: SettingScope.User,
-        key: 'general.voice.enabled',
-        value: true,
-      },
     ]);
+    expect(broadcastSettingsChanged).toHaveBeenCalledTimes(2);
     expect(broadcastSettingsChanged).toHaveBeenNthCalledWith(
       1,
-      'voiceModel',
-      'qwen3-asr-flash',
-      'user',
-      'client-1',
-    );
-    expect(broadcastSettingsChanged).toHaveBeenNthCalledWith(
-      2,
       'general.voice.mode',
       'hold',
       'user',
       'client-1',
     );
     expect(broadcastSettingsChanged).toHaveBeenNthCalledWith(
-      3,
+      2,
       'general.voice.language',
       'english',
-      'user',
-      'client-1',
-    );
-    expect(broadcastSettingsChanged).toHaveBeenNthCalledWith(
-      4,
-      'general.voice.enabled',
-      true,
       'user',
       'client-1',
     );
@@ -578,13 +679,19 @@ describe('workspace voice routes', () => {
   it('POST broadcasts committed batch voice writes when batch persistence partially fails', async () => {
     await writeVoiceModelSettings(h);
     const broadcastSettingsChanged = vi.fn();
-    const persistSettings = vi.fn(async (_workspace, writes) => {
-      throw new WorkspaceSettingsPartialPersistError(
-        'batch failed',
-        [writes[0]!],
-        new Error('disk full'),
-      );
-    });
+    const persistSettings = vi.fn(
+      async (workspace: string, requestedWrites: WorkspaceSettingsWrites) => {
+        const writes =
+          typeof requestedWrites === 'function'
+            ? requestedWrites(loadSettings(workspace))
+            : requestedWrites;
+        throw new WorkspaceSettingsPartialPersistError(
+          'batch failed',
+          [writes[0]!],
+          new Error('disk full'),
+        );
+      },
+    );
     const app = express();
     app.use(express.json({ limit: '10mb' }));
     registerWorkspaceVoiceRoutes(app, {
@@ -600,15 +707,15 @@ describe('workspace voice routes', () => {
     });
 
     const res = await request(app).post('/workspace/voice').send({
-      voiceModel: 'qwen3-asr-flash',
       mode: 'hold',
+      language: 'english',
     });
 
     expect(res.status).toBe(500);
     expect(broadcastSettingsChanged).toHaveBeenCalledTimes(1);
     expect(broadcastSettingsChanged).toHaveBeenCalledWith(
-      'voiceModel',
-      'qwen3-asr-flash',
+      'general.voice.mode',
+      'hold',
       'user',
       'client-1',
     );

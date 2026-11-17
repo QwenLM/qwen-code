@@ -118,6 +118,7 @@ import {
   type ServeWorkspaceSkillsStatus,
 } from '@qwen-code/acp-bridge/status';
 import {
+  loadSettings,
   resetHomeEnvBootstrapForTesting,
   SettingScope,
   SETTINGS_DIRECTORY_NAME,
@@ -143,6 +144,8 @@ import type {
   InvokeWorkspaceCommandFn,
   QueryWorkspaceStatusFn,
   WorkspaceRequestContext,
+  WorkspaceSettingsWrite,
+  WorkspaceSettingsWrites,
   WorkspaceSkillToggleActivation,
 } from '../types.js';
 
@@ -293,6 +296,47 @@ describe('createDaemonWorkspaceService', () => {
   });
 
   describe('workspace voice', () => {
+    it('does not persist or publish repeated same-scope voice settings', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          general: { voice: { enabled: false, mode: 'tap' } },
+        });
+        const committedScope = vi.fn();
+        const publishWorkspaceEvent = vi.fn();
+        const persistSettings = vi.fn(
+          async (
+            targetWorkspace: string,
+            requestedWrites: WorkspaceSettingsWrites,
+          ) => {
+            const fresh = loadSettings(targetWorkspace);
+            const writes =
+              typeof requestedWrites === 'function'
+                ? requestedWrites(fresh)
+                : requestedWrites;
+            fresh.setValues(writes, committedScope);
+          },
+        );
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            persistSettings,
+            publishWorkspaceEvent,
+          }),
+        );
+
+        for (let i = 0; i < 2; i++) {
+          const result = await svc.setWorkspaceVoiceSettings(makeCtx(), {
+            enabled: false,
+            mode: 'tap',
+          });
+          expect(result).toMatchObject({ enabled: false, mode: 'tap' });
+        }
+
+        expect(committedScope).not.toHaveBeenCalled();
+        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+      });
+    });
+
     it('reports missing voice settings persistence as a structured voice error', async () => {
       const svc = createDaemonWorkspaceService(makeDeps());
 
@@ -313,7 +357,20 @@ describe('createDaemonWorkspaceService', () => {
 
     it('persists voice settings through batch persistence and publishes events', async () => {
       await withIsolatedQwenHome(async () => {
-        const persistSettings = vi.fn(async () => {});
+        let committedWrites: WorkspaceSettingsWrite[] = [];
+        const persistSettings = vi.fn(
+          async (
+            workspace: string,
+            requestedWrites: WorkspaceSettingsWrites,
+          ) => {
+            const fresh = loadSettings(workspace);
+            committedWrites =
+              typeof requestedWrites === 'function'
+                ? requestedWrites(fresh)
+                : requestedWrites;
+            fresh.setValues(committedWrites);
+          },
+        );
         const publishWorkspaceEvent = vi.fn();
         const svc = createDaemonWorkspaceService(
           makeDeps({ persistSettings, publishWorkspaceEvent }),
@@ -326,25 +383,26 @@ describe('createDaemonWorkspaceService', () => {
 
         expect(persistSettings).toHaveBeenCalledWith(
           '/workspace',
-          [
-            {
-              scope: SettingScope.User,
-              key: 'general.voice.mode',
-              value: 'tap',
-            },
-            {
-              scope: SettingScope.User,
-              key: 'general.voice.language',
-              value: 'english',
-            },
-            {
-              scope: SettingScope.User,
-              key: 'general.voice.enabled',
-              value: false,
-            },
-          ],
+          expect.any(Function),
           undefined,
         );
+        expect(committedWrites).toEqual([
+          {
+            scope: SettingScope.User,
+            key: 'general.voice.mode',
+            value: 'tap',
+          },
+          {
+            scope: SettingScope.User,
+            key: 'general.voice.language',
+            value: 'english',
+          },
+          {
+            scope: SettingScope.User,
+            key: 'general.voice.enabled',
+            value: false,
+          },
+        ]);
         expect(publishWorkspaceEvent).toHaveBeenCalledTimes(3);
         expect(publishWorkspaceEvent).toHaveBeenCalledWith({
           type: 'settings_changed',
@@ -361,7 +419,18 @@ describe('createDaemonWorkspaceService', () => {
 
     it('forces qualified ACP Voice writes into the workspace scope', async () => {
       await withIsolatedQwenHome(async () => {
-        const persistSettings = vi.fn(async () => {});
+        let committedWrites: WorkspaceSettingsWrite[] = [];
+        const persistSettings = vi.fn(
+          async (
+            workspace: string,
+            requestedWrites: WorkspaceSettingsWrites,
+          ) => {
+            committedWrites =
+              typeof requestedWrites === 'function'
+                ? requestedWrites(loadSettings(workspace))
+                : requestedWrites;
+          },
+        );
         const svc = createDaemonWorkspaceService(
           makeDeps({
             persistSettings,
@@ -378,25 +447,26 @@ describe('createDaemonWorkspaceService', () => {
 
         expect(persistSettings).toHaveBeenCalledWith(
           '/workspace',
-          [
-            {
-              scope: SettingScope.Workspace,
-              key: 'general.voice.mode',
-              value: 'tap',
-            },
-            {
-              scope: SettingScope.Workspace,
-              key: 'general.voice.language',
-              value: 'english',
-            },
-            {
-              scope: SettingScope.Workspace,
-              key: 'general.voice.enabled',
-              value: false,
-            },
-          ],
+          expect.any(Function),
           undefined,
         );
+        expect(committedWrites).toEqual([
+          {
+            scope: SettingScope.Workspace,
+            key: 'general.voice.mode',
+            value: 'tap',
+          },
+          {
+            scope: SettingScope.Workspace,
+            key: 'general.voice.language',
+            value: 'english',
+          },
+          {
+            scope: SettingScope.Workspace,
+            key: 'general.voice.enabled',
+            value: false,
+          },
+        ]);
       });
     });
 
@@ -476,13 +546,19 @@ describe('createDaemonWorkspaceService', () => {
 
     it('publishes committed batch voice writes when batch persistence partially fails', async () => {
       const publishWorkspaceEvent = vi.fn();
-      const persistSettings = vi.fn(async (_workspace, writes) => {
-        throw new WorkspaceSettingsPartialPersistError(
-          'batch failed',
-          [writes[0]!],
-          new Error('disk full'),
-        );
-      });
+      const persistSettings = vi.fn(
+        async (workspace: string, requestedWrites: WorkspaceSettingsWrites) => {
+          const writes =
+            typeof requestedWrites === 'function'
+              ? requestedWrites(loadSettings(workspace))
+              : requestedWrites;
+          throw new WorkspaceSettingsPartialPersistError(
+            'batch failed',
+            [writes[0]!],
+            new Error('disk full'),
+          );
+        },
+      );
       const svc = createDaemonWorkspaceService(
         makeDeps({ persistSettings, publishWorkspaceEvent }),
       );

@@ -18,6 +18,7 @@ import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
   buildWorkspaceVoiceStatus,
+  changedWorkspaceVoiceSettingsWrites,
   EMPTY_WORKSPACE_VOICE_UPDATE_ERROR,
   transcribeWorkspaceVoiceAudio,
   validateWorkspaceVoiceState,
@@ -41,7 +42,7 @@ import {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   WorkspaceSettingsPartialPersistError,
-  type WorkspaceSettingsWrite,
+  type WorkspaceSettingsWrites,
 } from '../workspace-service/types.js';
 import {
   isGenerationClosedError,
@@ -72,7 +73,7 @@ type PersistSetting = (
 
 type PersistSettings = (
   workspace: string,
-  writes: WorkspaceSettingsWrite[],
+  writes: WorkspaceSettingsWrites,
   assertGenerationOpen?: () => void,
 ) => Promise<void>;
 
@@ -222,21 +223,25 @@ async function persistVoiceUpdate(
   if (!deps.persistSettings && !deps.persistSetting) {
     throw new Error('workspace voice settings persistence is not available');
   }
-  const writes = buildWorkspaceVoiceSettingsWrites(settings, update, {
+  let writes = buildWorkspaceVoiceSettingsWrites(settings, update, {
     workspaceTrusted,
     ...(deps.scopeOverride ? { scopeOverride: deps.scopeOverride } : {}),
   });
 
   if (deps.persistSettings) {
+    const planWrites = (fresh: LoadedSettings) => {
+      writes = changedWorkspaceVoiceSettingsWrites(fresh, writes);
+      return writes;
+    };
     try {
       if (assertGenerationOpen) {
         await deps.persistSettings(
           deps.boundWorkspace,
-          writes,
+          planWrites,
           assertGenerationOpen,
         );
       } else {
-        await deps.persistSettings(deps.boundWorkspace, writes);
+        await deps.persistSettings(deps.boundWorkspace, planWrites);
       }
     } catch (err) {
       if (err instanceof WorkspaceSettingsPartialPersistError) {
