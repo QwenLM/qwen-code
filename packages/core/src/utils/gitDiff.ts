@@ -1556,6 +1556,28 @@ function isSafeLogRange(range: string): boolean {
   );
 }
 
+/**
+ * Whether `ref` resolves to a commit reachable from HEAD (`git merge-base
+ * --is-ancestor`). False when the ref is unsafe, unknown, or git fails —
+ * callers gate range composition on this, so a failed probe must refuse the
+ * boundary rather than trust it.
+ */
+export async function isGitAncestorOfHead(
+  cwd: string,
+  ref: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return false;
+  if (ref.startsWith('-') || !/^[A-Za-z0-9_./~^-]+$/.test(ref)) return false;
+  const stdout = await runGit(
+    ['merge-base', '--is-ancestor', ref, 'HEAD'],
+    gitRoot,
+    env,
+  );
+  return stdout !== null;
+}
+
 function parseLogRecords(stdout: string): GitLogEntry[] {
   const fields = stdout.split('\0');
   if (fields.at(-1) === '') fields.pop();

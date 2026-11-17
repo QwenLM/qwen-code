@@ -218,7 +218,8 @@ export type WebShellRightPanelItem =
   | 'sideTask'
   | 'terminal'
   | 'webPreview'
-  | 'trajectory';
+  | 'trajectory'
+  | 'changeOverview';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
