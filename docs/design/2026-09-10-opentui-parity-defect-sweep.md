@@ -1492,11 +1492,16 @@ left alone, and so is every key after the swap runs. The last question tab arms 
 at all, clamped as it is, so it gets no lock; a trailing key there still lands on the row
 it reaches.
 
-ink cannot reach this leak. Its buffer notifies the parent from an effect run at commit
-(`text-buffer.ts`), so a keystroke handled after the Enter never gets a commit where its
-step is still mounted, and its text never reaches the state the plan is built from. Ours
-writes through the setter synchronously, which is what makes a mid-read submit read the
-live text at all, so it needs the explicit stop.
+ink's question dialog reached this leak as well. Its buffer notifies the parent from an
+effect run at commit (`text-buffer.ts`), which delays a trailing key's text by one commit
+rather than dropping it: the answered row stays mounted for the whole pause, so the text
+still reached the state a multi-select answer is rebuilt from, and a model was sent
+`TealX` for a typed `Teal`. ink has since gained the same stop (#17485): for the pause
+its field takes no keys and is remounted from the recorded answer. The remount lands on
+the very commit whose effect would have reported the trailing key, so that key never
+reaches the answer and no separate check is needed. Ours writes through the setter
+synchronously, which is what makes a mid-read submit read the live text at all, so it
+needs the explicit stop.
 
 Coverage is eight new unit tests, four in the authentication suite and four in the
 confirmation dialog's, and eight mutations, one per behaviour named below. Each fails
