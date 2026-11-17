@@ -270,7 +270,7 @@ export interface SessionStatsState {
   // from userPromptCount, the user-visible statistic (R8-F3 decouple).
   promptCount: number;
   // User-visible "Prompts" statistic (/stats, feedback threshold, tip cadence).
-  // Advances only for user-initiated turns (user query, cron, teammate), not
+  // Advances for the historical prompt set (user query, cron, teammate), not
   // for background notification/goal/retry mints that still advance promptCount.
   userPromptCount: number;
 }

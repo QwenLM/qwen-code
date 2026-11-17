@@ -99,9 +99,11 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     mints a fresh id — user query, cron, teammate, `Notification`, `Goal` and
     `Retry` alike — so a registered id is never reused by a foreground turn
     (R6-1/R7-1/R8-F1 root fix). The mint counter is decoupled from the
-    user-visible `Prompts` statistic (`userPromptCount`, advanced only for
-    user-initiated turns), so background mints do not inflate `/stats`, the
-    feedback threshold or the tip cadence (R8-F3). The registry is bounded FIFO
+    user-visible `Prompts` statistic (`userPromptCount`, advanced for user
+    queries, cron and teammate turns — the set that historically counted as
+    prompts — but not for background notification/goal/retry mints), so
+    background mints do not inflate `/stats`, the feedback threshold or the tip
+    cadence (R8-F3). The registry is bounded FIFO
     like `stopHookChains`, evicting by insertion order (R8-F11); this is safe
     because a background interaction's continuations drain within its turn, long
     before 32 newer interactions would evict its id — the bound is not a drain
@@ -205,8 +207,12 @@ reversible; a later PR can flip the default once nightly evidence is in.
   `packages/cli/src/ui/contexts/SessionContext.tsx` — the prompt-id mint counter
   (`promptCount`) advances for every minting top-level turn (user query, cron,
   teammate, notification, goal, retry); the user-visible Prompts statistic
-  (`userPromptCount`) advances only for user-initiated turns and feeds `/stats`,
-  the feedback threshold and the tip cadence.
+  (`userPromptCount`) advances for user queries, cron and teammate turns (the
+  historical prompt set) and feeds `/stats` (`statsCommand.ts`), the feedback
+  threshold (`useFeedbackDialog.ts`) and the tip cadence (`AppContainer.tsx`).
+- `packages/core/src/core/agent-loop.ts` — `turnModelRound` builds its `Turn`
+  without `isSessionTurn`: every production caller is a background round
+  (subagent shared loop, unified-loop speculation) sharing the session `Config`.
 - `packages/cli/src/nonInteractiveCli.ts` — a headless teammate turn mints its
   own prompt id; a `teammateTurnActive` flag keeps it for the turn and its
   continuations and restores the base id for the next foreground turn.

@@ -4901,9 +4901,9 @@ export const useLlmStream = (
         // (R6-1/R7-1/R8-F1). They advance the counter only when they mint (a
         // continuation reusing an existing id must not skip one). The mint
         // counter is decoupled from the user-visible Prompts statistic
-        // (userPromptCount, advanced below only for user-initiated turns), so
-        // background mints do not inflate /stats, the feedback threshold or the
-        // tip cadence (R8-F3).
+        // (userPromptCount, advanced below for the historical prompt set: user
+        // query, cron, teammate), so background mints do not inflate /stats, the
+        // feedback threshold or the tip cadence (R8-F3).
         if (
           submitType === SendMessageType.UserQuery ||
           submitType === SendMessageType.Cron ||
@@ -4921,7 +4921,8 @@ export const useLlmStream = (
           submitType === SendMessageType.Cron ||
           submitType === SendMessageType.Teammate
         ) {
-          // User-visible Prompts statistic: only user-initiated turns count.
+          // User-visible Prompts statistic: the historical prompt set (user
+          // query, cron, teammate) counts.
           recordUserPrompt();
           // log user prompt event for telemetry, only text prompts for now
           if (typeof queryToSend === 'string') {
