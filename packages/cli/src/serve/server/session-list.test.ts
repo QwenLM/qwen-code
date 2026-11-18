@@ -15,6 +15,8 @@ import {
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { createWorktreeSessionMarkerExclusive } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import { writeWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -1243,6 +1245,143 @@ describe('merged session catalog pagination', () => {
         objective: 'ship it',
         updatedAt: new Date(1_700_000_000_000).toISOString(),
       });
+    });
+  });
+});
+
+describe('worktree sidecar enrichment (R3-1)', () => {
+  let directory: string;
+  let workspaceCwd: string;
+  let runtimeBaseDir: string;
+
+  beforeEach(async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'session-wt-enrich-'));
+    workspaceCwd = path.join(directory, 'workspace');
+    runtimeBaseDir = path.join(directory, 'runtime');
+    await fs.mkdir(workspaceCwd);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it('reads worktree.baseCommit from worktreeBase, not originalHeadCommit, for restart survivors', async () => {
+    // enrichWorktreeSidecars is the sole producer of worktree meta for sessions
+    // listed after a daemon restart. worktreeBase is the worktree's own base;
+    // originalHeadCommit is the source checkout's HEAD (differs for a worktree
+    // created from a sibling managed worktree). The precedence must prefer
+    // worktreeBase, and baseBranch comes from originalBranch.
+    const sessionId = '00000000-0000-4000-8000-000000000001';
+    const chats = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    await fs.mkdir(chats, { recursive: true });
+    await fs.writeFile(
+      path.join(chats, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-user`,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'stored prompt' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+    );
+    const worktreeDir = path.join(
+      workspaceCwd,
+      '.qwen',
+      'worktrees',
+      'my-task',
+    );
+    await fs.mkdir(worktreeDir, { recursive: true });
+    await createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
+    await writeWorktreeSession(path.join(chats, `${sessionId}.worktree.json`), {
+      slug: 'my-task',
+      worktreePath: worktreeDir,
+      worktreeBranch: 'worktree-my-task',
+      originalCwd: workspaceCwd,
+      workspaceCwd,
+      originalBranch: 'main',
+      originalHeadCommit: 'source-sha',
+      worktreeBase: 'base-sha',
+    });
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.worktree).toMatchObject({
+      baseCommit: 'base-sha',
+      baseBranch: 'main',
+    });
+  });
+
+  it('falls back to originalHeadCommit for a legacy sidecar with no worktreeBase', async () => {
+    // Every released daemon writes originalHeadCommit (required) and no
+    // worktreeBase (optional). The sibling above sets both, so it cannot see
+    // the legacy fallback arm: dropping `|| sidecar.originalHeadCommit` from
+    // the enrichment would leave it green. This sidecar omits worktreeBase
+    // entirely, so baseCommit must come from originalHeadCommit.
+    const sessionId = '00000000-0000-4000-8000-000000000002';
+    const chats = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    await fs.mkdir(chats, { recursive: true });
+    await fs.writeFile(
+      path.join(chats, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-user`,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'stored prompt' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+    );
+    const worktreeDir = path.join(
+      workspaceCwd,
+      '.qwen',
+      'worktrees',
+      'legacy-task',
+    );
+    await fs.mkdir(worktreeDir, { recursive: true });
+    await createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
+    await writeWorktreeSession(path.join(chats, `${sessionId}.worktree.json`), {
+      slug: 'legacy-task',
+      worktreePath: worktreeDir,
+      worktreeBranch: 'worktree-legacy-task',
+      originalCwd: workspaceCwd,
+      workspaceCwd,
+      originalBranch: 'main',
+      originalHeadCommit: 'legacy-sha',
+    });
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.worktree).toMatchObject({
+      baseCommit: 'legacy-sha',
+      baseBranch: 'main',
     });
   });
 });

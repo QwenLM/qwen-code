@@ -1632,10 +1632,9 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      // One fence check per cleanup step; this PR's goal sidecar removal adds
-      // one alongside the pre-existing cleanup steps (the artifact-summary
-      // fence among them came from main), taking the total from 9 to 10.
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(10);
+      // One fence check per cleanup step: main's goal + artifact-summary
+      // sidecars (10) plus this PR's branch sidecar removal (1) → 11.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(11);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,
       });
@@ -2169,8 +2168,9 @@ describe('SessionService', () => {
         errors: [],
       });
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      // The goal sidecar move added one fence check to the conflict path.
-      expect(assertCleanupOwned).toHaveBeenCalledTimes(5);
+      // The goal sidecar move added one fence check to the conflict path (5);
+      // this PR's separate branch-sidecar reconcile try adds one more → 6.
+      expect(assertCleanupOwned).toHaveBeenCalledTimes(6);
     },
     warnsOnWorktreeSidecarFailure: async (kind: MoveKind) => {
       const m = seeded(kind, '.worktree.json');
