@@ -7,6 +7,7 @@
 import { gradeActiveWorkCoverage } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { sseMaxConnections } from '../daemon-status.js';
 import { isDeepHealthQuery } from '../health-query.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
@@ -14,7 +15,10 @@ import type { ServeOptions } from '../types.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface CreateHealthRoutesDeps {
-  opts: Pick<ServeOptions, 'hostname' | 'requireAuth'>;
+  opts: Pick<
+    ServeOptions,
+    'hostname' | 'requireAuth' | 'maxConnections' | 'maxSseConnections'
+  >;
   workspaceRegistry: WorkspaceRegistry;
   getActiveSseCount: () => number;
   getRateLimiter: () => RateLimiterInstance | undefined;
@@ -134,6 +138,12 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
         // report, so this never disagrees with the grade above.
         activeWorkStaleMs: oldestReportAt === null ? 0 : now - oldestReportAt,
         connectedClients: getActiveSseCount(),
+        // Effective SSE admission cap paired with the live occupancy above
+        // so a probe can see saturation approaching (null = unlimited).
+        connectedClientsMax: sseMaxConnections(
+          opts.maxConnections,
+          opts.maxSseConnections,
+        ),
         channelAlive,
         lastActivityAt:
           lastActivity !== null ? new Date(lastActivity).toISOString() : null,

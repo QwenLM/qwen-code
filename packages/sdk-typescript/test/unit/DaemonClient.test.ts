@@ -2275,6 +2275,64 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('fetches a PR file list over REST with cwd and sessionId', async () => {
+      const files = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        files: [{ path: 'src/a.ts', additions: 10, deletions: 2 }],
+        hiddenCount: 0,
+        additions: 10,
+        deletions: 2,
+        headSha: 'abc1234',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceByCwd('/work/secondary')
+          .workspaceGitHubPullRequestFiles(42, '/work/secondary', 'sess-1'),
+      ).resolves.toEqual(files);
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1',
+        ],
+      ]);
+    });
+
+    it('forwards the bound PR repo slug as a query parameter', async () => {
+      const files = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitHubPullRequestFiles(
+          42,
+          '/work/secondary',
+          'sess-1',
+          'o/r',
+        );
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1&repo=o%2Fr',
+        ],
+      ]);
+    });
+
     it('routes the git mutation and GitHub create methods over REST', async () => {
       const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
@@ -6109,6 +6167,52 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         name: 'Side task',
       });
+    });
+  });
+
+  describe('sendToSubSession', () => {
+    it('posts the send to the sub-sessions route of the caller', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(202, { sessionId: 'kid', workspaceCwd: '/work/b' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.sendToSubSession(
+        'main-1',
+        { prompt: 'look', workspace: '/work/b', targetSessionId: 'kid' },
+        'client-1',
+      );
+
+      expect(result).toEqual({ sessionId: 'kid', workspaceCwd: '/work/b' });
+      expect(calls[0]?.url).toBe('http://daemon/session/main-1/sub-sessions');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        prompt: 'look',
+        workspace: '/work/b',
+        targetSessionId: 'kid',
+      });
+    });
+
+    it('asks the tasks route for the sends it reports back', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 'main-1',
+          now: 1,
+          tasks: [],
+          subSessions: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.sessionTasks('main-1', undefined, {
+        includeSubSessions: true,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/main-1/tasks?includeSubSessions=true',
+      );
     });
   });
 

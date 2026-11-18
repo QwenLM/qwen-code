@@ -377,6 +377,7 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -2115,6 +2116,8 @@ export interface BackgroundNotificationQueueItem {
   sourceTurnId?: string;
   displayText: string;
   modelText: string;
+  /** Full send receipt, also stored separately as an external record. */
+  sentMessageContext?: string;
   taskId: string;
   status: string;
   kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
@@ -2127,6 +2130,7 @@ export interface BackgroundNotificationQueueItem {
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    fromSession?: { sessionId: string; workspaceCwd: string };
   };
 }
 
@@ -2960,9 +2964,9 @@ export class Session implements SessionContext {
    * the next one (see `appendExternalRecord`). Live history needs it because
    * writing the record does not touch `LlmChat` history; resume already gets
    * the same text from the record itself via `appendApiHistoryRecord`, and
-   * this array lives only in memory, so the two never double up.
+   * this map lives only in memory, so the two never double up.
    */
-  pendingExternalAgentContext: string[] = [];
+  pendingExternalAgentContext = new Map<string, string>();
 
   /** recordKey -> record uuid of external records this process wrote. */
   readonly #externalRecordIds = new Map<string, string>();
@@ -3259,7 +3263,7 @@ export class Session implements SessionContext {
     // `/clear` starts a new transcript chain under this long-lived Session:
     // agent text queued for the old chain must not reach the next model turn,
     // and record ids from the finalized chain must not answer a re-send.
-    this.pendingExternalAgentContext = [];
+    this.pendingExternalAgentContext.clear();
     this.#externalRecordIds.clear();
     const expired = this.takeQueuedPeerDeliveries(this.config.getSessionId());
     if (expired.length > 0) this.onPeerDeliveriesExpired?.(expired);
@@ -4379,6 +4383,7 @@ export class Session implements SessionContext {
                 workspaceGeneration: req.workspaceGeneration,
               }
             : {}),
+          ...(req.sessionId ? { sessionId: req.sessionId } : {}),
         });
         if (typeof resp['sessionId'] !== 'string' || !resp['sessionId']) {
           throw new Error(
@@ -4386,7 +4391,13 @@ export class Session implements SessionContext {
           );
         }
         if (req.completion === 'sent') {
-          this.relatedAgentIds.add(resp['sessionId']);
+          // The completion arrives under this id, so the Todo Stop Guard
+          // links it to the work that asked for it.
+          this.relatedAgentIds.add(
+            typeof resp['taskId'] === 'string' && resp['taskId']
+              ? resp['taskId']
+              : resp['sessionId'],
+          );
         }
         return {
           sessionId: resp['sessionId'],
@@ -6011,7 +6022,9 @@ export class Session implements SessionContext {
   }
 
   #assertExpectedApprovalMode(params: PromptRequest): void {
-    const expectedMode = params._meta?.[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+    const expectedMode =
+      params._meta?.[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY] ??
+      params._meta?.[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
     if (
       expectedMode !== undefined &&
       expectedMode !== this.config.getApprovalMode()
@@ -7193,6 +7206,13 @@ export class Session implements SessionContext {
           return { stopReason: 'cancelled' };
         }
         this.#assertExpectedApprovalMode(params);
+        if (
+          params._meta?.[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY] !==
+          undefined
+        ) {
+          const mode = params._meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+          this.#applyApprovalMode(mode as ApprovalMode);
+        }
         if (goalTurn?.origin !== 'runtime') this.notificationsPaused = false;
         // Increment turn counter for each user prompt
         this.turn += 1;
@@ -8080,16 +8100,21 @@ export class Session implements SessionContext {
             // TODO(multi-agent): a turn that fails after this point drops the
             // context from live history (resume restores it from the record).
             if (
-              this.pendingExternalAgentContext.length > 0 &&
+              this.pendingExternalAgentContext.size > 0 &&
               !isContinue &&
               !isRestoreAskUserQuestion &&
               !isSlashInput
             ) {
               parts = insertAfterFunctionResponses(
                 parts,
-                this.pendingExternalAgentContext.map((text) => ({ text })),
+                Array.from(
+                  this.pendingExternalAgentContext.values(),
+                  (text) => ({
+                    text,
+                  }),
+                ),
               );
-              this.pendingExternalAgentContext = [];
+              this.pendingExternalAgentContext.clear();
             }
 
             // A restore turn must not TAKE the reminder: `take` burns it and
@@ -14152,7 +14177,20 @@ export class Session implements SessionContext {
         );
       }
     }
-    this.pendingExternalAgentContext.push(request.modelText);
+    // A send receipt can be written after its reply was accepted. The
+    // reply already carries its context into the caller's model history.
+    if (
+      request.kind !== 'agent_mention' ||
+      !request.payload.sentTo ||
+      !this.persistedBackgroundNotificationTaskIds.has(
+        request.recordKey.slice('send:'.length),
+      )
+    ) {
+      this.pendingExternalAgentContext.set(
+        request.recordKey,
+        request.modelText,
+      );
+    }
     return { recordId, created: true };
   }
 
@@ -14740,7 +14778,26 @@ export class Session implements SessionContext {
           }
           await this.#emitBackgroundNotificationDisplay(item);
 
-          const notificationParts: Part[] = [{ text: item.modelText }];
+          const sentMessageContext = item.sentMessageContext;
+          let modelText = item.modelText;
+          if (sentMessageContext !== undefined) {
+            // A normal prompt or restore may have already loaded this receipt.
+            const receiptInHistory =
+              this.#getCurrentChat().findLastHistoryEntry(
+                (entry) =>
+                  entry.role === 'user' &&
+                  (entry.parts?.some(
+                    (part) => part.text === sentMessageContext,
+                  ) ??
+                    false),
+              );
+            if (!receiptInHistory) {
+              const closingTag = '</task-notification>';
+              modelText = `${modelText.slice(0, -closingTag.length)}${sentMessageContext}${closingTag}`;
+            }
+            this.pendingExternalAgentContext.delete(`send:${item.taskId}`);
+          }
+          const notificationParts: Part[] = [{ text: modelText }];
           if (droppedSummary) {
             notificationParts.unshift({ text: droppedSummary.modelText });
           }
@@ -15416,6 +15473,10 @@ export class Session implements SessionContext {
         `Unknown approval mode: ${params.modeId}`,
       );
     }
+    this.#applyApprovalMode(approvalMode);
+  }
+
+  #applyApprovalMode(approvalMode: ApprovalMode): void {
     const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
     // Only plan-involving transitions touch the revision: entering PLAN starts
@@ -15442,7 +15503,7 @@ export class Session implements SessionContext {
       .extNotification('qwen/notify/session/mode-update', {
         v: 1,
         sessionId: this.sessionId,
-        currentModeId: params.modeId,
+        currentModeId: approvalMode,
         ...(approvalMode === ApprovalMode.PLAN
           ? {
               planExecutionMode:

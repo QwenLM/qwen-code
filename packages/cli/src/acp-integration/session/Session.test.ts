@@ -102,6 +102,7 @@ import {
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { EventBus } from '@qwen-code/acp-bridge/eventBus';
@@ -1396,7 +1397,9 @@ describe('Session', () => {
         },
       });
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      expect(session.pendingExternalAgentContext).toEqual([request.modelText]);
+      expect([...session.pendingExternalAgentContext.values()]).toEqual([
+        request.modelText,
+      ]);
     });
 
     it('returns a record already in the transcript, even mid-turn', async () => {
@@ -1422,7 +1425,7 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.recordExternalAgentRecordStrict,
       ).not.toHaveBeenCalled();
-      expect(session.pendingExternalAgentContext).toEqual([]);
+      expect(session.pendingExternalAgentContext.size).toBe(0);
       expect(
         vi
           .mocked(mockClient.sessionUpdate)
@@ -1457,7 +1460,7 @@ describe('Session', () => {
         mockChatRecordingService.recordExternalAgentRecordStrict,
       ).toHaveBeenCalledWith(request);
       // Nothing is shown or queued for a session that is going away.
-      expect(session.pendingExternalAgentContext).toEqual([]);
+      expect(session.pendingExternalAgentContext.size).toBe(0);
 
       // Written: a re-send now gets the record id back without a write.
       await expect(session.appendExternalRecord(request)).resolves.toEqual({
@@ -17182,6 +17185,48 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('applies the delegated mode only after the prompt can start its turn', async () => {
+      let mode = ApprovalMode.YOLO;
+      vi.mocked(mockConfig.getApprovalMode).mockImplementation(() => mode);
+      vi.mocked(mockConfig.setApprovalMode).mockImplementation((next) => {
+        mode = next;
+      });
+      let enter!: () => void;
+      let admit!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const admitted = new Promise<void>((resolve) => {
+        admit = resolve;
+      });
+      vi.spyOn(session, 'assertCanStartTurn')
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(() => {
+          enter();
+          return admitted;
+        });
+      mockChat.sendMessageStream = vi.fn(async () => {
+        expect(mode).toBe(ApprovalMode.DEFAULT);
+        return createEmptyStream();
+      });
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: {
+          [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: ApprovalMode.YOLO,
+          [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: ApprovalMode.DEFAULT,
+        },
+      });
+
+      await entered;
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      admit();
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledExactlyOnceWith(
+        ApprovalMode.DEFAULT,
+      );
+    });
+
     it('rejects a delegated mode mismatch after awaited prompt admission', async () => {
       let mode = ApprovalMode.DEFAULT;
       vi.mocked(mockConfig.getApprovalMode).mockImplementation(() => mode);
@@ -23408,6 +23453,51 @@ describe('Session', () => {
       },
     );
 
+    it('links a follow-up completion by the task id the daemon reports', async () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        sessionId: 'kid',
+        taskId: 'kid:prompt-2',
+      });
+      const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
+        .calls[0]?.[0];
+      await spawn?.({
+        prompt: 'again',
+        completion: 'sent',
+        sessionId: 'kid',
+      });
+      expect(mockClient.extMethod).toHaveBeenLastCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        expect.objectContaining({ sessionId: 'kid' }),
+      );
+      await session.enqueueBackgroundNotification({
+        displayText: 'Sub-session completed.',
+        modelText: '<task-notification />',
+        taskId: 'kid:prompt-2',
+        status: 'completed',
+        kind: 'agent',
+      });
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{
+              taskId: string;
+              continuesTodoStopGuardWorkChain: boolean;
+            }>;
+          }
+        ).notificationQueue,
+      ).toContainEqual(
+        expect.objectContaining({
+          taskId: 'kid:prompt-2',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+      );
+    });
+
     it('registers the create_sub_session tool on the daemon session registry', async () => {
       // The tool is daemon-only: it must exist on every session the daemon
       // creates so the model can call it, and nowhere else.
@@ -23780,6 +23870,62 @@ describe('Session', () => {
       expect(
         queued.filter((item) => item.taskId === completion.taskId),
       ).toHaveLength(0);
+    });
+
+    it.each([
+      ['missing from history', false],
+      ['already in history', true],
+    ])('relays a send receipt %s', async (_scenario, receiptInHistory) => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const modelText =
+        '<task-notification><result>Done</result></task-notification>';
+      const sentMessageContext =
+        '<sent-message task-id="worker-reply">Original request</sent-message>';
+      const fromSession = { sessionId: 'worker', workspaceCwd: '/work/target' };
+      if (receiptInHistory) {
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: sentMessageContext }] },
+        ]);
+      }
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker replied.',
+          modelText,
+          sentMessageContext,
+          taskId: 'worker-reply',
+          status: 'completed',
+          kind: 'agent',
+          structured: { fromSession },
+        }),
+      ).resolves.toEqual({ accepted: true });
+
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).toHaveBeenCalledExactlyOnceWith(
+        [{ text: modelText }],
+        'Worker replied.',
+        expect.objectContaining({ fromSession }),
+      );
+      const expectedText = receiptInHistory
+        ? modelText
+        : `<task-notification><result>Done</result>${sentMessageContext}</task-notification>`;
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({
+            message: expect.arrayContaining([{ text: expectedText }]),
+          }),
+          expect.any(String),
+          undefined,
+          undefined,
+        );
+      });
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
     });
 
     it('coalesces concurrent retries while daemon completion persistence is in flight', async () => {

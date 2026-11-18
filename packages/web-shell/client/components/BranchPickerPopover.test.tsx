@@ -230,6 +230,8 @@ function mount(
     onOpenCommit: () => void;
     onOpenWorktrees: () => void;
     onOpenLog: () => void;
+    onCreateWorktreeBranch: (name: string) => Promise<void>;
+    onHandoff: (to: 'local' | 'worktree') => Promise<void>;
     onOpenChange: (open: boolean) => void;
     onBranchChanged: () => void;
     open: boolean;
@@ -256,6 +258,8 @@ function mount(
           onOpenCommit={overrides.onOpenCommit}
           onOpenWorktrees={overrides.onOpenWorktrees}
           onOpenLog={overrides.onOpenLog}
+          onCreateWorktreeBranch={overrides.onCreateWorktreeBranch}
+          onHandoff={overrides.onHandoff}
         >
           <button type="button">trigger</button>
         </BranchPickerPopover>
@@ -292,6 +296,16 @@ function clickButton(label: string): void {
   act(() => {
     button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
+}
+
+function moveToWorktreeHintPresent(): boolean {
+  return Array.from(
+    document.body.querySelectorAll('[data-testid="branch-picker-action-hint"]'),
+  ).some((el) =>
+    el.textContent?.includes(
+      'handing back later requires a clean local checkout',
+    ),
+  );
 }
 
 afterEach(() => {
@@ -535,6 +549,154 @@ describe('BranchPickerPopover actions', () => {
 
     expect(onOpenWorktrees).toHaveBeenCalledTimes(1);
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('offers "Create branch here" for a detached worktree session and submits the name', async () => {
+    const onCreateWorktreeBranch = vi.fn().mockResolvedValue(undefined);
+    const onOpenChange = vi.fn();
+    mountWithBranches(
+      { ...BRANCHES, detached: true, head: 'abc123' },
+      {
+        gitCwd: '/repo/.qwen/worktrees/task',
+        gitSessionId: 'sess-1',
+        onCreateWorktreeBranch,
+        onOpenChange,
+      },
+    );
+    await flush();
+
+    clickButton('Create branch here');
+    const input = document.querySelector<HTMLInputElement>(
+      '[data-testid="branch-picker-create-branch-input"]',
+    );
+    expect(input).toBeTruthy();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(input, 'feat/from-detached');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+
+    expect(onCreateWorktreeBranch).toHaveBeenCalledWith('feat/from-detached');
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('hides "Create branch here" without a detached worktree session', async () => {
+    const onCreateWorktreeBranch = vi.fn().mockResolvedValue(undefined);
+    // Attached (not detached) worktree session: no offer.
+    mountWithBranches(BRANCHES, {
+      gitCwd: '/repo/.qwen/worktrees/task',
+      gitSessionId: 'sess-1',
+      onCreateWorktreeBranch,
+    });
+    await flush();
+    expect(
+      document.body.querySelector(
+        '[data-testid="branch-picker-create-branch"]',
+      ),
+    ).toBeNull();
+
+    // Detached but no owning session (workspace-level browse): no offer.
+    act(() => root.unmount());
+    container.remove();
+    mountWithBranches(
+      { ...BRANCHES, detached: true, head: 'abc123' },
+      { onCreateWorktreeBranch },
+    );
+    await flush();
+    expect(
+      document.body.querySelector(
+        '[data-testid="branch-picker-create-branch"]',
+      ),
+    ).toBeNull();
+    expect(onCreateWorktreeBranch).not.toHaveBeenCalled();
+  });
+
+  it('does not submit an invalid branch name', async () => {
+    const onCreateWorktreeBranch = vi.fn().mockResolvedValue(undefined);
+    mountWithBranches(
+      { ...BRANCHES, detached: true, head: 'abc123' },
+      {
+        gitCwd: '/repo/.qwen/worktrees/task',
+        gitSessionId: 'sess-1',
+        onCreateWorktreeBranch,
+      },
+    );
+    await flush();
+
+    clickButton('Create branch here');
+    const input = document.querySelector<HTMLInputElement>(
+      '[data-testid="branch-picker-create-branch-input"]',
+    );
+    expect(input).toBeTruthy();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(input, 'bad name');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flush();
+
+    expect(onCreateWorktreeBranch).not.toHaveBeenCalled();
+    // The rejection must be visible, not a dead key.
+    expect(document.body.textContent).toContain('Invalid branch name');
+  });
+
+  it('hands off to local from a worktree session', async () => {
+    const onHandoff = vi.fn().mockResolvedValue(undefined);
+    const onOpenChange = vi.fn();
+    mountWithBranches(
+      { ...BRANCHES, detached: true, head: 'abc123' },
+      {
+        gitCwd: '/repo/.qwen/worktrees/task',
+        gitSessionId: 'sess-1',
+        onHandoff,
+        onOpenChange,
+      },
+    );
+    await flush();
+
+    expect(moveToWorktreeHintPresent()).toBe(false);
+    clickButton('Hand off to local');
+    await flush();
+
+    expect(onHandoff).toHaveBeenCalledWith('local');
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('offers moving a local session into a worktree', async () => {
+    const onHandoff = vi.fn().mockResolvedValue(undefined);
+    mountWithBranches(BRANCHES, { onHandoff });
+    await flush();
+
+    expect(moveToWorktreeHintPresent()).toBe(true);
+    clickButton('Move to worktree');
+    await flush();
+
+    expect(onHandoff).toHaveBeenCalledWith('worktree');
+  });
+
+  it('hides the handoff action without the callback', async () => {
+    mountWithBranches(BRANCHES, { gitSessionId: 'sess-1' });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="branch-picker-handoff"]'),
+    ).toBeNull();
   });
 
   it('wires "Commit" to onOpenCommit and closes', async () => {
@@ -1539,9 +1701,12 @@ describe('BranchPickerPopover checkout resolution panel', () => {
         'POST /workspaces/:workspace/git/checkout: checkout_failed',
       ),
     );
-    // The mount read answers dirty; the failure-path refresh answers the
-    // clean post-switch tree, so the hint transition witnesses that the
-    // refreshed STATUS was applied, not just requested.
+    // The mount read AND the dirty refusal's catch refresh both answer
+    // dirty; only the failure-path refresh answers the clean post-switch
+    // tree, so the hint transition witnesses that the refreshed STATUS
+    // was applied, not just requested (a single dirty seed would be
+    // consumed by the catch refresh, leaving the hint clean too early).
+    workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
     workspaceGit.mockResolvedValueOnce(status({ unstaged: 2, computedAt: 2 }));
     workspaceGit.mockResolvedValue(status({ branch: 'dev', computedAt: 3 }));
     mountWithBranches(CHECKOUT_BRANCHES, {
@@ -1551,6 +1716,9 @@ describe('BranchPickerPopover checkout resolution panel', () => {
 
     clickButton('dev');
     await flush();
+    // Still dirty after the catch refresh: the clean hint below can only
+    // come from the failure-path refresh.
+    expect(footerText()).toContain('↓1 · uncommitted changes');
     const listingReadsBefore = workspaceGitBranches.mock.calls.length;
     const statusReadsBefore = workspaceGit.mock.calls.length;
     // Only the post-switch listing can produce the '↓1 · origin/dev' hint.
@@ -1619,6 +1787,51 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     // is a dismissible error, not a sticky warning — it must not survive
     // the reopen (only the kept-entry warning does).
     expect(footerText()).not.toContain('cannot discard and switch');
+  });
+
+  it('keeps the picker usable while the failure-path refresh is in flight', async () => {
+    let settleListing: ((value: DaemonGitBranchesResult) => void) | undefined;
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'checkout_failed',
+          message: 'cannot discard and switch: fatal: invalid reference',
+        },
+        'POST /workspaces/:workspace/git/checkout: checkout_failed',
+      ),
+    );
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    // Arm a PENDING listing read for the failure-path refresh only (the
+    // mount and dirty-catch reads already consumed the default mock).
+    workspaceGitBranches.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          settleListing = resolve;
+        }),
+    );
+    clickButton('Discard Changes and Switch…');
+    await flush();
+    clickButton('Discard and Switch');
+    await flush();
+
+    // The catch does not await the refresh: busyAction is released, so a
+    // competing plain checkout starts even while the listing read hangs.
+    // ('dev', not 'main': the Update Project row's 'origin/main' hint
+    // would substring-match a 'main' click.)
+    clickButton('dev');
+    await flush();
+    expect(workspaceGitCheckout).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      settleListing?.(CHECKOUT_BRANCHES);
+    });
+    await flush();
   });
 
   it('closes the picker after a plain checkout succeeds', async () => {

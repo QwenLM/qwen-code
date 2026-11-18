@@ -5406,7 +5406,11 @@ describe('HTTP Managed Session store', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(session.authority.writesStopped).toBe(false);
       unavailable = false;
-      await vi.advanceTimersByTimeAsync(25_000);
+      // Let any in-flight settle poll finish, then settle on demand; assert
+      // before the renewed lease expires again so a second, legitimate
+      // renewal stays outside the window.
+      await vi.advanceTimersByTimeAsync(500);
+      await session.authority.settlePendingAppend();
       expect(session.authority.writesStopped).toBe(false);
       expect(session.authority.committedSequence).toBe(committedBefore + 1);
       expect(session.authority.currentActivation?.renewalSeq).toBe(1);
@@ -5474,6 +5478,9 @@ describe('HTTP Managed Session store', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(session.authority.writesStopped).toBe(false);
       unavailable = false;
+      // Let any in-flight settle poll finish first: it rides the serial
+      // queue, and under fake timers it only completes when timers advance.
+      await vi.advanceTimersByTimeAsync(500);
       // The funnel's new entry settles on demand before it reads replay.
       await session.authority.settlePendingAppend();
       expect(session.authority.writesStopped).toBe(false);
@@ -5536,7 +5543,8 @@ describe('HTTP Managed Session store', () => {
       server.editStoredTransaction(server.storedTransactions.length - 1, {
         recordDigest: 'f'.repeat(64),
       });
-      await vi.advanceTimersByTimeAsync(25_000);
+      await vi.advanceTimersByTimeAsync(500);
+      await session.authority.settlePendingAppend().catch(() => undefined);
       expect(session.authority.writesStopped).toBe(true);
       // A fenced log must not keep extending the lease it just acquired:
       // the takeover this error asks for can only start once it lapses.
@@ -5585,17 +5593,20 @@ describe('HTTP Managed Session store', () => {
         domain: 'goal_state' as const,
         content: { record: JSON.parse(MESSAGE_BODY.toString('utf8')) },
       };
+      // Same-call settlement proves the lost acknowledgement landed on this
+      // call, so the caller observes a successful commit.
       await expect(
         session.authority.commitDomainRecord(command, request, {
           class: 'trusted_entry',
         }),
-      ).rejects.toThrow('append outcome is unknown');
+      ).resolves.toMatchObject({ receipt: { replayed: false } });
       failing = false;
       const replayed = await session.authority.commitDomainRecord(
         command,
         request,
         { class: 'trusted_entry' },
       );
+      expect(replayed.receipt.replayed).toBe(true);
       const committed = server.commits.find(
         (commit) => commit['operation'] === 'recordGoalState',
       );
@@ -5652,13 +5663,15 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         contentDigest: 'a'.repeat(64),
       };
+      // Same-call settlement proves the lost acknowledgement landed on this
+      // call, so the caller observes a successful commit.
       await expect(
         session.authority.commitExtensionRecord(
           command,
           { domain: 'mcp_configuration', record: template },
           { class: 'trusted_entry' },
         ),
-      ).rejects.toThrow('append outcome is unknown');
+      ).resolves.toMatchObject({ receipt: { replayed: false } });
       failing = false;
       await expect(
         session.authority.commitExtensionRecord(
