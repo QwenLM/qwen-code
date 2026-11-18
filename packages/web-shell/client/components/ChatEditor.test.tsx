@@ -140,7 +140,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
       },
       capabilities: { features: [] },
     }),
-    useOptionalWorkspace: () => uploadWorkspaceState.current,
+    useOptionalWorkspace: () => {
+      throw new Error('composer must not read the daemon workspace hook');
+    },
   };
 });
 
@@ -187,7 +189,10 @@ const composerCoreState = vi.hoisted(() => ({
   workspaceUploadBusy: false,
 }));
 
-// Controllable `useOptionalWorkspace()` value for file-upload gating tests.
+// Controllable `useOptionalComposerWorkspace()` value for file-upload gating
+// tests, supplied through the neutral hook mock above. The daemon-barrel
+// `useOptionalWorkspace` entry throws, so re-coupling the composer to the
+// daemon hook reddens this suite instead of passing silently.
 // Defaults to undefined (upload disabled) so existing tests are unaffected.
 const uploadWorkspaceState = vi.hoisted(() => ({
   current: undefined as
