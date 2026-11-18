@@ -1554,8 +1554,8 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('delivers async output after the functionResponse parts on a ToolResult turn', async () => {
-      // The owning turn claims the exploration-budget prompt id; its ToolResult
-      // continuation (same prompt id) is the owner that may drain the block.
+      // The owning turn's ToolResult continuation (same prompt id, never a
+      // side query) is an owner that may drain the block.
       await run([{ text: 'main' }], 'prompt-async-tr', {
         type: SendMessageType.UserQuery,
       });
@@ -1638,6 +1638,44 @@ describe('Gemini Client (client.ts)', () => {
       expect(hasAsyncBlock(ownerParts)).toBe(true);
       const asyncPart = ownerParts.find(isAsyncHookPart) as Part;
       expect(asyncPart.text).toContain('owned hook output');
+    });
+
+    it('delivers on a ToolResult-first continue turn whose prompt id was never claimed', async () => {
+      // continue_last_turn sends ToolResult as the first turn under a fresh
+      // prompt id; no UserQuery claimed the budget id. The block must still be
+      // delivered — refusing it is the same silent-loss class this PR fixes.
+      installAsyncOutput('continue turn hook output');
+      await run(
+        [fnResponse('read_file', { ok: true }, 'call-continue')],
+        'prompt-continue',
+        { type: SendMessageType.ToolResult },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(hasAsyncBlock(parts)).toBe(true);
+      expect((parts.find(isAsyncHookPart) as Part).text).toContain(
+        'continue turn hook output',
+      );
+    });
+
+    it('delivers on a continue ToolResult even when a prior turn left a stale claimed budget id', async () => {
+      // A prior main turn claimed the exploration-budget prompt id; the
+      // continue-interrupted turn then sends ToolResult first under a NEW id.
+      // Only a recorded side-query id may refuse a ToolResult — a stale budget
+      // id must not.
+      await run([{ text: 'prior turn' }], 'prompt-prior', {
+        type: SendMessageType.UserQuery,
+      });
+      installAsyncOutput('stale continue hook output');
+      await run(
+        [fnResponse('read_file', { ok: true }, 'call-continue-2')],
+        'prompt-continue-new',
+        { type: SendMessageType.ToolResult },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(hasAsyncBlock(parts)).toBe(true);
+      expect((parts.find(isAsyncHookPart) as Part).text).toContain(
+        'stale continue hook output',
+      );
     });
   });
 

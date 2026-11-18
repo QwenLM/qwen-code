@@ -750,6 +750,10 @@ export class LlmClient {
   // is bound to its owning interaction: every budget entrypoint below is a
   // no-op for an invocation that does not own it.
   private toolExplorationBudgetPromptId: string | undefined;
+  // Prompt ids introduced by a flagged concurrent side query. Their tool-result
+  // continuations arrive unflagged, so the recorded id — not the flag — is what
+  // keeps them from draining the owning turn's pending async hook block.
+  private readonly concurrentSideQueryPromptIds = new Set<string>();
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -4375,9 +4379,16 @@ export class LlmClient {
       // the ownership check below every budget entrypoint enforces for the
       // side turn's tool results too.
       if (!options?.isConcurrentSideQuery) {
+        // A new main turn supersedes the previous turn's side queries; a retry
+        // or goal turn reusing the same prompt id must keep them recorded.
+        if (prompt_id !== this.toolExplorationBudgetPromptId) {
+          this.concurrentSideQueryPromptIds.clear();
+        }
         this.toolExplorationBudget.reset();
         this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
+      } else {
+        this.concurrentSideQueryPromptIds.add(prompt_id);
       }
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
@@ -5213,13 +5224,18 @@ export class LlmClient {
       // without it (or a hook system without pending output) delivers nothing.
       // A concurrent `/btw` side query must not consume the running turn's
       // pending block: its first send carries isConcurrentSideQuery, but its
-      // tool-result continuation arrives unflagged, so ownership rides on the
-      // exploration-budget prompt id — the same convention the budget and loop
-      // guards use above. A non-owner send leaves the block for the owning
-      // turn's next send instead of draining it into the wrong conversation.
+      // tool-result continuation arrives unflagged, so the prompt id recorded
+      // at that flagged first send is what refuses the continuation. Every
+      // other ToolResult drains — the owning turn's continuation and a
+      // continue-interrupted turn that sends ToolResult first under an id no
+      // side query claimed. The exploration-budget prompt id cannot serve as
+      // that discriminator: it is only claimed on startsInteraction, so a
+      // ToolResult-first turn (fresh or stale budget id) would be refused and
+      // silently lose the block.
       const skipAsyncHookDrain =
         options?.isConcurrentSideQuery === true ||
-        (messageType === SendMessageType.ToolResult && !ownsExplorationBudget);
+        (messageType === SendMessageType.ToolResult &&
+          this.concurrentSideQueryPromptIds.has(prompt_id));
       const asyncHookContextPart = skipAsyncHookDrain
         ? null
         : drainAsyncHookContextPart(this.config.getHookSystem?.());
