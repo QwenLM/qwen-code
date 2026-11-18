@@ -6,6 +6,7 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import * as path from 'node:path';
 import { SettingsWatcher } from './settingsWatcher.js';
 import {
   SettingScope,
@@ -279,6 +280,43 @@ describe('SettingsWatcher', () => {
       );
     });
 
+    it('watches only the settings file and its parent directory', () => {
+      watcher.startWatching();
+
+      const ignored = mockWatch.mock.calls[0][1].ignored as (
+        filePath: string,
+      ) => boolean;
+      expect(ignored('/home/user/.qwen')).toBe(false);
+      expect(ignored('/home/user/.qwen/settings.json')).toBe(false);
+      for (const unrelated of [
+        'installation_id',
+        'output-language.md',
+        'sessions',
+        'sessions/settings.json',
+        'settings.json.write-private',
+      ]) {
+        expect(ignored(`/home/user/.qwen/${unrelated}`)).toBe(true);
+      }
+    });
+
+    it('normalizes the configured target path before filtering', () => {
+      const customPath = path.normalize('/custom/config/preferences.json');
+      const customWatcher = new SettingsWatcher(
+        makeLoadedSettings({
+          user: { path: customPath },
+          workspaceSettingsActive: false,
+        }),
+      );
+      customWatcher.startWatching();
+      const ignored = mockWatch.mock.calls[0][1].ignored as (
+        filePath: string,
+      ) => boolean;
+      expect(ignored('/custom/config')).toBe(false);
+      expect(ignored('/custom/config/preferences.json')).toBe(false);
+      expect(ignored('/custom/config/settings.json')).toBe(true);
+      customWatcher.stopWatching();
+    });
+
     it('should pass ignored filter that rejects special file types', () => {
       watcher.startWatching();
 
@@ -294,13 +332,13 @@ describe('SettingsWatcher', () => {
       const ignoredFn = watchCall[1].ignored;
 
       expect(
-        ignoredFn('/some/file', {
+        ignoredFn('/home/user/.qwen/settings.json', {
           isFile: () => true,
           isDirectory: () => false,
         }),
       ).toBe(false);
       expect(
-        ignoredFn('/some/socket', {
+        ignoredFn('/home/user/.qwen/settings.json', {
           isFile: () => false,
           isDirectory: () => false,
         }),

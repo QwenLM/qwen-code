@@ -57,16 +57,19 @@ public class JournalPackTransactions {
     /** Commits the BUILDING catalog row on its own, before the object PUT. */
     public void insertBuilding(String packId, String scope, String tenant, String workspace,
             String session, long from, long through, String objectKey, long byteLength,
-            String objectSha, long now) {
+            String objectSha, long now, String builderId, long reclaimCutoff) {
         buildingTx.executeWithoutResult(status -> {
             // A crashed or rolled-back build leaves a BUILDING row at this (scope, from_revision).
-            // Reclaim it and its orphaned object before re-inserting, so a retry of the same range
-            // does not violate uk_ma_journal_pack_scope_from. Only BUILDING rows are reclaimed; a
-            // published pack at this range would already have advanced the watermark past it.
+            // Reclaim only rows this builder owns (a retry of its own dead build) or whose lease has
+            // expired (gmt_modified <= reclaimCutoff). A BUILDING row owned by another replica and
+            // still within its lease is a live concurrent build: leave it alone and let the INSERT
+            // below collide on uk_ma_journal_pack_scope_from, which aborts this builder safely
+            // instead of deleting the other replica's in-flight row and object.
             List<Map<String, Object>> stale = jdbc.queryForList(
                     "SELECT pack_id, object_key FROM ma_journal_pack WHERE session_scope_key = ?"
-                            + " AND from_revision = ? AND state = 'BUILDING'",
-                    scope, from);
+                            + " AND from_revision = ? AND state = 'BUILDING' AND (builder_id = ?"
+                            + " OR gmt_modified <= ?)",
+                    scope, from, builderId, reclaimCutoff);
             for (Map<String, Object> row : stale) {
                 store().deleteIfPresent(text(row.get("object_key")));
                 jdbc.update("DELETE FROM ma_journal_pack WHERE pack_id = ?", row.get("pack_id"));
@@ -74,10 +77,10 @@ public class JournalPackTransactions {
             jdbc.update("INSERT INTO ma_journal_pack"
                             + " (pack_id, session_scope_key, tenant_id, workspace_id, session_id,"
                             + " from_revision, through_revision, manifest_resource_key, object_key,"
-                            + " state, byte_length, sha256, gmt_create, gmt_modified) VALUES (?, ?, ?,"
-                            + " ?, ?, ?, ?, ?, ?, 'BUILDING', ?, ?, ?, ?)",
+                            + " state, byte_length, sha256, builder_id, gmt_create, gmt_modified)"
+                            + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'BUILDING', ?, ?, ?, ?, ?)",
                     packId, scope, tenant, workspace, session, from, through, "", objectKey,
-                    byteLength, objectSha, now, now);
+                    byteLength, objectSha, builderId, now, now);
         });
     }
 
@@ -86,8 +89,17 @@ public class JournalPackTransactions {
             String session, long from, long through, byte[] manifest) {
         String manifestId = "manifest-" + packId;
         requiredTx.executeWithoutResult(status -> {
-            jdbc.update("UPDATE ma_journal_pack SET state = 'VERIFIED', gmt_modified = ?"
-                    + " WHERE pack_id = ?", System.currentTimeMillis(), packId);
+            // Assert the pack row still exists and is BUILDING: a concurrent replica may have
+            // reclaimed it (expired lease) between our PUT and this transaction. Advancing the
+            // watermark without a live pack row would leave a covered range with no published pack,
+            // so a zero-row update must roll the whole publication back.
+            int verified = jdbc.update("UPDATE ma_journal_pack SET state = 'VERIFIED',"
+                    + " gmt_modified = ? WHERE pack_id = ? AND state = 'BUILDING'",
+                    System.currentTimeMillis(), packId);
+            if (verified != 1) {
+                throw JournalStoreRows.conflict("managed_journal_pack_conflict",
+                        "The pack row was reclaimed by a concurrent compaction before verification.");
+            }
             int published = jdbc.update("UPDATE ma_session_head SET packed_through_revision = ?,"
                             + " gmt_modified = " + ManagedSchemaTime.SQL_NOW
                             + " WHERE tenant_id = ? AND session_id = ? AND head_kind ="
@@ -99,10 +111,15 @@ public class JournalPackTransactions {
                 throw JournalStoreRows.conflict("managed_journal_pack_conflict",
                         "The head watermark moved while the pack was being built.");
             }
-            jdbc.update("UPDATE ma_journal_pack SET state = 'PUBLISHED', manifest_resource_key = ?,"
-                            + " gmt_modified = ? WHERE pack_id = ?",
+            int publishedRow = jdbc.update("UPDATE ma_journal_pack SET state = 'PUBLISHED',"
+                            + " manifest_resource_key = ?, gmt_modified = ? WHERE pack_id = ?"
+                            + " AND state = 'VERIFIED'",
                     ManagedSessionStore.resourceKey(scope, manifestId),
                     System.currentTimeMillis(), packId);
+            if (publishedRow != 1) {
+                throw JournalStoreRows.conflict("managed_journal_pack_conflict",
+                        "The pack row was reclaimed by a concurrent compaction before publication.");
+            }
             jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
                             + " workspace_id, session_id, resource_id, kind, schema_version,"
                             + " byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"

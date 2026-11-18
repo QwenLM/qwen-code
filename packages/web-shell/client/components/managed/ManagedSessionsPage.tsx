@@ -94,6 +94,8 @@ import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { ManagedDiagnosticsPanel } from './ManagedDiagnosticsPanel';
+import { ManagedTerminalPanel } from './ManagedTerminalPanel';
+import { newManagedTerminalId } from './managed-terminal-protocol';
 import { useManagedDiagnosticsText } from './managed-diagnostics-messages';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import { TodoFullList } from '../messages/TodoView';
@@ -105,6 +107,7 @@ import type {
   ManagedAgentWorkspace,
   ManagedInputBlock,
 } from './managed-agent-provider';
+import { ManagedLocalFilesControl } from '../ManagedLocalFilesControl';
 import type { PromptImage, PromptFile } from '../../adapters/promptTypes';
 import {
   encodeManagedInput,
@@ -127,6 +130,8 @@ interface PendingPrompt {
   workspaceId?: string;
   input?: ManagedInputBlock[];
 }
+
+type PendingElsewhereAction = 'retry' | 'discard';
 
 interface ManagedSessionListError {
   readonly httpError?: JavaManagedAgentHttpError;
@@ -290,42 +295,51 @@ export function ManagedSessionsPage({
   return <p role="status">{t('managed.unavailable')}</p>;
 }
 
-const FAILURE_MESSAGES: Record<string, readonly [string, string]> = {
+const FAILURE_MESSAGES: Record<string, readonly [string, string, string]> = {
   model_payment_required: [
     'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
     '模型接口要求支付（HTTP 402），可能是余额不足或计费受限。请检查供应商账户余额与计费状态后重试。',
+    'Требуется оплата API модели (HTTP 402). Перед повтором проверьте баланс и биллинг аккаунта поставщика.',
   ],
   model_authentication_failed: [
     'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
     '模型接口鉴权失败（HTTP 401）。请检查供应商凭据配置。',
+    'Ошибка аутентификации API модели (HTTP 401). Проверьте настроенные учётные данные поставщика.',
   ],
   model_access_denied: [
     'Model API access denied (HTTP 403). Check the provider account and model permissions.',
     '模型接口拒绝访问（HTTP 403）。请检查供应商账户与模型访问权限。',
+    'Доступ к API модели запрещён (HTTP 403). Проверьте аккаунт поставщика и права на модель.',
   ],
   model_request_timeout: [
     'The model API request timed out. Try again later.',
     '模型接口请求超时，请稍后重试。',
+    'Запрос к API модели превысил время ожидания. Попробуйте позже.',
   ],
   model_rate_limited: [
     'Model API rate limit exceeded (HTTP 429). Wait and try again later.',
     '模型接口触发限流（HTTP 429），请稍后重试。',
+    'Превышен лимит запросов API модели (HTTP 429). Подождите и попробуйте позже.',
   ],
   model_request_rejected: [
     'The model API rejected the request. Check the model configuration and input.',
     '模型接口拒绝了请求，请检查模型配置与输入内容。',
+    'API модели отклонил запрос. Проверьте конфигурацию модели и входные данные.',
   ],
   model_service_unavailable: [
     'The model API service is unavailable. Try again later.',
     '模型接口服务暂不可用，请稍后重试。',
+    'Сервис API модели недоступен. Попробуйте позже.',
   ],
   model_request_failed: [
     'Model API request failed. Check the server logs for this session before retrying.',
     '模型接口请求失败，请根据当前会话检查服务日志后再重试。',
+    'Запрос к API модели не удался. Перед повтором проверьте журналы сервера для этой сессии.',
   ],
   hosted_turn_failed: [
     'The turn failed. Check the server logs for this session to identify the cause.',
     '本轮执行失败，请根据当前会话检查服务日志以定位具体原因。',
+    'Ход не удался. Проверьте журналы сервера для этой сессии, чтобы найти причину.',
   ],
 };
 
@@ -482,6 +496,10 @@ function ManagedSessionsContent({
   const [wideTasks, setWideTasks] = useState(false);
   const [taskPanelSession, setTaskPanelSession] = useState<string>();
   const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
+  const terminalTriggerRef = useRef<HTMLButtonElement>(null);
+  const [terminalSession, setTerminalSession] = useState<string>();
+  const terminalIds = useRef(new Map<string, string>());
+  const terminalOpen = !!sessionId && terminalSession === sessionId;
   const publicChildren = detail.summary?.capabilities.childAgents === true;
   const tasks = useManagedTasks(
     provider,
@@ -530,6 +548,9 @@ function ManagedSessionsContent({
     // instance; without re-running here the observer never attaches.
   }, [sessionId, hostSessionOnly]);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
+  useEffect(() => {
+    setTerminalSession(undefined);
+  }, [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [archivedSummaries, setArchivedSummaries] = useState<
     ManagedAgentSessionSummary[]
@@ -640,6 +661,11 @@ function ManagedSessionsContent({
   const pendingHere = pending?.sessionId === sessionId ? pending : undefined;
   const pendingElsewhere = pending !== undefined && pendingHere === undefined;
   const pendingRef = useRef(pending);
+  // 跨会话只拦提交：Retry / Discard 先回到归属会话，再复用该会话原有的
+  // 重试与草稿恢复逻辑，避免在异会话里直接操作另一条会话的输入。
+  const pendingElsewhereIntent = useRef<
+    { idempotencyKey: string; action: PendingElsewhereAction } | undefined
+  >(undefined);
   const encoding = useRef(false);
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
     undefined,
@@ -898,6 +924,27 @@ function ManagedSessionsContent({
     setDiscarded(false);
   }, [provider, sessionId, hostSessionOnly]);
 
+  // submit and discardPending are recreated on every render, so the intent
+  // effect below reads them through refs: depending on them directly would
+  // re-run a guard that can only early-return, and wrapping either in
+  // useCallback would change when their large closures are captured.
+  const submitRef = useRef<() => void>(() => {});
+  const discardPendingRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    const intent = pendingElsewhereIntent.current;
+    if (
+      !intent ||
+      busy ||
+      !pendingHere ||
+      pendingHere.idempotencyKey !== intent.idempotencyKey
+    )
+      return;
+    pendingElsewhereIntent.current = undefined;
+    if (intent.action === 'retry') void submitRef.current();
+    else discardPendingRef.current();
+  }, [busy, pendingHere, sessionId]);
+
   // The Discard button unmounts itself, dropping focus to <body>: land it on
   // the composer that just got the draft back. The move must wait for the
   // clear to commit — the textarea is disabled while pending is set — and
@@ -1137,7 +1184,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? '此会话暂不支持 BTW/回顾。'
-            : 'BTW/recap is unavailable for this session.',
+            : language === 'ru'
+              ? 'BTW/обзор недоступны для этой сессии.'
+              : 'BTW/recap is unavailable for this session.',
         );
         return;
       }
@@ -1149,7 +1198,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? 'BTW 仅支持文本问题，/recap 不接受参数。'
-            : 'BTW accepts text only; /recap accepts no arguments.',
+            : language === 'ru'
+              ? 'BTW принимает только текст; /recap не принимает аргументы.'
+              : 'BTW accepts text only; /recap accepts no arguments.',
         );
         return;
       }
@@ -1162,7 +1213,9 @@ function ManagedSessionsContent({
         setError(
           language === 'zh-CN'
             ? '此会话暂不支持 BTW/回顾生成。'
-            : 'BTW/recap generation is unavailable for this session.',
+            : language === 'ru'
+              ? 'Генерация BTW/обзора недоступна для этой сессии.'
+              : 'BTW/recap generation is unavailable for this session.',
         );
         return;
       }
@@ -1365,6 +1418,9 @@ function ManagedSessionsContent({
     }
   }
 
+  // Keep the intent effect on the latest closure without re-running it.
+  submitRef.current = submit;
+
   const attachmentCapability = useRef({ sessionId, enabled: false });
   if (attachmentCapability.current.sessionId !== sessionId)
     attachmentCapability.current = { sessionId, enabled: false };
@@ -1373,8 +1429,9 @@ function ManagedSessionsContent({
       summary.capabilities.inputAttachments === true && worktreeReady;
   const { request: requestTurnCancel, busy: turnCancelBusy } = turnCancel;
   const failureMessage = summary?.failure
-    ? (FAILURE_MESSAGES[summary.failure.code]?.[language === 'zh-CN' ? 1 : 0] ??
-      summary.failure.message)
+    ? (FAILURE_MESSAGES[summary.failure.code]?.[
+        language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0
+      ] ?? summary.failure.message)
     : undefined;
   const cancel = useCallback(async () => {
     const abort = lifetime.current;
@@ -1413,7 +1470,11 @@ function ManagedSessionsContent({
             size="sm"
             onClick={() => sideQueries.show('recap')}
           >
-            {language === 'zh-CN' ? '回顾' : 'Recap'}
+            {language === 'zh-CN'
+              ? '回顾'
+              : language === 'ru'
+                ? 'Обзор'
+                : 'Recap'}
           </Button>
         )}
       </>
@@ -1436,6 +1497,59 @@ function ManagedSessionsContent({
       >
         {diagnosticsText('title')}
       </Button>
+    ) : null;
+  const terminalPanelOpen =
+    terminalOpen &&
+    currentSummary?.capabilities.terminal === true &&
+    !!provider.terminal;
+  const terminalId = sessionId
+    ? terminalIds.current.get(`${provider.storageKey}:${sessionId}`)
+    : undefined;
+  // A non-true capabilities.terminal reading is transient server state (a DB
+  // or filesystem blip in a session-list poll), not proof the terminal died.
+  // The panel therefore stays mounted across capability dips: unmounting would
+  // send the release frame and SIGKILL a live PTY. The relay is the authority
+  // on loss — it maps worker loss to a non-retryable close code that renders
+  // the terminal-lost notice. Genuine close still unmounts via onClose and
+  // session change below.
+  function toggleTerminal() {
+    if (terminalPanelOpen) {
+      setTerminalSession(undefined);
+      return;
+    }
+    if (!sessionId || !currentSummary || !provider.terminal) return;
+    const key = `${provider.storageKey}:${sessionId}`;
+    if (!terminalIds.current.has(key)) {
+      terminalIds.current.set(key, newManagedTerminalId());
+    }
+    setTerminalSession(sessionId);
+  }
+  const terminalButton =
+    interactive &&
+    currentSummary?.capabilities.terminal === true &&
+    provider.terminal ? (
+      <Button
+        ref={terminalTriggerRef}
+        variant="outline"
+        size="sm"
+        aria-expanded={terminalPanelOpen}
+        onClick={toggleTerminal}
+      >
+        {t('terminal.title')}
+      </Button>
+    ) : null;
+  const localFilesButton =
+    provider.clientFiles && currentSummary?.capabilities.clientFiles ? (
+      <ManagedLocalFilesControl
+        provider={provider}
+        sessionId={currentSummary.sessionId}
+        sessionName={
+          currentSummary.title === currentSummary.sessionId
+            ? undefined
+            : currentSummary.title
+        }
+        triggerClassName="inline-flex h-8 w-8 items-center justify-center rounded-md border border-input bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+      />
     ) : null;
   function prepareHandoff() {
     if (
@@ -1537,6 +1651,61 @@ function ManagedSessionsContent({
         {t('managed.cancel')}
       </Button>
     ) : null;
+  function openPendingOwner(current: PendingPrompt | undefined) {
+    const owner = current?.sessionId;
+    // Route through openSession like every other navigation entry: it clears
+    // the draft/error of the conversation being left and forwards the owner's
+    // workspace. A request with no owner clears the selection instead.
+    if (!owner) {
+      onSelectSession(undefined);
+      setText('');
+      setError(undefined);
+      return;
+    }
+    openSession(
+      owner,
+      // The owner may not be on the current (filtered, paginated, or
+      // host-mode empty) page, so prefer the workspace captured when the
+      // request was submitted.
+      current?.workspaceId ??
+        lifecycleSummaries.find((session) => session.sessionId === owner)
+          ?.workspace?.workspaceId,
+    );
+  }
+  // Retry / Discard belong to the conversation that owns the unconfirmed
+  // send: navigate there first, then let the effect above reuse that
+  // conversation's own retry (same idempotency key) or draft restoration.
+  function runPendingElsewhereAction(action: PendingElsewhereAction) {
+    const current = pendingRef.current;
+    if (!current) return;
+    pendingElsewhereIntent.current = {
+      idempotencyKey: current.idempotencyKey,
+      action,
+    };
+    openPendingOwner(current);
+  }
+  function discardPending() {
+    const current = pendingRef.current;
+    if (!current || current.sessionId !== sessionId) return;
+    // 放弃的是一条无法确认的发送意图，不是已经落库的消息；恢复到原会话
+    // 输入框后继续编辑，避免用户丢失唯一一份草稿。
+    pendingRef.current = undefined;
+    setPending(undefined);
+    void persistPending(pendingKey, undefined);
+    setText(current.text);
+    composerRef.current?.setText(current.text);
+    restoreManagedAttachments(composerRef.current, current.input);
+    composerCommit.current = undefined;
+    setError(undefined);
+    // A create that committed server-side before an unconfirmed failure is
+    // otherwise invisible until the user happens to press Refresh.
+    if (current.sessionId === undefined) setListRevision((value) => value + 1);
+    focusComposer.current = { sessionId };
+    setDiscarded(true);
+  }
+
+  discardPendingRef.current = discardPending;
+
   function openSession(id: string, targetWorkspaceId?: string) {
     const open = onOpenSession ?? onSelectSession;
     if (targetWorkspaceId) open(id, targetWorkspaceId);
@@ -1818,7 +1987,7 @@ function ManagedSessionsContent({
     busy ||
     restoreBusy ||
     pendingRestoreFailed ||
-    Boolean(pending) ||
+    Boolean(pendingHere) ||
     lifecycle.blocked(sessionId) ||
     modelChange.blocked ||
     compression.blocked ||
@@ -2004,7 +2173,9 @@ function ManagedSessionsContent({
                     )}
                     {sessionActions(summary)}
                     {diagnosticsButton}
+                    {terminalButton}
                     {sideQueryButtons}
+                    {localFilesButton}
                   </span>
                 }
                 hideWorkspaceIcon={!showManagedSessionHeader}
@@ -2058,7 +2229,9 @@ function ManagedSessionsContent({
                 </Button>
               )}
               {diagnosticsButton}
+              {terminalButton}
               {sideQueryButtons}
+              {localFilesButton}
               {provider.tasks &&
                 (summary.capabilities.tasks === true ||
                   taskCancel.pendingTaskIds.length > 0) && (
@@ -2315,38 +2488,35 @@ function ManagedSessionsContent({
           {pendingElsewhere && !busy && (
             <div
               role="status"
-              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-center gap-3 text-sm text-muted-foreground"
+              className="mx-auto mt-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] flex-col gap-2 text-sm text-muted-foreground sm:flex-row sm:items-center"
             >
-              <p>{t('managed.pendingElsewhere')}</p>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  const owner = pending?.sessionId;
-                  // Route through openSession like every other navigation
-                  // entry: it clears the draft/error of the conversation being
-                  // left and forwards the owner's workspace. A request with no
-                  // owner clears the selection instead.
-                  if (!owner) {
-                    onSelectSession(undefined);
-                    setText('');
-                    setError(undefined);
-                    return;
-                  }
-                  openSession(
-                    owner,
-                    // The owner may not be on the current (filtered,
-                    // paginated, or host-mode empty) page, so prefer the
-                    // workspace captured when the request was submitted.
-                    pending?.workspaceId ??
-                      lifecycleSummaries.find(
-                        (session) => session.sessionId === owner,
-                      )?.workspace?.workspaceId,
-                  );
-                }}
-              >
-                {t('managed.openPendingOwner')}
-              </Button>
+              {/* Stacked on a narrow composer: three actions cannot share a
+                  row with the notice without squeezing it to a few chars. */}
+              <p className="min-w-0 sm:flex-1">
+                {t('managed.pendingElsewhere')}
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={() => runPendingElsewhereAction('retry')}
+                >
+                  {t('managed.retry')}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => runPendingElsewhereAction('discard')}
+                >
+                  {t('managed.discard')}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => openPendingOwner(pending)}
+                >
+                  {t('managed.openPendingOwner')}
+                </Button>
+              </div>
             </div>
           )}
           {pendingHere && !busy && (
@@ -2362,44 +2532,9 @@ function ManagedSessionsContent({
               >
                 {t('managed.retry')}
               </Button>
-              {/* Offered only where the handler can restore the draft:
-                  destroying the only copy from a foreign session would lose
-                  it for good. */}
-              {pendingHere.sessionId === sessionId && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    // An escape from a permanently failing retry: reuse the
-                    // draft text without minting a new idempotency key.
-                    pendingRef.current = undefined;
-                    setPending(undefined);
-                    void persistPending(pendingKey, undefined);
-                    // The pending record is client-scoped but the draft
-                    // belongs to the session it was written for: restore it
-                    // only there.
-                    if (pendingHere.sessionId === sessionId) {
-                      setText(pendingHere.text);
-                      composerRef.current?.setText(pendingHere.text);
-                      restoreManagedAttachments(
-                        composerRef.current,
-                        pendingHere.input,
-                      );
-                    }
-                    composerCommit.current = undefined;
-                    setError(undefined);
-                    // A create that committed server-side before an
-                    // unconfirmed failure is otherwise invisible until the
-                    // user happens to press Refresh.
-                    if (pendingHere.sessionId === undefined)
-                      setListRevision((current) => current + 1);
-                    focusComposer.current = { sessionId };
-                    setDiscarded(true);
-                  }}
-                >
-                  {t('managed.discard')}
-                </Button>
-              )}
+              <Button variant="ghost" size="sm" onClick={discardPending}>
+                {t('managed.discard')}
+              </Button>
             </div>
           )}
           {pendingApproval && (
@@ -2644,7 +2779,9 @@ function ManagedSessionsContent({
                           description:
                             language === 'zh-CN'
                               ? '私下继续追问当前会话'
-                              : 'Ask a private follow-up',
+                              : language === 'ru'
+                                ? 'Задать частный уточняющий вопрос'
+                                : 'Ask a private follow-up',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -2657,7 +2794,9 @@ function ManagedSessionsContent({
                           description:
                             language === 'zh-CN'
                               ? '回顾已完成的对话'
-                              : 'Recap the completed conversation',
+                              : language === 'ru'
+                                ? 'Обзор завершённого разговора'
+                                : 'Recap the completed conversation',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -2700,6 +2839,12 @@ function ManagedSessionsContent({
                     : []
                 }
                 currentModel={displayedModel}
+                modelPickerScope={{
+                  sessionId,
+                  workspaceId: sessionId
+                    ? (sessionWorkspaceId ?? undefined)
+                    : workspaceId,
+                }}
                 availableModels={
                   modelChange.options?.supported
                     ? modelChange.options.models.map((model) => ({
@@ -2853,6 +2998,7 @@ function ManagedSessionsContent({
                     : undefined
                 }
                 disabled={composerDisabled}
+                submitDisabled={pendingElsewhere}
                 placeholderText={t(
                   alignManagedChatWithHost
                     ? (() => {
@@ -3167,6 +3313,27 @@ function ManagedSessionsContent({
             restoreFocus={() => {
               if (taskTriggerRef.current?.isConnected)
                 taskTriggerRef.current.focus();
+              else (sessionsNavRef.current ?? pageRef.current)?.focus();
+            }}
+          />
+        )}
+        {/* Keep the panel mounted while the user has it open, independent of
+            transient dips: `interactive` goes false when a side panel opens and
+            the summary is briefly absent during a reload. Unmounting here would
+            send the release frame and SIGTERM the live PTY. The relay is the
+            authority on loss (a non-retryable close renders the terminal-lost
+            notice); genuine close unmounts via onClose and session change. */}
+        {terminalOpen && sessionId && terminalId && provider.terminal && (
+          <ManagedTerminalPanel
+            key={`${provider.storageKey}:${sessionId}:${terminalId}`}
+            terminal={provider.terminal}
+            sessionId={sessionId}
+            terminalId={terminalId}
+            clientId={clientId}
+            onClose={() => setTerminalSession(undefined)}
+            restoreFocus={() => {
+              if (terminalTriggerRef.current?.isConnected)
+                terminalTriggerRef.current.focus();
               else (sessionsNavRef.current ?? pageRef.current)?.focus();
             }}
           />

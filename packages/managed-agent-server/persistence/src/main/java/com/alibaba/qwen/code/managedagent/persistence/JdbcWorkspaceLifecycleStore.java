@@ -43,13 +43,7 @@ public class JdbcWorkspaceLifecycleStore
     private final JdbcManagedExtensionRecordStore records;
     private final ObjectProvider<RuntimeBindingRepository> bindings;
     private WorkspaceProfileLifecycleVerifier profiles;
-    private ResidentWorkspaces residents = new ResidentWorkspaces(java.util.List.of());
     private JdbcJournalPacks packs;
-
-    @org.springframework.beans.factory.annotation.Autowired
-    void setResidentConfiguration(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties) {
-        residents = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
-    }
 
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     void setJournalPacks(JdbcJournalPacks packs) {
@@ -204,7 +198,7 @@ public class JdbcWorkspaceLifecycleStore
                         if ("input.accepted".equals(event.path("kind").asText())) {
                             accepted.add(turn);
                             String source = event.path("payload").path("source").asText();
-                            if (!v2 || !List.of("monitor", "child_agent", "automation", "session_message", "channel").contains(source)) {
+                            if (!v2 || !List.of("monitor", "child_agent", "automation", "session_message", "channel", "loop").contains(source)) {
                                 pending.add(turn);
                             }
                         } else if (v2 && "activation.changed".equals(event.path("kind").asText())
@@ -313,12 +307,6 @@ public class JdbcWorkspaceLifecycleStore
         if (!writers.isEmpty() && "ACTIVE".equals(writers.getFirst().get("state"))
                 && ((Number) writers.getFirst().get("live_writer")).intValue() != 0) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
-        }
-        if (residents.verifyClosed(jdbc, operation.tenantId(), operation.sessionId())) {
-            if (!writers.isEmpty() && !"SEALED".equals(writers.getFirst().get("state"))) {
-                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
-            }
-            return;
         }
         RuntimeBindingRepository repository = bindings.getIfAvailable();
         if (!(repository instanceof com.alibaba.qwen.code.runtimebroker.persistence.JdbcHarnessResources)) {

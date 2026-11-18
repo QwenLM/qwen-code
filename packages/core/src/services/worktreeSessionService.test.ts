@@ -397,6 +397,23 @@ describe('writeWorktreeSession', () => {
     await writeJson({ ...sample, supersedes: null });
     await expectStrictInvalid();
   });
+
+  it('round-trips the worktreeBase creation-base field (R5-4)', async () => {
+    const withBase: WorktreeSession = {
+      ...sample,
+      worktreeBase: 'c'.repeat(40),
+    };
+    await writeWorktreeSession(filePath, withBase);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withBase,
+    });
+  });
+
+  it('rejects a sidecar with a non-string worktreeBase', async () => {
+    await writeJson({ ...sample, worktreeBase: 42 });
+    await expectStrictInvalid();
+  });
 });
 
 describe('createWorktreeSession', () => {
@@ -944,6 +961,25 @@ describe('restoreWorktreeContext', () => {
     expect(result.contextMessage).toContain(live.worktreeBranch);
     // Sidecar should remain on disk so subsequent reads still see it.
     expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('names detached HEAD in the context message when the branch is empty', async () => {
+    const live = await liveSession('repo-detached', { worktreeBranch: '' });
+    await writeWorktreeSession(filePath, live);
+    await fs.writeFile(
+      path.join(live.worktreePath, '.qwen-session'),
+      'session-owner',
+      'utf8',
+    );
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'session-owner',
+    );
+
+    expect(result.session).toEqual(live);
+    expect(result.contextMessage).toContain('(detached HEAD)');
+    expect(result.contextMessage).not.toContain('(branch:');
   });
 
   it('restores a sidecar caught in the link-then-unlink publish window', async () => {

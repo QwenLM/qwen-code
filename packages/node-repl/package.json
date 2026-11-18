@@ -41,7 +41,7 @@
     "watch": "tsc --watch"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "^0.24.7",
     "ws": "^8.18.0",

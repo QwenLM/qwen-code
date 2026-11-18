@@ -4,8 +4,9 @@ import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -267,7 +268,8 @@ class StorageRowLockOrderMySqlIT {
                 .put("stateDirectory", temp.resolve("runtime").toString()).put("nodeExecutable", "/test/node")
                 .put("cliEntry", "/test/cli.js");
         var cleared = new CapturingJdbc(database.source(), "fence_operation_id = NULL WHERE");
-        var operation = new WorkspaceMigrationStore(cleared, manager, guard, new InMemoryRuntimeBindingRepository(),
+        var operation = new WorkspaceMigrationStore(cleared, manager, guard, new JdbcRuntimeBindingRepository(database.source(),
+                new AesGcmSecretProtector("test", new byte[32])),
                 request.toString().getBytes(StandardCharsets.UTF_8), true,
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
         operation.retire(mock(RuntimeBrokerService.class));

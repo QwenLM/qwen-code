@@ -28,6 +28,7 @@ import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
 import type { ComposerPlaceholderState } from './utils/composerInputState';
+import type { WebShellModelPickerOptions } from './model-picker';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
@@ -200,6 +201,7 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
+  | 'artifacts'
   | 'tokenUsage'
   | 'contextUsage';
 
@@ -216,7 +218,8 @@ export type WebShellRightPanelItem =
   | 'sideTask'
   | 'terminal'
   | 'webPreview'
-  | 'trajectory';
+  | 'trajectory'
+  | 'changeOverview';
 
 export interface WebShellRightPanelOptions {
   /** Empty-state actions to show. Defaults to review and sideTask. */
@@ -263,6 +266,14 @@ export interface ChatHeaderRenderInfo {
   onOpenTokenUsage?: () => void;
   /** Opens context usage for the current session, when available. */
   onOpenContextUsage?: () => void;
+  /**
+   * Number of session artifacts. Published together with `onOpenArtifacts`
+   * only when the artifacts section can actually be opened, so a count never
+   * appears without a way to act on it.
+   */
+  artifactCount?: number;
+  /** Opens the environment panel's artifacts section, when available. */
+  onOpenArtifacts?: () => void;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
 }
@@ -716,6 +727,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  modelPicker?: WebShellModelPickerOptions;
   onRefreshModels?: Parameters<DaemonSessionActions['refreshModels']>[0];
   allowedApprovalModes?: readonly WebShellApprovalMode[];
   filterArtifact?: ArtifactFilter;

@@ -1238,6 +1238,12 @@ export class QQChannel extends ChannelBase {
     return !isGroup || this.groupActiveMsgEnabled.get(target.chatId) !== false;
   }
 
+  protected override canDeliverBackgroundWorkflow(
+    target: SessionTarget,
+  ): boolean {
+    return this.supportsProactiveTarget(target);
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     const inboundContext = this.inboundReplyContext.getStore();
     const latest = this.replyMsgId.get(chatId);

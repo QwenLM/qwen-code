@@ -54,6 +54,7 @@ function Harness({
   composerInput,
   composerInputVersion,
   onSubmit,
+  prepareSubmit,
   onInputTextChange,
   sessionId,
   atWorkspaceCwd,
@@ -65,6 +66,7 @@ function Harness({
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
   onSubmit: ReturnType<typeof vi.fn>;
+  prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
   onInputTextChange?: (text: string) => void;
   sessionId?: string;
   atWorkspaceCwd?: string;
@@ -75,6 +77,7 @@ function Harness({
 }) {
   const composer = useComposerCore({
     onSubmit,
+    prepareSubmit,
     onInputTextChange,
     commands: [],
     editorTheme: {},
@@ -124,6 +127,7 @@ function Harness({
 async function mount({
   composerInput,
   onSubmit = vi.fn(),
+  prepareSubmit,
   onInputTextChange,
   sessionId,
   atWorkspaceCwd,
@@ -134,6 +138,7 @@ async function mount({
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
+  prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
   onInputTextChange?: (text: string) => void;
   sessionId?: string;
   atWorkspaceCwd?: string;
@@ -160,6 +165,7 @@ async function mount({
               currentComposerInput ? currentComposerInputVersion : undefined
             }
             onSubmit={onSubmit}
+            prepareSubmit={prepareSubmit}
             onInputTextChange={onInputTextChange}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
@@ -1338,4 +1344,49 @@ describe('mobile composer draft attachment restore', () => {
       }
     },
   );
+});
+
+describe('mobile composer prepareSubmit gate', () => {
+  it('waits for prepareSubmit and sends text inserted during it', async () => {
+    mockTouchDevice();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prepareSubmit = vi.fn(() => gate);
+    const { onSubmit } = await mount({ prepareSubmit });
+    typeText('typed');
+
+    act(() => latest!.submitText());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(true);
+
+    await act(async () => {
+      latest!.insertText(' dictated');
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed dictated');
+    expect(latest!.getText()).toBe('');
+  });
+
+  it('does not submit the mobile draft after unmount during preparation', async () => {
+    mockTouchDevice();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { onSubmit } = await mount({ prepareSubmit: () => gate });
+    typeText('mobile draft');
+
+    act(() => latest!.submitText());
+    act(() => root?.unmount());
+    root = null;
+    await act(async () => {
+      release();
+    });
+    // The textarea draft outlives the view ref on mobile, so only the
+    // mounted guard can stop this submit.
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
 });

@@ -422,7 +422,7 @@ public class ManagedChannelService {
                 tenantId, channelId, resentId,
                 String.valueOf(first.get("segmentId")),
                 ((Number) first.get("ordinal")).intValue(), "planned", null,
-                0, 0));
+                0, 0, plan.size()));
         instances.claim(tenantId, channelId, resentId, claim.sessionId());
         return new ResendResponse(resentId, deliveryId, true,
                 view(row, claim.sessionId()));
@@ -486,26 +486,44 @@ public class ManagedChannelService {
         String deliveryId = claim.deliveryId();
         // Converge the ledger with the committed record first: a receipt
         // the answer was lost for still landed, and a claim_delivery commit
-        // the ledger never saw still moved the record to sending.
-        instances.findDeliveryRecord(tenantId, claim.sessionId(), deliveryId)
-                .ifPresent(record -> {
-                    String json = instances.readResource(tenantId,
-                            claim.sessionId(), record.recordResourceId());
-                    JsonNode tree = json == null ? null
-                            : readJson(json, "channel delivery record");
-                    if (tree != null) {
-                        planSegments(tenantId, channelId, deliveryId, tree);
-                    }
-                    String state = record.deliveryState();
-                    if (!"planned".equals(state)) {
-                        stepLedger(tenantId, channelId, deliveryId, state,
-                                "delivered".equals(state) && tree != null
-                                        ? lastSegmentReceipt(tree) : null,
-                                claim.claimGeneration());
-                    }
-                });
+        // the ledger never saw still moved the record to sending. When the
+        // ledger already holds the entire immutable plan with every segment
+        // receipted, converge it from its own receipts and skip the LONGTEXT
+        // read + parse + re-plan every sweep would otherwise pay (#16818 A). A
+        // truncated plan — even one whose present rows are all receipted, under
+        // a record of any state — keeps the read so planSegments heals the
+        // missing tail (R5-1). The delivery row is loaded once and threaded
+        // through; whenever a step occurs its returned row is adopted so the
+        // state acted on below stays fresh without a second delivery-row
+        // SELECT.
         Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
                 channelId, deliveryId);
+        Optional<ChannelDelivery> converged = convergeFullyReceiptedFromLedger(
+                ledger, tenantId, claim.sessionId(), channelId, deliveryId,
+                claim.claimGeneration());
+        if (converged.isPresent()) {
+            ledger = converged;
+        } else {
+            var record = instances.findDeliveryRecord(tenantId,
+                    claim.sessionId(), deliveryId);
+            if (record.isPresent()) {
+                String json = instances.readResource(tenantId,
+                        claim.sessionId(), record.get().recordResourceId());
+                JsonNode tree = json == null ? null
+                        : readJson(json, "channel delivery record");
+                if (tree != null) {
+                    planSegments(tenantId, channelId, deliveryId, tree);
+                }
+                String state = record.get().deliveryState();
+                if (!"planned".equals(state)) {
+                    ledger = Optional.of(stepLedger(tenantId, channelId,
+                            deliveryId, state,
+                            "delivered".equals(state) && tree != null
+                                    ? lastSegmentReceipt(tree) : null,
+                            claim.claimGeneration()));
+                }
+            }
+        }
         if (ledger.isPresent() && "planned".equals(ledger.get().state())) {
             // The claim row committed but the claimed-delivery commit never
             // landed, and the lease already lapsed — the failed claim is
@@ -536,6 +554,61 @@ public class ManagedChannelService {
                 claim.sessionId(), body);
         stepLedger(tenantId, channelId, deliveryId, deliveryState(result),
                 null, claim.claimGeneration());
+    }
+
+    /**
+     * When the ledger holds the entire immutable segment plan with every
+     * segment receipted, the record body has nothing left to converge: close a
+     * lagging line from the ledger's own receipts and return the fresh row so
+     * the caller skips the LONGTEXT read. This is the crash window where the
+     * last receipt landed but the ledger's step to delivered failed. The
+     * completeness proof is load-bearing (R5-1): plan is not transactional, so
+     * an interrupted write can leave a receipted PREFIX — under a record of any
+     * state, including delivered — and the rows the ledger happens to hold are
+     * not proof the plan is whole. The plan's size is immutable and persisted
+     * with the delivery, so only a ledger holding exactly that many rows may
+     * skip; a short ledger keeps the read, whose planSegments heals the missing
+     * tail instead of closing the line on a truncated chain. A missing ledger
+     * row or any null receipt also returns empty. The caller passes the row it
+     * already loaded; the only extra lookup on the skip path is the record's
+     * state (a point query, not its LONGTEXT body). A terminal refusal
+     * (rejected or cancelled) keeps the read so the ledger mirrors the record
+     * instead of overriding it from the receipts. Convergence stays ahead of
+     * the settle path.
+     */
+    private Optional<ChannelDelivery> convergeFullyReceiptedFromLedger(
+            Optional<ChannelDelivery> ledger, String tenantId, String sessionId,
+            String channelId, String deliveryId, Long claimGeneration) {
+        if (ledger.isEmpty()) {
+            return Optional.empty();
+        }
+        List<SegmentLedger> ledgerSegments = segments.list(tenantId, channelId,
+                deliveryId);
+        if (ledgerSegments.isEmpty() || ledgerSegments.stream()
+                .anyMatch(segment -> segment.providerReceipt() == null)) {
+            return Optional.empty();
+        }
+        if (ledgerSegments.size() != ledger.get().segmentCount()) {
+            return Optional.empty();
+        }
+        if (!"delivered".equals(ledger.get().state())) {
+            // The record still owns a terminal refusal: a rejection or
+            // cancellation that committed after the last receipt but before
+            // the ledger step must not be overwritten from the receipts. Only
+            // the record's state is looked up here; its body stays unread.
+            var record = instances.findDeliveryRecord(tenantId, sessionId,
+                    deliveryId);
+            if (record.isPresent()
+                    && ("rejected".equals(record.get().deliveryState())
+                            || "cancelled".equals(
+                                    record.get().deliveryState()))) {
+                return Optional.empty();
+            }
+            return Optional.of(stepLedger(tenantId, channelId, deliveryId,
+                    "delivered", ledgerSegments.getLast().providerReceipt(),
+                    claimGeneration));
+        }
+        return ledger;
     }
 
     /** The last provider receipt the committed record holds, when any. */
@@ -597,9 +670,12 @@ public class ManagedChannelService {
         }
         DeliveryPage page = deliveries.listByChannel(tenantId, channelId,
                 decoded, limit);
+        Map<String, List<SegmentLedger>> segmentsByDelivery = segments
+                .listByDelivery(tenantId, channelId, page.deliveries().stream()
+                        .map(ChannelDelivery::deliveryId).toList());
         List<PublicChannelDelivery> data = page.deliveries().stream()
-                .map(row -> publicDelivery(row,
-                        segments.list(tenantId, channelId, row.deliveryId())))
+                .map(row -> publicDelivery(row, segmentsByDelivery.getOrDefault(
+                        row.deliveryId(), List.of())))
                 .toList();
         String next = null;
         if (page.hasMore() && !page.deliveries().isEmpty()) {
@@ -675,11 +751,15 @@ public class ManagedChannelService {
         // Identity pre-check before planning: a pending record whose first
         // segment differs from a stored delivery row is a conflicting chain;
         // refuse it before any segment row is written, so no orphan rows
-        // persist under the key for the public projection to publish.
+        // persist under the key for the public projection to publish. Settle
+        // the record here as well: this pre-check fires before the full-chain
+        // block below, so without its own retirement the refused record would
+        // stay planned and be re-imported on every sweep (verify-pr F1).
         Optional<ChannelDelivery> stored = deliveries.find(tenantId, channelId,
                 pending.deliveryId());
         if (stored.isPresent() && (!stored.get().segmentId().equals(firstSegmentId)
                 || stored.get().ordinal() != firstOrdinal)) {
+            settleConflictingChain(tenantId, pending);
             throw new IllegalStateException(
                     "delivery id already belongs to another segment");
         }
@@ -702,11 +782,13 @@ public class ManagedChannelService {
         planSegments(tenantId, channelId, pending.deliveryId(), record);
         // The delivery-level identity is the record's first segment, stable
         // across a resumed partial: naming the first unsent segment here
-        // would make findOrCreate reject the row the first claim wrote.
+        // would make findOrCreate reject the row the first claim wrote. The
+        // plan's size is persisted so the reconcile gate can prove the ledger
+        // complete rather than trusting the rows it happens to hold (R5-1).
         ChannelDelivery ledger = deliveries.findOrCreate(new ChannelDelivery(
                 tenantId, channelId, pending.deliveryId(),
                 firstSegmentId, firstOrdinal, "planned", null,
-                0, 0));
+                0, 0, record.required("segments").size()));
         Optional<ChannelClaim> existing = instances.findClaim(tenantId,
                 channelId, pending.deliveryId());
         ChannelClaim observed = existing.isEmpty()

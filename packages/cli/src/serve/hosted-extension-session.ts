@@ -117,6 +117,15 @@ export class HostedExtensionSession {
   get enabled(): boolean {
     return this.history.length > 0;
   }
+  /**
+   * Every configRevision the durable chain names. A resident whose bootstrap
+   * never completed builds no Hooks/MCP object, yet a hold row may still sit
+   * under one of these revisions' owner ids (R5-1).
+   */
+  get configRevisions(): readonly number[] {
+    return [...new Set(this.history.map((entry) => entry.configRevision))];
+  }
+
   get activeBundleRef(): ManagedSessionDurableRef | undefined {
     return (
       this.history.findLast((entry) => entry.phase === 'active')?.bundleRef ??

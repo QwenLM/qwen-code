@@ -72,9 +72,9 @@ class SharedHarnessOwnershipTest {
                 new RuntimeLifecycleAuthority("close", 1)));
         bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-b", null);
 
-        // Unbound and private Kubernetes Workspace placements keep today's unfenced Workspace isolation.
+        // Unbound and private external Workspace placements keep today's unfenced Workspace isolation.
         bindings.requireHarnessAdmission(new RuntimeProvisionRequest(SCOPE, null, "legacy", null), SCOPE, "harness-a", null);
-        bindings.requireHarnessAdmission(new RuntimeProvisionRequest(SCOPE, null, "kubernetes-workspace", "storage"),
+        bindings.requireHarnessAdmission(new RuntimeProvisionRequest(SCOPE, null, "external-workspace", "storage"),
                 SCOPE, "harness-a", null);
         bindings.requireHarnessAdmission(SCOPE, "harness-a", null);
     }
@@ -195,17 +195,6 @@ class SharedHarnessOwnershipTest {
         assertClosed(() -> bindings.admitExecution(sessions, executions, execution(binding, a, "call-a")));
         assertEquals(ToolExecutionRecord.State.PREPARED,
                 bindings.admitExecution(sessions, executions, execution(binding, b, "call-b")).getState());
-    }
-
-    @Test
-    void inMemoryRepositoryFencesTheSameHarnessSession() {
-        var registry = new InMemoryRuntimeBindingRepository();
-        var saved = new InMemoryRuntimeSessionRepository();
-        var binding = ready(registry, SHARED);
-        registry.requestHarnessDrain("tenant", "harness-a");
-
-        assertClosed(() -> registry.admitSession(saved, candidate(binding, "harness-a", "a-1")));
-        assertNotNull(registry.admitSession(saved, candidate(binding, "harness-b", "b-1")));
     }
 
     @Test

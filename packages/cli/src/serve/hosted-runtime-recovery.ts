@@ -207,7 +207,12 @@ export type HostedRecoveryDeclineReason =
   /** The checkpoint's durable bytes fail the parse/identity verdict. */
   | 'checkpoint_blocked'
   /** The recovered state still does not authorize this Turn. */
-  | 'unresolved_after_settle';
+  | 'unresolved_after_settle'
+  /** #17260: the Turn's saved public-child recovery profile belongs to a
+   * topology this Harness cannot open at all (a shell-era child profile
+   * after the move off the shell topology). No retry re-opens it, so the
+   * coordinator abandons the recovery on the first drive. */
+  | 'public_child_recovery_unsupported';
 
 export type HostedRuntimeRecoveryOutcome =
   | { readonly kind: 'recovered'; readonly turn: HostedRecoveryTurn }
