@@ -5,6 +5,7 @@
  */
 
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { getHeadCommit } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import {
   applySessionStartupConfig,
   parseSessionStartupConfig,
@@ -5912,12 +5913,29 @@ export function createSessionControlPlane(
         }
       }
 
+      // A plain session (no branch/worktree meta) records its start commit so
+      // the change overview's commit fallback can scope <baseCommit>..HEAD.
+      // Captured here centrally for every plain producer (scheduled tasks,
+      // sub-sessions, live tasks, a2a, …) that does not pass one (R5-1). Read
+      // once at creation; a failed read stays undefined (no boundary). The
+      // attach/coalesce paths return before this point, so an existing
+      // session's recorded start commit is never recomputed from a moved HEAD.
+      const startCommit =
+        baseCommit ??
+        (branch || worktree ? undefined : getHeadCommit(boundWorkspace));
       const entry = createSessionEntry(
         ci,
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId, sourceType, sourceId, worktree, branch, baseCommit },
+        {
+          parentSessionId,
+          sourceType,
+          sourceId,
+          worktree,
+          branch,
+          baseCommit: startCommit,
+        },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -13439,6 +13457,14 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (entry?.worktree !== undefined) {
         delete entry.worktree;
+        markSessionCatalogChanged();
+      }
+    },
+
+    setSessionBaseCommit(sessionId, baseCommit) {
+      const entry = byId.get(sessionId);
+      if (entry && baseCommit) {
+        entry.baseCommit = baseCommit;
         markSessionCatalogChanged();
       }
     },

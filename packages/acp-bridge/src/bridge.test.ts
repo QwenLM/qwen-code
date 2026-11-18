@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, it, expect, onTestFinished, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { getEventListeners } from 'node:events';
 import { promises as fsp } from 'node:fs';
@@ -28069,6 +28070,64 @@ describe('createAcpSessionBridge', () => {
       bridge.setSessionWorktree('missing-session', worktree);
       expect(bridge.getSessionCatalogVersion().revision).toBe(v1.revision);
       await bridge.shutdown();
+    });
+
+    it('records a start commit on a live plain entry via setSessionBaseCommit (R5-1)', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(
+        bridge.getSessionSummary(session.sessionId).baseCommit,
+      ).toBeUndefined();
+      bridge.setSessionBaseCommit?.(session.sessionId, 'startsha');
+      expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+        'startsha',
+      );
+      // A missing entry is a no-op, not a throw.
+      bridge.setSessionBaseCommit?.('missing-session', 'startsha');
+      await bridge.shutdown();
+    });
+
+    it('captures the workspace HEAD as the start commit for a plain spawn (R5-1)', async () => {
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-base-commit-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'init');
+      const head = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        // A plain producer passes no baseCommit/branch/worktree; doSpawn must
+        // capture the workspace HEAD so the commit fallback keeps a boundary.
+        const session = await bridge.spawnOrAttach({ workspaceCwd: repo });
+        expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+          head,
+        );
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
     });
 
     it('advances on a persisted-only branch without a live registration', async () => {

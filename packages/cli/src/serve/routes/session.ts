@@ -5713,6 +5713,15 @@ export function registerSessionRoutes(
                     // The cd landed: finish the transfer instead of
                     // discarding the branch/snapshot just applied locally.
                     await clearWorktreeSessionDurable(sidecarPath);
+                    // Promote the worktree base into the plain start commit so
+                    // the commit fallback keeps a boundary after the worktree
+                    // meta is removed (R5-1).
+                    if (base) {
+                      runtime.bridge.setSessionBaseCommit?.(
+                        storageSessionId,
+                        base,
+                      );
+                    }
                     runtime.bridge.clearSessionWorktree?.(storageSessionId);
                     res.status(200).json({
                       sessionId: storageSessionId,
@@ -5730,6 +5739,12 @@ export function registerSessionRoutes(
                 throw error;
               }
               await clearWorktreeSessionDurable(sidecarPath);
+              // Promote the worktree base into the plain start commit so the
+              // commit fallback keeps a boundary after the worktree meta is
+              // removed (R5-1).
+              if (base) {
+                runtime.bridge.setSessionBaseCommit?.(storageSessionId, base);
+              }
               runtime.bridge.clearSessionWorktree?.(storageSessionId);
               res.status(200).json({
                 sessionId: storageSessionId,
@@ -5908,10 +5923,18 @@ export function registerSessionRoutes(
                 slug,
                 path: worktree.path,
                 branch: '',
+                baseCommit,
+                baseBranch: currentBranch ?? undefined,
               });
               res.status(200).json({
                 sessionId: storageSessionId,
-                worktree: { slug, path: worktree.path, branch: '' },
+                worktree: {
+                  slug,
+                  path: worktree.path,
+                  branch: '',
+                  baseCommit,
+                  baseBranch: currentBranch ?? undefined,
+                },
                 currentCwd: changed.newCwd,
               });
             } catch (error) {
@@ -5929,10 +5952,18 @@ export function registerSessionRoutes(
                   slug,
                   path: worktree.path,
                   branch: '',
+                  baseCommit,
+                  baseBranch: currentBranch ?? undefined,
                 });
                 res.status(200).json({
                   sessionId: storageSessionId,
-                  worktree: { slug, path: worktree.path, branch: '' },
+                  worktree: {
+                    slug,
+                    path: worktree.path,
+                    branch: '',
+                    baseCommit,
+                    baseBranch: currentBranch ?? undefined,
+                  },
                   currentCwd: worktree.path,
                 });
                 return;
@@ -6616,6 +6647,11 @@ export function registerSessionRoutes(
           );
           return;
         }
+        // Record the branch point so the change overview's commit fallback can
+        // scope this session's window to <baseCommit>..HEAD. A current-checkout
+        // branch session has no worktree sidecar to restore it from, so without
+        // this capture the fallback would be suppressed permanently (R5-1).
+        const branchBaseCommit = await getHeadCommit(runtime.workspaceCwd);
         const result = await runtime.bridge.branchSession(
           sessionId,
           {
@@ -6626,6 +6662,12 @@ export function registerSessionRoutes(
         );
         if (atRecordId === undefined) {
           const restored = result as BridgeBranchedSession;
+          if (branchBaseCommit) {
+            runtime.bridge.setSessionBaseCommit?.(
+              restored.sessionId,
+              branchBaseCommit,
+            );
+          }
           const releaseLiveBranch = async () => {
             if (restored.attached) {
               await runtime.bridge

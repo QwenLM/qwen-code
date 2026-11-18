@@ -31037,6 +31037,38 @@ describe('createServeApp', () => {
       );
     });
 
+    it('records the branch point on a current-checkout branched session (R5-1)', async () => {
+      // A no-worktree branch session has no sidecar to restore a start commit
+      // from; the route must capture the workspace HEAD at creation and record
+      // it on the new live entry, or the change overview's commit fallback is
+      // suppressed permanently.
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async () => ({
+        sessionId: 'branch-session',
+        displayName: 'Branch',
+        forkedFrom: { sessionId: 'session-A', displayName: 'Source' },
+      }));
+      const setSessionBaseCommit = vi.fn();
+      bridge.setSessionBaseCommit = setSessionBaseCommit;
+      mockBranchOps.getHeadCommit = () => Promise.resolve('branchbase123');
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      try {
+        const res = await request(app)
+          .post('/session/session-A/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ name: 'feat' });
+
+        expect(res.status).toBe(201);
+        expect(setSessionBaseCommit).toHaveBeenCalledWith(
+          'branch-session',
+          'branchbase123',
+        );
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
     it('returns 409 when the checkpoint is no longer active', async () => {
       const bridge = fakeBridge();
       bridge.branchSession = vi.fn(async () => {

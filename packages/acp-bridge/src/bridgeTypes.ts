@@ -2223,6 +2223,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   clearSessionWorktree?(sessionId: string): void;
 
   /**
+   * Record the immutable start commit on a live session entry that has no
+   * branch/worktree meta (a current-checkout branch session, or a worktree
+   * handed back to the local checkout). The change overview's commit fallback
+   * scopes its window to `<baseCommit>..HEAD`; without it the fallback is
+   * suppressed. No-op when the session is not live or the read failed.
+   */
+  setSessionBaseCommit?(sessionId: string, baseCommit: string): void;
+
+  /**
    * Arm the worktree-reset admission barrier for a session id: while armed,
    * `sendPrompt` and the other writers that reach the session's checkout or
    * cwd (`rewindSession`, `launchSessionForkAgent`, `branchSession`,

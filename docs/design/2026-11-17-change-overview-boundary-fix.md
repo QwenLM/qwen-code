@@ -160,12 +160,21 @@ summary.baseCommit` (plain session) → `<start>..HEAD`; else `baseBranch`
   with no remote) is dropped by the route's existence probe rather than failing
   the walk, so the present exclusions — bound PR heads above all — still apply.
   Known residuals: a remote named other than `origin`/`upstream` is not covered
-  (its integrated commits may re-list as loose work); the worktree-handoff flow
-  can record `originalBranch` from a sibling checkout whose HEAD diverges from
-  the recorded base commit, so in that rare case the base-branch narrowing can
-  be imprecise; and plain sessions record no `baseBranch`, so they get no
-  base-branch narrowing (the start-commit window still bounds their work). The
-  start-commit window bounds the session's work correctly in every case.
+  (its integrated commits may re-list as loose work); an advance of the base
+  branch that **no** remote-tracking ref reaches (a local-only base branch, or
+  unpushed commits on the local base) re-lists as loose work after the session
+  merges it — the deliberate trade of excluding only remote-tracking refs:
+  `--not <local base>` cannot distinguish "the base absorbed the session's own
+  commits" (must not exclude, or the window empties) from "the base advanced
+  into the session" (should exclude), and excluding the local name broke the
+  far more common absorbed case, so the local name is left out; the
+  worktree-handoff flow can record `originalBranch` from a sibling checkout
+  whose HEAD diverges from the recorded base commit, so in that rare case the
+  base-branch narrowing can be imprecise; and plain sessions record no
+  `baseBranch`, so they get no base-branch narrowing (the start-commit window
+  still bounds their work). In every case the start-commit window still bounds
+  the session's work; these residuals only affect the best-effort upstream
+  narrowing within that window.
 - Keep the guard: if any produced PR unit failed to resolve a head, suppress
   the fallback (its commits cannot be excluded, so they must not be re-listed).
 - Capability skew: with bound PR units but **no** exclude capability (a new
