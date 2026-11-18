@@ -2831,6 +2831,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
+  'sidebar.sessionGoal': (v) =>
+    `Goal: ${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.sessionPrStateMerged': 'Merged',
   'sidebar.sessionPrStateClosed': 'Closed',
   'sidebar.sessionIssue': (v) => `Issue #${v?.number ?? ''}`,
@@ -8103,6 +8105,8 @@ const ZH: Messages = {
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
+  'sidebar.sessionGoal': (v) =>
+    `目标：${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.sessionPrStateMerged': '已合入',
   'sidebar.sessionPrStateClosed': '已关闭',
   'sidebar.sessionIssue': (v) => `议题 #${v?.number ?? ''}`,

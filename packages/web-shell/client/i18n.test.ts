@@ -240,6 +240,24 @@ describe('web-shell i18n catalog', () => {
     expect(getTranslator('ru')('goals.budget.time')).toBe('Активное время');
   });
 
+  it('localizes the sidebar goal marker label in every catalog', () => {
+    // The marker's accessible name composes the localized status word with
+    // the objective; a missing zh/ru entry would fall back to EN mid-label.
+    for (const [language, expected] of [
+      ['en', 'Goal: Paused — ship it'],
+      ['zh-CN', '目标：已暂停 — ship it'],
+      ['ru', 'Цель: Пауза — ship it'],
+    ] as const) {
+      const t = getTranslator(language);
+      expect(
+        t('sidebar.sessionGoal', {
+          status: t('goal.status.paused'),
+          objective: 'ship it',
+        }),
+      ).toBe(expected);
+    }
+  });
+
   it('keeps every scheduled-task delivery translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');

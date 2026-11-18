@@ -15,6 +15,7 @@ import {
   canonicalSessionPrUrl,
   readSessionPrsDetailed,
   readSessionArtifactSummarySidecarAsync,
+  readSessionGoalSidecar,
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
@@ -587,6 +588,47 @@ async function enrichArtifactSummaries(
   }
 }
 
+/**
+ * Enrich persisted session summaries with the goal list projection from
+ * sidecar files, so the sidebar marker survives daemon restarts and shows
+ * for unloaded/archived sessions the live-only Goals listing cannot see.
+ * Same pattern as {@link enrichPrSidecars}; disk-only, no IPC probes. An
+ * absent or unreadable sidecar leaves `goal` unset (no marker).
+ */
+async function enrichGoalSidecars(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    let sidecar: Awaited<ReturnType<typeof readSessionGoalSidecar>>;
+    try {
+      const sidecarPath = sessionService.getGoalSessionPathForArchiveState(
+        sessionId,
+        archiveState,
+      );
+      sidecar = signal
+        ? await readSessionGoalSidecar(sidecarPath, { signal })
+        : await readSessionGoalSidecar(sidecarPath);
+    } catch {
+      signal?.throwIfAborted();
+      sidecar = null;
+    }
+    if (sidecar) {
+      bySessionId.set(sessionId, {
+        ...summary,
+        goal: {
+          status: sidecar.status,
+          objective: sidecar.objective,
+          updatedAt: new Date(sidecar.updatedAt).toISOString(),
+        },
+      });
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -860,6 +902,7 @@ async function loadAllPersistedSummaries(
     archiveState,
     signal,
   );
+  await enrichGoalSidecars(bySessionId, sessionService, archiveState, signal);
   signal.throwIfAborted();
   return {
     sessions: [...bySessionId.values()],
@@ -1706,6 +1749,12 @@ async function listWorkspaceSessionsForResponseInRuntime(
     archiveState,
     readOptions.signal,
   );
+  await enrichGoalSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
   readOptions.signal?.throwIfAborted();
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
@@ -1887,6 +1936,12 @@ export async function searchWorkspaceSessionsForResponse(
       readOptions.signal,
     );
     await enrichArtifactSummaries(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichGoalSidecars(
       bySessionId,
       sessionService,
       'active',
