@@ -19737,10 +19737,14 @@ describe('createServeApp', () => {
           ]);
           expect(bridge.killCalls).toHaveLength(0);
           expect(bridge.loadCalls[0]).toMatchObject({
-            suppressWorktreeContextRestore: true,
             deferRestoreAskUserQuestionPrompt: true,
             deferAutomaticWorkUntilCwdRestore: true,
           });
+          // Non-Channel restores keep the child's worktree restore (marker
+          // heal + resumed notice); only Channel restores suppress it.
+          expect(bridge.loadCalls[0].suppressWorktreeContextRestore).toBe(
+            channel ? true : undefined,
+          );
         } finally {
           mockWt.readSidecar = undefined;
           mockWt.readMarker = undefined;

@@ -724,9 +724,15 @@ export async function restoreSessionCore(options: {
           isPart4AWorktreeRestore &&
           sidecarStrictUnderLock &&
           canDeferRestoreQuestion;
-        suppressWorktreeContextRestore ||= deferAutomaticWorkUntilCwdRestore;
+        // The hold does not imply suppression: the child's own worktree
+        // restore only heals a missing ownership marker and sets the resumed
+        // notice — it never relocates nor starts automatic work — so it must
+        // keep running for non-Channel restores. Suppressing it would turn a
+        // missing marker into a permanent 409 and drop the notice.
         deferRestoreAskUserQuestionPrompt =
-          suppressWorktreeContextRestore && canDeferRestoreQuestion;
+          (suppressWorktreeContextRestore ||
+            deferAutomaticWorkUntilCwdRestore) &&
+          canDeferRestoreQuestion;
         assertRuntimeGenerationOpen?.();
         if (isInternalWorkspaceRuntime(runtime)) {
           sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -758,12 +764,10 @@ export async function restoreSessionCore(options: {
                 sessionId,
                 workspaceCwd,
                 ...(suppressWorktreeContextRestore
-                  ? {
-                      suppressWorktreeContextRestore: true,
-                      ...(deferRestoreAskUserQuestionPrompt
-                        ? { deferRestoreAskUserQuestionPrompt: true }
-                        : {}),
-                    }
+                  ? { suppressWorktreeContextRestore: true }
+                  : {}),
+                ...(deferRestoreAskUserQuestionPrompt
+                  ? { deferRestoreAskUserQuestionPrompt: true }
                   : {}),
                 ...(deferAutomaticWorkUntilCwdRestore
                   ? { deferAutomaticWorkUntilCwdRestore: true }
@@ -782,12 +786,10 @@ export async function restoreSessionCore(options: {
                 sessionId,
                 workspaceCwd,
                 ...(suppressWorktreeContextRestore
-                  ? {
-                      suppressWorktreeContextRestore: true,
-                      ...(deferRestoreAskUserQuestionPrompt
-                        ? { deferRestoreAskUserQuestionPrompt: true }
-                        : {}),
-                    }
+                  ? { suppressWorktreeContextRestore: true }
+                  : {}),
+                ...(deferRestoreAskUserQuestionPrompt
+                  ? { deferRestoreAskUserQuestionPrompt: true }
                   : {}),
                 ...(deferAutomaticWorkUntilCwdRestore
                   ? { deferAutomaticWorkUntilCwdRestore: true }
