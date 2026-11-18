@@ -507,6 +507,25 @@ describe('DeleteSessionDialog selection', () => {
     );
   });
 
+  it('lets an error keep the hint over a refusal', () => {
+    // Deliberate: the hint has one slot and an error is the durable statement,
+    // so a refused row stays untickable without taking that slot.
+    scopedSessionsError = new Error('load boom');
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toContain('load boom');
+  });
+
   it('keeps a load error in the hint when a row is ticked', () => {
     // Clearing the refusal must not clobber an unrelated error sharing the hint.
     scopedSessionsError = new Error('load boom');
@@ -667,6 +686,35 @@ describe('DeleteSessionDialog selection', () => {
     });
     expect(hint()).toContain('Failed to delete 1 session(s): locked');
     expect(hint()).not.toContain('background work');
+  });
+
+  it('keeps a settled delete failure in the hint when a blocked row is clicked', async () => {
+    // The failure text has no second rendering site in this dialog, so a later
+    // refusal must not be able to take the slot away from it.
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's1', error: 'locked' }],
+    });
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
   });
 
   it('drops the refusal when the refused row filters away and back', () => {
