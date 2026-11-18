@@ -54,8 +54,9 @@ workspace 列；工作区归属在 JOIN 的 `ma_operation` 行
   读取，JSON 游标分页即可。`workspace_artifact_library_stream` 保持缺席。
 - 公开孪生路由。只有 Web UI 消费此面；WebShell-only 的 workspace-files
   族是先例。
-- schema 或索引变更、响应信封中的会话元数据、富 MIME 预览。会话标题在客户端
-  用页面已加载的会话列表解析；产物字节仍是投影发布的原始 stdout/stderr 流。
+- 响应信封中的会话元数据、富 MIME 预览。会话标题在客户端用页面已加载的会话
+  列表解析；产物字节仍是投影发布的原始 stdout/stderr 流。唯一的 schema 变更
+  是 V1 基线上的工作区访问路径索引（见「存储与服务」）。
 
 ## 协议
 
@@ -167,7 +168,9 @@ Range、周期重授权等守卫全部保留。
 - `ApiModels`：`WebShellWorkspaceArtifactQueryRequest(@NotBlank String
 workspaceId, String cursor, Integer limit)` 带 `rejectUnknown`；
   `ManagedAgentApiContractTest.RECORD_SCHEMAS` 建立映射，路由交换探针覆盖
-  匿名拒绝与准入页。
+  匿名拒绝（`401`）与准入页（`200`）：契约上下文种一个可读工作区及一条投影
+  产物行，并 stub reader 的 publication 支持，使响应按 schema 校验到
+  `ArtifactResponse.access`，而不止信封。
 - `WorkspaceDiscoveryController`：`WebShellCapabilities` 增加
   `workspaceArtifactLibrary`，计算为
   `settings.getArtifacts().isEnabled() && reader.supported()`；伸缩构造器
@@ -206,11 +209,16 @@ watermark 查询为同一 JOIN 与过滤上的 `SELECT COALESCE(MAX(a.id), 0)`�
 
 投影枚举不动：`ManagedSchemaProjectionTest` 将每个投影钉为表的非 `id` 列、
 按 DDL 顺序。本查询在 select 列与 keyset 中引用 `a.id`，遵循既有实践——
-where/join 子句可引用投影之外的 joined 表列；不做 schema 或索引变更。
-预期计划经 `idx_ma_operation_claim (operation_kind, state)` 收窄
+where/join 子句可引用投影之外的 joined 表列。V1 基线新增一个索引：
+`idx_ma_operation_workspace ON ma_operation (workspace_id, operation_kind,
+state, id)`，使页面成本以工作区的投影为界，而非整个部署的工具产物目录——
+每次打开产物库都会请求首页，空工作区也不例外。`tenant_id` 保留为残余过滤
+而非前导列：两个身份列都是 `VARBINARY(2048)`，`(tenant_id, workspace_id)`
+前导对会超过 InnoDB 3072 字节的索引键上限。预期计划经工作区索引收窄
 `ma_operation`，按主键探测 `ma_session`，经
 `uk_managed_artifact_stream (result_id, stream_id)` 探测 `ma_artifact`，
-再对匹配行按 `a.id` 排序。若数据量需要，专用工作区索引可作为后续。
+再对匹配行按 `a.id` 排序。工作区产物集成套件（H2 与 MySQL 孪生）中的
+schema 断言钉住该索引的前导列，删除即红。
 
 `ManagedArtifactService` 增加 `workspacePage(TenantContext, workspaceId,
 cursor, limit)`，实现上述准入、校验、可用性、策略分组与游标发出，并注入
@@ -248,7 +256,11 @@ options)` 经共享 JSON RPC 路径 POST `/workspaces/artifacts/query`，body
   它按 `artifact.session_id` 重取产物元数据，用既有 64 KiB 读取器分页字节，
   预览与下载门控（`reader.canDownload`）不变。加载更多追加下一游标页；
   空、加载、错误状态显式，`404` 回产物库不可用消息而非空列表。文案在新
-  `managed-artifact-library-messages.ts`（EN/ZH），注册进 `i18n.tsx`。
+  `managed-artifact-library-messages.ts`（EN/ZH/RU），注册进 `i18n.tsx`。
+  产物库仅交互态可达，故 transcript 构建用
+  `managed-artifact-library-messages.transcript-stub.ts`（三个空对象）替换
+  该模块（在 `vite.lib.config.ts` 中与其他 `managed-*` stub 并列注册）：
+  文案不进任何导出文档，渲染器预算保持 main 的钉值。
 
 对话框不使用 `useArtifactWorkspaceTarget` 或 `ArtifactPanel`：它们依赖
 Managed-only shell 不提供的 daemon 工作区上下文。
@@ -260,7 +272,8 @@ Java（managed-agent-server）：
 - `contracts`：`ApiModels.java`、`ManagedToolResultStore.java`、OpenAPI
   契约 JSON。
 - `control-plane`：`ManagedArtifactService.java`。
-- `persistence`：`JdbcManagedToolResultStore.java`。
+- `persistence`：`JdbcManagedToolResultStore.java`、`V1__managed_schema.sql`
+  基线（一个新索引，按模块预发布规则就地编辑）。
 - `server`：`ManagedArtifactController.java`、
   `WorkspaceDiscoveryController.java`。
 - `verification`：`SurfaceRegistry.java`、`SurfaceAdmissionAcceptanceTest.java`、
@@ -276,7 +289,10 @@ TypeScript：
   `java-managed-agent-provider.ts`、`managed-agent-provider.ts`、
   `managed-tool-result-types.ts`、`ManagedWorkspaceNavigation.tsx`、
   `ManagedSessionsPage.tsx`、新 `ManagedArtifactLibraryPage.tsx` 与文案
-  模块、`i18n.tsx`，及同址测试。
+  模块及其 transcript stub、`i18n.tsx`、`vite.lib.config.ts`（stub 注册）、
+  `build-artifact.test.ts`（transcript 边界），及同址测试。
+- `packages/web-templates`：`src/export-html/build.mjs`——渲染器预算常量
+  保持 main 的钉值；测量记录注明 stub。
 
 文档：本设计双语文档与 E2E 计划
 `.qwen/e2e-tests/managed-workspace-artifact-library.md`。
@@ -317,5 +333,8 @@ TypeScript：
   既有 `WebShellArtifactPage`，会话路由不受响应 schema 漂移影响。
 - 结果是查询时过滤的逐页快照；分页中途的授权或绑定变化由游标的
   tenant/actor/workspace 绑定与不可用行授权重检捕获，而非事务性工作区快照。
-- 不加新索引：计划复用既有索引并对匹配集排序。预发布数据量下可接受；若
-  实测需要，工作区级索引是点名的后续项。
+- 一个新索引 `idx_ma_operation_workspace (workspace_id, operation_kind,
+state, id)`：每次访问工作区都会打开产物库，页面成本必须以工作区为界，
+  而非以目录为界。`tenant_id` 不能与 `workspace_id` 并列前导——两者都是
+  `VARBINARY(2048)`，该对会超过 InnoDB 3072 字节键上限——故保留为残余
+  过滤，在不加宽键的前提下保持隔离。

@@ -65,10 +65,11 @@ Out of scope:
   pagination suffices. `workspace_artifact_library_stream` stays absent.
 - A public twin route. Only the Web UI consumes this surface; the WebShell-only
   workspace-files family is the precedent.
-- Schema or index changes, session metadata in the response envelope, and
-  rich MIME previews. Session titles resolve client-side from the session
-  list the page already loads; artifact bytes remain the raw stdout/stderr
-  streams the projection publishes.
+- Session metadata in the response envelope and rich MIME previews. Session
+  titles resolve client-side from the session list the page already loads;
+  artifact bytes remain the raw stdout/stderr streams the projection
+  publishes. The one schema change is the workspace access-path index on the
+  V1 baseline (see Store and service).
 
 ## Protocol
 
@@ -202,7 +203,10 @@ revalidation guards.
 - `ApiModels`: `WebShellWorkspaceArtifactQueryRequest(@NotBlank String
 workspaceId, String cursor, Integer limit)` with `rejectUnknown`;
   `ManagedAgentApiContractTest.RECORD_SCHEMAS` maps it, and the route exchange
-  probes cover the anonymous refusal and an admitted page.
+  probes cover the anonymous refusal (`401`) and an admitted page (`200`):
+  the contract context seeds one readable workspace with a projected artifact
+  row and stubs the reader's publication support, so the response is
+  schema-validated down to `ArtifactResponse.access`, not just the envelope.
 - `WorkspaceDiscoveryController`: `WebShellCapabilities` gains
   `workspaceArtifactLibrary`, computed as
   `settings.getArtifacts().isEnabled() && reader.supported()`; a telescoping
@@ -250,11 +254,20 @@ The projection enum is untouched: `ManagedSchemaProjectionTest` pins each
 projection to the table's non-`id` columns in DDL order. Referencing `a.id`
 in this one query's select list and keyset follows the existing practice of
 referencing joined-table columns outside the projection in where/join
-clauses; no schema or index change is made. The expected plan narrows
-`ma_operation` through `idx_ma_operation_claim (operation_kind, state)`,
-probes `ma_session` by its primary key and `ma_artifact` through
+clauses. The V1 baseline gains one index,
+`idx_ma_operation_workspace ON ma_operation (workspace_id, operation_kind,
+state, id)`, so the page's cost is bounded by the workspace's projections
+instead of the deployment's whole tool-output catalog — a first page is
+requested on every library open, including empty workspaces. `tenant_id`
+stays a residual filter rather than a leading column: both identity columns
+are `VARBINARY(2048)`, and a `(tenant_id, workspace_id)` leading pair would
+exceed InnoDB's 3072-byte index key limit. The expected plan narrows
+`ma_operation` through the workspace index, probes `ma_session` by its
+primary key and `ma_artifact` through
 `uk_managed_artifact_stream (result_id, stream_id)`, then sorts the matched
-rows by `a.id`. A dedicated workspace index can follow if volume demands it.
+rows by `a.id`. A schema assertion in the workspace-artifact integration
+suite (H2 and MySQL twins) pins the index's leading columns, so removing it
+turns the gate red.
 
 `ManagedArtifactService` gains `workspacePage(TenantContext, workspaceId,
 cursor, limit)` implementing the admission, validation, availability, policy
@@ -303,7 +316,11 @@ options)` posts `/workspaces/artifacts/query` with
   next cursor page; empty, loading, and error states are explicit, and a
   `404` answers with the library-unavailable message rather than an empty
   list. Strings live in a new `managed-artifact-library-messages.ts`
-  (EN/ZH) registered in `i18n.tsx`.
+  (EN/ZH/RU) registered in `i18n.tsx`. The library is interactive-only, so a
+  `managed-artifact-library-messages.transcript-stub.ts` of three empty
+  objects replaces the module in the transcript build (registered in
+  `vite.lib.config.ts` beside the other `managed-*` stubs): the copy ships in
+  no exported document, and the renderer budget stays at main's tracking.
 
 The dialog never uses `useArtifactWorkspaceTarget` or `ArtifactPanel`: those
 depend on the daemon workspace context the Managed-only shell does not
@@ -316,7 +333,8 @@ Java (managed-agent-server):
 - `contracts`: `ApiModels.java`, `ManagedToolResultStore.java`, the OpenAPI
   contract JSON.
 - `control-plane`: `ManagedArtifactService.java`.
-- `persistence`: `JdbcManagedToolResultStore.java`.
+- `persistence`: `JdbcManagedToolResultStore.java`, the `V1__managed_schema.sql`
+  baseline (one new index, edited in place per the module's pre-release rule).
 - `server`: `ManagedArtifactController.java`,
   `WorkspaceDiscoveryController.java`.
 - `verification`: `SurfaceRegistry.java`, `SurfaceAdmissionAcceptanceTest.java`,
@@ -332,8 +350,11 @@ TypeScript:
   `java-managed-agent-client.ts`, `java-managed-agent-provider.ts`,
   `managed-agent-provider.ts`, `managed-tool-result-types.ts`,
   `ManagedWorkspaceNavigation.tsx`, `ManagedSessionsPage.tsx`, the new
-  `ManagedArtifactLibraryPage.tsx` and messages module, `i18n.tsx`, and
-  collocated tests.
+  `ManagedArtifactLibraryPage.tsx` and messages module with its transcript
+  stub, `i18n.tsx`, `vite.lib.config.ts` (stub registration),
+  `build-artifact.test.ts` (transcript boundary), and collocated tests.
+- `packages/web-templates`: `src/export-html/build.mjs` — the renderer budget
+  constants stay at main's tracking; the measurement record notes the stub.
 
 Docs: this design pair and the E2E plan
 `.qwen/e2e-tests/managed-workspace-artifact-library.md`.
@@ -386,6 +407,9 @@ Docs: this design pair and the E2E plan
   change mid-pagination is caught by the cursor's tenant/actor/workspace
   binding and the unavailable-row grant re-check, not by a transactional
   workspace snapshot.
-- No new index: the plan reuses existing indexes and sorts the matched set.
-  Pre-release volumes make this acceptable; a workspace-scoped index is the
-  named follow-up if measurement demands it.
+- One new index, `idx_ma_operation_workspace (workspace_id, operation_kind,
+state, id)`: the library opens on every workspace visit, so the page's cost
+  must be workspace-bounded, not catalog-bounded. `tenant_id` cannot lead the
+  index beside `workspace_id` — both are `VARBINARY(2048)` and the pair would
+  exceed InnoDB's 3072-byte key limit — so it stays a residual filter, which
+  preserves isolation without widening the key.

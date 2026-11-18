@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_235;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_147_200;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -148,16 +148,15 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_235;
 // to the warning and 1,671 to the ceiling. (A local build against the worktree's
 // own node_modules measures lower — 2,138,797 — but the lane's absolute number
 // is what these constants track.)
-// The workspace artifact library copy (nine keys across two locales) adds
-// 1,189 on its own: the same tree with main 3d75b8ee60's dictionary measures
-// 2,145,833 bytes, against 2,147,022 with the new copy. Merging main (which
-// carries the #17746 ceiling raise for the #17515/#17398 copy plus the other
-// inbound transcript copy) and re-measuring the merged tree against the
-// frozen-lockfile node_modules gives 2,148,522 JS bytes (CSS 2,423,645,
-// separate); the forbidden-input guard passes and the third-party input mix is
-// unchanged. Re-track that merged measurement: leave 713 bytes to the warning
-// and 1,713 to the ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_150_235;
+// The workspace artifact library copy (nine keys across three locales) is
+// interactive-only: managed-artifact-library-messages.transcript-stub.ts
+// replaces it in transcript mode, so it contributes no bytes here. The merged
+// tree first measured 2,148,522 JS bytes with the copy inlined; registering
+// the stub brings it to 2,146,575 (CSS 2,423,645, separate), 46 above the
+// 2,146,529 lane measurement #17746 re-tracked. The forbidden-input guard
+// passes and the third-party input mix is unchanged, so the constants stay at
+// main's #17746 tracking instead of raising them for this PR.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_148_200;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

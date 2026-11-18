@@ -139,11 +139,15 @@ describe('ManagedArtifactLibraryPage', () => {
       limit: 50,
     });
     expect(document.body.textContent).toContain('Artifact library · Project');
-    expect(document.body.textContent).toContain('stdout · 5 B');
-    expect(document.body.textContent).toContain('Task one');
-    expect(document.body.textContent).toContain('stdout · 6 B');
-    expect(document.body.textContent).toContain('Session session-');
-    expect(document.body.textContent).toContain('Unavailable');
+    expect(row(artifact.id).textContent).toContain('stdout · 5 B');
+    expect(row(artifact.id).textContent).toContain('Task one');
+    expect(row(artifact.id).textContent).not.toContain('Unavailable');
+    expect(row(other.id).textContent).toContain('stdout · 6 B');
+    const fallback = [...row(other.id).querySelectorAll('span')].find((node) =>
+      node.textContent?.startsWith('Session '),
+    );
+    expect(fallback?.textContent).toBe('Session session-');
+    expect(row(other.id).textContent).toContain('Unavailable');
     expect(reader.getArtifact).toHaveBeenCalledWith(
       'session-1',
       'artifact-1',
@@ -169,10 +173,10 @@ describe('ManagedArtifactLibraryPage', () => {
     expect(reader.readRange).not.toHaveBeenCalled();
   });
 
-  it('appends cursor pages without duplicating rows', async () => {
+  it('appends cursor pages without dropping earlier rows', async () => {
     vi.mocked(library.listArtifacts)
       .mockResolvedValueOnce(page([artifact], true, 'page-2'))
-      .mockResolvedValueOnce(page([other, artifact]));
+      .mockResolvedValueOnce(page([other]));
     await render();
     await click('Load more');
     expect(library.listArtifacts).toHaveBeenNthCalledWith(
@@ -180,8 +184,8 @@ describe('ManagedArtifactLibraryPage', () => {
       'ws-1',
       expect.objectContaining({ cursor: 'page-2', limit: 50 }),
     );
-    expect(document.body.textContent).toContain('stdout · 5 B');
-    expect(document.body.textContent).toContain('stdout · 6 B');
+    expect(row(artifact.id).textContent).toContain('stdout · 5 B');
+    expect(row(other.id).textContent).toContain('stdout · 6 B');
     expect(document.body.querySelectorAll('button[aria-pressed]')).toHaveLength(
       2,
     );
@@ -190,6 +194,49 @@ describe('ManagedArtifactLibraryPage', () => {
         (node) => node.textContent === 'Load more',
       ),
     ).toBe(false);
+  });
+
+  it('deduplicates rows repeated across cursor pages', async () => {
+    vi.mocked(library.listArtifacts)
+      .mockResolvedValueOnce(page([artifact], true, 'page-2'))
+      .mockResolvedValueOnce(page([artifact, other]));
+    await render();
+    await click('Load more');
+    expect(document.body.querySelectorAll('button[aria-pressed]')).toHaveLength(
+      2,
+    );
+  });
+
+  it('keeps earlier rows and re-enables Load more when a cursor page fails', async () => {
+    let rejectPage: (reason: unknown) => void = () => {};
+    vi.mocked(library.listArtifacts)
+      .mockResolvedValueOnce(page([artifact], true, 'page-2'))
+      .mockImplementationOnce(
+        () =>
+          new Promise((_resolve, reject) => {
+            rejectPage = reject;
+          }),
+      );
+    await render();
+    const loadMore = () =>
+      [...document.body.querySelectorAll('button')].find(
+        (node) => node.textContent === 'Load more',
+      )!;
+    await act(async () => {
+      loadMore().click();
+      await flush();
+    });
+    expect(loadMore().disabled).toBe(true);
+    await act(async () => {
+      rejectPage(new Error('page boom'));
+      await flush();
+    });
+    expect(document.body.textContent).toContain(
+      'Could not load the artifact library:',
+    );
+    expect(document.body.textContent).toContain('page boom');
+    expect(loadMore().disabled).toBe(false);
+    expect(row(artifact.id).textContent).toContain('stdout · 5 B');
   });
 
   it('shows the empty state for a workspace without artifacts', async () => {

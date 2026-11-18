@@ -2082,8 +2082,11 @@ function ManagedSessionsContent({
           onSelectWorkspace={onSelectWorkspace}
           onSelectSession={openSession}
           onWorkspacesChange={onWorkspacesChange}
-          onOpenArtifactLibrary={(workspaceId, label) =>
-            setArtifactLibraryWorkspace({ workspaceId, label })
+          onOpenArtifactLibrary={
+            interactive
+              ? (workspaceId, label) =>
+                  setArtifactLibraryWorkspace({ workspaceId, label })
+              : undefined
           }
         />
       ) : (

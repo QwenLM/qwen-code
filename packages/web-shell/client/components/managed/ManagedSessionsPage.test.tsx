@@ -5086,6 +5086,71 @@ describe('ManagedSessionsPage', () => {
     );
   });
 
+  it('hides the artifact library entry while the page is not interactive', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const bound = summary('s1', {
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      capabilities: { canSend: true, canCancel: false, artifacts: true },
+    });
+    mocks.client.getSession.mockResolvedValue(bound);
+    mocks.client.listSessions.mockResolvedValue({ sessions: [bound] });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    await render('s1', 'en', provider, slot, false);
+    expect(
+      slot.querySelector('button[aria-label="Artifact library: Project"]'),
+    ).toBeNull();
+    expect(listWorkspaceArtifacts).not.toHaveBeenCalled();
+    await render('s1', 'en', provider, slot, true);
+    expect(document.body.textContent).not.toContain(
+      'Artifact library · Project',
+    );
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    expect(entry).toBeTruthy();
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    expect(document.body.textContent).toContain('Artifact library · Project');
+  });
+
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {
     const listSessions = vi.fn().mockResolvedValue({
       sessions: [summary('java-session')],
