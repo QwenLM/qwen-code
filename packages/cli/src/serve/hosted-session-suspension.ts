@@ -14,6 +14,8 @@
 
 /** Candidate idle period; measured before suspension is enabled. */
 export const HOSTED_IDLE_SUSPEND_MS = 10 * 60 * 1000;
+/** Candidate per-instance concurrent cold-open cap; measured likewise. */
+export const HOSTED_COLD_OPEN_LIMIT = 8;
 /** Bounded wait for admitted async work before the eligibility recheck. */
 export const HOSTED_SUSPEND_WORK_WAIT_MS = 30_000;
 /** Teardown retries (backoff + jitter) before operator recovery. */

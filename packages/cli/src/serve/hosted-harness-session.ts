@@ -353,6 +353,7 @@ import {
   type PendingSessionInput,
 } from './hosted-wake-intake.js';
 import {
+  HOSTED_COLD_OPEN_LIMIT,
   HOSTED_IDLE_SUSPEND_MS,
   admitSuspensionWork,
   armIdleSuspension,
@@ -892,6 +893,8 @@ interface HostedSession {
   channels?: HostedChannelSession;
   /** Pending channel reply-plan retries; live work that blocks suspension. */
   replyPlanRetries?: Map<string, ReturnType<typeof setTimeout>>;
+  /** One-shot flag: the first MCP readiness of this load was measured. */
+  mcpReadyMeasured?: boolean;
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
@@ -4612,11 +4615,23 @@ export function registerHostedHarnessSessionRoutes(
     idleSuspendMs?: number;
     suspendRetryBaseMs?: number;
     suspendRetryCap?: number;
+    coldOpenLimit?: number;
   },
 ): {
   owns: (id: string) => boolean;
   accepting: () => boolean;
   beginOperation?: () => () => void;
+  suspensionStats: () => {
+    cleanSuspensions: number;
+    revertedAttempts: number;
+    eligibilityFailures: number;
+    blockedTeardowns: number;
+    openBusyRefusals: number;
+    coldOpens: number;
+    coldOpenTotalMs: number;
+    coldOpenStoreMs: number;
+    mcpReadyMs: number;
+  };
 } {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
   // their Session, whose close never frees a parked turn's mount; the
@@ -4656,6 +4671,33 @@ export function registerHostedHarnessSessionRoutes(
       ? optionValue
       : HOSTED_IDLE_SUSPEND_MS;
   })();
+  // Cold-open admission: suspension turns steady-state work into bursts of
+  // journal restores and MCP reinstalls, so the instance caps how many run
+  // at once (the design's candidate constant). The slot is held from the
+  // restore until the open completes, released by the route's finally.
+  const coldOpenLimit = options?.coldOpenLimit ?? HOSTED_COLD_OPEN_LIMIT;
+  let coldOpensInFlight = 0;
+  const suspensionStats = {
+    cleanSuspensions: 0,
+    revertedAttempts: 0,
+    eligibilityFailures: 0,
+    blockedTeardowns: 0,
+    openBusyRefusals: 0,
+    coldOpens: 0,
+    coldOpenTotalMs: 0,
+    coldOpenStoreMs: 0,
+    mcpReadyMs: 0,
+  };
+  const releaseColdOpenSlot = (res: Response): void => {
+    if (!res.locals['coldOpenSlot']) return;
+    res.locals['coldOpenSlot'] = false;
+    coldOpensInFlight -= 1;
+    const totalMs = Date.now() - (res.locals['coldOpenStart'] as number);
+    const storeMs = (res.locals['coldOpenStoreMs'] as number | undefined) ?? 0;
+    suspensionStats.coldOpens += 1;
+    suspensionStats.coldOpenTotalMs += totalMs;
+    suspensionStats.coldOpenStoreMs += storeMs;
+  };
   const opening = new Set<string>();
   const unresolvedOpenings = new Set<string>();
   let initialReconciliations = 0;
@@ -4946,6 +4988,9 @@ export function registerHostedHarnessSessionRoutes(
     const suspension = suspensions.get(sessionId);
     if (!session || !suspension) return;
     const broker = brokerOptions;
+    const attemptStart = Date.now();
+    let marked = false;
+    let lastTeardownError: unknown;
     // Capped retries resume at the failed step: only precise retries of
     // the same operations are allowed past the irreversible boundary.
     const done = {
@@ -4956,13 +5001,17 @@ export function registerHostedHarnessSessionRoutes(
       writer: false,
     };
     const outcome = await runSuspensionAttempt(suspension, {
-      pendingInputs: async () =>
-        pendingSessionInputs(
-          session.managed.authority.eventsInSequenceRange(
-            1,
-            session.managed.authority.committedSequence,
-          ),
-        ).length > 0,
+      pendingInputs: async () => {
+        const pending =
+          pendingSessionInputs(
+            session.managed.authority.eventsInSequenceRange(
+              1,
+              session.managed.authority.committedSequence,
+            ),
+          ).length > 0;
+        if (!marked && pending) suspensionStats.eligibilityFailures += 1;
+        return pending;
+      },
       markClosing: (attemptStart) => {
         if (
           suspensionLiveWork(session) ||
@@ -4971,9 +5020,12 @@ export function registerHostedHarnessSessionRoutes(
           session.lifecycle !== undefined ||
           session.mcpClosing === true ||
           instance?.accepting === false
-        )
+        ) {
+          suspensionStats.eligibilityFailures += 1;
           return false;
+        }
         if (!beginSuspensionClose(suspension)) return false;
+        marked = true;
         // The wake pump reads mcpClosing through wakeBusy(), so internal
         // wake work obeys the same gate as the routes.
         session.mcpClosing = true;
@@ -4981,44 +5033,49 @@ export function registerHostedHarnessSessionRoutes(
       },
       liveWork: () => suspensionLiveWork(session),
       teardown: async () => {
-        if (!done.wake) {
-          session.monitorWake?.close();
-          done.wake = true;
+        try {
+          if (!done.wake) {
+            session.monitorWake?.close();
+            done.wake = true;
+          }
+          if (!done.owners) {
+            await session.hooks?.close({ terminal: false });
+            await session.mcp?.close({ terminal: false });
+            done.owners = true;
+          }
+          if (!done.lease) {
+            if (await releaseLeaseNow(session, false))
+              throw new Error('Runtime lease release is unproven.');
+            if (broker) await retryHostedCleanup(session, broker, true);
+            else if (hasHostedCleanupDebt(session.managed))
+              throw new Error('Runtime cleanup remains owed.');
+            done.lease = true;
+          }
+          if (!done.publishers) {
+            for (const timer of session.replyPlanRetries?.values() ?? [])
+              clearTimeout(timer);
+            session.replyPlanRetries?.clear();
+            await session.shell?.publisher?.close();
+            await session.backgroundLane?.publisher?.close();
+            done.publishers = true;
+          }
+          if (!done.writer) {
+            // Outside the authority serial queue: the renewal runs inside
+            // it, so waiting from within would deadlock.
+            await session.managed.stopRenewal();
+            await session.managed.releaseActivation();
+            // The memoized seal: a retry reconciles this same seal.
+            await session.managed.authority.close();
+            done.writer = true;
+          }
+          // Only after every step confirmed: stopLocal fences the seal
+          // reconciliation requests too, so it must come last.
+          await session.stores!.stopLocal();
+          for (const stop of session.streams) stop();
+        } catch (cause) {
+          lastTeardownError = cause;
+          throw cause;
         }
-        if (!done.owners) {
-          await session.hooks?.close({ terminal: false });
-          await session.mcp?.close({ terminal: false });
-          done.owners = true;
-        }
-        if (!done.lease) {
-          if (await releaseLeaseNow(session, false))
-            throw new Error('Runtime lease release is unproven.');
-          if (broker) await retryHostedCleanup(session, broker, true);
-          else if (hasHostedCleanupDebt(session.managed))
-            throw new Error('Runtime cleanup remains owed.');
-          done.lease = true;
-        }
-        if (!done.publishers) {
-          for (const timer of session.replyPlanRetries?.values() ?? [])
-            clearTimeout(timer);
-          session.replyPlanRetries?.clear();
-          await session.shell?.publisher?.close();
-          await session.backgroundLane?.publisher?.close();
-          done.publishers = true;
-        }
-        if (!done.writer) {
-          // Outside the authority serial queue: the renewal runs inside
-          // it, so waiting from within would deadlock.
-          await session.managed.stopRenewal();
-          await session.managed.releaseActivation();
-          // The memoized seal: a retry reconciles this same seal.
-          await session.managed.authority.close();
-          done.writer = true;
-        }
-        // Only after every step confirmed: stopLocal fences the seal
-        // reconciliation requests too, so it must come last.
-        await session.stores!.stopLocal();
-        for (const stop of session.streams) stop();
       },
       removeResident: () => {
         sessions.delete(sessionId);
@@ -5035,13 +5092,17 @@ export function registerHostedHarnessSessionRoutes(
       retryCap: options?.suspendRetryCap,
     });
     if (outcome === 'suspended') {
+      suspensionStats.cleanSuspensions += 1;
       // Drop the registry entry only if no reload already reused it.
       if (suspensions.get(sessionId) === suspension && !sessions.has(sessionId))
         suspensions.delete(sessionId);
       writeStderrLineSafe(
         `qwen serve: Hosted Session ${sessionId} suspended idle.`,
       );
+    } else if (outcome === 'reverted') {
+      suspensionStats.revertedAttempts += 1;
     } else if (outcome === 'blocked') {
+      suspensionStats.blockedTeardowns += 1;
       // The resident is gone but the teardown may have failed before its
       // last steps: no callback may restart work on a removed object.
       // stopLocal stays uncalled — the original client still owes the
@@ -5049,7 +5110,9 @@ export function registerHostedHarnessSessionRoutes(
       for (const stop of session.streams) stop();
       void session.managed.stopRenewal().catch(() => undefined);
       writeStderrLineSafe(
-        `qwen serve: Hosted Session ${sessionId} teardown needs operator recovery.`,
+        `qwen serve: Hosted Session ${sessionId} teardown needs operator recovery` +
+          ` afterMs=${Date.now() - attemptStart} attempts=${suspension.teardownAttempts}` +
+          ` reason=${String(lastTeardownError)}`,
       );
     }
   };
@@ -6557,6 +6620,14 @@ export function registerHostedHarnessSessionRoutes(
             createdBy: 'hosted-harness',
           }
         : undefined;
+      if (coldOpensInFlight >= coldOpenLimit) {
+        suspensionStats.openBusyRefusals += 1;
+        return error(res, 409, 'hosted_session_open_busy');
+      }
+      coldOpensInFlight += 1;
+      res.locals['coldOpenSlot'] = true;
+      res.locals['coldOpenStart'] = Date.now();
+      const storeRecoveryStart = Date.now();
       managed = await openManagedSession({
         runtimeBaseDir: cwd,
         transcriptPath: '',
@@ -6572,6 +6643,7 @@ export function registerHostedHarnessSessionRoutes(
           ? { create: refs, requireNew: true }
           : { retainVerifiedResources: true }),
       });
+      res.locals['coldOpenStoreMs'] = Date.now() - storeRecoveryStart;
       if (stores.supportsModelDiagnostics?.())
         await enableManagedSessionDiagnostics(managed);
       if (stores.supportsExecutionDiagnostics?.())
@@ -8733,7 +8805,7 @@ export function registerHostedHarnessSessionRoutes(
   };
 
   app.post('/session', (req, res) => {
-    void open(req, res, true);
+    void open(req, res, true).finally(() => releaseColdOpenSlot(res));
   });
   app.post('/session/:id/load', (req, res) => {
     let held: HostedSession | undefined;
@@ -8741,6 +8813,7 @@ export function registerHostedHarnessSessionRoutes(
       held = session;
     }).finally(() => {
       if (held) held.hooksBusy = false;
+      releaseColdOpenSlot(res);
     });
   });
 
@@ -9732,7 +9805,15 @@ export function registerHostedHarnessSessionRoutes(
           systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
         });
       try {
+        // MCP connection and discovery are lazy: the first readiness of a
+        // load is where the reinstall cost lands, so measure it once.
+        const mcpReadyStart =
+          session.mcp && !session.mcpReadyMeasured ? Date.now() : undefined;
         await session.mcp?.ensureReady(abort.signal);
+        if (mcpReadyStart !== undefined) {
+          session.mcpReadyMeasured = true;
+          suspensionStats.mcpReadyMs += Date.now() - mcpReadyStart;
+        }
         await session.hooks?.ensureReady(abort.signal);
         abort.signal.throwIfAborted();
         const authority = session.managed.authority;
@@ -14782,5 +14863,6 @@ export function registerHostedHarnessSessionRoutes(
       [...sessions.keys(), ...opening].some(
         (candidate) => candidate.toLowerCase() === id.toLowerCase(),
       ),
+    suspensionStats: () => ({ ...suspensionStats }),
   };
 }

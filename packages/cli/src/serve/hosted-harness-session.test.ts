@@ -691,6 +691,7 @@ async function app(
     idleSuspendMs?: number;
     suspendRetryBaseMs?: number;
     suspendRetryCap?: number;
+    coldOpenLimit?: number;
   },
 ) {
   const result = express();
@@ -711,7 +712,7 @@ async function app(
         ),
       };
   installHostedHarnessContractMiddleware(result, contract);
-  registerHostedHarnessSessionRoutes(
+  const registration = registerHostedHarnessSessionRoutes(
     result,
     contract,
     state.root,
@@ -719,6 +720,9 @@ async function app(
     suspensionOptions,
   );
   const listener = createServer(result);
+  (
+    listener as Server & { harnessRegistration?: typeof registration }
+  ).harnessRegistration = registration;
   listeners.add(listener);
   // Match supertest's IPv4 URL; wildcard IPv6 can share an unrelated IPv4 port.
   await new Promise<void>((resolve) =>
@@ -45897,6 +45901,7 @@ describe('idle suspension', () => {
     const load = await loadSession(server);
     expect(load.status).toBe(200);
     expect((await statusOf(server, load.body.clientId)).status).toBe(200);
+    expect(statsOf(server).cleanSuspensions).toBe(1);
   });
 
   it('an admitted mutation resets the idle timer', async () => {
@@ -45945,6 +45950,9 @@ describe('idle suspension', () => {
     const status = await statusOf(server, clientId);
     expect(status.status).toBe(200);
     expect(status.body.recoveryBlocked).toBe(true);
+    expect(statsOf(server).revertedAttempts).toBeGreaterThanOrEqual(1);
+    expect(statsOf(server).eligibilityFailures).toBeGreaterThanOrEqual(1);
+    expect(statsOf(server).cleanSuspensions).toBe(0);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       clientId,
@@ -46020,5 +46028,131 @@ describe('idle suspension', () => {
     const status = await statusOf(server, clientId);
     expect(status.status).toBe(409);
     expect(status.body.code).toBe('hosted_session_teardown_blocked');
+    expect(statsOf(server).blockedTeardowns).toBe(1);
+    expect(statsOf(server).cleanSuspensions).toBe(0);
+  });
+
+  const statsOf = (server: Server) =>
+    (
+      server as Server & {
+        harnessRegistration: ReturnType<
+          typeof registerHostedHarnessSessionRoutes
+        >;
+      }
+    ).harnessRegistration.suspensionStats();
+
+  // The instance caps concurrent cold opens; the excess is refused with
+  // the transient code the control plane classifies as a budget-exempt
+  // wait, and the slot frees when the in-flight open completes.
+  it('refuses cold opens past the instance cap until a slot frees', async () => {
+    const server = await app(false, undefined, true, { coldOpenLimit: 1 });
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = false;
+    state.appendFault = async (_journal, _records, _append) => {
+      if (!stalled) {
+        stalled = true;
+        await stall;
+      }
+      return false;
+    };
+    const creating = headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+      })
+      .then((response) => response);
+    await vi.waitFor(
+      async () => {
+        expect(stalled).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+    const refused = await headers(supertest(server).post('/session')).send({
+      sessionId: '44444444-4444-4444-8444-444444444444',
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_session_open_busy');
+    expect(statsOf(server).openBusyRefusals).toBe(1);
+    release();
+    expect((await creating).status).toBe(200);
+    const retried = await headers(supertest(server).post('/session')).send({
+      sessionId: '44444444-4444-4444-8444-444444444444',
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(retried.status).toBe(200);
+    expect(statsOf(server).coldOpens).toBeGreaterThanOrEqual(2);
+    expect(statsOf(server).coldOpenStoreMs).toBeGreaterThanOrEqual(0);
+  });
+
+  // Drain and suspension mark in synchronous sections: a Session whose
+  // suspension teardown is converging refuses the drain's ownership
+  // release instead of letting both close it at once.
+  it('a converging suspension refuses the drain ownership release', async () => {
+    const server = await app(false, 'pod-a', true, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 10,
+      suspendRetryCap: 2,
+    });
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+      harnessPlacement: {
+        instanceId: 'pod-a',
+        bootId: BOOT_ID,
+        placementEpoch: 1,
+      },
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = false;
+    state.appendFault = async (_journal, records, _append) => {
+      const isRelease = (
+        records as Array<{
+          managedSession?: { kind?: string; payload?: { phase?: string } };
+        }>
+      ).some(
+        (record) =>
+          record.managedSession?.kind === 'activation.changed' &&
+          record.managedSession?.payload?.phase === 'released',
+      );
+      if (isRelease && !stalled) {
+        stalled = true;
+        await stall;
+      }
+      return false;
+    };
+    await vi.waitFor(
+      async () => {
+        // Probe with a read: a mutation probe would itself reset the idle
+        // timer and the gate would never close.
+        const probe = await statusOf(server, clientId);
+        expect(probe.body.code).toBe('hosted_session_closing');
+      },
+      { timeout: 5000 },
+    );
+    const drained = await headers(
+      supertest(server).post('/internal/hosted-harness/v1/instance:drain'),
+    ).send({ operationId: randomUUID(), expectedBootId: BOOT_ID });
+    expect(drained.body.state).toBe('QUIESCING');
+    const busy = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/ownership:release`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ operationId: randomUUID(), placementEpoch: 1 });
+    expect(busy.status).toBe(409);
+    expect(busy.body.code).toBe('hosted_ownership_release_busy');
+    release();
   });
 });
