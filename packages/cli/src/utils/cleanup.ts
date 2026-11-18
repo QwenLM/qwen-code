@@ -7,18 +7,24 @@
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 
-const cleanupFunctions: Array<(() => void) | (() => Promise<void>)> = [];
+type CleanupFunction = (() => void) | (() => Promise<void>);
+
+const priorityCleanupFunctions: CleanupFunction[] = [];
+const cleanupFunctions: CleanupFunction[] = [];
 let exitCleanupPromise: Promise<void> | undefined;
 
 export function registerCleanup(
-  fn: (() => void) | (() => Promise<void>),
-  options: { first?: boolean } = {},
+  fn: CleanupFunction,
+  options: { priority?: boolean; first?: boolean } = {},
 ): () => void {
-  if (options.first) cleanupFunctions.unshift(fn);
-  else cleanupFunctions.push(fn);
+  const functions = options.priority
+    ? priorityCleanupFunctions
+    : cleanupFunctions;
+  if (options.first) functions.unshift(fn);
+  else functions.push(fn);
   return () => {
-    const index = cleanupFunctions.indexOf(fn);
-    if (index !== -1) cleanupFunctions.splice(index, 1);
+    const index = functions.indexOf(fn);
+    if (index !== -1) functions.splice(index, 1);
   };
 }
 
@@ -86,11 +92,13 @@ async function runExitCleanupPass(
   const overall = options._testOverallTimeoutMs ?? OVERALL_CLEANUP_TIMEOUT_MS;
 
   const drain = (async () => {
-    for (const fn of cleanupFunctions) {
-      try {
-        await withTimeout(Promise.resolve().then(fn), perFn);
-      } catch (_) {
-        // Ignore errors during cleanup.
+    for (const functions of [priorityCleanupFunctions, cleanupFunctions]) {
+      for (const fn of functions) {
+        try {
+          await withTimeout(Promise.resolve().then(fn), perFn);
+        } catch (_) {
+          // Ignore errors during cleanup.
+        }
       }
     }
   })();
@@ -106,7 +114,8 @@ async function runExitCleanupPass(
     await Promise.race([drain, wallClock]);
   } finally {
     if (wallClockTimer) clearTimeout(wallClockTimer);
-    cleanupFunctions.length = 0; // Clear the array
+    priorityCleanupFunctions.length = 0;
+    cleanupFunctions.length = 0;
   }
 }
 
@@ -119,6 +128,7 @@ async function runExitCleanupPass(
  * d6485964c (paths, jsonl-utils, ripGrep).
  */
 export function _resetCleanupFunctionsForTest(): void {
+  priorityCleanupFunctions.length = 0;
   cleanupFunctions.length = 0;
   exitCleanupPromise = undefined;
 }
