@@ -101,6 +101,65 @@ export function validManagedReceipt(value: unknown): boolean {
   );
 }
 
+/**
+ * The notice the inbound clamp appends when it shortens a message, so the
+ * agent and operator can tell the input was clipped rather than receiving a
+ * bare prefix whose tail — often the operative constraints — is silently gone.
+ * Inbound-specific: the outbound CHANNEL_TRUNCATION_NOTICE lives in core and
+ * speaks of a reply, and channel-base does not import core.
+ */
+export const CHANNEL_INBOUND_TRUNCATION_NOTICE =
+  '\n\n[Message truncated because it exceeded the channel input size limit.]';
+
+// The wire's text bound (the control plane's Jakarta @Size) and the Harness
+// envelope's byte line; the overhead allowance covers the event's JSON
+// metadata around the text. Shared so the providers cannot drift.
+const MAX_WIRE_TEXT_CHARS = 32_000;
+const ENVELOPE_BYTE_LIMIT = 64 * 1024;
+const TEXT_ENVELOPE_OVERHEAD_BYTES = 4096;
+
+/**
+ * Clamp an over-long inbound message to both server bounds so it is admitted
+ * truncated instead of meeting a deterministic refusal and being dropped
+ * whole, and mark the truncation. The char cap counts UTF-16 units (the
+ * server's maxTextChars does too); a UTF-16 slice can land inside a surrogate
+ * pair, so back off a trailing high surrogate. The byte bound is enforced on
+ * the JSON-serialized envelope, where a control character costs six bytes and
+ * a quote/backslash two — not on the raw UTF-8 length — so budget the escaped
+ * length and cut by code points. The notice's characters and escaped bytes are
+ * reserved inside both budgets so the marked result still fits; a frame that
+ * fits unchanged carries no notice.
+ */
+export function fitInboundText(text: string): string {
+  const encodedBytes = (s: string): number =>
+    Buffer.byteLength(JSON.stringify(s), 'utf8') - 2;
+  const byteLimit = ENVELOPE_BYTE_LIMIT - TEXT_ENVELOPE_OVERHEAD_BYTES;
+  const notice = CHANNEL_INBOUND_TRUNCATION_NOTICE;
+  // A frame that fits both bounds unchanged is admitted as-is, no notice.
+  let bounded = text.slice(0, MAX_WIRE_TEXT_CHARS);
+  if (/[\uD800-\uDBFF]$/.test(bounded)) bounded = bounded.slice(0, -1);
+  if (bounded === text && encodedBytes(bounded) <= byteLimit) return text;
+  // Truncation: reserve room for the notice in both budgets, cut the core to
+  // fit, then append the notice. Escaping is per-character, so the marked
+  // result's escaped length is the core's plus the notice's, within the budget.
+  const coreCharLimit = Math.max(0, MAX_WIRE_TEXT_CHARS - notice.length);
+  const coreByteLimit = Math.max(0, byteLimit - encodedBytes(notice));
+  let core = text.slice(0, coreCharLimit);
+  if (/[\uD800-\uDBFF]$/.test(core)) core = core.slice(0, -1);
+  if (encodedBytes(core) > coreByteLimit) {
+    const chars = Array.from(core);
+    let lo = 0;
+    let hi = chars.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (encodedBytes(chars.slice(0, mid).join('')) <= coreByteLimit) lo = mid;
+      else hi = mid - 1;
+    }
+    core = chars.slice(0, lo).join('');
+  }
+  return core + notice;
+}
+
 /** The trusted control-plane surface the adapter talks to. */
 export interface ManagedChannelControlPlane {
   /**

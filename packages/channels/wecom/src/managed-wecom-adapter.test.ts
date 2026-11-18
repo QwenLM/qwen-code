@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CHANNEL_INBOUND_TRUNCATION_NOTICE,
   MANAGED_OUTBOUND_LIMIT,
   type ManagedChannelControlPlane,
   type ManagedClaimedDelivery,
@@ -466,7 +467,7 @@ describe('managed WeCom adapter inbound', () => {
     await second.adapter.disconnect();
   });
 
-  it('truncates an over-long inbound text to the wire bound instead of dropping it', async () => {
+  it('truncates an over-long inbound text to the wire bound and marks it', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     fake.push(
       'msg-long',
@@ -474,7 +475,28 @@ describe('managed WeCom adapter inbound', () => {
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
-    expect(plane.submit[0]!.text).toHaveLength(32_000);
+    const text = plane.submit[0]!.text;
+    // The notice is reserved inside the char cap: the core shrinks by the
+    // notice's length so the marked result still fits the 32,000-unit bound.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'x'.repeat(32_000 - CHANNEL_INBOUND_TRUNCATION_NOTICE.length) +
+        CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
+    expect(text).toHaveLength(32_000);
+    await adapter.disconnect();
+  });
+
+  it('admits a fitting inbound text unchanged, with no truncation notice', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    const content = 'a short message that fits both bounds';
+    fake.push('msg-fit', messageData({ msgid: 'msg-fit', text: { content } }));
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    expect(plane.submit[0]!.text).toBe(content);
+    expect(plane.submit[0]!.text).not.toContain(
+      CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     await adapter.disconnect();
   });
 
@@ -496,7 +518,12 @@ describe('managed WeCom adapter inbound', () => {
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(
       64 * 1024 - 4096,
     );
-    expect(text).toBe('a' + '中'.repeat(20_479));
+    // The notice's escaped bytes (73) are reserved from the 61,440-byte budget,
+    // leaving 61,367 for the core: 'a' + floor((61367-1)/3) = 20,455 CJK chars.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'a' + '中'.repeat(20_455) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     await adapter.disconnect();
   });
 
@@ -511,7 +538,16 @@ describe('managed WeCom adapter inbound', () => {
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
-    expect(plane.submit[0]!.text).toBe('a' + '😀'.repeat(15_359));
+    const text = plane.submit[0]!.text;
+    // Core budget 61,367 bytes: 'a' + floor((61367-1)/4) = 15,341 astral chars
+    // (4 bytes each), whole pairs, then the notice.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    // The exact prefix pins whole astral pairs (a lone surrogate would change
+    // the repeated '😀' run); no separate surrogate regex here, since valid
+    // astral characters are themselves surrogate pairs.
+    expect(text).toBe(
+      'a' + '😀'.repeat(15_341) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     await adapter.disconnect();
   });
 
@@ -531,6 +567,12 @@ describe('managed WeCom adapter inbound', () => {
     expect(plane.submit).toHaveLength(1);
     const text = plane.submit[0]!.text;
     expect(text.length).toBeLessThan(20_000);
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    // Core budget 61,367 escaped bytes: floor(61367/6) = 10,227 control chars
+    // (six escaped bytes each), then the notice.
+    expect(text).toBe(
+      String.fromCharCode(1).repeat(10_227) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     expect(
       Buffer.byteLength(JSON.stringify(text), 'utf8') - 2,
     ).toBeLessThanOrEqual(64 * 1024 - 4096);
@@ -547,19 +589,27 @@ describe('managed WeCom adapter inbound', () => {
 
   it('does not admit a lone surrogate at the character-cap boundary', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // The 32,000th UTF-16 unit is a high surrogate whose pair tail sits past
-    // the cap; the clamp must back it off rather than admit a lone surrogate.
+    // Over-long content whose core slice (at the reduced char cap) lands on a
+    // high surrogate: the clamp must back it off rather than admit a lone
+    // surrogate, then append the notice. The astral run keeps the total past
+    // the char cap so truncation actually fires.
+    const coreCharLimit = 32_000 - CHANNEL_INBOUND_TRUNCATION_NOTICE.length;
     fake.push(
       'msg-surr',
       messageData({
         msgid: 'msg-surr',
-        text: { content: 'x'.repeat(31_999) + '😀'.repeat(2) },
+        text: {
+          content: 'x'.repeat(coreCharLimit - 1) + '\u{1F600}'.repeat(100),
+        },
       }),
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
     const text = plane.submit[0]!.text;
-    expect(text).toHaveLength(31_999);
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'x'.repeat(coreCharLimit - 1) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     expect(/[\uD800-\uDFFF]/.test(text)).toBe(false);
     await adapter.disconnect();
   });
