@@ -911,6 +911,36 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     expect(active.deleteSession).not.toHaveBeenCalled();
   });
 
+  it('gates a non-attached row Delete on background work too', async () => {
+    // The delete route has no idle guard, so a background-only row that is not
+    // the attached session would otherwise kill work it advertises — while the
+    // Session Overview card already refuses the same session.
+    const renderOther = async (overrides: Partial<DaemonSessionSummary>) => {
+      active.sessions = [
+        makeSession('other-session', {
+          displayName: 'Other session',
+          ...overrides,
+        }),
+      ];
+      active.data = active.sessions;
+      connection.sessionId = 'session-current';
+      renderSidebar({ currentSessionActive: false });
+      await flushSidebar();
+    };
+    await renderOther({ activeWorkState: 'idle' });
+    expect(findSessionDeleteButton('Other session').disabled).toBe(false);
+    await renderOther({
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'idle',
+    });
+    const busy = findSessionDeleteButton('Other session');
+    expect(busy.disabled).toBe(true);
+    expect(busy.getAttribute('title')).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+    expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
   it('shares dialog search text with Managed navigation and resets it on close', async () => {
     const onSearchQueryChange = vi.fn();
     renderSidebar({

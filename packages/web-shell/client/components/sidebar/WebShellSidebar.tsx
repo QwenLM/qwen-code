@@ -2985,7 +2985,10 @@ export function WebShellSidebar({
     (session: DaemonSessionSummary) =>
       // The current session is deletable too (issue #12619), but deleting the
       // session the client is attached to tears its runtime down, so it is
-      // only offered once nothing is running — background work included.
+      // only offered once nothing is running. Background work blocks any row:
+      // the delete route has no idle guard, so it would kill work the row
+      // advertises, and the Session Overview card already refuses it.
+      session.hasRunningBackgroundTasks !== true &&
       (!isCurrentSession(session) || !hasLiveWork(session)) &&
       canShowDeleteSession(session),
     [canShowDeleteSession, isCurrentSession],
@@ -5854,13 +5857,24 @@ export function WebShellSidebar({
       // a button that can never succeed. Keep it disabled until the user opens
       // another chat (leaving first, then deleting, is tracked separately).
       const currentStandalone = Boolean(standalone?.active);
+      // The attached session is only deletable once nothing runs (#12619).
+      // Background work additionally blocks any row: the delete route has no
+      // idle guard, so confirming would kill work the row says is running,
+      // and the Session Overview card already refuses the same session.
+      const deleteBlockedByBackground =
+        !isCurrent && session.hasRunningBackgroundTasks === true;
       const deleteDisabled =
-        busy || currentStandalone || (isCurrent && running);
+        busy ||
+        currentStandalone ||
+        (isCurrent && running) ||
+        deleteBlockedByBackground;
       const deleteDisabledTitle = currentStandalone
         ? t('sidebar.currentStandaloneDeleteDisabled')
         : isCurrent && running
           ? t('sidebar.currentDeleteDisabled')
-          : undefined;
+          : deleteBlockedByBackground
+            ? t('sidebar.deleteRunningDisabled')
+            : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');
       // Archived sessions cannot load into a split pane (they leave an empty
       // pane), so the sidebar withholds the split action for them.

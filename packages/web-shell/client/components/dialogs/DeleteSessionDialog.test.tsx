@@ -335,20 +335,29 @@ describe('DeleteSessionDialog selection', () => {
     expect(isChecked(rows()[2])).toBe(true);
     expect(dangerButton().disabled).toBe(false);
 
-    // Alone, the stale selection must disarm the button.
+    // Alone, the stale selection must disarm the button and uncheck the row:
+    // a blocked row cannot be unchecked by hand, so leaving it ticked would
+    // count a session the request omits.
     sessions = busy;
     rerender();
     expect(dangerButton().disabled).toBe(true);
+    expect(isChecked(rows()[2])).toBe(false);
     expect(deleteSessionsMock).not.toHaveBeenCalled();
 
     // Alongside another row the button stays armed, so the request itself has
-    // to drop the row that turned busy — the button state cannot carry this.
+    // to drop the row that turned busy — and the count the user reads must
+    // agree with what is actually sent.
     sessions = idle;
     rerender();
+    clickRow(2);
     clickRow(0);
+    expect(hint()).toContain('2');
     sessions = busy;
     rerender();
     expect(dangerButton().disabled).toBe(false);
+    expect(isChecked(rows()[2])).toBe(false);
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('2');
     await act(async () => {
       dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });

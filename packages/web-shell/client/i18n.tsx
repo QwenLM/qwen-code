@@ -2794,6 +2794,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
     'A running session cannot be archived; archiving would stop its work',
+  'sidebar.deleteRunningDisabled':
+    'A session with background work cannot be deleted; deleting would stop it',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
@@ -8045,6 +8047,8 @@ const ZH: Messages = {
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archiveRunningDisabled':
     '不能归档运行中的会话，归档会终止其正在执行的工作',
+  'sidebar.deleteRunningDisabled':
+    '不能删除有后台工作的会话，删除会终止这份工作',
   'sidebar.archivedTitle': '已归档',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',

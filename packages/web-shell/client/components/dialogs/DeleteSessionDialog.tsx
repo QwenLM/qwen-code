@@ -123,12 +123,17 @@ export function DeleteSessionDialog({
 
   useEffect(() => {
     if (selectedIds.size === 0) return;
-    const filteredSet = new Set(filtered.map((s) => s.sessionId));
+    // Drop rows that filtered out AND rows that turned busy since they were
+    // ticked. A blocked row cannot be unchecked by hand, so leaving it in the
+    // set would show a checked, counted row that the request silently omits.
+    const keep = new Set(
+      filtered.filter((s) => !blocksCurrentDelete(s)).map((s) => s.sessionId),
+    );
     setSelectedIds((prev) => {
-      const pruned = new Set([...prev].filter((id) => filteredSet.has(id)));
+      const pruned = new Set([...prev].filter((id) => keep.has(id)));
       return pruned.size === prev.size ? prev : pruned;
     });
-  }, [filtered, selectedIds.size]);
+  }, [blocksCurrentDelete, filtered, selectedIds.size]);
 
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {

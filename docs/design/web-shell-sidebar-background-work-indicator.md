@@ -53,6 +53,11 @@ Out of scope (recorded as follow-ups, not silently dropped):
   still reads `idle` there, which keeps the panel's sort order and displayed
   status unchanged; its two destructive card actions are gated separately (see
   below), because that grade alone would offer them.
+- The pre-existing difference for a _turn_ running in a session this client is
+  not attached to: the sidebar row still offers Delete while the Session
+  Overview card refuses it, because the card has always required an `idle`
+  grade. This change makes the two agree about background work; aligning the
+  turn case is a separate policy decision.
 - Deciding what the `unknown` and `unsupported` grades mean for archive and
   delete. The shared predicate answers "is work known to be running"; the
   side-task archive gate additionally fails closed on those grades, and that
@@ -74,12 +79,18 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   archive confirmation (which previously spelled the same disjunction out
   twice). A row that says it is busy must not offer the action that ends the
   work, and no two entry points may disagree.
-- Two staleness holes close with it. Selection mode keeps its own copy of each
-  ticked session, so its refresh contract now carries the background flag too —
-  otherwise bulk Archive would judge a session by the value it had when ticked.
-  And the delete dialog re-evaluates the guard when building the request, not
-  only on click: a row that turns busy after being ticked can no longer be
-  unchecked, so the checked set alone cannot be trusted.
+- The row's Delete refuses background work on any row, not just the attached
+  one: the delete route has no idle guard, so confirming would kill work the
+  row advertises, and the Session Overview card already refuses that session.
+  An idle attached session stays deletable (#12619).
+- Three staleness holes close with it. Selection mode keeps its own copy of
+  each ticked session, so its refresh contract now carries the background flag
+  too — otherwise bulk Archive would judge a session by the value it had when
+  ticked. The delete dialog re-evaluates the guard when building the request,
+  not only on click. And it prunes a row that turned busy out of the selection,
+  so the checkbox and the count the user reads agree with what is sent — a
+  blocked row cannot be unchecked by hand, so leaving it ticked would silently
+  omit a session the dialog said was included.
 - Tint the marker with the same amber as the status dot (`--warning-color`)
   whenever background tasks are running, via `.sessionLoadingBackground`.
 - Name the marker only where it is the sole carrier. In the background-only
@@ -130,8 +141,11 @@ background-only, blue for other active work.
 
 - The amber tint relies on `--warning-color`, already used by the background
   status dot; the fallback `#d29922` matches it.
-- No new i18n keys: `background.running`, `sidebar.running` and
-  `sidebar.activeWork` already exist in every locale.
+- The marker reuses `background.running`, `sidebar.running` and
+  `sidebar.activeWork`, which already exist in every locale. One key is added:
+  `sidebar.deleteRunningDisabled`, because both existing delete-refusal strings
+  say "the current session" and the row gate also refuses other sessions. It is
+  translated in every locale.
 - The composed strings join with a middle dot (`·`) surrounded by spaces, the
   separator already used by the details tooltip and the capacity dialog.
 - Touch layouts are unaffected: the new hiding rule lives inside
@@ -191,11 +205,12 @@ row. No page errors.
 3. The details popover names both states whenever they coexist, including
    behind an approval or a question, without reordering blocked-state
    precedence.
-4. Archive and delete are not offered for a session whose only activity is
-   background work — on the project rows, the recent rows, the Session Overview
-   cards, and in the delete dialog for the session this client is attached to.
-   Bulk Archive follows the flag as it changes after a row is ticked, and a
-   multi-row delete request drops a row that turned busy after selection.
+4. Archive and delete are not offered for a session with background work — on
+   the project rows (whether or not it is the attached session), the recent
+   rows, the Session Overview cards, and in the delete dialog. An idle attached
+   session stays deletable. Bulk Archive follows the flag as it changes after a
+   row is ticked; a row that turns busy after selection is unchecked, stops
+   being counted, and is dropped from the request.
 5. Dot precedence, the touch layout, and the existing hover contracts are
    unchanged.
 6. Every assertion above dies under the corresponding mutation.
