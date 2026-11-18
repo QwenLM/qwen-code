@@ -124,6 +124,29 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     expect(nonHoverCss).not.toMatch(/\.sessionMetaSlotReserved/);
   });
 
+  it('hides the busy marker when a background-only row reveals its actions', () => {
+    // A background-only row is not .runningSession, so hovering anywhere on
+    // the row reveals the overlay — not just hovering the meta slot. Without
+    // this the amber busy marker sits under the revealed action buttons.
+    expect(hoverMedia).toMatch(
+      /\.sessionRow:hover:not\(\.runningSession\)\s*\.sessionLoading,[^{]*\{[^}]*opacity:\s*0;/,
+    );
+  });
+
+  it('keeps the background busy marker on the warning token', () => {
+    // The amber is what makes a background-only row read as busy rather than
+    // merely spinning, and the component test can only see the class name.
+    // Swapping the token for the muted one would keep every suite green, so
+    // pin the declaration itself. Prettier wraps the color-mix across lines,
+    // so the body must not be assumed to sit on one line.
+    expect(sidebarCss).toMatch(
+      /\.sessionLoadingBackground\s*\{[^}]*border-top-color:\s*var\(--warning-color/,
+    );
+    expect(sidebarCss).toMatch(
+      /\.sessionLoadingBackground\s*\{[^}]*border-color:\s*color-mix\([^)]*var\(--warning-color/,
+    );
+  });
+
   it('hides the trailing markers whenever the overlay is revealed', () => {
     for (const marker of [
       'sessionGitIcon',

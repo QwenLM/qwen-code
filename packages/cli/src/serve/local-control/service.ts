@@ -13,6 +13,7 @@ import type { SleepInhibitorHandle } from '@qwen-code/qwen-code-core';
 import { sleepInhibitor } from '@qwen-code/qwen-code-core';
 import type { MutableOriginAllowlist } from '../auth.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { PAIRING_LISTENER_MAX_CONNECTIONS } from '../daemon-status.js';
 import type { CredentialStore } from './credentials.js';
 import { tagListener } from './listener-identity.js';
 import { enableSocketKeepalive } from '../socket-keepalive.js';
@@ -30,7 +31,6 @@ import {
 
 /** Key under which the LAN origin is registered in the mutable CORS allowlist. */
 const CORS_KEY = 'local-control';
-const MAX_CONNECTIONS = 64;
 const HEADERS_TIMEOUT_MS = 10_000;
 const KEEP_ALIVE_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30 * 60_000;
@@ -243,7 +243,7 @@ export class LocalControlService {
           this.#deps.app,
         )
       : createServer(this.#deps.app);
-    server.maxConnections = MAX_CONNECTIONS;
+    server.maxConnections = PAIRING_LISTENER_MAX_CONNECTIONS;
     // Same keepalive policy as the primary listener: pairing clients sit
     // behind NATs that silently drop idle flows.
     enableSocketKeepalive(server);
@@ -251,7 +251,7 @@ export class LocalControlService {
     // Whole-request budget. A trickling body holds its connection slot for as
     // long as `requestTimeout` allows, and slots are consumed pre-auth: with
     // no budget an unauthenticated LAN client could hold all
-    // `MAX_CONNECTIONS` slots open indefinitely and starve the listener
+    // `PAIRING_LISTENER_MAX_CONNECTIONS` slots open indefinitely and starve the listener
     // (`headersTimeout` covers only the header phase, `keepAliveTimeout` only
     // idle sockets — a slow body is neither). 30 minutes bounds that class
     // while still covering a phone trickling a large workspace file over slow
