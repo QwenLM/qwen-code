@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_148_800;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -156,7 +156,10 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_148_800;
 // measures 2,147,740; adding the mid-batch failure notice brings the current
 // tree to 2,148,000. Merging the latest main and its transcript-reachable
 // additions raises the measurement to 2,148,696, so the warning sits 104
-// above that figure and the ceiling 904 above it.
+// above that figure and the ceiling 904 above it. Workspace-lock scoping,
+// capped-result retry guidance, and stale-callback invalidation then add 220
+// bytes, bringing the current tree to 2,148,976. The warning sits 24 above
+// that measurement, while the existing ceiling retains 624 bytes of headroom.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_149_600;
 
 // Modules that must not be reachable from the document entry, checked against
