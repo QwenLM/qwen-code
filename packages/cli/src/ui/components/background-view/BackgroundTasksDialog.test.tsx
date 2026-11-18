@@ -364,11 +364,9 @@ describe('BackgroundTasksDialog', () => {
     expect(h.cancel).not.toHaveBeenCalled();
   });
 
-  it('re-anchors detail selection when roster drift moves the viewed entry', () => {
-    // Selection is index-based and the roster re-sorts on every status
-    // change. When a DIFFERENT entry moves into the pinned index while
-    // the viewed entry is still alive, the dialog must follow the viewed
-    // entry to its new index instead of ejecting the user to the list.
+  it('keeps detail selection on the viewed entry when the roster reorders', () => {
+    // The provider follows the viewed entry by identity when the roster
+    // reorders, so the dialog stays in detail mode at its new index.
     const newerAgent = entry({ agentId: 'agent-new', startTime: 10 });
     const workflow = workflowEntry({
       runId: 'wf_viewed',

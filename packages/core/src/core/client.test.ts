@@ -768,6 +768,7 @@ describe('Gemini Client (client.ts)', () => {
     const chat = {
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      peekLastHistoryEntry: vi.fn().mockReturnValue(undefined),
       findLastHistoryEntry: vi.fn().mockReturnValue(undefined),
       ...overrides,
     };
@@ -2660,6 +2661,56 @@ describe('Gemini Client (client.ts)', () => {
       expect(hasFunctionResponse('call_auq_resume')).toBe(false);
     });
 
+    it('keeps a restorable question last when refreshing its working directory', async () => {
+      vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
+      await resumeDanglingQuestion();
+      const before = client.getChat().peekLastHistoryEntry();
+      const call = before?.parts?.find(
+        (part) => part.functionCall,
+      )?.functionCall;
+
+      await client.addWorkingDirectoryChangedContext('/old', '/new');
+
+      const history = client.getChat().getHistoryShallow();
+      expect(
+        history.at(-1)?.parts?.find((part) => part.functionCall)?.functionCall,
+      ).toBe(call);
+      expect(entryAfterCall('call_auq_resume')).toBeUndefined();
+      expect(history.at(-3)?.parts?.[0]?.text).toContain(
+        'changed from /old to /new',
+      );
+      expect(hasFunctionResponse('call_auq_resume')).toBe(false);
+    });
+
+    it('does not move a question that was answered during the directory refresh', async () => {
+      vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
+      await resumeDanglingQuestion();
+      vi.mocked(getDirectoryContextString).mockImplementationOnce(async () => {
+        client.getChat().addHistory({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_auq_resume',
+                name: 'ask_user_question',
+                response: { answer: 'Polling' },
+              },
+            },
+          ],
+        });
+        return 'Updated directory context';
+      });
+
+      await client.addWorkingDirectoryChangedContext('/old', '/new');
+
+      expect(
+        entryAfterCall('call_auq_resume')?.parts?.[0]?.functionResponse?.id,
+      ).toBe('call_auq_resume');
+      expect(client.getChat().peekLastHistoryEntry()?.parts?.[0]?.text).toBe(
+        'Updated directory context',
+      );
+    });
+
     it('repairs a restorable ask_user_question when restore preservation is suppressed', async () => {
       vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
       Object.assign(mockConfig, {
@@ -2972,13 +3023,12 @@ describe('Gemini Client (client.ts)', () => {
       expect(setTools).toHaveBeenCalledWith(tools);
     });
 
-    it('leaves the todo reminder to a host that runs its own tool-call guards', async () => {
+    it('adds the todo reminder to a tool-result send', async () => {
       // The prompt's first round makes its tool-result rounds the turn's own.
       await runTurn(
         SendMessageType.UserQuery,
         [{ text: 'hello' }],
         'prompt-tool-result',
-        { toolLoopGuardsByHost: true },
       );
       todoReminder('run tests');
       vi.mocked(mockConfig.takeActiveTodoReminder).mockClear();
@@ -2996,15 +3046,20 @@ describe('Gemini Client (client.ts)', () => {
         SendMessageType.ToolResult,
         [fnResponse('read_file', { ok: true })],
         'prompt-tool-result',
-        { toolLoopGuardsByHost: true },
       );
 
-      expect(mockConfig.takeActiveTodoReminder).not.toHaveBeenCalled();
+      expect(mockConfig.takeActiveTodoReminder).toHaveBeenCalledWith(
+        'prompt-tool-result',
+      );
       expect(client.consumeManagedAutoMemoryRecall).toHaveBeenCalledWith(
         'tool_result',
       );
       expect(lastRequest()).toEqual(
-        expect.arrayContaining([{ text: 'LOOP_REMINDER' }, 'MEMORY_RECALL']),
+        expect.arrayContaining([
+          { text: 'LOOP_REMINDER' },
+          '<system-reminder>unfinished todo: run tests</system-reminder>',
+          'MEMORY_RECALL',
+        ]),
       );
     });
 
@@ -9382,31 +9437,6 @@ Other open files:
       });
     });
 
-    it('leaves the tool-call guards to a host that runs its own', async () => {
-      // Past an explicit cap of 2, and an alternating pattern for the
-      // heuristics, which are on here.
-      vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(2);
-      vi.mocked(mockConfig.isMaxToolCallsPerTurnExplicit).mockReturnValue(true);
-      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(false);
-      const calls = Array.from({ length: 10 }, (_, i) =>
-        toolCallRequest(`call-${i}`, 'read_file', { path: i % 2 ? 'a' : 'b' }),
-      );
-      mockTurnRunFn.mockReturnValueOnce(turnStream(...calls));
-      installChat();
-
-      const events = await run([{ text: 'read the files' }], 'prompt-cap', {
-        type: SendMessageType.UserQuery,
-        toolLoopGuardsByHost: true,
-      });
-
-      expect(events).not.toContainEqual(
-        expect.objectContaining({ type: LlmEventType.LoopDetected }),
-      );
-      expect(
-        events.filter((event) => event.type === LlmEventType.ToolCallRequest),
-      ).toHaveLength(10);
-    });
-
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
       // skipLoopDetection defaults true, so this also confirms the consecutive
       // guard halts via the always-on path on a mixed batch (distinct calls
@@ -13513,7 +13543,7 @@ Other open files:
         expect(policy.continueAt).not.toHaveBeenCalled();
       });
 
-      it("keeps a host's span and guard options in a Stop hook continuation", async () => {
+      it("keeps a host's span in a Stop hook continuation", async () => {
         installMessageBus(blockStopOnce(), 'Stop');
         notDoneChat();
         mockTurnRunFn.mockImplementation(() => textTurn('not done'));
@@ -13523,13 +13553,11 @@ Other open files:
         await run([{ text: 'Hi' }], 'prompt-stop-hook-host-options', {
           type: SendMessageType.UserQuery,
           interactionSpan,
-          toolLoopGuardsByHost: true,
         });
 
         expect(send.mock.calls[1][3]).toMatchObject({
           type: SendMessageType.Hook,
           interactionSpan,
-          toolLoopGuardsByHost: true,
         });
         expect(tel.startInteractionSpan).not.toHaveBeenCalled();
       });

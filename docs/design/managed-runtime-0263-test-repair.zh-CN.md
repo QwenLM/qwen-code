@@ -2,12 +2,14 @@
 
 [English](managed-runtime-0263-test-repair.md) | [简体中文](managed-runtime-0263-test-repair.zh-CN.md)
 
-> **已退役 —— 被 dead-tag 发布修复清理取代。** v0.26.3 修复步骤及其签入补丁已从
-> `release-managed-runtime.yml` 移除（投产前收敛，切片2）。锁定决策 D3 放弃
-> v0.26.3 managed-runtime 回填：已发布的 managed-runtime 产物无用户，故修复路径
-> 无服务对象。`tag=v0.26.3` 的 dispatch 现在会在 Java 门禁
-> （`Issue13180HardenedVerificationTest`）失败，因为不再应用修复。下方流程仅作为
-> 历史记录保留；「恢复步骤必须保留」的要求已被 D3 取代。
+> **已退役 —— 被 dead-tag 发布修复清理取代。** v0.26.3 与 v0.26.5 修复步骤及其签入
+> 补丁已从 `release-managed-runtime.yml` 移除（投产前收敛，切片2）。锁定决策 D3
+> 放弃 v0.26.3 与 v0.26.5 managed-runtime 回填：已发布的 managed-runtime 产物
+> 无用户，故修复路径无服务对象。`tag=v0.26.3` 的 dispatch 现在会在 Java 门禁
+> （`Issue13180HardenedVerificationTest`）失败，`tag=v0.26.5` 的 dispatch 会在
+> `-Pcentral-release` 的 Javadoc 生成（`ManagedEventEnvelopes.java:335` 未转义 `<`）
+> 失败，因为不再应用这些修复。下方流程仅作为历史记录保留；「恢复步骤必须保留」的
+> 要求已被 D3 取代。
 
 ## 问题与范围
 

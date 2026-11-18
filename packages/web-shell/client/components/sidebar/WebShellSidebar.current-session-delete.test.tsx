@@ -6,6 +6,7 @@
 
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import * as React from 'react';
 import { act } from 'react';
 import { createPortal } from 'react-dom';
@@ -353,6 +354,59 @@ describe('sidebar session selection', () => {
     act(() => click(button('Select sessions')));
   }
 
+  async function selectWorkspaceFilter(label: string): Promise<void> {
+    await act(async () => click(button('Display options'), true));
+    const workspaceTrigger = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.startsWith('Workspace'));
+    expect(workspaceTrigger).toBeDefined();
+    await act(async () => {
+      workspaceTrigger!.focus();
+      workspaceTrigger!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+      );
+    });
+    const option = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ).find((item) => item.textContent === label);
+    expect(option).toBeDefined();
+    await act(async () => click(option!, true));
+    await flushSidebar();
+  }
+
+  it('clears the selection when the workspace filter changes', async () => {
+    await enterSelection();
+    act(() => click(selection('First session')));
+    const archive = action('Archive');
+    const workspaceCatalog = [
+      {
+        id: 'primary',
+        cwd: '/tmp/project',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary',
+        cwd: '/tmp/other',
+        primary: false,
+        trusted: true,
+      },
+    ];
+    connection.capabilities = {
+      ...connection.capabilities!,
+      workspaces: workspaceCatalog,
+    };
+    workspace.capabilities = connection.capabilities;
+    renderSidebar({ workspaces: workspaceCatalog });
+    await flushSidebar();
+    await selectWorkspaceFilter('other');
+    expect(button('Select sessions').getAttribute('aria-pressed')).toBe(
+      'false',
+    );
+    expect(archive.isConnected).toBe(false);
+    expect(archiveSelections).not.toHaveBeenCalled();
+  });
+
   it('counts selected sessions without navigating and clears them on exit', async () => {
     await enterSelection();
     expect(action('Pin').disabled).toBe(true);
@@ -559,6 +613,33 @@ describe('sidebar session selection', () => {
     await flushSidebar();
     expect(action('Archive').disabled).toBe(true);
     expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('tracks background work starting and finishing in a selected idle session', async () => {
+    // The toolbar reads the selection's own copy, so the refresh contract has
+    // to carry the background flag in both directions — a monitor grades idle
+    // and would otherwise be archived with its work still running.
+    await enterSelection();
+    act(() => click(selection('First session')));
+    expect(action('Archive').disabled).toBe(false);
+    const setBackground = async (running: boolean) => {
+      active.sessions = active.sessions.map((session) =>
+        session.sessionId === 'first'
+          ? {
+              ...session,
+              hasRunningBackgroundTasks: running,
+              activeWorkState: 'idle' as const,
+            }
+          : session,
+      );
+      active.data = active.sessions;
+      renderSidebar();
+      await flushSidebar();
+    };
+    await setBackground(true);
+    expect(action('Archive').disabled).toBe(true);
+    await setBackground(false);
+    expect(action('Archive').disabled).toBe(false);
   });
 
   it('does not restore failed selections after changing session content during archiving', async () => {
@@ -798,6 +879,65 @@ describe('WebShellSidebar current-session delete (issue #12619)', () => {
     renderSidebar({ currentSessionActive: false });
     await flushSidebar();
     expect(findSessionDeleteButton('Current session').disabled).toBe(true);
+    expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('gates the attached session row Delete on background work alone', async () => {
+    // Paired with the idle case so this cannot pass by blocking every attached
+    // session: #12619 keeps it deletable once nothing runs.
+    const renderCurrent = async (overrides: Partial<DaemonSessionSummary>) => {
+      active.sessions = [
+        makeSession('session-current', {
+          displayName: 'Current session',
+          ...overrides,
+        }),
+      ];
+      active.data = active.sessions;
+      connection.sessionId = 'session-current';
+      renderSidebar({ currentSessionActive: false });
+      await flushSidebar();
+    };
+    await renderCurrent({ activeWorkState: 'idle' });
+    expect(findSessionDeleteButton('Current session').disabled).toBe(false);
+    await renderCurrent({
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'idle',
+    });
+    const busy = findSessionDeleteButton('Current session');
+    expect(busy.disabled).toBe(true);
+    expect(busy.getAttribute('title')).toBe(
+      'The current session is running and cannot be deleted',
+    );
+    expect(active.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it('gates a non-attached row Delete on background work too', async () => {
+    // The delete route has no idle guard, so a background-only row that is not
+    // the attached session would otherwise kill work it advertises — while the
+    // Session Overview card already refuses the same session.
+    const renderOther = async (overrides: Partial<DaemonSessionSummary>) => {
+      active.sessions = [
+        makeSession('other-session', {
+          displayName: 'Other session',
+          ...overrides,
+        }),
+      ];
+      active.data = active.sessions;
+      connection.sessionId = 'session-current';
+      renderSidebar({ currentSessionActive: false });
+      await flushSidebar();
+    };
+    await renderOther({ activeWorkState: 'idle' });
+    expect(findSessionDeleteButton('Other session').disabled).toBe(false);
+    await renderOther({
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'idle',
+    });
+    const busy = findSessionDeleteButton('Other session');
+    expect(busy.disabled).toBe(true);
+    expect(busy.getAttribute('title')).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
     expect(active.deleteSession).not.toHaveBeenCalled();
   });
 

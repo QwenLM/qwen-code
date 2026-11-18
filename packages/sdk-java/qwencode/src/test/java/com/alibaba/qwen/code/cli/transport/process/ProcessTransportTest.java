@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.cli.transport.process;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -9,6 +10,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.TypeReference;
@@ -17,8 +20,13 @@ import com.alibaba.qwen.code.cli.protocol.message.control.payload.CLIControlInit
 import com.alibaba.qwen.code.cli.protocol.message.control.CLIControlRequest;
 import com.alibaba.qwen.code.cli.protocol.message.control.CLIControlResponse;
 import com.alibaba.qwen.code.cli.protocol.message.SDKUserMessage;
+import com.alibaba.qwen.code.cli.protocol.message.SDKResultMessage;
+import com.alibaba.qwen.code.cli.protocol.message.control.payload.ControlResponsePayload;
+import com.alibaba.qwen.code.cli.session.Session;
+import com.alibaba.qwen.code.cli.session.event.consumers.SessionEventSimpleConsumers;
 import com.alibaba.qwen.code.cli.transport.Transport;
 import com.alibaba.qwen.code.cli.transport.TransportOptions;
+import com.alibaba.qwen.code.cli.utils.Timeout;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Tag;
@@ -30,6 +38,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ProcessTransportTest {
 
@@ -61,6 +72,57 @@ class ProcessTransportTest {
         ProcessTransport transport = new ProcessTransport(transportOptions);
         try {
             assertEquals(CUSTOM_ENV_VALUE, transport.processOutput.readLine());
+        } finally {
+            transport.close();
+        }
+    }
+
+    @Test
+    @DisabledOnOs(OS.WINDOWS)
+    @org.junit.jupiter.api.Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void currentlySwallowsControlResponseWriteFailureWithoutConsumingResult() throws Exception {
+        Path executable = tempDir.resolve("control-request.sh");
+        String script = "#!/bin/sh\n"
+                + "IFS= read -r initialize\n"
+                + "printf '%s\\n' '{\"type\":\"control_response\",\"response\":{\"request_id\":\"init\","
+                + "\"subtype\":\"success\",\"response\":{\"subtype\":\"initialize\",\"capabilities\":{}}}}'\n"
+                + "IFS= read -r prompt\n"
+                + "printf '%s\\n' '{\"type\":\"control_request\",\"request_id\":\"permission-request-1\","
+                + "\"request\":{\"subtype\":\"can_use_tool\",\"tool_name\":\"run_shell_command\",\"input\":{}}}'\n"
+                + "printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}'\n"
+                + "IFS= read -r response || :\n";
+        Files.write(executable, script.getBytes(StandardCharsets.UTF_8));
+        assertTrue(executable.toFile().setExecutable(true));
+        ProcessTransport transport = new ProcessTransport(new TransportOptions()
+                .setPathToQwenExecutable(executable.toString())
+                .setTurnTimeout(new Timeout(5L, TimeUnit.SECONDS))
+                .setMessageTimeout(new Timeout(3L, TimeUnit.SECONDS)));
+        AtomicBoolean inputClosed = new AtomicBoolean();
+        AtomicBoolean resultConsumed = new AtomicBoolean();
+        try {
+            Session session = new Session(transport);
+            // Characterize the existing Runnable-wait limitation using the real process read loop.
+            assertDoesNotThrow(() -> session.sendPrompt("test", new SessionEventSimpleConsumers() {
+                @Override
+                public CLIControlResponse<? extends ControlResponsePayload> onControlRequest(
+                        Session currentSession, CLIControlRequest<?> request) {
+                    try {
+                        transport.processInput.close();
+                        inputClosed.set(true);
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                    return null;
+                }
+
+                @Override
+                public void onResultMessage(Session currentSession, SDKResultMessage resultMessage) {
+                    resultConsumed.set(true);
+                }
+            }));
+            assertTrue(inputClosed.get());
+            assertFalse(resultConsumed.get());
+            assertFalse(transport.isReading());
         } finally {
             transport.close();
         }

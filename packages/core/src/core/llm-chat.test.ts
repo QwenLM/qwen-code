@@ -5529,6 +5529,45 @@ describe('LlmChat', async () => {
       ]);
     });
 
+    it('records only the synthetic prefix after hard rescue preserves an operation', async () => {
+      const { target, recordChatCompression } = recordingChat();
+      const retained = modelText('latest original response');
+      const compressed = compressResult(
+        CompressionStatus.COMPRESSED,
+        [
+          userText('summary'),
+          modelText('Understood.'),
+          userText('Recent operation follows.'),
+          retained,
+        ],
+        176_000,
+        40_000,
+        true,
+      );
+      compressed.info.summaryPrefixLength = 3;
+      mockCompressOnce(compressed);
+      mockStream(textStream('after rescue'));
+      target.setLastPromptTokenCount(176_999);
+
+      await sendDrain(
+        'continue with the next change',
+        'retained-hard-rescue',
+        target,
+      );
+
+      expect(recordChatCompression).toHaveBeenCalledTimes(1);
+      expect(recordChatCompression.mock.calls[0][0]).toMatchObject({
+        summaryPrefixLength: 3,
+        compressedHistory: [
+          userText('summary'),
+          modelText('Understood.'),
+          userText('Recent operation follows.'),
+          retained,
+          userText('continue with the next change'),
+        ],
+      });
+    });
+
     it('rejects before request serialization when oversized resumed history cannot be compressed', async () => {
       chat.setHistory(oversizedHistory());
       expect(chat.getLastPromptTokenCount()).toBe(0);
@@ -14974,6 +15013,48 @@ describe('LlmChat', async () => {
       ]);
     });
 
+    it('passes the retained-operation boundary and prompt ownership to the checkpoint', async () => {
+      const retained = modelText('latest original response');
+      markApiHistoryPrompt(retained, 'original-prompt');
+      const compressed = compressResult(
+        CompressionStatus.COMPRESSED,
+        [
+          userText('summary'),
+          modelText('Understood.'),
+          userText('Recent operation follows.'),
+          retained,
+        ],
+        1000,
+        200,
+        true,
+      );
+      compressed.info.summaryPrefixLength = 3;
+      mockCompress(compressed);
+      const observer = vi.fn();
+      chat.setCompressionObserver(observer);
+      const pending = userText('next question');
+      markApiHistoryPrompt(pending, 'next-prompt');
+
+      await chat.tryCompress('next-prompt', true, undefined, {
+        pendingUserMessage: pending,
+      });
+
+      expect(observer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          summaryPrefixLength: 3,
+          compressedHistory: [
+            userText('summary'),
+            modelText('Understood.'),
+            userText('Recent operation follows.'),
+            retained,
+            pending,
+          ],
+          promptIds: [null, null, null, 'original-prompt', 'next-prompt'],
+        }),
+      );
+      expect(chat.getHistoryShallow()[3]).toEqual(retained);
+    });
+
     it('keeps live history unchanged when the Managed compression checkpoint is refused', async () => {
       mockCompressionService('compressed');
       const before = [userText('old question'), modelText('old answer')];
@@ -15105,6 +15186,36 @@ describe('LlmChat', async () => {
       ).toBeUndefined();
     });
 
+    it.each([false, true])(
+      'records the full-compaction prefix during fast compression (attachment: %s)',
+      async (attachment) => {
+        pinFastCompressionIdleClear();
+        const compacted = await composePostCompactHistory([], 'Summary.', {
+          maxFiles: 0,
+          planModeActive: attachment,
+        });
+        const recordChatCompression = vi.fn();
+        const fastChat = newChat({
+          history: [...compacted, ...thoughtHistory()],
+          recorder: { recordChatCompression },
+        });
+        const result = fastChat.compressFast();
+        expect(result.info.compressionStatus).toBe(
+          CompressionStatus.COMPRESSED,
+        );
+        expect(recordChatCompression).toHaveBeenCalledOnce();
+        expect(recordChatCompression.mock.calls[0][0].summaryPrefixLength).toBe(
+          attachment ? 3 : 2,
+        );
+        expect(
+          recordChatCompression.mock.calls[0][0].compressedHistory.slice(
+            0,
+            compacted.length,
+          ),
+        ).toEqual(compacted);
+      },
+    );
+
     // Issue #9309: /compress-fast then /compress banners use two scales (API
     // count incl. system prompt + tools vs a history-only re-estimate), so
     // each exposes its estimated side instead of implying lost context.
@@ -15143,6 +15254,34 @@ describe('LlmChat', async () => {
       );
       expect(info.originalTokenCountIsEstimated).toBe(true);
     });
+
+    it.each([
+      { estimated: false, options: undefined, expected: 321 },
+      { estimated: true, options: undefined, expected: 0 },
+      {
+        estimated: false,
+        options: { precomputedEffectiveTokens: 6000 },
+        expected: 0,
+      },
+      {
+        estimated: false,
+        options: {
+          originalTokenCountOverride: { count: 6000, isEstimated: false },
+        },
+        expected: 0,
+      },
+    ])(
+      'only forwards unaccounted output for a prompt-only API baseline: %j',
+      async ({ estimated, options, expected }) => {
+        const compressSpy = mockCompressionService('compressed');
+        chat.setHistory([userText('a'), modelText('b')]);
+        chat.seedResumeTokenCounts(5000, 321, estimated);
+        await chat.tryCompress('output-accounting', true, undefined, options);
+        expect(compressSpy.mock.calls[0][1].unaccountedOutputTokens).toBe(
+          expected,
+        );
+      },
+    );
 
     it('reports an authoritative original count when the API count is fresh', async () => {
       mockCompressionService('compressed');
@@ -16461,6 +16600,8 @@ describe('LlmChat', async () => {
       vi.mocked(promptMirror()).mockClear();
       vi.mocked(cachedMirror()).mockClear();
       catalog = 'catalog';
+      expect(chat.peekLastPromptTokenCount()).toBe(0);
+      expect(promptMirror()).not.toHaveBeenCalled();
       expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getLastOutputTokenCount()).toBe(0);
       expect(chat.getLastCachedContentTokenCount()).toBe(0);
@@ -16512,12 +16653,16 @@ describe('LlmChat', async () => {
     it('restores retained counts when the route switches back (#9506)', () => {
       chat.seedResumeTokenCounts(321, 45, true);
       switchRoute('anthropic-model@beef1234');
+      expect(chat.peekLastPromptTokenCount()).toBe(0);
       expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getLastOutputTokenCount()).toBe(0);
 
       // Back on the original route: the exact retained prompt, output and
       // provenance, not the zero a foreign touch used to leave behind.
       switchRoute('gemini-pro@test0001');
+      vi.mocked(promptMirror()).mockClear();
+      expect(chat.peekLastPromptTokenCount()).toBe(321);
+      expect(promptMirror()).not.toHaveBeenCalled();
       expect(chat.getLastPromptTokenCount()).toBe(321);
       expect(chat.getLastOutputTokenCount()).toBe(45);
       expect(chat.isLastPromptTokenCountEstimated()).toBe(true);

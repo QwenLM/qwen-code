@@ -7,10 +7,6 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { setBoundedMapEntry } from '../utils/bounded-map';
-import {
-  useReportedArtifactRegistration,
-  type RegistrationErrorTranslator,
-} from './useReportedArtifactRegistration';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
 const MAX_CACHED_SESSIONS = 20;
@@ -45,11 +41,16 @@ export interface SessionArtifactsState {
   error: string | null;
   hydrated: boolean;
   refresh: () => Promise<void>;
+  /**
+   * Click-time artifact count from the session-list summary, valid only
+   * while no authoritative data exists for the current session (no cache
+   * entry, no keyed restored snapshot). Undefined once the load-embedded
+   * snapshot or a gated fetch lands, so a stale hint cannot outlive the load.
+   */
+  artifactCountHint?: number;
 }
 
-export function useSessionArtifacts(
-  translateError?: RegistrationErrorTranslator,
-): SessionArtifactsState {
+export function useSessionArtifacts(): SessionArtifactsState {
   const actions = useActions();
   const connection = useConnection();
   const ownerGuard = useDaemonSessionOwnerGuard();
@@ -76,6 +77,15 @@ export function useSessionArtifacts(
   );
   const previousArtifactsVersionRef = useRef(artifactsVersion);
 
+  const restoredSnapshot =
+    connection.restoredArtifactsSessionId === sessionId
+      ? connection.restoredArtifacts
+      : undefined;
+  // Read by the refresh failure path: a failed gated fetch must not cache an
+  // empty placeholder over a snapshot the client already holds for this session.
+  const restoredSnapshotRef = useRef(restoredSnapshot);
+  restoredSnapshotRef.current = restoredSnapshot;
+
   const refresh = useCallback(async () => {
     const requestId = ++requestIdRef.current;
     if (!sessionKey) {
@@ -97,11 +107,15 @@ export function useSessionArtifacts(
         );
       }
     } catch {
-      // The artifacts panel treats a failed refresh as an empty error state.
+      // The artifacts panel treats a failed refresh as an empty error state —
+      // but only when there is no load-embedded snapshot to keep showing. A
+      // cached [] would shadow the snapshot for the rest of the hook's life,
+      // since ?? does not fall through on a defined empty array.
       if (
         requestIdRef.current === requestId &&
         owner.isCurrent() &&
-        !artifactsBySessionRef.current.has(sessionKey)
+        !artifactsBySessionRef.current.has(sessionKey) &&
+        restoredSnapshotRef.current === undefined
       ) {
         cacheArtifacts(artifactsBySessionRef.current, sessionKey, []);
       }
@@ -141,6 +155,7 @@ export function useSessionArtifacts(
   const visibleArtifacts =
     sessionKey && supportsArtifacts
       ? (artifactsBySessionRef.current.get(sessionKey)?.artifacts ??
+        restoredSnapshot ??
         EMPTY_ARTIFACTS)
       : EMPTY_ARTIFACTS;
   const artifactById = useMemo(
@@ -151,12 +166,20 @@ export function useSessionArtifacts(
     sessionKey &&
       artifactsBySessionRef.current.get(sessionKey)?.hydratedOwner === owner,
   );
-  useReportedArtifactRegistration(
-    visibleArtifacts,
-    hydrated,
-    refresh,
-    translateError,
-  );
+  // The hint bridges the click→load window only. Any authoritative data for
+  // this session — a cache entry (even an empty list from a successful fetch)
+  // or the keyed restored snapshot — retires it; the session keying keeps the
+  // optimistic switch from leaking the previous session's count.
+  const artifactCountHint =
+    sessionKey &&
+    supportsArtifacts &&
+    connection.artifactCountHintSessionId === sessionId &&
+    connection.artifactCountHint !== undefined &&
+    connection.artifactCountHint > 0 &&
+    !artifactsBySessionRef.current.has(sessionKey) &&
+    restoredSnapshot === undefined
+      ? connection.artifactCountHint
+      : undefined;
   return {
     artifacts: visibleArtifacts,
     artifactById,
@@ -164,9 +187,13 @@ export function useSessionArtifacts(
       Boolean(
         sessionId && isConnected && !connection.catchingUp && supportsArtifacts,
       ) &&
-      Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)),
+      Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)) &&
+      // The embedded snapshot already supplies a list; showing a skeleton over
+      // it between catch-up and the gated fetch would flicker the early entry.
+      restoredSnapshot === undefined,
     error: null,
     hydrated,
     refresh,
+    artifactCountHint,
   };
 }

@@ -11,6 +11,7 @@ import {
   type SessionStartupConfig,
 } from './session-startup-config.js';
 import { randomUUID } from 'node:crypto';
+import { forwardPrompt } from './channel-connection.js';
 import * as path from 'node:path';
 import {
   type ClientSideConnection,
@@ -48,6 +49,7 @@ import {
   TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
   SessionSourceError,
+  GeneratedUiStateError,
   validateSessionSourceInput,
   canonicalSessionPrUrl,
   isSessionPrRole,
@@ -169,6 +171,8 @@ import {
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -178,6 +182,7 @@ import {
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_UPDATES,
@@ -1672,6 +1677,7 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'session_metadata_updated',
   'session_cwd_changed',
   'artifact_changed',
+  'sub_session_task_changed',
   'source_changed',
   'settings_changed',
   'extensions_changed',
@@ -1680,6 +1686,7 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'mcp_server_removed',
   'user_shell_command',
   'user_shell_result',
+  'mod_log',
   // Workspace-level fan-out (workspace service, git watcher, memory /
   // agent CRUD, device-flow registry) reaches every session bus via
   // `publishWorkspaceEvent` while idle. The `auth_device_flow_*` members
@@ -1733,9 +1740,25 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   const meta = updateRecord['_meta'];
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
   const metaRecord = meta as Record<string, unknown>;
-  return (
+  if (
     metaRecord['source'] === 'user-shell' ||
     metaRecord['hookLifecycle'] !== undefined
+  ) {
+    return true;
+  }
+  // A /send receipt records a message without starting a new turn here.
+  // Ordinary agent mentions still count as turn content.
+  if (subtype !== 'user_message_chunk') return false;
+  const agentMessage = metaRecord['qwenAgentMessage'];
+  if (!agentMessage || typeof agentMessage !== 'object') return false;
+  const { kind, sentTo } = agentMessage as Record<string, unknown>;
+  if (kind !== 'agent_mention' || !sentTo || typeof sentTo !== 'object') {
+    return false;
+  }
+  const target = sentTo as Record<string, unknown>;
+  return (
+    typeof target['sessionId'] === 'string' &&
+    typeof target['workspaceCwd'] === 'string'
   );
 }
 
@@ -4546,6 +4569,14 @@ export function createSessionControlPlane(
         isWaitingForPermission = true;
       }
     }
+    // While a restore is in flight the store is repopulated across awaits,
+    // so any count read here is partial (or zero). Treat it as unknown:
+    // emit only the marker, never a partial count the list merge would
+    // overlay onto the sidecar-enriched one.
+    const artifactCountPending =
+      channelInfoForEntry(entry)?.pendingRestoreIds.has(entry.sessionId) ===
+      true;
+    const artifactCount = artifactCountPending ? 0 : entry.artifacts.count();
     return {
       sessionId: entry.sessionId,
       workspaceCwd: entry.workspaceCwd,
@@ -4561,6 +4592,7 @@ export function createSessionControlPlane(
       ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
       clientCount: entry.clientIds.size,
       hasActivePrompt: hasInFlightPromptActivity(entry),
+      pendingPromptCount: entry.pendingPromptCount,
       activeWorkState: entryActiveWorkState(entry),
       hasRunningBackgroundTasks: entry.hasRunningBackgroundTasks,
       ...(entry.backgroundTurn ? { backgroundTurn: entry.backgroundTurn } : {}),
@@ -4573,6 +4605,18 @@ export function createSessionControlPlane(
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
       ...(entry.branch ? { branch: entry.branch } : {}),
       ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
+      // session/load registers the entry before it awaits
+      // artifacts.restore(), and rewind restores into a live entry; both
+      // windows mark the session pending. Carry the ambiguity explicitly
+      // so the list merge keeps the sidecar-enriched count instead of
+      // reading the omission as zero — while live-state, occupancy and
+      // live-only consumers still see the session (the accessor's
+      // contract is "all live sessions", not "all settled sessions").
+      ...(artifactCountPending
+        ? { artifactCountPending: true }
+        : artifactCount > 0
+          ? { artifactCount }
+          : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -5085,6 +5129,7 @@ export function createSessionControlPlane(
           runtimeBaseDir: opts.artifactSnapshotRuntimeBaseDir,
         }).setLastUserPromptAt(entry.sessionId, timestamp);
       },
+      opts.onResolveSubSessionWorkspace,
     );
     const connection = harness.createConnection(client, channel);
     // Add to `aliveChannels` + register the `channel.exited` handler
@@ -7105,6 +7150,32 @@ export function createSessionControlPlane(
     return result;
   };
 
+  const requestGeneratedUiState = async <T>(
+    sessionId: string,
+    method: string,
+    params: Record<string, unknown>,
+    clientId: string,
+  ): Promise<T> => {
+    const entry = byId.get(sessionId);
+    if (!entry) throw new SessionNotFoundError(sessionId);
+    if (!resolveTrustedClientId(entry, clientId))
+      throw new Error('A session-bound client id is required');
+    if (entry.closing) throw new SessionNotFoundError(sessionId);
+    assertSessionResetNotPending(sessionId);
+    const result = await requestSessionStatus<
+      T & {
+        stateError?: { code: GeneratedUiStateError['code']; message: string };
+      }
+    >(sessionId, method, params);
+    if (result.stateError) {
+      throw new GeneratedUiStateError(
+        result.stateError.code,
+        result.stateError.message,
+      );
+    }
+    return result;
+  };
+
   const notifyAgentSessionClose = async (
     entry: SessionEntry,
     ci: ChannelInfo | undefined,
@@ -8233,6 +8304,7 @@ export function createSessionControlPlane(
     historyPageSize: number,
     liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
+    // Active turns need the live journal; persisted pages cannot replace it.
     // A pending permission/question lives only in the in-memory journal — it
     // is never persisted to the chat transcript — and the turns that park on
     // one without an RPC prompt (Goal and background-notification turns)
@@ -8241,9 +8313,6 @@ export function createSessionControlPlane(
     // would strand the interaction: the session summary still advertises it
     // (input-needed badge) while the re-opening client receives nothing to
     // answer.
-    if (entry.pendingInteractions.size > 0) {
-      return replayFieldsFor(entry, 'load', liveReplayMode);
-    }
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
@@ -8254,6 +8323,16 @@ export function createSessionControlPlane(
         let cursor: string | undefined;
         let page: BridgeSessionTranscriptPage;
         do {
+          // Check before every read, including empty-page traversal and a
+          // retry after activity started while the previous read was pending.
+          if (
+            entry.promptActive ||
+            entry.goalTurnActive === true ||
+            entry.backgroundTurn ||
+            entry.pendingInteractions.size > 0
+          ) {
+            return replayFieldsFor(entry, 'load', liveReplayMode);
+          }
           page = await requestSessionTranscriptPage({
             sessionId: entry.sessionId,
             ...(cursor ? { cursor } : { direction: 'backward' }),
@@ -8286,6 +8365,7 @@ export function createSessionControlPlane(
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&
+          !entry.goalTurnActive &&
           !entry.backgroundTurn &&
           entry.events.epoch === eventEpoch &&
           entry.events.lastEventId === lastEventId &&
@@ -8747,6 +8827,10 @@ export function createSessionControlPlane(
         await rollbackAttachRegistration(existing, clientId);
         throw error;
       }
+      // Warm attach (page reload / second tab on a live session) gets the
+      // same early artifact snapshot as a fresh restore, so the header entry
+      // does not wait for the gated fetch on the most common re-open path.
+      const existingArtifacts = await existing.artifacts.listRestored();
       return {
         sessionId: existing.sessionId,
         workspaceCwd: existing.workspaceCwd,
@@ -8764,6 +8848,9 @@ export function createSessionControlPlane(
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
+        ...(existingArtifacts.length > 0
+          ? { artifacts: existingArtifacts }
+          : {}),
         hasRunningBackgroundTasks: existing.hasRunningBackgroundTasks,
         hasActivePrompt:
           existing.promptActive ||
@@ -9251,6 +9338,11 @@ export function createSessionControlPlane(
                         [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                       }
                     : {}),
+                  ...(req.deferAutomaticWorkUntilCwdRestore
+                    ? {
+                        [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
+                      }
+                    : {}),
                 },
               });
               return await restoreChannel.connection.loadSession(request);
@@ -9278,6 +9370,11 @@ export function createSessionControlPlane(
                 ...(req.suppressWorktreeContextRestore
                   ? {
                       [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+                    }
+                  : {}),
+                ...(req.deferAutomaticWorkUntilCwdRestore
+                  ? {
+                      [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
                     }
                   : {}),
               },
@@ -9515,6 +9612,9 @@ export function createSessionControlPlane(
             options,
           );
         }
+        // A restore that raced another registration attaches to the live
+        // entry; carry the same early artifact snapshot as a fresh restore.
+        const racedArtifacts = await racedEntry.artifacts.listRestored();
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
@@ -9534,6 +9634,7 @@ export function createSessionControlPlane(
             ? { sourceId: racedEntry.sourceId }
             : {}),
           state: racedEntry.restoreState ?? {},
+          ...(racedArtifacts.length > 0 ? { artifacts: racedArtifacts } : {}),
           hasRunningBackgroundTasks: racedEntry.hasRunningBackgroundTasks,
           hasActivePrompt:
             restorePromptAdmitted ||
@@ -9700,6 +9801,7 @@ export function createSessionControlPlane(
           options,
         );
       }
+      const restoredArtifacts = await entry.artifacts.listRestored();
       // Explicit `session/load` / `session/resume` is "give me THIS
       // id"; it must NOT become the implicit attach target for
       // subsequent omitted-id `POST /session` callers under `single`
@@ -9720,6 +9822,9 @@ export function createSessionControlPlane(
         state: entry.restoreState ?? {},
         ...(deferArtifactWorkspace || artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
+          : {}),
+        ...(restoredArtifacts.length > 0
+          ? { artifacts: restoredArtifacts }
           : {}),
         hasRunningBackgroundTasks: entry.hasRunningBackgroundTasks,
         hasActivePrompt:
@@ -11521,6 +11626,8 @@ export function createSessionControlPlane(
       // checks `signal.aborted` only AFTER reaching the head — wasted
       // queue churn on every retry-after-abort, plus a confusing trace
       // where the prompt appears to "run" before erroring.
+      const dispatchSignal = context?.dispatchSignal;
+      dispatchSignal?.throwIfAborted();
       if (signal?.aborted) {
         throw new DOMException('Prompt aborted', 'AbortError');
       }
@@ -11555,17 +11662,7 @@ export function createSessionControlPlane(
       });
       const isQueued = entry.pendingPromptCount > 1;
       const pendingAbort = new AbortController();
-      if (signal) {
-        if (signal.aborted) {
-          pendingAbort.abort(signal.reason);
-        } else {
-          signal.addEventListener(
-            'abort',
-            () => pendingAbort.abort(signal.reason),
-            { once: true },
-          );
-        }
-      }
+      const onCallerAbort = () => pendingAbort.abort(signal?.reason);
       const channelDisplayText = getChannelPromptDisplayText(
         entry,
         context?.promptDisplayText,
@@ -11678,33 +11775,52 @@ export function createSessionControlPlane(
         deadlineTimer = setTimeout(onDeadline, deadlineMs);
         deadlineTimer.unref();
       }
+      const releaseGuardWaitWithoutSuccessor = () => {
+        const ownerPromptId =
+          entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+        if (!ownerPromptId) return;
+        const hasSuccessor = entry.pendingPromptList.some(
+          (candidate) =>
+            candidate.promptId !== ownerPromptId &&
+            !candidate.terminalPublished &&
+            !candidate.abortController.signal.aborted,
+        );
+        if (hasSuccessor) return;
+        delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+        void entry.connection
+          .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, {
+            sessionId,
+            promptId: ownerPromptId,
+          })
+          .catch((error) => {
+            writeStderrLine(
+              `qwen serve: Todo Stop Guard queued-prompt release failed for ` +
+                `${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+      };
+      const publishPromptFailure = (err: unknown) => {
+        publishPromptTerminal(
+          entry,
+          pendingEntry,
+          err instanceof DOMException && err.name === 'AbortError'
+            ? { kind: 'cancelled' }
+            : { kind: 'error', err },
+        );
+      };
+      const onQueuedDispatchAbort = () => {
+        if (pendingEntry.state === 'queued') {
+          pendingAbort.abort(dispatchSignal?.reason);
+          publishPromptFailure(dispatchSignal?.reason);
+        }
+      };
       if (isQueued) {
         pendingAbort.signal.addEventListener(
           'abort',
           () => {
-            if (pendingEntry.state !== 'queued') return;
-            const waitingOwnerPromptId =
-              entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
-            if (!waitingOwnerPromptId) return;
-            const hasAnotherQueuedPrompt = entry.pendingPromptList.some(
-              (candidate) =>
-                candidate !== pendingEntry &&
-                candidate.state === 'queued' &&
-                !candidate.abortController.signal.aborted,
-            );
-            if (hasAnotherQueuedPrompt) return;
-            delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
-            void entry.connection
-              .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, {
-                sessionId,
-                promptId: waitingOwnerPromptId,
-              })
-              .catch((error) => {
-                writeStderrLine(
-                  `qwen serve: Todo Stop Guard queued-prompt release failed for ` +
-                    `${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
-                );
-              });
+            if (pendingEntry.state === 'queued') {
+              releaseGuardWaitWithoutSuccessor();
+            }
           },
           { once: true },
         );
@@ -11719,10 +11835,15 @@ export function createSessionControlPlane(
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
+        dispatchSignal?.addEventListener('abort', onQueuedDispatchAbort, {
+          once: true,
+        });
+        if (dispatchSignal?.aborted) onQueuedDispatchAbort();
       }
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
+      let handoffOwnerPromptId: string | undefined;
       const result = entry.promptQueue.then(() =>
         telemetry.runWithContext(capturedContext, async () => {
           const queueWaitMs = Date.now() - queuedAt;
@@ -11730,6 +11851,7 @@ export function createSessionControlPlane(
           // Check abort BEFORE promoting state — if `removePendingPrompt`
           // already aborted this entry, skip the running transition and
           // the `pending_prompt_started` event entirely.
+          dispatchSignal?.throwIfAborted();
           if (pendingAbort.signal.aborted) {
             // A deadline that expired while this prompt was still queued
             // aborted with the typed error; surface it to the caller so
@@ -11759,7 +11881,9 @@ export function createSessionControlPlane(
           // mid-turn message has no client-side row to render.
           if (pendingEntry.state === 'queued' || isPromotedMidTurn) {
             if (pendingEntry.state === 'queued') {
-              delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+              // Promotion can still fail before the child receives the prompt.
+              handoffOwnerPromptId =
+                entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
               pendingEntry.state = 'running';
             }
             entry.events.publish({
@@ -11877,6 +12001,8 @@ export function createSessionControlPlane(
                       context.submittedPrompt;
                   }
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
+                  delete meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+                  delete meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
                   delete meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
                   // Channel classification is authenticated channel-worker
                   // metadata; the daemon prompt route validates the worker
@@ -11918,6 +12044,14 @@ export function createSessionControlPlane(
                   if (modelPrompt !== undefined) {
                     meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
                   }
+                  if (context?.expectedApprovalMode !== undefined) {
+                    meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY] =
+                      context.expectedApprovalMode;
+                  }
+                  if (context?.approvalModeBeforeStart !== undefined) {
+                    meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY] =
+                      context.approvalModeBeforeStart;
+                  }
                   const attachmentReferences = dispatchBlocks.filter(
                     isSessionAttachmentReference,
                   );
@@ -11953,6 +12087,8 @@ export function createSessionControlPlane(
                 // Resolving attachments can yield; a quarantine that began
                 // meanwhile still refuses the prompt before it is sent.
                 assertChannelAdmitsPrompts(entry);
+                dispatchSignal?.throwIfAborted();
+                context?.assertCanDispatch?.();
                 entry.events.setEventDetailMode(eventDetailMode);
                 entry.backgroundStartsSuspended = false;
                 let resolveTerminal!: () => void;
@@ -12028,10 +12164,57 @@ export function createSessionControlPlane(
                   settleActivePromptState(entry, pendingEntry.promptId);
                   throw echoErr;
                 }
-                pendingEntry.dispatched = true;
                 const precedingBackgroundTurnId = entry.backgroundTurn?.turnId;
-                const promptPromise = entry.connection
-                  .prompt(promptRequest)
+                const onWriteStarted = context?.onPromptWriteStarted;
+                const onDispatched = context?.onPromptDispatched;
+                const guardedDispatch =
+                  context?.assertCanDispatch !== undefined ||
+                  dispatchSignal !== undefined ||
+                  onWriteStarted !== undefined ||
+                  onDispatched !== undefined;
+                const notifyDispatchObserver = (observer?: () => void) => {
+                  try {
+                    observer?.();
+                  } catch (error) {
+                    opts.onDiagnosticLine?.(
+                      `qwen serve: prompt dispatch observer failed for session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+                      'warn',
+                    );
+                  }
+                };
+                if (!guardedDispatch) pendingEntry.dispatched = true;
+                const promptPromise = forwardPrompt(
+                  entry.connection,
+                  promptRequest,
+                  guardedDispatch
+                    ? {
+                        signal: dispatchSignal,
+                        assertCanWrite() {
+                          if (pendingAbort.signal.aborted) {
+                            throw new DOMException(
+                              'Prompt aborted',
+                              'AbortError',
+                            );
+                          }
+                          if (
+                            byId.get(sessionId) !== entry ||
+                            isClosingOrAuthorizingClose(entry)
+                          ) {
+                            throw new SessionNotFoundError(sessionId);
+                          }
+                          assertChannelAdmitsPrompts(entry);
+                          context?.assertCanDispatch?.();
+                        },
+                        onWriteStarted() {
+                          pendingEntry.dispatched = true;
+                          notifyDispatchObserver(onWriteStarted);
+                        },
+                        onWritten() {
+                          notifyDispatchObserver(onDispatched);
+                        },
+                      }
+                    : undefined,
+                )
                   .then((response) => {
                     // A successful RPC response proves the child drained its preceding automatic execution.
                     if (
@@ -12053,7 +12236,6 @@ export function createSessionControlPlane(
                     // (after the terminal broadcast), not here.
                     settleActivePromptState(entry, pendingEntry.promptId);
                   });
-
                 // Race against channel termination: if the underlying transport
                 // dies (child crashed, stream torn down) WHILE the prompt is in
                 // flight, the SDK's pending-request promise can hang because the
@@ -12144,7 +12326,10 @@ export function createSessionControlPlane(
                     originatorClientId,
                   );
                   permissionMediator.cancelForTurnCancel(sessionId);
-                  if (byId.get(sessionId) === entry) {
+                  if (
+                    pendingEntry.dispatched &&
+                    byId.get(sessionId) === entry
+                  ) {
                     void forwardRunningPromptCancel(entry, pendingEntry, {
                       sessionId,
                       _meta: {
@@ -12193,18 +12378,19 @@ export function createSessionControlPlane(
             kind: 'complete',
             result: promptResult,
           });
+          if (promptResult.stopReason === 'cancelled') {
+            releaseGuardWaitWithoutSuccessor();
+          } else if (
+            handoffOwnerPromptId !== undefined &&
+            entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId ===
+              handoffOwnerPromptId
+          ) {
+            delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+          }
         },
         (err) => {
-          if (err instanceof DOMException && err.name === 'AbortError') {
-            // An aborted prompt (queued removal, caller socket close,
-            // deadline…) still owes its formal terminal — fall back to a
-            // `cancelled` turn_complete. Paths that already published one
-            // (removePendingPrompt, onDeadline, flush) are deduped by the
-            // per-prompt latch inside `publishPromptTerminal`.
-            publishPromptTerminal(entry, pendingEntry, { kind: 'cancelled' });
-            return;
-          }
-          publishPromptTerminal(entry, pendingEntry, { kind: 'error', err });
+          publishPromptFailure(err);
+          releaseGuardWaitWithoutSuccessor();
         },
       );
       // Tail swallows failures so subsequent prompts still run. The caller
@@ -12223,6 +12409,8 @@ export function createSessionControlPlane(
       );
       result
         .finally(() => {
+          signal?.removeEventListener('abort', onCallerAbort);
+          dispatchSignal?.removeEventListener('abort', onQueuedDispatchAbort);
           if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
           // Remove this prompt from the pending list and publish a
           // completed event so SSE subscribers can update their queue view.
@@ -12283,6 +12471,16 @@ export function createSessionControlPlane(
           drainQuarantinedChannelFor(entry);
         })
         .catch(() => {});
+      // Arm only after synchronous admission succeeds. The signal may have
+      // aborted in an admission callback, before the queued work can run.
+      if (signal?.aborted) {
+        onCallerAbort();
+      } else {
+        signal?.addEventListener('abort', onCallerAbort, {
+          once: true,
+          signal: pendingAbort.signal,
+        });
+      }
       return result;
     },
 
@@ -12458,6 +12656,12 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.lastEventId;
+    },
+
+    getSessionPendingPermissionIds(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return [...entry.pendingPermissionIds];
     },
 
     getSessionEventEpoch(sessionId) {
@@ -13015,9 +13219,13 @@ export function createSessionControlPlane(
       );
 
       // Relocation moves the session's cwd — including into a subdir of the
-      // checkout the transfer is moving. The route relocates the *replacement*
-      // (never armed), so the superseded id fails closed here.
-      assertSessionResetNotPending(sessionId);
+      // checkout the transfer is moving. The reset route relocates the
+      // *replacement* (never armed), so the superseded id fails closed here.
+      // The handoff route arms the barrier on the session it is moving and
+      // owns it for the whole transfer; it alone may pass the exemption.
+      if (!req.allowWhileResetPending) {
+        assertSessionResetNotPending(sessionId);
+      }
 
       // Chain onto promptQueue and update tail — ensures:
       // 1. cd waits for any in-flight prompt to complete
@@ -13807,6 +14015,20 @@ export function createSessionControlPlane(
       return toSessionSummary(entry);
     },
 
+    hasSessionOrPendingRegistration(sessionId) {
+      const id = sessionId.toLowerCase();
+      for (const sessions of [
+        byId,
+        inFlightRestores,
+        inFlightSessionIdReservations,
+      ]) {
+        for (const registeredId of sessions.keys()) {
+          if (registeredId.toLowerCase() === id) return true;
+        }
+      }
+      return false;
+    },
+
     getSessionExecutionSnapshot(sessionId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -14295,6 +14517,25 @@ export function createSessionControlPlane(
       );
     },
 
+    captureSessionApprovalModeGuard(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const generation = entry.approvalModePublishGeneration;
+      const assertCurrent = () => {
+        assertLivePromptEntry(sessionId, entry);
+        if (
+          entry.approvalModeRoundtripInFlight ||
+          entry.approvalModePublishGeneration !== generation
+        ) {
+          throw new Error(
+            'The session approval mode changed during delegation. Retry the launch.',
+          );
+        }
+      };
+      assertCurrent();
+      return assertCurrent;
+    },
+
     async getSessionContextUsageStatus(sessionId, opts) {
       return requestSessionStatus(
         sessionId,
@@ -14345,6 +14586,24 @@ export function createSessionControlPlane(
       return requestSessionStatus<ServeSessionLspStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      );
+    },
+
+    async getGeneratedUiState(sessionId, cardId, context) {
+      return requestGeneratedUiState(
+        sessionId,
+        'qwen/session/generated-ui/state/get',
+        { cardId },
+        context.clientId,
+      );
+    },
+
+    async setGeneratedUiState(sessionId, cardId, write, context) {
+      return requestGeneratedUiState(
+        sessionId,
+        'qwen/session/generated-ui/state/set',
+        { cardId, baseRevision: write.baseRevision, value: write.value },
+        context.clientId,
       );
     },
 
@@ -16511,16 +16770,26 @@ export function createSessionControlPlane(
         const shouldRestoreArtifactSnapshot =
           artifactSnapshot !== undefined &&
           artifactSnapshotUnavailable === undefined;
-        const artifactRestoreWarnings =
-          artifactSnapshotUnavailable !== undefined
-            ? [
-                `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
-              ]
-            : shouldRestoreArtifactSnapshot
-              ? await entry.artifacts.restore(artifactSnapshot, {
-                  preserveLiveEphemeral: true,
-                })
-              : [];
+        // Rewind restores into a live entry across awaits; mark the
+        // session pending so summaries withhold the partial count (the
+        // same marker the load path uses) instead of publishing it.
+        const rewindChannel = channelInfoForEntry(entry);
+        rewindChannel?.pendingRestoreIds.add(entry.sessionId);
+        let artifactRestoreWarnings: string[];
+        try {
+          artifactRestoreWarnings =
+            artifactSnapshotUnavailable !== undefined
+              ? [
+                  `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
+                ]
+              : shouldRestoreArtifactSnapshot
+                ? await entry.artifacts.restore(artifactSnapshot, {
+                    preserveLiveEphemeral: true,
+                  })
+                : [];
+        } finally {
+          rewindChannel?.pendingRestoreIds.delete(entry.sessionId);
+        }
         const artifactRestoreFailed =
           entry.artifacts.consumeLegacyOnlyRestore() ||
           artifactRestoreWarnings.some(isArtifactRestoreFailureWarning);

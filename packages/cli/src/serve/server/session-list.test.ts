@@ -22,7 +22,37 @@ import type {
 import {
   InvalidCursorError,
   listWorkspaceSessionsForResponse,
+  searchWorkspaceSessionsForResponse,
 } from './session-list.js';
+
+// Mid-scan abort harness: the wrapper aborts the caller's signal as the
+// second async sidecar read starts, deterministically landing the abort
+// inside the enrichment loop (no timer race against fast local reads).
+const abortHarness = vi.hoisted(() => ({
+  controller: undefined as AbortController | undefined,
+  reads: 0,
+}));
+
+vi.mock(
+  '@qwen-code/qwen-code-core/services/session-artifact-summary-sidecar.js',
+  async (importOriginal) => {
+    const mod =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/session-artifact-summary-sidecar.js')
+      >();
+    return {
+      ...mod,
+      readSessionArtifactSummarySidecarAsync: async (
+        filePath: string,
+        options?: { signal?: AbortSignal },
+      ) => {
+        abortHarness.reads += 1;
+        if (abortHarness.reads === 2) abortHarness.controller?.abort();
+        return mod.readSessionArtifactSummarySidecarAsync(filePath, options);
+      },
+    };
+  },
+);
 
 describe('merged session catalog pagination', () => {
   let directory: string;
@@ -38,6 +68,7 @@ describe('merged session catalog pagination', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    abortHarness.controller = undefined;
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -810,5 +841,249 @@ describe('merged session catalog pagination', () => {
         expect(result.sessions[0]?.prs).toBeUndefined();
       },
     );
+  });
+
+  describe('artifact summary sidecar enrichment', () => {
+    async function writeArtifactSummarySidecar(
+      session: BridgeSessionSummary,
+      content: string,
+      archived = false,
+    ): Promise<void> {
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+        ...(archived ? ['archive'] : []),
+      );
+      await fs.mkdir(chats, { recursive: true });
+      await fs.writeFile(
+        path.join(chats, `${session.sessionId}.artifacts.json`),
+        content,
+      );
+    }
+
+    const sidecarBody = (artifactCount: number) =>
+      JSON.stringify({
+        version: 1,
+        artifactCount,
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      });
+
+    it('enriches a cold session with the restorable count from the sidecar', async () => {
+      const cold = summary(0);
+      await persist(cold);
+      await writeArtifactSummarySidecar(cold, sidecarBody(3));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(3);
+    });
+
+    it.each(['missing', '{not json', '{"version":1,"artifactCount":-1}'])(
+      'leaves artifactCount unset for a missing or corrupt sidecar: %s',
+      async (content) => {
+        const cold = summary(0);
+        await persist(cold);
+        if (content !== 'missing') {
+          await writeArtifactSummarySidecar(cold, content);
+        }
+        const { bridge } = bridgeFor([]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {},
+          { runtimeBaseDir },
+        );
+
+        expect(result.sessions[0]?.artifactCount).toBeUndefined();
+      },
+    );
+
+    it('keeps the list page resolving when a sidecar read throws (EISDIR)', async () => {
+      const cold = summary(0);
+      const healthy = summary(1);
+      await persist(cold);
+      await persist(healthy);
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      // A directory at the sidecar path makes the async reader throw
+      // EISDIR (not ENOENT); the enricher's catch must contain it so one
+      // unreadable sidecar cannot reject the whole page.
+      await fs.mkdir(path.join(chats, `${cold.sessionId}.artifacts.json`), {
+        recursive: true,
+      });
+      await writeArtifactSummarySidecar(healthy, sidecarBody(4));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { view: 'organized' },
+        { runtimeBaseDir },
+      );
+
+      const byId = new Map(
+        result.sessions.map((session) => [session.sessionId, session]),
+      );
+      expect(byId.get(cold.sessionId)?.artifactCount).toBeUndefined();
+      expect(byId.get(healthy.sessionId)?.artifactCount).toBe(4);
+    });
+
+    it('lets the live count supersede a stale sidecar count', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeArtifactSummarySidecar(session, sidecarBody(99));
+      const { bridge } = bridgeFor([{ ...session, artifactCount: 3 }]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(3);
+    });
+
+    it('drops the stale sidecar count when the live entry reports none', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeArtifactSummarySidecar(session, sidecarBody(99));
+      // A live entry without artifactCount has zero artifacts; the sidecar's
+      // 99 must not survive the merge.
+      const { bridge } = bridgeFor([session]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBeUndefined();
+    });
+
+    it('keeps the sidecar count while the live entry marks its restore pending', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeArtifactSummarySidecar(session, sidecarBody(3));
+      // A restoring entry is live but not hydrated: the omitted count is
+      // unknown, not zero, so the sidecar-enriched count must survive.
+      const { bridge } = bridgeFor([
+        { ...session, artifactCountPending: true },
+      ]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(3);
+    });
+
+    it('enriches the organized view from the same sidecar', async () => {
+      const cold = summary(0);
+      await persist(cold);
+      await writeArtifactSummarySidecar(cold, sidecarBody(2));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { view: 'organized' },
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(2);
+    });
+
+    it('enriches archived sessions from the archive chats dir', async () => {
+      const archived = summary(0);
+      await persist(archived, archived.createdAt, true);
+      await writeArtifactSummarySidecar(archived, sidecarBody(5), true);
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { archiveState: 'archived' },
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.artifactCount).toBe(5);
+    });
+
+    it('enriches search hits with the sidecar count', async () => {
+      const cold = summary(0);
+      await persist(cold);
+      await writeArtifactSummarySidecar(cold, sidecarBody(3));
+
+      const result = await searchWorkspaceSessionsForResponse(
+        workspaceCwd,
+        'stored prompt',
+        {},
+        { runtimeBaseDir },
+      );
+
+      const hit = result.results.find(
+        (r) => r.session.sessionId === cold.sessionId,
+      );
+      expect(hit?.session.artifactCount).toBe(3);
+    });
+
+    it('rejects when the signal aborts mid-scan, after the first sidecar read', async () => {
+      const first = summary(0);
+      const second = summary(1);
+      const third = summary(2);
+      await persist(first);
+      await persist(second);
+      await persist(third);
+      await writeArtifactSummarySidecar(first, sidecarBody(3));
+      await writeArtifactSummarySidecar(second, sidecarBody(4));
+      await writeArtifactSummarySidecar(third, sidecarBody(5));
+      const { bridge } = bridgeFor([]);
+      abortHarness.controller = new AbortController();
+      abortHarness.reads = 0;
+
+      await expect(
+        listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { view: 'organized' },
+          { runtimeBaseDir, signal: abortHarness.controller.signal },
+        ),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      // The third session discriminates the per-iteration abort checks
+      // from the post-enrichment one: without the loop-top/catch checks
+      // the swallowed abort lets the scan read a third sidecar before
+      // the later check rejects.
+      expect(abortHarness.reads).toBe(2);
+
+      // A scan interrupted mid-way must not cache a snapshot: the next
+      // request re-scans (three more sidecar reads). A synchronous scan
+      // never calls the async reader, so it never observes the abort,
+      // completes the page, and serves the retry from the cache.
+      const retry = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { view: 'organized' },
+        { runtimeBaseDir },
+      );
+      expect(abortHarness.reads).toBe(5);
+      expect(
+        retry.sessions.map((session) => session.artifactCount).sort(),
+      ).toEqual([3, 4, 5]);
+      abortHarness.controller = undefined;
+    });
   });
 });

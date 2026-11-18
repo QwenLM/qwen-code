@@ -7,6 +7,7 @@
 import { userPromptTimestamp } from './last-user-prompt-time.js';
 import { shellResultText } from '../utils/shell-result.js';
 import type { SessionSourcesSnapshot } from './session-sources.js';
+import type { GeneratedUiStateRecordPayload } from './generated-ui-state.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
@@ -57,6 +58,10 @@ import {
   truncateTitleForList,
   writeSessionTitleSidecar,
 } from './session-title-sidecar.js';
+import {
+  sessionArtifactSummarySidecarPath,
+  writeSessionArtifactSummarySidecar,
+} from './session-artifact-summary-sidecar.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -80,7 +85,10 @@ import {
   type SessionWriterCommitProof,
   SessionWriterLease,
 } from './session-writer-lease.js';
-import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import {
+  GENERATED_UI_STATE_SUBTYPE,
+  prepareTranscriptRecords,
+} from '../utils/transcript-records.js';
 import {
   getApiHistoryPromptId,
   isApiHistoryDirectoryContext,
@@ -461,6 +469,7 @@ export interface ChatRecord {
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
     | 'session_sources_snapshot'
+    | 'generated_ui_state'
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
@@ -582,6 +591,7 @@ export interface ChatRecord {
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
     | SessionSourcesSnapshot
+    | GeneratedUiStateRecordPayload
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
     | GoalTurnEndRecordPayload
@@ -644,6 +654,7 @@ export interface NotificationRecordPayload {
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    fromSession?: { sessionId: string; workspaceCwd: string };
   };
 }
 
@@ -731,7 +742,10 @@ export interface ChatCompressionRecordPayload {
   contextPrefixLength?: number;
   /** Generated summary and restore entries preceding any retained raw input. */
   summaryPrefixLength?: number;
-  /** Prompt identities parallel to compressedHistory. */
+  /**
+   * Prompt identities parallel to compressedHistory. The first retained model
+   * response may carry its owning prompt's identity when that prompt was summarized.
+   */
   promptIds?: Array<string | null>;
   /** Internal directory context, without changing the model-facing snapshot. */
   directoryContextIndices?: number[];
@@ -1184,9 +1198,14 @@ export type ChatRecordingFailureListener = (
   event: ChatRecordingFailureEvent,
 ) => void | Promise<void>;
 
+interface StrictRecordAppendOptions {
+  updateActiveTail?: boolean;
+  expectedBranchGeneration?: number;
+}
+
 interface BufferedRecordAppend {
   record: ChatRecord;
-  options: { updateActiveTail?: boolean } | undefined;
+  options: StrictRecordAppendOptions | undefined;
   resolve?: () => void;
   reject?: (error: unknown) => void;
 }
@@ -1243,6 +1262,8 @@ export interface ChatRecordingRestoreState {
 export class ChatRecordingService {
   /** UUID of the active logical tail, including records queued for writing. */
   private lastRecordUuid: string | null = null;
+  /** Bumped whenever the active branch is replaced (rewind, reset). */
+  private branchGeneration = 0;
   /** UUID of the last active-tail record confirmed written to disk. */
   private lastPersistedRecordUuid: string | null = null;
   /** Active chain mirrored in memory so end-of-turn validation is incremental. */
@@ -1515,6 +1536,13 @@ export class ChatRecordingService {
     return sessionTitleSidecarPath(this.ensureChatsDir(), this.getSessionId());
   }
 
+  private artifactSummarySidecarPath(): string {
+    return sessionArtifactSummarySidecarPath(
+      this.ensureChatsDir(),
+      this.getSessionId(),
+    );
+  }
+
   /**
    * Keeps the session list label independent of the transcript's head. A
    * transcript can be rebuilt without its first records (the writer recreates
@@ -1615,6 +1643,7 @@ export class ChatRecordingService {
     this.currentSessionWorkflowMode = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
+    this.branchGeneration += 1;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
     this.modPromptKeysForTitle.clear();
@@ -1993,11 +2022,18 @@ export class ChatRecordingService {
 
   private async appendRecordStrict(
     record: ChatRecord,
-    options?: { updateActiveTail?: boolean },
+    options?: StrictRecordAppendOptions,
   ): Promise<void> {
     if (this.writeFailure) throw this.writeFailure;
     if (!this.acceptingWrites || this.state !== 'active')
       throw new SessionWriterUnavailableError();
+    if (
+      options?.expectedBranchGeneration !== undefined &&
+      this.branchGeneration !== options.expectedBranchGeneration
+    )
+      throw new Error(
+        'Cannot save view state during a transcript branch change',
+      );
     if (this.refusesManagedRecord(record)) {
       throw new ManagedSessionRecordRefusedError(record);
     }
@@ -3647,6 +3683,7 @@ export class ChatRecordingService {
       if (!input.isCurrent()) return false;
       const rewindWrite = strict(rewind);
       committed = true;
+      this.branchGeneration += 1;
       projectTurns(retained);
       this.resetExternalRecordIndex();
       this.lastAttributionSnapshotJson = undefined;
@@ -3902,6 +3939,7 @@ export class ChatRecordingService {
       this.pendingHookTurnParents.clear();
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
+      this.branchGeneration += 1;
       const projectionStart = Math.max(
         0,
         this.turnParentUuids.length - this.userDisplayTextsForTitle.length,
@@ -3986,6 +4024,7 @@ export class ChatRecordingService {
     this.pendingHookTurnParents.clear();
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
+    this.branchGeneration += 1;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
 
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
@@ -4584,6 +4623,14 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });
+    // Derived list cache, refreshed after the authoritative append. Older
+    // records carry no count; the load-time seed covers those sessions.
+    if (payload.artifactCount !== undefined) {
+      writeSessionArtifactSummarySidecar(
+        this.artifactSummarySidecarPath(),
+        payload.artifactCount,
+      );
+    }
   }
 
   async recordSessionArtifactSnapshot(
@@ -4596,7 +4643,38 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });
+    writeSessionArtifactSummarySidecar(
+      this.artifactSummarySidecarPath(),
+      payload.artifacts.length,
+    );
   }
+  /** Identifies the current active branch; changes when it is replaced. */
+  getBranchGeneration(): number {
+    return this.branchGeneration;
+  }
+
+  /**
+   * One card's saved view state, beside the active tail. A save needs a
+   * conversation record to hang from; without one it could not be read back.
+   */
+  async recordGeneratedUiState(
+    payload: GeneratedUiStateRecordPayload,
+    generation: number,
+  ): Promise<void> {
+    if (this.lastRecordUuid === null)
+      throw new Error('There is no conversation to attach view state to');
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: GENERATED_UI_STATE_SUBTYPE,
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, {
+      updateActiveTail: false,
+      expectedBranchGeneration: generation,
+    });
+  }
+
   async recordSessionSourcesSnapshot(
     payload: SessionSourcesSnapshot,
   ): Promise<void> {

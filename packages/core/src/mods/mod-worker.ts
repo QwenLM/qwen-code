@@ -29,11 +29,16 @@ import {
   type ModStoreOperation,
   type ModWorkerRequest,
 } from './types.js';
-import { ENGINE_NODE, type ModRenderSite } from './render-tree.js';
+import {
+  ENGINE_NODE,
+  MOD_ROW_SITES,
+  type ModRenderSite,
+} from './render-tree.js';
 import {
   MOD_EVENTS,
   MOD_HOST_EVENTS,
   MOD_STORE_EVENTS,
+  MOD_TOOL_EVENTS,
   MOD_METHODS,
   MOD_READS,
   ModBudget,
@@ -1249,9 +1254,11 @@ port.on('message', async (request: ModWorkerRequest) => {
           !MOD_HOST_EVENTS.includes(event) ||
           (event === 'prompt.submit'
             ? request.prompts === true
-            : MOD_STORE_EVENTS.includes(event)
-              ? keepsStore
-              : sites.length > 0),
+            : MOD_TOOL_EVENTS.includes(event)
+              ? request.tools === true
+              : MOD_STORE_EVENTS.includes(event)
+                ? keepsStore
+                : sites.length > 0),
       );
       for (const plugin of request.plugins) {
         assertLive();
@@ -1403,8 +1410,9 @@ port.on('message', async (request: ModWorkerRequest) => {
           return ENGINE_NODE;
         },
       );
-      result =
-        request.input.component === 'AssistantMessage' ? { tree, props } : tree;
+      result = MOD_ROW_SITES.has(request.input.component)
+        ? { tree, props }
+        : tree;
     } else if (request.type === 'turn-complete') {
       result = await dispatch(
         'turn.complete',

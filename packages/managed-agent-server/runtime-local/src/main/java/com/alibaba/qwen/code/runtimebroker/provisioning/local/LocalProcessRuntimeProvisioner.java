@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.local;
 
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
@@ -146,10 +145,6 @@ public final class LocalProcessRuntimeProvisioner
     public static LocalProcessRuntimeProvisioner durable(List<String> command,
             Path stateDirectory, HttpRuntimeTransport transport, boolean trustedRebootRecovery) {
         LocalRuntimeStore.HostIdentity identity = LocalRuntimeStore.HostIdentity.current();
-        if (trustedRebootRecovery && "macos".equals(identity.pidNamespace())) {
-            throw new IllegalStateException("Trusted whole-host reboot recovery requires Linux;"
-                    + " set runtime-broker.trusted-local-reboot-recovery=false on macOS");
-        }
         return new LocalProcessRuntimeProvisioner(command, stateDirectory, transport, null,
                 new LocalRuntimeStore(stateDirectory, identity), trustedRebootRecovery);
     }
@@ -216,7 +211,6 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public RuntimeProvisionRequest createRequest(RuntimeScope scope,
             String isolationKey) {
-        requireLegacyProfile(scope);
         return storageResolver == null
                 ? OperatorRuntimeRecovery.super.createRequest(scope, isolationKey)
                 : new RuntimeProvisionRequest(scope, isolationKey, kind(),
@@ -247,9 +241,6 @@ public final class LocalProcessRuntimeProvisioner
     public CompletionStage<RuntimeResourceHandle> ensureResource(
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle knownHandle) {
-        if (CsiFilesRetirementProfile.isProfile(request.getScope())) {
-            return CompletableFuture.failedFuture(privateProfileRefusal());
-        }
         if (store != null) {
             return submit(() -> store.locked(request, seed, knownHandle, true,
                     (resource, registration) -> registration.handle()));
@@ -279,9 +270,6 @@ public final class LocalProcessRuntimeProvisioner
     /** Local operator attestation requires the exact registered worker to be gone. */
     @Override
     public RuntimeObservation attestOperatorStop(RuntimeBindingRecord binding, String recoveryId) {
-        if (binding != null) {
-            requireLegacyProfile(binding.getRequest().getScope());
-        }
         if (store == null || binding == null || !binding.getRequest().isManagedContext()
                 || !LocalRuntimeStore.supported(binding.getResourceHandle())
                 || binding.getProvisionSeed() == null || binding.getLease() == null
@@ -317,9 +305,6 @@ public final class LocalProcessRuntimeProvisioner
     /** Read-only preflight of the original durable registration. */
     @Override
     public void verifyOperatorRegistration(RuntimeBindingRecord binding) {
-        if (binding != null) {
-            requireLegacyProfile(binding.getRequest().getScope());
-        }
         if (store == null || binding == null || !binding.getRequest().isManagedContext()
                 || !LocalRuntimeStore.supported(binding.getResourceHandle())
                 || binding.getProvisionSeed() == null || binding.getLease() == null) {
@@ -360,9 +345,6 @@ public final class LocalProcessRuntimeProvisioner
     @Override
     public CompletionStage<Void> release(RuntimeProvisionRequest request,
             RuntimeLease lease) {
-        if (CsiFilesRetirementProfile.isProfile(request.getScope())) {
-            return CompletableFuture.failedFuture(privateProfileRefusal());
-        }
         if (store == null) {
             stop(lease);
         }
@@ -558,7 +540,6 @@ public final class LocalProcessRuntimeProvisioner
 
     private RuntimeLease start(RuntimeProvisionRequest request,
             RuntimeProvisionSeed provided) {
-        requireLegacyProfile(request.getScope());
         if (store != null) {
             RuntimeProvisionSeed seed = provided == null ? newSeed() : provided;
             if (provided == null) {
@@ -900,7 +881,6 @@ public final class LocalProcessRuntimeProvisioner
     private RuntimeObservation observe(RuntimeProvisionRequest request,
             RuntimeProvisionSeed seed, RuntimeResourceHandle handle,
             RuntimeLease lastLease) {
-        requireLegacyProfile(request.getScope());
         if (store != null) {
             return observeDurable(request, seed, handle, lastLease);
         }
@@ -988,7 +968,6 @@ public final class LocalProcessRuntimeProvisioner
 
     private void attestOwned(RuntimeProvisionRequest request,
             RuntimeLease lease) {
-        requireLegacyProfile(request.getScope());
         OwnedProcess process = owned.get(ownershipKey(lease));
         if (process == null || !process.alive()) {
             throw failed("Managed Runtime process is not alive.");
@@ -1096,17 +1075,6 @@ public final class LocalProcessRuntimeProvisioner
 
     private static RuntimeBrokerException capacity(String message, RejectedExecutionException cause) {
         return new RuntimeBrokerException(503, "runtime_local_capacity", message, true, cause);
-    }
-
-    private static void requireLegacyProfile(RuntimeScope scope) {
-        if (CsiFilesRetirementProfile.isProfile(scope)) {
-            throw privateProfileRefusal();
-        }
-    }
-
-    private static RuntimeBrokerException privateProfileRefusal() {
-        return new RuntimeBrokerException(409, "runtime_provision_failed",
-                "Private CSI file profile requires its dedicated Kubernetes worker.", false);
     }
 
     private static RuntimeBrokerException failed(String message,

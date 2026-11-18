@@ -15,7 +15,6 @@ import {
 import { createPortal } from 'react-dom';
 import {
   Clock3Icon,
-  FolderIcon,
   HourglassIcon,
   MessageSquarePlusIcon,
   MessagesSquareIcon,
@@ -46,6 +45,7 @@ import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
 import { getModelDisplayName } from '../../utils/modelDisplay';
 import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
+import { WorkspacePill } from '../WorkspacePill';
 import { DialogShell } from './DialogShell';
 import {
   ScheduledTaskDeliveryFields,
@@ -214,14 +214,7 @@ function renderWorkspacePill(
   candidates: readonly DaemonWorkspaceCapability[],
 ) {
   return (
-    <span className={styles.workspacePill} title={cwd}>
-      <span className={styles.workspaceIcon} aria-hidden="true">
-        <FolderIcon />
-      </span>
-      <span className={styles.workspaceName}>
-        {workspaceLabelForCwd(cwd, candidates)}
-      </span>
-    </span>
+    <WorkspacePill cwd={cwd} label={workspaceLabelForCwd(cwd, candidates)} />
   );
 }
 
@@ -2239,7 +2232,7 @@ export function ScheduledTasksDialog({
             task.workspaceCwd ??
             (!isMultiWorkspace ? primaryWorkspaceCwd : undefined);
           const deliveryLabel = task.delivery
-            ? `${t('scheduledTasks.delivery.cardPrefix')} ${task.delivery.target.channelName} · ${t(`scheduledTasks.delivery.${task.delivery.target.type}`)} · ${task.delivery.target.id}`
+            ? `${t('scheduledTasks.delivery.cardPrefix')} ${task.delivery.target.channelName} · ${task.delivery.target.id}`
             : undefined;
           const busy = busyId === taskKey(task);
           return (

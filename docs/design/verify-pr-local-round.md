@@ -76,15 +76,23 @@ them rather than at the end of the document.
   harness ran. With `--context <snapshot>` the expected head comes from that
   host-held file instead of the artifact's writable `context.json`, and an
   unusable snapshot is a hard exit 1, not a warning: the artifact directory is
-  writable by the PR code the round just ran.
+  writable by the PR code the round just ran. The trust refusal is root-aware
+  (a filesystem trust root — `/` or a Windows drive root — contains every path
+  and is rejected as a usage error), refuses a context inside the PR-writable
+  tree, and refuses a hard link retaining a second name. Because a path outside
+  the tree and a single link still do not prove the host wrote the file,
+  `--context-sha256 <digest>` binds the content: `prepare` prints the sha256 of
+  the snapshot it writes host-side, the skill holds it outside the clone and
+  passes it, and the checker refuses a byte mismatch. Without the digest the
+  checker discloses that provenance rests on the path/link checks alone.
 - `scripts/verify-pr-guard.mjs` owns both halves of the pre-publish guard.
   `--pr <n> --repo <owner>/<repo> --snapshot <file>` fetches the head, the PR
   state and all three comment lists with `--paginate`, and writes the file only
   when every call succeeded. `--compare --start <a> --now <b>` reports every
   reason the round is dirty and exits 1.
 
-The checker gains three rules over the artifacts the contract asks the round
-to write. The artifact contract names all three, because a file no artifact
+The checker gains four rules over the artifacts the contract asks the round
+to write. The artifact contract names all four, because a file no artifact
 list asks for is a file no round produces, and a check over an absent file is
 silent:
 
@@ -106,6 +114,39 @@ silent:
   totals on a line of their own. A malformed list is an error. Over 1000
   assertions with no gate results is a warning: the four such rounds among
   18 recent CI artifacts had each counted whole workspace suites.
+- `boundary.json` declares where the untrusted PR code ran: `mode:
+"container"` with a non-empty `detail`, `mode: "vm"` for an attested VM, or
+  `mode: "waived"` for a host round — the latter two naming the approving
+  maintainer (`by`), a permalink to the approval comment (`approval`), and
+  the `reason` (a VM also records an `attestation`). Unlike the three above,
+  a merely absent
+  file is an error on the authoritative check: the isolation rule existed
+  only as prose until two local rounds on PR #16866 ran the whole battery on
+  the host with no gate and no waiver. The one exception is the CI entry
+  path (`$QWEN_VERIFY_CONTEXT` set), where the inner round does not write the
+  declaration itself, so an absent file — or a container declaration whose
+  gate record is absent — is only a warning in the round's own self-check;
+  the operator writes both later (the publish job on the CI lane, step 7's
+  host block on the container recipe). That host block runs the checker
+  without the variable set, so absence there is again an error. A container
+  declaration must also be backed by `boundary-gate.json`
+  — the record a passing `verify-pr-prepare.mjs --require-isolation
+  --artifact-dir <round-dir>` writes, corroborating the gate run behind the
+  declaration; the waiver's `approval` must be a GitHub comment
+  permalink a reader can open, not free text, and the maintainer is its
+  sole author — the round never posts the comment it cites. When the
+  host-held `--context` snapshot carries the repo slug and the PR number
+  (prepare writes the slug into it), the permalink must cite that round's
+  own PR; the artifact directory's own `context.json` never supplies these
+  coordinates, because it is PR-writable. The CI publish job writes the
+  CI lane's own declaration and `ci-lane` gate record before running the
+  checker, so the round's own copy does not decide the check and older
+  base-pinned skills still pass. The artifact tree is PR-writable and
+  `--publish-lane` is an argv claim, not an authenticated identity, so the
+  gate record corroborates
+  against an operator who skipped the gate (the incident's shape), not
+  against PR code that forges it; the publisher-owned CI path is the
+  authoritative one.
 
 Each prepared artifact directory keeps `context.json` with the round's full
 coordinates — `repo`, `pr`, `baseRefOid` and `headRefOid` — so a local round

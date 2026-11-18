@@ -30,6 +30,11 @@ export function useDaemonMemory(options: DaemonResourceOptions = {}) {
       if (typeof file?.content === 'string') {
         return { content: file.content, truncated: file.truncated === true };
       }
+      if (file?.truncated === true) {
+        // The daemon could not provide a safely replaceable snapshot.
+        // Preserve its read-only marker for withheld content or a torn read.
+        return { content: '', truncated: true };
+      }
       return workspaceActions.readWorkspaceFile(filePath);
     },
     [workspaceActions],

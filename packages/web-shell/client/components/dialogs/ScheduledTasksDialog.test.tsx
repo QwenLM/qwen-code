@@ -2956,7 +2956,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     });
   }
 
-  it.each(['dingtalk-webhook', 'feishu-webhook'])(
+  it.each(['dingtalk-webhook', 'feishu-webhook', 'wecom-webhook'])(
     'creates a task with the %s configured destination without contacts or a manual ID',
     async (type) => {
       useConfiguredWebhook(type);
@@ -2983,7 +2983,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     },
   );
 
-  it.each(['dingtalk-webhook', 'feishu-webhook'])(
+  it.each(['dingtalk-webhook', 'feishu-webhook', 'wecom-webhook'])(
     'preserves an unsupported %s saved destination when editing another task field',
     async (type) => {
       useConfiguredWebhook(type);
@@ -3155,6 +3155,29 @@ describe('ScheduledTasksDialog Channel delivery', () => {
       'delivery',
     );
   });
+
+  it.each(['chat', 'user'] as const)(
+    'identifies a %s delivery card by Channel name and destination ID',
+    async (type) => {
+      await mount(
+        [
+          baseTask({
+            delivery: {
+              kind: 'channel',
+              target: { channelName: 'receiver', type, id: 'destination-42' },
+            },
+          }),
+        ],
+        options,
+      );
+      const row = container?.querySelector(
+        '[data-testid="scheduled-task-delivery"]',
+      );
+      expect(row?.textContent).toContain('receiver · destination-42');
+      expect(row?.textContent).not.toMatch(/ · (Chat|User) · /);
+      expect(row?.getAttribute('title')).toBe(row?.textContent);
+    },
+  );
 
   it('only warns about per-run delivery while a target is selected', async () => {
     const warning =
