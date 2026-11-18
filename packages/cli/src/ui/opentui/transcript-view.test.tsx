@@ -2981,3 +2981,106 @@ it('publishes actual Mod markdown and distinct replay tool producers through pre
     mod.mockRestore();
   }
 });
+
+it('announces the navigation help once across item arrivals and window slides', () => {
+  // The renderable a row is spoken from lives as long as its host node, so the
+  // bridge caches by element: a re-mounted row would arrive as a new instance
+  // and append again. The keyed item array is a nested array child, which owns
+  // its own fragment slot, so the trailing rows keep their position.
+  const cache = new WeakMap<Element, Renderable>();
+  const publicNode = (element: Element): Renderable => {
+    const leaf = element.tagName === 'MARKDOWN' || element.tagName === 'SPAN';
+    const prototype =
+      element.tagName === 'MARKDOWN'
+        ? MarkdownRenderable.prototype
+        : element.tagName === 'SPAN'
+          ? TextBufferRenderable.prototype
+          : Renderable.prototype;
+    let node = cache.get(element);
+    if (!node) {
+      node = Object.assign(Object.create(prototype), {
+        id: element.getAttribute('data-id') ?? '',
+        visible: true,
+        isDestroyed: false,
+        children: [] as Renderable[],
+      }) as Renderable & { children: Renderable[] };
+      cache.set(element, node);
+    }
+    Object.assign(node, {
+      content: element.getAttribute('content') ?? '',
+      plainText: element.textContent ?? '',
+      children: leaf ? [] : [...element.children].map(publicNode),
+    });
+    return node;
+  };
+  const events = new EventEmitter();
+  let output = '';
+  const presentation = new ScreenReaderPresentation(
+    new ScreenReaderOutputWriter((chunk) => {
+      output += chunk;
+    }),
+  );
+  const history = Object.assign(Object.create(Renderable.prototype), {
+    id: 'screen-reader-history',
+    visible: true,
+    isDestroyed: false,
+    children: [] as Renderable[],
+  }) as Renderable & { children: Renderable[] };
+  const root = Object.assign(Object.create(Renderable.prototype), {
+    id: '',
+    visible: true,
+    isDestroyed: false,
+    children: [history],
+  }) as Renderable;
+  const owner = {};
+  const stop = presentation.observeFrames(events, () => root);
+  const helpCount = () =>
+    (output.match(/Shift\+Up\/Down or PageUp\/Down to read history/g) ?? [])
+      .length;
+  const user = (id: string): LiveHistoryItem => ({
+    kind: 'user',
+    id,
+    text: `Body ${id}`,
+  });
+  let items: LiveHistoryItem[] = [user('h1')];
+  const view = render(
+    <OpenTuiTranscriptView
+      screenReader
+      items={items}
+      availableTerminalHeight={40}
+    />,
+  );
+  const frame = (height: number) => {
+    view.rerender(
+      <OpenTuiTranscriptView
+        screenReader
+        items={items}
+        availableTerminalHeight={height}
+      />,
+    );
+    history.children = [...view.container.children].map(publicNode);
+    presentation.setHistory(owner, items);
+    events.emit('frame');
+  };
+  try {
+    frame(40);
+    expect(helpCount()).toBe(1);
+    for (const id of ['h2', 'h3', 'h4']) {
+      items = [...items, user(id)];
+      frame(40);
+    }
+    expect(helpCount()).toBe(1);
+    // A long transcript whose bottom-anchored window slides on every arrival.
+    items = Array.from({ length: 40 }, (_, i) => user(`long-${i}`));
+    frame(12);
+    expect(helpCount()).toBe(1);
+    for (let i = 40; i < 46; i++) {
+      items = [...items, user(`long-${i}`)];
+      frame(12);
+    }
+    expect(helpCount()).toBe(1);
+  } finally {
+    stop();
+    view.unmount();
+  }
+});

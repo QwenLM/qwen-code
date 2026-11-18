@@ -1290,4 +1290,35 @@ describe('screen-reader semantic presentation', () => {
     expect(output.match(/^assistant: The actual reply$/gm)).toHaveLength(1);
     expect(output.match(/Agent powering down/g)).toHaveLength(1);
   });
+
+  it('keeps a re-mounted session preview out of the permanent scrollback', () => {
+    const events = new EventEmitter();
+    // The picker mounts a fresh transcript subtree per Space press, so the
+    // preview's rows arrive as new instances every time it is re-opened.
+    const preview = () => {
+      const node = box([text('Session Preview'), text('PREVIEW_BODY')]);
+      node.id = 'screen-reader-live-preview';
+      return node;
+    };
+    const dialog = box([preview()]) as Renderable & {
+      children: Renderable[];
+    };
+    dialog.id = 'screen-reader-dialog';
+    const root = box([dialog]);
+    const writer = new ScreenReaderOutputWriter(() => {});
+    const appendStatic = vi.spyOn(writer, 'appendStatic');
+    const updateDynamic = vi.spyOn(writer, 'updateDynamic');
+    const presentation = new ScreenReaderPresentation(writer);
+    presentation.observeFrames(events, () => root);
+    events.emit('frame');
+    expect(appendStatic.mock.calls.map(([value]) => value)).toEqual(['Dialog']);
+    expect(updateDynamic).toHaveBeenLastCalledWith(
+      'Session Preview\nPREVIEW_BODY',
+    );
+    dialog.children = [];
+    events.emit('frame');
+    dialog.children = [preview()];
+    events.emit('frame');
+    expect(appendStatic.mock.calls.map(([value]) => value)).toEqual(['Dialog']);
+  });
 });

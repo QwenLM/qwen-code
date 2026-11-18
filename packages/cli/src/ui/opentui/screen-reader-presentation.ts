@@ -80,6 +80,17 @@ function controlRows(node: Renderable): ControlRow[] {
     const help = node.findDescendantById('screen-reader-history-help');
     return help ? controlRows(help) : [];
   }
+  if (node.id === 'screen-reader-live-preview') {
+    // One row owned by the tagged box, so the whole preview rides the replace
+    // lane: the picker mounts a fresh subtree per Space press, and per-row
+    // owners would append a conversation to the scrollback on every peek.
+    const value = node
+      .getChildren()
+      .flatMap(controlRows)
+      .map((row) => row.text)
+      .join('\n');
+    return value.trim() ? [{ owner: node, text: value }] : [];
+  }
   if (node.id === 'screen-reader-protected-input')
     return [{ owner: node, text: t('Protected input') }];
   if (
