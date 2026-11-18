@@ -198,7 +198,7 @@ class SshRuntimeWiringTest {
             assertThat(ReflectionTestUtils.getField(assembled, "delegate")).isSameAs(primary);
             assertThat(assembled.supportsKind("ssh-process")).isTrue();
             assertThat(assembled.supportsKind("local-process")).isFalse();
-            assertThat(broker.supportsWorkspaceClose(null)).isFalse();
+            assertThat(broker.supportsWorkspaceClose((ContextBinding) null)).isFalse();
             assertThat(broker.supportsWorkspaceClose(local)).isFalse();
             assertThat(broker.supportsWorkspaceClose(remote)).isTrue();
             assertThat(broker.supportsWorkspaceContextChange(local)).isFalse();

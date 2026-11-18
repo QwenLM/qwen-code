@@ -8,7 +8,7 @@ import {
   useId,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
-import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
+import { isAgentTool } from '../../constants/toolNames.js';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { GoalApprovalContent } from './GoalApprovalContent';

@@ -63,6 +63,8 @@ function live(): TrajectoryLiveSnapshot {
       { source: 'live' },
     ),
     tools: createToolLifecycleState(),
+    hooks: { entries: new Map() },
+    hookPromptIds: new Map(),
     incomplete: false,
     truncated: false,
   };

@@ -1,3 +1,4 @@
+import { randomUUID } from '../../utils/random-uuid.js';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import {
   useCallback,
@@ -183,10 +184,7 @@ const NO_MENTION_TEXTS: readonly string[] = [];
 
 /** Idempotency key for one @-mention post (`[A-Za-z0-9_.:-]{1,128}`). */
 function newClientMessageId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
-    return `mention:${crypto.randomUUID()}`;
-  const random = Math.random().toString(36).slice(2);
-  return `mention:${Date.now().toString(36)}-${random}`;
+  return `mention:${randomUUID()}`;
 }
 
 export function useAgentChatEntry({

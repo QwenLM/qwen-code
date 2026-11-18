@@ -58,6 +58,7 @@ import {
 } from './hosted-model-selection.js';
 import {
   findHostedApprovalContinuation,
+  HostedPublicChildRecoveryProfileChanged,
   type RestoredHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
 import {
@@ -190,6 +191,11 @@ import {
   HostedRestoreKeptBytes,
   readerWithVerified,
 } from './hosted-restore-kept-bytes.js';
+import {
+  excludedHostedPrompts,
+  isExcludedHostedRecord,
+  normalizeHostedTurnRecords,
+} from './hosted-turn-history.js';
 import {
   isChildSessionRun,
   parseChildRun,
@@ -351,6 +357,7 @@ import {
   LOOP_INPUT_SOURCE,
   type HostedLoopClassifier,
 } from './hosted-loop-session.js';
+import { HostedCronSession } from './hosted-cron-session.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
   parseHookExecution,
@@ -388,10 +395,13 @@ import {
 import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import {
   hostedShellLaneAttachesChildAgents,
+  hasHostedExternalFilesExcludedOptions,
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
   isHostedWorkspaceReadProfile,
   isHostedWorkspacePublicShellProfile,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
   HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V4,
 } from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
@@ -822,6 +832,8 @@ interface HostedSession {
   automations?: HostedAutomationSession;
   /** Self-paced /loop wakeups: the Session's single unfired loop input. */
   loops?: HostedLoopSession;
+  /** Fixed-interval /loop: the cron trio over the internal automation routes. */
+  crons?: HostedCronSession;
   /** The active turn's permission classifier, adapted for loop arming; the
    * model turn refreshes it so a wakeup is vetted by the same classifier
    * that vets the turn's other side-effectful tools. */
@@ -939,7 +951,10 @@ async function hostedApprovalForTurn(
       'hosted-workspace-files/1',
       'hosted-workspace-shell/1',
       'hosted-workspace-shell/3',
+      'hosted-workspace-shell/4',
       'hosted-workspace-files/3',
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      'hosted-workspace-files/4',
     ].includes(session.toolProfile ?? '');
   const admission = await readHostedTurnApprovalSelection(
     session.managed,
@@ -1540,33 +1555,15 @@ function acceptedInputSequence(
   return sequence;
 }
 
-/**
- * The prompts whose turns settled without an answer (`error` or
- * `cancelled`). Turn results are `turn.settled` journal events, not
- * projected messages, so they never reach any record-based exclusion in
- * the model runner: the history is filtered against the journal here —
- * what ended without an answer is over, and its instruction never merges
- * into a later turn the way a crashing text turn's naked user record
- * otherwise would (the no-toolProfile path's older design already did
- * this; tool-profile Sessions now follow it).
- */
-function unansweredPrompts(session: HostedSession): Set<string> {
+function unansweredPrompts(
+  session: HostedSession,
+  records: readonly ChatRecord[],
+): Set<string> {
   const authority = session.managed.authority;
-  const prompts = new Set<string>();
-  for (const event of authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  )) {
-    if (
-      event.kind === 'turn.settled' &&
-      (event.payload['outcome'] === 'error' ||
-        event.payload['outcome'] === 'cancelled')
-    ) {
-      const turnId = event.payload['turnId'];
-      if (typeof turnId === 'string') prompts.add(turnId);
-    }
-  }
-  return prompts;
+  return excludedHostedPrompts(
+    authority.eventsInSequenceRange(1, authority.committedSequence),
+    records,
+  );
 }
 
 /** Which input sources ride the wake pump — the one predicate the probe,
@@ -4082,14 +4079,19 @@ async function executeHostedTurn(
     async (modelScope) =>
       harness.run(async () => {
         const projected = await session.managed.sink.project();
-        const modelRecords = await session.managed.sink.projectModelRecords();
+        const rawModelRecords =
+          await session.managed.sink.projectModelRecords();
+        const unanswered = unansweredPrompts(session, projected);
+        const modelRecords = normalizeHostedTurnRecords(
+          rawModelRecords,
+          unanswered,
+        );
         const settledPrompts = new Set(
           authority
             .eventsInSequenceRange(1, authority.committedSequence)
             .filter((event) => event.kind === 'turn.settled')
             .map((event) => event.payload['turnId']),
         );
-        const unanswered = unansweredPrompts(session);
         const history = (
           session.toolProfile
             ? modelRecords.filter(
@@ -4100,14 +4102,7 @@ async function executeHostedTurn(
                     entry.daemonPromptId === promptId),
               )
             : modelRecords
-        ).filter(
-          (entry) =>
-            !(
-              entry.type === 'user' &&
-              entry.daemonPromptId !== undefined &&
-              unanswered.has(entry.daemonPromptId)
-            ),
-        );
+        ).filter((entry) => !isExcludedHostedRecord(entry, unanswered));
         let parentUuid = projected.at(-1)?.uuid ?? null;
         if (!resumeFromToolResults && !resumeApproval && !resumeModel) {
           const continuation = isHostedWakeContinuationId(promptId);
@@ -4218,6 +4213,7 @@ async function executeHostedTurn(
                   childRuns: session.childRuns,
                   monitors: session.monitors,
                   loops: session.loops,
+                  crons: session.crons,
                   wakeKick: () => session.monitorWake?.kick(),
                   backgroundLane: session.backgroundLane,
                   childAgents: childAgentsOf(session),
@@ -4287,7 +4283,7 @@ async function executeHostedTurn(
                   sessionId,
                   cwd,
                   history,
-                  excludedPromptIds: unansweredPrompts(session),
+                  excludedPromptIds: unansweredPrompts(session, projected),
                   classifierUserText: () =>
                     readHostedClassifierUserText(session),
                   setLoopClassifier: (classify) => {
@@ -5008,6 +5004,16 @@ export function registerHostedHarnessSessionRoutes(
     holdCancellation?: (session: HostedSession) => void,
   ): Promise<void> => {
     const body = object(req.body);
+    const requestedProfile =
+      body?.['toolProfile'] ??
+      (!create ? sessions.get(req.params['id']!)?.toolProfile : undefined);
+    if (
+      requestedProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+      (!contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE) ||
+        contract.lifecycleProtocolVersion !== 1 ||
+        hasHostedExternalFilesExcludedOptions(body))
+    )
+      return error(res, 400, 'hosted_tool_profile_unavailable');
     let cleanupPromptId = body?.['recoveryCleanupPromptId'];
     const cancellationPromptId = body?.['cancellationPromptId'];
     if (
@@ -5104,7 +5110,8 @@ export function registerHostedHarnessSessionRoutes(
       (contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/1') ||
         contract.lifecycleV2Profiles?.includes(
           HOSTED_WORKSPACE_SHELL_PROFILE_V3,
-        ));
+        ) ||
+        contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/4'));
     if (
       publicChildAgentsVersion === 1 &&
       (!isHostedWorkspacePublicShellProfile(toolProfile) ||
@@ -5132,6 +5139,7 @@ export function registerHostedHarnessSessionRoutes(
       foregroundOnly &&
       ((toolProfile !== undefined &&
         toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+        toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
         toolProfile !== 'hosted-workspace-shell/1') ||
         (create && toolProfile === undefined) ||
         body?.['mcpServers'] !== undefined ||
@@ -5280,7 +5288,12 @@ export function registerHostedHarnessSessionRoutes(
     if (
       lifecycle &&
       (lifecycleProtocolVersion === 1
-        ? toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE
+        ? toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+          !(
+            toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+            contract.lifecycleProtocolVersion === 1 &&
+            contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE)
+          )
         : typeof toolProfile !== 'string' ||
           !contract.lifecycleV2Profiles?.includes(toolProfile))
     ) {
@@ -5310,6 +5323,7 @@ export function registerHostedHarnessSessionRoutes(
         hookCatalog !== undefined ||
         (toolProfile !== undefined &&
           toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+          toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
           toolProfile !== 'hosted-workspace-shell/1'))
     ) {
       error(res, 409, 'hosted_tool_profile_conflict');
@@ -5365,6 +5379,7 @@ export function registerHostedHarnessSessionRoutes(
         ![
           'hosted-workspace-shell/1',
           HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+          'hosted-workspace-shell/4',
           HOSTED_MCP_PROFILE,
         ].includes(toolProfile as string) ||
         resident.foregroundOnly ||
@@ -5925,6 +5940,15 @@ export function registerHostedHarnessSessionRoutes(
             error(res, 409, 'hosted_harness_quiescing');
             return;
           }
+          // #17260: the parked Turn's saved public-child profile belongs
+          // to a topology this Harness cannot open. The durable verdict
+          // never changes on retry, so answer the typed terminal decline
+          // instead of the retriable refusal that kept the coordinator's
+          // recovery sweep re-driving it forever.
+          if (cause instanceof HostedPublicChildRecoveryProfileChanged) {
+            recoveryDeclined(res, 'public_child_recovery_unsupported');
+            return;
+          }
           blockRecovery(resident, namedStoreFailure(cause));
           writeStderrLineSafe(
             'qwen serve: Hosted recovery redrive failed: ' + String(cause),
@@ -6249,6 +6273,8 @@ export function registerHostedHarnessSessionRoutes(
                         approval,
                         !agentDefinition &&
                           (toolProfile === HOSTED_WORKSPACE_FILE_PROFILE ||
+                            toolProfile ===
+                              HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
                             toolProfile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
                             isHostedWorkspaceShellProfile(toolProfile)),
                       )
@@ -6312,6 +6338,44 @@ export function registerHostedHarnessSessionRoutes(
           ).toString('utf8'),
         ),
       );
+      const externalFiles =
+        definition?.['toolProfile'] === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE;
+      if (
+        externalFiles &&
+        (!contract.features?.includes(
+          HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+        ) ||
+          contract.lifecycleProtocolVersion !== 1 ||
+          hasHostedExternalFilesExcludedOptions(body) ||
+          hasHostedExternalFilesExcludedOptions(definition) ||
+          managed.authority
+            .eventsInSequenceRange(1, managed.authority.committedSequence)
+            .some(
+              (event) =>
+                event.kind === 'domain.committed' &&
+                [
+                  'hook_registration',
+                  'hook_execution',
+                  'mcp_configuration',
+                  'mcp_operation',
+                  'child_run',
+                  'monitor_run',
+                  'schedule',
+                  'automation_run',
+                  'child_acceptance',
+                  'session_message',
+                  'channel_route',
+                  'channel_delivery',
+                  'team_state',
+                  'team_task',
+                  'team_plan',
+                  'session_command',
+                ].includes(event.payload['domain'] as string),
+            ))
+      ) {
+        await managed.close();
+        return error(res, 409, 'hosted_tool_profile_conflict');
+      }
       let savedAgentDefinition: HostedAgentDefinition | undefined;
       let savedSessionSkillsRef: ManagedSessionDurableRef | undefined;
       let skills: HostedSkillCatalog | undefined;
@@ -6430,6 +6494,7 @@ export function registerHostedHarnessSessionRoutes(
       if (
         (foregroundOnly &&
           ((toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+            toolProfile !== HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
             toolProfile !== 'hosted-workspace-shell/1') ||
             mcpServers !== undefined ||
             hookCatalog !== undefined ||
@@ -6583,6 +6648,10 @@ export function registerHostedHarnessSessionRoutes(
             ).toString('utf8'),
           ),
         );
+      if (externalFiles && hasExtensionConfiguration) {
+        await managed.close();
+        return error(res, 409, 'hosted_tool_profile_conflict');
+      }
       const mcpSettings = hasExtensionConfiguration
         ? []
         : await readHostedMcpSettings(managed);
@@ -6593,6 +6662,7 @@ export function registerHostedHarnessSessionRoutes(
           ![
             'hosted-workspace-shell/1',
             HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+            'hosted-workspace-shell/4',
             HOSTED_MCP_PROFILE,
           ].includes(toolProfile ?? '') ||
           (session.childDepth ?? 0) !== 0)
@@ -6759,7 +6829,12 @@ export function registerHostedHarnessSessionRoutes(
       if (session.extensionAgentPrompt)
         session.extensionContext = `${session.extensionContext ?? ''}\n\n${session.extensionAgentPrompt}`;
       if (extensionManagement?.pending) session.blocked = true;
-      if (!foregroundOnly && session.toolProfile && brokerOptions) {
+      if (
+        !externalFiles &&
+        !foregroundOnly &&
+        session.toolProfile &&
+        brokerOptions
+      ) {
         session.childRuns = new HostedChildRunSession(
           {
             authority: session.managed.authority,
@@ -6880,31 +6955,33 @@ export function registerHostedHarnessSessionRoutes(
         });
       // H6b: every hosted Session owns its automation funnel — a run's
       // input needs no Runtime, and its settle reads the turn alone.
-      session.automations = new HostedAutomationSession(
-        {
-          authority: managed.authority,
-          resources: managed.resources,
-          sink: managed.sink,
-        },
-        managed.authority.sessionHeader.sessionKey,
-        {
-          // The gate probe runs in the Workspace Runtime through the
-          // Broker; a Harness without one blocks every gated fire.
-          ...(brokerOptions
-            ? gateOptions({
-                broker: {
-                  ...brokerOptions,
-                  lifecycleAuthority: () => session.lifecycle,
-                },
-                sessionKey: managed.authority.sessionHeader.sessionKey,
-                toolProfile: () => session.toolProfile,
-              })
-            : {}),
-          shellAvailable: () =>
-            isHostedWorkspaceShellProfile(session.toolProfile),
-          hooksConfigured: () => session.hooks !== undefined,
-        },
-      );
+      if (!externalFiles) {
+        session.automations = new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          managed.authority.sessionHeader.sessionKey,
+          {
+            // The gate probe runs in the Workspace Runtime through the
+            // Broker; a Harness without one blocks every gated fire.
+            ...(brokerOptions
+              ? gateOptions({
+                  broker: {
+                    ...brokerOptions,
+                    lifecycleAuthority: () => session.lifecycle,
+                  },
+                  sessionKey: managed.authority.sessionHeader.sessionKey,
+                  toolProfile: () => session.toolProfile,
+                })
+              : {}),
+            shellAvailable: () =>
+              isHostedWorkspaceShellProfile(session.toolProfile),
+            hooksConfigured: () => session.hooks !== undefined,
+          },
+        );
+      }
       // Self-paced /loop: every hosted Session owns its wakeup funnel — a
       // wakeup is a journal input the wake pump defers to its notBefore. The
       // arm-time review rides the active turn's permission classifier; with
@@ -6933,16 +7010,36 @@ export function registerHostedHarnessSessionRoutes(
           }),
         },
       );
+      // Fixed-interval /loop: the cron trio rides the internal automation
+      // routes over the store channel; the arm-time review reuses the active
+      // turn's permission classifier, refused when none is active.
+      session.crons = session.stores
+        ? new HostedCronSession(session.stores, session.loops, {
+            classify: (input) =>
+              session.loopClassify
+                ? session.loopClassify(input)
+                : Promise.resolve({
+                    allowed: false,
+                    reason: 'No active permission classifier for cron arming.',
+                  }),
+            shellAvailable: isHostedWorkspaceShellProfile(session.toolProfile),
+            loopWakeupAvailable:
+              session.toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+              session.toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE_V4,
+          })
+        : undefined;
       // H5b: every hosted Session owns its channel funnel — a channel input
       // needs no Runtime, and its reply plans from the settled turn alone.
-      session.channels = new HostedChannelSession(
-        {
-          authority: managed.authority,
-          resources: managed.resources,
-          sink: managed.sink,
-        },
-        managed.authority.sessionHeader.sessionKey,
-      );
+      if (!externalFiles) {
+        session.channels = new HostedChannelSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          managed.authority.sessionHeader.sessionKey,
+        );
+      }
       // H3: the embedded wake scheduler of a notification-capable Session.
       // A notification rides its observation revision (H4b: its child
       // acceptance; H6: an automation input rides its run's dispatch
@@ -7450,6 +7547,14 @@ export function registerHostedHarnessSessionRoutes(
       // A bare load of a parked Session keeps refusing with 409 so it never
       // drives a Runtime by accident.
       const unsettled = unsettledPromptId(session);
+      if (
+        externalFiles &&
+        unsettled &&
+        (await readHostedTurnApprovalSelection(managed, unsettled))?.planMode
+      ) {
+        await managed.close();
+        return error(res, 409, 'hosted_tool_profile_conflict');
+      }
       const pendingCommandApproval =
         session.extensions?.enabled && unsettled
           ? await findHostedApprovalContinuation(managed, unsettled)
@@ -8312,6 +8417,11 @@ export function registerHostedHarnessSessionRoutes(
         thrown instanceof ManagedSessionCloseError ? thrown.sealError : thrown;
       if (cause instanceof HostedRecoveryQuiescingError) {
         error(res, 409, 'hosted_harness_quiescing');
+      } else if (cause instanceof HostedPublicChildRecoveryProfileChanged) {
+        // #17260: same durable verdict as the attached redrive above — a
+        // saved public-child profile this topology cannot open declines
+        // terminally instead of the generic retriable open failure.
+        recoveryDeclined(res, 'public_child_recovery_unsupported');
       } else if (isRetryableWorkspaceAcquisition(cause)) {
         error(res, 409, cause.code);
       } else if (
@@ -8610,7 +8720,12 @@ export function registerHostedHarnessSessionRoutes(
         session.managed.authority.sessionHeader.sessionKey,
       ) ||
       (protocolVersion === 1 &&
-        session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE)
+        session.toolProfile !== HOSTED_WORKSPACE_FILE_PROFILE &&
+        !(
+          session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+          contract.lifecycleProtocolVersion === 1 &&
+          contract.features?.includes(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE)
+        ))
     )
       return error(res, 400, 'invalid_hosted_lifecycle_request');
     if (
@@ -8902,14 +9017,19 @@ export function registerHostedHarnessSessionRoutes(
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-shell/3',
+                  'hosted-workspace-shell/4',
                   'hosted-workspace-files/3',
+                  'hosted-workspace-files/4',
                 ]
               : [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-shell/3',
+                  'hosted-workspace-shell/4',
                   'hosted-workspace-files/2',
                   'hosted-workspace-files/3',
+                  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+                  'hosted-workspace-files/4',
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
@@ -8926,6 +9046,7 @@ export function registerHostedHarnessSessionRoutes(
           'hosted-workspace-files/1',
           'hosted-workspace-shell/1',
           'hosted-workspace-shell/3',
+          'hosted-workspace-shell/4',
         ].includes(session.toolProfile ?? '') ||
           (session.childDepth ?? 0) !== 0 ||
           session.mcp ||
@@ -9528,12 +9649,17 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_turn_active');
     if (action !== 'register')
       return error(res, 400, 'invalid_client_files_action');
-    // A foregroundOnly or memory-only (no toolProfile) Session never declares a
-    // client-files catalog — the Turn drops the lane — so registering a relay
-    // client would hold a connection for tools no Turn hands out while the panel
-    // reports connected. Refuse like the sibling management lanes; unregister
-    // above stays admitted in every state.
-    if (session.foregroundOnly || !session.toolProfile)
+    // A foregroundOnly, memory-only (no toolProfile), or external-files Session
+    // never declares a client-files catalog — the Turn drops the lane or the
+    // external branch never calls clientFilesDeclarations — so registering a
+    // relay client would hold a connection for tools no Turn hands out while
+    // the panel reports connected. Refuse like the sibling management lanes;
+    // unregister above stays admitted in every state.
+    if (
+      session.foregroundOnly ||
+      !session.toolProfile ||
+      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+    )
       return error(res, 409, 'hosted_client_files_profile_unsupported');
     const serverId = body?.['serverId'];
     const generation = body?.['generation'];
@@ -9725,6 +9851,7 @@ export function registerHostedHarnessSessionRoutes(
       ![
         'hosted-workspace-shell/1',
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        'hosted-workspace-shell/4',
         HOSTED_MCP_PROFILE,
       ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.some(
@@ -9754,6 +9881,7 @@ export function registerHostedHarnessSessionRoutes(
       ![
         'hosted-workspace-shell/1',
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        'hosted-workspace-shell/4',
         HOSTED_MCP_PROFILE,
       ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
@@ -9937,6 +10065,7 @@ export function registerHostedHarnessSessionRoutes(
       ![
         'hosted-workspace-shell/1',
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        'hosted-workspace-shell/4',
         HOSTED_MCP_PROFILE,
       ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
@@ -11912,7 +12041,13 @@ export function registerHostedHarnessSessionRoutes(
       try {
         const harness = createManagedHarnessHandle(session.managed);
         let projected = await session.managed.sink.project();
-        let modelRecords = await session.managed.sink.projectModelRecords();
+        const initialRawRecords =
+          await session.managed.sink.projectModelRecords();
+        let unanswered = unansweredPrompts(session, projected);
+        let modelRecords = normalizeHostedTurnRecords(
+          initialRawRecords,
+          unanswered,
+        );
         const settledPrompts = new Set(
           session.managed.authority
             .eventsInSequenceRange(
@@ -11926,7 +12061,7 @@ export function registerHostedHarnessSessionRoutes(
         // tool rounds stay in history, and only the parked round's results
         // become the resume request. Otherwise a turn that parked after two
         // tool rounds would resume with an unanswered call in between.
-        const deriveRound = () => {
+        const deriveRound = (unanswered: ReadonlySet<string>) => {
           const turnRecords = projected.filter(
             (entry) => entry.daemonPromptId === promptId,
           );
@@ -11947,18 +12082,13 @@ export function registerHostedHarnessSessionRoutes(
           const parkedRound = new Set(
             turnRecords.slice(lastCallIndex + 1).map((entry) => entry.uuid),
           );
-          const unanswered = unansweredPrompts(session);
           const history = modelRecords.filter(
             (entry) =>
               (entry.type === 'system' ||
                 settledPrompts.has(entry.daemonPromptId) ||
                 (entry.daemonPromptId === promptId &&
                   !parkedRound.has(entry.uuid))) &&
-              !(
-                entry.type === 'user' &&
-                entry.daemonPromptId !== undefined &&
-                unanswered.has(entry.daemonPromptId)
-              ),
+              !isExcludedHostedRecord(entry, unanswered),
           );
           const resumeParts = turnRecords
             .slice(lastCallIndex + 1)
@@ -11969,7 +12099,7 @@ export function registerHostedHarnessSessionRoutes(
         // An agent wait that never folded may legitimately hold no tool
         // result yet (#13708) — the fold itself produces it below, so the
         // no-results guard runs only after the resume arm has had its say.
-        let { history, resumeParts } = deriveRound();
+        let { history, resumeParts } = deriveRound(unanswered);
         let parentUuid = projected.at(-1)?.uuid ?? null;
         const messageRecord = (
           type: 'assistant' | 'tool_result',
@@ -12048,6 +12178,7 @@ export function registerHostedHarnessSessionRoutes(
             childRuns: session.childRuns,
             monitors: session.monitors,
             loops: session.loops,
+            crons: session.crons,
             wakeKick: () => session.monitorWake?.kick(),
             backgroundLane: session.backgroundLane,
             childAgents: childAgentsOf(session),
@@ -12130,8 +12261,11 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
-              modelRecords = await session.managed.sink.projectModelRecords();
-              ({ history, resumeParts } = deriveRound());
+              const rawRecords =
+                await session.managed.sink.projectModelRecords();
+              unanswered = unansweredPrompts(session, projected);
+              modelRecords = normalizeHostedTurnRecords(rawRecords, unanswered);
+              ({ history, resumeParts } = deriveRound(unanswered));
             }
           }
           // H4e-b3: the command wait resumes exactly like the agent wait —
@@ -12185,8 +12319,11 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
-              modelRecords = await session.managed.sink.projectModelRecords();
-              ({ history, resumeParts } = deriveRound());
+              const rawRecords =
+                await session.managed.sink.projectModelRecords();
+              unanswered = unansweredPrompts(session, projected);
+              modelRecords = normalizeHostedTurnRecords(rawRecords, unanswered);
+              ({ history, resumeParts } = deriveRound(unanswered));
             }
           }
           // A sibling the Runtime reconciliation does not own (a team
@@ -12209,8 +12346,10 @@ export function registerHostedHarnessSessionRoutes(
           });
           if (answered > 0) {
             projected = await session.managed.sink.project();
-            modelRecords = await session.managed.sink.projectModelRecords();
-            ({ history, resumeParts } = deriveRound());
+            const rawRecords = await session.managed.sink.projectModelRecords();
+            unanswered = unansweredPrompts(session, projected);
+            modelRecords = normalizeHostedTurnRecords(rawRecords, unanswered);
+            ({ history, resumeParts } = deriveRound(unanswered));
           }
           if (resumeParts.length === 0) {
             throw new Error(
@@ -12274,7 +12413,7 @@ export function registerHostedHarnessSessionRoutes(
             sessionId,
             cwd,
             history,
-            excludedPromptIds: unansweredPrompts(session),
+            excludedPromptIds: unansweredPrompts(session, projected),
             classifierUserText: () => readHostedClassifierUserText(session),
             setLoopClassifier: (classify) => {
               session.loopClassify = classify;
@@ -13492,6 +13631,7 @@ export function registerHostedHarnessSessionRoutes(
     if (
       !session.toolProfile ||
       session.toolProfile === HOSTED_MCP_PROFILE ||
+      session.toolProfile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
       !brokerOptions
     )
       return error(res, 409, 'hosted_file_history_unavailable');
