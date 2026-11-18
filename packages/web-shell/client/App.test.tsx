@@ -4445,6 +4445,16 @@ describe('task activity key', () => {
       container.querySelector('[data-testid="artifacts-list"]'),
     ).toBeNull();
     expect(entry()!.getAttribute('aria-pressed')).toBe('false');
+
+    // A third click reopens through the upsert branch (the tab already exists).
+    await act(async () => {
+      entry()!.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-list"]'),
+    ).not.toBeNull();
+    expect(entry()!.getAttribute('aria-pressed')).toBe('true');
   });
 
   it('opens an artifact preview tab when a row in the artifacts list is clicked', async () => {
@@ -4486,10 +4496,15 @@ describe('task activity key', () => {
       row!.click();
     });
     await flush();
-    // The row click reaches the real preview opener: an artifact tab for the
-    // clicked artifact becomes present in the right panel tab bar.
+    // The row click reaches the real preview opener: the artifacts list is
+    // replaced by the clicked artifact's preview tab. The row and the tab carry
+    // the same title, so only a role="tab"-qualified selector tells them apart;
+    // with onOpenArtifact unwired the list would stay mounted and this fails.
     expect(
-      container.querySelector('button[title="report.html"]'),
+      container.querySelector('[data-testid="artifacts-list"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[role="tab"][title="report.html"]'),
     ).not.toBeNull();
   });
 
@@ -4543,6 +4558,42 @@ describe('task activity key', () => {
     expect(
       container.querySelector('[data-testid="artifacts-list"]')?.textContent,
     ).toContain('report.html');
+  });
+
+  it('does not restore a persisted artifacts tab when the host hides the artifacts entry', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'artifacts:session-1',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp({
+      chatHeader: { items: ['title', 'environment', 'rightPanel'] },
+    });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="artifacts-list"]'),
+    ).toBeNull();
   });
 
   it('hides the header artifacts entry when the session has no artifacts', async () => {

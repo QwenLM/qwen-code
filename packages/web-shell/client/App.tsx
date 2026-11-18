@@ -7052,6 +7052,7 @@ export function App({
   );
   const openArtifactsListPanel = useCallback(
     (sourceSessionId: string) => {
+      rememberArtifactPanelTrigger();
       const tab: ArtifactPanelTab = {
         id: `artifacts:${sourceSessionId}`,
         kind: 'artifacts',
@@ -7069,7 +7070,7 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [getDefaultReviewPanelWidth, rememberArtifactPanelTrigger, t],
   );
   const openAttachmentPanel = useCallback(
     (
@@ -8279,6 +8280,10 @@ export function App({
                     ? tab
                     : undefined;
                 case 'artifacts':
+                  // A stored tab outlives the host's opt-in, like the sibling
+                  // restore arms: a host that hides the artifacts header entry
+                  // must not get the list tab back through the browser profile.
+                  if (!artifactsHeaderItemVisible) return undefined;
                   // Identity only; the list reads the live artifacts prop.
                   return tab;
                 case 'change_overview':
@@ -8390,6 +8395,7 @@ export function App({
       cancelled = true;
     };
   }, [
+    artifactsHeaderItemVisible,
     artifactsLoading,
     connection.sessionContext,
     connection.loadingTranscript,

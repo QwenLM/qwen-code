@@ -649,6 +649,13 @@ describe('ArtifactPanel artifacts list tab', () => {
       container.querySelector('[data-testid="artifacts-list-skeleton"]'),
     ).not.toBeNull();
   });
+
+  it('shows the package icon on the artifacts tab in the tab bar', () => {
+    const container = renderPanel({ artifacts: [artifact] });
+    const tab = container.querySelector('[role="tab"][title="Artifacts"]');
+    expect(tab).not.toBeNull();
+    expect(tab!.querySelector('.lucide-package')).not.toBeNull();
+  });
 });
 
 describe('ArtifactPanel terminal tabs', () => {

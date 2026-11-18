@@ -104,4 +104,14 @@ describe('ArtifactsListPanel', () => {
     ).not.toBeNull();
     expect(view.querySelector('[data-testid="artifacts-list"]')).toBeNull();
   });
+
+  it('shows the skeleton over the empty state while loading with no artifacts', () => {
+    const view = mount({ artifacts: [], loading: true });
+    expect(
+      view.querySelector('[data-testid="artifacts-list-skeleton"]'),
+    ).not.toBeNull();
+    expect(
+      view.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).toBeNull();
+  });
 });
