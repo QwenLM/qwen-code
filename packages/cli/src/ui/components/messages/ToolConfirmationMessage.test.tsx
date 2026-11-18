@@ -1195,6 +1195,7 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('Unknown shell safety');
       expect(frame).toContain('Apply this change?');
       expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
     });
 
     it('counts the edit warnings a one-row body budget drops whole', async () => {
@@ -1242,6 +1243,7 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).not.toContain('Unknown shell safety');
       expect(frame).toContain('Apply this change?');
       expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
     });
 
     it('resolves ordinary IDE edits but skips confirmations that have no IDE diff', async () => {
@@ -1372,8 +1374,15 @@ describe('ToolConfirmationMessage', () => {
       const frame = lastFrame() ?? '';
       expect(frame.split(EOL).length).toBeLessThanOrEqual(10);
       expect(frame).toContain('previously blocked');
-      expect(frame).toContain('line-1');
-      expect(frame).toContain('line-4');
+      // Each command row on a row of its own, in order. A row compressed onto
+      // its neighbour still prints its text, so the substrings alone would pass
+      // a squeezed frame; the row split is what sees it.
+      expect(
+        frame
+          .split(EOL)
+          .filter((line) => line.includes('line-'))
+          .map((line) => line.trim()),
+      ).toEqual(['line-1', 'line-2', 'line-3', 'line-4']);
       expect(frame).not.toContain('hidden');
       expect(frame).toContain('Yes, allow once');
       expect(frame).toContain('No');
