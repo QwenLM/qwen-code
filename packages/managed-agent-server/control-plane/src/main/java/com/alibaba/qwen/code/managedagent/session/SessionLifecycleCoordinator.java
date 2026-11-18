@@ -98,13 +98,14 @@ public class SessionLifecycleCoordinator {
     // barrier forever (review round 9, R9-4).
     private static final int SETTLED_COMPLETION_BUDGET_FACTOR = 4;
     // The daemon refuses a lifecycle phase while it is still busy with the
-    // previous prompt: hosted_lifecycle_recovery_required names its cleanup
-    // debt, and hosted_turn_active names a turn, MCP call or hook that is
-    // still draining. Both clear through the daemon's own work, not by
-    // anything the caller changes, so neither is a permanent hook refusal
-    // or spends the close's retry budget.
+    // previous prompt, closing its resident Session, or out of cold-open
+    // admission slots. These clear through the daemon's own work, not by
+    // anything the caller changes, so none is a permanent hook refusal or
+    // spends the close's retry budget; past the budget the wait is
+    // published as recovery_blocked with its own code.
     private static final Set<String> SELF_CLEARING_DAEMON_REFUSALS =
-            Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active");
+            Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active",
+                    "hosted_session_closing", "hosted_session_open_busy");
     private final AgentStateStore store;
     private WorkspaceLifecycleStore lifecycle;
 
@@ -342,10 +343,15 @@ public class SessionLifecycleCoordinator {
                         && SELF_CLEARING_DAEMON_REFUSALS.contains(refusal)) {
                     daemonWaitCode = refusal;
                 } else {
+                    // A wedged teardown keeps its own code too: the close
+                    // reconciles under this operation's authority or an
+                    // operator takes over, and the generic hooks code
+                    // would name a debt the Session does not have.
                     blocked = cause instanceof HarnessHttpFailure httpError
                             && httpError.getErrorCode() != null
                             && (httpError.getErrorCode().startsWith("workspace_lifecycle") || httpError.getErrorCode().startsWith("workspace_close")
-                                    || "runtime_admission_closed".equals(httpError.getErrorCode()))
+                                    || "runtime_admission_closed".equals(httpError.getErrorCode())
+                                    || "hosted_session_teardown_blocked".equals(httpError.getErrorCode()))
                             ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
                 }
             }
@@ -1122,14 +1128,16 @@ public class SessionLifecycleCoordinator {
                                     harness.runMessageOperation(tenantId,
                                             childSessionId, stop);
                                 } catch (HarnessHttpFailure error) {
-                                    // A child waiting on its recovery or
-                                    // closing takes no stop yet: the retry
-                                    // asks again, as on the relay's arm.
+                                    // A child waiting on its recovery,
+                                    // closing, or out of cold-open slots
+                                    // takes no stop yet: the retry asks
+                                    // again, as on the relay's arm.
                                     if (!"hosted_turn_recovery_required"
                                             .equals(error.getErrorCode())
                                             && !"hosted_session_closing"
-                                                    .equals(error
-                                                            .getErrorCode())) {
+                                                    .equals(error.getErrorCode())
+                                            && !"hosted_session_open_busy"
+                                                    .equals(error.getErrorCode())) {
                                         stopFailure = error;
                                     }
                                 } catch (RuntimeException error) {

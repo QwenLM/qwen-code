@@ -72,15 +72,15 @@ incremental by design
 
 ### Forked (one implementation per column)
 
-| Concern                       | Daemon path                                                                                                                                                 | Managed path                                                                                                                                       |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Main chat orchestration       | inline in `App.tsx` (~27k lines total)                                                                                                                      | `components/managed/ManagedSessionsPage.tsx` (~3.4k lines)                                                                                         |
-| Split-view / side-task column | `components/ChatPane.tsx` (~2.2k lines), rendered by `components/SplitView.tsx` and `components/artifacts/SideTaskPanel.tsx`; `App.tsx` renders `SplitView` | absent — managed sessions do not open in split view or side tasks                                                                                  |
-| Session state                 | `daemon/session/DaemonSessionProvider.tsx` (~7.1k lines) and `daemon/session/**`                                                                            | `components/managed/use-managed-session.ts` and the `use-managed-*` hooks                                                                          |
-| Backend contract              | `DaemonSessionClient` from `@qwen-code/sdk/daemon`                                                                                                          | `ManagedAgentProvider` (`components/managed/managed-agent-provider.ts`, ~910 lines of interface) over `/api/agent/web-shell/v1/**`                 |
-| Status display                | inline composer-status JSX in `App.tsx` and `ChatPane.tsx` (shared `ComposerStatusStack.module.css`), `ComposerUsageStats`, `GoalStatusStrip`               | `ManagedSessionProgress`                                                                                                                           |
-| Conversation search           | `ConversationSearch` (main column)                                                                                                                          | absent                                                                                                                                             |
-| Panels                        | daemon terminal, artifacts, local files, git mode, voice, Live                                                                                              | `ManagedTerminalPanel`, `ManagedToolResultPanel`, `ManagedTaskPanel`, `ManagedDiagnosticsPanel`, `ManagedRecoveryPanel`, `ManagedChildSessionView` |
+| Concern                       | Daemon path                                                                                                                                                 | Managed path                                                                                                                       |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Main chat orchestration       | inline in `App.tsx` (~27k lines total)                                                                                                                      | `components/managed/ManagedSessionsPage.tsx` (~3.4k lines)                                                                         |
+| Split-view / side-task column | `components/ChatPane.tsx` (~2.2k lines), rendered by `components/SplitView.tsx` and `components/artifacts/SideTaskPanel.tsx`; `App.tsx` renders `SplitView` | absent — managed sessions do not open in split view or side tasks                                                                  |
+| Session state                 | `daemon/session/DaemonSessionProvider.tsx` (~7.1k lines) and `daemon/session/**`                                                                            | `components/managed/use-managed-session.ts` and the `use-managed-*` hooks                                                          |
+| Backend contract              | `DaemonSessionClient` from `@qwen-code/sdk/daemon`                                                                                                          | `ManagedAgentProvider` (`components/managed/managed-agent-provider.ts`, ~910 lines of interface) over `/api/agent/web-shell/v1/**` |
+| Status display                | inline composer-status JSX in `App.tsx` and `ChatPane.tsx` (shared `ComposerStatusStack.module.css`), `ComposerUsageStats`, `GoalStatusStrip`               | `ManagedSessionProgress`                                                                                                           |
+| Conversation search           | `ConversationSearch` (main column)                                                                                                                          | absent                                                                                                                             |
+| Panels                        | daemon terminal, artifacts, local files, git mode, voice, Live                                                                                              | `ManagedTerminalPanel`, `ManagedToolResultPanel`, `ManagedTaskPanel`, `ManagedDiagnosticsPanel`, `ManagedChildSessionView`         |
 
 `ChatPane.tsx` independently wires `TranscriptViewport`, `ToolApproval`,
 `AskUserQuestion`, `GoalStatusStrip`, and `ChatEditor`, owns submit and
@@ -310,8 +310,8 @@ slice 2 extracts from the inline JSX currently duplicated in `App.tsx` and
 region. It takes the controller and slot renderers as props and imports
 nothing from `daemon/**`, `components/managed/**`, or
 `@qwen-code/sdk/daemon`. Backend-specific panels (daemon artifacts, managed
-diagnostics/tasks/recovery/terminal) are passed in as slots by the owning
-page.
+diagnostics/tasks/terminal) are passed in as slots by the owning page. Managed
+recovery has no panel slot: its verdict renders as a conversation message.
 
 ### Adapters
 

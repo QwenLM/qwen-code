@@ -2,7 +2,11 @@
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionSubSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
+} from '@qwen-code/sdk/daemon';
+import type { ComposerChipTask } from '../utils/composerTasks';
 import { I18nProvider } from '../i18n';
 import {
   ComposerTaskChips,
@@ -55,6 +59,23 @@ function shell(
   };
 }
 
+function sent(
+  id: string,
+  status: DaemonSessionSubSessionTaskStatus['status'] = 'running',
+): DaemonSessionSubSessionTaskStatus {
+  return {
+    kind: 'session',
+    id,
+    sessionId: id,
+    workspaceCwd: '/work/b',
+    label: `look at ${id}`,
+    status,
+    startTime: 1_000,
+    runtimeMs: 2_000,
+    byPerson: true,
+  };
+}
+
 describe('ComposerTaskChips', () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -75,7 +96,7 @@ describe('ComposerTaskChips', () => {
   });
 
   function render(
-    tasks: DaemonSessionTaskWithWorkflowStatus[],
+    tasks: ComposerChipTask[],
     props: Partial<Parameters<typeof ComposerTaskChips>[0]> = {},
     ref = createRef<ComposerTaskChipsHandle>(),
   ) {
@@ -125,6 +146,45 @@ describe('ComposerTaskChips', () => {
     ]);
   });
 
+  it('shows a message sent to another session while it runs there', () => {
+    const { onSelectTask } = render([
+      shell('shell-1'),
+      sent('kid-1'),
+      sent('kid-2', 'completed'),
+    ]);
+    expect(chips().map((chip) => chip.textContent)).toEqual([
+      '1 other session',
+      '1 shell',
+    ]);
+    act(() => chips()[0]!.click());
+    expect(onSelectTask).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'session', sessionId: 'kid-1' }),
+    );
+  });
+
+  it('says so when a session a message went to is waiting for an answer', () => {
+    const { onSelectTask } = render([
+      { ...sent('kid-1'), waitingForInput: true },
+    ]);
+    expect(chips().map((chip) => chip.textContent)).toEqual([
+      '1 session needs your answer',
+    ]);
+    expect(chips()[0]!.hasAttribute('data-waiting')).toBe(true);
+    act(() => chips()[0]!.click());
+    expect(onSelectTask).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'kid-1' }),
+    );
+  });
+
+  it('counts only the waiting sessions in the waiting label', () => {
+    render([sent('kid-1'), { ...sent('kid-2'), waitingForInput: true }]);
+    expect(chips().map((chip) => chip.textContent)).toEqual([
+      '1 session needs your answer',
+    ]);
+    expect(sent('kid-1').waitingForInput).toBeUndefined();
+    expect(chips()[0]!.hasAttribute('data-waiting')).toBe(true);
+  });
+
   it('keeps a pausing or paused workflow as unfinished work', () => {
     render([workflow('wf-1', 'pausing')]);
     expect(chips().map((chip) => chip.textContent)).toEqual(['1 workflow']);
@@ -168,6 +228,39 @@ describe('ComposerTaskChips', () => {
     expect(
       container.querySelector('[data-testid="composer-task-list"]'),
     ).toBeNull();
+  });
+
+  it('offers no explain button for a message sent to another session', () => {
+    const onExplainTask = vi.fn();
+    render([sent('kid-1'), shell('shell-1')], { onExplainTask });
+    const explains = Array.from(
+      container.querySelectorAll('[data-testid="composer-task-explain"]'),
+    );
+    expect(
+      explains.map((button) => button.getAttribute('data-explain-kind')),
+    ).toEqual(['shell']);
+
+    render([sent('kid-1'), sent('kid-2')], { onExplainTask });
+    act(() => chips()[0]!.click());
+    expect(
+      container.querySelector(
+        '[data-testid="composer-task-list"] [data-testid="composer-task-explain"]',
+      ),
+    ).toBeNull();
+  });
+
+  it('lists several sessions by name alone, with no icon', () => {
+    render([sent('kid-1'), sent('kid-2')]);
+    act(() => chips()[0]!.click());
+    const list = container.querySelector(
+      '[data-testid="composer-task-list"]',
+    ) as HTMLElement;
+    const rows = Array.from(list.querySelectorAll('button'));
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining('look at kid-1'),
+      expect.stringContaining('look at kid-2'),
+    ]);
+    expect(list.querySelector('svg')).toBeNull();
   });
 
   it('closes the list on a click outside the chips', () => {

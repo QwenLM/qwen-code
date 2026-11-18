@@ -1260,6 +1260,7 @@ import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY,
   LOAD_REPLAY_MAX_UPDATES,
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
   SESSION_SOURCE_META_KEY,
@@ -2508,6 +2509,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         hardSuspendTodoStopGuard: ReturnType<typeof vi.fn>;
         beginClose: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
+        releaseAutomaticWorkAfterCwdRestore: ReturnType<typeof vi.fn>;
         waitForActiveTurnsToSettle: ReturnType<typeof vi.fn>;
         cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
@@ -6239,6 +6241,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           startCronScheduler: vi.fn(),
           beginClose: vi.fn().mockReturnValue(vi.fn()),
           beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+          releaseAutomaticWorkAfterCwdRestore: vi.fn(),
           waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
           waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
           cancelMcpAppCalls: vi.fn(),
@@ -8617,6 +8620,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it.each(['same', 'changed', 'failed'])(
+    'releases deferred automatic work only after a successful %s cwd operation',
+    async (outcome) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const directory = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-cwd-restore-')),
+      );
+      const target =
+        outcome === 'same' ? directory : path.join(directory, 'nested');
+      await fs.mkdir(target, { recursive: true });
+      const innerConfig = await setupSessionMocks(sessionId);
+      Object.assign(innerConfig, {
+        getTargetDir: vi.fn().mockReturnValue(directory),
+        isRestrictiveSandbox: vi.fn().mockReturnValue(false),
+        relocateWorkingDirectory:
+          outcome === 'failed'
+            ? vi.fn().mockRejectedValue(new Error('relocation rejected'))
+            : vi.fn().mockResolvedValue({}),
+      });
+      Object.assign(innerConfig.getLlmClient(), {
+        addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
+      });
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        await agent.newSession({ cwd: directory, mcpServers: [] });
+        const releaseGate = vi.fn();
+        lastSessionMock!.beginCloseIfAvailable.mockReturnValue(releaseGate);
+        const operation = agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+          sessionId,
+          path: target,
+        });
+        if (outcome === 'failed') {
+          await expect(operation).rejects.toThrow('relocation rejected');
+          expect(
+            lastSessionMock!.releaseAutomaticWorkAfterCwdRestore,
+          ).not.toHaveBeenCalled();
+        } else {
+          await expect(operation).resolves.toMatchObject({ newCwd: target });
+          expect(
+            lastSessionMock!.releaseAutomaticWorkAfterCwdRestore,
+          ).toHaveBeenCalledOnce();
+          expect(releaseGate.mock.invocationCallOrder[0]).toBeLessThan(
+            lastSessionMock!.releaseAutomaticWorkAfterCwdRestore.mock
+              .invocationCallOrder[0]!,
+          );
+        }
+        expect(releaseGate).toHaveBeenCalledOnce();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('serializes a working-directory change and hard-suspends Todo Stop Guard', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const targetDir = await fs.mkdtemp(
@@ -10026,6 +10084,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       sequence: 1,
       recordedAt: '2026-07-04T00:00:00.000Z',
       changes: [],
+      // The derived count must ride the payload through the persist handler
+      // to the recorder (this suite's normalizeEventPayload mock is a
+      // pass-through; the real normalizer's count preservation is pinned in
+      // core's session-artifact-persistence.test.ts).
+      artifactCount: 3,
     };
     const snapshotPayload = {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -10683,6 +10746,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         label: 'research worker',
       },
     );
+    const fromSession = { sessionId: 'source-B', workspaceCwd: '/tmp/source' };
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification, {
+        sessionId,
+        displayText: 'Session replied.',
+        modelText:
+          '<task-notification><result>Done</result></task-notification>',
+        taskId: 'worker-reply',
+        status: 'completed',
+        kind: 'agent',
+        fromSession,
+        sentMessageContext: '<sent-message>Original text</sent-message>',
+      }),
+    ).resolves.toEqual({ sessionId, accepted: true });
+    expect(
+      lastSessionMock!.enqueueBackgroundNotification,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        modelText:
+          '<task-notification><result>Done</result></task-notification>',
+        sentMessageContext: '<sent-message>Original text</sent-message>',
+        structured: { fromSession },
+      }),
+    );
     await expect(
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification, {
         sessionId,
@@ -10696,7 +10783,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).rejects.toThrowError(/Invalid background notification label/);
     expect(
       lastSessionMock!.enqueueBackgroundNotification,
-    ).toHaveBeenCalledTimes(1);
+    ).toHaveBeenCalledTimes(2);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -30800,6 +30887,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         installRewriter: ReturnType<typeof vi.fn>;
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
         startCronScheduler: ReturnType<typeof vi.fn>;
+        deferAutomaticWorkUntilCwdRestore: ReturnType<typeof vi.fn>;
+        releaseAutomaticWorkAfterCwdRestore: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
         recoverMessageDeletionContext: ReturnType<typeof vi.fn>;
         assertCanStartTurn: ReturnType<typeof vi.fn>;
@@ -31250,6 +31339,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         ),
         startCronScheduler: vi.fn(),
         enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
+        deferAutomaticWorkUntilCwdRestore: vi.fn(),
+        releaseAutomaticWorkAfterCwdRestore: vi.fn(),
         beginClose: vi.fn().mockReturnValue(releaseCloseGate),
         beginCloseIfAvailable: vi.fn().mockReturnValue(releaseCloseGate),
         waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
@@ -32108,6 +32199,69 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         expect(
           innerConfig.suppressRestorableAskUserQuestionPreservation,
         ).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s holds cold automatic work before replay services for the private parent',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent('worktree-parent');
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: {
+            [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
+          },
+        };
+        if (action === 'load') await agent.loadSession(params);
+        else await agent.unstable_resumeSession(params);
+
+        expect(
+          lastSessionMock!.deferAutomaticWorkUntilCwdRestore,
+        ).toHaveBeenCalledOnce();
+        expect(
+          lastSessionMock!.deferAutomaticWorkUntilCwdRestore.mock
+            .invocationCallOrder[0],
+        ).toBeLessThan(
+          lastSessionMock!.startCronScheduler.mock.invocationCallOrder[0]!,
+        );
+        expect(
+          lastSessionMock!.releaseAutomaticWorkAfterCwdRestore,
+        ).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s rejects automatic-work deferral from an untrusted parent',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: {
+            [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
+          },
+        };
+        await expect(
+          action === 'load'
+            ? agent.loadSession(params)
+            : agent.unstable_resumeSession(params),
+        ).rejects.toThrow('requires a trusted private ACP parent');
+        expect(Session).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

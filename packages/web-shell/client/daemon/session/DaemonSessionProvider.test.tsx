@@ -6585,6 +6585,115 @@ describe('DaemonSessionProvider', () => {
     expect(streamingState).toBe('idle');
   });
 
+  it.each([
+    [
+      'a message from another client',
+      'user_message_chunk',
+      'waiting',
+      undefined,
+    ],
+    [
+      'an answer from another client',
+      'agent_message_chunk',
+      'responding',
+      undefined,
+    ],
+    [
+      'a /send message recorded here',
+      'user_message_chunk',
+      'idle',
+      {
+        qwenAgentMessage: {
+          kind: 'agent_mention',
+          mentionedAgentIds: [],
+          sentTo: { sessionId: 'kid', workspaceCwd: '/work/b' },
+        },
+      },
+    ],
+  ] as const)(
+    'reads %s (%s) as %s',
+    async (_name, sessionUpdate, expected, meta) => {
+      const hold = createDeferred<void>();
+      const session = createMockSession({
+        events: async function* observedMessage(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          // This session's own earlier turn, settled: the page is idle.
+          yield {
+            v: 1,
+            id: 8,
+            type: 'session_update',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'hello' },
+              },
+            },
+          };
+          yield {
+            v: 1,
+            id: 9,
+            type: 'session_update',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'hi' },
+              },
+            },
+          };
+          yield {
+            v: 1,
+            id: 10,
+            type: 'turn_complete',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: { promptId: 'prompt-0', stopReason: 'end_turn' },
+          };
+          yield {
+            v: 1,
+            id: 11,
+            type: 'session_update',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate,
+                content: { type: 'text', text: 'look at this' },
+                ...(meta ? { _meta: meta } : {}),
+              },
+            },
+          };
+          await Promise.race([
+            hold.promise,
+            new Promise<void>((resolve) =>
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              }),
+            ),
+          ]);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+      function Harness() {
+        streamingState = useDaemonStreamingState();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(streamingState).toBe(expected);
+      hold.resolve();
+    },
+  );
+
   it('settles non-blocking prompts when turn completion arrives before acceptance returns', async () => {
     const accepted = createDeferred<NonBlockingPromptAccepted>();
     const turnComplete = createDeferred<void>();
@@ -8420,9 +8529,17 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await requireActions(actions).loadSession('session-2', {
         workspaceCwd: '/mock-workspace',
+        artifactCountHint: 7,
       });
       await flushPromises();
     });
+
+    // The click-time hint rides the optimistic switch, keyed to the target.
+    const hinted = frames.find(
+      (frame) => frame.connection.artifactCountHint !== undefined,
+    );
+    expect(hinted?.connection.artifactCountHint).toBe(7);
+    expect(hinted?.connection.artifactCountHintSessionId).toBe('session-2');
 
     const early = frames.find(
       (frame) => frame.connection.restoredArtifacts !== undefined,
@@ -8430,6 +8547,9 @@ describe('DaemonSessionProvider', () => {
     expect(early).toBeTruthy();
     expect(early!.connection.sessionId).toBe('session-2');
     expect(early!.connection.restoredArtifactsSessionId).toBe('session-2');
+    // Authoritative data landed: the early commit retires the hint.
+    expect(early!.connection.artifactCountHint).toBeUndefined();
+    expect(early!.connection.artifactCountHintSessionId).toBeUndefined();
     // The replay has not injected yet at the early commit.
     expect(
       early!.blocks.some(
@@ -8441,6 +8561,9 @@ describe('DaemonSessionProvider', () => {
     expect(frames[frames.length - 1]!.blocks).toMatchObject([
       { kind: 'assistant', text: 'replayed transcript' },
     ]);
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHint,
+    ).toBeUndefined();
   });
 
   it('does not early-commit the artifact key when the restore has no artifacts', async () => {
@@ -8468,6 +8591,7 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await requireActions(actions).loadSession('session-2', {
         workspaceCwd: '/mock-workspace',
+        artifactCountHint: 7,
       });
       await flushPromises();
     });
@@ -8477,6 +8601,21 @@ describe('DaemonSessionProvider', () => {
     expect(
       frames.every((frame) => frame.connection.restoredArtifacts === undefined),
     ).toBe(true);
+    // The hint bridges the whole load window when no early commit runs, and
+    // the attach retires it once the session is bound.
+    expect(
+      frames.some(
+        (frame) =>
+          frame.connection.sessionId === 'session-2' &&
+          frame.connection.artifactCountHint === 7,
+      ),
+    ).toBe(true);
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHint,
+    ).toBeUndefined();
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHintSessionId,
+    ).toBeUndefined();
     expect(frames[frames.length - 1]!.blocks).toMatchObject([
       { kind: 'assistant', text: 'replayed transcript' },
     ]);

@@ -1711,11 +1711,15 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
-    // The relay's stop arm tolerates a child that waits on its recovery or
-    // is already closing; the cascade mirrors exactly those two refusal
-    // codes — any other failure defers the Turn cancel, these two do not.
-    @Test
-    void aToleratedMessageStopRefusalStillCancelsTheTurn() {
+    // The relay's stop arm tolerates a child that waits on its recovery,
+    // is already closing, or is out of cold-open slots; the cascade mirrors
+    // exactly those refusal codes — any other failure defers the Turn
+    // cancel, these do not.
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "hosted_turn_recovery_required", "hosted_session_closing",
+            "hosted_session_open_busy"})
+    void aToleratedMessageStopRefusalStillCancelsTheTurn(String refusalCode) {
         World world = closingWorld("msg-tolerated-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
@@ -1729,8 +1733,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         var refusal = Mockito.mock(
                 com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure.class);
-        Mockito.when(refusal.getErrorCode())
-                .thenReturn("hosted_session_closing");
+        Mockito.when(refusal.getErrorCode()).thenReturn(refusalCode);
         harness.messageFailure = refusal;
         List<String> calls = new CopyOnWriteArrayList<>();
         harness.messageApplied = body -> calls.add("message-stop");

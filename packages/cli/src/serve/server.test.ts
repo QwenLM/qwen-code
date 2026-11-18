@@ -42,6 +42,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import type { SubSessionLauncher } from './create-sub-session.js';
 import * as toolCallsReader from './session-tool-calls.js';
 import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
@@ -700,6 +701,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_info',
   'session_source_metadata',
   'session_side_task',
+  'session_sub_session_send',
   'session_prompt',
   'session_turn_status',
   'session_attachments',
@@ -4804,6 +4806,7 @@ describe('createServeApp', () => {
       '/channel-events',
       '/live',
       '/scheduled-tasks',
+      '/pr-watches',
       '/goals',
       '/settings',
     ])(
@@ -19419,7 +19422,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('keeps a fired non-Channel restore prompt unattested instead of killing the session', async () => {
+    it('keeps a fired non-Channel restore prompt compatible on an older bridge', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
@@ -19431,8 +19434,9 @@ describe('createServeApp', () => {
           hasActivePrompt: true,
         }),
       });
-      // No persisted source and none requested, so this is not a Channel
-      // restore and the route asks the bridge for no deferral. With
+      delete (bridge as Partial<AcpSessionBridge>)
+        .fireDeferredRestoreAskUserQuestionPrompt;
+      // Without deferred admission the route keeps its older behavior. With
       // `restoreAskUserQuestion` enabled the bridge then FIRES the re-hung
       // question during the cold restore, and that response reports an
       // active prompt while carrying no `currentCwd` at all.
@@ -19670,78 +19674,88 @@ describe('createServeApp', () => {
       }
     });
 
-    it('relocates a cold Channel restore before firing its deferred question', async () => {
-      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
-      let relocated = false;
-      const bridge = fakeBridge({
-        loadImpl: async (req) => ({
-          sessionId: req.sessionId,
-          workspaceCwd: req.workspaceCwd,
-          attached: false,
-          clientId: 'client-load',
-          state: {},
-          hasActivePrompt: false,
-        }),
-        changeSessionCwdImpl: async (sessionId, req) => {
-          relocated = true;
-          return {
-            sessionId,
-            previousCwd: WS_BOUND,
-            newCwd: req.path,
-            warnings: [],
-          };
-        },
-        fireDeferredRestoreAskUserQuestionPromptImpl: () => {
-          expect(relocated).toBe(true);
-          return true;
-        },
-      });
-      const readCreationMetadata = vi
-        .spyOn(SessionService.prototype, 'readCreationMetadata')
-        .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
-      mockWt.realpath = (p) => p;
-      mockWt.readMarker = () =>
-        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
-      mockWt.readSidecar = () =>
-        Promise.resolve({
-          slug: 'my-task',
-          worktreePath,
-          worktreeBranch: 'worktree-my-task',
-          originalCwd: WS_BOUND,
-          workspaceCwd: WS_BOUND,
-          originalBranch: 'main',
-          originalHeadCommit: 'abc123',
+    it.each([true, false])(
+      'relocates a cold restore before its question (Channel=%s)',
+      async (channel) => {
+        const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+        let relocated = false;
+        const bridge = fakeBridge({
+          loadImpl: async (req) => ({
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-load',
+            state: {},
+            hasActivePrompt: false,
+          }),
+          changeSessionCwdImpl: async (sessionId, req) => {
+            relocated = true;
+            return {
+              sessionId,
+              previousCwd: WS_BOUND,
+              newCwd: req.path,
+              warnings: [],
+            };
+          },
+          fireDeferredRestoreAskUserQuestionPromptImpl: () => {
+            expect(relocated).toBe(true);
+            return true;
+          },
         });
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue(
+            channel ? { sourceType: 'channel', sourceId: 'telegram' } : {},
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        mockWt.realpath = (p) => p;
+        mockWt.readMarker = () =>
+          Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+        mockWt.readSidecar = () =>
+          Promise.resolve({
+            slug: 'my-task',
+            worktreePath,
+            worktreeBranch: 'worktree-my-task',
+            originalCwd: WS_BOUND,
+            workspaceCwd: WS_BOUND,
+            originalBranch: 'main',
+            originalHeadCommit: 'abc123',
+          });
 
-      try {
-        const res = await request(app)
-          .post('/session/wt-session/load')
-          .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .send({ cwd: WS_BOUND });
+        try {
+          const res = await request(app)
+            .post('/session/wt-session/load')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ cwd: WS_BOUND });
 
-        expect(res.status).toBe(200);
-        expect(res.body.hasActivePrompt).toBe(true);
-        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
-        expect(bridge.fireDeferredRestoreAskUserQuestionPromptCalls).toEqual([
-          { sessionId: 'wt-session', clientId: 'client-load' },
-        ]);
-        expect(bridge.killCalls).toHaveLength(0);
-        expect(bridge.loadCalls[0]).toMatchObject({
-          suppressWorktreeContextRestore: true,
-          deferRestoreAskUserQuestionPrompt: true,
-        });
-      } finally {
-        mockWt.readSidecar = undefined;
-        mockWt.readMarker = undefined;
-        mockWt.realpath = undefined;
-        readCreationMetadata.mockRestore();
-      }
-    });
+          expect(res.status).toBe(200);
+          expect(res.body.hasActivePrompt).toBe(true);
+          expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+          expect(bridge.fireDeferredRestoreAskUserQuestionPromptCalls).toEqual([
+            { sessionId: 'wt-session', clientId: 'client-load' },
+          ]);
+          expect(bridge.killCalls).toHaveLength(0);
+          expect(bridge.loadCalls[0]).toMatchObject({
+            deferRestoreAskUserQuestionPrompt: true,
+            deferAutomaticWorkUntilCwdRestore: true,
+          });
+          // Non-Channel restores keep the child's worktree restore (marker
+          // heal + resumed notice); only Channel restores suppress it.
+          expect(bridge.loadCalls[0].suppressWorktreeContextRestore).toBe(
+            channel ? true : undefined,
+          );
+        } finally {
+          mockWt.readSidecar = undefined;
+          mockWt.readMarker = undefined;
+          mockWt.realpath = undefined;
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
 
     it('serializes concurrent Channel worktree restores through integrity admission', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
@@ -31202,6 +31216,172 @@ describe('createServeApp', () => {
         sessionId: 'session-A',
       });
       expect(res.headers['retry-after']).toBe('5');
+    });
+  });
+
+  describe('GET /session/:id/tasks?includeSubSessions=true', () => {
+    const appWithOutgoing = (
+      listOutgoing: SubSessionLauncher['listOutgoing'],
+    ) => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge({
+          sessionTasksImpl: async (sessionId) => ({
+            v: 1,
+            sessionId,
+            now: 5_000,
+            tasks: [],
+          }),
+        }),
+      });
+      (
+        app.locals as {
+          subSessionLauncherFor?: () => Partial<SubSessionLauncher> | undefined;
+        }
+      ).subSessionLauncherFor = () => ({ listOutgoing });
+      return app;
+    };
+    const get = (app: ReturnType<typeof createServeApp>, query = '') =>
+      request(app)
+        .get(`/session/session-A/tasks${query}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    it('lists the sends the daemon reports back beside the child tasks', async () => {
+      const listOutgoing = vi.fn(() => [
+        {
+          id: 'kid',
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          label: 'look',
+          status: 'running' as const,
+          startTime: 1_000,
+          byPerson: true,
+        },
+        {
+          id: 'kid:p2',
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          label: 'again',
+          status: 'completed' as const,
+          startTime: 2_000,
+          endTime: 2_500,
+          byPerson: false,
+        },
+      ]);
+      const res = await get(
+        appWithOutgoing(listOutgoing),
+        '?includeSubSessions=true',
+      );
+      expect(res.status).toBe(200);
+      expect(listOutgoing).toHaveBeenCalledWith('session-A');
+      expect(res.body.tasks).toEqual([]);
+      expect(res.body.subSessions).toEqual([
+        expect.objectContaining({
+          kind: 'session',
+          id: 'kid',
+          runtimeMs: 4_000,
+        }),
+        expect.objectContaining({ id: 'kid:p2', runtimeMs: 500 }),
+      ]);
+    });
+
+    it('leaves them out unless asked', async () => {
+      const listOutgoing = vi.fn(() => []);
+      const res = await get(appWithOutgoing(listOutgoing));
+      expect(res.status).toBe(200);
+      expect(res.body).not.toHaveProperty('subSessions');
+      expect(listOutgoing).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /session/:id/sub-sessions', () => {
+    const appWithLauncher = (
+      launchForPerson: SubSessionLauncher['launchForPerson'] | undefined,
+    ) => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+      });
+      (
+        app.locals as {
+          subSessionLauncherFor?: () => Partial<SubSessionLauncher> | undefined;
+        }
+      ).subSessionLauncherFor = () =>
+        launchForPerson ? { launchForPerson } : undefined;
+      return app;
+    };
+    const post = (app: ReturnType<typeof createServeApp>, body: object) =>
+      request(app)
+        .post('/session/session-A/sub-sessions')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(body);
+
+    it('202 runs the send on the caller launcher with the open session as caller', async () => {
+      const launchForPerson = vi.fn(async () => ({
+        sessionId: 'kid',
+        workspaceCwd: '/work/b',
+        taskId: 'kid:p1',
+        result: 'not returned',
+      }));
+      const res = await post(appWithLauncher(launchForPerson), {
+        prompt: '  look  ',
+        workspace: '/work/b',
+        targetSessionId: 'kid',
+      });
+      expect(res.status).toBe(202);
+      expect(res.body).toEqual({
+        sessionId: 'kid',
+        workspaceCwd: '/work/b',
+        taskId: 'kid:p1',
+      });
+      expect(launchForPerson).toHaveBeenCalledWith({
+        callerSessionId: 'session-A',
+        prompt: 'look',
+        workspace: '/work/b',
+        sessionId: 'kid',
+      });
+    });
+
+    it.each([
+      [{}, 'invalid_sub_session_prompt'],
+      [{ prompt: '   ' }, 'invalid_sub_session_prompt'],
+      [{ prompt: 'p', workspace: 'a\nb' }, 'invalid_sub_session_workspace'],
+      [{ prompt: 'p', workspace: 7 }, 'invalid_sub_session_workspace'],
+      [{ prompt: 'p', targetSessionId: '' }, 'invalid_sub_session_target'],
+    ])('400 for %j', async (body, code) => {
+      const launchForPerson = vi.fn();
+      const res = await post(appWithLauncher(launchForPerson), body);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe(code);
+      expect(launchForPerson).not.toHaveBeenCalled();
+    });
+
+    it("409 carries the launcher's refusal", async () => {
+      const res = await post(
+        appWithLauncher(async () => {
+          throw new Error('Workspace /work/b is not trusted.');
+        }),
+        { prompt: 'p', workspace: '/work/b' },
+      );
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({
+        code: 'sub_session_send_refused',
+        error: 'Workspace /work/b is not trusted.',
+      });
+    });
+
+    it('keeps the usual status for typed errors', async () => {
+      const res = await post(
+        appWithLauncher(async () => {
+          throw new SessionNotFoundError('session-A');
+        }),
+        { prompt: 'p' },
+      );
+      expect(res.status).toBe(404);
+    });
+
+    it('501 when the runtime has no launcher', async () => {
+      const res = await post(appWithLauncher(undefined), { prompt: 'p' });
+      expect(res.status).toBe(501);
+      expect(res.body.code).toBe('sub_session_send_unavailable');
     });
   });
 
