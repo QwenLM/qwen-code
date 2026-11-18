@@ -12968,6 +12968,44 @@ Other open files:
         expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
       });
 
+      it('excludes Notification/Teammate by messageType even when the registry does not (R10-6)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // The messageType arms are sender-decided defense-in-depth: a
+        // background first send must stay excluded even if the prompt-id
+        // registry fails to exclude it (a future registration regression or
+        // bounded eviction). Force the registry to report "not registered" so
+        // only the messageType arm can exclude the send.
+        const registry = (
+          client as unknown as {
+            backgroundInteractionPromptIds: Set<string>;
+          }
+        ).backgroundInteractionPromptIds;
+        const hasSpy = vi.spyOn(registry, 'has').mockReturnValue(false);
+        try {
+          for (const type of [
+            SendMessageType.Notification,
+            SendMessageType.Teammate,
+          ]) {
+            await run([{ text: 'background' }], `membership-arm-${type}`, {
+              type,
+            });
+            expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+          }
+          // A foreground UserQuery is still a member when the registry reports
+          // the id absent.
+          await run([{ text: 'user' }], 'membership-arm-user', {
+            type: SendMessageType.UserQuery,
+          });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
+        } finally {
+          hasSpy.mockRestore();
+        }
+      });
+
       it('bounds the background-interaction registry FIFO (R8-F11)', async () => {
         // Pin the bound value itself: raising it must not silently pass (S2).
         expect(MAX_BACKGROUND_INTERACTION_PROMPT_IDS).toBe(32);

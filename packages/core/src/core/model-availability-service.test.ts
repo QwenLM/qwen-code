@@ -41,6 +41,31 @@ describe('ModelAvailabilityService', () => {
     });
   });
 
+  it('tracks a terminal capacity failure and upgrades a consumed sticky mark', () => {
+    // markTerminal is retained ported API (its terminal/quota-marking caller is
+    // a separate feature); pin both terminal reasons and that a terminal mark
+    // upgrades an already-consumed sticky mark rather than being ignored.
+    service.markRetryOncePerTurn(model);
+    service.consumeStickyAttempt(model);
+    expect(service.snapshot(model)).toEqual({
+      available: false,
+      reason: 'retry_once_per_turn',
+    });
+
+    service.markTerminal(model, 'capacity');
+    expect(service.snapshot(model)).toEqual({
+      available: false,
+      reason: 'capacity',
+    });
+
+    // A turn boundary must not revive the terminal mark.
+    service.resetTurn();
+    expect(service.snapshot(model)).toEqual({
+      available: false,
+      reason: 'capacity',
+    });
+  });
+
   it('does not override terminal failure with sticky failure', () => {
     service.markTerminal(model, 'quota');
     service.markRetryOncePerTurn(model);

@@ -508,6 +508,14 @@ export interface SendMessageOptions {
    * (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * Stable model-availability ledger turn key for this send, when it differs
+   * from the send's `prompt_id`. A headless runtime Goal run keeps the
+   * foreground turn's `prompt_id` for identity but opens its own ledger turn
+   * so a fallback the foreground turn exhausted is re-probed for the Goal run.
+   * Forwarded to `LlmChat`; defaults to `prompt_id` when unset.
+   */
+  ledgerTurnKey?: string;
 }
 
 /** UserPromptSubmit's verdict on a prompt, taken before the prompt expands. */
@@ -5231,6 +5239,7 @@ export class LlmClient {
         messageType !== SendMessageType.Notification &&
           messageType !== SendMessageType.Teammate &&
           !this.backgroundInteractionPromptIds.has(prompt_id),
+        options?.ledgerTurnKey,
       );
 
       // Assemble the outgoing request. IDE context is merged into the

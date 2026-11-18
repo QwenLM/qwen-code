@@ -794,6 +794,7 @@ export class Turn {
     private readonly onModelRequestDispatched?: () => void,
     private readonly isExplicitRetry?: boolean,
     private readonly isSessionTurn?: boolean,
+    private readonly ledgerTurnKey?: string,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -828,6 +829,7 @@ export class Turn {
           ? { retractDeliveredOutputOnRetry: true }
           : {}),
         ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
+        ...(this.ledgerTurnKey ? { ledgerTurnKey: this.ledgerTurnKey } : {}),
       };
       const responseStream = prepared
         ? await this.chat.sendPreparedMessageStream(

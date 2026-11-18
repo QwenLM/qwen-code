@@ -8926,6 +8926,52 @@ describe('LlmChat', async () => {
       expect(fallbackA).toHaveBeenCalledTimes(2);
     });
 
+    it('a background send leaves the live turn’s consumed fallback mark untouched', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      wireFallbacks(
+        ['fallback-a'],
+        vi
+          .fn()
+          .mockImplementation(async () =>
+            fallbackRoute('fallback-a', fallbackA),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      // Primary 429s on the live turn, then recovers for the background send.
+      streamMock()
+        .mockRejectedValueOnce(capacityError)
+        .mockResolvedValueOnce(textStream('primary ok'));
+      fallbackA.mockRejectedValue(capacityError);
+
+      // Live turn: fallback-a exhausts and is consumed for the turn.
+      await expect(
+        sendSessionCollect('test', 'prompt-live-mark'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(service.snapshot('fallback-a')).toEqual({
+        available: false,
+        reason: 'retry_once_per_turn',
+      });
+
+      // A background send (no isSessionTurn) served by the recovered primary
+      // must not rotate the turn key or clear the live turn's consumed mark —
+      // not merely be skipped itself.
+      const events = await sendCollect('test', 'forked_query');
+      expect(hasChunkText(events, 'primary ok')).toBe(true);
+      expect(service.snapshot('fallback-a')).toEqual({
+        available: false,
+        reason: 'retry_once_per_turn',
+      });
+    });
+
     it('an explicit Retry served by the primary still re-probes consumed fallbacks', async () => {
       const service = new ModelAvailabilityService();
       vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
@@ -9263,6 +9309,28 @@ describe('LlmChat', async () => {
         expect(requests).toContain('test-model');
         expect(requests).toContain('fallback-b');
         expect(requests).not.toContain('fallback-a');
+
+        // Request 3, a fresh ledger turn key (the headless runtime Goal run's
+        // boundary, R10-4): same base prompt id, but the new ledgerTurnKey
+        // resets the consumed mark, so the exhausted fallback-a is re-probed
+        // over the real socket instead of staying skipped.
+        requests.length = 0;
+        const events3 = await collect(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'real-http-ledger-turn',
+            undefined,
+            {
+              isSessionTurn: true,
+              ledgerTurnKey: 'real-http-ledger-turn/goal/goal-runtime:g1',
+            },
+          ),
+        );
+        expect(hasChunkText(events3, 'real-ok')).toBe(true);
+        expect(requests).toContain('test-model');
+        expect(requests).toContain('fallback-a');
+        expect(requests).toContain('fallback-b');
       } finally {
         await new Promise<void>((resolve, reject) => {
           server.close((err) => (err ? reject(err) : resolve()));

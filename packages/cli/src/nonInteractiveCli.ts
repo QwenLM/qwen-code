@@ -3198,6 +3198,15 @@ export async function runNonInteractive(
                 },
               }
             : {}),
+          // A runtime Goal run keeps the foreground turn's prompt_id for
+          // identity but opens its own ledger turn, so a fallback the
+          // foreground turn exhausted is re-probed for the Goal run. The key
+          // is stable across the run's segments (goalTurn.turnKey), so sticky
+          // marks still persist within the run, as continuations do.
+          ...(goalTurn &&
+            goalTurn.origin === 'runtime' && {
+              ledgerTurnKey: `${prompt_id}/goal/${goalTurn.turnKey}`,
+            }),
         };
         let shouldFinalizeTurn: boolean;
         if (replyOnly) {

@@ -112,7 +112,12 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     the registered teammate id cannot drop later foreground sends (R8-F2). A
     `Goal` turn is a ledger member (not registered), but its minted id is
     likewise unique, so a fallback it exhausts cannot be skipped by a later user
-    turn that never tried it.
+    turn that never tried it. In the headless CLI a runtime-origin `Goal` run
+    keeps the foreground turn's `prompt_id` for identity but passes a fresh
+    `ledgerTurnKey` (`<prompt_id>/goal/<goalTurnKey>`, stable across the run's
+    segments), so a fallback the foreground turn exhausted is re-probed for the
+    Goal run rather than staying skipped; a user-origin `Goal` turn shares the
+    foreground key (R10-4).
     `Turn` takes it as a constructor parameter (default unset) and
     forwards it to the send options only when set. `turnModelRound` builds its
     `Turn` without it because every production caller is a background round (the
@@ -198,7 +203,9 @@ reversible; a later PR can flip the default once nightly evidence is in.
   decide ledger membership at the sender: `LlmClient` sets `isSessionTurn` per
   `messageType`, `Turn` forwards it from a constructor parameter (default unset),
   and a registry of concurrent side-query prompt ids excludes a side query's
-  unflagged tool-result continuation.
+  unflagged tool-result continuation. `SendMessageOptions.ledgerTurnKey` is
+  threaded the same way (sender → `Turn` → send options) for the headless
+  runtime Goal run's fresh turn boundary.
 - `packages/cli/src/acp-integration/session/Session.ts` +
   `packages/cli/src/acp-integration/session/ledger-turn-key.ts` — the ACP send
   sets `isSessionTurn`; `deriveLedgerTurnKey` normalizes mid-turn continuation
@@ -215,7 +222,9 @@ reversible; a later PR can flip the default once nightly evidence is in.
   (subagent shared loop, unified-loop speculation) sharing the session `Config`.
 - `packages/cli/src/nonInteractiveCli.ts` — a headless teammate turn mints its
   own prompt id; a `teammateTurnActive` flag keeps it for the turn and its
-  continuations and restores the base id for the next foreground turn.
+  continuations and restores the base id for the next foreground turn. A
+  runtime-origin Goal run keeps the base prompt id but sets a fresh
+  `ledgerTurnKey` so it opens its own ledger turn (R10-4).
 - `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts`
   — `experimental.modelAvailabilityTracking` (default false) + propagation, with
   CLI wiring tests mirroring the `unifiedAgentLoop` opt-in/opt-out/unset shape.
