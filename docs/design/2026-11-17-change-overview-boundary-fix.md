@@ -97,11 +97,15 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
   so a plain session that hands off into a worktree keeps its pre-handoff
   commits (the worktree's creation tip is later than the session start). The
   hand-back promotion (`setSessionBaseCommit`) is fill-only
-  (`entry.baseCommit === undefined`), so it never overwrites a recorded start;
-  a session created as a worktree has no top-level start and still gains its
-  boundary on hand-back. `worktreeBase` keeps its physical meaning (the
-  worktree's own creation base, used by the handoff rewind classification and
-  orphan cleanup), distinct from the session start.
+  (`entry.baseCommit === undefined && entry.branch?.baseCommit === undefined`),
+  so it never overwrites a recorded start — whether that start lives on the
+  top-level field (plain session) or on `branch.baseCommit` (a branch session,
+  which has no top-level value; R7-1). A session created as a worktree has
+  neither a top-level nor a branch start (only `worktree.baseCommit`, which is
+  not gated because the promotion runs before `clearSessionWorktree`), so it
+  still gains its boundary on hand-back. `worktreeBase` keeps its physical
+  meaning (the worktree's own creation base, used by the handoff rewind
+  classification and orphan cleanup), distinct from the session start.
 - The status-route hydration and summary projection forward the new fields;
   legacy sessions without them stay `undefined`.
 
@@ -150,8 +154,9 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
 
 ### Layer 3 — hook rewrite (web-shell)
 
-- Boundary priority: `branch.baseCommit ?? worktree.baseCommit ??
-summary.baseCommit` (plain session) → `<start>..HEAD`; else `baseBranch`
+- Boundary priority: `summary.baseCommit ?? branch.baseCommit ??
+worktree.baseCommit` (the session's own creation start wins over a derived
+  branch/worktree base tip) → `<start>..HEAD`; else `baseBranch`
   (non-`'HEAD'`, whitelist-safe) → `<base>..HEAD`; else **suppress** (no
   range-less walk ever).
 - When the exclude capability is present and PR heads resolved, pass every
@@ -212,6 +217,18 @@ summary.baseCommit` (plain session) → `<start>..HEAD`; else `baseBranch`
   retries once on the **same boundary window without `excludeRefs`** so the
   overview degrades to the loose window instead of blanking every unit. Only a
   log still unavailable after that retry surfaces `loadFailed`.
+- Over-subtraction backstop (R7-2): a base-branch remote-tracking ref can reach
+  the session's **own** pushed commits — the recorded base is the session's own
+  branch (a worktree handed off from a pushed feature branch), or the base
+  absorbed and pushed the work — so `git log <range> --not <base>` returns
+  empty while the panel would otherwise report a complete overview with no
+  committed work. An excluded log that is `available:true` with **zero entries**
+  and base-branch exclusions applied is therefore treated as untrustworthy: the
+  hook re-runs once dropping **only the base-branch entries**, keeping the
+  PR-head exclusions that the fallback guard relies on. This is distinct from
+  the missing-head backstop (`available:false` drops all exclusions); the
+  accepted residual is that a legitimately empty window may re-list upstream
+  integration commits once the base-branch narrowing is dropped.
 - Retire the now-redundant ancestry heuristic: remove the `headIsAncestor`
   probe from the files route, the SDK field, and the hook's ancestor-head
   selection. Remove `isGitAncestorOfHead` and its tests if no consumer remains

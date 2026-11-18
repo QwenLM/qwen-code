@@ -77,10 +77,13 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   `summary.baseCommit ?? branch.baseCommit ?? worktree.baseCommit`：会话自身
   创建时的起点优先于派生的分支/worktree 基线顶端，故普通会话移交给 worktree
   后仍保住移交前的提交（worktree 的创建顶端晚于会话起点）。回本地的提升
-  （`setSessionBaseCommit`）为仅填充（`entry.baseCommit === undefined`），绝不
-  覆盖已记录的起点；作为 worktree 创建的会话无顶层起点，回本地时仍由此补上
-  边界。`worktreeBase` 保持物理语义（worktree 自身的创建基线，供 handoff 回退
-  分类与孤儿清理使用），与会话起点不同。
+  （`setSessionBaseCommit`）为仅填充
+  （`entry.baseCommit === undefined && entry.branch?.baseCommit === undefined`），
+  绝不覆盖已记录的起点——无论起点在顶层字段（普通会话）还是 `branch.baseCommit`
+  （分支会话，顶层本为空；R7-1）。作为 worktree 创建的会话既无顶层也无分支起点
+  （仅 `worktree.baseCommit`，不被门控，因提升先于 `clearSessionWorktree`），回本地
+  时仍由此补上边界。`worktreeBase` 保持物理语义（worktree 自身的创建基线，供
+  handoff 回退分类与孤儿清理使用），与会话起点不同。
 - status 路由水合与摘要投影转发新字段；无此字段的 legacy 会话保持 `undefined`。
 
 ### 层 2——log 路由的可达性排除（core + cli + SDK）
@@ -159,6 +162,13 @@ excludeRefsSupported` 门控。
   存在的排除仍生效。作为兜底，若排除后的 log 仍不可用（如起点 commit 本身不在
   对象库），hook 在**同一边界窗口不带 `excludeRefs`** 重试一次，使总览降级到
   松散窗口而非清空全部单元。仅当重试后仍不可用才呈现 `loadFailed`。
+- 过度排除兜底（R7-2）：基线远程跟踪 ref 可能可达会话**自身**已推送的提交——
+  记录的基线就是会话自身分支（从已推送 feature 分支移交出的 worktree），或基线
+  吸收并推送了工作——于是 `git log <range> --not <基线>` 返回空，而面板否则会
+  报「完整、无提交工作」。故对 `available:true` 且**零条目**、且施加了基线排除的
+  排除 log 视为不可信：hook 仅去掉**基线项**重试一次，保留兜底守卫依赖的 PR head
+  排除。这与缺失 head 兜底（`available:false` 去掉全部排除）不同；接受的残留是
+  合法空窗在去掉基线收窄后可能重现上游整合提交。
 - 退役冗余的祖先启发式：从 files 路由移除 `headIsAncestor` 探针、SDK 字段、
   hook 的祖先 head 选择。若无消费方残留则移除 `isGitAncestorOfHead` 及其测试
   （排除模型已涵盖；保留两者是冗余面）。
