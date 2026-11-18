@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { PendingAsyncOutput } from './types.js';
+import {
+  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+  type PendingAsyncOutput,
+} from './types.js';
 
 /**
  * Reserved tag wrapping background (async) hook output when it is delivered
@@ -18,12 +21,22 @@ export const ASYNC_HOOK_CONTEXT_OPEN = '<qwen:async-hook-context>';
 export const ASYNC_HOOK_CONTEXT_CLOSE = '</qwen:async-hook-context>';
 
 /**
- * Upper bound on the joined async block, mirroring the user-prompt-expansion
- * additional-context cap. The registry accumulates every completion with no
- * total limit, so a verbose hook (or many completions) could otherwise append
- * megabytes to the request and to the side query that reuses it.
+ * Upper bound on the joined async block. Aliased to the user-prompt-expansion
+ * additional-context cap so the two stay in lockstep. The registry accumulates
+ * every completion with no total limit, so a verbose hook (or many completions)
+ * could otherwise append megabytes to the request and to the side query that
+ * reuses it.
  */
-export const MAX_ASYNC_HOOK_CONTEXT_LENGTH = 10_000;
+export const MAX_ASYNC_HOOK_CONTEXT_LENGTH =
+  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH;
+
+/**
+ * Marks a context half that was cut to fit the bound, so a truncated block does
+ * not read as complete. Mirrors `TOOL_HOOK_CONTEXT_TRUNCATION_NOTICE`; room for
+ * it is reserved inside the bound.
+ */
+export const ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE =
+  '\n[async hook context truncated]';
 
 export function wrapAsyncHookContext(context: string): string {
   return `${ASYNC_HOOK_CONTEXT_OPEN}\n${context}\n${ASYNC_HOOK_CONTEXT_CLOSE}`;
@@ -52,10 +65,41 @@ export function isAsyncHookContextPartText(text: string): boolean {
 }
 
 /**
+ * Cut `text` to at most `length` UTF-16 units without splitting an astral
+ * character (back off an orphaned high surrogate, as `safePrefix` does for tool
+ * hook context) and without leaving a partial `<`/`>` escape entity at the cut.
+ */
+function safeCut(text: string, length: number): string {
+  if (length <= 0) return '';
+  if (length >= text.length) return text;
+  const end = /[\uD800-\uDBFF]$/.test(text.slice(0, length))
+    ? length - 1
+    : length;
+  return text.slice(0, end).replace(/&(?:lt?|gt?)?$/, '');
+}
+
+/**
+ * Bound one half of the block to `budget` characters, reserving room inside the
+ * budget for the truncation notice when the half is cut (mirroring
+ * `boundToolHookContext`).
+ */
+function boundHalf(text: string, budget: number): string {
+  if (!text || budget <= 0) return '';
+  if (text.length <= budget) return text;
+  const notice = ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE;
+  if (budget <= notice.length) {
+    return safeCut(text, budget);
+  }
+  return safeCut(text, budget - notice.length) + notice;
+}
+
+/**
  * Render pending async output as model-facing text: the additional contexts
  * verbatim, then the notification messages labeled by type and hook. `<`/`>`
  * are escaped so hook output cannot forge the closing tag. The joined block is
- * bounded by `MAX_ASYNC_HOOK_CONTEXT_LENGTH`. Returns null when there is
+ * bounded by `MAX_ASYNC_HOOK_CONTEXT_LENGTH`. Notification messages take
+ * priority over a verbose context tail: the drain is get-and-clear, so a notice
+ * displaced by the cut would be lost forever. Returns null when there is
  * nothing to deliver.
  */
 export function formatAsyncHookOutput(
@@ -63,31 +107,33 @@ export function formatAsyncHookOutput(
 ): string | null {
   const escape = (text: string) =>
     text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const blocks: string[] = [];
+  const contextBlocks: string[] = [];
   for (const context of output.contexts) {
     if (context.trim()) {
-      blocks.push(escape(context));
+      contextBlocks.push(escape(context));
     }
   }
+  const messageBlocks: string[] = [];
   for (const message of output.messages) {
     if (message.message.trim()) {
-      blocks.push(
+      messageBlocks.push(
         escape(`[${message.type}] ${message.hookName}: ${message.message}`),
       );
     }
   }
-  if (blocks.length === 0) {
+  if (contextBlocks.length === 0 && messageBlocks.length === 0) {
     return null;
   }
-  const joined = blocks.join('\n\n');
-  if (joined.length <= MAX_ASYNC_HOOK_CONTEXT_LENGTH) {
-    return joined;
+  const joinedContext = contextBlocks.join('\n\n');
+  const messageText = messageBlocks.join('\n\n');
+  if (messageText.length >= MAX_ASYNC_HOOK_CONTEXT_LENGTH) {
+    return boundHalf(messageText, MAX_ASYNC_HOOK_CONTEXT_LENGTH);
   }
-  // Strip a trailing partial escape entity left by the cut, mirroring
-  // sanitizeUserPromptExpansionAdditionalContext.
-  return joined
-    .slice(0, MAX_ASYNC_HOOK_CONTEXT_LENGTH)
-    .replace(/&(?:lt?|gt?)?$/, '');
+  const separator = messageText && joinedContext ? '\n\n' : '';
+  const contextBudget =
+    MAX_ASYNC_HOOK_CONTEXT_LENGTH - messageText.length - separator.length;
+  const contextText = boundHalf(joinedContext, contextBudget);
+  return [contextText, messageText].filter(Boolean).join('\n\n');
 }
 
 /**

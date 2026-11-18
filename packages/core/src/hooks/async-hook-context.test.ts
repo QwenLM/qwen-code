@@ -11,6 +11,7 @@ import {
   ASYNC_HOOK_CONTEXT_OPEN,
   ASYNC_HOOK_CONTEXT_CLOSE,
   MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+  ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
   wrapAsyncHookContext,
   isAsyncHookContextPartText,
   formatAsyncHookOutput,
@@ -88,12 +89,12 @@ describe('async-hook-context', () => {
       );
     });
 
-    it('bounds the joined block across many completions', () => {
+    it('bounds the joined block across many completions to exactly the cap', () => {
       const contexts = Array.from({ length: 20 }, () => 'y'.repeat(10_000));
       const rendered = formatAsyncHookOutput({ contexts, messages: [] });
-      expect((rendered ?? '').length).toBeLessThanOrEqual(
-        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
-      );
+      // A total-loss regression (returning null) must not satisfy this bound.
+      expect(rendered).not.toBeNull();
+      expect(rendered).toHaveLength(10_000);
     });
 
     it('does not truncate a block under the cap', () => {
@@ -105,14 +106,71 @@ describe('async-hook-context', () => {
       expect(rendered).toBe(context);
     });
 
-    it('strips a trailing partial escape entity left by the cut', () => {
-      // The escaped '<' (&lt;) straddles the cap boundary; the cut leaves '&l',
-      // which must be stripped rather than delivered as a broken entity.
+    it('marks a cut context with the truncation notice inside the bound', () => {
       const rendered = formatAsyncHookOutput({
-        contexts: ['x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH - 2) + '<'],
+        contexts: ['x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH + 100)],
         messages: [],
       });
-      expect(rendered).toBe('x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH - 2));
+      expect(rendered).toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
+      expect((rendered ?? '').length).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+      );
+    });
+
+    it('keeps a notification message when a verbose context fills the cap', () => {
+      // The drain is get-and-clear: a notice displaced by the context cut would
+      // be lost forever, so the message half is reserved before the context.
+      const rendered = formatAsyncHookOutput({
+        contexts: ['x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH + 5000)],
+        messages: [
+          {
+            type: 'warning',
+            message: 'lint failed',
+            hookName: 'H',
+            hookId: 'h1',
+            timestamp: 0,
+          },
+        ],
+      });
+      expect(rendered).not.toBeNull();
+      expect(rendered).toContain('lint failed');
+      expect(rendered).toContain('[warning]');
+      expect((rendered ?? '').length).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+      );
+    });
+
+    it('strips a trailing partial escape entity left by the cut', () => {
+      // The escaped '<' (&lt;) straddles the context cut (the cap minus the
+      // reserved notice); the cut leaves '&l', which must be stripped rather
+      // than delivered as a broken entity.
+      const cut =
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH -
+        ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length;
+      const filler = 'x'.repeat(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length);
+      const rendered = formatAsyncHookOutput({
+        contexts: ['x'.repeat(cut - 2) + '<' + filler],
+        messages: [],
+      });
+      expect(rendered).toBe(
+        'x'.repeat(cut - 2) + ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
+      );
+    });
+
+    it('backs the cut off an astral character instead of splitting it', () => {
+      // An emoji straddling the context cut would leave an orphaned high
+      // surrogate (re-sent every later turn); the cut must back off one unit.
+      const cut =
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH -
+        ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length;
+      const filler = 'x'.repeat(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length);
+      const rendered = formatAsyncHookOutput({
+        contexts: ['x'.repeat(cut - 1) + '\u{1F600}' + filler],
+        messages: [],
+      });
+      expect(rendered).toBe(
+        'x'.repeat(cut - 1) + ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
+      );
     });
   });
 
