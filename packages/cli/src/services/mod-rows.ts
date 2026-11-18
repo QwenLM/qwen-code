@@ -24,6 +24,8 @@ interface Row {
   stale?: boolean;
   queued: boolean;
   readonly listeners: Set<() => void>;
+  // Hear each render of the row end, whatever it answered.
+  readonly settles: Set<() => void>;
 }
 
 // Rows answered and no longer shown are kept for a remount up to this many.
@@ -65,7 +67,13 @@ export class ModRows {
       row.input = input;
       row.key = key;
     } else
-      row = { input, key, queued: false, listeners: new Set<() => void>() };
+      row = {
+        input,
+        key,
+        queued: false,
+        listeners: new Set<() => void>(),
+        settles: new Set<() => void>(),
+      };
     this.rows.set(id, row);
     row.listeners.add(listener);
     if (this.due(row)) this.enqueue(id, row);
@@ -74,6 +82,38 @@ export class ModRows {
       row.listeners.delete(listener);
       if (!this.running) this.prune();
     };
+  }
+
+  /**
+   * Shows a row until its hooks answered its input, for a client that asks
+   * once: resolves to the answer, `props` absent where the row keeps its own,
+   * or to none when the rows are cleared or `signal` aborts first.
+   */
+  ask(
+    input: ModRenderInput,
+    signal: AbortSignal,
+  ): Promise<{ props?: ModRenderInput['props'] } | undefined> {
+    const id = rowId(input);
+    return new Promise((resolve) => {
+      if (signal.aborted) return resolve(undefined);
+      const release = this.watch(input, () => {});
+      const row = this.rows.get(id)!;
+      const finish = (answer?: { props?: ModRenderInput['props'] }) => {
+        row.settles.delete(settled);
+        signal.removeEventListener('abort', aborted);
+        release();
+        resolve(answer);
+      };
+      const answered = () => finish(row.answer ? { props: row.answer } : {});
+      const settled = () => {
+        if (this.rows.get(id) !== row) finish(undefined);
+        else if (!this.due(row)) answered();
+      };
+      const aborted = () => finish(undefined);
+      if (!this.due(row)) return answered();
+      row.settles.add(settled);
+      signal.addEventListener('abort', aborted, { once: true });
+    });
   }
 
   /** The props a row draws with, once its hooks answered its input. */
@@ -101,8 +141,10 @@ export class ModRows {
     const rows = [...this.rows.values()];
     this.rows.clear();
     this.queue.length = 0;
-    for (const row of rows)
+    for (const row of rows) {
+      for (const settled of [...row.settles]) settled();
       if (row.answer) for (const listener of row.listeners) listener();
+    }
   }
 
   private enqueue(id: string, row: Row): void {
@@ -150,6 +192,7 @@ export class ModRows {
           ready.answerKey = key;
           if (this.due(ready) && ready.listeners.size)
             this.enqueue(readyId, ready);
+          for (const settled of [...ready.settles]) settled();
           if (changed) for (const listener of ready.listeners) listener();
         }
       } finally {

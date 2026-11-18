@@ -132,14 +132,20 @@ session has its own Mods, even when one process serves several sessions. A
 session that a client loads again while it is still open keeps its Mods and
 does not repeat `session.start`.
 
-An ACP session has no surface of its own: `session.start` receives
-`surface: null` and `isInteractive: false`, as in a headless run. It raises
+A session of the Web Shell daemon draws on the `desktop` surface:
+`session.start` receives `surface: 'desktop'` and `isInteractive: true`, and
+`$.session.surfaces()` is `["desktop"]`. The surface is the daemon's, so a
+session another client drives through the daemon reports it too. Zed and the
+VS Code companion draw no Mod output: their sessions receive `surface: null`
+and `isInteractive: false`, as in a headless run. Every ACP session raises
 `session.start` and `session.end`, and `turn.start` and `turn.complete` for
 each prompt that runs `UserPromptSubmit`. `$.model.complete`, `$.store`, the
 `$.session` reads, `$.clock` and `$.turn.abort` work as in the terminal.
 
-It does not raise `ui.render`, `prompt.submit`, `tool.call` or `tool.check` yet,
-so hooks on them are skipped with the diagnostic described in
+A Web Shell session raises `ui.render` for the [reply rows](#reply-rows) the
+Web Shell shows; no ACP session raises it for other sites, nor
+`prompt.submit`, `tool.call` or `tool.check` yet, so hooks on them are skipped
+with the diagnostic described in
 [Middleware and recovery](#middleware-and-recovery). `$.prompt.submit` drops its prompt, and
 Mod commands are not offered. If the Mods fail to load, the session refuses each
 prompt with the reason; fix the Mod configuration and start a new session.
@@ -149,7 +155,9 @@ the ACP extension notification `qwen/notify/session/mod-log`, with params
 `{ sessionId, plugin, text }`. The text has ANSI and control characters
 removed, with the limits of headless runs. Clients that do not know the method
 ignore it. The Web Shell daemon forwards each one to the session's event stream
-as a `mod_log` event with the same fields; the Web Shell does not show them yet.
+as a `mod_log` event with the same fields, and the Web Shell shows it in the
+transcript as an informational line, `[Mod <plugin>] <text>`. These lines are
+not saved with the session, so a reloaded transcript no longer shows them.
 
 ## Supported subset
 
@@ -169,7 +177,7 @@ as a `mod_log` event with the same fields; the Web Shell does not show them yet.
 | Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                         |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input                                |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                                               |
-| Drawing    | `ui.render` draws the [band above the prompt](#the-band-above-the-prompt) and rewrites complete [reply rows](#reply-rows) and expanded [thinking rows](#thinking-rows) in both the Ink and OpenTUI terminal interfaces |
+| Drawing    | `ui.render` draws the [band above the prompt](#the-band-above-the-prompt) and rewrites [reply rows](#reply-rows) and [thinking rows](#thinking-rows) in the Ink and OpenTUI terminals, and reply rows in the Web Shell |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                                                |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
@@ -187,7 +195,7 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
-`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete`, `prompt.submit`, in the Ink and OpenTUI terminals `ui.render`, and the API event of each supported
+`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete`, `prompt.submit`, in the Ink and OpenTUI terminals and the Web Shell `ui.render`, and the API event of each supported
 `$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
@@ -564,7 +572,7 @@ declares:
 | `$.session.cwd()`, `$.session.root()` | the session's working directory; the two are the same in Qwen Code                      |
 | `$.session.model()`                   | the main model's id                                                                     |
 | `$.session.turns()`                   | the user turns in the session's transcript, counting resumed turns and not rewound ones |
-| `$.session.surfaces()`                | `["terminal"]` in a terminal, `[]` in a headless run or an ACP session                  |
+| `$.session.surfaces()`                | `["terminal"]` in a terminal, `["desktop"]` in a Web Shell session, `[]` elsewhere      |
 | `$.session.surface()`                 | the first surface, or `null`                                                            |
 | `$.session.usage()`                   | `{startedAt, context: {tokens, window, percent}, rateLimits}`                           |
 | `$.clock.now()`                       | the current time in epoch milliseconds                                                  |
@@ -791,7 +799,8 @@ it beneath the answer, up to 4,096 characters:
 - in a terminal, as the transcript line `[Mod <plugins>] <text>`;
 - in headless text mode, as the same line on stderr after the answer;
 - in JSON modes, as a `system` `ui_log` message before the result;
-- in an ACP session, as a `qwen/notify/session/mod-log` notification.
+- in an ACP session, as a `qwen/notify/session/mod-log` notification, which
+  the Web Shell shows as the same transcript line.
 
 The conversation record keeps the answer. In a terminal the hooks run after the
 answer, and the next prompt can already start. A headless run waits for them
@@ -1001,11 +1010,14 @@ These differ from Claude Code:
 
 ## Elements
 
-`$.ui.resolve(e)` returns the element table of the terminal: a frozen object
-with no prototype that holds Claude Code's eleven terminal constructors,
-`Box`, `Text`, `Button`, `Input`, `Select`, `Link`, `Code`, `Markdown`,
-`Client`, `Raster` and `Image`. It reads the table without a dispatch. `e` is a
-`ui.render` event; any argument whose `surface` is not `"terminal"` throws.
+`$.ui.resolve(e)` returns the element table of the event's surface: a frozen
+object with no prototype. The terminal's holds Claude Code's eleven terminal
+constructors, `Box`, `Text`, `Button`, `Input`, `Select`, `Link`, `Code`,
+`Markdown`, `Client`, `Raster` and `Image`. A Web Shell session also hands out
+the desktop's ten, `Box`, `Text`, `Button`, `Input`, `Select`, `Svg`, `Link`,
+`Code`, `Markdown` and `Client`, for its `desktop` events. It reads the table
+without a dispatch. `e` is a `ui.render` event; any argument whose `surface`
+names no table the session hands out throws.
 
 A constructor takes the props, `children` among them, and returns a frozen
 plain-data element `{ type, props?, hover?, children? }`. Children are
@@ -1177,6 +1189,39 @@ In Ink, reply rows are drawn only with the virtualized history
 in the terminal scrollback, a printed row cannot change, so the site is not
 offered and its hooks are skipped. OpenTUI always draws them. Subagent views,
 the session preview and headless runs do not raise the site yet. A row whose text is too large for a Mod payload is not raised.
+
+### In the Web Shell
+
+The Web Shell asks the session's Mods for each block of the model's reply once
+the block is complete and on screen, so a long transcript costs a hook run only
+for the blocks someone scrolls to. Command output, a workspace agent's reply and
+a subagent's text are not offered. A hook receives:
+
+```js
+{
+  surface: 'desktop',
+  component: 'AssistantMessage',
+  requestId: '3f9c…', // a digest of the block's props
+  props: { text: 'The worker runs one dispatch at a time.', isFirstOfReply: true },
+}
+```
+
+`isFirstOfReply` is `false` on a block that follows another reply block with
+nothing but thinking or Mod log lines between them. The same text and flag make the same
+row: a second browser tab or a reload is answered from the first answer
+without running the hooks again, for as long as the session stays open. The
+Web Shell asks one row at a time per session, and the 30-second limit and the
+one-row-at-a-time queue apply as in the terminal. A row shows its own text
+until it is answered and keeps its answer after it scrolls away. The copy
+buttons copy the original text. A row asked again after
+`$.ui.invalidate('ui.render')` draws its new answer once the Web Shell asks
+for it again, which today means after a reload.
+
+The Web Shell does not draw thinking rows yet. A hook that names the
+`Thinking` component loads in a Web Shell session without the "will not run"
+diagnostic, since the session raises `ui.render` for reply rows, and is not
+called. Turn Mods on from the Web Shell settings page; sessions started after
+the change load them, though the page asks for a restart as the terminals do.
 
 ## Thinking rows
 

@@ -18,6 +18,7 @@ import {
   type ModRenderSite,
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
+import { MOD_MAX_BYTES } from '@qwen-code/qwen-code-core/mods/types.js';
 import { ModSession, type ModTerminalHost } from './mod-session.js';
 
 const mocks = vi.hoisted(() => ({
@@ -93,7 +94,8 @@ describe('Mod session renders', () => {
 
   function setup({
     sites = ['AbovePrompt'],
-  }: { sites?: readonly ModRenderSite[] } = {}) {
+    desktop = false,
+  }: { sites?: readonly ModRenderSite[]; desktop?: boolean } = {}) {
     const sessionId = vi.fn(() => 'session-1');
     const extension = {
       id: 'id',
@@ -109,8 +111,8 @@ describe('Mod session renders', () => {
       getModel: () => 'model',
       getCliVersion: () => '1.2.3',
       getExtensions: () => [extension],
-      isInteractive: () => true,
-      getExperimentalZedIntegration: () => false,
+      isInteractive: () => !desktop,
+      getExperimentalZedIntegration: () => desktop,
       isTrustedFolder: () => true,
       getDisableAllHooks: () => false,
       getBareMode: () => false,
@@ -160,7 +162,12 @@ describe('Mod session renders', () => {
       sites: () => sites,
       draw: vi.fn<NonNullable<ModTerminalHost['draw']>>(),
     };
-    const session = new ModSession(config as unknown as Config, host);
+    const session = new ModSession(
+      config as unknown as Config,
+      desktop
+        ? { surface: 'desktop', log: host.log, sites: () => sites }
+        : host,
+    );
     sessions.push(session);
     const renderHost = () =>
       mocks.create.mock.lastCall![9] as ModRenderHost | undefined;
@@ -480,6 +487,95 @@ describe('Mod session renders', () => {
     expect(session.rowProps('session-2', replyRow)).toEqual({
       ...replyRow.props,
       text: 'Rewritten',
+    });
+  });
+
+  describe('rows a desktop client draws', () => {
+    const props = { text: 'Original', isFirstOfReply: true };
+
+    it('loads on the desktop surface with the rows its client draws', async () => {
+      const { session, renderHost } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      await session.initialize(new AbortController().signal);
+      const args = mocks.create.mock.lastCall!;
+      // surface, prompts, queuePrompt and tools stay the ACP host's.
+      expect([args[5], args[10], args[11], args[14]]).toEqual([
+        'desktop',
+        false,
+        undefined,
+        false,
+      ]);
+      expect(renderHost()?.sites).toEqual(['AssistantMessage']);
+    });
+
+    it('answers a row with what its hooks rewrote, the same props from the first answer', async () => {
+      const { runtime, session } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      await session.initialize(new AbortController().signal);
+      runtime.render.mockImplementation(async (request) => ({
+        tree: ENGINE_NODE,
+        props: { ...request.props, text: `译 ${request.requestId.length}` },
+        notes: [],
+      }));
+      const signal = new AbortController().signal;
+      await expect(
+        session.askRow('AssistantMessage', props, signal),
+      ).resolves.toEqual({
+        status: 'answered',
+        props: { text: '译 32', isFirstOfReply: true },
+      });
+      const [asked] = runtime.render.mock.lastCall!;
+      expect(asked).toEqual({
+        surface: 'desktop',
+        component: 'AssistantMessage',
+        requestId: expect.stringMatching(/^[0-9a-f]{32}$/),
+        props,
+      });
+      await session.askRow('AssistantMessage', { ...props }, signal);
+      expect(runtime.render).toHaveBeenCalledOnce();
+      await session.askRow(
+        'AssistantMessage',
+        { ...props, isFirstOfReply: false },
+        signal,
+      );
+      expect(runtime.render).toHaveBeenCalledTimes(2);
+      expect(runtime.render.mock.lastCall![0].requestId).not.toBe(
+        asked.requestId,
+      );
+    });
+
+    it('answers unhooked where no hook hears the site, and draws a row too large as it is', async () => {
+      const { runtime, session } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      await session.initialize(new AbortController().signal);
+      const signal = new AbortController().signal;
+      await expect(
+        session.askRow(
+          'AssistantMessage',
+          { text: 'x'.repeat(MOD_MAX_BYTES), isFirstOfReply: true },
+          signal,
+        ),
+      ).resolves.toEqual({ status: 'answered' });
+      await expect(
+        session.askRow('Thinking', { text: 'thought' }, signal),
+      ).resolves.toEqual({ status: 'unhooked' });
+      runtime.renderHooks = [];
+      await expect(
+        session.askRow('AssistantMessage', props, signal),
+      ).resolves.toEqual({ status: 'unhooked' });
+      expect(runtime.render).not.toHaveBeenCalled();
+      // A terminal's rows are its own to draw.
+      const terminal = setup({ sites: ['AssistantMessage'] });
+      await terminal.session.initialize(new AbortController().signal);
+      await expect(
+        terminal.session.askRow('AssistantMessage', props, signal),
+      ).resolves.toEqual({ status: 'unhooked' });
     });
   });
 

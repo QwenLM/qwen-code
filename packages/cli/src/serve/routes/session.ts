@@ -11414,6 +11414,41 @@ export function registerSessionRoutes(
     ),
   );
 
+  // A transcript row the client draws, for the session's Mods to rewrite. The
+  // child checks the props against the site and builds the row's envelope.
+  const modRowInput = z.object({
+    component: z.string().min(1).max(64),
+    props: z.record(z.string(), z.unknown()),
+  });
+  app.post(
+    '/session/:id/mod-row',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/mod-row',
+      async (req, res, sessionId, runtime) => {
+        const parsed = modRowInput.safeParse(safeBody(req));
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_mod_row',
+            error: 'A row component and its props are required',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.askSessionModRow(
+              sessionId,
+              parsed.data,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
   const btwRequestId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
   const btwStreamInput = z.object({
     question: z.string().max(BTW_MAX_INPUT_LENGTH).trim().min(1),

@@ -4991,6 +4991,28 @@ export interface DaemonSessionRecapResult {
   recap: string | null;
 }
 
+/**
+ * A transcript row a client draws, for the session's Mods to rewrite:
+ * `component` names the site, and `props` are the ones the row draws with
+ * (for `AssistantMessage`: `{ text, isFirstOfReply }`).
+ */
+export interface DaemonModRow {
+  component: string;
+  props: Record<string, unknown>;
+}
+
+/**
+ * A session's answer for one row. `unhooked`: no hook hears the site in this
+ * session, so ask it no more. `unanswered`: the hooks did not answer in time
+ * or the session moved on; ask again later. `answered`: draw `props` where
+ * the hooks rewrote the row, and the row's own props otherwise.
+ * Pre-flight `caps.features.session_mod_rows` before asking.
+ */
+export type DaemonModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
+
 export type DaemonSessionBtwStreamEvent =
   | { v: 1; type: 'answer' | 'done'; requestId: string; answer: string }
   | { v: 1; type: 'error'; requestId: string; code: string; message: string };

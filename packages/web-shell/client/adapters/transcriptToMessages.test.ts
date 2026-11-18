@@ -123,8 +123,15 @@ it('preserves literal slash-command output and artifact references when a direct
   expect(messages[0]).toMatchObject({
     role: 'assistant',
     content: text,
+    // Not the model's reply, so no Mod row.
+    source: 'slash_command',
     reportedArtifacts: [descriptor],
   });
+  expect(
+    transcriptBlocksToDaemonMessages([
+      textBlock('answer', 'assistant', 'The answer', 1),
+    ])[0],
+  ).not.toHaveProperty('source');
 });
 
 it('retains slash-command insight cards when no export descriptor is reported', () => {
@@ -936,6 +943,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
           role: 'assistant',
           content:
             'Compression instructions were truncated to 2000 characters.\nContext compressed (263195 -> 99799).',
+          source: 'slash_command',
           isStreaming: false,
           timestamp: 1,
         },
@@ -960,6 +968,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
           id: 'compression',
           role: 'assistant',
           content: 'Context compressed.',
+          source: 'slash_command',
           isStreaming: false,
           timestamp: 1,
         },

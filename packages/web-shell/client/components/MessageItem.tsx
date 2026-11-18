@@ -49,6 +49,7 @@ import type {
 } from '../adapters/messageTypes';
 import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
 import { HookStatistics } from './messages/HookStatistics';
+import type { ModRowAsker } from './messages/mod-rows';
 import type { HookStatisticsTurn } from './messages/hook-statistics-context';
 
 interface MessageItemProps {
@@ -108,6 +109,10 @@ interface MessageItemProps {
   turnSources?: readonly WebShellSource[];
   onSourceOpen?: (source: WebShellSource) => void;
   generateContent?: SessionContentGenerator;
+  /** The asker of the session's Mod rows, where its Mods may rewrite them. */
+  modRows?: ModRowAsker;
+  /** Set on a block of the model's reply the Mods may rewrite; see AssistantMessage. */
+  modRowFirstOfReply?: boolean;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -145,6 +150,8 @@ export const MessageItem = memo(function MessageItem({
   turnSources,
   onSourceOpen,
   generateContent,
+  modRows,
+  modRowFirstOfReply,
 }: MessageItemProps) {
   const { t } = useI18n();
   // The inline editor is owned here because the toggle (in the timestamp row)
@@ -256,6 +263,8 @@ export const MessageItem = memo(function MessageItem({
             customFooterInfo={assistantTurnFooterInfo}
             turnSources={turnSources}
             onSourceOpen={onSourceOpen}
+            modRows={modRows}
+            modRowFirstOfReply={modRowFirstOfReply}
           />
         );
       case 'thinking':
@@ -543,6 +552,11 @@ function areMessageItemPropsEqual(
     return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
   if (prev.generateContent !== next.generateContent) return false;
+  if (
+    prev.modRows !== next.modRows ||
+    prev.modRowFirstOfReply !== next.modRowFirstOfReply
+  )
+    return false;
   if (
     prev.turnSources !== next.turnSources ||
     prev.onSourceOpen !== next.onSourceOpen

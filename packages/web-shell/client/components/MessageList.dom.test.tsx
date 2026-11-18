@@ -57,9 +57,13 @@ vi.mock('./MessageItem', async () => {
       onRetrySend,
       onEditUserMessage,
       assistantFeedbackPromptId,
+      modRows,
+      modRowFirstOfReply,
     }: {
       message: Message;
       assistantFeedbackPromptId?: string;
+      modRows?: unknown;
+      modRowFirstOfReply?: boolean;
       showAssistantActions?: boolean;
       assistantFooterAlwaysVisible?: boolean;
       showAssistantBranch?: boolean;
@@ -85,6 +89,10 @@ vi.mock('./MessageItem', async () => {
           'data-assistant-actions': String(Boolean(showAssistantActions)),
           'data-footer-visible': String(Boolean(assistantFooterAlwaysVisible)),
           'data-feedback-prompt': assistantFeedbackPromptId,
+          'data-mod-row-first':
+            modRows && modRowFirstOfReply !== undefined
+              ? String(modRowFirstOfReply)
+              : undefined,
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
           'data-timestamp': message.timestamp,
@@ -395,6 +403,7 @@ function mount(
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
     onEditUserMessage?: (turnIndex: number, content: string) => void;
+    askModRow?: MessageListProps['askModRow'];
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -437,6 +446,7 @@ function mount(
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
                 onEditUserMessage={opts.onEditUserMessage}
+                askModRow={opts.askModRow}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -748,6 +758,65 @@ it('keeps Edit on the latest ordinary prompt when send records follow it', () =>
   expect(edit).not.toBeNull();
   click(edit!);
   expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
+});
+
+describe('MessageList — Mod reply rows', () => {
+  it("offers the model's reply blocks, each saying whether it opens its reply", () => {
+    const messages: Message[] = [
+      userMsg('u1'),
+      asstMsg('a1'),
+      {
+        id: 'log',
+        role: 'system',
+        variant: 'info',
+        source: 'mod_log',
+        content: '[Mod zh] rewrote a row',
+      },
+      thinkingMsg('t1'),
+      asstMsg('a2'),
+      toolMsg('tool-1'),
+      asstMsg('a3'),
+      { ...asstMsg('command'), source: 'slash_command' },
+      {
+        ...asstMsg('agent'),
+        agentMessage: { kind: 'agent_message' },
+        author: { name: 'reviewer' },
+      },
+      asstMsg('a4'),
+    ];
+    const flags = (container: HTMLElement) =>
+      messages.map((message) =>
+        container
+          .querySelector(`[data-testid="msg-${message.id}"]`)
+          ?.getAttribute('data-mod-row-first'),
+      );
+    // A reply block after thinking or a Mod's log line continues the reply
+    // before it, and one after another agent's reply opens its own.
+    expect(
+      flags(
+        mount(messages, undefined, {
+          isResponding: true,
+          sourceSessionId: 'session-1',
+          askModRow: vi.fn(),
+        }),
+      ),
+    ).toEqual([
+      null,
+      'true',
+      null,
+      null,
+      'false',
+      null,
+      'true',
+      null,
+      null,
+      'true',
+    ]);
+    // A daemon that asks no Mods offers none.
+    expect(flags(mount(messages, undefined, { isResponding: true }))).toEqual(
+      messages.map(() => null),
+    );
+  });
 });
 
 describe('MessageList — compact mode', () => {

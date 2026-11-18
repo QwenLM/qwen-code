@@ -3937,6 +3937,53 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     expect(events).toEqual([]);
   });
 
+  it("draws a Mod's log line below the reply it arrives during", () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...normalizeDaemonEvent(
+          envelopeOf('session_update', {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Hello ' },
+          }),
+        ),
+        ...normalizeDaemonEvent(
+          envelopeOf('mod_log', {
+            sessionId: 's1',
+            plugin: 'zh-display',
+            text: 'translated 1 row',
+          }),
+        ),
+        ...normalizeDaemonEvent(
+          envelopeOf('session_update', {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'world' },
+          }),
+        ),
+      ],
+    );
+    expect(
+      state.blocks.map((block) =>
+        'text' in block ? [block.kind, block.text] : [block.kind],
+      ),
+    ).toEqual([
+      ['assistant', 'Hello world'],
+      ['status', '[Mod zh-display] translated 1 row'],
+    ]);
+    expect(state.blocks[1]).toMatchObject({
+      source: 'mod_log',
+      data: { plugin: 'zh-display', text: 'translated 1 row' },
+    });
+    expect(
+      normalizeDaemonEvent(envelopeOf('mod_log', { sessionId: 's1' })),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
   it('stamps debugReason on unrecognized daemon events', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('some_future_event', { sessionId: 's1' }),

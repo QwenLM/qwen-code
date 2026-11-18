@@ -91,6 +91,7 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
+  type BridgeModRowAnswer,
   type ServeSessionAgentsStatus,
   type ServeSessionAgentTrace,
   type ServeSessionStatsStatus,
@@ -2406,6 +2407,9 @@ const DAEMON_CONFIRM_CANCELLATION_META_KEY = 'qwen.daemon.confirmCancellation';
  * disconnect cancellation in v1 (see server.ts route comment).
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
+// The child answers a row ask within 60 seconds; this backstop is for a
+// wedged channel.
+const SESSION_MOD_ROW_TIMEOUT_MS = 75_000;
 const SESSION_GENERATION_TIMEOUT_MS = 65_000;
 const SESSION_BTW_STREAM_TIMEOUT_MS = 310_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
@@ -15364,6 +15368,30 @@ export function createSessionControlPlane(
         originatorClientId,
         opts.planMode,
       );
+    },
+
+    async askSessionModRow(sessionId, row, _context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.harness.isDying)
+        throw new SessionNotFoundError(sessionId);
+      const endSideRequest = beginSideRequest(entry);
+      try {
+        return (await raceLongLived(
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionModRow,
+              { sessionId, component: row.component, props: row.props },
+            ),
+            SESSION_MOD_ROW_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.sessionModRow,
+          ),
+          getTransportClosedReject(entry),
+        )) as BridgeModRowAnswer;
+      } finally {
+        endSideRequest();
+      }
     },
 
     async generateSessionRecap(sessionId, _context) {

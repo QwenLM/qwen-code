@@ -26341,6 +26341,13 @@ export function App({
                                     ? sessionActions.generateSessionContent
                                     : undefined
                                 }
+                                askModRow={
+                                  connection.capabilities?.features.includes(
+                                    'session_mod_rows',
+                                  )
+                                    ? sessionActions.askModRow
+                                    : undefined
+                                }
                               />
                                 )}
                               </ConversationSearch>

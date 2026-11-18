@@ -29,6 +29,7 @@ const {
   formatThinkingDuration,
   getThinkingSummaryKey,
 } = await import('./AssistantMessage');
+const { ModRowAsker } = await import('./mod-rows');
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
@@ -671,6 +672,99 @@ describe('AssistantMessage markdown tables', () => {
         '[data-selection-copy-table] button[aria-label="Copy"]',
       ),
     ).toBeNull();
+  });
+});
+
+describe('AssistantMessage Mod rows', () => {
+  const answered = (text: string, isFirstOfReply = true) =>
+    vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text, isFirstOfReply },
+    }));
+
+  it("draws the Mods' rewrite of a complete reply and copies the original", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    try {
+      const ask = answered('**你好**', false);
+      const container = render(
+        <AssistantMessage
+          content="**Hello**"
+          showFooterActions
+          modRows={new ModRowAsker(ask)}
+          modRowFirstOfReply={false}
+        />,
+      );
+      await act(async () => {});
+      expect(ask).toHaveBeenCalledWith({
+        component: 'AssistantMessage',
+        props: { text: '**Hello**', isFirstOfReply: false },
+      });
+      const body = container.querySelector(`.${styles.content}`)!;
+      expect(body.textContent).toBe('你好');
+      for (const label of ['Copy content', 'Copy Markdown source']) {
+        await act(async () =>
+          container
+            .querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!
+            .click(),
+        );
+        expect(writeText).toHaveBeenLastCalledWith('**Hello**');
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('asks for a reply only once it is complete and on screen, and keeps the answer off it', async () => {
+    const observers: Array<
+      (entries: Array<{ isIntersecting: boolean }>) => void
+    > = [];
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(
+          callback: (entries: Array<{ isIntersecting: boolean }>) => void,
+        ) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    try {
+      const ask = answered('你好');
+      const asker = new ModRowAsker(ask);
+      render(
+        <AssistantMessage
+          content="Hello"
+          isStreaming
+          modRows={asker}
+          modRowFirstOfReply
+        />,
+      );
+      expect(observers).toHaveLength(0);
+      const container = render(
+        <AssistantMessage content="Hello" modRows={asker} modRowFirstOfReply />,
+      );
+      const body = () =>
+        container.querySelector(`.${styles.content}`)!.textContent;
+      act(() => observers[0]!([{ isIntersecting: false }]));
+      expect(ask).not.toHaveBeenCalled();
+      await act(async () => observers[0]!([{ isIntersecting: true }]));
+      expect(ask).toHaveBeenCalledOnce();
+      expect(body()).toBe('你好');
+      act(() => observers[0]!([{ isIntersecting: false }]));
+      expect(body()).toBe('你好');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('draws a reply as it is without a Mod row asker', () => {
+    const container = render(<AssistantMessage content="Hello" />);
+    expect(container.querySelector(`.${styles.content}`)!.textContent).toBe(
+      'Hello',
+    );
   });
 });
 

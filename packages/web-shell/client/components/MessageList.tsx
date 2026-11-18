@@ -21,6 +21,8 @@ import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
   DaemonContextMemoryDetail,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionArtifact,
 } from '@qwen-code/sdk/daemon';
 import type {
@@ -67,6 +69,7 @@ import { Checkbox } from './ui/checkbox';
 import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
+import { modRowAsker } from './messages/mod-rows';
 import type { HookStatisticsTurn } from './messages/hook-statistics-context';
 import { collectHookStatisticsTurns } from './messages/hook-statistics-turns';
 import { MessageTimestamp } from './MessageTimestamp';
@@ -217,6 +220,38 @@ export interface MessageListProps {
   onToolResultOpen?: (itemId: string) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
+  /** Asks the session's Mods for a reply row; unset where none can be asked. */
+  askModRow?: (
+    sessionId: string,
+    row: DaemonModRow,
+  ) => Promise<DaemonModRowAnswer>;
+}
+
+/**
+ * The blocks of the model's own replies the Mods may rewrite, each with
+ * whether it opens its reply: one whose previous message is not one of them.
+ * Thinking does not count, nor a Mod's log line, which a reload drops: a row
+ * keeps its props, and so its answer, across the reload.
+ */
+function modReplyRows(messages: readonly Message[]): Map<string, boolean> {
+  const rows = new Map<string, boolean>();
+  let previousIsReply = false;
+  for (const message of messages) {
+    if (
+      message.role === 'thinking' ||
+      (message.role === 'system' && message.source === 'mod_log')
+    )
+      continue;
+    const isReply =
+      message.role === 'assistant' &&
+      message.source === undefined &&
+      message.agentMessage === undefined &&
+      message.author === undefined &&
+      message.localCommandId === undefined;
+    if (isReply) rows.set(message.id, !previousIsReply);
+    previousIsReply = isReply;
+  }
+  return rows;
 }
 
 function isStreamingTailContentOnlyUpdate(
@@ -3153,11 +3188,25 @@ export const MessageList = memo(
       onToolResultOpen,
       onError,
       generateContent,
+      askModRow,
     },
     ref,
   ) {
     const frozenViewportRef = useRef(frozenViewport);
     frozenViewportRef.current = frozenViewport;
+    const modRows = useMemo(
+      () =>
+        askModRow && sourceSessionId
+          ? modRowAsker(sourceSessionId, (row) =>
+              askModRow(sourceSessionId, row),
+            )
+          : undefined,
+      [askModRow, sourceSessionId],
+    );
+    const modReplyRowFirsts = useMemo(
+      () => (modRows ? modReplyRows(messages) : undefined),
+      [modRows, messages],
+    );
     const { t } = useI18n();
     const transcriptRenderMode = useTranscriptRenderMode();
     const compactMode = useContext(CompactModeContext);
@@ -6034,6 +6083,10 @@ export const MessageList = memo(
           return (
             <MessageItem
               message={displayItem.message}
+              modRows={modRows}
+              modRowFirstOfReply={modReplyRowFirsts?.get(
+                displayItem.message.id,
+              )}
               hookTurn={hookTurns.get(displayItem.message.id)}
               onLocateBackgroundSource={
                 displayItem.message.role === 'system' &&
@@ -6187,6 +6240,8 @@ export const MessageList = memo(
         hasOlderHistory,
         historyCapacityReached,
         generateContent,
+        modRows,
+        modReplyRowFirsts,
         headerOffset,
         visibleItems,
         flashTarget,

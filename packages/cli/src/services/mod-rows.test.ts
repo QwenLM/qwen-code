@@ -189,4 +189,80 @@ describe('ModRows', () => {
     await dispatches.settled();
     expect(rows.get(row('1'))).toBeUndefined();
   });
+
+  describe('a client that asks once', () => {
+    it('answers a rewrite, then from the cache, and a row its hooks left alone', async () => {
+      const dispatches = queue();
+      const render = vi.fn(async (input: ModAssistantMessageInput) =>
+        input.requestId === '1'
+          ? { ...input.props, text: `译 ${input.requestId}` }
+          : undefined,
+      );
+      const rows = new ModRows(dispatches.schedule, async (input) =>
+        render(input as ModAssistantMessageInput),
+      );
+      const signal = new AbortController().signal;
+      await expect(rows.ask(row('1'), signal)).resolves.toEqual({
+        props: { text: '译 1', isFirstOfReply: true },
+      });
+      await expect(rows.ask(row('1'), signal)).resolves.toEqual({
+        props: { text: '译 1', isFirstOfReply: true },
+      });
+      await expect(rows.ask(row('2'), signal)).resolves.toEqual({});
+      await expect(rows.ask(row('2'), signal)).resolves.toEqual({});
+      expect(render).toHaveBeenCalledTimes(2);
+    });
+
+    it('asks again for a row invalidated since, and once for two clients', async () => {
+      const dispatches = queue();
+      let round = 0;
+      const render = vi.fn(async (input: ModAssistantMessageInput) => ({
+        ...input.props,
+        text: `${++round} ${input.requestId}`,
+      }));
+      const rows = new ModRows(dispatches.schedule, async (input) =>
+        render(input as ModAssistantMessageInput),
+      );
+      const signal = new AbortController().signal;
+      const [first, second] = await Promise.all([
+        rows.ask(row('1'), signal),
+        rows.ask(row('1'), signal),
+      ]);
+      expect(first).toEqual(second);
+      expect(render).toHaveBeenCalledTimes(1);
+      rows.invalidate('AssistantMessage');
+      await expect(rows.ask(row('1'), signal)).resolves.toEqual({
+        props: { text: '2 1', isFirstOfReply: true },
+      });
+    });
+
+    it('answers none once aborted or cleared, and leaves no row in the queue', async () => {
+      const dispatches = queue();
+      const releases: Array<() => void> = [];
+      const render = vi.fn(async (input: ModAssistantMessageInput) => {
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return { ...input.props, text: `译 ${input.requestId}` };
+      });
+      const rows = new ModRows(dispatches.schedule, async (input) =>
+        render(input as ModAssistantMessageInput),
+      );
+      const running = rows.ask(row('1'), new AbortController().signal);
+      const aborted = new AbortController();
+      const waiting = rows.ask(row('2'), aborted.signal);
+      aborted.abort();
+      await expect(waiting).resolves.toBeUndefined();
+      await vi.waitFor(() => expect(releases).toHaveLength(1));
+      rows.clear();
+      await expect(running).resolves.toBeUndefined();
+      releases[0]!();
+      await dispatches.settled();
+      // The aborted row was never rendered.
+      expect(render.mock.calls.map(([input]) => input.requestId)).toEqual([
+        '1',
+      ]);
+      await expect(
+        rows.ask(row('3'), AbortSignal.abort()),
+      ).resolves.toBeUndefined();
+    });
+  });
 });

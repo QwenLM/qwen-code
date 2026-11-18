@@ -171,6 +171,11 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
   role: 'assistant';
   content: string;
   isStreaming?: boolean;
+  /**
+   * The block's `meta.source` when the text is not the model's reply, such
+   * as `slash_command` for a command's output.
+   */
+  source?: string;
   branchRecordId?: string;
   /**
    * Token usage folded onto this assistant block by the daemon SDK reducer

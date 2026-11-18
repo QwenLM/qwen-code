@@ -248,6 +248,8 @@ import type {
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
@@ -4914,6 +4916,33 @@ export class DaemonClient {
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/recap');
     return (await res.json()) as DaemonSessionRecapResult;
+  }
+
+  /**
+   * Ask a live session's Mods for a transcript row this client draws. The
+   * daemon answers once the row's `ui.render` hooks did, which can take as
+   * long as a model call; `signal` aborts only the local fetch. Older
+   * daemons return 404: pre-flight `caps.features.session_mod_rows`.
+   */
+  async askSessionModRow(
+    sessionId: string,
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): Promise<DaemonModRowAnswer> {
+    const res = await this.transport.fetch(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mod-row`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify(row),
+        signal: opts?.signal,
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/mod-row');
+    return (await res.json()) as DaemonModRowAnswer;
   }
 
   async *generateSessionContent(

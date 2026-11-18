@@ -8135,6 +8135,32 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('askSessionModRow', () => {
+    it("POSTs the row and returns the session's answer", async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          status: 'answered',
+          props: { text: '你好', isFirstOfReply: true },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const row = {
+        component: 'AssistantMessage',
+        props: { text: 'Hello', isFirstOfReply: true },
+      };
+      await expect(
+        client.askSessionModRow('s/1', row, { clientId: 'client-1' }),
+      ).resolves.toEqual({
+        status: 'answered',
+        props: { text: '你好', isFirstOfReply: true },
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/mod-row');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body as string)).toEqual(row);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+  });
+
   describe('recapSession (#4175 follow-up)', () => {
     it('POSTs an empty body and returns the typed recap', async () => {
       const { fetch, calls } = recordingFetch(() =>

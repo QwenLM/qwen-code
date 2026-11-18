@@ -54,6 +54,7 @@ import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './AssistantMessage.module.css';
 import { HookStatistics } from './HookStatistics';
 import type { HookStatisticsTurn } from './hook-statistics-context';
+import { useModRow, useOnScreen, type ModRowAsker } from './mod-rows';
 
 interface AssistantMessageProps {
   hookTurn?: HookStatisticsTurn;
@@ -77,6 +78,13 @@ interface AssistantMessageProps {
   customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
   turnSources?: readonly WebShellSource[];
   onSourceOpen?: (source: WebShellSource) => void;
+  /** The asker of the session's Mod rows, where its Mods may rewrite them. */
+  modRows?: ModRowAsker;
+  /**
+   * Set on a block of the model's own reply, which the session's Mods may
+   * draw rewritten: whether the block opens the reply.
+   */
+  modRowFirstOfReply?: boolean;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
@@ -97,12 +105,31 @@ export const AssistantMessage = memo(function AssistantMessage({
   customFooterInfo,
   turnSources,
   onSourceOpen,
+  modRows,
+  modRowFirstOfReply,
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
   const documentMode = renderMode === 'document';
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const contentRef = useRef<HTMLDivElement>(null);
+  // A complete block is asked for once it is on screen; it draws the Mods'
+  // rewrite of its text, while copying and the stored message keep the
+  // original.
+  const modRow =
+    modRows && modRowFirstOfReply !== undefined && !isStreaming && content
+      ? {
+          component: 'AssistantMessage',
+          props: { text: content, isFirstOfReply: modRowFirstOfReply },
+        }
+      : undefined;
+  const rewrite = useModRow(
+    modRows,
+    modRow,
+    useOnScreen(contentRef, modRow !== undefined),
+  );
+  const rewritten =
+    typeof rewrite?.['text'] === 'string' ? rewrite['text'] : undefined;
   const [copied, flashCopied] = useCopiedFlash();
   const [markdownCopied, flashMarkdownCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
@@ -142,7 +169,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   const handleCopy = useCallback(
     (format: 'text' | 'markdown') => {
       let value = content;
-      if (format === 'text') {
+      if (format === 'text' && rewritten === undefined) {
         const body = contentRef.current;
         if (!body) return;
         const range = body.ownerDocument.createRange();
@@ -154,7 +181,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         .then(format === 'text' ? flashCopied : flashMarkdownCopied)
         .catch(warnClipboardWriteFailure);
     },
-    [content, flashCopied, flashMarkdownCopied],
+    [content, flashCopied, flashMarkdownCopied, rewritten],
   );
   // Clicking the lit icon clears the mark; clicking the other one switches it.
   const handleFeedback = useCallback(
@@ -247,7 +274,7 @@ export const AssistantMessage = memo(function AssistantMessage({
             enabled={renderMode === 'interactive' && !isStreaming}
           >
             <Markdown
-              content={content}
+              content={rewritten ?? content}
               source="assistant"
               isStreaming={isStreaming}
             />

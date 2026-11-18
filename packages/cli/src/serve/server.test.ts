@@ -810,6 +810,8 @@ const EXPECTED_STAGE1_FEATURES = [
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
   'session_recap',
+  // `POST /session/:id/mod-row` asks the session's Mods for a row.
+  'session_mod_rows',
   // Side question (/btw) against the session's conversation context.
   'session_btw',
   // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
@@ -933,6 +935,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
       f !== 'session_recap' &&
+      f !== 'session_mod_rows' &&
       f !== 'session_generation' &&
       f !== 'workspace_generation' &&
       f !== 'session_btw' &&
@@ -987,6 +990,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_git_check_ignore',
   'workspace_mcp_restart',
   'session_recap',
+  'session_mod_rows',
   'session_generation',
   'workspace_generation',
   'session_btw',
@@ -1285,6 +1289,7 @@ interface FakeBridgeOpts {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ) => Promise<{ sessionId: string; recap: string | null }>;
+  askSessionModRowImpl?: AcpSessionBridge['askSessionModRow'];
   generateSessionContentImpl?: NonNullable<
     AcpSessionBridge['generateSessionContent']
   >;
@@ -1616,6 +1621,11 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   generateSessionRecapCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  askSessionModRowCalls: Array<{
+    sessionId: string;
+    row: { component: string; props: Record<string, unknown> };
     context?: BridgeClientRequestContext;
   }>;
   generateSessionContentCalls: Array<{
@@ -2286,6 +2296,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       recap: 'Default fake recap.',
     }));
+  const askSessionModRowCalls: FakeBridge['askSessionModRowCalls'] = [];
+  const askSessionModRowImpl: AcpSessionBridge['askSessionModRow'] =
+    opts.askSessionModRowImpl ?? (async () => ({ status: 'unhooked' }));
   const generateSessionContentCalls: FakeBridge['generateSessionContentCalls'] =
     [];
   const generateSessionContentImpl =
@@ -2508,6 +2521,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setApprovalModeCalls,
     shellCalls,
     generateSessionRecapCalls,
+    askSessionModRowCalls,
     generateSessionContentCalls,
     generateSessionBtwCalls,
     forkCalls,
@@ -2948,6 +2962,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return generateSessionRecapImpl(sessionId, context);
+    },
+    async askSessionModRow(sessionId, row, context) {
+      askSessionModRowCalls.push({
+        sessionId,
+        row,
+        ...(context ? { context } : {}),
+      });
+      return askSessionModRowImpl(sessionId, row, context);
     },
     generateSessionContent(sessionId, prompt, signal, context) {
       generateSessionContentCalls.push({
@@ -28722,6 +28744,68 @@ describe('createServeApp', () => {
           },
         },
       ]);
+    });
+  });
+
+  describe('POST /session/:id/mod-row', () => {
+    const row = {
+      component: 'AssistantMessage',
+      props: { text: 'Hello', isFirstOfReply: true },
+    };
+
+    it("answers with the session's Mods and passes the client on", async () => {
+      const bridge = fakeBridge({
+        askSessionModRowImpl: async () => ({
+          status: 'answered',
+          props: { text: '你好', isFirstOfReply: true },
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/mod-row')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send(row);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        status: 'answered',
+        props: { text: '你好', isFirstOfReply: true },
+      });
+      expect(bridge.askSessionModRowCalls).toEqual([
+        { sessionId: 'session-A', row, context: { clientId: 'client-1' } },
+      ]);
+    });
+
+    it.each([
+      {},
+      { component: '', props: {} },
+      { component: 'AssistantMessage' },
+      { component: 'AssistantMessage', props: 'text' },
+    ])('400 for a row without a component and props: %j', async (body) => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/mod-row')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_mod_row');
+      expect(bridge.askSessionModRowCalls).toHaveLength(0);
+    });
+
+    it('404 for a session that is not live', async () => {
+      const bridge = fakeBridge({
+        askSessionModRowImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/mod-row')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(row);
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
     });
   });
 

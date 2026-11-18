@@ -1967,6 +1967,13 @@ export function ChatPane({
                         ? actions.generateSessionContent
                         : undefined
                     }
+                    askModRow={
+                      connection.capabilities?.features.includes(
+                        'session_mod_rows',
+                      )
+                        ? actions.askModRow
+                        : undefined
+                    }
                   />
                 </WorkflowDetailsProvider>
               </McpAppReadOnlyContext.Provider>

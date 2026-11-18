@@ -436,6 +436,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.experimental.agentCollaboration': '启用 Agent 协作',
   'settings.description.experimental.agentCollaboration':
     '启用持久化的工作区 Agent 在共享任务线程上协作（实验性）。与 Agent Team 相互独立：两个开关互不隐含。启用只表示允许协作；把 Agent 开放给外部调用方、信任某个连接、注册 host 仍各自需要显式配置。也可通过 QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 环境变量启用。',
+  'settings.label.experimental.mods': 'Mods（实验性）',
+  'settings.description.experimental.mods':
+    '在受信任的本地交互终端、无界面会话和 ACP 会话中加载已启用扩展的实验性 Mods。修改后需重启。',
   'settings.label.experimental.unifiedAgentLoop': '统一 Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
     '让会话运行在共享的 agent loop 上。未设置时，每个入口使用自己的默认值：headless 会话（`-p` 与 stream-json）、Ink TUI 和子代理运行在共享 loop 上，ACP 会话（Zed、VS Code、Web Shell、channel）、OpenTUI 和 Hosted Harness 仍用各自的 loop（在这些入口上属实验性）。设为 `true` 时它们都运行在共享 loop 上（Hosted Harness 的模型轮运行在它上面，同时保留其 journal 化工具派发），设为 `false` 时它们都用各自的 loop，headless、Ink TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 环境变量按入口覆盖此设置：`1` 开启所有入口，`0` 关闭所有入口，逗号分隔的列表（如 `headless,acp=0`）强制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作为整值识别，不在列表内生效；列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',

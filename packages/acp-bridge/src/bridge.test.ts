@@ -1247,6 +1247,7 @@ describe('createAcpSessionBridge', () => {
       ).toEqual({
         'qwen.goalProposals': true,
         'qwen.mcpAppHost': true,
+        'qwen.modRows': ['AssistantMessage'],
       });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather
@@ -31973,6 +31974,54 @@ describe('createAcpSessionBridge', () => {
       });
       await expect(
         bridge.generateSessionRecap('does-not-exist'),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      await bridge.shutdown();
+    });
+  });
+
+  describe('askSessionModRow', () => {
+    it("forwards a row to the child and returns the Mods' answer", async () => {
+      let observed: Record<string, unknown> | undefined;
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          const { clientStream, agentStream } = createInMemoryChannel();
+          const agent = new FakeAgent({
+            extMethodImpl: (method, params) => {
+              if (method !== 'qwen/control/session/mod_row')
+                return Promise.resolve({});
+              observed = params;
+              return Promise.resolve({
+                status: 'answered',
+                props: { text: '你好', isFirstOfReply: true },
+              });
+            },
+          });
+          new AgentSideConnection(() => agent as Agent, agentStream);
+          return {
+            stream: clientStream,
+            exited: new Promise<
+              | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+              | undefined
+            >(() => {}),
+            kill: async () => {},
+            killSync: () => {},
+          };
+        },
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const row = {
+        component: 'AssistantMessage',
+        props: { text: 'Hello', isFirstOfReply: true },
+      };
+      await expect(
+        bridge.askSessionModRow(session.sessionId, row),
+      ).resolves.toEqual({
+        status: 'answered',
+        props: { text: '你好', isFirstOfReply: true },
+      });
+      expect(observed).toEqual({ sessionId: session.sessionId, ...row });
+      await expect(
+        bridge.askSessionModRow('does-not-exist', row),
       ).rejects.toBeInstanceOf(SessionNotFoundError);
       await bridge.shutdown();
     });

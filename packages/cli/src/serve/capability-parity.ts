@@ -417,6 +417,7 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     evidence: 'surface:MCP_MANAGEMENT',
   },
   session_recap: NO_MANAGED_EQUIVALENT('no Managed recap route'),
+  session_mod_rows: NO_MANAGED_EQUIVALENT('no Managed Mod row route'),
   session_generation: NO_MANAGED_EQUIVALENT(
     'no Managed stateless generation route',
   ),

@@ -395,6 +395,7 @@ import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/ses
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
+  type BridgeModRowAnswer,
   type ServeSessionContextStatus,
 } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -430,6 +431,7 @@ import {
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import { AcpModSession, type AcpModTurn } from './acp-mod-session.js';
+import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
   AvailableCommand,
@@ -3055,6 +3057,8 @@ export class Session implements SessionContext {
     private readonly onPeerDeliveriesExpired?: (
       deliveries: PeerQueuedDelivery[],
     ) => void,
+    /** The Mod row sites the client draws. */
+    private readonly modRowSites: readonly ModRenderSite[] = [],
   ) {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
@@ -5618,6 +5622,7 @@ export class Session implements SessionContext {
       this.settings,
       this.sessionId,
       this.client,
+      this.modRowSites,
     );
     const rewriteConfig = loadRewriteConfig(this.settings);
     if (rewriteConfig?.enabled) {
@@ -5628,6 +5633,17 @@ export class Session implements SessionContext {
         (update) => this.sendUpdate(update),
       );
     }
+  }
+
+  /** Answers a Mod row the client draws. */
+  askModRow(component: unknown, props: unknown): Promise<BridgeModRowAnswer> {
+    if (this.mods) return this.mods.askRow(component, props);
+    // The Mods start once the history is replayed.
+    return Promise.resolve({
+      status: this.settings.merged.experimental?.mods
+        ? 'unanswered'
+        : 'unhooked',
+    });
   }
 
   /**

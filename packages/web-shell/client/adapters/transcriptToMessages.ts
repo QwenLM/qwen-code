@@ -1006,10 +1006,12 @@ export function transcriptBlocksToDaemonMessages(
           needsNewContentMessage = false;
           currentThinkingIdx = null;
         } else if (textBlock.text.trim().length > 0) {
+          const source = getString(meta, 'source');
           messages.push({
             id: block.id,
             role: 'assistant',
             content: textBlock.text,
+            ...(source ? { source } : {}),
             ...(reportedArtifacts.length ? { reportedArtifacts } : {}),
             ...(backgroundTurn ? { backgroundTurn } : {}),
             isStreaming: textBlock.streaming,
