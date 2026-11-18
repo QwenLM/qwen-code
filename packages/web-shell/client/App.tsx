@@ -25246,7 +25246,11 @@ export function App({
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <svg
+                        viewBox="0 0 24 24"
+                        aria-hidden="true"
+                        className="rtl:-scale-x-100"
+                      >
                         <path
                           d="M15 5l-7 7 7 7"
                           fill="none"

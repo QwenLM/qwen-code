@@ -57032,6 +57032,27 @@ describe('Arabic RTL layout', () => {
       }
     }
   });
+
+  // The in-place panel header paints its own inline chevron instead of the
+  // shared icon, so the five full-page mirrors above never reach it.
+  it('mirrors the in-place panel back chevron in Arabic', async () => {
+    const { container } = renderApp({ language: 'ar' });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const arrow = container.querySelector('[data-testid="panel-back"] svg');
+    expect(arrow).not.toBeNull();
+    expect(arrow!.getAttribute('class') ?? '').toContain('rtl:-scale-x-100');
+  });
 });
 
 describe('Standalone writer-blocked navigation', () => {
