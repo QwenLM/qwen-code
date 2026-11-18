@@ -1,8 +1,14 @@
 import {
   SessionSortMenu,
+  readSessionGroupBy,
   readSessionSort,
+  readWorkspaceFilter,
+  writeSessionGroupBy,
   writeSessionSort,
+  writeWorkspaceFilter,
+  type SessionGroupBy,
   type SessionSort,
+  type WorkspaceFilter,
 } from './SessionSortMenu';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
@@ -119,6 +125,10 @@ import {
   PopoverTrigger,
 } from '../ui/popover';
 import { formatDateTime } from '../../utils/formatDateTime';
+import {
+  BindSessionPrDialog,
+  type BindSessionPrPayload,
+} from '../dialogs/BindSessionPrDialog';
 import { DialogShell } from '../dialogs/DialogShell';
 import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
 import {
@@ -147,12 +157,8 @@ import {
 import { writeClipboardText } from '../../utils/clipboard';
 import { isDesktopShell } from '../../utils/externalOpen';
 import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
-import {
-  mergeSessionContentHits,
-  sessionMatchesGitQuery,
-  sessionMatchesSource as matchesSessionSource,
-} from './sessionSearch';
-import { useSessionContentSearch } from './useSessionContentSearch';
+import { sessionMatchesSource as matchesSessionSource } from './sessionSearch';
+import { SessionSearchDialog } from './SessionSearchDialog';
 import { useLivePresence } from '../../live/live-presence';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
 import {
@@ -195,6 +201,7 @@ import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
 import { RecentSessions } from './RecentSessions';
+import { ActivityDateSessions } from './ActivityDateSessions';
 import { LocalFilesControl } from '../LocalFilesControl';
 import { DesktopRelayControl } from '../DesktopRelayControl';
 import { workspaceLabelForCwd } from '../../utils/workspace';
@@ -424,6 +431,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
 export type WebShellSidebarSessionActionItem =
   | 'details'
   | 'rename'
+  | 'bindPr'
   | 'group'
   | 'export'
   | 'delete'
@@ -457,7 +465,17 @@ export interface WebShellSidebarSessionActionsOptions {
 }
 
 export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
-  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive', 'split'];
+  [
+    'details',
+    'rename',
+    'bindPr',
+    'group',
+    'export',
+    'delete',
+    'pin',
+    'archive',
+    'split',
+  ];
 
 const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
   ['pin'];
@@ -1400,6 +1418,14 @@ export function WebShellSidebar({
     writeSessionSort(sortHost, value);
     setSortPreference({ host: sortHost, value });
   };
+  const [groupByPreference, setGroupByPreference] = useState(() => ({
+    host: sortHost,
+    value: readSessionGroupBy(sortHost),
+  }));
+  const changeSessionGroupBy = (value: SessionGroupBy) => {
+    writeSessionGroupBy(sortHost, value);
+    setGroupByPreference({ host: sortHost, value });
+  };
   const sourceMetadataEnabled = Boolean(
     connection.capabilities?.features?.includes('session_source_metadata'),
   );
@@ -1502,6 +1528,20 @@ export function WebShellSidebar({
     () => providedWorkspaces ?? workspace.capabilities?.workspaces ?? [],
     [providedWorkspaces, workspace.capabilities?.workspaces],
   );
+  const [workspaceFilterPreference, setWorkspaceFilterPreference] = useState(
+    () => ({
+      host: sortHost,
+      value: readWorkspaceFilter(sortHost),
+    }),
+  );
+  const workspaceFilter =
+    workspaceFilterPreference.host === sortHost
+      ? workspaceFilterPreference.value
+      : readWorkspaceFilter(sortHost);
+  const changeWorkspaceFilter = (value: WorkspaceFilter) => {
+    writeWorkspaceFilter(sortHost, value);
+    setWorkspaceFilterPreference({ host: sortHost, value });
+  };
   // Display-only ordering preference, scoped per daemon host so two hosts
   // never share one list. Workspaces the stored order does not mention (new
   // registrations) keep the daemon's order after the listed ones.
@@ -1565,23 +1605,22 @@ export function WebShellSidebar({
   const lockedWorkspace = lockedWorkspaceCwd
     ? workspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
     : undefined;
-  const includePrimaryWorkspaceSessions =
-    sessionContent === undefined &&
-    (!lockedWorkspaceCwd || lockedWorkspace?.primary === true);
   const projectName =
     getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
-  const displayedWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
+  const sidebarWorkspaces = useMemo<DaemonWorkspaceCapability[]>(() => {
     const availableWorkspaces =
       workspaces.length > 0
         ? workspaces
-        : [
-            {
-              id: 'primary',
-              cwd: connection.workspaceCwd || projectName,
-              primary: true,
-              trusted: true,
-            },
-          ];
+        : projectFeaturesEnabled
+          ? [
+              {
+                id: 'primary',
+                cwd: connection.workspaceCwd || projectName,
+                primary: true,
+                trusted: true,
+              },
+            ]
+          : [];
     const visibleWorkspaces = showLive
       ? availableWorkspaces
       : availableWorkspaces.filter((entry) => entry.kind !== 'live');
@@ -1592,9 +1631,22 @@ export function WebShellSidebar({
     connection.workspaceCwd,
     lockedWorkspaceCwd,
     projectName,
+    projectFeaturesEnabled,
     showLive,
     workspaces,
   ]);
+  const displayedWorkspaces = useMemo(() => {
+    if (workspaceFilter === 'all') return sidebarWorkspaces;
+    if (workspaceFilter === 'standalone') return [];
+    return sidebarWorkspaces.filter(
+      (workspace) => `workspace:${workspace.cwd}` === workspaceFilter,
+    );
+  }, [sidebarWorkspaces, workspaceFilter]);
+  const includePrimaryWorkspaceSessions =
+    sessionContent === undefined &&
+    (!lockedWorkspaceCwd || lockedWorkspace?.primary === true) &&
+    (workspaceFilter === 'all' ||
+      displayedWorkspaces.some((workspace) => workspace.primary));
   const liveStateWorkspaceCwds = useMemo(
     () =>
       displayedWorkspaces
@@ -1805,6 +1857,10 @@ export function WebShellSidebar({
   );
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
+  const [bindPrCandidate, setBindPrCandidate] =
+    useState<DaemonSessionSummary | null>(null);
+  const [bindPrSubmitting, setBindPrSubmitting] = useState(false);
+  const [bindPrError, setBindPrError] = useState<string | undefined>();
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedSessions, setSelectedSessions] = useState(
     () => new Map<string, DaemonSessionSummary>(),
@@ -1852,6 +1908,7 @@ export function WebShellSidebar({
     focusedHostOrigin,
     lockedWorkspaceCwd,
     sessionContent,
+    workspaceFilter,
     exitSelection,
   ]);
   useEffect(() => {
@@ -1999,6 +2056,7 @@ export function WebShellSidebar({
   );
   const [collapsedSessionsOpen, setCollapsedSessionsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const searchTriggerRef = useRef<HTMLElement | null>(null);
   const [bodyScrolled, setBodyScrolled] = useState(false);
   const [workspaceRenameCandidate, setWorkspaceRenameCandidate] =
     useState<DaemonWorkspaceCapability | null>(null);
@@ -2060,28 +2118,9 @@ export function WebShellSidebar({
       sidebarMountedRef.current = false;
     };
   }, []);
-  const [searchQuery, setSearchQuery] = useState('');
   useEffect(() => {
-    onSearchQueryChange?.(searchQuery);
-  }, [onSearchQueryChange, searchQuery]);
-  // Order-insensitive membership key: poll-driven catalog updates change
-  // it only when the session-id set actually changes, so externally
-  // deleted/archived sessions invalidate content-search hits the same way
-  // local-handler token bumps do (without re-firing on every poll tick).
-  const sessionMembershipKey = useMemo(
-    () =>
-      sessions
-        .map((session) => session.sessionId)
-        .sort()
-        .join('|'),
-    [sessions],
-  );
-  const contentSearchHits = useSessionContentSearch(
-    workspace.client,
-    primaryWorkspaceCwd,
-    searchQuery,
-    `${workspaceSessionsReloadToken}:${sessionMembershipKey}`,
-  );
+    if (!searchOpen) onSearchQueryChange?.('');
+  }, [onSearchQueryChange, searchOpen]);
   const [isResizing, setIsResizing] = useState(false);
   const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
     () => new Set(),
@@ -2110,10 +2149,11 @@ export function WebShellSidebar({
   }, []);
   const isCollapsedCloseBlocked = useCallback(
     () =>
+      searchOpen ||
       sessionMenuOpenRef.current ||
       groupMenu !== null ||
       deleteCandidate !== null,
-    [deleteCandidate, groupMenu],
+    [deleteCandidate, groupMenu, searchOpen],
   );
   const previousRunningBySourceRef = useRef<
     Record<SidebarSessionSource, Map<string, boolean> | null>
@@ -2182,6 +2222,27 @@ export function WebShellSidebar({
       ? JSON.stringify(['standalone', currentSessionId])
       : currentSessionIdentity;
   const activityEnabled = organizationEnabled && !sectionView;
+  const activityDateProjectWorkspaces = displayedWorkspaces.filter(
+    (entry) => entry.kind !== 'live',
+  );
+  const activityDateGroupingSupported =
+    activityEnabled &&
+    workspaceQualifiedRestCoreEnabled &&
+    selectedSessionSource !== 'channel' &&
+    managedWorkspaces === undefined &&
+    activityDateProjectWorkspaces.length > 0 &&
+    activityDateProjectWorkspaces.every(
+      (entry) =>
+        entry.trusted &&
+        isAbsolutePath(entry.cwd) &&
+        liveStateWorkspaceCwdSet.has(entry.cwd),
+    );
+  const sessionGroupBy = activityDateGroupingSupported
+    ? groupByPreference.host === sortHost
+      ? groupByPreference.value
+      : readSessionGroupBy(sortHost)
+    : 'workspace';
+  const activityDateMode = sessionGroupBy === 'activityDate';
   const [activityOpen, setActivityOpen] = useState(false);
   const activityOperationScope = `${focusedHostOrigin}:${JSON.stringify(liveStateWorkspaceCwds)}`;
   const activityOperations = useActivityOperations(activityOperationScope);
@@ -2208,7 +2269,7 @@ export function WebShellSidebar({
     client: workspace.client,
     workspaceCwds: liveStateWorkspaceCwds,
     enabled: activityEnabled,
-    open: activityOpen,
+    open: activityOpen || activityDateMode,
     liveStateEnabled: workspaceSessionLiveStateEnabled,
     currentKey: activityCurrentKey,
     onArchivedCurrent: (entry) =>
@@ -2221,7 +2282,6 @@ export function WebShellSidebar({
     if (!activityEnabled) return;
     if (!activityOpen) {
       setSearchOpen(false);
-      setSearchQuery('');
     }
     setActivityOpen((value) => !value);
     if (collapsed) onCollapsedChange(false);
@@ -2499,6 +2559,9 @@ export function WebShellSidebar({
     () => orderWorkspaces(projectWorkspaces, workspaceOrder),
     [projectWorkspaces, workspaceOrder],
   );
+  const renderedProjectWorkspaces = activityDateMode
+    ? []
+    : orderedProjectWorkspaces;
   useEffect(() => {
     const sourceCwd = workspaceDrag?.cwd ?? workspaceDragStartRef.current?.cwd;
     if (
@@ -2693,6 +2756,12 @@ export function WebShellSidebar({
       options: { requirePinned: boolean },
     ): void => {
       if (!matchesSessionSource(session, selectedSessionSource)) return;
+      if (workspaceFilter === 'standalone') return;
+      if (
+        workspaceFilter.startsWith('workspace:') &&
+        `workspace:${getSessionWorkspaceCwd(session)}` !== workspaceFilter
+      )
+        return;
       // Rows fetched through the pinned filter stay unless an optimistic
       // unpin flips them; rows merged from other pages must be pinned.
       if (session.isPinned === false) return;
@@ -2720,17 +2789,16 @@ export function WebShellSidebar({
   }, [
     applyOptimisticPin,
     getIdentityForSession,
+    getSessionWorkspaceCwd,
     includePrimaryWorkspaceSessions,
     optimisticPins,
     primaryPinnedSessions,
     selectedSessionSource,
     secondaryPinnedSessions,
     sessions,
+    workspaceFilter,
   ]);
-  // Identities the Pinned section renders. Pinned rows have exactly one
-  // owner: content-search exemptions keep a pinned ghost in the list only
-  // when the Pinned section does NOT carry it — otherwise the session
-  // renders twice (or, for rename, nowhere that hosts the form).
+  // Track actual Pinned membership so duplicate rows share one rename form.
   const pinnedSectionIdentities = useMemo(
     () =>
       new Set(pinnedSessions.map((session) => getIdentityForSession(session))),
@@ -2758,14 +2826,33 @@ export function WebShellSidebar({
       isCurrentSession,
     ],
   );
+  const activityDateEntries = useMemo(
+    () =>
+      activityEntries.filter(
+        (entry) =>
+          isActivityEligible(entry, activityPreferences, true) &&
+          !entry.session.isPinned &&
+          matchesSessionSource(entry.session, selectedSessionSource),
+      ),
+    [activityEntries, activityPreferences, selectedSessionSource],
+  );
+  const activityTrackingEntries = useMemo(
+    () =>
+      activityOpen
+        ? activityEntries
+        : activityDateMode
+          ? activityDateEntries
+          : [],
+    [activityDateEntries, activityDateMode, activityEntries, activityOpen],
+  );
   const activityIdentities = useMemo(
     () =>
       new Set(
-        (activityOpen ? activity.entries : []).map(({ session }) =>
+        activityTrackingEntries.map(({ session }) =>
           getIdentityForSession(session),
         ),
       ),
-    [activity.entries, activityOpen, getIdentityForSession],
+    [activityTrackingEntries, getIdentityForSession],
   );
   const markActivityRead = useCallback(
     async (entries: ActivityEntry[]) => {
@@ -2788,12 +2875,12 @@ export function WebShellSidebar({
   >(undefined);
   const activityScope = JSON.stringify(liveStateWorkspaceCwds);
   useEffect(() => {
-    if (!activityEnabled || !activityOpen) {
+    if (!activityEnabled || !(activityOpen || activityDateMode)) {
       previousActivityRunning.current = undefined;
       return;
     }
     const running = new Map(
-      activity.entries.map(({ session }) => [
+      activityTrackingEntries.map(({ session }) => [
         getIdentityForSession(session),
         Boolean(session.hasActivePrompt),
       ]),
@@ -2822,17 +2909,19 @@ export function WebShellSidebar({
         : next;
     });
   }, [
-    activity.entries,
     activityEnabled,
+    activityDateMode,
     activityOpen,
     activityScope,
+    activityTrackingEntries,
     currentSessionIdentity,
     getIdentityForSession,
     workspace.client,
   ]);
-  const canRenameSession = useCallback(
+  // The metadata-mutation capability, independent of any one menu item, so
+  // Bind PR can gate on its own `bindPr` key rather than riding on `rename`.
+  const canMutateSessionMetadata = useCallback(
     (session: DaemonSessionSummary) => {
-      if (!sessionActionItems.has('rename')) return false;
       const scope = resolveSessionWorkspaceScope(session);
       if (isCurrentSession(session) && isMutableSessionScope(scope)) {
         return true;
@@ -2847,9 +2936,13 @@ export function WebShellSidebar({
       isCurrentSession,
       isMutableSessionScope,
       resolveSessionWorkspaceScope,
-      sessionActionItems,
       workspaceSessionMetadataEnabled,
     ],
+  );
+  const canRenameSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('rename') && canMutateSessionMetadata(session),
+    [canMutateSessionMetadata, sessionActionItems],
   );
   const canShowDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
@@ -3282,8 +3375,8 @@ export function WebShellSidebar({
     for (const session of [...sessions, ...eligibleSecondarySessions]) {
       byIdentity.set(getIdentityForSession(session), session);
     }
-    if (activityEnabled && activityOpen) {
-      for (const entry of activity.entries) {
+    if (activityEnabled && (activityOpen || activityDateMode)) {
+      for (const entry of activityTrackingEntries) {
         byIdentity.set(getIdentityForSession(entry.session), entry.session);
       }
     }
@@ -3294,8 +3387,9 @@ export function WebShellSidebar({
     secondaryStatusQueriesActive,
     sessions,
     activityEnabled,
+    activityDateMode,
     activityOpen,
-    activity.entries,
+    activityTrackingEntries,
   ]);
   const collapsedSessionStatus = useMemo(() => {
     if (statusSessions.some((session) => session.isWaitingForPermission)) {
@@ -3841,25 +3935,20 @@ export function WebShellSidebar({
     if (railLayout) {
       if (homeHidden && !homePreviewOpen) {
         setSearchOpen(false);
-        setSearchQuery('');
         setCollapsedSessionsOpen(false);
         cancelRename();
         setGroupMenu(null);
       }
-      // The Live section unmounts the search field (the !liveView gate on
-      // it). Resetting here keeps a surviving searchOpen from remounting an
-      // autoFocus input on the way back and stealing focus. The Channels
-      // section keeps the field mounted, so its search stays open.
+      // Live disables search; clear its open state so returning does not
+      // reopen the dialog and steal focus. Channels still supports search.
       if (liveView) {
         setSearchOpen(false);
-        setSearchQuery('');
       }
       return;
     }
     if (!collapsed) {
       setCollapsedSessionsOpen(false);
       setSearchOpen(false);
-      setSearchQuery('');
       cancelRename();
       setGroupMenu(null);
     } else if (!collapsedSessionsOpen) {
@@ -3872,7 +3961,6 @@ export function WebShellSidebar({
       // group picker would likewise block dismissal of the next
       // hover-opened switcher.
       setSearchOpen(false);
-      setSearchQuery('');
       cancelRename();
       setGroupMenu(null);
     }
@@ -3890,7 +3978,6 @@ export function WebShellSidebar({
     if (projectFeaturesEnabled) return;
     setCollapsedSessionsOpen(false);
     setSearchOpen(false);
-    setSearchQuery('');
     cancelRename();
     setGroupMenu(null);
   }, [cancelRename, projectFeaturesEnabled]);
@@ -3977,6 +4064,82 @@ export function WebShellSidebar({
       onError,
       sessionCatalogController,
       setSessionBusy,
+      t,
+      workspace.client,
+    ],
+  );
+
+  const handleBindPrFromMenu = useCallback((session: DaemonSessionSummary) => {
+    setBindPrError(undefined);
+    // A write left in flight by a dismissed dialog must not render the newly
+    // opened form dead; invalidate it and reset the flag for the new request.
+    bindPrRequestRef.current++;
+    setBindPrSubmitting(false);
+    setBindPrCandidate(session);
+  }, []);
+
+  // Supplementary PR registration — mirrors saveRename's workspace routing
+  // (current session → own session actions; other sessions → the owning
+  // workspace's metadata route; cwd-less rows → the global route). Unlike
+  // saveRename there is no standalone branch: standalone rows (including
+  // recents rows) never show the item, since their metadata route only
+  // accepts displayName.
+  // A monotonically increasing request token scopes the submitting flag and
+  // the settle-time writes to the request that owns them. Closing or reopening
+  // the dialog bumps it, so a write left in flight by a dismissed dialog can
+  // neither render a newly opened form dead nor close/error it when it settles
+  // (even if the same session is reopened). The catalog refresh still runs:
+  // the binding was persisted regardless of the dialog's fate.
+  const bindPrRequestRef = useRef(0);
+  const submitBindPr = useCallback(
+    (pr: BindSessionPrPayload) => {
+      const session = bindPrCandidate;
+      if (!session || bindPrSubmitting) return;
+      const request = ++bindPrRequestRef.current;
+      const sessionId = session.sessionId;
+      const workspaceCwd = getSessionWorkspaceCwd(session);
+      setBindPrSubmitting(true);
+      setBindPrError(undefined);
+      const bind = isCurrentSession(session)
+        ? actions.bindSessionPr(pr)
+        : workspaceCwd
+          ? workspace.client
+              .workspaceByCwd(workspaceCwd)
+              .updateSessionMetadata(sessionId, { pr })
+          : workspace.client.updateSessionMetadata(sessionId, { pr });
+      bind
+        .then(() => {
+          if (workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          bumpWorkspaceReload();
+          if (bindPrRequestRef.current !== request) return;
+          setBindPrCandidate(null);
+          setBindPrSubmitting(false);
+        })
+        .catch((err: unknown) => {
+          if (workspaceCwd) {
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          }
+          // Only surface the error on the still-open dialog; if the user
+          // dismissed it mid-write the failure is dropped (they cancelled).
+          if (bindPrRequestRef.current !== request) return;
+          setBindPrError(
+            err instanceof Error
+              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+              : t('sessionsOverview.bindPrFailed'),
+          );
+          setBindPrSubmitting(false);
+        });
+    },
+    [
+      actions,
+      bindPrCandidate,
+      bindPrSubmitting,
+      bumpWorkspaceReload,
+      getSessionWorkspaceCwd,
+      isCurrentSession,
+      sessionCatalogController,
       t,
       workspace.client,
     ],
@@ -4887,64 +5050,15 @@ export function WebShellSidebar({
     ],
   );
 
-  const searchedSessions = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    // Keep the daemon catalog order: the organized bucketing below relies on
-    // it (pinned rows sort first there); the flat view re-sorts by recency on
-    // its own, so no sort here.
-    const sourceScopedSessions = sessions
-      .map(applyOptimisticPin)
-      .filter((session) =>
-        matchesSessionSource(session, selectedSessionSource),
-      );
-    if (!query) return sourceScopedSessions;
-    const localMatches = sourceScopedSessions.filter((session) => {
-      const label = getSessionLabel(session).toLowerCase();
-      return (
-        label.includes(query) ||
-        session.sessionId.toLowerCase().includes(query) ||
-        sessionMatchesGitQuery(session, query)
-      );
-    });
-    // Merge daemon transcript-content hits into the local fast-path
-    // matches (shared with WorkspaceSection's copy — see sessionSearch).
-    return mergeSessionContentHits(
-      sourceScopedSessions,
-      localMatches,
-      contentSearchHits,
-      selectedSessionSource,
-      applyOptimisticPin,
-    );
-  }, [
-    applyOptimisticPin,
-    contentSearchHits,
-    searchQuery,
-    selectedSessionSource,
-    sessions,
-  ]);
-  // Content-search hits the loaded catalog doesn't carry ("ghosts"). A
-  // pinned ghost must still render somewhere while its hit is active:
-  // the filters below drop pinned rows because loaded pinned sessions
-  // render in the Pinned section — but when the Pinned section DOES
-  // carry the session (pinned page settled, or an optimistic pin), the
-  // ghost must not be retained too: pinned rows have exactly one owner.
-  const searchGhostIds = useMemo(() => {
-    const catalogIds = new Set(sessions.map((session) => session.sessionId));
-    const ghosts = new Set<string>();
-    for (const hit of contentSearchHits.values()) {
-      if (catalogIds.has(hit.session.sessionId)) continue;
-      if (pinnedSectionIdentities.has(getIdentityForSession(hit.session))) {
-        continue;
-      }
-      ghosts.add(hit.session.sessionId);
-    }
-    return ghosts;
-  }, [
-    contentSearchHits,
-    getIdentityForSession,
-    pinnedSectionIdentities,
-    sessions,
-  ]);
+  const sourceScopedSessions = useMemo(
+    () =>
+      sessions
+        .map(applyOptimisticPin)
+        .filter((session) =>
+          matchesSessionSource(session, selectedSessionSource),
+        ),
+    [applyOptimisticPin, selectedSessionSource, sessions],
+  );
   const isPinnedSectionMember = useCallback(
     (session: DaemonSessionSummary) =>
       pinnedSectionIdentities.has(getIdentityForSession(session)),
@@ -4953,11 +5067,8 @@ export function WebShellSidebar({
   const filteredSessions = useMemo(() => {
     const unpinnedSessions =
       selectedSessionSource === 'channel'
-        ? searchedSessions
-        : searchedSessions.filter(
-            (session) =>
-              !session.isPinned || searchGhostIds.has(session.sessionId),
-          );
+        ? sourceScopedSessions
+        : sourceScopedSessions.filter((session) => !session.isPinned);
     const nextSessions = unpinnedSessions.slice();
     if (organizationEnabled || sessionSort === 'lastUserPromptAt') {
       return nextSessions;
@@ -4976,15 +5087,14 @@ export function WebShellSidebar({
   }, [
     sessionSort,
     organizationEnabled,
-    searchGhostIds,
-    searchedSessions,
+    sourceScopedSessions,
     selectedSessionSource,
   ]);
 
   const sessionTree = useSessionTree(
     primaryWorkspaceExpansionId,
-    searchedSessions,
-    searchQuery.trim().length > 0,
+    sourceScopedSessions,
+    false,
   );
   const channelCatalogLoaded = channelCatalogData !== undefined;
   const channelSessionSections = useMemo(
@@ -5008,7 +5118,6 @@ export function WebShellSidebar({
   );
 
   const sessionSections = useMemo<SessionSection[]>(() => {
-    const searching = searchQuery.trim().length > 0;
     const validGroupIds = new Set(groups.map((group) => group.id));
     const sessionsByColor = new Map<
       DaemonSessionGroupPresetColor,
@@ -5023,7 +5132,7 @@ export function WebShellSidebar({
       sessionsByGroupId.set(group.id, []);
     }
     const recentSessions: DaemonSessionSummary[] = [];
-    // Bucket the search-filtered catalog in one pass, pinned rows included:
+    // Bucket the source-filtered catalog in one pass, pinned rows included:
     // they are lifted into the Pinned section, but their group/color section
     // must keep them, otherwise a section whose members are all pinned
     // rendered `· 0`, indistinguishable from lost memberships (#10391).
@@ -5031,7 +5140,7 @@ export function WebShellSidebar({
     // the pinned ones) preserves the daemon catalog order — pinned rows sort
     // first there — so a pinned member is never pushed behind its section's
     // preview limit by rows it sorts ahead of.
-    for (const session of searchedSessions) {
+    for (const session of sourceScopedSessions) {
       // Color takes precedence: the picker keeps color and group mutually
       // exclusive, but stay defensive if a store somehow carries both.
       if (
@@ -5058,14 +5167,8 @@ export function WebShellSidebar({
       // On sources with a Pinned section, a pinned session without a
       // (renderable) group stays Pinned-section-only; it never spills into
       // Ungrouped. The channel source has no Pinned section, so its pinned
-      // rows keep the normal Ungrouped bucket. Pinned content-search ghosts
-      // are exempt: the Pinned section never sees them, so dropping them
-      // here would render the matching session nowhere.
-      if (
-        session.isPinned &&
-        selectedSessionSource !== 'channel' &&
-        !searchGhostIds.has(session.sessionId)
-      ) {
+      // rows keep the normal Ungrouped bucket.
+      if (session.isPinned && selectedSessionSource !== 'channel') {
         continue;
       }
       recentSessions.push(session);
@@ -5085,10 +5188,9 @@ export function WebShellSidebar({
         sessions: colorSessions,
       });
     }
-    // Named groups next (kept visible even when empty, unless searching).
+    // Named groups next, kept visible even when empty.
     for (const group of groups) {
       const groupSessions = sessionsByGroupId.get(group.id) ?? [];
-      if (searching && groupSessions.length === 0) continue;
       sections.push({
         id: `group:${group.id}`,
         kind: 'group',
@@ -5115,9 +5217,7 @@ export function WebShellSidebar({
   }, [
     groups,
     organizationEnabled,
-    searchGhostIds,
-    searchedSessions,
-    searchQuery,
+    sourceScopedSessions,
     selectedSessionSource,
     t,
   ]);
@@ -5139,13 +5239,11 @@ export function WebShellSidebar({
     const isInitialCatalog =
       awaitingInitialSessionCatalogBySourceRef.current[sessionSource];
     if (isInitialCatalog) {
-      // First-sync registration must reflect the full unfiltered catalog:
-      // sections hidden by an active search would never register and would
-      // later auto-collapse as mid-session additions. An empty first catalog
-      // keeps the latch so the first real sections still register as initial
+      // An empty first catalog keeps the latch so the first real sections
+      // still register as initial
       // — channel sessions are externally driven and can arrive while the
       // tab is open on an empty settle.
-      if (searchQuery.trim() || activeSections.length === 0) return;
+      if (activeSections.length === 0) return;
       awaitingInitialSessionCatalogBySourceRef.current[sessionSource] = false;
       for (const id of unseenIds) knownSessionSectionIdsRef.current.add(id);
       return;
@@ -5163,7 +5261,6 @@ export function WebShellSidebar({
     channelCatalogLoaded,
     channelSessionSections,
     organizationEnabled,
-    searchQuery,
     selectedSessionSource,
     sessionSections,
     sessionSource,
@@ -5377,9 +5474,7 @@ export function WebShellSidebar({
       const {
         isArchived = false,
         renameFormDisabled = false,
-        searchSnippet = searchQuery.trim()
-          ? contentSearchHits.get(session.sessionId)?.snippet
-          : undefined,
+        searchSnippet,
         standalone,
         tree,
         recent,
@@ -5702,6 +5797,15 @@ export function WebShellSidebar({
       const showRename = standalone
         ? sessionActionItems.has('rename')
         : canRenameSession(session);
+      // PR binding gates on the metadata-mutation capability and its own
+      // `bindPr` item (not rename's); standalone sessions — including recents
+      // rows, where the `standalone` adapter param is undefined — are excluded
+      // because their metadata route only accepts displayName.
+      const showBindPr =
+        !standalone &&
+        !recent?.isStandalone &&
+        sessionActionItems.has('bindPr') &&
+        canMutateSessionMetadata(session);
       const activeExportScope = getActiveExportScope(session);
       const showExport = standalone
         ? sessionActionItems.has('export')
@@ -5760,6 +5864,7 @@ export function WebShellSidebar({
         (showPin && !inlineActionItems.has('pin')) ||
         showArchive ||
         (showRename && !inlineActionItems.has('rename')) ||
+        showBindPr ||
         showGroup ||
         (showExport && !inlineActionItems.has('export')) ||
         (showDelete && !inlineActionItems.has('delete'));
@@ -5769,6 +5874,7 @@ export function WebShellSidebar({
           showPin ||
           showArchive ||
           showRename ||
+          showBindPr ||
           showExport ||
           showDelete ||
           showGroup);
@@ -6140,6 +6246,15 @@ export function WebShellSidebar({
                                 {t('sidebar.rename')}
                               </DropdownMenuItem>
                             )}
+                            {showBindPr && (
+                              <DropdownMenuItem
+                                disabled={busy}
+                                onSelect={() => handleBindPrFromMenu(session)}
+                              >
+                                <GitPullRequestIcon />
+                                {t('sessionsOverview.bindPr')}
+                              </DropdownMenuItem>
+                            )}
                             {showGroup && (
                               <DropdownMenuItem
                                 disabled={busy}
@@ -6203,13 +6318,13 @@ export function WebShellSidebar({
       canShowDeleteSession,
       canOrganizeSession,
       canRenameSession,
+      canMutateSessionMetadata,
       canUnarchiveSession,
       canMutateSessionArchive,
       canOpenSplitView,
       canUseWorkspaceQualifiedActions,
       cancelRename,
       completedUnreadIds,
-      contentSearchHits,
       editingSessionIdentity,
       exportingSessionIds,
       getArchivedExportWorkspaceCwd,
@@ -6217,6 +6332,7 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceCwd,
       handleArchive,
+      handleBindPrFromMenu,
       handleDeleteSession,
       handleExportSession,
       handleLoadSession,
@@ -6236,7 +6352,6 @@ export function WebShellSidebar({
       onAddSessionToSplitView,
       resolveSessionWorkspaceScope,
       saveRename,
-      searchQuery,
       sessionActionItems,
       inlineActionItems,
       livePresence,
@@ -6331,9 +6446,8 @@ export function WebShellSidebar({
         ),
         projectSessionVisibleCount,
       );
-      const unlimited = Boolean(searchQuery.trim()) || editingRowBeyondBound;
       const previewLimited =
-        !unlimited && treeRows.length > projectSessionVisibleCount;
+        !editingRowBeyondBound && treeRows.length > projectSessionVisibleCount;
       const displayedRows = previewLimited
         ? treeRows.slice(0, projectSessionVisibleCount)
         : treeRows;
@@ -6402,10 +6516,7 @@ export function WebShellSidebar({
             id={section.id}
             label={section.label}
             count={tree.rows.length}
-            limitSessions={
-              !editingSessionBeyondPreview(section.sessions) &&
-              !searchQuery.trim()
-            }
+            limitSessions={!editingSessionBeyondPreview(section.sessions)}
             expanded={!collapsedSessionSectionIds.has(section.id)}
             onToggle={() => toggleSessionSection(section.id)}
           >
@@ -6437,10 +6548,7 @@ export function WebShellSidebar({
               <CalendarClockIcon data-web-shell-scheduled-task-group />
             ) : undefined
           }
-          limitSessions={
-            !editingSessionBeyondPreview(section.sessions) &&
-            !searchQuery.trim()
-          }
+          limitSessions={!editingSessionBeyondPreview(section.sessions)}
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}
           onRename={
@@ -6464,10 +6572,7 @@ export function WebShellSidebar({
                 // Pinned members also render in the Pinned section; while that
                 // section is expanded its row hosts the rename form, so this
                 // duplicate row must not mount a second autofocused input.
-                // Gate on the Pinned section actually carrying the row —
-                // content-search ghosts never appear there, so without the
-                // membership check no row would host the form at all and
-                // rename would be silently inoperable for them.
+                // The separately paged Pinned catalog may not carry this row.
                 renameFormDisabled:
                   Boolean(row.session.isPinned) &&
                   pinnedExpanded &&
@@ -6502,7 +6607,6 @@ export function WebShellSidebar({
     reload,
     renderSessionRow,
     sessionTree,
-    searchQuery,
     selectedSessionSource,
     sessionSections,
     sessionsPage,
@@ -6513,6 +6617,7 @@ export function WebShellSidebar({
 
   const standaloneSessionsVisible = Boolean(
     !sectionView &&
+      (workspaceFilter === 'all' || workspaceFilter === 'standalone') &&
       workspace.capabilities?.features?.includes(
         STANDALONE_SESSIONS_CAPABILITY,
       ) === true &&
@@ -6773,46 +6878,78 @@ export function WebShellSidebar({
     standaloneSessionsVisible,
     t,
   ]);
+  const displayMenuEnabled =
+    activityDateGroupingSupported ||
+    questionSortSupported ||
+    standaloneSessionsVisible ||
+    sidebarWorkspaces.length > 1 ||
+    workspaceFilter !== 'all';
   const sessionActionControlsVisible =
     !sectionView && sessionContent === undefined && (!collapsed || mobileOpen);
   const sessionActionButtonClassName =
     'size-8 shrink-0 cursor-pointer rounded-lg p-[7px] hover:bg-accent';
   const searchEnabled = !liveView && !hideProjectHeader;
+  const [managedSearchSlot, setManagedSearchSlot] =
+    useState<HTMLDivElement | null>(null);
+  const [managedHomeNode, setManagedHomeNode] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const [managedHostNode, setManagedHostNode] = useState<HTMLDivElement | null>(
+    null,
+  );
+  // The managed navigation is a portal target rendered by the host. Moving the
+  // wrapper between the sidebar and the dialog keeps the target node — and the
+  // portal mounted into it — alive; re-parenting the React element instead
+  // unmounts it and refetches the managed list on every open/close.
+  useLayoutEffect(() => {
+    if (!managedHostNode) return;
+    if (searchOpen && managedSearchSlot) {
+      managedSearchSlot.appendChild(managedHostNode);
+      return () => {
+        managedHomeNode?.appendChild(managedHostNode);
+      };
+    }
+  }, [searchOpen, managedSearchSlot, managedHomeNode, managedHostNode]);
+  // Managed session rows are portaled into the dialog from another React
+  // tree, so React never dispatches their synthetic events through this
+  // wrapper. Only a native listener observes the row selection.
+  useEffect(() => {
+    if (!managedHostNode || !searchOpen) return;
+    const dismiss = (event: Event) => {
+      const target = event.target;
+      if (
+        !(target instanceof Element) ||
+        !target.closest('[data-managed-session-id]')
+      )
+        return;
+      if (
+        event instanceof KeyboardEvent &&
+        (event.isComposing ||
+          event.keyCode === 229 ||
+          (event.key !== 'Enter' && event.key !== ' '))
+      )
+        return;
+      setSearchOpen(false);
+      onSearchQueryChange?.('');
+    };
+    managedHostNode.addEventListener('click', dismiss);
+    managedHostNode.addEventListener('keydown', dismiss);
+    return () => {
+      managedHostNode.removeEventListener('click', dismiss);
+      managedHostNode.removeEventListener('keydown', dismiss);
+    };
+  }, [managedHostNode, searchOpen, onSearchQueryChange]);
   // The activity panel replaces the session list, so a query typed there
   // filters rows the panel never shows.
   const topRowSearchVisible =
     searchEnabled &&
     !activityOpen &&
     (!collapsed || mobileOpen || homePreviewOpen);
-  // A narrow column cannot fit a usable field beside the icon buttons, so
-  // there the field drops to a full-width row under the brand row instead.
-  const topRowColumnWidth =
-    sidebarWidth - (railLayout ? SIDEBAR_RAIL_WIDTH : 0);
-  const inlineTopRowSearch =
-    topRowSearchVisible && !mobileOpen && topRowColumnWidth >= 285;
   // The top row owns the search control whenever it is visible. Hosts that
   // hide the brand row, and the collapsed strip (whose session list lives in
   // a popover), fall back to the older Projects-header placement.
   const searchInProjectHeader =
     !shouldRenderBrand || (!railLayout && collapsed && !mobileOpen);
-  const renderSearchField = (className?: string) => (
-    <div className={cx(styles.projectSearch, className)}>
-      <SearchIcon aria-hidden="true" />
-      <Input
-        value={searchQuery}
-        placeholder={t('sidebar.searchPlaceholder')}
-        aria-label={t('sidebar.search')}
-        autoFocus
-        onChange={(event) => setSearchQuery(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === 'Escape') {
-            setSearchQuery('');
-            setSearchOpen(false);
-          }
-        }}
-      />
-    </div>
-  );
   const renderSearchToggle = (className: string) => (
     <button
       type="button"
@@ -6820,12 +6957,10 @@ export function WebShellSidebar({
       title={t('sidebar.search')}
       aria-label={t('sidebar.search')}
       aria-expanded={searchOpen}
-      onClick={() => {
-        setSearchOpen((open) => {
-          if (open) setSearchQuery('');
-          return !open;
-        });
-        setProjectsExpanded(true);
+      aria-haspopup="dialog"
+      onClick={(event) => {
+        searchTriggerRef.current = event.currentTarget;
+        setSearchOpen(true);
       }}
     >
       <SearchIcon size={18} strokeWidth={1.5} />
@@ -7043,6 +7178,7 @@ export function WebShellSidebar({
   );
   const footerContent = (footer !== false || mobileOpen) && (
     <div
+      data-web-shell-sidebar-footer
       className={cx(
         styles.footer,
         !railLayout && footerCompact && styles.footerCompact,
@@ -7238,6 +7374,47 @@ export function WebShellSidebar({
   );
   return (
     <>
+      {searchOpen && searchEnabled && (
+        <SessionSearchDialog
+          client={workspace.client}
+          workspaces={projectWorkspaces}
+          initialSessions={sessions}
+          primaryWorkspaceCwd={primaryWorkspaceCwd}
+          includeStandalone={standaloneSessionsVisible}
+          catalogKey={`${workspaceSessionsReloadToken}:${sessions
+            .map((session) => session.sessionId)
+            .sort()
+            .join('|')}`}
+          source={selectedSessionSource}
+          organizationEnabled={organizationEnabled}
+          qualified={workspaceQualifiedRestCoreEnabled}
+          restoreFocus={searchTriggerRef.current}
+          customContent={sessionContent}
+          additionalContent={
+            managedWorkspaces && !sectionView ? (
+              <div ref={setManagedSearchSlot} />
+            ) : undefined
+          }
+          onQueryChange={(query) => {
+            onSearchQueryChange?.(query);
+          }}
+          onClose={() => {
+            setSearchOpen(false);
+            onSearchQueryChange?.('');
+          }}
+          onSelect={({ session, workspaceCwd }) => {
+            if (workspaceCwd)
+              handleLoadSession(session.sessionId, workspaceCwd);
+            else
+              void Promise.resolve(
+                onLoadStandaloneSession?.(
+                  session.sessionId,
+                  session.displayName,
+                ),
+              ).catch((error) => onError(error, t('sidebar.switchFailed')));
+          }}
+        />
+      )}
       <aside
         ref={sidebarRef}
         className={cx(
@@ -7386,6 +7563,20 @@ export function WebShellSidebar({
               </div>
             </div>
           </DialogShell>
+        )}
+        {bindPrCandidate && (
+          <BindSessionPrDialog
+            workspaceCwd={getSessionWorkspaceCwd(bindPrCandidate) ?? ''}
+            busy={bindPrSubmitting}
+            error={bindPrError}
+            onSubmit={submitBindPr}
+            onClose={() => {
+              bindPrRequestRef.current++;
+              setBindPrCandidate(null);
+              setBindPrSubmitting(false);
+              setBindPrError(undefined);
+            }}
+          />
         )}
         {workspaceRenameCandidate && (
           <WorkspaceRenameDialog
@@ -7776,30 +7967,11 @@ export function WebShellSidebar({
               <div className={styles.sectionHeader}>
                 {t(liveView ? 'sidebar.live' : 'sidebar.channels')}
                 {channelView && searchEnabled && shouldRenderBrand && (
-                  <div
-                    className={cx(
-                      styles.topRowActions,
-                      searchOpen &&
-                        inlineTopRowSearch &&
-                        styles.topRowActionsSearching,
-                    )}
-                  >
-                    {searchOpen &&
-                      inlineTopRowSearch &&
-                      renderSearchField(styles.topRowSearchField)}
+                  <div className={styles.topRowActions}>
                     {renderSearchToggle(styles.searchToggle)}
                   </div>
                 )}
               </div>
-              {channelView &&
-                searchEnabled &&
-                shouldRenderBrand &&
-                searchOpen &&
-                !inlineTopRowSearch && (
-                  <div className={styles.topRowSearchRow}>
-                    {renderSearchField()}
-                  </div>
-                )}
             </>
           )}
           {liveView &&
@@ -7815,9 +7987,7 @@ export function WebShellSidebar({
             <>
               <div className={styles.topRow}>
                 {branding?.render ? (
-                  searchOpen && inlineTopRowSearch ? null : (
-                    branding.render()
-                  )
+                  branding.render()
                 ) : (
                   <>
                     <span className={styles.brandLogo} aria-hidden="true">
@@ -7834,24 +8004,12 @@ export function WebShellSidebar({
                           <IconQwenLogo />
                         ))}
                     </span>
-                    {(!collapsed || mobileOpen || homePreviewOpen) &&
-                      !(searchOpen && inlineTopRowSearch) && (
-                        <span className={styles.brandName}>{brandName}</span>
-                      )}
+                    {(!collapsed || mobileOpen || homePreviewOpen) && (
+                      <span className={styles.brandName}>{brandName}</span>
+                    )}
                   </>
                 )}
-                <div
-                  className={cx(
-                    styles.topRowActions,
-                    searchOpen &&
-                      inlineTopRowSearch &&
-                      styles.topRowActionsSearching,
-                  )}
-                >
-                  {topRowSearchVisible &&
-                    searchOpen &&
-                    inlineTopRowSearch &&
-                    renderSearchField(styles.topRowSearchField)}
+                <div className={styles.topRowActions}>
                   {activityEnabled &&
                     (!railLayout || !collapsed || mobileOpen) && (
                       <button
@@ -7884,17 +8042,14 @@ export function WebShellSidebar({
                     renderSearchToggle(styles.searchToggle)}
                 </div>
               </div>
-              {topRowSearchVisible && searchOpen && !inlineTopRowSearch && (
-                <div className={styles.topRowSearchRow}>
-                  {renderSearchField()}
-                </div>
-              )}
             </>
           )}
           {!sectionView &&
             (selectionMode ||
               primaryNavItems.has('newTask') ||
-              (questionSortSupported && sessionActionControlsVisible)) && (
+              (displayMenuEnabled &&
+                hideProjectHeader &&
+                sessionActionControlsVisible)) && (
               <div
                 className={cx(
                   styles.newTaskNav,
@@ -7937,10 +8092,17 @@ export function WebShellSidebar({
                 ) : null}
                 {sessionActionControlsVisible && (
                   <div className="ml-auto flex shrink-0 items-center gap-1">
-                    {questionSortSupported && (
+                    {displayMenuEnabled && hideProjectHeader && (
                       <SessionSortMenu
                         value={sessionSort}
                         onChange={changeSessionSort}
+                        workspaceValue={workspaceFilter}
+                        onWorkspaceChange={changeWorkspaceFilter}
+                        groupValue={sessionGroupBy}
+                        onGroupChange={changeSessionGroupBy}
+                        groupEnabled={activityDateGroupingSupported}
+                        workspaces={sidebarWorkspaces}
+                        sortEnabled={questionSortSupported}
                         triggerClassName={sessionActionButtonClassName}
                       />
                     )}
@@ -7970,6 +8132,7 @@ export function WebShellSidebar({
           <div
             ref={sidebarBodyRef}
             className={styles.body}
+            data-web-shell-sidebar-body
             onScroll={(event) =>
               setBodyScrolled(event.currentTarget.scrollTop > 0)
             }
@@ -8027,7 +8190,7 @@ export function WebShellSidebar({
                       sessionArchiveEnabled && sessionActionItems.has('archive')
                     }
                   />
-                ) : (
+                ) : searchOpen && sessionContent !== undefined ? null : (
                   sessionContent
                 )
               }
@@ -8080,6 +8243,7 @@ export function WebShellSidebar({
               {!channelView &&
                 (!liveNavigationEnabled || liveView) &&
                 showLive &&
+                workspaceFilter === 'all' &&
                 livePresence &&
                 liveWorkspaces.length === 0 && (
                   <div
@@ -8195,47 +8359,62 @@ export function WebShellSidebar({
               )}
               {!liveView && !hideProjectHeader && (
                 <div className={styles.projectsHeader}>
-                  <button
-                    className={styles.projectsHeaderToggle}
-                    type="button"
-                    aria-expanded={projectsExpanded}
-                    onClick={() => {
-                      const nextExpanded = !projectsExpanded;
-                      writeWorkspaceExpanded('projects', nextExpanded);
-                      setProjectsExpanded(nextExpanded);
-                    }}
-                  >
-                    <span>{t('sidebar.project')}</span>
-                    {workspaceOverviewEnabled &&
-                      managedWorkspaces === undefined &&
-                      projectWorkspaces.length > 1 && (
-                        <span
-                          className={styles.projectsHeaderCount}
-                          aria-label={t('sidebar.workspaceCount', {
-                            count: projectWorkspaces.length,
-                          })}
-                          title={t('sidebar.workspaceCount', {
-                            count: projectWorkspaces.length,
-                          })}
-                        >
-                          {projectWorkspaces.length}
-                        </span>
-                      )}
-                    <IconChevron expanded={projectsExpanded} />
-                  </button>
+                  {activityDateMode ? (
+                    <span
+                      className={styles.projectsHeaderToggle}
+                      style={{ cursor: 'default' }}
+                    >
+                      {t('sidebar.recentConversations')}
+                    </span>
+                  ) : (
+                    <button
+                      className={styles.projectsHeaderToggle}
+                      type="button"
+                      aria-expanded={projectsExpanded}
+                      onClick={() => {
+                        const nextExpanded = !projectsExpanded;
+                        writeWorkspaceExpanded('projects', nextExpanded);
+                        setProjectsExpanded(nextExpanded);
+                      }}
+                    >
+                      <span>{t('sidebar.project')}</span>
+                      {workspaceOverviewEnabled &&
+                        managedWorkspaces === undefined &&
+                        projectWorkspaces.length > 1 && (
+                          <span
+                            className={styles.projectsHeaderCount}
+                            aria-label={t('sidebar.workspaceCount', {
+                              count: projectWorkspaces.length,
+                            })}
+                            title={t('sidebar.workspaceCount', {
+                              count: projectWorkspaces.length,
+                            })}
+                          >
+                            {projectWorkspaces.length}
+                          </span>
+                        )}
+                      <IconChevron expanded={projectsExpanded} />
+                    </button>
+                  )}
                   <div className={styles.projectsHeaderActions}>
-                    {searchInProjectHeader &&
-                      !sessionActionControlsVisible &&
-                      !sectionView &&
-                      questionSortSupported &&
+                    {!sectionView &&
+                      displayMenuEnabled &&
                       sessionContent === undefined && (
                         <SessionSortMenu
                           value={sessionSort}
                           onChange={changeSessionSort}
+                          workspaceValue={workspaceFilter}
+                          onWorkspaceChange={changeWorkspaceFilter}
+                          groupValue={sessionGroupBy}
+                          onGroupChange={changeSessionGroupBy}
+                          groupEnabled={activityDateGroupingSupported}
+                          workspaces={sidebarWorkspaces}
+                          sortEnabled={questionSortSupported}
                           triggerClassName={styles.projectsHeaderAction}
                         />
                       )}
-                    {managedWorkspaces === undefined &&
+                    {!activityDateMode &&
+                      managedWorkspaces === undefined &&
                       projectWorkspaces.length > 0 && (
                         <button
                           className={styles.projectsHeaderAction}
@@ -8292,16 +8471,16 @@ export function WebShellSidebar({
                   </div>
                 </div>
               )}
-              {searchEnabled &&
-                searchOpen &&
-                searchInProjectHeader &&
-                renderSearchField()}
               {/* Managed 历史由外部 App Host 注入，不受本地 Workspaces
                   折叠状态控制；否则折叠分组会把仍有效的 Managed 会话一起隐藏。 */}
-              {!channelView && !liveView && managedWorkspaces}
+              {!channelView && !liveView && managedWorkspaces && (
+                <div ref={setManagedHomeNode}>
+                  <div ref={setManagedHostNode}>{managedWorkspaces}</div>
+                </div>
+              )}
               <div
                 className="flex flex-col"
-                hidden={liveView || !projectsExpanded}
+                hidden={liveView || (!projectsExpanded && !activityDateMode)}
               >
                 {/* Multi-daemon (#13727): the connected host occupies its
                     fixed origin rank instead of floating to the top, so a
@@ -8320,7 +8499,23 @@ export function WebShellSidebar({
                   {!hideProjectHeader && <WorkspaceHostHeading />}
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
-                      {orderedProjectWorkspaces.map((ws) => (
+                      {activityDateMode && (
+                        <ActivityDateSessions
+                          key={activityOperationScope}
+                          entries={activityDateEntries}
+                          sortBy={sessionSort}
+                          loading={activity.loading}
+                          unavailable={activity.unavailable || !daemonAvailable}
+                          hasMore={activity.hasMore}
+                          onRetry={activity.retry}
+                          editingSessionIdentity={editingSessionIdentity}
+                          sessionIdentity={getIdentityForSession}
+                          renderSession={(entry) =>
+                            renderSessionRow(entry.session)
+                          }
+                        />
+                      )}
+                      {renderedProjectWorkspaces.map((ws) => (
                         <div
                           key={ws.id}
                           data-sidebar-workspace={ws.cwd}
@@ -8496,7 +8691,6 @@ export function WebShellSidebar({
                             onOpenCommit={
                               projectFeaturesEnabled ? onOpenCommit : undefined
                             }
-                            searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}
                             autoExpandKey={
                               autoExpandWorkspace?.id === ws.id
@@ -8830,8 +9024,7 @@ export function WebShellSidebar({
                                   }
                             }
                           />
-                          {ws.primary &&
-                          (projectExpanded || searchQuery.trim()) ? (
+                          {ws.primary && projectExpanded ? (
                             <div
                               className={styles.workspaceSessionBody}
                               style={
@@ -8846,7 +9039,7 @@ export function WebShellSidebar({
                     </div>
                   </div>
                 </div>
-                {!hideProjectHeader && (
+                {!hideProjectHeader && workspaceFilter === 'all' && (
                   <OtherHostProjects
                     onOpenHostSession={onOpenHostSession}
                     rankOf={rankOfHost}
@@ -8870,7 +9063,6 @@ export function WebShellSidebar({
                     refreshKey={
                       standaloneRefreshKey + standaloneSessionsReloadToken
                     }
-                    searchQuery={searchQuery}
                     renderSession={(session, standalone) =>
                       renderSessionRow(session, {
                         isArchived: standalone.isArchived,

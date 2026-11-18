@@ -87,6 +87,13 @@ const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 const MAX_BUFFERED_INPUT_BYTES = 256 * 1024;
 const MAX_INPUT_FRAME_BYTES = 1024 * 1024;
 export const MAX_CONCURRENT_WEB_TERMINALS = 8;
+/**
+ * The end evidence for a terminal the PTY backend ended by failure. The
+ * backend has already torn the process tree down, so the terminal is
+ * definitively gone; this registry-defined code lets the hold settle instead
+ * of wedging on an unprovable end. It is not a claimed process exit status.
+ */
+export const WEB_TERMINAL_FAILURE_EXIT_CODE = 1;
 /** Reclaim a PTY session after this long with no connected listener. */
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
 
@@ -247,6 +254,15 @@ export class WebTerminalRegistry {
   private readonly sessions = new Map<string, PtySession>();
   private readonly creating = new Map<string, string>();
   private readonly cancelledCreations = new Set<string>();
+  // Terminals this registry released while live. A released terminal and a
+  // failed spawn both leave no session, but only the former has a proven
+  // release receipt; the distinction keeps a failed spawn from being reported
+  // as a clean exit.
+  private readonly released = new Set<string>();
+  // Creations that ended without a session and were not released (a failed
+  // load/spawn). They carry a failure end receipt so the hold settles instead
+  // of answering unknown forever — but never the clean release code.
+  private readonly failedCreations = new Set<string>();
   private disposed = false;
 
   private readonly nextId = (() => {
@@ -275,6 +291,13 @@ export class WebTerminalRegistry {
       return { error: 'Web terminal limit reached', retryable: true };
     }
     this.creating.set(terminalId, options.workspaceCwd);
+    // A new lifecycle revokes any stale release receipt for this id: the Web
+    // Shell reuses one terminal id across panel reopenings, so an id released
+    // once must not keep certifying a later failed re-spawn as a proven exit.
+    // Clear only at creation admission — control() still needs the receipt of
+    // an already-released terminal until it consumes it.
+    this.released.delete(terminalId);
+    this.failedCreations.delete(terminalId);
     let ptyLoad: PtyLoadResult;
     try {
       ptyLoad = await loadPty();
@@ -656,6 +679,14 @@ export class WebTerminalRegistry {
     };
   }
 
+  /**
+   * Whether a terminal is mid-creation: admitted by the caller but not yet
+   * registered. A missing snapshot during this window is not a proven exit.
+   */
+  isCreating(terminalId: string): boolean {
+    return this.creating.has(terminalId);
+  }
+
   /** Read buffered output and exit state when a browser tab reconnects. */
   readSnapshot(terminalId: string): WebTerminalSnapshot | undefined {
     const session = this.sessions.get(terminalId);
@@ -670,6 +701,45 @@ export class WebTerminalRegistry {
         ? { failed: true, failureMessage: session.failure.message }
         : {}),
     };
+  }
+
+  /**
+   * Read only the lifecycle state, without materializing the scrollback.
+   * Admission and maintenance polls need just these booleans; joining the
+   * whole replay buffer for them is O(scrollback) per call.
+   */
+  readState(
+    terminalId: string,
+  ): { exited: boolean; failed: boolean; exitCode?: number } | undefined {
+    const session = this.sessions.get(terminalId);
+    if (!session) return undefined;
+    if (session.failure) {
+      return {
+        exited: false,
+        failed: true,
+        exitCode: WEB_TERMINAL_FAILURE_EXIT_CODE,
+      };
+    }
+    return {
+      exited: session.exited,
+      failed: false,
+      ...(session.exitCode !== undefined ? { exitCode: session.exitCode } : {}),
+    };
+  }
+
+  /**
+   * Whether this registry released the terminal while it was live. A released
+   * terminal has a proven release receipt; a failed spawn leaves no session
+   * but was never released, so it must not be reported as a clean exit.
+   */
+  isReleased(terminalId: string): boolean {
+    return this.released.has(terminalId);
+  }
+
+  /** Whether a creation ended without a session and was not released (a failed
+   * load/spawn). It carries a failure end, never the clean release code. */
+  isFailedCreation(terminalId: string): boolean {
+    return this.failedCreations.has(terminalId);
   }
 
   write(terminalId: string, data: string): WebTerminalWriteResult {
@@ -755,6 +825,7 @@ export class WebTerminalRegistry {
     }
     this.clearReclaim(session);
     this.sessions.delete(terminalId);
+    this.released.add(terminalId);
     if (!session.exited && !session.failure) {
       for (const listener of session.exitListeners) {
         listener({ exitCode: 143, signal: 15 });
@@ -797,6 +868,17 @@ export class WebTerminalRegistry {
   }
 
   private finishCreating(terminalId: string): void {
+    // A creation that ends without a session must leave a provable end receipt
+    // so the hold settles instead of answering unknown forever: a cancelled
+    // creation was released (clean release code), a failed load/spawn is a
+    // failure end. A successful creation already has its session, so no receipt.
+    if (!this.sessions.has(terminalId)) {
+      if (this.cancelledCreations.has(terminalId)) {
+        this.released.add(terminalId);
+      } else {
+        this.failedCreations.add(terminalId);
+      }
+    }
     this.creating.delete(terminalId);
     this.cancelledCreations.delete(terminalId);
   }

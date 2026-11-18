@@ -28,6 +28,8 @@ export {
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  parseChannelWorkflowOrigin,
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
@@ -40,6 +42,7 @@ export type {
   ChannelLoopToolResult,
   ChannelToolContext,
   ChannelToolDefinition,
+  ChannelWorkflowOrigin,
   PermissionRequestEvent,
   PermissionResolvedEvent,
   SessionDiedEvent,
@@ -235,3 +238,15 @@ export type {
 } from './types.js';
 export { matchMessageRoute } from './message-routes.js';
 export type { MatchedMessageRoute } from './message-routes.js';
+export type {
+  ManagedChannelAdapter,
+  ManagedChannelPolicy,
+  ManagedInboundEvent,
+  ManagedClaimedDelivery,
+  ManagedReceipt,
+  ManagedChannelControlPlane,
+} from './managed-channel.js';
+export {
+  MANAGED_OUTBOUND_LIMIT,
+  validManagedReceipt,
+} from './managed-channel.js';

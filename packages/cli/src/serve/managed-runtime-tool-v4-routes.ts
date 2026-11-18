@@ -20,7 +20,7 @@ import {
   parseManagedShellCapture,
   parseManagedToolReceipt,
 } from './managed-runtime-tool-v3-routes.js';
-import { MEASURED_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import { isMeasuredWorkspaceCapability } from './managed-workspace-activation.js';
 import type {
   ManagedToolExecutor,
   ManagedToolInvocationView,
@@ -80,8 +80,7 @@ export function registerManagedRuntimeToolV4Routes(
     >,
   executor: ManagedToolExecutor,
 ): void {
-  if (identity.capabilityDigest !== MEASURED_WORKSPACE_CAPABILITY_DIGEST)
-    return;
+  if (!isMeasuredWorkspaceCapability(identity.capabilityDigest)) return;
   const frozen = new Map<
     string,
     {

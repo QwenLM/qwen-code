@@ -1,8 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher;
-import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore.ContextCompressionState;
@@ -35,7 +33,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
@@ -43,11 +40,11 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SyncRename;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
-import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -86,7 +83,7 @@ public class ManagedAgentStore implements AgentStateStore {
             ManagedAgentSettings properties, HarnessRules harnessRules) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 null, new JdbcManagedSessionSkills(jdbc, objectMapper, new RequestDigests(), null), null,
-                null, null, null, null, null);
+                null, null, null, null);
     }
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
@@ -96,11 +93,11 @@ public class ManagedAgentStore implements AgentStateStore {
             JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
             JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
-            JdbcSessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
+            JdbcSessionWorktreeStore sessionWorktrees,
             JdbcManagedExtensionRecordStore configRecords) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
-                sessionWorktrees, journalEventTransport, configRecords, null, null);
+                sessionWorktrees, configRecords, null, null);
     }
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper,
@@ -110,11 +107,11 @@ public class ManagedAgentStore implements AgentStateStore {
             JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
             JdbcWorkspaceLifecycleStore lifecycle, JdbcManagedAgentDefinitionStore definitions,
-            JdbcSessionWorktreeStore sessionWorktrees, JournalEventTransport journalEventTransport,
+            JdbcSessionWorktreeStore sessionWorktrees,
             JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs) {
         this(jdbc, objectMapper, clock, eventPublisher, workspaces, properties, harnessRules,
                 worktreeFiles, creationSkills, extensionPackages, lifecycle, definitions,
-                sessionWorktrees, journalEventTransport, configRecords, modelConfigs, null);
+                sessionWorktrees, configRecords, modelConfigs, null);
     }
 
     @Autowired
@@ -125,7 +122,7 @@ public class ManagedAgentStore implements AgentStateStore {
             JdbcManagedSessionSkills creationSkills,
             com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages extensionPackages,
             @Nullable JdbcWorkspaceLifecycleStore lifecycle, @Nullable JdbcManagedAgentDefinitionStore definitions,
-            @Nullable JdbcSessionWorktreeStore sessionWorktrees, @Nullable JournalEventTransport journalEventTransport,
+            @Nullable JdbcSessionWorktreeStore sessionWorktrees,
             @Lazy @Nullable JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
             @Nullable JdbcJournalPacks journalPacks) {
         String approvalMode = properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
@@ -133,14 +130,12 @@ public class ManagedAgentStore implements AgentStateStore {
         List<String> definitionToolProfiles = properties.getDefinitionToolProfiles();
         List<String> definitionModels = properties.getDefinitionModels();
         List<WebShellModelOption> modelCatalog = ManagedSessionModelConfigs.catalog(properties);
-        boolean journalEventTransportEnabled = properties.getEventTransport().isEnabled();
         boolean workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         boolean workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         boolean workspaceChildAgentsEnabled = properties.admitsPublicChildAgents();
         boolean managedExtensionExecutionEnabled = properties.getExtensions().isEnabled() && properties.getManagedExtensions().isEnabled();
         long lifecycleHandoffMillis = properties.getSessionStore().getWriterLeaseDuration().toMillis();
         List<? extends ManagedAgentSettings.RuntimeBroker.WorkspaceMount> workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
-        ResidentWorkspaces residentWorkspaces = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
         WorkspaceCreationRoots createdRoots = new WorkspaceCreationRoots(jdbc, properties);
         if (StringUtils.isBlank(agentRevision)
                 || agentRevision.length() > 128) {
@@ -151,10 +146,10 @@ public class ManagedAgentStore implements AgentStateStore {
         this.eventJournal = new AgentEventJournal(storeRows, jdbc, clock, eventPublisher);
         this.sessionQueries = new AgentSessionQueries(storeRows, worktreeFiles, jdbc, modelCatalog);
         this.messageProjection = new AgentMessageProjection(eventJournal, storeRows, jdbc, objectMapper, clock);
-        this.sessionPolicies = new AgentSessionPolicies(eventJournal, sessionQueries, storeRows, worktreeFiles, harnessRules, configRecords, jdbc, objectMapper, clock, approvalMode, workspaces, agentRevision, definitionToolProfiles, definitionModels, modelCatalog, definitions, creationSkills, workspaceFilesEnabled, workspaceShellEnabled, residentWorkspaces);
+        this.sessionPolicies = new AgentSessionPolicies(eventJournal, sessionQueries, storeRows, worktreeFiles, harnessRules, configRecords, jdbc, objectMapper, clock, approvalMode, workspaces, agentRevision, definitionToolProfiles, definitionModels, modelCatalog, definitions, creationSkills, workspaceFilesEnabled, workspaceShellEnabled);
         this.sessionCommands = new AgentSessionCommands(eventJournal, sessionPolicies, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, workspaceShellEnabled);
         this.lifecycleOperations = new AgentLifecycleOperations(eventJournal, sessionCommands, sessionPolicies, sessionQueries, storeRows, jdbc, lifecycle, objectMapper, clock, workspaces, workspaceFilesEnabled, lifecycleHandoffMillis);
-        this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, residentWorkspaces, createdRoots, journalEventTransport, journalEventTransportEnabled, modelConfigs);
+        this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, createdRoots, modelConfigs);
         this.turnExecution = new AgentTurnExecution(eventJournal, messageProjection, sessionCommands, storeRows, jdbc, objectMapper, clock, journalPacks);
         this.executionOperations = new AgentExecutionOperations(eventJournal, lifecycleOperations, sessionPolicies, sessionQueries, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, journalPacks);
     }
@@ -219,22 +214,6 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public Admission replayWorkspaceSessionCommand(String tenantId, String actorId, String idempotencyKey, String requestDigest) {
         return sessionAdmissions.replayWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest);
-    }
-
-    Admission insertCsiSessionCommand(
-            WorkspaceCsiRegistration registration,
-            String actorId,
-            String idempotencyKey,
-            String requestDigest,
-            String requestedRevision,
-            String title,
-            WorkspaceSelection selection) {
-        return sessionAdmissions.insertCsiSessionCommand(registration, actorId, idempotencyKey, requestDigest, requestedRevision, title, selection);
-    }
-
-    RuntimeProvisionRequest requireCsiRequest(
-            WorkspaceCsiRegistration registration, String sessionId) {
-        return sessionAdmissions.requireCsiRequest(registration, sessionId);
     }
 
     @Override
@@ -359,55 +338,8 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public SessionMutationCommand beginSessionRename(String tenantId, String key, String digest, String sessionId, String title) {
-        return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, null);
-    }
-
-    @Override
-    @Transactional
-    public SessionMutationCommand beginSessionRename(String tenantId, String key, String digest, String sessionId, String title, String actorId) {
-        return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, actorId);
-    }
-
-    @Override
-    @Transactional
-    public SessionRecord completeSessionRename(String tenantId, String key, String sessionId, String title, String bootId, long revision) {
-        return sessionCommands.completeSessionRename(tenantId, key, sessionId, title, bootId, revision);
-    }
-
-    @Override
-    @Transactional
-    public SessionRecord completeSessionRename(RenameDelivery delivery, String owner, String bootId) {
-        return sessionCommands.completeSessionRename(delivery, owner, bootId);
-    }
-
-    @Override
-    @Transactional
-    public void abandonSessionRename(String tenantId, String key, String sessionId, long revision, String owner) {
-        sessionCommands.abandonSessionRename(tenantId, key, sessionId, revision, owner);
-    }
-
-    @Override
-    @Transactional
-    public List<RenameDelivery> deliverableRenames(long now) {
-        return sessionCommands.deliverableRenames(now);
-    }
-
-    @Override
-    @Transactional
-    public Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
-        return sessionCommands.claimRename(delivery, owner, lease);
-    }
-
-    @Override
-    public void markRenameSubmitted(RenameDelivery delivery, String owner) {
-        sessionCommands.markRenameSubmitted(delivery, owner);
-    }
-
-    @Override
-    @Transactional
-    public void retryRename(RenameDelivery delivery, String owner, long availableAt) {
-        sessionCommands.retryRename(delivery, owner, availableAt);
+    public SyncRename settleRenameSync(String tenantId, String key, String digest, String sessionId, String title, String actorId) {
+        return sessionCommands.settleRenameSync(tenantId, key, digest, sessionId, title, actorId);
     }
 
     @Transactional
@@ -493,10 +425,6 @@ public class ManagedAgentStore implements AgentStateStore {
     static final String SUBMIT_INPUT_UNCONFIRMED = AgentSessionCommands.SUBMIT_INPUT_UNCONFIRMED;
 
     static final String CANCEL_UNCONFIRMED = AgentSessionCommands.CANCEL_UNCONFIRMED;
-
-    static final String SESSION_TITLE_UNCONFIRMED = AgentSessionCommands.SESSION_TITLE_UNCONFIRMED;
-
-    static final String SESSION_TITLE_UNDELIVERED = AgentExecutionOperations.SESSION_TITLE_UNDELIVERED;
 
     @Override
     @Transactional
@@ -612,17 +540,6 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public AcceptanceVerdict turnInputAcceptance(String tenantId, String sessionId, String operationId) {
         return executionOperations.turnInputAcceptance(tenantId, sessionId, operationId);
-    }
-
-    @Override
-    public Optional<AcceptanceVerdict> renameAcceptance(ParkedOperation parked) {
-        return executionOperations.renameAcceptance(parked);
-    }
-
-    @Override
-    @Transactional
-    public boolean settleParkedRename(ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
-        return executionOperations.settleParkedRename(parked, verdict, retryAt);
     }
 
     @Override

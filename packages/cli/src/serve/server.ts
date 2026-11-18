@@ -27,6 +27,7 @@ import type {
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
+import { sseMaxConnections } from './daemon-status.js';
 import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
@@ -164,6 +165,7 @@ import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js
 import {
   createRequestedSessionIdAdmission,
   requestedSessionIdPersistenceExists,
+  type RequestedSessionIdAdmission,
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
@@ -175,7 +177,10 @@ import {
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
-import { registerGoalsRoutes } from './routes/goals.js';
+import {
+  registerGoalsRoutes,
+  registerWorkspaceQualifiedGoalsRoutes,
+} from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
 import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
 import {
@@ -191,6 +196,7 @@ import {
   collectBoundSessionIds,
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
+  type KeepaliveSessionResumeRequest,
 } from './scheduled-task-keepalive.js';
 import {
   registerWorkspaceDiagnosticStatusRoutes,
@@ -285,6 +291,7 @@ import {
   deleteDaemonSessionIfOrphan,
   SessionArchiveCoordinator,
 } from './server/session-archive.js';
+import { restoreSessionCore } from './server/session-restore.js';
 import {
   installSelfOriginStripMiddleware,
   installRemoteSelfOriginMiddleware,
@@ -3662,6 +3669,15 @@ export function createServeApp(
     workspaceRegistry,
     archiveCoordinator,
     requestedSessionIdAdmission,
+    // Late-bound: the refresh timer is started before this app exists, so the
+    // serve root installs the hook on locals and it is read per restore.
+    onSessionRestored: ({ workspaceCwd, sessionId }) => {
+      (
+        app.locals as {
+          prWatchDrainNow?: (cwd: string, sessionId?: string) => void;
+        }
+      ).prWatchDrainNow?.(workspaceCwd, sessionId);
+    },
     mutate,
     sendBridgeError,
     daemonLog,
@@ -3685,6 +3701,27 @@ export function createServeApp(
         }
       : {}),
   });
+  // The PR watch's in-process wake shares this instance with the routes: a
+  // second tracker would not see these reservations and could restore over one.
+  (
+    app.locals as {
+      requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+    }
+  ).requestedSessionIdAdmission = requestedSessionIdAdmission;
+  // Same reason: a live-conversation restore throws without this, so the wake
+  // would report every session in such a workspace unavailable.
+  if (liveConversationWorkspaceForRoutes) {
+    (
+      app.locals as {
+        materializeLiveConversationDirectory?: (
+          sessionId: string,
+        ) => Promise<string>;
+      }
+    ).materializeLiveConversationDirectory = (sessionId: string) =>
+      liveConversationWorkspaceForRoutes.materializeConversationDirectory(
+        sessionId,
+      );
+  }
 
   if (standaloneSessionService) {
     registerStandaloneSessionRoutes(app, {
@@ -3913,6 +3950,12 @@ export function createServeApp(
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
+  // The qualified listing lets a multi-workspace Web Shell aggregate every
+  // registered project's goals, not just the primary's.
+  registerWorkspaceQualifiedGoalsRoutes(app, {
+    workspaceRegistry,
+    conversationRuntimeActivity,
+  });
 
   // The primary workspace's /autofix-pr watches, read from the clone's files
   // (as `qwen autofix-pr status` lists them). Read-only.
@@ -4025,6 +4068,44 @@ export function createServeApp(
   // embeds that call createServeApp neither spawn sessions on boot nor hold a
   // heartbeat timer (both would read the bound workspace's real tasks file).
   if (deps.manageScheduledTaskSessions) {
+    const restoreScheduledSession = async (
+      runtime: WorkspaceRuntime,
+      request: KeepaliveSessionResumeRequest,
+    ) => {
+      const generation = workspaceRegistry.getManagedEntryByWorkspaceId(
+        runtime.workspaceId,
+      )?.current;
+      if (generation?.runtime !== runtime) {
+        throw new WorkspaceGenerationClosedError();
+      }
+      const assertOpen = () => generation.guard.assertOpen();
+      assertOpen();
+      const result = await restoreSessionCore({
+        action: 'resume',
+        runtime,
+        workspaceCwd: runtime.workspaceCwd,
+        sessionId: request.sessionId,
+        archiveCoordinator,
+        requestedSessionIdAdmission,
+        assertRuntimeGenerationOpen: assertOpen,
+        daemonLog,
+        materializeLiveConversationDirectory: undefined,
+        historyPageSize: undefined,
+        liveReplayMode: undefined,
+        compactedReplayMode: undefined,
+        clientId: undefined,
+        approvalMode: undefined,
+        restoreSource: {
+          sourceType: request.sourceType,
+          sourceId: request.sourceId,
+        },
+        isCancelled: () => runtimeStopsClosing,
+      });
+      if (result.kind !== 'restored') {
+        throw new Error('Scheduled session restore was cancelled');
+      }
+      return result.session;
+    };
     const registerScheduledTaskAuthorizations = (
       workspaceCwd: string,
       tasks: readonly DurableCronTask[],
@@ -4063,6 +4144,8 @@ export function createServeApp(
       void runWithWorkspaceRuntimeStorage(runtime, () =>
         rehydrateScheduledTaskSessions({
           bridge: runtime.bridge,
+          restoreSession: (request) =>
+            restoreScheduledSession(runtime, request),
           boundWorkspace: runtime.workspaceCwd,
           loadTimeoutMs: scheduledTaskRestoreTimeoutMs,
           onTasksRead: (tasks) =>
@@ -4104,6 +4187,7 @@ export function createServeApp(
       if (keepaliveStops.has(runtime.workspaceCwd)) return;
       const keepalive = startScheduledTaskKeepalive({
         bridge: runtime.bridge,
+        restoreSession: (request) => restoreScheduledSession(runtime, request),
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
         reviveTimeoutMs: scheduledTaskRestoreTimeoutMs,
@@ -4162,6 +4246,10 @@ export function createServeApp(
     workspaceRegistry,
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
+    // null = unlimited (listener cap disabled or explicit opt-out).
+    maxSseConnections:
+      sseMaxConnections(opts.maxConnections, opts.maxSseConnections) ??
+      undefined,
     sendBridgeError,
     virtualSubagentSessions,
     resolveSubagentSessionRuntime,

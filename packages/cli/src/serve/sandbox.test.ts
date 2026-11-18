@@ -667,6 +667,8 @@ describe('getSandboxPassthroughEnvArgs', () => {
         QWEN_CODE_DESKTOP: '1',
         QWEN_CODE_ENABLE_WORKFLOWS: '1',
         QWEN_CODE_DISABLE_WORKFLOWS: '1',
+        QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '0',
+        QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: '0',
       }),
     ).toEqual([
       '--env',
@@ -689,6 +691,10 @@ describe('getSandboxPassthroughEnvArgs', () => {
       'QWEN_CODE_ENABLE_WORKFLOWS=1',
       '--env',
       'QWEN_CODE_DISABLE_WORKFLOWS=1',
+      '--env',
+      'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=0',
+      '--env',
+      'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=0',
     ]);
   });
 });
