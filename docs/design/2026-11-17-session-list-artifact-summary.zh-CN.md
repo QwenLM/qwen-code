@@ -103,7 +103,10 @@
   会话（journal 记录早于 sidecar）与 fork 的首次打开，并在任何带外 journal
   编辑后重新播种。零数量会治愈已存在的陈旧 sidecar（一次失败的尽力零写入
   不能留下永久幻影计数），但不会为无产物会话新建；数量相等时跳过写入，
-  暖 load 不新增写盘；部分读取的 transcript 绝不播种。播种还要求 journal
+  暖 load 不新增写盘；部分读取的 transcript 绝不播种。播种在空对话早退
+  之前执行，因此 side-records-only 会话（首个 prompt 之前注册的产物——与
+  库守卫接受的 transcript 形状相同）即使没有可加载的对话，也在首次打开时
+  获得数量。播种还要求 journal
   具备权威性：无历史链缺口（断链会把 artifact 事件孤儿化出活跃分支而少计），
   且无记录级损坏警告——与库变更守卫同一判定
   （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。两处
@@ -209,6 +212,8 @@
 - `packages/acp-bridge/src/bridgeTypes.ts`（`BridgeSessionSummary`）。
 - `packages/sdk-typescript/src/daemon/types.ts`（`DaemonSessionSummary`）。
 - `packages/cli/src/serve/server/session-list.ts`（增强、合并规则）。
+- `packages/cli/src/serve/acp-http/dispatch.ts`（ACP session/list 投影
+  数量与恢复中标记）。
 - `packages/web-shell/client/daemon/session/types.ts`（connection 字段、
   action 选项）。
 - `packages/web-shell/client/daemon/session/actions.ts`（乐观 hint、清空）。
@@ -243,14 +248,18 @@
   保留与 fork 剥离；recording-service sidecar 写入（带/不带数量的 event、
   snapshot，两条路径的先 journal 后 sidecar 顺序，无计数旧事件保留已有
   sidecar）；load 播种及其权威性门（历史链缺口、含变更级丢弃的记录级损坏
-  警告、被容忍的单产物级跳过、全拒绝日志被播种与库守卫同样拒绝），active
+  警告、被容忍的单产物级跳过、全拒绝日志被播种与库守卫同样拒绝、
+  side-records-only 会话在空对话早退之前播种），active
   与 archived 两态、event 与 snapshot（fork）记录、按冷启动可恢复集合计数
   （无快照 published file 定位符经 bridge/core 共享谓词排除、真正预览快照
   保留）；库删除更新（可恢复
-  幸存者算术，单个与批量、请求批次含陈旧 id）；
-  archive/delete/冲突处理；工作目录搬迁；store `count()` 含删除后递减；
+  幸存者算术，单个与批量、请求批次含陈旧 id、无快照 published file 定位符
+  排除）；
+  archive/delete/冲突处理（含 kept 侧无 sidecar 的形状）；工作目录搬迁；
+  store `count()` 含删除后递减；
   `toSessionSummary` 携带/省略与恢复中标记（`artifactCountPending` 保持行
-  可见、合并保留 sidecar 计数、rewind 恢复抛错时清理）；ACP 边界把盖章
+  可见、合并保留 sidecar 计数、rewind 恢复抛错时清理、共享通道上按会话
+  键控）；ACP 边界把盖章
   数量带到 recorder、ACP
   session/list 投影携带数量与标记；全部
   列表路径的增强（含扫描中途 abort 的逐次检查与被中断扫描不进缓存、单会话

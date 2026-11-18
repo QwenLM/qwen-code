@@ -123,6 +123,10 @@ clicked, using the list data the sidebar already holds.
   best-effort zero write must not leave a phantom count forever) but never
   creates one for an artifact-free session; an equal count skips the write so
   a warm load adds no disk write; a partial transcript read never seeds. The
+  seed runs before the empty-conversation early return, so side-records-only
+  sessions (artifacts registered before the first prompt — the same
+  transcript shape the library guard accepts) gain a count on their first
+  open even though they have no conversation to load. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no
   record-level damage warnings — the same predicate the library mutation
@@ -256,6 +260,8 @@ clicked, using the list data the sidebar already holds.
 - `packages/acp-bridge/src/bridgeTypes.ts` (`BridgeSessionSummary`).
 - `packages/sdk-typescript/src/daemon/types.ts` (`DaemonSessionSummary`).
 - `packages/cli/src/serve/server/session-list.ts` (enrichment, merge rule).
+- `packages/cli/src/serve/acp-http/dispatch.ts` (ACP session/list projection
+  of the count and the pending marker).
 - `packages/web-shell/client/daemon/session/types.ts` (connection fields,
   action options).
 - `packages/web-shell/client/daemon/session/actions.ts` (optimistic hint,
@@ -298,17 +304,21 @@ clicked, using the list data the sidebar already holds.
   an existing sidecar); load seed and its authority gate (history gap,
   record-level damage warnings including change-level drops, tolerated
   per-artifact skips, all-refused journals refused by the seed and the
-  library guard alike), in both active and archived states, from event and
-  snapshot (fork) records, counting the cold-restorable set (non-snapshot
-  published file locators excluded via the shared bridge/core predicate,
-  real preview snapshots kept); library
+  library guard alike, side-records-only sessions seeded before the
+  empty-conversation early return), in both active and archived states, from
+  event and snapshot (fork) records, counting the cold-restorable set
+  (non-snapshot published file locators excluded via the shared bridge/core
+  predicate, real preview snapshots kept); library
   removal update (restorable-survivor arithmetic, single and batch, stale
-  ids in the requested batch);
-  archive/delete/conflict handling; working-directory relocation; store
+  ids in the requested batch, non-snapshot published file locators
+  excluded);
+  archive/delete/conflict handling (including the kept-side-absent shape);
+  working-directory relocation; store
   `count()` including the decrement after a removal; `toSessionSummary`
   include/omit and the pending-restore marker (`artifactCountPending` keeps
-  the row visible and the merge keeps the sidecar count, and a rejecting
-  rewind restore clears it); the ACP boundary
+  the row visible and the merge keeps the sidecar count, a rejecting
+  rewind restore clears it, and it is keyed per session on a shared
+  channel); the ACP boundary
   carries the stamped count to the recorder and the ACP session/list
   projection carries the count and the marker; enrichment on all list paths,
   including a mid-scan abort (per-iteration checks, interrupted scan not
