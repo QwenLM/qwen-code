@@ -2734,6 +2734,12 @@ export class AcpDispatcher {
               ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),
               ...(s.groupId !== undefined ? { groupId: s.groupId } : {}),
               ...(s.color !== undefined ? { color: s.color } : {}),
+              ...(s.artifactCount !== undefined
+                ? { artifactCount: s.artifactCount }
+                : {}),
+              ...(s.artifactCountPending !== undefined
+                ? { artifactCountPending: s.artifactCountPending }
+                : {}),
             })),
             ...(result.nextCursor != null
               ? { nextCursor: result.nextCursor }

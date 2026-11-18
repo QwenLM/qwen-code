@@ -110,6 +110,7 @@ import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { ModSession, type ModTurn } from './services/mod-session.js';
 import { frameModPrompt } from './services/mod-prompt-frame.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
+import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   AlreadyReportedError,
@@ -2741,6 +2742,7 @@ export async function runNonInteractive(
       // exists.
       const sharedAgentLoop =
         config.isUnifiedAgentLoopEnabled?.('headless') === true;
+      logAgentLoopEntry(config, 'headless');
       type SharedLoopScope = {
         maxRounds?: number;
         runtimeView?: RuntimeContentGeneratorView;
@@ -2860,6 +2862,9 @@ export async function runNonInteractive(
           },
           ...(modSession?.hasToolHooks && { executor: modExecutor }),
           runtimeView: scope.runtimeView,
+          // Record the results of the calls a cancelled batch started, as the
+          // current loop does; the abort then ends the run.
+          keepCancelledResults: 'launched',
           host: {
             onRoundStart: (round) => {
               roundStartedAt = Date.now();

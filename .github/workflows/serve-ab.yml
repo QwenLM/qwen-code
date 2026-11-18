@@ -27,13 +27,18 @@ on:
     branches:
       - 'main'
       - 'release/**'
-    # The daemon's HTTP response surface lives entirely under serve/. `core` has
-    # no serve/health subtree, and firing on all ~1100 packages/core/src files
-    # (tools, prompts, models, …) would trigger the expensive 2x-build A/B on
-    # most core PRs for nothing — a rare core-only response change is an
-    # acceptable best-effort miss. Doc/UI-only PRs don't need an A/B either.
+    # The daemon's HTTP response surface lives under serve/, except the
+    # canonical capability registry, which lives in the daemon SDK and is
+    # named below. `core` has no serve/health subtree, and firing on all
+    # ~1100 packages/core/src files (tools, prompts, models, …) would trigger
+    # the expensive 2x-build A/B on most core PRs for nothing — a rare
+    # core-only response change is an acceptable best-effort miss. Doc/UI-only
+    # PRs don't need an A/B either.
     paths:
       - 'packages/cli/src/serve/**'
+      # The registry decides the /capabilities body this lane diffs; a
+      # registry-only edit in the SDK must trigger the A/B too.
+      - 'packages/sdk-typescript/src/daemon/capabilities.ts'
       # Core files the daemon's session-admission answers are decided by:
       # transcript lookup and creation-metadata reads, the JSONL recovery they
       # sit on, and the two the harness MIRRORS to place its fixtures (a rename

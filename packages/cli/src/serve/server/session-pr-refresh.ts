@@ -11,6 +11,7 @@
 // static — a dynamic import() of the barrel from inside would make the
 // barrel's full namespace live and poison the shared chunk for every
 // static barrel importer (ACP agent included).
+import type { BoundPromptLanguage } from '@qwen-code/channel-base';
 import { existsSync } from 'node:fs';
 import {
   fetchGitHubPullRequestIssues,
@@ -137,6 +138,8 @@ export interface SessionPrRefreshOptions {
     events?: ReadonlySet<PrTransitionType>;
     /** Per-host subscription when the deprecated channel alias is in effect. */
     eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
+    /** The language the listing write persists its summaries in. */
+    language?: BoundPromptLanguage;
     log?: (message: string) => void;
   };
 }
@@ -307,6 +310,7 @@ async function recordListedPrStates(
                   },
                   observedAt,
                   events,
+                  prWatch.language,
                 )
               : undefined;
           // Same diagnostic the view path emits: an evicted entry is a lost
@@ -782,7 +786,7 @@ export function startSessionPrRefreshTimer(deps: {
   const prDrainState = createPrWatchDrainState();
   // Set only once a gated path actually claimed the watch — the tick's
   // observation block or an on-demand drain — so shutdown never reads a watch
-  // seam while the switch is off (switch-off parity).
+  // seam while no deps are provisioned (unprovisioned parity).
   let activeWatchDir: string | undefined;
   let running = false;
   // Latched by stopWatch so an on-demand drain cannot claim the watch
@@ -831,6 +835,7 @@ export function startSessionPrRefreshTimer(deps: {
             locks: watchDeps.locks,
             allowedHosts: watchDeps.allowedHosts,
             eventsForHost: watchDeps.eventsForHost,
+            ...(watchDeps.language ? { language: watchDeps.language } : {}),
             // Without this the seam's `log` is a declared-and-read field with
             // no setter, and every listing-write refusal stays silent — the
             // claim's contract is that a blocked outcome is always logged.
@@ -856,7 +861,7 @@ export function startSessionPrRefreshTimer(deps: {
             // A failed observation tick must not starve the state refresh,
             // but log it: every other failure path in the watch logs, and a
             // tick that throws every tick would otherwise be invisible while
-            // the switch is on.
+            // the watch is enabled.
             process.stderr.write(
               `[serve] PR watch observation tick failed: ${String(error)}\n`,
             );
@@ -869,8 +874,8 @@ export function startSessionPrRefreshTimer(deps: {
           }
           // Delivery drain (master §4/§5): runs after the observation so it
           // can deliver the transitions this tick detected. Behind the same
-          // off switch and its own unpopulated deps seam, so it is inert until
-          // the enablement increment. Restores run off-tick inside the drain.
+          // deps-presence gate as the observation, so with no subscription it
+          // is inert. Restores run off-tick inside the drain.
           const drainDeps = deps.getPrDrainDeps?.();
           if (drainDeps) {
             // `listAll()` omits every non-active entry, so a draining or

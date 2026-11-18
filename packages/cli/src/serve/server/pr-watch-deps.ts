@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { BoundPromptLanguage } from '@qwen-code/channel-base';
 import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import { resolveGithubWebOrigin } from '@qwen-code/channel-github/web-origin';
 import { defaultPrWatchDir } from './pr-watch-store.js';
@@ -80,6 +81,12 @@ export interface PrWatchDepsSources {
   subscription: PrWatchSubscription;
   /** Applies to both the setting and the alias. */
   wakeDormant: boolean;
+  /**
+   * The prompt language for both seams, resolved once at boot. One value for
+   * both so the observation and the drain cannot disagree about the locale
+   * within one boot. Absent means English.
+   */
+  language?: BoundPromptLanguage;
   /** Late-bound: the serve app is built after the refresh timer starts. */
   archiveCoordinator: () => SessionArchiveCoordinator | undefined;
   /**
@@ -235,6 +242,7 @@ export function createPrWatchDeps(
     locks,
     allowedHosts,
     eventsForHost: sources.subscription.eventsForHost,
+    ...(sources.language ? { language: sources.language } : {}),
     log,
   };
 
@@ -247,6 +255,7 @@ export function createPrWatchDeps(
     // operator setting existed.
     actionsForEvent: sources.subscription.actionsForEvent,
     wakeDormant: sources.wakeDormant,
+    ...(sources.language ? { language: sources.language } : {}),
     scanBindings: async (runtime) => {
       const bindings: SessionPrBindingSummary[] = [];
       const partial = await scanWorkspaceBindings(runtime, bindings);

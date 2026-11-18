@@ -17,13 +17,14 @@ import {
 } from 'react';
 import type {
   CSSProperties,
+  ComponentProps,
   ReactNode,
   RefObject,
   DragEvent as ReactDragEvent,
   ChangeEvent as ReactChangeEvent,
 } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import { useOptionalWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalComposerWorkspace } from '../hooks/useComposerWorkspace.js';
 import type { CommandInfo } from '../adapters/types';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { EXECUTION_APPROVAL_MODES } from '../utils/planMode';
@@ -35,7 +36,10 @@ import type {
   ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
-import type { SkillInfo } from '../completions/slashCompletion';
+import type {
+  SkillInfo,
+  SlashArgumentCompleter,
+} from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
 import type {
   DaemonReasoningControls,
@@ -83,7 +87,11 @@ import { computePrependSkillTransaction } from './composer/prependSkillInvocatio
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { getShadowAwareActiveElement } from '../utils/dom';
 import { POPOVER_MIN_HEIGHT, popoverTopEdge } from '../utils/popoverRoom';
-import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
+import {
+  isCoarsePointerDevice,
+  MODEL_SHEET_QUERY,
+} from '../hooks/useIsTouchComposer';
+import { useIsLargeScreen } from '../hooks/useIsLargeScreen';
 import {
   getComposerTagIconUrl,
   isBuiltinComposerTagIconUrl,
@@ -104,7 +112,7 @@ import type {
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
 import { appendUnavailableComposerModels } from '../utils/composerModels';
-import { VoiceButton } from '../voice/VoiceButton';
+import { VoiceButton, type VoiceButtonHandle } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
   VoiceStatusRevision,
@@ -121,6 +129,7 @@ import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  ChevronUpIcon,
   GitBranchIcon,
   PanelBottomCloseIcon,
   Settings2Icon,
@@ -145,6 +154,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from './ui/popover';
+import { Drawer, DrawerContent, DrawerTitle, DrawerTrigger } from './ui/drawer';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Switch } from './ui/switch';
@@ -252,6 +262,8 @@ interface ChatEditorProps {
   skillsLoadError?: boolean;
   skillsLoaded?: boolean;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Completes arguments the static subcommand trees cannot (`/send`). */
+  slashArgumentCompleter?: SlashArgumentCompleter;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => boolean;
@@ -286,6 +298,10 @@ interface ChatEditorProps {
   onOpenWorktrees?: () => void;
   /** Opens the commit history graph. */
   onOpenLog?: () => void;
+  /** "Create branch here" for the session's detached managed worktree. */
+  onCreateWorktreeBranch?: (name: string) => Promise<void>;
+  /** "Hand off" between the session's worktree and the local checkout. */
+  onHandoff?: (to: 'local' | 'worktree') => Promise<void>;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -837,6 +853,7 @@ function ToolbarDropdownRow({
   hasCheckItems,
   onSelect,
   itemTooltipMount,
+  itemTooltipSide,
   modelPicker,
   pickerContext,
   overlayRoot,
@@ -847,6 +864,7 @@ function ToolbarDropdownRow({
   hasCheckItems: boolean;
   onSelect: (id: string) => void;
   itemTooltipMount?: WebShellUnavailableModelTooltipMount;
+  itemTooltipSide?: ComponentProps<typeof UnavailableModelTooltip>['side'];
   modelPicker?: WebShellModelPickerOptions;
   pickerContext?: ModelPickerContext;
   overlayRoot: HTMLElement | null;
@@ -942,6 +960,7 @@ function ToolbarDropdownRow({
       enabled={!customActive}
       model={{ id: item.id, label: item.label, tooltip: item.tooltip }}
       mount={itemTooltipMount}
+      side={itemTooltipSide}
     >
       {button}
     </UnavailableModelTooltip>
@@ -976,7 +995,7 @@ function ToolbarPopover({
   items: DropdownItem[];
   activeId: string;
   onOpenChange: (open: boolean) => void;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, source?: 'sheet') => void;
   trigger: ReactNode;
   tooltip?: ReactNode;
   showCheck?: boolean;
@@ -997,14 +1016,20 @@ function ToolbarPopover({
   modelPicker?: WebShellModelPickerOptions;
   pickerContext?: ModelPickerContext;
 }) {
+  const { t } = useI18n();
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
+  // Touch and narrow viewports have no room beside the popover for the model
+  // list, so the whole control becomes a bottom sheet with inline sections.
+  const mobileSheet = useIsLargeScreen(MODEL_SHEET_QUERY) && !modePopover;
   const [collisionBoundary, setCollisionBoundary] =
     useState<HTMLElement | null>(null);
   const selectionRef = useRef(false);
   const handoffRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const submenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const sheetBodyRef = useRef<HTMLDivElement>(null);
+  const sheetListRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const returningFromSubmenuRef = useRef(false);
   const scopeKey = JSON.stringify([
@@ -1032,6 +1057,24 @@ function ToolbarPopover({
   }, [open]);
 
   useEffect(() => {
+    if (mobileSheet) {
+      // Focus non-input containers so touch interaction never opens the
+      // software keyboard, while keyboard and screen-reader focus stays in
+      // the dialog and enters the expanded list.
+      if (open && submenuOpen) {
+        sheetListRef.current?.focus();
+      } else if (open && returningFromSubmenuRef.current) {
+        returningFromSubmenuRef.current = false;
+        submenuTriggerRef.current?.focus();
+      } else if (open) {
+        // The Drawer portal mounts after this effect on the initial opening.
+        // If no submenu state changed, focus its body once that mount commits.
+        queueMicrotask(() => {
+          if (!submenuOpen) sheetBodyRef.current?.focus();
+        });
+      }
+      return;
+    }
     if (open && submenuOpen) {
       searchInputRef.current?.focus();
       return;
@@ -1040,7 +1083,7 @@ function ToolbarPopover({
       returningFromSubmenuRef.current = false;
       submenuTriggerRef.current?.focus();
     }
-  }, [open, submenuOpen]);
+  }, [open, submenuOpen, mobileSheet]);
 
   const hasCheckItems = hasRichItems || showCheck;
   const dropdownItems = (
@@ -1062,9 +1105,19 @@ function ToolbarPopover({
           hasCheckItems={hasCheckItems}
           onSelect={(id) => {
             selectionRef.current = true;
+            if (mobileSheet) {
+              // Keep the sheet open so reasoning controls stay reachable;
+              // only the floating model card collapses on selection.
+              returningFromSubmenuRef.current = true;
+              setSubmenuOpen(false);
+              setSearchQuery('');
+              onSelect(id, 'sheet');
+              return;
+            }
             onSelect(id);
           }}
           itemTooltipMount={itemTooltipMount}
+          itemTooltipSide={mobileSheet ? 'top' : undefined}
           modelPicker={modelPicker}
           pickerContext={pickerContext}
           overlayRoot={overlayRoot}
@@ -1121,6 +1174,107 @@ function ToolbarPopover({
       {dropdownItems}
     </>
   );
+
+  if (mobileSheet) {
+    return (
+      <Drawer
+        open={open}
+        onOpenChange={onOpenChange}
+        shouldScaleBackground={false}
+      >
+        <DrawerTrigger ref={triggerRef} asChild>
+          {trigger}
+        </DrawerTrigger>
+        <DrawerContent
+          aria-describedby={undefined}
+          data-web-shell-model-sheet
+          className="pb-[max(1rem,env(safe-area-inset-bottom))]"
+          onClick={(event) => event.stopPropagation()}
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            triggerRef.current?.focus();
+          }}
+          onEscapeKeyDown={(event) => {
+            if (isHostOverlayEvent(event)) event.preventDefault();
+          }}
+          onPointerDownOutside={(event) => {
+            if (isHostOverlayEvent(event.detail.originalEvent)) {
+              event.preventDefault();
+            }
+          }}
+          onInteractOutside={(event) => {
+            if (isHostOverlayEvent(event.detail.originalEvent)) {
+              event.preventDefault();
+            }
+          }}
+        >
+          <DrawerTitle className="sr-only">
+            {submenu?.sectionLabel ?? t('model.select')}
+          </DrawerTitle>
+          <div
+            ref={sheetBodyRef}
+            tabIndex={-1}
+            className="min-h-0 overflow-y-auto px-3 outline-none"
+            data-vaul-no-drag
+          >
+            {header}
+            {!submenu && searchableItems}
+          </div>
+          {submenu && (
+            <div className="relative px-3">
+              <button
+                type="button"
+                ref={submenuTriggerRef}
+                className={`${styles.dropdownItem} ${styles.sheetSectionRow}`}
+                data-web-shell-model-submenu-trigger
+                aria-expanded={submenuOpen}
+                aria-label={submenu.triggerAriaLabel}
+                onClick={() => {
+                  if (submenuOpen) returningFromSubmenuRef.current = true;
+                  setSubmenuOpen((value) => !value);
+                  setSearchQuery('');
+                }}
+              >
+                <span>{submenu.sectionLabel}</span>
+                <span className={styles.sheetSectionValue}>
+                  <span title={submenu.triggerLabel}>
+                    {submenu.triggerLabel}
+                  </span>
+                  {submenuOpen ? (
+                    <ChevronUpIcon aria-hidden="true" />
+                  ) : (
+                    <ChevronDownIcon aria-hidden="true" />
+                  )}
+                </span>
+              </button>
+              {submenuOpen && (
+                <div
+                  ref={sheetListRef}
+                  tabIndex={-1}
+                  data-web-shell-model-sheet-list
+                  className="absolute inset-x-3 bottom-[calc(100%+8px)] max-h-[60vh] overflow-y-auto rounded-xl border bg-popover p-2 shadow-lg outline-none"
+                  data-vaul-no-drag
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {searchableItems}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="px-3 pt-2">
+            <Button
+              className="w-full"
+              data-web-shell-model-sheet-done
+              onClick={() => onOpenChange(false)}
+            >
+              {t('common.done')}
+            </Button>
+          </div>
+        </DrawerContent>
+      </Drawer>
+    );
+  }
 
   return (
     <Popover
@@ -1376,7 +1530,11 @@ function ModelReasoningControls({
             <button
               key={effort}
               type="button"
-              className={styles.reasoningEffortRow}
+              className={`${styles.reasoningEffortRow}${
+                reasoning.effort === effort
+                  ? ` ${styles.reasoningEffortRowActive}`
+                  : ''
+              }`}
               aria-pressed={reasoning.effort === effort}
               data-web-shell-effort={effort}
               disabled={!reasoning.enabled || busy || !onSelect}
@@ -1738,6 +1896,7 @@ export const ChatEditor = memo(
       skillsLoadError = false,
       skillsLoaded = false,
       slashCommandCategoryOrder,
+      slashArgumentCompleter,
       autoSubmitSlashCommands = false,
       queuedMessages = [],
       onPopQueuedMessages,
@@ -1760,6 +1919,8 @@ export const ChatEditor = memo(
       onOpenCommit,
       onOpenWorktrees,
       onOpenLog,
+      onCreateWorktreeBranch,
+      onHandoff,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -1871,7 +2032,7 @@ export const ChatEditor = memo(
 
     // Resolve the upload target BEFORE useComposerCore so the @ panel's upload
     // item can be capability-gated (hidden on daemons without the feature).
-    const uploadWorkspace = useOptionalWorkspace();
+    const uploadWorkspace = useOptionalComposerWorkspace();
     const uploadTarget = useMemo(() => {
       // The host switch also applies to an explicitly scoped Managed target;
       // daemon targets require their own capability and trust checks below.
@@ -1973,8 +2134,19 @@ export const ChatEditor = memo(
       [onAttachmentPreview, onComposerTagClick],
     );
 
+    const [voiceActive, setVoiceActive] = useState(false);
+    const voiceButtonRef = useRef<VoiceButtonHandle>(null);
+    // Assigned below once insertVoiceText exists; useComposerCore awaits it
+    // before a user-initiated submit so dictation lands in the sent message.
+    const prepareVoiceSubmitRef = useRef<() => Promise<void>>(async () => {});
     const core = useComposerCore({
       onSubmit,
+      // Only install the finalizer while a capture is active (voiceActive
+      // stays true through transcribing), so plain typed sends keep the
+      // synchronous submit path.
+      prepareSubmit: voiceActive
+        ? () => prepareVoiceSubmitRef.current()
+        : undefined,
       onInputTextChange,
       onCycleMode,
       cycleModeOnTab,
@@ -1989,6 +2161,7 @@ export const ChatEditor = memo(
         Boolean(onSkillsOpenChange) &&
         (!skillsLoaded || skillsLoading || skillsLoadError),
       slashCommandCategoryOrder,
+      slashArgumentCompleter,
       autoSubmitSlashCommands,
       queuedMessages,
       onPopQueuedMessages,
@@ -2481,9 +2654,12 @@ export const ChatEditor = memo(
       focusComposer,
     ]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+    const mobileModelSheet = useIsLargeScreen(MODEL_SHEET_QUERY);
     useEffect(() => {
-      if (modelControlsDisabled) setModelDropdownOpen(false);
-    }, [modelControlsDisabled]);
+      // Model changes disable Sheet controls while it stays open for adjustments.
+      if (modelControlsDisabled && !mobileModelSheet)
+        setModelDropdownOpen(false);
+    }, [modelControlsDisabled, mobileModelSheet]);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const isMobile = Boolean(core.mobileComposer);
     const [mobileFocused, setMobileFocused] = useState(false);
@@ -2507,7 +2683,6 @@ export const ChatEditor = memo(
     const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
     const widthToggleRef = useRef<HTMLButtonElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
-    const [voiceActive, setVoiceActive] = useState(false);
     const pendingVoiceInsertRef = useRef<{
       text: string;
       sessionId: string | undefined;
@@ -2536,6 +2711,16 @@ export const ChatEditor = memo(
       } else {
         insertVoiceText(text);
       }
+    };
+    // A send must include the active dictation: finalize the capture and
+    // insert its transcript before the submit reads the draft. Insert
+    // directly rather than through the deferred simple-mode path — the
+    // submit follows in the same continuation, so there is no review step
+    // that needs the editor revealed first.
+    prepareVoiceSubmitRef.current = async () => {
+      const text = await voiceButtonRef.current?.flush();
+      const trimmed = text?.trim();
+      if (trimmed) insertVoiceText(trimmed);
     };
     useLayoutEffect(() => {
       const pending = pendingVoiceInsertRef.current;
@@ -2748,19 +2933,32 @@ export const ChatEditor = memo(
     }, [onTogglePlan, core, planControlsDisabled]);
 
     const handleModelSelect = useCallback(
-      (modelId: string) => {
+      (modelId: string, source?: 'sheet') => {
         if (modelControlsDisabled) return;
         if (modelItems.some((item) => item.id === modelId && item.disabled)) {
           return;
         }
         onSelectModel?.(modelId);
+        if (source === 'sheet') return;
         setModelDropdownOpen(false);
         core.focus();
       },
       [onSelectModel, core, modelControlsDisabled, modelItems],
     );
     const showCancelButton = isRunning && !core.hasContent;
-    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
+    // While a dictation is active the send intent wins over the stop role:
+    // on touch layouts Send is the only submit path, so the button must send
+    // (queue) the dictation, not cancel the turn. The separate stop button
+    // below stays reachable during dictation, and desktop keeps Escape.
+    const stopAffordance = showCancelButton && !voiceActive;
+    // Stopping a running agent is unrelated to submit finalization: a voice
+    // flush may hold submitPreparing for up to a minute, and the stop buttons
+    // must stay usable throughout (mobile/simple have no other composer exit).
+    const cancelPreparing = isPreparing || core.pendingImageBatchCount > 0;
+    const composerPreparing = cancelPreparing || core.submitPreparing;
+    // With an empty draft during a run the submit button doubles as the Stop
+    // control; finalization must not take that affordance away.
+    const submitLoading = composerPreparing && !stopAffordance;
 
     const {
       searchMode,
@@ -3014,6 +3212,8 @@ export const ChatEditor = memo(
             onOpenCommit={onOpenCommit}
             onOpenWorktrees={onOpenWorktrees}
             onOpenLog={onOpenLog}
+            onCreateWorktreeBranch={onCreateWorktreeBranch}
+            onHandoff={onHandoff}
           >
             <button
               type="button"
@@ -3982,6 +4182,7 @@ export const ChatEditor = memo(
                   }}
                 >
                   <VoiceButton
+                    ref={voiceButtonRef}
                     disabled={disabled}
                     onActiveChange={setVoiceActive}
                     target={voiceTarget}
@@ -3991,52 +4192,54 @@ export const ChatEditor = memo(
                 </span>
               </>
             )}
-            {(isMobile || isSimple) && isRunning && core.hasContent && (
-              <button
-                type="button"
-                className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
-                disabled={composerPreparing || !onCancel}
-                data-web-shell-composer-stop
-                aria-label={t('composerMobile.stop')}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onCancel?.();
-                }}
-              >
-                <StopIcon />
-              </button>
-            )}
+            {(isMobile || isSimple) &&
+              isRunning &&
+              (core.hasContent || voiceActive) && (
+                <button
+                  type="button"
+                  className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
+                  disabled={cancelPreparing || !onCancel}
+                  data-web-shell-composer-stop
+                  aria-label={t('composerMobile.stop')}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onCancel?.();
+                  }}
+                >
+                  <StopIcon />
+                </button>
+              )}
             <button
               className={
-                composerPreparing || showCancelButton
+                submitLoading || stopAffordance
                   ? `${styles.sendBtn} ${styles.sendBtnRunning}${
                       cancelArmed ? ` ${styles.sendBtnArmed}` : ''
                     }`
                   : styles.sendBtn
               }
               disabled={
-                composerPreparing
+                submitLoading
                   ? true
-                  : showCancelButton
+                  : stopAffordance
                     ? !onCancel
-                    : !core.canSubmit
+                    : core.submitBlocked || (!core.hasContent && !voiceActive)
               }
               data-web-shell-composer-submit
               onClick={(e) => {
                 e.stopPropagation();
-                if (composerPreparing) {
+                if (submitLoading) {
                   return;
                 }
-                if (showCancelButton) {
+                if (stopAffordance) {
                   onCancel?.();
                   return;
                 }
                 core.submitText();
               }}
               aria-label={
-                composerPreparing
+                submitLoading
                   ? t('common.loading')
-                  : showCancelButton
+                  : stopAffordance
                     ? cancelArmed && !isMobile
                       ? t('stream.cancelArmed')
                       : t(isMobile ? 'composerMobile.stop' : 'stream.cancel')
@@ -4048,9 +4251,9 @@ export const ChatEditor = memo(
                   : undefined
               }
             >
-              {composerPreparing ? (
+              {submitLoading ? (
                 <LoadingIcon />
-              ) : showCancelButton ? (
+              ) : stopAffordance ? (
                 cancelArmed && !isMobile ? (
                   <span className={styles.escLabel} aria-hidden="true">
                     Esc
@@ -4989,7 +5192,7 @@ export const ChatEditor = memo(
                 <Button
                   variant="outline"
                   className="min-h-11"
-                  disabled={composerPreparing || !onCancel}
+                  disabled={cancelPreparing || !onCancel}
                   onClick={onCancel}
                 >
                   {t('composerMobile.stop')}

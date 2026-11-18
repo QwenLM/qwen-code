@@ -5,9 +5,13 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/apt-mirror-probe.sh"
 
 cleanup_release_containers() {
-  container_ids="$(timeout 30 docker ps -aq --filter "label=org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}" 2>/dev/null)" || container_ids=''
+  if ! container_ids="$(timeout 30 docker ps -aq --filter "label=org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}" 2>/dev/null)"; then
+    echo "::warning::failed to list release containers for ${RELEASE_CONTAINER_OWNER}; they cannot be removed"
+    container_ids=''
+  fi
   if [ -n "$container_ids" ]; then
-    printf '%s\n' "$container_ids" | xargs -r timeout 60 docker rm -f > /dev/null 2>&1 || echo "::warning::failed to remove release containers for ${RELEASE_CONTAINER_OWNER}"
+    # BSD xargs (macOS) has no -r; the guard above keeps the input non-empty.
+    printf '%s\n' "$container_ids" | xargs timeout 60 docker rm -f > /dev/null 2>&1 || echo "::warning::failed to remove release containers for ${RELEASE_CONTAINER_OWNER}"
   fi
 }
 
@@ -23,6 +27,11 @@ fi
 
 trap cleanup_release_containers EXIT
 trap 'exit 1' INT TERM
+
+# The test retry below reserves time inside the 120-minute job, so capture
+# the epoch at the start of the step: the image build and the gates above
+# spend that budget too.
+release_step_start_epoch="$(date +%s)"
 
 sandbox_revision="$(git rev-parse HEAD)"
 sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-release-${sandbox_revision}"
@@ -42,6 +51,7 @@ sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxI
 # runner starts with an order of magnitude more free disk than either floor.
 check_docker_data_root_floor() {
   min_free_kb="$1"
+  checkpoint="$2"
   if [ "$RUNNER_ENVIRONMENT" != 'self-hosted' ]; then
     return 0
   fi
@@ -75,7 +85,7 @@ check_docker_data_root_floor() {
   if ! DISK_FLOOR_MIN_FREE_KB="$min_free_kb" \
     DISK_FLOOR_MIN_FREE_INODES="${DISK_FLOOR_DOCKER_MIN_FREE_INODES:-}" \
     bash .github/scripts/check-disk-floor.sh "$docker_root"; then
-    echo "::error::docker data root floor gate failed for ${docker_root} on ${RUNNER_NAME:-this runner}; its knobs are DISK_FLOOR_DOCKER_MIN_FREE_KB (pre-build), DISK_FLOOR_DOCKER_POST_MIN_FREE_KB (pre-vitest) and DISK_FLOOR_DOCKER_MIN_FREE_INODES, not the job-start gate's DISK_FLOOR_MIN_FREE_KB / DISK_FLOOR_MIN_FREE_INODES"
+    echo "::error::docker data root floor gate failed at the ${checkpoint} checkpoint for ${docker_root} on ${RUNNER_NAME:-this runner}; its knobs are DISK_FLOOR_DOCKER_MIN_FREE_KB (pre-build), DISK_FLOOR_DOCKER_POST_MIN_FREE_KB (pre-vitest, pre-retry) and DISK_FLOOR_DOCKER_MIN_FREE_INODES, not the job-start gate's DISK_FLOOR_MIN_FREE_KB / DISK_FLOOR_MIN_FREE_INODES"
     return 1
   fi
 }
@@ -141,7 +151,7 @@ if [ "$image_inspect_status" -ne 0 ]; then
   # E2E lane runs this same labelled prune under this same mutex unbounded;
   # bounding that side too is a cross-lane change tracked separately.
   timeout 20m docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
-  check_docker_data_root_floor "${DISK_FLOOR_DOCKER_MIN_FREE_KB:-8388608}"
+  check_docker_data_root_floor "${DISK_FLOOR_DOCKER_MIN_FREE_KB:-8388608}" pre-build
   # This lane prunes the builder cache above, so its apt layers stay cold, and
   # its routed host (`ecs-qwen-hk4-host`, or `ubuntu-latest` when the ECS pool
   # is unavailable) already reaches `deb.debian.org` at MB/s — there the probe
@@ -151,7 +161,10 @@ if [ "$image_inspect_status" -ne 0 ]; then
   apply_apt_mirror
   # See e2e.yml: closing the lock descriptors in the child keeps a descendant
   # that outlives this job from holding the lock.
-  npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-
+  if ! npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-; then
+    echo "::error::sandbox image build failed for ${sandbox_image}; the Docker integration tests did not run"
+    exit 1
+  fi
   if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
     flock --unlock 7
     exec 7>&-
@@ -176,9 +189,70 @@ fi
 # already consumed that headroom, so re-charging it here would fail the lane
 # after the build succeeded. DISK_FLOOR_DOCKER_POST_MIN_FREE_KB tunes this
 # checkpoint independently of the pre-build floor.
-check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}"
+check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}" pre-vitest
 
 # The package.json docker test scripts each rebuild the sandbox image. Run
 # vitest directly here so this job reuses the image built above.
-QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli 9>&-
-QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive 9>&-
+#
+# One retry per suite, for a failure that vitest's own per-test retries did
+# not absorb. It cannot rescue a deterministic failure — the second attempt
+# fails the same way — so a repeated failure stays red. Reclaim this attempt's
+# containers first so a leaked one cannot poison the retry, and re-sample the
+# disk floor: the failed attempt's container layers are not all reclaimed by
+# the cleanup, so a retry must not start below the floor the first attempt
+# was admitted on.
+# scripts/tests/release-workflow.test.js binds this budget to the job's
+# `timeout-minutes`, so retuning either must update both.
+DOCKER_TEST_STEP_BUDGET_SECONDS=6600
+# A retry admitted after a fast failure still spends the suite's own length,
+# so the gate charges the larger of the failed attempt and the suite's
+# expected duration. Measured failures: `cli` 1685s and 2317s, `interactive`
+# ~21 minutes in the passing release job. The charge is an estimate, so a
+# retry slower than expected can still overrun the step budget; over-refusing a
+# retry whose first attempt hung is the safe direction.
+DOCKER_TEST_CLI_EXPECTED_SECONDS=2400
+DOCKER_TEST_INTERACTIVE_EXPECTED_SECONDS=1260
+run_docker_test_suite() {
+  QWEN_SANDBOX=docker npx vitest run --root ./integration-tests "$1" 9>&-
+}
+
+for suite in cli interactive; do
+  attempt_start_epoch="$(date +%s)"
+  if run_docker_test_suite "$suite"; then
+    continue
+  fi
+  now_epoch="$(date +%s)"
+  attempt_seconds=$(( now_epoch - attempt_start_epoch ))
+  elapsed_seconds=$(( now_epoch - release_step_start_epoch ))
+  # The retry is admitted only when the time already spent in this step plus
+  # its charge plus the suites still to run fit the step's share of
+  # `timeout-minutes: 120`: the step starts ~8 minutes into the job, so 110
+  # minutes leaves margin, and `interactive` — which follows `cli` — has to
+  # run after a `cli` retry.
+  expected_suite_seconds="$DOCKER_TEST_CLI_EXPECTED_SECONDS"
+  remaining_suite_seconds=0
+  if [ "$suite" = 'cli' ]; then
+    remaining_suite_seconds="$DOCKER_TEST_INTERACTIVE_EXPECTED_SECONDS"
+  else
+    expected_suite_seconds="$DOCKER_TEST_INTERACTIVE_EXPECTED_SECONDS"
+  fi
+  retry_seconds="$attempt_seconds"
+  if [ "$expected_suite_seconds" -gt "$retry_seconds" ]; then
+    retry_seconds="$expected_suite_seconds"
+  fi
+  if (( elapsed_seconds + retry_seconds + remaining_suite_seconds > DOCKER_TEST_STEP_BUDGET_SECONDS )); then
+    reserve_detail=''
+    if [ "$remaining_suite_seconds" -gt 0 ]; then
+      reserve_detail=", ${remaining_suite_seconds}s reserved for the remaining suite"
+    fi
+    echo "::error::Docker integration tests (${suite}) failed after ${attempt_seconds}s (${elapsed_seconds}s of the ${DOCKER_TEST_STEP_BUDGET_SECONDS}s step budget already spent, ${retry_seconds}s charged for the retry${reserve_detail}); a retry would overrun the 120-minute job timeout"
+    exit 1
+  fi
+  cleanup_release_containers
+  check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}" pre-retry
+  echo "::warning::Docker integration tests (${suite}) failed after ${attempt_seconds}s; retrying once"
+  if ! run_docker_test_suite "$suite"; then
+    echo "::error::Docker integration tests (${suite}) failed again after a retry"
+    exit 1
+  fi
+done

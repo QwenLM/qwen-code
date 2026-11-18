@@ -72,6 +72,20 @@ export interface AcpToolBatchHost {
   readonly client: AgentSideConnection;
   readonly toolCallEmitter: ToolCallEmitter;
   readonly messageEmitter: MessageEmitter;
+  /**
+   * The session's trusted live tool instances — `capture_screen_context` and
+   * the five live-task tools (`list_threads`, `read_thread`, `wait_threads`,
+   * `send_message_to_thread`, `create_thread`) — trusted by instance identity,
+   * so a same-named tool inherits none of it. `speak_to_user` is not in the
+   * set: it stays on the permission flow so a user's deny / ask rule applies.
+   */
+  isTrustedLiveTool?(tool: unknown): boolean;
+  /**
+   * The session's read-only response to a request that reached approval:
+   * the call is refused with this message; no `session/request_permission`
+   * leaves the session. Omit for ordinary sessions.
+   */
+  readonly readOnlyRefusalMessage?: string;
   sendUpdate(update: SessionUpdate): Promise<void>;
   /** `session/request_permission`, one at a time. */
   requestPermission(
@@ -552,6 +566,12 @@ export async function runAcpToolBatch(
         },
         onToolResultFullTurnModel: options.onFullTurnModel,
         refuseToolCall: (request) => host.refuseToolCall(request),
+        ...(host.isTrustedLiveTool && {
+          isTrustedTool: (tool) => host.isTrustedLiveTool!(tool),
+        }),
+        ...(host.readOnlyRefusalMessage !== undefined && {
+          readOnlyRefusalMessage: host.readOnlyRefusalMessage,
+        }),
         onPermissionPromptTerminalSequence: (sequence) => {
           if (!closed) host.sendTerminalSequence(sequence);
         },

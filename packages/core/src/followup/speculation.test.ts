@@ -15,6 +15,8 @@ import {
 import type { Content, Part } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import * as agentLoop from '../core/agent-loop.js';
+import * as agentLoopRollout from '../config/agent-loop-rollout.js';
+import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import type { CacheSafeParams } from '../agents/forkedAgent.js';
 import type { LlmClient } from '../core/client.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
@@ -119,6 +121,75 @@ describe('startSpeculation', () => {
 
     expect(forkedAgentMocks.createForkedChat).not.toHaveBeenCalled();
     expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+  });
+
+  it('does not log the entry marker when the speculation never starts', async () => {
+    // The marker must sit after the early returns: a sandboxed, cache-less or
+    // pre-aborted speculation never runs a round, so it must not log a path.
+    const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+    const sandboxed = {
+      getShellExecutionSandbox: () => ({}),
+    } as unknown as Config;
+    await expect(startSpeculation(sandboxed, 'write a.ts')).rejects.toThrow(
+      'unavailable with tools.executionSandbox',
+    );
+    const cacheless = {
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(null);
+    await expect(startSpeculation(cacheless, 'read a.ts')).rejects.toThrow(
+      'CacheSafeParams not available for speculation',
+    );
+    // The third early return: a parent signal already aborted at entry resolves
+    // to an aborted state without running a round, so it must not log either.
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(
+      {} as CacheSafeParams,
+    );
+    await expect(
+      startSpeculation(cacheless, 'read a.ts', AbortSignal.abort()),
+    ).resolves.toMatchObject({ status: 'aborted' });
+    expect(entrySpy).not.toHaveBeenCalled();
+    entrySpy.mockRestore();
+  });
+
+  it('logs the speculation loop entry marker', async () => {
+    const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn().mockReturnValue(true),
+      ensureTool: vi.fn(),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [
+            {
+              content: {
+                parts: [fnCall('read_file', { path: '.env' }, 'call-marker')],
+              },
+            },
+          ],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'read .env');
+    await vi.waitFor(() => expect(state.status).toBe('boundary'));
+
+    expect(entrySpy).toHaveBeenCalledWith(config, 'speculation');
+    entrySpy.mockRestore();
+    await abortSpeculation(state);
   });
 
   it('stops before executing a permission-deferred tool', async () => {
@@ -1018,10 +1089,15 @@ describe('speculation model round on the shared agent loop', () => {
   const text = (value: string) => ({ parts: [{ text: value }] });
 
   it.each([
-    { name: 'text-only completion', rounds: [text('done')] },
+    {
+      name: 'text-only completion',
+      rounds: [text('done')],
+      expectedExecuteCalls: 0,
+    },
     {
       name: 'one tool call then completion',
       rounds: [call('call-parity'), text('done')],
+      expectedExecuteCalls: 1,
     },
     {
       name: 'two tool calls keep their order',
@@ -1034,21 +1110,29 @@ describe('speculation model round on the shared agent loop', () => {
         },
         text('done'),
       ],
+      expectedExecuteCalls: 2,
     },
     {
       name: 'a thought part is dropped',
       rounds: [
         { parts: [{ text: 'reasoning', thought: true }, { text: 'done' }] },
       ],
+      expectedExecuteCalls: 0,
     },
-  ])('matches the raw-chunk round: $name', async ({ rounds }) => {
-    const off = await runScenario(false, rounds);
-    const on = await runScenario(true, rounds);
-    expect(off.status).toBe('completed');
-    expect(on.executeCalls).toBe(off.executeCalls);
-    expect(on.toolUseCount).toBe(off.toolUseCount);
-    expect(on.messages).toEqual(off.messages);
-  });
+  ])(
+    'matches the raw-chunk round: $name',
+    async ({ rounds, expectedExecuteCalls }) => {
+      const off = await runScenario(false, rounds);
+      const on = await runScenario(true, rounds);
+      expect(off.status).toBe('completed');
+      // Absolute anchors: parity alone would also pass if both arms ran nothing.
+      expect(off.executeCalls).toBe(expectedExecuteCalls);
+      expect(off.toolUseCount).toBe(expectedExecuteCalls);
+      expect(on.executeCalls).toBe(off.executeCalls);
+      expect(on.toolUseCount).toBe(off.toolUseCount);
+      expect(on.messages).toEqual(off.messages);
+    },
+  );
 
   it('runs the shared round only with the setting on (branch marker)', async () => {
     const spy = vi.spyOn(agentLoop, 'runModelRound');
@@ -1062,6 +1146,139 @@ describe('speculation model round on the shared agent loop', () => {
       spy.mockRestore();
     }
   });
+});
+
+describe('speculation partial-batch boundary hand-back', () => {
+  // A batch that bails mid-way keeps the executed responses and strips the
+  // unexecuted calls from the model message by order, not by name. Both arms
+  // must hand back the same partial history (the coverage item #17324 names).
+  type Scenario = {
+    parts: Part[];
+    isPermissionDeferred?: (name: string) => boolean;
+    guard?: ToolInvocationGuard;
+  };
+
+  async function runPartialBatch(unified: boolean, scenario: Scenario) {
+    forkedAgentMocks.sendMessageStream.mockReset();
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'file contents',
+      returnDisplay: 'file contents',
+    });
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn(
+        scenario.isPermissionDeferred ?? (() => false),
+      ),
+      ensureTool: vi.fn().mockResolvedValue({
+        build: vi.fn().mockReturnValue({ params: { path: 'a.ts' }, execute }),
+      }),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      isUnifiedAgentLoopEnabled: vi.fn().mockReturnValue(unified),
+      getToolInvocationGuard: vi.fn().mockReturnValue(scenario.guard),
+    } as unknown as Config;
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield responseChunk(scenario.parts);
+      }
+    });
+
+    const sharedRound = vi.spyOn(agentLoop, 'runModelRound');
+    const state = await startSpeculation(config, 'read a.ts');
+    await vi.waitFor(() => expect(state.status).toBe('boundary'));
+    const snapshot = {
+      messages: state.messages,
+      boundaryDetail: state.boundary?.detail,
+      executeCalls: execute.mock.calls.length,
+      sharedRoundCalls: sharedRound.mock.calls.length,
+    };
+    sharedRound.mockRestore();
+    await abortSpeculation(state);
+    return snapshot;
+  }
+
+  function expectPartialHandBack(
+    snapshot: Awaited<ReturnType<typeof runPartialBatch>>,
+    kept: { callId: string; text?: string },
+  ) {
+    expect(snapshot.boundaryDetail).toBe('speculation_boundary');
+    expect(snapshot.executeCalls).toBe(1);
+    expect(snapshot.messages).toHaveLength(3);
+    const modelMessage = snapshot.messages[1];
+    expect(modelMessage.role).toBe('model');
+    const keptCalls = (modelMessage.parts ?? []).filter((p) => p.functionCall);
+    expect(keptCalls).toHaveLength(1);
+    expect(keptCalls[0].functionCall?.id).toBe(kept.callId);
+    const keptTexts = (modelMessage.parts ?? [])
+      .filter((p) => p.text !== undefined)
+      .map((p) => p.text);
+    expect(keptTexts).toEqual(kept.text === undefined ? [] : [kept.text]);
+    const resultMessage = snapshot.messages[2];
+    expect(resultMessage.role).toBe('user');
+    expect(resultMessage.parts).toHaveLength(1);
+    expect(resultMessage.parts?.[0].functionResponse).toMatchObject({
+      id: kept.callId,
+      name: 'read_file',
+    });
+  }
+
+  const scenarios: Array<{
+    name: string;
+    make: () => Scenario;
+    kept: { callId: string; text?: string };
+  }> = [
+    {
+      name: 'a permission-deferred second call bails after the first executes',
+      make: () => ({
+        parts: [
+          { text: 'Reading both files.' },
+          fnCall('read_file', { path: 'a.ts' }, 'call-kept'),
+          fnCall('write_file', { path: 'b.ts' }, 'call-stripped'),
+        ],
+        isPermissionDeferred: (name) => name === 'write_file',
+      }),
+      kept: { callId: 'call-kept', text: 'Reading both files.' },
+    },
+    {
+      name: 'a guard denial on the second same-named call keeps the first by order',
+      make: () => ({
+        parts: [
+          fnCall('read_file', { path: 'a.ts' }, 'call-dup-1'),
+          fnCall('read_file', { path: 'b.ts' }, 'call-dup-2'),
+        ],
+        guard: vi
+          .fn<ToolInvocationGuard>()
+          .mockResolvedValueOnce({ allowed: true })
+          .mockResolvedValue({
+            allowed: false,
+            reason: 'host policy denied',
+          }),
+      }),
+      kept: { callId: 'call-dup-1' },
+    },
+  ];
+
+  it.each(scenarios)(
+    'hands back the partial batch: $name',
+    async ({ make, kept }) => {
+      const off = await runPartialBatch(false, make());
+      expect(off.sharedRoundCalls).toBe(0);
+      expectPartialHandBack(off, kept);
+
+      const on = await runPartialBatch(true, make());
+      expect(on.sharedRoundCalls).toBeGreaterThan(0);
+      expectPartialHandBack(on, kept);
+      expect(on.messages).toEqual(off.messages);
+    },
+  );
 });
 
 describe('speculation shared-round event semantics', () => {

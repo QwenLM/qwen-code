@@ -65,6 +65,7 @@ import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
 import { useWorkspaceSessionLiveState } from '../session-catalog/workspace-session-live-state';
 import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
+import { hasLiveWork } from '../session-catalog/session-live-work';
 import { getDaemonToken } from '../config/daemon';
 import {
   SESSION_ARCHIVE_BATCH_SIZE,
@@ -273,7 +274,10 @@ export function deriveSessionCards(
         currentContextKind,
       ),
       prs: session.prs,
-      gitBranch: session.worktree?.branch ?? session.branch?.name,
+      gitBranch:
+        session.worktree?.branch ||
+        session.worktree?.slug ||
+        session.branch?.name,
       workspaceCwd: session.workspaceCwd,
       sourceType: session.sourceType,
     };
@@ -788,22 +792,40 @@ function SessionOverviewPanelInner({
       isRegisteredTrustedCard(card),
     [currentWorkspaceCwd, isRegisteredTrustedCard],
   );
+  // The card's grade drives its sort and displayed status, so it stays as it
+  // is; the two destructive actions read the shared predicate as well, because
+  // a background-only session grades idle here and closing it kills that work.
+  // An unresolved session falls back to the grade alone rather than blocking.
+  const cardHasLiveWork = useCallback(
+    (card: SessionCard) => {
+      const session = sessionByIdentity.get(getSessionIdentity(card));
+      return session ? hasLiveWork(session) : false;
+    },
+    [sessionByIdentity],
+  );
   const canArchiveCard = useCallback(
     (card: SessionCard) =>
       sessionArchiveEnabled &&
       sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
         'qwen-live' &&
       card.status === 'idle' &&
+      !cardHasLiveWork(card) &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionArchiveEnabled, sessionByIdentity],
+    [
+      canUseSessionMutation,
+      cardHasLiveWork,
+      sessionArchiveEnabled,
+      sessionByIdentity,
+    ],
   );
   const canDeleteCard = useCallback(
     (card: SessionCard) =>
       sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
         'qwen-live' &&
       card.status === 'idle' &&
+      !cardHasLiveWork(card) &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionByIdentity],
+    [canUseSessionMutation, cardHasLiveWork, sessionByIdentity],
   );
   const canRenameCard = useCallback(
     (card: SessionCard) =>

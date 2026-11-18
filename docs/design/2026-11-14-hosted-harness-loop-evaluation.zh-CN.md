@@ -2,7 +2,7 @@
 
 [English](2026-11-14-hosted-harness-loop-evaluation.md) | [简体中文](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)
 
-- **状态**：仅评估；不做实现、不引入开关。本文记录 Hosted Harness 循环与共享代理循环之间的 parity 差异，并区分两条迁移路径：journal 化工具批处理必须保留，而模型轮可以作为独立的 opt-in 切片迁到共享 `runModelRound`。这是[统一代理循环](2026-10-23-unified-agent-loop.md)计划（跟踪 issue #15327）最后一个表面的评估——该设计明确将 Hosted Harness 留待「其他表面之后单独评估」。本文沿用[流式工具派发评估](2026-11-11-streaming-tool-dispatch.md)（#16949）的纯文档切片形态。2026-11-14 的首轮评审修正了两处前置条件——executor 适配器不是模型轮迁移的依赖、hook 隔离已经存在——本版本已反映这些修正。
+- **状态**：评估；其建议的仅模型轮切片已在 #17264 实现（opt-in `hosted` 入口，默认关），journal 化工具批处理保留。本文记录 Hosted Harness 循环与共享代理循环之间的 parity 差异，并区分两条迁移路径：journal 化工具批处理必须保留，而模型轮可以作为独立的 opt-in 切片迁到共享 `runModelRound`。这是[统一代理循环](2026-10-23-unified-agent-loop.md)计划（跟踪 issue #15327）最后一个表面的评估——该设计明确将 Hosted Harness 留待「其他表面之后单独评估」。本文沿用[流式工具派发评估](2026-11-11-streaming-tool-dispatch.md)（#16949）的纯文档切片形态。2026-11-14 的首轮评审修正了两处前置条件——executor 适配器不是模型轮迁移的依赖、hook 隔离已经存在——本版本已反映这些修正。
 - **日期**：2026-11-14，评审修正 2026-11-14。行号引用已在 `main` `af312d610143` 上核实。
 - **行为来源**：`packages/cli/src/serve/hosted-harness-model.ts`（1,599 行）与 `packages/cli/src/serve/hosted-workspace-tool-turn.ts`（10,908 行）。
 - **相关**：
@@ -65,7 +65,7 @@ Hosted Harness 在 `runPreparedHostedHarnessTextTurn`（`hosted-harness-model.ts
 
 - Hosted 工具执行是 journal 化 exactly-once 恢复系统；共享内存批处理无法替换它，除非用 Hosted 专属持久性污染 `packages/core`、或削弱 Hosted profile 的保证。因此 Hosted Harness 不会完整收敛到 `runAgentLoop`，工具批处理迁移保持推迟。
 - Hosted 模型轮已经就是共享的 `LlmClient` 轮。把它迁到 `runModelRound`、同时保留外层循环与 tool turn，正是 ACP 与 speculation 已在用的形态。它可行，且不受制于 executor 适配器或 hook send option。其真实工作是撤回、prepared-recovery 与停止原因映射的适配，外加 parity 证据。
-- 本 PR 是评估：不新增开关、不改变默认、不移动任何代码。仅模型轮的实现及其 parity 套件是后续切片；工具批处理迁移仍推迟。
+- 本文是评估。仅模型轮的实现及其 parity 套件已在 #17264 落地（opt-in `hosted` 入口，默认关）；工具批处理迁移仍推迟。
 
 ## 留给后续的决定点
 

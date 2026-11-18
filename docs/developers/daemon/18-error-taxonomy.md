@@ -95,7 +95,7 @@ Typed classes thrown by the bridge / mediator. Most carry an HTTP status via the
 | `mcp_server_spawn_failed`  | MCP server spawn or restart failed.                                                |
 | `invalid_config`           | MCP or daemon configuration was invalid.                                           |
 | `prompt_deadline_exceeded` | Prompt wallclock deadline expired.                                                 |
-| `writer_idle_timeout`      | SSE writer made no successful writes before its idle timeout.                      |
+| `writer_idle_timeout`      | SSE writer stalled on `drain` (consumer stopped reading) past its stall budget.    |
 
 These are surfaced through the preflight cell's `errorKind` so client UIs render structured remediation (not raw stack traces).
 
