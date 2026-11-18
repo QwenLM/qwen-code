@@ -4779,6 +4779,12 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
+    // The Mods' session.end runs while the Config still answers.
+    try {
+      await session.modsClosed;
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
     // Before the Config shuts down, which does not touch the registry:
     // a record left behind advertises a session that is gone, and peers
     // would keep addressing it until this process exits.
