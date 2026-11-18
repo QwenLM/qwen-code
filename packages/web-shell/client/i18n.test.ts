@@ -10,6 +10,7 @@ import {
 } from './i18n';
 import type { WebShellLanguage } from './i18n';
 import { CHANNEL_METHOD_PLATFORMS } from './components/channels/channel-platform';
+import { RU_PART6 } from './i18n-ru-part6';
 import * as ruPart1Stub from './i18n-ru-part1.transcript-stub';
 import * as ruPart2Stub from './i18n-ru-part2.transcript-stub';
 import * as ruPart3Stub from './i18n-ru-part3.transcript-stub';
@@ -659,6 +660,9 @@ describe('web-shell ru locale', () => {
   });
 
   it('keeps the Generic Webhook platform name unchanged in Russian', () => {
+    expect(RU_PART6['channels.platform.name.generic-webhook']).toBe(
+      'Generic Webhook',
+    );
     expect(getTranslator('ru')('channels.platform.name.generic-webhook')).toBe(
       'Generic Webhook',
     );
