@@ -51464,38 +51464,47 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         },
       ],
     });
-    const daemonHandle = await runQwenServe(
-      { ...baseOpts, port: 0, ...opts },
-      { bridge: parkedBridge(), ...deps },
-    );
-    await daemonHandle.runtimeReady;
-    const primaryPort = (daemonHandle.server.address() as AddressInfo).port;
-    const manage = (action: string, body: object = {}) =>
-      fetch(`http://127.0.0.1:${primaryPort}/remote-access/${action}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-    const enabled = (await (await manage('enable', { port: 0 })).json()) as {
-      active?: boolean;
-      url?: string;
-    };
-    if (!enabled.active || !enabled.url) {
-      throw new Error('remote access listener did not activate');
+    let daemonHandle: RunHandle | undefined;
+    try {
+      daemonHandle = await runQwenServe(
+        { ...baseOpts, port: 0, ...opts },
+        { bridge: parkedBridge(), ...deps },
+      );
+      await daemonHandle.runtimeReady;
+      const primaryPort = (daemonHandle.server.address() as AddressInfo).port;
+      const manage = (action: string, body: object = {}) =>
+        fetch(`http://127.0.0.1:${primaryPort}/remote-access/${action}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+      const enabled = (await (await manage('enable', { port: 0 })).json()) as {
+        active?: boolean;
+        url?: string;
+      };
+      if (!enabled.active || !enabled.url) {
+        throw new Error('remote access listener did not activate');
+      }
+      const revealed = (await (await manage('reveal')).json()) as {
+        token?: string;
+      };
+      if (!revealed.token) throw new Error('remote access token not revealed');
+      return {
+        handle: daemonHandle,
+        primaryPort,
+        lanBase: enabled.url,
+        lanAuth: { Authorization: `Bearer ${revealed.token}` },
+        restore: () => {
+          interfacesSpy.mockRestore();
+        },
+      };
+    } catch (error) {
+      // A failed boot/enable must not leak the interfaces spy into the
+      // rest of the file.
+      interfacesSpy.mockRestore();
+      await daemonHandle?.close().catch(() => {});
+      throw error;
     }
-    const revealed = (await (await manage('reveal')).json()) as {
-      token?: string;
-    };
-    if (!revealed.token) throw new Error('remote access token not revealed');
-    return {
-      handle: daemonHandle,
-      primaryPort,
-      lanBase: enabled.url,
-      lanAuth: { Authorization: `Bearer ${revealed.token}` },
-      restore: () => {
-        interfacesSpy.mockRestore();
-      },
-    };
   }
 
   it('clamps the remote-access listener independently of the primary listener (issue #17712)', async () => {
