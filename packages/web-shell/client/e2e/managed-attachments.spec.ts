@@ -4,7 +4,10 @@ import type { JavaAgentSession } from '../components/managed/java-managed-agent-
 const SESSION_ID = 'managed-attach-session';
 const SCOPE_REVISION = 'rev-1';
 
-function sessionSummary(inputAttachments: boolean): JavaAgentSession {
+function sessionSummary(
+  inputAttachments: boolean,
+  bound: boolean,
+): JavaAgentSession {
   return {
     sessionId: SESSION_ID,
     title: 'Attachment conversation',
@@ -13,17 +16,19 @@ function sessionSummary(inputAttachments: boolean): JavaAgentSession {
     createdAt: 1,
     updatedAt: 1,
     lastSequence: 0,
-    workspace: {
-      workspaceId: 'ws-a',
-      cwdRelative: '.',
-      contextRevision: 1,
-      state: 'ready',
-    },
+    workspace: bound
+      ? {
+          workspaceId: 'ws-a',
+          cwdRelative: '.',
+          contextRevision: 1,
+          state: 'ready',
+        }
+      : undefined,
     capabilities: {
       actions: false,
       artifacts: false,
       tasks: false,
-      workspaceTurns: true,
+      workspaceTurns: bound,
       inputAttachments,
     },
   } as JavaAgentSession;
@@ -41,7 +46,11 @@ interface Captured {
 
 async function mockManagedRoutes(
   page: import('@playwright/test').Page,
-  options: { inputAttachments: boolean; maxUploadBytes?: number },
+  options: {
+    inputAttachments: boolean;
+    maxUploadBytes?: number;
+    bound?: boolean;
+  },
 ): Promise<Captured> {
   const captured: Captured = {
     submits: [],
@@ -49,7 +58,10 @@ async function mockManagedRoutes(
     fileQueries: [],
     unexpected: [],
   };
-  const summary = sessionSummary(options.inputAttachments);
+  const summary = sessionSummary(
+    options.inputAttachments,
+    options.bound !== false,
+  );
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -260,6 +272,40 @@ test('Managed composer encodes an attached PNG into the submitted input @smoke',
       data: png.toString('base64'),
     },
   ]);
+  expect(captured.unexpected).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
+test('Managed composer encodes an attached text file on an unbound Session @smoke', async ({
+  page,
+}) => {
+  const captured = await mockManagedRoutes(page, {
+    inputAttachments: true,
+    bound: false,
+  });
+  const { editor, errors } = await openSession(page);
+  await pickComposerFile(page, 'attach', {
+    name: 'notes.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('unbound attached notes\n'),
+  });
+  await expect(
+    page.locator('[data-web-shell-composer-attachments]'),
+  ).toContainText('notes.md');
+  await editor.fill('read the unbound attachment');
+  await editor.press('Enter');
+  await expect.poll(() => captured.submits.length).toBe(1);
+  expect(captured.submits[0].input).toEqual([
+    { type: 'input_text', text: 'read the unbound attachment' },
+    {
+      type: 'input_file',
+      name: 'notes.md',
+      mime_type: 'text/markdown',
+      text: 'unbound attached notes\n',
+    },
+  ]);
+  expect(captured.fileQueries).toEqual([]);
+  expect(captured.uploads).toEqual([]);
   expect(captured.unexpected).toEqual([]);
   expect(errors).toEqual([]);
 });

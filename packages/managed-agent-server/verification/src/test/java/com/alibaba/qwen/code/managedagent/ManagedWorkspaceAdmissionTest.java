@@ -422,6 +422,8 @@ class ManagedWorkspaceAdmissionTest {
             public boolean isAvailable() { return true; }
             @Override
             public boolean isWorkspaceFilesAvailable() { return true; }
+            @Override
+            public boolean supportsInputAttachments() { return true; }
         };
         var coordinator = mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class);
         ManagedAgentService admitted = new ManagedAgentService(enabled, new RequestDigests(), coordinator, harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
@@ -448,6 +450,7 @@ class ManagedWorkspaceAdmissionTest {
                 .isInstanceOf(ManagedAgentException.class);
         var capabilities = stopped.getWebShellSession(tenant, "actor-a", session).capabilities();
         assertThat(capabilities.workspaceTurns()).isTrue();
+        assertThat(capabilities.inputAttachments()).isTrue();
         assertThat(capabilities.foregroundShell()).isFalse();
         assertThat(capabilities.sessionClose()).isFalse();
         assertThat(capabilities.sessionDelete()).isFalse();
