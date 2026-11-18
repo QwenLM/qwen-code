@@ -11,7 +11,20 @@ import {
   isTableStart,
   fitPendingSlice,
   splitMarkdownTableRow,
+  CODE_FENCE_RE,
+  isClosingCodeFence,
 } from './pending-rendered-height.js';
+
+describe('isClosingCodeFence', () => {
+  it.each(['not-a-close', ' still-code', '\u00a0', '\r\r', '\r text'])(
+    'rejects non-closing trailing content %j',
+    (trailing) => {
+      expect(
+        isClosingCodeFence(CODE_FENCE_RE.exec(`\`\`\`${trailing}`), '```'),
+      ).toBe(false);
+    },
+  );
+});
 
 describe('splitMarkdownTableRow', () => {
   it('splits a simple row into trimmed cells', () => {
@@ -260,6 +273,26 @@ describe('fitPendingSlice', () => {
     expect(clipped).toBe(false);
     expect(keptLines).toBe(6);
   });
+
+  it.each(['```', '~~~'])(
+    'charges a table after a closed %s block equally for LF and raw CRLF lines',
+    (fence) => {
+      const lines = [
+        `${fence}ts`,
+        'code',
+        `${fence} \t`,
+        '',
+        '| A | B |',
+        '| - | - |',
+        '| 1 | 2 |',
+        '| 3 | 4 |',
+      ];
+      const lf = fitPendingSlice(lines.join('\n').split('\n'), 80, 8, 10);
+      const crlf = fitPendingSlice(lines.join('\r\n').split('\n'), 80, 8, 10);
+      expect(lf).toEqual({ keptLines: 4, clipped: true });
+      expect(crlf).toEqual(lf);
+    },
+  );
 
   it('charges the taller vertical-format height on a NARROW terminal', () => {
     // 4 cols → minHorizontalWidth = max(24, 6*4+5) = 29. contentWidth 20 < 29 →

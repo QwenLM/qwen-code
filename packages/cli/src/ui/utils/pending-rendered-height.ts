@@ -47,7 +47,8 @@ export function isClosingCodeFence(
     match !== null &&
     match[1]!.startsWith(openingFence[0]!) &&
     match[1]!.length >= openingFence.length &&
-    /^[ \t]*$/.test(match[2] ?? '')
+    // Raw CRLF lines and a stream paused before LF can retain the final CR.
+    /^[ \t]*\r?$/.test(match[2] ?? '')
   );
 }
 

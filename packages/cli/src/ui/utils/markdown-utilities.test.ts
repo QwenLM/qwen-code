@@ -305,6 +305,10 @@ describe('markdown-utilities', () => {
   });
 
   describe('getEnclosingFenceInfo', () => {
+    it('closes a fence when the buffer ends between CR and LF', () => {
+      expect(getEnclosingFenceInfo('```ts\r\ncode\r\n```\r', 17)).toBeNull();
+    });
+
     it('returns null when the index is not inside a fence', () => {
       const content = 'plain intro\n\n```ts\ncode\n```\n\nafter';
       expect(getEnclosingFenceInfo(content, 3)).toBeNull(); // in the intro
@@ -337,6 +341,27 @@ describe('markdown-utilities', () => {
   });
 
   describe('fence recognition', () => {
+    it.each([16385, 16386, 16387])(
+      'does not reopen a closed fence when a %s-character buffer ends at CR',
+      (length) => {
+        const cap = 16384;
+        const opening = '```js\r\n';
+        const closing = '\r\n```\r';
+        const content =
+          opening +
+          'x'.repeat(length - opening.length - closing.length) +
+          closing;
+        const splitPoint = findLastSafeSplitPoint(content, cap);
+        const { before, after } = splitFencedMarkdown(content, splitPoint);
+        expect(before).toBe(content.slice(0, splitPoint));
+        expect(after).toBe(content.slice(splitPoint));
+        const continued = `${after}\n\nFollowing prose`;
+        expect(
+          getEnclosingFenceInfo(continued, continued.indexOf('Following')),
+        ).toBeNull();
+      },
+    );
+
     it.each(['\n', '\r\n'])(
       'closes a longer fence with spaces and tabs under %j line endings',
       (eol) => {
