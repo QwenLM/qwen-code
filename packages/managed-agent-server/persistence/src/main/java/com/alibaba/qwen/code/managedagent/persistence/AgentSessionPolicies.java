@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExten
 import com.alibaba.qwen.code.managedagent.contracts.persistence.AgentDefinitionCompiler;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
@@ -197,19 +196,10 @@ final class AgentSessionPolicies {
                 AgentDefinitionExtensions.skills(content.get("skills"), true));
     }
 
-    // Pre-admission capability read for default Skill discovery: resolves the
-    // same pin admission will use, without locking the Workspace. External
-    // storage never admits extension pins, so it answers null.
     String creationToolProfile(String tenantId, String actorId,
             String agentId, String requestedRevision, String workspaceId) {
         AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision, true);
-        if (!WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
-                && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile())) {
-            return pin.toolProfile();
-        }
-        ManagedWorkspaceRegistry.ResolvedBinding workspace = workspaces.resolveForCreation(
-                tenantId, actorId, new WorkspaceSelection(workspaceId, "."));
-        return workspaces.isExternal(workspace.binding()) ? null : pin.toolProfile();
+        return ExternalWorkspaceSessionPolicies.profileForSkillDiscovery(workspaces, tenantId, actorId, workspaceId, pin.toolProfile());
     }
 
     boolean hasMcpServers(SessionRecord session) {

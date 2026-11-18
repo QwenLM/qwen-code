@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -15,6 +16,16 @@ import java.util.Set;
  */
 final class ExternalWorkspaceSessionPolicies {
     private ExternalWorkspaceSessionPolicies() {
+    }
+
+    /** External storage never admits extension pins. Discovery reads the binding before admission takes its locks. */
+    static String profileForSkillDiscovery(JdbcManagedWorkspaceRegistry workspaces, String tenantId,
+            String actorId, String workspaceId, String profile) {
+        if (!WorkspaceToolProfiles.isPublicShell(profile) && !WorkspaceToolProfiles.MCP.equals(profile)) {
+            return profile;
+        }
+        var workspace = workspaces.resolveForRead(tenantId, actorId, new WorkspaceSelection(workspaceId, "."));
+        return workspaces.isExternal(workspace.binding()) ? null : profile;
     }
 
     /**
