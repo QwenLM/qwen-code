@@ -1013,19 +1013,34 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
         : 'unsafe-src';
     // Document mode (export) never writes a src — remote or local — into the
     // DOM: the export document must not contain machine paths or URLs the
-    // viewer did not author. The chip shows the path the user wrote, so the
-    // percent-encoded backslashes the markdown pipeline produced are reversed.
-    const pathText = documentMode ? '' : trimmedSrc.replace(/%5[cC]/g, '\\');
-    // The export renderer is standalone (no i18n provider — useI18n falls
-    // back to the raw key), so document mode stays on a fixed English label.
+    // viewer did not author. In chat mode the chip shows the path the user
+    // wrote: the markdown pipeline percent-encodes the whole destination
+    // before the component sees it, so it is decoded for display (a sequence
+    // decodeURIComponent rejects falls back to reversing the backslashes).
+    // Data-URI payloads are never shown: a chip must not repeat a base64
+    // blob the user never wrote.
+    let pathText = '';
+    if (!documentMode && !SAFE_IMAGE_DATA_URI.test(trimmedSrc)) {
+      try {
+        pathText = decodeURIComponent(trimmedSrc);
+      } catch {
+        // A literal `%` (e.g. `/tmp/100%.png`) makes decodeURIComponent throw.
+        pathText = trimmedSrc.replace(/%5[cC]/g, '\\');
+      }
+    }
+    // WebShellTranscript wraps I18nProvider in document mode too, so the
+    // catalog applies to both modes; the raw-key guard only covers
+    // provider-less renders, where useI18n falls back to the identity t.
+    const missingSource = t('markdown.imageMissingSource');
+    const missingLabel =
+      missingSource === 'markdown.imageMissingSource'
+        ? '(missing image source)'
+        : missingSource;
     const text = pathText
       ? alt && alt !== pathText
         ? `${alt} — ${pathText}`
         : pathText
-      : alt ||
-        (documentMode
-          ? '(image unavailable)'
-          : t('markdown.imageMissingSource'));
+      : alt || missingLabel;
     return (
       <span
         className={styles.imageFallback}
@@ -1041,7 +1056,10 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
       src={trimmedSrc}
       alt={alt || ''}
       className={styles.image}
-      onError={() => setFailedSrc(trimmedSrc)}
+      // Interactive only: a static export must keep the element in place —
+      // the document export gate asserts the image and its src survive a
+      // failed payload decode (chat-transcript-document.test.ts).
+      onError={documentMode ? undefined : () => setFailedSrc(trimmedSrc)}
     />
   );
 }
@@ -1331,11 +1349,14 @@ export const Markdown = memo(function Markdown({
     documentMode,
     sourceComponents?.sup,
   ]);
-  // Image `src` values that MarkdownImage turns into a fallback chip —
-  // local filesystem paths, safe base64 data images — would otherwise be
-  // blanked by the sanitizer before the chip can show the path, so let
-  // them through. Scoped to `src` (link hrefs keep the sanitizer) and off
-  // in document mode, where the export DOM must not carry machine paths.
+  // Two `src` shapes the sanitizer would blank are let through: drive-letter
+  // local paths, which `defaultUrlTransform` reads as an unknown `C:`
+  // protocol, and `SAFE_IMAGE_DATA_URI` values, which it blanks as a `data:`
+  // URL and which `MarkdownImage` renders as an `<img>`, not a chip.
+  // POSIX/`~`/UNC local paths pass the sanitizer untouched and are chipped
+  // by `MarkdownImage` itself. Scoped to `src` (link hrefs keep the
+  // sanitizer) and off in document mode, where the export DOM must not
+  // carry machine paths or inline payloads.
   const urlTransform = useMemo(
     () => (url: string, key?: string) => {
       if (key === 'src' && !documentMode) {

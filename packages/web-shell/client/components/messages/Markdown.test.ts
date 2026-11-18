@@ -348,6 +348,41 @@ describe('markdown image fallback', () => {
     }
   });
 
+  it('shows the written path, decoded, for a local path with a space', () => {
+    // The pipeline percent-encodes the whole destination before the
+    // component sees it; the chip must show the path the user wrote.
+    const view = renderMd('![shot](</Users/foo/my shot.png>)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('shot — /Users/foo/my shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('does not show the payload of a failed data image', () => {
+    const view = renderMd('![chart](data:image/png;base64,iVBORw0KGgo=)');
+    try {
+      const img = view.querySelector('img')!;
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="load-error"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('chart');
+      expect(chip!.textContent).not.toContain('iVBORw0KGgo');
+      expect(chip!.getAttribute('title')).not.toContain('iVBORw0KGgo');
+    } finally {
+      cleanup(view);
+    }
+  });
+
   it('replaces a file: scheme with a chip instead of a broken <img>', () => {
     const view = renderMd('![secret](file:///tmp/private.png)');
     try {
@@ -377,7 +412,6 @@ describe('markdown image fallback', () => {
   });
 
   it('localizes the no-alt placeholder from the active catalog', () => {
-    const expected = getTranslator('zh-CN')('markdown.imageMissingSource');
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -395,7 +429,10 @@ describe('markdown image fallback', () => {
         '[data-web-shell-image-fallback="unsafe-src"]',
       );
       expect(chip).toBeTruthy();
-      expect(chip!.textContent).toBe(expected);
+      expect(chip!.textContent).toBe('（缺少图片来源）');
+      expect(chip!.textContent).not.toBe(
+        getTranslator('en')('markdown.imageMissingSource'),
+      );
     } finally {
       act(() => root.unmount());
       container.remove();
@@ -441,6 +478,18 @@ describe('markdown image fallback', () => {
       const img = view.querySelector('img')!;
       expect(img).toBeTruthy();
       expect(img.getAttribute('src')).toBe('https://example.com/logo.png');
+      expect(view.querySelector('[data-web-shell-image-fallback]')).toBeNull();
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('keeps a same-origin asset as an <img>', () => {
+    const view = renderMd('![logo](/images/logo.png)');
+    try {
+      expect(view.querySelector('img')?.getAttribute('src')).toBe(
+        '/images/logo.png',
+      );
       expect(view.querySelector('[data-web-shell-image-fallback]')).toBeNull();
     } finally {
       cleanup(view);
@@ -601,6 +650,70 @@ describe('document image policy', () => {
 
     act(() => root.unmount());
     container.remove();
+  });
+
+  it('localizes the no-alt chip from the active catalog in document mode', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'zh-CN' },
+          createElement(
+            TranscriptRenderModeProvider,
+            { value: 'document' },
+            createElement(Markdown, {
+              content: '![](https://example.com/x.png)',
+            }),
+          ),
+        ),
+      );
+    });
+    try {
+      const chip = container.querySelector(
+        '[data-web-shell-image-fallback="unsafe-src"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('（缺少图片来源）');
+      expect(container.innerHTML).not.toContain('https://example.com');
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
+  it('keeps a document-safe data image in the export DOM when its load fails', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, {
+            content: '![inline-safe](data:image/png;base64,iVBORw0KGgo=)',
+          }),
+        ),
+      );
+    });
+    try {
+      const img = container.querySelector('img')!;
+      expect(img).toBeTruthy();
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      // A static export must keep the element in place: no chip swap.
+      expect(container.querySelector('img')).toBeTruthy();
+      expect(
+        container.querySelector('[data-web-shell-image-fallback]'),
+      ).toBeNull();
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
   });
 
   it('renders chart fences as static code in document mode', () => {
