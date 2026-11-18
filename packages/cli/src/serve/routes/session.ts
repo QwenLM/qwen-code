@@ -11461,7 +11461,9 @@ export function registerSessionRoutes(
       if (fd !== undefined) {
         try {
           fs.closeSync(fd);
-        } catch {}
+        } catch {
+          // Closing a read-only descriptor must not replace the source verdict.
+        }
       }
     }
   };
