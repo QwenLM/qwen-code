@@ -9,6 +9,8 @@ export const MANAGED_AGENT_PATHS = [
   /^packages\/managed-agent-server\//,
   /^packages\/sdk-java\//,
   /^packages\/cli\/src\/serve\//,
+  /^packages\/cli\/src\/commands\/channel\//,
+  /^packages\/channels\/github\//,
   /^packages\/core\/src\/managed-runtime\//,
   /^integration-tests\/helpers\/hosted-/,
   /^integration-tests\/vitest\.hosted\.config\.ts$/,

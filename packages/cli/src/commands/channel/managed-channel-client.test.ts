@@ -142,6 +142,29 @@ describe('HttpManagedChannelControlPlane', () => {
     });
   });
 
+  it('injectPrEvent composes the model-facing prompt, not the raw evidence', async () => {
+    const headSha = 'a'.repeat(40);
+    const evidence = `CI failed on head ${headSha}. Failed checks: build.`;
+    const { plane, calls } = client([{ status: 200, body: {} }]);
+    await plane.injectPrEvent({
+      owner: 'Owner',
+      repo: 'Repo',
+      prNumber: 7,
+      transition: 'ci_failure',
+      headSha,
+      evidence,
+      episode: 1,
+    });
+    expect(calls[0]!.url).toMatch(/\/pr-watch:inject$/);
+    const body = JSON.parse(calls[0]!.init.body as string) as {
+      text: string;
+    };
+    expect(body.text).toContain('Owner/Repo#7');
+    expect(body.text).toContain('ci_failure');
+    expect(body.text).toContain(headSha);
+    expect(body.text).not.toContain(evidence);
+  });
+
   it('surfaces the server error code on a refusal', async () => {
     const { plane } = client([
       {

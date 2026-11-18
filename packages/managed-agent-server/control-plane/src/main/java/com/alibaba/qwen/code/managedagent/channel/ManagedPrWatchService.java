@@ -178,23 +178,48 @@ public class ManagedPrWatchService {
                 "staged", 0, 0);
         PrWatchInjection row = injections.findOrCreate(candidate);
         if (!row.sessionId().equals(binding.sessionId())) {
-            // A merely staged row owned by another Session is not an admission:
-            // that binding's Harness call never committed and the PR has since
-            // been rebound. Release the stale receipt and re-stage under the
-            // current binding so the occurrence can still be delivered; only an
-            // admitted row reserves the identity for its Session (a dead
-            // binding must not block the PR forever — the lazy-retire rule).
-            if ("admitted".equals(row.state())
-                    || !injections.releaseStaged(tenantId, inputId)) {
+            // Only an admitted row reserves the identity for its Session. A
+            // staged row owned by another Session may be a receipt whose
+            // Harness call never committed — or one that committed and lost
+            // the answer before admit(). Prove which by replaying the pinned
+            // envelope against the pinned Session (idempotent by inputId).
+            if ("admitted".equals(row.state())) {
                 throw new ManagedAgentException(409,
                         "pr_watch_injection_conflict",
                         "The PR event was already admitted to another Session.");
             }
-            row = injections.findOrCreate(candidate);
-            if (!row.sessionId().equals(binding.sessionId())) {
-                throw new ManagedAgentException(409,
-                        "pr_watch_injection_conflict",
-                        "The PR event was already admitted to another Session.");
+            try {
+                Map<String, Object> replay = harness.runChannelOperation(
+                        tenantId, row.sessionId(), submitBody(row));
+                // The pinned Session has the input: admit its row and return
+                // the original admission. Releasing here would re-deliver an
+                // occurrence that Session already acted on.
+                if (injections.admit(tenantId, inputId,
+                        row.sessionId()) == null) {
+                    throw new ManagedAgentException(409,
+                            "pr_watch_injection_conflict",
+                            "The injection row was admitted with another"
+                                    + " identity.");
+                }
+                return admission(replay, row);
+            } catch (HarnessFailure error) {
+                // The pinned Session cannot accept the input (dead or
+                // closed): the receipt never committed. Release it and
+                // re-stage under the current binding so a dead binding does
+                // not block the PR forever — the lazy-retire rule.
+                if (!injections.releaseStaged(tenantId, inputId)) {
+                    throw new ManagedAgentException(409,
+                            "pr_watch_injection_conflict",
+                            "The PR event was already admitted to another"
+                                    + " Session.");
+                }
+                row = injections.findOrCreate(candidate);
+                if (!row.sessionId().equals(binding.sessionId())) {
+                    throw new ManagedAgentException(409,
+                            "pr_watch_injection_conflict",
+                            "The PR event was already admitted to another"
+                                    + " Session.");
+                }
             }
         }
         if ("admitted".equals(row.state())) {
@@ -217,7 +242,7 @@ public class ManagedPrWatchService {
         } catch (HarnessFailure error) {
             throw ManagedChannelService.translate(error);
         }
-        if (injections.admit(tenantId, inputId) == null) {
+        if (injections.admit(tenantId, inputId, row.sessionId()) == null) {
             throw new ManagedAgentException(409, "pr_watch_injection_conflict",
                     "The injection row was admitted with another identity.");
         }

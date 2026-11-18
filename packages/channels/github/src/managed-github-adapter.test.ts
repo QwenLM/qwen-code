@@ -5,14 +5,15 @@
  */
 
 import {
-  chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ManagedChannelControlPlane,
@@ -34,7 +35,9 @@ import {
 } from './managed-github-adapter.js';
 import {
   MANAGED_GITHUB_PENDING_LIMIT,
+  MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
   ManagedGithubStateStore,
+  validManagedGithubState,
   type ManagedGithubState,
 } from './managed-state.js';
 
@@ -334,7 +337,10 @@ function fakePrWatchPlane(journal: string[]) {
     },
     injectPrEvent: async (event) => {
       journal.push(`inject:${event.transition}`);
-      if (stateFile) {
+      // The rollback fixtures deny the save by putting a directory at the
+      // state file's path; there is no durable state to snapshot then, and
+      // reading it would fail the injection for the wrong reason.
+      if (stateFile && statSync(stateFile).isFile()) {
         const state = JSON.parse(readFileSync(stateFile, 'utf8')) as {
           watch?: {
             prs: Record<
@@ -509,6 +515,24 @@ function seedState(
   const state = readState(adapter);
   mutate(state);
   writeFileSync(adapter.stateFile, JSON.stringify(state));
+}
+
+// Deny the state save portably: a directory at the state file's path makes
+// ManagedGithubStateStore.save's renameSync fail on every platform, where
+// chmod 0o500 denies the write on POSIX only. restore() puts the captured
+// bytes back, leaving disk exactly as a failed save does — the pre-denial
+// baseline — and is idempotent so a hook and a finally can both call it.
+function denyStateSave(file: string): () => void {
+  const bytes = readFileSync(file, 'utf8');
+  rmSync(file);
+  mkdirSync(file);
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    rmSync(file, { recursive: true, force: true });
+    writeFileSync(file, bytes);
+  };
 }
 
 async function waitUntil(
@@ -2367,6 +2391,7 @@ describe('managed GitHub adapter PR watch', () => {
     });
     expect(watch.injected[0]!.evidence).toContain('CI failed on head sha-a');
     expect(watch.injected[0]!.evidence).toContain('build, test');
+    expect(watch.injected[0]!.evidence).not.toContain('may be incomplete');
     const entry = readState(adapter).watch!.prs[PR_KEY]!;
     expect(entry.ciFiredSha).toBe('sha-a');
     expect(entry.fired).toHaveLength(1);
@@ -2380,6 +2405,26 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.tick();
     expect(watch.injected).toHaveLength(1);
     expect(fake.ciSeen.length).toBe(ciReads);
+    await adapter.disconnect();
+  });
+
+  it('marks the evidence when the failed-check list is incomplete', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline passing
+    fake.knobs.ci = {
+      aggregate: 'failing',
+      failedChecks: ['build'],
+      namesIncomplete: true,
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.evidence).toContain('Failed checks: build.');
+    // A partial list must not read as exhaustive: the bound agent would
+    // otherwise reason about a subset of the breakage as the whole.
+    expect(watch.injected[0]!.evidence).toContain(
+      'The failed-check list may be incomplete.',
+    );
     await adapter.disconnect();
   });
 
@@ -2479,6 +2524,30 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.tick();
     expect(watch.injected).toHaveLength(1);
     expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('never overwrites the head SHA with a headless observation', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline sha-a
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeable: true,
+      mergeableState: 'clean',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    expect(readState(adapter).watch!.prs[PR_KEY]!.headSha).toBe('sha-a');
+    // The carried baseline is what makes the next real move a head_change: a
+    // blanked baseline loses the move and, with it, the CI re-check that
+    // rides the head change.
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick();
+    const moves = watch.injected.filter((e) => e.transition === 'head_change');
+    expect(moves).toHaveLength(1);
+    expect(moves[0]!.evidence).toContain('from sha-a to sha-b');
     await adapter.disconnect();
   });
 
@@ -2641,6 +2710,37 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.disconnect();
   });
 
+  it('logs the bindings folded onto an already-bound PR', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    // The control plane's binding identity is byte-exact owner/repo, so both
+    // spellings are accepted rows. This watch keys case-insensitively and
+    // serves only the first: the folded row is inert, its Session never
+    // receives an event, so the fold must be visible instead of silent.
+    watch.setBindings([
+      binding({ owner: 'octocat', repo: 'hello-world', prNumber: 7 }),
+      binding({
+        owner: 'Octocat',
+        repo: 'hello-world',
+        prNumber: 7,
+        sessionId: 'session-2',
+      }),
+    ]);
+    await adapter.tick();
+    expect(fake.pullsSeen).toEqual([
+      { owner: 'octocat', repo: 'hello-world', prNumber: 7 },
+    ]);
+    expect(Object.keys(readState(adapter).watch!.prs)).toEqual([
+      'octocat/hello-world#7',
+    ]);
+    expect(lines.some((l) => /skipped 1 listed binding\(s\)/.test(l))).toBe(
+      true,
+    );
+    await adapter.disconnect();
+  });
+
   it('rotates the capped observation window so every binding is observed', async () => {
     const lines: string[] = [];
     const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
@@ -2743,8 +2843,7 @@ describe('managed GitHub adapter PR watch', () => {
     watch.setBindings([binding()]);
     await adapter.tick(); // baseline on disk
     fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
-    const dir = dirname(adapter.stateFile);
-    chmodSync(dir, 0o500);
+    const restore = denyStateSave(adapter.stateFile);
     try {
       // The detection queues ci_failure but its save fails: the claim must
       // roll back, or the end-of-pass drain would inject an event whose
@@ -2752,7 +2851,7 @@ describe('managed GitHub adapter PR watch', () => {
       // history and re-fire the head).
       await adapter.tick();
     } finally {
-      chmodSync(dir, 0o700);
+      restore();
     }
     expect(watch.injected).toHaveLength(0);
     const held = readState(adapter).watch!.prs[PR_KEY]!;
@@ -2769,32 +2868,30 @@ describe('managed GitHub adapter PR watch', () => {
     const { adapter, fake, watch } = await watchAdapter();
     watch.setBindings([binding()]);
     await adapter.tick();
-    const dir = dirname(adapter.stateFile);
-    let injectCalls = 0;
+    let restore: (() => void) | undefined;
     watch.setOnInject(() => {
-      injectCalls += 1;
-      // The first injection lands while the state dir turns unwritable: the
-      // fired recording fails and must roll back; the second heals it.
-      chmodSync(dir, injectCalls === 1 ? 0o500 : 0o700);
+      // The first injection lands while the state file is unwritable: the
+      // fired recording fails and must roll back, never half-settle.
+      restore ??= denyStateSave(adapter.stateFile);
     });
     fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
     try {
       await adapter.tick();
-      expect(watch.injected).toHaveLength(1);
-      const held = readState(adapter).watch!.prs[PR_KEY]!;
-      expect(held.pending).toHaveLength(1);
-      expect(held.fired ?? []).toHaveLength(0);
-      await adapter.tick();
-      expect(watch.injected).toHaveLength(2);
-      // The re-drive injected the identical event (derived-id idempotency).
-      expect(watch.injected[1]).toEqual(watch.injected[0]);
-      const settled = readState(adapter).watch!.prs[PR_KEY]!;
-      expect(settled.pending ?? []).toHaveLength(0);
-      expect(settled.fired).toHaveLength(1);
     } finally {
-      chmodSync(dir, 0o700);
+      restore?.();
       watch.setOnInject(undefined);
     }
+    expect(watch.injected).toHaveLength(1);
+    const held = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(held.pending).toHaveLength(1);
+    expect(held.fired ?? []).toHaveLength(0);
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(2);
+    // The re-drive injected the identical event (derived-id idempotency).
+    expect(watch.injected[1]).toEqual(watch.injected[0]);
+    const settled = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(settled.pending ?? []).toHaveLength(0);
+    expect(settled.fired).toHaveLength(1);
     await adapter.disconnect();
   });
 
@@ -2847,7 +2944,21 @@ describe('managed GitHub adapter PR watch', () => {
     }
     const entry = readState(adapter).watch!.prs[PR_KEY]!;
     expect(entry.pending).toHaveLength(16);
-    expect(lines.some((l) => /pending overflow.*dropped/.test(l))).toBe(true);
+    // The drop direction is the contract: the OLDEST transition goes and the
+    // newest stays. Every key shares the fixed fake clock and differs only by
+    // seq, so a count alone would also pass if pop() dropped the newest.
+    const keyFor = (seq: number) =>
+      `prw:head_change:Owner/Repo#9:${seq}:${NOW}`;
+    expect(entry.pending!.map((p) => p.key)).toEqual(
+      Array.from({ length: 16 }, (_, i) => keyFor(i + 2)),
+    );
+    expect(
+      lines.some(
+        (l) =>
+          /pending overflow/.test(l) &&
+          l.includes(`dropped ${keyFor(1)} undelivered`),
+      ),
+    ).toBe(true);
     expect(watch.injected).toHaveLength(0);
     await adapter.disconnect();
   });
@@ -2888,6 +2999,45 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.disconnect();
   });
 
+  it('evicts the oldest episode watermarks past the cap so the state stays loadable', async () => {
+    const cwd = tempCwd();
+    const first = await watchAdapter(cwd);
+    first.watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    await first.adapter.tick(); // baseline clean
+    await first.adapter.disconnect();
+    // A long-lived instance accumulates one watermark per PR it ever watched.
+    // Seed the cap with stale PRs the binding list no longer includes, so the
+    // next transition is the one that crosses the line.
+    seedState(first.adapter, (state) => {
+      const episodes: Record<string, number> = {};
+      for (let i = 0; i < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT; i++) {
+        episodes[`stale/repo#${i}`] = 1;
+      }
+      state.watch!.episodes = episodes;
+    });
+    const second = await watchAdapter(cwd);
+    second.watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    second.fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeable: false,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await second.adapter.tick(); // merge_conflict: the 1025th watermark
+    expect(second.watch.injected).toHaveLength(1);
+    const state = readState(second.adapter);
+    const episodes = state.watch!.episodes!;
+    // save() does not validate but load() refuses an over-cap map: without
+    // the eviction the adapter writes a file it can never start on again.
+    expect(Object.keys(episodes).length).toBeLessThanOrEqual(
+      MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+    );
+    expect(validManagedGithubState(state)).toBe(true);
+    expect(episodes[PR_KEY]).toBe(1);
+    expect(episodes['stale/repo#0']).toBeUndefined();
+    await second.adapter.disconnect();
+  });
+
   it('treats a merged/closed PR as terminal: no transition, binding retired', async () => {
     const { adapter, fake, watch } = await watchAdapter();
     watch.setBindings([binding()]);
@@ -2908,6 +3058,49 @@ describe('managed GitHub adapter PR watch', () => {
     const seenBefore = fake.pullsSeen.length;
     await adapter.tick();
     expect(fake.pullsSeen.length).toBe(seenBefore);
+    await adapter.disconnect();
+  });
+
+  it('keeps a failed retire best-effort: the pass drains and the next tick retries', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding(), binding({ prNumber: 12 })]);
+    await adapter.tick(); // baseline both open
+    fake.knobs.pullFor = (prNumber) =>
+      prNumber === 9
+        ? {
+            headSha: 'sha-a',
+            mergeable: true,
+            mergeableState: 'clean',
+            state: 'closed',
+          }
+        : fake.knobs.pull;
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setRetireError(new Error('control plane unavailable'));
+    await adapter.tick();
+    // The retire failed, but it is best-effort: it must neither abort the
+    // pass nor starve the co-bound PR, whose ci_failure still drains.
+    expect(watch.retired).toHaveLength(0);
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]).toMatchObject({
+      prNumber: 12,
+      transition: 'ci_failure',
+    });
+    expect(
+      lines.some((l) =>
+        /could not retire the terminal PR binding owner\/repo#9.*retries on the next tick/.test(
+          l,
+        ),
+      ),
+    ).toBe(true);
+    // Best-effort means re-driven: the next tick retires the terminal PR.
+    watch.setRetireError(undefined);
+    await adapter.tick();
+    expect(watch.retired).toEqual([
+      { owner: 'Owner', repo: 'Repo', prNumber: 9 },
+    ]);
     await adapter.disconnect();
   });
 

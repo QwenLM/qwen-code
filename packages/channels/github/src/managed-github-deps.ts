@@ -295,6 +295,7 @@ async function createClient(
       // the bound agent may be partial (early pagination stop or name cap).
       let namesIncomplete = false;
       const failedChecks: string[] = [];
+      const reportedNames = new Set<string>();
       await octokit.paginate(
         octokit.rest.checks.listForRef,
         { owner, repo, ref: headSha, per_page: 100 },
@@ -318,10 +319,20 @@ async function createClient(
             ) {
               sawFailure = true;
               if (typeof run.name === 'string' && run.name.length > 0) {
-                if (failedChecks.length < MAX_REPORTED_FAILED_CHECKS) {
-                  failedChecks.push(run.name.slice(0, MAX_CHECK_NAME_CHARS));
-                } else {
+                const name = run.name.slice(0, MAX_CHECK_NAME_CHARS);
+                // One check's re-runs must not spend the whole name budget:
+                // dedupe before counting against the cap. The marker stays
+                // conservative — any failing run whose name is not listed (a
+                // repeat or past the cap) means the list names only part of
+                // the breakage.
+                if (
+                  reportedNames.has(name) ||
+                  failedChecks.length >= MAX_REPORTED_FAILED_CHECKS
+                ) {
                   namesIncomplete = true;
+                } else {
+                  reportedNames.add(name);
+                  failedChecks.push(name);
                 }
               }
             } else if (run.conclusion) {

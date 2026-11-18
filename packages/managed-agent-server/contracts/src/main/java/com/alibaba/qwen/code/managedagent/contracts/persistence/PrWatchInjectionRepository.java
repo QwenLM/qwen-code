@@ -43,17 +43,23 @@ public interface PrWatchInjectionRepository {
     public Optional<PrWatchInjection> find(String tenantId, String inputId);
 
     /**
-     * Records the admission of a staged injection. Returns null when the
-     * row is absent; a replay of an admitted row returns the current row.
+     * Records the admission of the staged injection owned by
+     * {@code sessionId}. Returns null when no staged row matches that
+     * identity — absent, already admitted, or re-staged under another
+     * Session — so a concurrent rebind surfaces as a conflict instead of
+     * flipping the other Session's row.
      */
-    public PrWatchInjection admit(String tenantId, String inputId);
+    public PrWatchInjection admit(String tenantId, String inputId,
+            String sessionId);
 
     /**
      * Releases a merely staged injection (receipt and operation) so the
-     * identity can be re-staged under a new binding. A staged row is not an
-     * admission: its Harness call never committed, and a rebind must not be
-     * blocked by it forever. Returns false when the row is absent or already
-     * admitted (an admitted row permanently reserves the identity).
+     * identity can be re-staged under a new binding. The caller must first
+     * prove the pinned Session never committed (a replay against it that
+     * cannot answer): a staged row whose Harness call did commit reserves
+     * the occurrence for that Session. A dead binding must not block the PR
+     * forever. Returns false when the row is absent or already admitted (an
+     * admitted row permanently reserves the identity).
      */
     public boolean releaseStaged(String tenantId, String inputId);
 }

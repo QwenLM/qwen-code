@@ -193,6 +193,53 @@ describe('submitPrEventInput', () => {
     expect(submits).toHaveLength(1);
   });
 
+  it('replay guard requires the same input id, not just the pr_event source', async () => {
+    const { store, events, submits } = fakeStore();
+    const p = params();
+    const otherInputId = prWatchInputId({
+      tenantId: 't1',
+      channelInstanceId: 'gh-e2e',
+      owner: 'Owner',
+      repo: 'Repo',
+      prNumber: 7,
+      transition: 'ci_failure',
+      headSha: HEAD,
+      episode: 2,
+    });
+    const digest = createHash('sha256').update('{}').digest('hex');
+    events.push({
+      v: 1,
+      sequence: 1,
+      eventId: 'input.accepted:other-episode',
+      sessionKey: KEY,
+      kind: 'input.accepted',
+      occurredAt: 0,
+      payload: {
+        inputId: otherInputId,
+        turnId: otherInputId,
+        source: PR_EVENT_INPUT_SOURCE,
+        contentRef: {
+          resourceId: 'res-1',
+          kind: 'managed-input',
+          schemaVersion: 1,
+          byteLength: 2,
+          digest,
+        },
+        deadline: null,
+        admissionRef: {
+          resourceId: 'res-2',
+          kind: 'managed-admission',
+          schemaVersion: 1,
+          byteLength: 2,
+          digest,
+        },
+      },
+    });
+    const result = await submitPrEventInput(store, KEY, p);
+    expect(result.replayed).toBe(false);
+    expect(submits).toHaveLength(1);
+  });
+
   it('refuses an envelope over the evidence character bound', async () => {
     const { store } = fakeStore();
     const p = params({

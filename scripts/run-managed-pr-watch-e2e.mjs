@@ -438,7 +438,12 @@ async function scenarioP1() {
   );
   check(
     'text is the model-facing prompt',
-    typeof inj.text === 'string' && inj.text.length > 0,
+    typeof inj.text === 'string' &&
+      inj.text.includes('Owner/Repo#7') &&
+      inj.text.includes('ci_failure') &&
+      inj.text.includes(SHA_A) &&
+      inj.evidence.length > 0 &&
+      !inj.text.includes(inj.evidence),
     inj.text,
   );
   // Independent witness: the id the adapter's fields derive must equal the

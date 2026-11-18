@@ -225,6 +225,10 @@ describe('cross-language parity fixture (TS side)', () => {
       identity: Record<string, unknown>;
       message: string;
     }>;
+    texts: Array<{
+      envelope: PrWatchInputEnvelope;
+      expected: string;
+    }>;
   };
 
   it('pins the source, transition set, and envelope limits', () => {
@@ -247,11 +251,26 @@ describe('cross-language parity fixture (TS side)', () => {
   it('refuses every fixture invalid identity with the same message', () => {
     for (const r of fixture.refusals) {
       const identity = r.identity as unknown as PrWatchEventIdentity;
-      if ('transition' in r.identity) {
-        expect(() => prWatchInputId(identity)).toThrow(r.message);
-      } else {
-        expect(() => prWatchBindingId(identity)).toThrow(r.message);
+      const derive =
+        'transition' in r.identity
+          ? () => prWatchInputId(identity)
+          : () => prWatchBindingId(identity);
+      // Exact equality (not toThrow's substring match), mirroring the Java
+      // hasMessage assertion, so a message drift on either side is caught.
+      let error: unknown;
+      try {
+        derive();
+      } catch (e) {
+        error = e;
       }
+      expect([r.id, error instanceof Error]).toEqual([r.id, true]);
+      expect([r.id, (error as Error).message]).toEqual([r.id, r.message]);
+    }
+  });
+
+  it('wraps every fixture prompt byte-for-byte', () => {
+    for (const t of fixture.texts) {
+      expect(prWatchInputText(t.envelope)).toBe(t.expected);
     }
   });
 });

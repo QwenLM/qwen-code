@@ -145,27 +145,47 @@ class PrWatchOperationsParityTest {
     }
 
     @Test
-    void wrapsThePromptByteForByteLikeTheTsContract() {
-        // Expected values generated from the authoritative TS prWatchInputText
-        // (packages/core/src/managed-runtime/managed-pr-watch-operations.ts);
-        // the ingress bounds the wrapped prompt, so the mirror must match it
-        // exactly, including the XML escaping of untrusted evidence.
-        assertThat(PrWatchOperations.prWatchInputText("octocat", "hello-world",
-                42, "ci_failure", "a".repeat(40), "checks: build",
-                "the build went red"))
-                .isEqualTo("<pr-watch-event>\n"
-                        + "<pr>octocat/hello-world#42</pr>\n"
-                        + "<transition>ci_failure</transition>\n"
-                        + "<head-sha>" + "a".repeat(40) + "</head-sha>\n"
-                        + "<evidence untrusted=\"true\">checks: build</evidence>\n"
-                        + "</pr-watch-event>\nthe build went red");
-        assertThat(PrWatchOperations.prWatchInputText("o&<>\"x", "r",
-                1, "head_change", "b".repeat(40), "a&b<c>d\"e", ""))
-                .isEqualTo("<pr-watch-event>\n"
-                        + "<pr>o&amp;&lt;&gt;&quot;x/r#1</pr>\n"
-                        + "<transition>head_change</transition>\n"
-                        + "<head-sha>" + "b".repeat(40) + "</head-sha>\n"
-                        + "<evidence untrusted=\"true\">a&amp;b&lt;c&gt;d&quot;e</evidence>\n"
-                        + "</pr-watch-event>\n");
+    void wrapsThePromptByteForByteLikeTheTsContract() throws IOException {
+        // Expected values live in the shared fixture, generated from the
+        // authoritative TS prWatchInputText; the TS test asserts the same
+        // strings, so a wrapper change on either side turns both suites red.
+        for (JsonNode fixture : fixtures().get("texts")) {
+            JsonNode e = fixture.get("envelope");
+            assertThat(PrWatchOperations.prWatchInputText(
+                    e.get("owner").asText(),
+                    e.get("repo").asText(),
+                    e.get("prNumber").asLong(),
+                    e.get("transition").asText(),
+                    e.get("headSha").asText(),
+                    e.get("evidence").asText(),
+                    e.get("text").asText()))
+                    .isEqualTo(fixture.get("expected").asText());
+        }
+    }
+
+    @Test
+    void pinsTheEventsBoundAgainstTheTransitionSet() throws Exception {
+        // The events @Size cap must admit every authoritative transition; a
+        // cap copied from today's set size would 400 a valid request once the
+        // deferred state_change lands. Pin the bound against the fixture set.
+        int transitionCount = fixtures().get("transitions").size();
+        java.lang.reflect.RecordComponent events = null;
+        for (java.lang.reflect.RecordComponent component
+                : PrWatchCreateRequest.class.getRecordComponents()) {
+            if (component.getName().equals("events")) {
+                events = component;
+            }
+        }
+        assertThat(events).isNotNull();
+        // Record-component constraints propagate to the accessor and the
+        // backing field, not to the RecordComponent reflection itself.
+        jakarta.validation.constraints.Size size =
+                events.getAccessor().getAnnotation(jakarta.validation.constraints.Size.class);
+        if (size == null) {
+            size = PrWatchCreateRequest.class.getDeclaredField("events")
+                    .getAnnotation(jakarta.validation.constraints.Size.class);
+        }
+        assertThat(size).isNotNull();
+        assertThat(size.max()).isGreaterThanOrEqualTo(transitionCount);
     }
 }

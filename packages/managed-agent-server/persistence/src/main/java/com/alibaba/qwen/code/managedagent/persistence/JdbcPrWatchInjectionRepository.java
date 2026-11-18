@@ -94,18 +94,25 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
     }
 
     @Override
-    public PrWatchInjection admit(String tenantId, String inputId) {
+    public PrWatchInjection admit(String tenantId, String inputId, String sessionId) {
         ChannelStoreSupport.requireId(inputId, "inputId");
+        ChannelStoreSupport.requireId(sessionId, "sessionId");
         PrWatchInjection old = find(tenantId, inputId).orElse(null);
         if (old == null) {
             return null;
         }
         String scope = ManagedSchemaKeys.key("CHANNEL", tenantId, old.channelInstanceId());
         String operation = ManagedSchemaKeys.operationKey(OperationKind.PR_WATCH_INJECT, scope,
-                ManagedSchemaKeys.key(old.sessionId()), inputId);
-        jdbc.update("UPDATE ma_operation SET state = 'admitted', phase = 'ADMITTED', result_json = ?,"
-                        + " gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'PR_WATCH_INJECT' AND state = 'staged'",
-                JSON.createObjectNode().put("inputId", inputId).toString(), databaseNow(), operation);
+                ManagedSchemaKeys.key(sessionId), inputId);
+        // The identity predicate keeps a concurrent rebind from being
+        // admitted under the caller's identity: if the staged row was
+        // released and re-staged for another Session, no row matches.
+        int updated = jdbc.update("UPDATE ma_operation SET state = 'admitted', phase = 'ADMITTED', result_json = ?,"
+                        + " gmt_modified = ? WHERE operation_key = ? AND operation_kind = 'PR_WATCH_INJECT' AND state = 'staged' AND session_id = ?",
+                JSON.createObjectNode().put("inputId", inputId).toString(), databaseNow(), operation, sessionId);
+        if (updated == 0) {
+            return null;
+        }
         return find(tenantId, inputId).orElse(null);
     }
 
@@ -168,8 +175,10 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
         if (candidate.prNumber() < 1 || candidate.episode() < 1) {
             throw new IllegalArgumentException("prNumber and episode must be positive");
         }
-        if (!INJECTION_STATES.contains(candidate.state())) {
-            throw new IllegalArgumentException("unknown injection state");
+        // Ingress only ever stages: admission is recorded by admit() after
+        // the Harness commits, so a candidate must not claim it up front.
+        if (!"staged".equals(candidate.state())) {
+            throw new IllegalArgumentException("injection candidates must be staged");
         }
         if (candidate.evidence() == null || candidate.text() == null || candidate.text().isEmpty()) {
             throw new IllegalArgumentException("evidence and text are required");

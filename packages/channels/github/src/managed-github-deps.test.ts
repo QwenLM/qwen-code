@@ -758,9 +758,49 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
       }
       return { status: 200, body: { state: 'success', total_count: 0 } };
     });
-    const { failedChecks } = await client.getCiStatus('Owner', 'Repo', 'sha-a');
+    const { failedChecks, namesIncomplete } = await client.getCiStatus(
+      'Owner',
+      'Repo',
+      'sha-a',
+    );
     expect(failedChecks).toHaveLength(5);
     expect(failedChecks[0]).toHaveLength(200);
+    // Two of the seven names never reached the agent: the cap raises the same
+    // honesty marker the early pagination stop does.
+    expect(namesIncomplete).toBe(true);
+  });
+
+  it('dedupes repeated runs of one check before spending the name budget', async () => {
+    // Five failing runs of one workflow (push, pull_request, merge_group and
+    // two re-runs) must not crowd out the other broken workflows: the budget
+    // counts distinct names, not runs.
+    const { client } = await clientFor((_method, url) => {
+      if (url.includes('/check-runs')) {
+        return {
+          status: 200,
+          body: {
+            total_count: 7,
+            check_runs: [
+              ...Array.from({ length: 5 }, () => ({
+                name: 'CI',
+                status: 'completed',
+                conclusion: 'failure',
+              })),
+              { name: 'build', status: 'completed', conclusion: 'failure' },
+              { name: 'lint', status: 'completed', conclusion: 'failure' },
+            ],
+          },
+        };
+      }
+      return { status: 200, body: { state: 'success', total_count: 0 } };
+    });
+    expect(await client.getCiStatus('Owner', 'Repo', 'sha-a')).toEqual({
+      aggregate: 'failing',
+      failedChecks: ['CI', 'build', 'lint'],
+      // Four failing runs are not named, so the list still reports itself as
+      // partial rather than exhaustive.
+      namesIncomplete: true,
+    });
   });
 
   it('rides the poll-floor hook on a rate-limited PR read', async () => {

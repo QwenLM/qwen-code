@@ -100,7 +100,8 @@ pr_number)`。不带 session 维度索引：slice 1 没有按 session 的读取�
 - **绑定路由。** 既有 internal channel 前缀
   `/internal/managed-channels/v1/channels/{channelId}` 下：`pr-watch:create`、
   `pr-watch:list`、`pr-watch:retire`。鉴权照 channel adapter internal 面（租户头 + 可信
-  adapter + 启用门）；create/retire 写入面注册进 `SurfaceRegistry`。
+  adapter + 启用门）；全部四个 `pr-watch:*` 路由——含 `pr-watch:list` 读与下方
+  `pr-watch:inject` 写——都注册进 `SurfaceRegistry`。
 - **注入路由。** 同前缀 `pr-watch:inject`。目标 Session 由绑定强制（绝非调用方指定），照
   `ManagedAutomationSessionService`。经既有 connector 路径
   （`QwenHostedHarnessConnector.runChannelOperation` → `POST /session/:id/channels/operations`）
@@ -112,9 +113,9 @@ transition ∥ headSha ∥ episode) + ":input"`；`turnId = inputId`。`episode`
   复用 episode、派生同一 id。缺 episode 控制面会把合法复发误 dedupe 成首次 admission。
   Harness 提交与 SQL 台账间崩溃重放到同一 admission（派生 id），沿用 channel 崩溃安全纪律。
   durable envelope 提交前钉住绑定 + PR + transition + headSha。
-- **Envelope。** `managed-input` 资源携 `{ text, prWatch: { owner, repo, prNumber,
-transition, headSha, evidence } }`；wake pump 读 `text` 作 prompt。private-only：不从
-  `pr_event` input plan 任何 `channel_delivery`。
+- **Envelope。** `managed-input` 资源携扁平记录 `{ owner, repo, prNumber, transition,
+headSha, evidence, text }`；`text` 存 XML 包裹后的提示词，wake pump 读取它。private-only：
+  不从 `pr_event` input plan 任何 `channel_delivery`。
 - **检测（D3）。** adapter 侧 watch pass 复用 daemon transition 语义（每 head 一次 CI fire、
   边沿触发冲突、head 变化）。最小事件集 ci_failure/merge_conflict/head_change（state_change
   延后）。adapter 经 `pr-watch:list` 得知绑定 PR。watch state（baseline + fired-ring +

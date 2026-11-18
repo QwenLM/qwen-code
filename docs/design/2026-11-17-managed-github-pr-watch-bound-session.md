@@ -221,8 +221,9 @@ gmt_create)`, unique `(tenant_id, channel_id, owner, repo, pr_number)`. No
 - **Binding routes.** Under the existing internal channel prefix
   `/internal/managed-channels/v1/channels/{channelId}`: `pr-watch:create`,
   `pr-watch:list`, `pr-watch:retire`. Authenticated like the channel adapter internal
-  surface (tenant header + trusted adapter + enablement gate); the create/retire write
-  surface is registered in the `SurfaceRegistry`.
+  surface (tenant header + trusted adapter + enablement gate); all four `pr-watch:*`
+  routes — including the `pr-watch:list` read and the `pr-watch:inject` write below —
+  are registered in the `SurfaceRegistry`.
 - **Injection route.** `pr-watch:inject` on the same prefix. The target Session is
   forced from the binding (never caller-chosen), mirroring
   `ManagedAutomationSessionService`. It submits `input.accepted` + `wake.requested`
@@ -238,9 +239,10 @@ prNumber ∥ transition ∥ headSha ∥ episode) + ":input"`; `turnId = inputId`
   between Harness commit and SQL ledger replays to the same admission (derived id),
   following the channel crash-safe discipline. The durable envelope pins the binding + PR
   - transition + headSha before commit.
-- **Envelope.** A `managed-input` resource carrying `{ text, prWatch: { owner, repo,
-prNumber, transition, headSha, evidence } }`; the wake pump reads `text` for the
-  prompt. Private-only: no `channel_delivery` is planned from a `pr_event` input.
+- **Envelope.** A `managed-input` resource carrying the flat record `{ owner, repo,
+prNumber, transition, headSha, evidence, text }`; `text` holds the XML-wrapped prompt
+  that the wake pump reads. Private-only: no `channel_delivery` is planned from a
+  `pr_event` input.
 - **Detection (D3).** Adapter-side watch pass reusing the daemon transition semantics
   (once-per-head CI fire, edge-triggered conflict, head change). Minimal event set:
   `ci_failure`, `merge_conflict`, `head_change` (`state_change` deferred). The adapter

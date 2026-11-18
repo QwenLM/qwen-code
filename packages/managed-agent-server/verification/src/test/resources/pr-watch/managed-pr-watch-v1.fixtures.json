@@ -1,7 +1,11 @@
 {
   "comment": "TS/Java parity fixture for the PR-watch identity derivation (episode revision). Generated from packages/core/src/managed-runtime/managed-pr-watch-operations.ts (the authoritative TS contract): inputId joins episode LAST, after headSha; bindingId carries no episode. The Java mirror (PrWatchOperations) must derive byte-identical ids and refuse the same invalid identities with the same messages. Two-directional: the TS contract test (managed-pr-watch-operations.test.ts) reads this file and asserts its own derivation/limits/refusals against it, and the Java parity test does the same, so a change on either side turns the other red.",
   "source": "pr_event",
-  "transitions": ["ci_failure", "merge_conflict", "head_change"],
+  "transitions": [
+    "ci_failure",
+    "merge_conflict",
+    "head_change"
+  ],
   "limits": {
     "maxTextChars": 32000,
     "maxEnvelopeBytes": 65536,
@@ -510,6 +514,88 @@
         "prNumber": 0
       },
       "message": "prNumber must be a positive safe integer."
+    },
+    {
+      "id": "binding-empty-tenant",
+      "identity": {
+        "tenantId": "",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42
+      },
+      "message": "tenantId must be non-empty and hold no NUL."
+    },
+    {
+      "id": "binding-nul-channel",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "a\u0000b",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42
+      },
+      "message": "channelInstanceId must be non-empty and hold no NUL."
+    },
+    {
+      "id": "binding-empty-owner",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "",
+        "repo": "hello-world",
+        "prNumber": 42
+      },
+      "message": "owner must be non-empty and hold no NUL."
+    },
+    {
+      "id": "binding-nul-repo",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "a\u0000b",
+        "prNumber": 42
+      },
+      "message": "repo must be non-empty and hold no NUL."
+    }
+  ],
+  "texts": [
+    {
+      "envelope": {
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "evidence": "checks: build",
+        "text": "the build went red"
+      },
+      "expected": "<pr-watch-event>\n<pr>octocat/hello-world#42</pr>\n<transition>ci_failure</transition>\n<head-sha>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</head-sha>\n<evidence untrusted=\"true\">checks: build</evidence>\n</pr-watch-event>\nthe build went red"
+    },
+    {
+      "envelope": {
+        "owner": "o&<>\"x",
+        "repo": "r",
+        "prNumber": 1,
+        "transition": "head_change",
+        "headSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "evidence": "a&b<c>d\"e",
+        "text": ""
+      },
+      "expected": "<pr-watch-event>\n<pr>o&amp;&lt;&gt;&quot;x/r#1</pr>\n<transition>head_change</transition>\n<head-sha>bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb</head-sha>\n<evidence untrusted=\"true\">a&amp;b&lt;c&gt;d&quot;e</evidence>\n</pr-watch-event>\n"
+    },
+    {
+      "envelope": {
+        "owner": "Octocat",
+        "repo": "Hello-World",
+        "prNumber": 7,
+        "transition": "merge_conflict",
+        "headSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "evidence": "",
+        "text": "resolve the conflict"
+      },
+      "expected": "<pr-watch-event>\n<pr>Octocat/Hello-World#7</pr>\n<transition>merge_conflict</transition>\n<head-sha>cccccccccccccccccccccccccccccccccccccccc</head-sha>\n</pr-watch-event>\nresolve the conflict"
     }
   ]
 }

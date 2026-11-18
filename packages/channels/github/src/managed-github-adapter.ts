@@ -99,9 +99,13 @@ export interface GithubSendFailure extends Error {
 /** One PR observation as the watch reads it (the pulls.get fields it needs). */
 export interface GithubPullObservation {
   headSha?: string;
-  /** null while GitHub computes mergeability; never overwrites the baseline. */
+  /** The raw pulls.get flag: null while GitHub computes mergeability. */
   mergeable: boolean | null;
-  /** undefined while mergeable is null (the daemon's UNKNOWN mapping). */
+  /**
+   * undefined while mergeable is null (the daemon's UNKNOWN mapping). This is
+   * the field the watch compares and persists, and it never overwrites the
+   * baseline: an undefined value carries the previous mergeableState forward.
+   */
   mergeableState?: string;
   state: string;
 }
@@ -876,6 +880,7 @@ export class ManagedGithubAdapter {
       return;
     }
     const byKey = new Map<string, GithubPrWatchBinding>();
+    let folded = 0;
     for (const binding of bindings) {
       if (
         typeof binding.owner !== 'string' ||
@@ -895,9 +900,19 @@ export class ManagedGithubAdapter {
       // watch skipped pulls.get for a comment-only channel for the same reason).
       if (events.length === 0) continue;
       const key = prWatchKey(binding.owner, binding.repo, binding.prNumber);
-      // One baseline per PR however the list spells it; the binding contract
-      // uniquifies (owner, repo, prNumber), so a duplicate is defensive only.
+      // One baseline per PR however the list spells it. The control plane's
+      // binding identity is byte-exact owner/repo, so two spellings of one PR
+      // are two accepted rows and only the first listed one is served here.
       if (!byKey.has(key)) byKey.set(key, { ...binding, events });
+      else folded += 1;
+    }
+    if (folded > 0) {
+      // The folded rows are inert: their Session never receives an event and
+      // the binding keeps consuming a slot. Name the fold instead of leaving
+      // the operator to discover a silently deaf binding.
+      this.log(
+        `Managed GitHub PR watch skipped ${folded} listed binding(s) whose PR an earlier row already binds; they receive no events until retired.`,
+      );
     }
     // Prune unbound entries only once their pending drained: an in-flight
     // transition keeps its baseline so a rebind does not re-fire it.
