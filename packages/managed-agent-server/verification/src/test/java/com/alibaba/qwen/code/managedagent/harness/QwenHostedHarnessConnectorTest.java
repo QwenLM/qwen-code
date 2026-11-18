@@ -58,11 +58,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -2179,7 +2181,7 @@ class QwenHostedHarnessConnectorTest {
     // Workspace admission, the takeover load for a Session another process
     // attached — and loads nothing for a Session this node already holds.
     @Test
-    void aTransportWakeLoadsThroughTheNewWorkAdmissionOnce() {
+    void aTransportWakeLoadsThroughTheNewWorkAdmission() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
@@ -2219,14 +2221,16 @@ class QwenHostedHarnessConnectorTest {
         assertThat(connector.attachedSessions()).containsExactly(
                 new HarnessConnector.AttachedSession("tenant-a", SESSION_ID));
 
-        // Held here now: a later wake loads nothing.
-        assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isFalse();
-        verify(client, times(1)).loadSession(any(LoadHarnessSession.class));
+        // Under the wake fence a cached reference is stale: a later wake
+        // evicts it and recovery-loads again. Skipping Sessions a live
+        // writer holds is the fence's job, not this verb's.
+        assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isTrue();
+        verify(client, times(2)).loadSession(any(LoadHarnessSession.class));
 
         // SQL recovery re-proves the generation even with that cached attachment.
         connector.recoverForWake("tenant-a", SESSION_ID);
         connector.recoverForWake("tenant-a", SESSION_ID);
-        verify(client, times(3)).loadSession(loads.capture());
+        verify(client, times(4)).loadSession(loads.capture());
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(
                 loads.getValue(), "toJson"))
                 .containsEntry("passiveManagedRuntimeRecovery", true)
@@ -2241,7 +2245,7 @@ class QwenHostedHarnessConnectorTest {
                 .hasMessageContaining("Workspace execution authority is unavailable");
         assertThatThrownBy(() -> connector.recoverForWake("tenant-a", SESSION_ID))
                 .hasMessageContaining("Workspace execution authority is unavailable");
-        verify(client, times(3)).loadSession(any(LoadHarnessSession.class));
+        verify(client, times(4)).loadSession(any(LoadHarnessSession.class));
     }
 
     @Test
@@ -2401,7 +2405,6 @@ class QwenHostedHarnessConnectorTest {
         assertThat(connector.attachedSessions()).isEmpty();
         connector.recoverForWake("tenant-a", SESSION_ID);
         assertThat(connector.attachedSessions()).containsExactly(new HarnessConnector.AttachedSession("tenant-a", SESSION_ID));
-        assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isFalse();
         ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
         verify(client).loadSession(loads.capture());
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(loads.getValue(), "toJson"))
@@ -4610,6 +4613,115 @@ class QwenHostedHarnessConnectorTest {
 
             assertThat(refs).isEmpty();
         }
+    }
+
+    // The wake fence proved no live writer, so a cached reference is stale
+    // (a suspended Session's sealed writer leaves one behind): the wake
+    // evicts exactly that reference and its marker, then recovery-loads.
+    @Test
+    @SuppressWarnings("unchecked")
+    void wakeActivationEvictsAStaleAttachmentAndLoadsUnderTheFence() {
+        var client = harnessClient();
+        var connector = connector(client);
+        var stale = mock(HarnessSessionRef.class);
+        var fresh = mock(HarnessSessionRef.class);
+        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(fresh.getRuntimeRecovery()).thenReturn(mock(HarnessRuntimeRecovery.class));
+        when(client.loadSession(any())).thenReturn(fresh);
+        Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+        Map<Object, HarnessSessionRef> refs =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "attachments");
+        Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
+        refs.put(key, stale);
+        markers.add(key);
+
+        boolean activated = connector.activateForWake("tenant-a", SESSION_ID);
+
+        assertThat(activated).isTrue();
+        assertThat(refs.get(key)).isSameAs(fresh);
+        assertThat(markers).contains(key);
+        verify(client).loadSession(any());
+    }
+
+    // A load that publishes a newer attachment while the wake evicts the
+    // stale one keeps its reference and marker; the wake reports the
+    // Session already attached and loads nothing.
+    @Test
+    @SuppressWarnings("unchecked")
+    void wakeActivationKeepsAConcurrentlyPublishedAttachment() throws Exception {
+        var client = harnessClient();
+        var connector = connector(client);
+        var stale = mock(HarnessSessionRef.class);
+        var fresh = mock(HarnessSessionRef.class);
+        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(fresh.getRuntimeRecovery()).thenReturn(mock(HarnessRuntimeRecovery.class));
+        var removed = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var refs = new ConcurrentHashMap<Object, HarnessSessionRef>() {
+            @Override
+            public HarnessSessionRef computeIfPresent(Object key,
+                    BiFunction<? super Object, ? super HarnessSessionRef, ? extends HarnessSessionRef> update) {
+                HarnessSessionRef result = super.computeIfPresent(key, update);
+                if (result == null) {
+                    removed.countDown();
+                    try {
+                        if (!release.await(5, TimeUnit.SECONDS)) {
+                            throw new AssertionError("Replacement was not published");
+                        }
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(error);
+                    }
+                }
+                return result;
+            }
+        };
+        ReflectionTestUtils.setField(connector, "attachments", refs);
+        Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+        Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
+        Map<Object, HarnessSessionRef> management =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "mcpManagementAttachments");
+        refs.put(key, stale);
+        markers.add(key);
+        management.put(key, stale);
+        var result = new AtomicReference<Boolean>();
+        var failure = new AtomicReference<Throwable>();
+        var worker = new Thread(() -> {
+            try {
+                result.set(connector.activateForWake("tenant-a", SESSION_ID));
+            } catch (Throwable error) {
+                failure.set(error);
+            }
+        });
+        worker.start();
+        assertThat(removed.await(5, TimeUnit.SECONDS)).isTrue();
+        refs.put(key, fresh);
+        markers.add(key);
+        release.countDown();
+        worker.join(5_000);
+
+        assertThat(failure.get()).isNull();
+        assertThat(result.get()).isFalse();
+        assertThat(refs.get(key)).isSameAs(fresh);
+        assertThat(markers).contains(key);
+        assertThat(management).isEmpty();
+        verify(client, never()).loadSession(any());
+    }
+
+    // Without a cached reference the wake keeps its existing behavior:
+    // new-work admission and the takeover load.
+    @Test
+    void wakeActivationWithoutACacheLoads() {
+        var client = harnessClient();
+        var connector = connector(client);
+        var fresh = mock(HarnessSessionRef.class);
+        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(client.loadSession(any())).thenReturn(fresh);
+
+        boolean activated = connector.activateForWake("tenant-a", SESSION_ID);
+
+        assertThat(activated).isTrue();
+        verify(client).loadSession(any());
     }
 
     private static HostedHarnessClient harnessClient() {

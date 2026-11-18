@@ -1712,12 +1712,22 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public boolean activateForWake(String tenantId, String sessionId) {
         try {
-            // An attachment held here is not this verb's to evict: a wake
-            // only accelerates, and a stale entry is repaired by the paths
-            // that own it.
-            if (attachments.containsKey(attachmentKey(tenantId,
-                    sessionId))) {
-                return false;
+            AttachmentKey key = attachmentKey(tenantId, sessionId);
+            HarnessSessionRef observed = attachments.get(key);
+            if (observed != null) {
+                // The caller reaches this verb only when the SQL wake fence
+                // shows no live writer, so a reference cached here is stale:
+                // a suspended Session's sealed writer leaves one behind
+                // until its owning path repairs it, and reporting "already
+                // attached" would strand the wake on the slow SQL scan.
+                // Remove exactly the observed reference and its marker; a
+                // concurrent load that published a newer attachment keeps
+                // it, and the recheck below then reports it attached.
+                removeAttachment(key, observed);
+                mcpManagementAttachments.remove(key, observed);
+                if (attachments.containsKey(key)) {
+                    return false;
+                }
             }
             // The relay verbs' new-work order: the Workspace checks, then a
             // Session a prior control-plane process attached re-attaches
