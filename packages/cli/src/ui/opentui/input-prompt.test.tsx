@@ -462,6 +462,19 @@ vi.mock('../utils/clipboardUtils.js', () => ({
   saveClipboardImage: () => mocks.state.saveClipboardImage(),
   cleanupOldClipboardImages: async () => {},
 }));
+const voiceOverride = vi.hoisted(() => ({
+  current: {} as Record<string, unknown>,
+}));
+vi.mock('../hooks/use-prompt-voice-input.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../hooks/use-prompt-voice-input.js')>();
+  return {
+    ...actual,
+    usePromptVoiceInput: (
+      options: Parameters<typeof actual.usePromptVoiceInput>[0],
+    ) => ({ ...actual.usePromptVoiceInput(options), ...voiceOverride.current }),
+  };
+});
 
 beforeEach(() => {
   isSubscriptionSignedIn.mockReturnValue(false);
@@ -5490,6 +5503,41 @@ describe('OpenTuiInputPrompt screen-reader history scrolling', () => {
       expect(currentBuffer().text).toBe('abcX');
     },
   );
+
+  it('routes the screen-reader voice row to the live lane without the meter', () => {
+    voiceOverride.current = {
+      status: 'recording',
+      interimText: 'hello world',
+      audioLevel: 1,
+    };
+    try {
+      renderPrompt({ screenReader: true });
+      const row = document.querySelector(
+        '[data-id="screen-reader-live-voice"]',
+      );
+      expect(row?.textContent).toBe('listening…\nhello world');
+      expect(row?.textContent).not.toContain('█');
+    } finally {
+      voiceOverride.current = {};
+    }
+  });
+
+  it('keeps the graphical voice meter off the screen-reader lane', () => {
+    voiceOverride.current = {
+      status: 'recording',
+      interimText: 'hello world',
+      audioLevel: 1,
+    };
+    try {
+      renderPrompt();
+      expect(
+        document.querySelector('[data-id="screen-reader-live-voice"]'),
+      ).toBeNull();
+      expect(document.body.textContent).toContain('█');
+    } finally {
+      voiceOverride.current = {};
+    }
+  });
 
   it('keeps Shift+Left native selection in screen-reader mode', async () => {
     renderPrompt({ screenReader: true });

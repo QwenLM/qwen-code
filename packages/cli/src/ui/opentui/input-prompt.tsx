@@ -2254,6 +2254,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         status={voiceInput.status}
         interimText={voiceInput.interimText}
         audioLevel={voiceInput.audioLevel}
+        screenReader={props.screenReader}
       />
       <text fg={borderColor}>
         {props.screenReader ? renderedLabel : topBorderLine}

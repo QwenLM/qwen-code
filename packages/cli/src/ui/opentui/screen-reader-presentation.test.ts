@@ -1136,4 +1136,59 @@ describe('screen-reader semantic presentation', () => {
     expect(output.match(/model-x/g)).toHaveLength(1);
     expect(output.match(/Worktree: main/g)).toHaveLength(1);
   });
+
+  it('re-announces a transient footer row that unmounts and returns unchanged', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const row = (id: string, value: string) => {
+      const node = text(value);
+      node.id = id;
+      return node;
+    };
+    const status = () => row('screen-reader-footer-status-0', 'model-x');
+    const armed = () =>
+      box([
+        status(),
+        row('screen-reader-footer-exit', 'Press Ctrl+C again to exit.'),
+        row('screen-reader-footer-queue', '2 queued'),
+      ]);
+    let root: Renderable = armed();
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    presentation.observeFrames(events, () => root);
+    events.emit('frame');
+    // The guard window lapses and the queue drains while the footer stays up.
+    root = box([status()]);
+    events.emit('frame');
+    root = armed();
+    events.emit('frame');
+    expect(output.match(/Press Ctrl\+C again to exit\./g)).toHaveLength(2);
+    expect(output.match(/2 queued/g)).toHaveLength(2);
+    expect(output.match(/model-x/g)).toHaveLength(1);
+  });
+
+  it('keeps a timer-driven readout on the dynamic block, not the scrollback', () => {
+    const events = new EventEmitter();
+    const clock = text('12:00:01');
+    clock.id = 'screen-reader-live-status-0';
+    const writer = new ScreenReaderOutputWriter(() => {});
+    const appendStatic = vi.spyOn(writer, 'appendStatic');
+    const updateDynamic = vi.spyOn(writer, 'updateDynamic');
+    const presentation = new ScreenReaderPresentation(writer);
+    presentation.observeFrames(events, () => box([clock]));
+    events.emit('frame');
+    Object.assign(clock, { plainText: '12:00:02' });
+    events.emit('frame');
+    Object.assign(clock, { plainText: '12:00:03' });
+    events.emit('frame');
+    expect(appendStatic).not.toHaveBeenCalled();
+    expect(updateDynamic.mock.calls.map(([value]) => value)).toEqual([
+      '12:00:01',
+      '12:00:02',
+      '12:00:03',
+    ]);
+  });
 });

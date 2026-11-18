@@ -333,27 +333,29 @@ export function OpenTuiFooter({
   if (screenReader) {
     const segments: Array<[string, string | null]> = exitHint
       ? [
-          ['exit', exitHint],
-          ['queue', queuedLabel],
+          ['footer-exit', exitHint],
+          ['footer-queue', queuedLabel],
         ]
       : [
-          ['sandbox', sandboxLabel ?? ''],
+          ['footer-sandbox', sandboxLabel ?? ''],
           // The visual two-row clip keeps the footer from growing mid-turn.
           // Speech has no such budget and the writer hard-wraps, so it takes
           // the logical lines whole instead of the clipped display buffer.
+          // Command output is opaque and may refresh on a timer, so it rides
+          // the live lane instead of appending a scrollback line per tick.
           ...statusLine.lines.map((line, index): [string, string] => [
-            `status-${index}`,
+            `${statusLine.commandSourced ? 'live' : 'footer'}-status-${index}`,
             line,
           ]),
-          ['context', contextLabel],
+          ['footer-context', contextLabel],
           [
-            'worktree',
+            'footer-worktree',
             activeWorktree && !settings.merged.ui?.hideBuiltinWorktreeIndicator
               ? `Worktree: ${activeWorktree.branch || 'detached HEAD'} (${activeWorktree.slug})`
               : '',
           ],
           [
-            'workflow',
+            'footer-workflow',
             workflowMode?.requested
               ? workflowMode.effective
                 ? 'Workflow mode: on'
@@ -362,19 +364,19 @@ export function OpenTuiFooter({
           ],
           // The pause glyph is a visual marker; speech takes the mode label.
           [
-            'mode',
+            'footer-mode',
             modeHint
               .map((part) => part.text)
               .join('')
               .replace(pausePrefix, ''),
           ],
-          ['queue', queuedLabel],
+          ['footer-queue', queuedLabel],
         ];
     return (
       <box flexDirection="column">
         {segments.map(([key, text]) =>
           text ? (
-            <text key={key} id={`screen-reader-footer-${key}`}>
+            <text key={key} id={`screen-reader-${key}`}>
               {text}
             </text>
           ) : null,

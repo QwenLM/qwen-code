@@ -368,20 +368,27 @@ export class ScreenReaderPresentation {
       const current = new Map<Renderable | string, string>();
       // The shell unmounts the whole footer behind a dialog or the completion
       // menu, so its rows keep their entry across that gap instead of being
-      // re-spoken when they return. The loading row is left out: a new turn
-      // must still announce itself once.
+      // re-spoken when they return. Rows whose own appearance is the event —
+      // loading, the armed-quit warning, the queue badge — are left out: each
+      // must speak again when it returns, even with identical text.
       for (const [key, text] of this.controls)
-        if (typeof key === 'string' && key.startsWith('screen-reader-footer-'))
+        if (
+          typeof key === 'string' &&
+          key.startsWith('screen-reader-footer-') &&
+          key !== 'screen-reader-footer-exit' &&
+          key !== 'screen-reader-footer-queue'
+        )
           current.set(key, text);
       const live: string[] = [];
       for (const row of root ? controlRows(root) : []) {
         const key = controlKey(row.owner);
-        // An editable value is ink's dynamic block: it replaces its own lines
-        // in place, so a keystroke never appends another copy of the whole
-        // field to the permanent scrollback.
+        // Editable values and repeat-driven readouts are ink's dynamic block:
+        // they replace their own lines in place, so neither a keystroke nor a
+        // refresh tick appends another copy to the permanent scrollback.
         if (
           row.owner instanceof EditBufferRenderable ||
-          row.owner.id?.startsWith('screen-reader-input-line')
+          row.owner.id?.startsWith('screen-reader-input-line') ||
+          row.owner.id?.startsWith('screen-reader-live-')
         ) {
           live.push(row.text);
           continue;

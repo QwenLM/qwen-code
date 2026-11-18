@@ -1360,7 +1360,7 @@ function SubscriptionWaitingIndicator() {
     return () => clearInterval(timer);
   }, []);
   return (
-    <text>
+    <text id="screen-reader-live-auth-waiting">
       <span fg={C.accent}>{SPINNER_FRAMES[frame]}</span>{' '}
       {t('Waiting for sign-in…')}
     </text>

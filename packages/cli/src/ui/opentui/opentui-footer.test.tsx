@@ -997,6 +997,30 @@ describe('OpenTuiFooter', () => {
     ).toBe('model-x');
   });
 
+  it('routes a command-sourced status line to the live lane, not the scrollback', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        screenReader
+        statusLine={{
+          lines: ['12:00:01'],
+          useThemeColors: false,
+          respectUserColors: false,
+          hideContextIndicator: true,
+          commandSourced: true,
+        }}
+      />,
+    );
+    expect(
+      container.querySelector('[data-id="screen-reader-live-status-0"]')
+        ?.textContent,
+    ).toBe('12:00:01');
+    expect(
+      container.querySelector('[data-id="screen-reader-footer-status-0"]'),
+    ).toBeNull();
+  });
+
   it('renders the user-selected session-id preset supplied by the shared state', () => {
     const { container } = render(
       <Footer

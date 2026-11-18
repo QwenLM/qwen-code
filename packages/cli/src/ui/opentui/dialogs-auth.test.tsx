@@ -412,6 +412,28 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     },
   );
 
+  it('keeps the sign-in waiting spinner on the live lane, not the scrollback', async () => {
+    const config = createMockConfig(AuthType.USE_OPENAI);
+    vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      model: 'test-model',
+      baseUrl: 'https://api.deepseek.com',
+    });
+    render(
+      <OpenTuiAuthDialog
+        config={config}
+        settings={createMockSettings()}
+        onClose={vi.fn()}
+      />,
+    );
+    await press('return');
+    expect(
+      document.querySelector(
+        '[data-screen-reader-id="screen-reader-live-auth-waiting"]',
+      )?.textContent,
+    ).toContain('Waiting for sign-in…');
+  });
+
   it('blocks Esc on the main view while unauthenticated', async () => {
     const { onClose } = renderDialog();
     const consumed = await pressEsc();
