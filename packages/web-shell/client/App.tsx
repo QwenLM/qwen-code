@@ -23493,9 +23493,7 @@ export function App({
   // The entry toggles the right panel's artifacts list tab, independent of the
   // environment panel.
   const artifactsHeaderEntry =
-    artifactsHeaderItemVisible &&
-    mainView === 'chat' &&
-    connection.sessionId
+    artifactsHeaderItemVisible && mainView === 'chat' && connection.sessionId
       ? {
           artifactCount: artifacts.length,
           onOpenArtifacts: () => {

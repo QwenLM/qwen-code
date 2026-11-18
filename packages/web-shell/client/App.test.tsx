@@ -4423,7 +4423,9 @@ describe('task activity key', () => {
       entry()!.click();
     });
     await flush();
-    expect(container.querySelector('[data-testid="artifacts-list"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="artifacts-list"]'),
+    ).toBeNull();
     expect(entry()!.getAttribute('aria-pressed')).toBe('false');
   });
 
