@@ -768,13 +768,16 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a daemon-wide pro
   "activeWorkReporting": "full",
   "activeWorkStaleMs": 4200,
   "connectedClients": 2,
+  "connectedClientsMax": 204,
+  "listenerConnectedClients": 2,
+  "listenerConnectedClientsMax": 204,
   "channelAlive": true,
   "lastActivityAt": "2026-07-15T08:30:00.000Z",
   "idleSinceMs": 120000
 }
 ```
 
-`sessions`, `pendingPermissions`, and `activePrompts` are sums. `activeWork` is true when any runtime has an accepted but unsettled prompt (including a FIFO-waiting prompt), a running background Agent, a queued/in-progress Agent terminal notification, Session-managed background shell or workflow work, or a child-owned Session turn. The aggregate `session` hold covers goal and cron processing, history mutation, and queued or running Monitor continuations; foreground prompts remain daemon-owned. Running Monitors, follow-up suggestions, and external processes the shell registry can no longer track remain outside the field. It is session-scoped: channel-level work with no session attached yet — a spawn in flight, a pending restore, MCP discovery or authentication — is not counted, so `activeWork` may read false while the daemon still declines to reclaim that channel. Do not read this field as "the daemon is reclaimable"; it describes session-owned work only. `activeWorkReporting` says how much of that boolean is actually vouched for: `full` when every live session is covered by a fresh report from a child that reports all required categories, `none` when no session negotiated reporting, and `partial` for anything between — including a stale snapshot or a negotiated child that omits a required category. A snapshot older than three report intervals stops counting as coverage: it is not a report that the session is idle, so the session goes back to reading as retained, exactly as if the child had never reported. Ordinary automatic cleanup is also disabled for a negotiated-but-incomplete child; a child that does not understand `shell` or `session` cannot safely authorize conditional close according to the complete current predicate. Completely unsupported historical children retain legacy cleanup behavior, and explicit close, kill, shutdown, and channel exit remain force operations. `activeWorkStaleMs` is the age of the oldest snapshot the boolean rests on **among the covered sessions**, and is `0` when no session is covered; it is diagnostic, because freshness is already graded into `activeWorkReporting` by the daemon (only the daemon knows each channel's negotiated cadence). The grade is computed once over every managed runtime rather than per runtime and then combined — a runtime with no sessions is vacuously complete, and treating that as evidence would let an empty workspace vouch for another workspace's unreported sessions. `lastActivityAt` is the latest non-null workspace activity time and `idleSinceMs` is derived from that same snapshot. `channelAlive` means at least one managed workspace channel is live; it does not mean every workspace is healthy. `connectedClients` and the optional `rateLimitHits` remain daemon-wide counters rather than per-workspace sums.
+`sessions`, `pendingPermissions`, and `activePrompts` are sums. `activeWork` is true when any runtime has an accepted but unsettled prompt (including a FIFO-waiting prompt), a running background Agent, a queued/in-progress Agent terminal notification, Session-managed background shell or workflow work, or a child-owned Session turn. The aggregate `session` hold covers goal and cron processing, history mutation, and queued or running Monitor continuations; foreground prompts remain daemon-owned. Running Monitors, follow-up suggestions, and external processes the shell registry can no longer track remain outside the field. It is session-scoped: channel-level work with no session attached yet — a spawn in flight, a pending restore, MCP discovery or authentication — is not counted, so `activeWork` may read false while the daemon still declines to reclaim that channel. Do not read this field as "the daemon is reclaimable"; it describes session-owned work only. `activeWorkReporting` says how much of that boolean is actually vouched for: `full` when every live session is covered by a fresh report from a child that reports all required categories, `none` when no session negotiated reporting, and `partial` for anything between — including a stale snapshot or a negotiated child that omits a required category. A snapshot older than three report intervals stops counting as coverage: it is not a report that the session is idle, so the session goes back to reading as retained, exactly as if the child had never reported. Ordinary automatic cleanup is also disabled for a negotiated-but-incomplete child; a child that does not understand `shell` or `session` cannot safely authorize conditional close according to the complete current predicate. Completely unsupported historical children retain legacy cleanup behavior, and explicit close, kill, shutdown, and channel exit remain force operations. `activeWorkStaleMs` is the age of the oldest snapshot the boolean rests on **among the covered sessions**, and is `0` when no session is covered; it is diagnostic, because freshness is already graded into `activeWorkReporting` by the daemon (only the daemon knows each channel's negotiated cadence). The grade is computed once over every managed runtime rather than per runtime and then combined — a runtime with no sessions is vacuously complete, and treating that as evidence would let an empty workspace vouch for another workspace's unreported sessions. `lastActivityAt` is the latest non-null workspace activity time and `idleSinceMs` is derived from that same snapshot. `channelAlive` means at least one managed workspace channel is live; it does not mean every workspace is healthy. `connectedClients` and the optional `rateLimitHits` remain daemon-wide counters rather than per-workspace sums. `connectedClients` is the aggregate long-lived stream occupancy — every SSE surface plus ACP SSE/WebSocket connections, the same scope as the admission cap — and `connectedClientsMax` is that cap (`null` = unlimited); `listenerConnectedClients` / `listenerConnectedClientsMax` are the arriving listener's governing pair: the bound is the tighter of the aggregate cap and that listener's own clamp (the aggregate itself on the primary listener; 51 on `local-control` / `remote-access`), since a lower aggregate binds first on every listener, and `null` = unlimited; the numerator counts the population that bound governs — the daemon total when the aggregate cap binds, the listener's own streams when its clamp binds — so the pair never reads as free headroom on a listener that is already refusing. The per-surface/per-listener breakdown lives in `runtime.transport.streamOccupancy` on `/daemon/status`, while `restSseActive` there remains the REST event surface alone.
 
 Restart controllers should treat the daemon as busy when:
 
@@ -789,7 +792,7 @@ Dropping the third term makes `activeWork === false` indistinguishable from "no 
 
 These fields are an observation cache, not a restart lease: even a fresh, fully-graded, empty answer describes the moment it was sampled, and work can start immediately afterwards. The rule above lowers the risk of a wrong restart substantially but does not eliminate it — strict safety needs a prepare-restart fence that stops new work admission, confirms the drain, and only then shuts down.
 
-> ⚠️ The deep probe is **informational**, not a real liveness verification or an atomic reclaim lease. Negotiated ACP children publish channel-wide active-work snapshots on a negotiated cadence, and the daemon grades their freshness into `activeWorkReporting` — but it never kills a channel over a missing report, because one session's silence is not evidence the process died. Transport liveness and stalled-Agent detection are separate mechanisms. `connectedClients` counts REST SSE connections, not every ACP transport. Use repeated samples and graceful shutdown for idle reclamation; use authenticated `/daemon/status` for transport and per-workspace diagnostics. If any managed runtime getter throws, deep health fails closed with `503 {"status":"degraded","reason":"aggregation_failed"}` rather than returning partial totals, and the daemon log identifies the failing workspace runtime. During bootstrap, before the runtime registry is ready, it returns `503 {"status":"degraded","reason":"bootstrap"}` with `Retry-After: 1`. For listener liveness, use the default `/health` without `?deep`.
+> ⚠️ The deep probe is **informational**, not a real liveness verification or an atomic reclaim lease. Negotiated ACP children publish channel-wide active-work snapshots on a negotiated cadence, and the daemon grades their freshness into `activeWorkReporting` — but it never kills a channel over a missing report, because one session's silence is not evidence the process died. Transport liveness and stalled-Agent detection are separate mechanisms. `connectedClients` counts every long-lived stream surface (REST/agent/generation/artifact/hosted SSE plus ACP SSE/WebSocket) against the shared admission cap, not just REST SSE. Use repeated samples and graceful shutdown for idle reclamation; use authenticated `/daemon/status` for transport and per-workspace diagnostics. If any managed runtime getter throws, deep health fails closed with `503 {"status":"degraded","reason":"aggregation_failed"}` rather than returning partial totals, and the daemon log identifies the failing workspace runtime. During bootstrap, before the runtime registry is ready, it returns `503 {"status":"degraded","reason":"bootstrap"}` with `Retry-After: 1`. For listener liveness, use the default `/health` without `?deep`.
 
 **Auth:** required on non-loopback binds and when loopback is hardened with `--require-auth`. On an ordinary loopback bind (`127.0.0.0/8`, `localhost`, `::1`, `[::1]`), `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) or hardened loopback, the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the ordinary-loopback exemption.
 
@@ -942,6 +945,11 @@ Response shape:
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
     "maxSseConnections": 204,
+    "maxSseConnectionsPerListener": {
+      "primary": 204,
+      "local-control": 51,
+      "remote-access": 51
+    },
     "eventRingSize": 8000,
     "eventRingMaxBytes": 8388608,
     "compactedReplayMaxBytes": 4194304,
@@ -962,6 +970,23 @@ Response shape:
     },
     "transport": {
       "restSseActive": 0,
+      "streamOccupancy": {
+        "total": 0,
+        "bySurface": {
+          "restEvents": 0,
+          "agentEvents": 0,
+          "generation": 0,
+          "artifactLibrary": 0,
+          "hostedEvents": 0,
+          "acpSse": 0,
+          "acpWs": 0
+        },
+        "byListener": {
+          "primary": 0,
+          "local-control": 0,
+          "remote-access": 0
+        }
+      },
       "acp": {
         "enabled": true,
         "connections": 0,

@@ -729,6 +729,7 @@ export const RU_PART2: Record<
   'daemon.runtime.memory': 'Память (RSS / куча)',
   'daemon.transport.title': 'Транспорт',
   'daemon.transport.restSse': 'Потоки REST SSE',
+  'daemon.transport.sseAdmission': 'Допуск SSE (занято / лимит)',
   'daemon.transport.acpDisabled': 'Транспорт ACP отключён',
   'daemon.transport.acpConnections': 'Подключения ACP',
   'daemon.transport.acpStreams': 'Потоки ACP (сессия/SSE/WS)',
