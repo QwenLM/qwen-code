@@ -22,6 +22,11 @@ import {
 import { applyReadHeaders } from './workspace-file-read.js';
 
 const MAX_SEARCH_CHARS = 200;
+// Bound the exclusion list at the transport: an unbounded ref count would
+// spawn git with an unbounded `--not` argv (a client could exhaust argv space
+// or fan out probes). The hook sends bound PR heads plus two base-branch refs,
+// far below this ceiling.
+const MAX_EXCLUDE_REFS = 256;
 
 function buildLogList(
   workspaceCwd: string,
@@ -145,6 +150,14 @@ async function handleLogList(
         res.status(400).json({
           errorKind: 'parse_error',
           error: 'exclude must be a non-empty comma-separated ref list',
+          status: 400,
+        });
+        return;
+      }
+      if (excludeRefs.length > MAX_EXCLUDE_REFS) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: `exclude accepts at most ${MAX_EXCLUDE_REFS} refs`,
           status: 400,
         });
         return;

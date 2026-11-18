@@ -267,13 +267,13 @@ export function useChangeOverview(
               ),
             ].filter(isSafeSingleRef)
           : [];
+      const prHeadExclusions = excludeRefsSupported
+        ? prResults
+            .map((result) => result.headSha)
+            .filter((sha): sha is string => sha !== undefined)
+        : [];
       const excludeRefs = excludeRefsSupported
-        ? [
-            ...prResults
-              .map((result) => result.headSha)
-              .filter((sha): sha is string => sha !== undefined),
-            ...baseBranchExclusions,
-          ]
+        ? [...prHeadExclusions, ...baseBranchExclusions]
         : [];
       let commitsTruncated = false;
       if (showFallback) {
@@ -301,6 +301,31 @@ export function useChangeOverview(
             log = await ws
               .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
                 sessionId,
+              })
+              .catch(() => undefined);
+          }
+          // A base-branch remote-tracking ref can reach the session's own
+          // pushed commits — the recorded base is the session's own branch
+          // (a worktree handed off from a pushed feature branch), or the base
+          // absorbed and pushed the work — so `git log <range> --not <base>`
+          // returns empty and the panel would report a complete, successful
+          // overview with no committed work. An empty excluded result with
+          // base-branch exclusions is untrustworthy: re-run once dropping ONLY
+          // the base-branch entries, keeping the PR-head exclusions that
+          // showFallback relies on to avoid re-listing PR-covered commits.
+          if (
+            log &&
+            log.available === true &&
+            log.entries.length === 0 &&
+            excludeRefsSupported &&
+            baseBranchExclusions.length > 0
+          ) {
+            log = await ws
+              .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
+                sessionId,
+                ...(prHeadExclusions.length > 0
+                  ? { excludeRefs: prHeadExclusions }
+                  : {}),
               })
               .catch(() => undefined);
           }

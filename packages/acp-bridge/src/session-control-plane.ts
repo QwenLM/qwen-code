@@ -13467,9 +13467,20 @@ export function createSessionControlPlane(
       // A plain session that visits a worktree already carries its creation
       // start S; promoting the worktree's later creation tip T on hand-back
       // must not overwrite S (that would permanently hide the S..T commits).
-      // Sessions created as a worktree have no top-level start, so this fills
-      // their boundary on hand-back (R6-1).
-      if (entry && baseCommit && entry.baseCommit === undefined) {
+      // A branch session records its start on branch.baseCommit and has no
+      // top-level value, so the guard must treat that as already recorded too
+      // — otherwise hand-back installs T top-level, the summary-first hook
+      // composes T..HEAD, and the branch session's window empties (R7-1).
+      // Sessions created as a worktree have neither a top-level nor a branch
+      // start (only worktree.baseCommit, which is NOT gated here because this
+      // runs before clearSessionWorktree), so this still fills their boundary
+      // on hand-back (R6-1).
+      if (
+        entry &&
+        baseCommit &&
+        entry.baseCommit === undefined &&
+        entry.branch?.baseCommit === undefined
+      ) {
         entry.baseCommit = baseCommit;
         markSessionCatalogChanged();
       }

@@ -28257,6 +28257,125 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    it('does not promote over a branch session recorded start (R7-1)', async () => {
+      // A branch session records its start on branch.baseCommit and has no
+      // top-level value. The fill-only guard must treat that as already
+      // recorded: hand-back promotes the worktree tip T, but the top-level
+      // field must stay undefined so the summary-first hook falls through to
+      // branch.baseCommit S (installing T top-level would empty the window).
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-r71-branch-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'session start');
+      const S = git('rev-parse', 'HEAD');
+      await fsp.writeFile(path.join(repo, 'b.txt'), 'b');
+      git('add', '.');
+      git('commit', '-qm', 'pre-handoff work');
+      const T = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({
+          workspaceCwd: repo,
+          branch: { name: 'feat', baseBranch: 'main', baseCommit: S },
+        });
+        const created = bridge.getSessionSummary(session.sessionId);
+        expect(created.baseCommit).toBeUndefined();
+        expect(created.branch?.baseCommit).toBe(S);
+        bridge.setSessionWorktree(session.sessionId, {
+          slug: 'wt',
+          path: path.join(repo, '.wt'),
+          branch: '',
+          baseCommit: T,
+          baseBranch: 'main',
+        });
+        bridge.setSessionBaseCommit?.(session.sessionId, T);
+        bridge.clearSessionWorktree?.(session.sessionId);
+        const back = bridge.getSessionSummary(session.sessionId);
+        expect(back.baseCommit).toBeUndefined();
+        expect(back.branch?.baseCommit).toBe(S);
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('still fills the boundary for a worktree-created session on hand-back (R7-1 constraint)', async () => {
+      // A worktree-created session has only worktree.baseCommit (no top-level,
+      // no branch). The guard must NOT gate on worktree.baseCommit (this runs
+      // before clearSessionWorktree), so the promotion still fills its boundary.
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-r71-wt-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'session start');
+      const S = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({
+          workspaceCwd: repo,
+          worktree: {
+            slug: 'wt',
+            path: path.join(repo, '.wt'),
+            branch: '',
+            baseCommit: S,
+            baseBranch: 'main',
+          },
+        });
+        const created = bridge.getSessionSummary(session.sessionId);
+        expect(created.baseCommit).toBeUndefined();
+        expect(created.worktree?.baseCommit).toBe(S);
+        bridge.setSessionBaseCommit?.(session.sessionId, S);
+        bridge.clearSessionWorktree?.(session.sessionId);
+        const back = bridge.getSessionSummary(session.sessionId);
+        expect(back.worktree).toBeUndefined();
+        expect(back.baseCommit).toBe(S);
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
+    });
+
     it('advances on a persisted-only branch without a live registration', async () => {
       const handle = makeChannel({
         extMethodImpl: (method) => {

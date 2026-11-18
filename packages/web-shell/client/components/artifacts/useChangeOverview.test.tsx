@@ -885,6 +885,77 @@ describe('useChangeOverview', () => {
     expect(output.units.map((unit) => unit.id)).toContain('uncommitted');
   });
 
+  it('re-runs without base-branch exclusions when they empty the window (R7-2)', async () => {
+    // The recorded base is the session's own pushed feature branch: the
+    // worktree meta's baseBranch is feature-x, so the exclusion set holds
+    // origin/feature-x / upstream/feature-x, which reach HEAD and empty the
+    // excluded walk. An empty excluded result with base-branch exclusions is
+    // untrustworthy — re-run dropping ONLY the base-branch entries (no PR heads
+    // here) so the session's own commits render instead of a false "no work".
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      worktree: {
+        path: '/work/wt',
+        baseCommit: 'startS',
+        baseBranch: 'feature-x',
+      },
+    });
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi.fn(),
+      workspaceGitLog: vi
+        .fn()
+        .mockResolvedValueOnce({
+          v: 1,
+          available: true,
+          entries: [],
+          hasMore: false,
+        })
+        .mockResolvedValueOnce({
+          v: 1,
+          workspaceCwd: '/work',
+          available: true,
+          entries: [
+            { sha: 'c9', shortSha: 'c9', subject: 'loose', parents: ['head2'] },
+          ],
+          hasMore: false,
+        }),
+      workspaceGitCommitDetail: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/work',
+        available: true,
+        files: [{ path: 'loose.ts', added: 1, removed: 0, isBinary: false }],
+        filesCount: 1,
+        linesAdded: 1,
+        linesRemoved: 0,
+      }),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(2);
+    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
+      1,
+      20,
+      0,
+      '/work/wt',
+      'startS..HEAD',
+      {
+        sessionId: 's1',
+        excludeRefs: ['origin/feature-x', 'upstream/feature-x'],
+      },
+    );
+    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
+      2,
+      20,
+      0,
+      '/work/wt',
+      'startS..HEAD',
+      { sessionId: 's1' },
+    );
+    expect(output.loadFailed).toBe(false);
+    expect(output.units.map((unit) => unit.id)).toContain('commit:c9');
+  });
+
   it('suppresses the fallback when bound PR heads cannot be excluded (capability skew)', async () => {
     // A new client against an older daemon: the files capability is present
     // (PR units render with resolved heads) but the exclude capability is

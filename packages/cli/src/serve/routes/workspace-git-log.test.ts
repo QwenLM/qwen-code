@@ -276,6 +276,23 @@ describe('workspace Git log routes', () => {
     expect(fetchGitLogMock).not.toHaveBeenCalled();
   });
 
+  it('rejects an over-long exclude ref list with 400', async () => {
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    const refs = Array.from({ length: 257 }, (_, i) => `ref${i}`).join(',');
+    const response = await request(app).get(
+      `/workspace/git/log?exclude=${refs}`,
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.errorKind).toBe('parse_error');
+    expect(fetchGitLogMock).not.toHaveBeenCalled();
+  });
+
   it('omits range when the query parameter is absent or blank', async () => {
     fetchGitLogMock.mockResolvedValue({ entries: [], hasMore: false });
     const app = express();
