@@ -13359,7 +13359,9 @@ describe('Session', () => {
   });
 
   describe('deleteMessageGroups', () => {
-    describe('hydrated file-history preflight', () => {
+    // This matrix uses POSIX roots; native Windows behavior is not asserted.
+    const isWin32 = path.sep === '\\';
+    describe.skipIf(isWin32)('hydrated file-history preflight', () => {
       it.each(
         ['current', 'foreign', 'legacy'].flatMap((origin) =>
           [
