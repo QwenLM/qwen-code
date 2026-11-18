@@ -187,6 +187,26 @@ Covered immediately:
 - Trailing user prompt: `interrupted_prompt`.
 - Trailing tool result submission: also classified as `interrupted_prompt` and
   replayed with Retry.
+
+  Client-facing status refinement: the synchronous classification above is
+  deliberately conservative and cannot tell the two shapes apart — a turn
+  that settled `end_turn` on a final tool call (a closed tool pair with no
+  trailing model text) and a turn that crashed after the tool run both end
+  on a `user` `functionResponse` tail. The client-facing path
+  (`Session.getRecoveryStatusForClient`, serve runtimes only) consults the
+  session's own prompt terminal ledger before reporting a
+  `interrupted_prompt` tail whose trailing user run is a pure closed tool
+  pair: a newest `completed`/`end_turn` record (the turn settled) or an empty
+  ledger (the session never admitted a prompt — a side-task fork inherited
+  the source's in-flight tail, which is still being answered in the source)
+  reports `clean` instead, while the synchronous classification and the
+  `interrupted_turn` handling are untouched. Accepted residual: self-driven
+  turns (notification / cron / goal) write no `in_flight` record, so a
+  self-driven turn that crashed on a closed tool pair is indistinguishable
+  from the settled case and is cleared too; the live-conversation runtime
+  wires no ledger sink, so the empty-ledger case fires there as well. A tail
+  carrying a real prompt text is never cleared by the guard.
+
 - Dangling tool call: `interrupted_turn`, with synthesized error tool results.
 - Non-adjacent tool result: existing repair hoists it into a legal position.
   The first version of this plan does not record hoist details separately

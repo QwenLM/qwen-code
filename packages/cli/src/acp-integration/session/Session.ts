@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  isPromptLedgerTerminalRecord,
+  type PromptLedgerRecord,
+} from '@qwen-code/acp-bridge/promptLedger';
 import type { HookProgress } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
 import { parseHookLifecycle } from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
 import {
@@ -217,6 +221,7 @@ import {
   resolveMainSessionOutputStyle,
   wrapSystemReminder,
   buildSessionRecoveryPlanFromApiHistory,
+  type SessionRecoveryPlan,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
   buildPermissionCheckContext,
@@ -3037,6 +3042,19 @@ export class Session implements SessionContext {
     private readonly onPeerDeliveriesExpired?: (
       deliveries: PeerQueuedDelivery[],
     ) => void,
+    /**
+     * The bounded tail of this session's prompt terminal ledger: `[]` when
+     * the ledger file is missing or empty (on a ledger-wired runtime, no
+     * prompt was ever admitted in this session), records in file order when
+     * it has them, or `undefined` without usable ledger evidence (witness
+     * absent on non-serve runtimes, torn tail, I/O error). Wired by the
+     * serve layer that owns the ledger layout. Synchronous by design: the
+     * read is a bounded ledger tail, and the recovery status path must not
+     * schedule I/O it cannot cancel.
+     */
+    private readonly promptLedgerRecords?: () =>
+      | readonly PromptLedgerRecord[]
+      | undefined,
   ) {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
@@ -6820,7 +6838,13 @@ export class Session implements SessionContext {
   }
 
   getRecoveryStatus(): NonNullable<ServeSessionContextStatus['recovery']> {
-    const recoveryPlan = this.#getRecoveryPlan(false);
+    return this.#recoveryStatusFromPlan(this.#getRecoveryPlan(false));
+  }
+
+  #recoveryStatusFromPlan(
+    recoveryPlan: SessionRecoveryPlan | undefined,
+  ): NonNullable<ServeSessionContextStatus['recovery']> {
+    const activeTurn = this.#hasActiveTurn();
     // A turn is still in flight, so there is no settled turn to continue.
     // `pendingPrompt` alone misses the automatic turns: notification and cron
     // turns run their own streaming loop under `notificationAbortController` /
@@ -6837,12 +6861,21 @@ export class Session implements SessionContext {
     // `channelTaskCaptures.size === 0`, which `assertCanStartTurn()` does NOT
     // reject, so taking it wholesale would suppress recovery while a channel
     // task capture is queued for no admission-side reason.
+    //
+    // `kind` is gated on the same signal. While a turn is in flight the tail
+    // classifier cannot tell "the model is still producing after a tool
+    // result" from "the prompt was interrupted": both present as a bare
+    // `user[functionResponse]` tail, and `completedToolCallIds` is empty
+    // outside Goal sessions, so it reports `interrupted_prompt`. The web
+    // shell renders the recovery banner from `kind`, not `canContinue`, so
+    // without the gate a healthy running turn shows the spurious "interrupted
+    // before the response completed" banner the moment a client fetches its
+    // context. An active turn has no settled turn to recover, so it reports
+    // `clean`.
     return {
-      kind: recoveryPlan?.kind ?? 'clean',
+      kind: activeTurn ? 'clean' : (recoveryPlan?.kind ?? 'clean'),
       canContinue:
-        recoveryPlan?.canContinue === true &&
-        !this.closing &&
-        !this.#hasActiveTurn(),
+        recoveryPlan?.canContinue === true && !this.closing && !activeTurn,
     };
   }
 
@@ -6853,9 +6886,27 @@ export class Session implements SessionContext {
     if (!initial.canContinue) return initial;
     try {
       const cancellation = await this.#getTurnCancellation();
-      const status = this.getRecoveryStatus();
+      // Re-classify after the await: a turn may have started while the
+      // cancellation check was in flight.
+      const recoveryPlan = this.#getRecoveryPlan(false);
+      const status = this.#recoveryStatusFromPlan(recoveryPlan);
       if (cancellation && !cancellation.confirmationId) {
         return { ...status, canContinue: false };
+      }
+      // The tail classifier cannot attribute the classified tail to the turn
+      // that produced it, so consult the session's own prompt terminal
+      // ledger before reporting it: a tail that settled `end_turn` on a
+      // closed tool pair, or a tail inherited from a forked source session
+      // (this session never admitted a prompt), is not an interruption of
+      // this session. Any missing or ambiguous evidence keeps the
+      // conservative kind. `status.canContinue` already implies the plan is
+      // present, but the classifier keeps a non-optional parameter.
+      if (
+        status.canContinue &&
+        recoveryPlan !== undefined &&
+        this.#isLedgerClearedInterruptedTail(recoveryPlan)
+      ) {
+        return { kind: 'clean', canContinue: false };
       }
       return {
         ...status,
@@ -6866,6 +6917,86 @@ export class Session implements SessionContext {
     } catch {
       return { kind: this.getRecoveryStatus().kind, canContinue: false };
     }
+  }
+
+  /**
+   * Whether the session's own prompt terminal ledger clears the classified
+   * interrupted tail — i.e. the tail cannot belong to a turn that ran in
+   * this session:
+   *
+   * - **settled**: the newest record is a `completed`/`end_turn` terminal. A
+   *   turn may legitimately settle `end_turn` on a closed tool pair (a final
+   *   `todo_write` with no trailing model text); the tail classifier reads
+   *   that `user` `functionResponse` as an interrupted tool-result
+   *   submission, and the ledger is the only witness that the turn settled.
+   * - **inherited**: the ledger has no record at all. Prompt admission is
+   *   the only place an `in_flight` record is written, so on a ledger-wired
+   *   runtime a session that never admitted a prompt never ran a turn: the
+   *   dangling tail was copied from the forked source session (a side task
+   *   forked mid-turn), where it is still being answered.
+   *
+   * `interrupted_prompt` additionally requires the tail to be a pure closed
+   * tool-result submission — a tail carrying a real prompt text is a
+   * genuine interrupted prompt and keeps the banner. `interrupted_turn`
+   * (a dangling model `functionCall`) is cleared only in the inherited
+   * case: with any ledger record present, a settled terminal next to a
+   * dangling call is contradictory, not inherited, so it stays classified.
+   *
+   * Accepted residual (review round 1, R1-1): self-driven turns
+   * (notification / cron / goal) write no `in_flight` record — the ledger
+   * records control-plane prompt admissions only — so a self-driven turn
+   * that crashed on a closed tool pair is indistinguishable from the
+   * settled case (its newest record is an earlier prompt's terminal) and
+   * from the inherited case (an empty ledger) alike, and is cleared too.
+   * The live-conversation runtime deliberately wires no ledger sink, so the
+   * inherited case fires there as well. Both clear only the Continue
+   * affordance for a pure tool-result tail — a pending user prompt carries
+   * text and keeps the banner.
+   */
+  #isLedgerClearedInterruptedTail(plan: SessionRecoveryPlan): boolean {
+    if (this.promptLedgerRecords === undefined) return false;
+    let records: readonly PromptLedgerRecord[] | undefined;
+    try {
+      records = this.promptLedgerRecords();
+    } catch {
+      return false;
+    }
+    if (records === undefined) return false;
+    if (plan.kind === 'interrupted_turn') {
+      return records.length === 0;
+    }
+    if (plan.kind !== 'interrupted_prompt') return false;
+    if (!this.#isClosedToolResultTail(plan)) return false;
+    if (records.length === 0) return true;
+    const newest = records.at(-1);
+    return (
+      newest !== undefined &&
+      isPromptLedgerTerminalRecord(newest) &&
+      newest.terminal === 'completed' &&
+      newest.stopReason === 'end_turn'
+    );
+  }
+
+  /**
+   * Whether the trailing user run of an `interrupted_prompt` plan is a pure
+   * closed tool-result submission: every part is a `functionResponse` whose
+   * `functionCall` exists in the history. A tail carrying any other part (a
+   * real prompt text) is not one.
+   */
+  #isClosedToolResultTail(plan: SessionRecoveryPlan): boolean {
+    const parts = plan.continuation?.parts;
+    if (!parts || parts.length === 0) return false;
+    const callIds = new Set<string>();
+    for (const entry of plan.originalApiHistory) {
+      for (const part of entry.parts ?? []) {
+        const id = part.functionCall?.id;
+        if (id) callIds.add(id);
+      }
+    }
+    return parts.every((part) => {
+      const id = part.functionResponse?.id;
+      return id !== undefined && callIds.has(id);
+    });
   }
 
   /**
@@ -6886,15 +7017,21 @@ export class Session implements SessionContext {
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
   }> {
     const recovery = await this.getRecoveryStatusForClient();
-    if (!recovery.canContinue && recovery.kind !== 'clean') {
+    if (
+      !recovery.canContinue &&
+      (recovery.kind !== 'clean' || this.#hasActiveTurn())
+    ) {
       // Name the veto that fired. `canContinue` collapses `closing` plus the
       // ten `#hasActiveTurn()` members into one boolean and the only UI
       // consumer renders nothing for it, so without this a leaked flag —
       // recovery disabled for the rest of the session — is indistinguishable
       // from a healthy automatic turn in flight. Logged here rather than in
       // `getRecoveryStatus()` to stay off the per-poll
-      // `buildSessionContextStatus` path, and gated on a non-clean kind so
-      // the ordinary "nothing to continue" no-op stays quiet.
+      // `buildSessionContextStatus` path, and gated so the ordinary
+      // "nothing to continue" no-op stays quiet. An in-flight turn now
+      // reports a clean kind (the in-flight gate above), so the veto — and a
+      // leaked flag masquerading as a healthy turn — is named off
+      // `#hasActiveTurn()` instead of the kind.
       debugLogger.debug('[Session] recovery canContinue vetoed', {
         kind: recovery.kind,
         closing: this.closing,
