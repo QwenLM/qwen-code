@@ -142,8 +142,13 @@ describe('managed DingTalk reconnect arbitration (#17173 R11)', () => {
     latest().emit('close');
     expect(sockets()).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(RETRY_MS);
-    await vi.advanceTimersByTimeAsync(0);
+    // Recovery is the wrapper's alone now, so nothing may reconnect before its
+    // interval elapses. Without this bound the case also passes on the SDK's
+    // own faster chain, which is the behaviour being replaced.
+    await vi.advanceTimersByTimeAsync(RETRY_MS - 1);
+    expect(sockets()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1);
     expect(sockets()).toBe(2);
     latest().open();
     await vi.advanceTimersByTimeAsync(0);
