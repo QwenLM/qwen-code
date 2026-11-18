@@ -111,14 +111,62 @@ describe('extractPostedCommentIds', () => {
     },
   );
 
-  it('does not attribute a result when two complete output headers match', () => {
-    const command =
-      "gh pr comment 1 --body 'Example:\nDirectory: (root)\n" +
-      'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
-      "Execution Error: (none)'";
+  it.each([
+    { directory: '(root)', outputLabel: 'Output', errorLabel: 'Error' },
+    {
+      directory: '/repository/notes\n2026',
+      outputLabel: 'Output',
+      errorLabel: 'Error',
+    },
+    {
+      directory: '/repository/notes\n2026',
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+    },
+  ])(
+    'does not attribute an ambiguous header ($outputLabel, $directory)',
+    ({ directory, outputLabel, errorLabel }) => {
+      const command =
+        "gh pr comment 1 --body 'Example:\nDirectory: (root)\n" +
+        'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
+        "Execution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)'";
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: ${directory}\n${outputLabel}: ${url}\n${errorLabel}: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual([]);
+    },
+  );
+
+  it.each([
+    { outputLabel: 'Output', errorLabel: 'Error' },
+    {
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+    },
+  ])(
+    'retains same-label diagnostics before the real $errorLabel footer',
+    ({ outputLabel, errorLabel }) => {
+      const command = 'gh pr comment 1 --body a';
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: (root)\n${outputLabel}: notice\n${errorLabel}: retrying\n${url}\n${errorLabel}: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+    },
+  );
+
+  it('does not attribute a URL found only in the execution error', () => {
+    const command = 'gh pr comment 1 --body a';
+    const url = 'https://github.com/o/r/pull/1#issuecomment-99';
     const entry = shellResult(
       command,
-      'https://github.com/o/r/pull/1#issuecomment-42',
+      '',
+      `Command: ${command}\nDirectory: (root)\nOutput (stdout and stderr combined): (empty)\nExecution Error: could not post ${url}\nExit Code: (none)\nSignal: (none)\nProcess Group PGID: (none)`,
     );
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
