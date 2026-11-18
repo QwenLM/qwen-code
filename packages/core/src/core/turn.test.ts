@@ -278,6 +278,36 @@ describe('Turn', () => {
         onModelRequestDispatched: dispatched,
       });
     });
+    it('forwards isSessionTurn and ledgerTurnKey to the chat send options (R15)', async () => {
+      // Interior link of the ledger-key hop: Turn must forward the sender's
+      // membership flag and the Goal run's fresh turn key to LlmChat, or the
+      // headless runtime Goal boundary never reaches the ledger.
+      const isolated = new Turn(
+        { sendMessageStream: mockSendMessageStream } as unknown as LlmChat,
+        'goal-prompt',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        'goal-prompt/goal/goal-runtime:t1',
+      );
+      for await (const event of isolated.run(
+        'test-model',
+        [{ text: 'hello' }],
+        new AbortController().signal,
+      )) {
+        expect(event).toBeDefined();
+      }
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isSessionTurn: true,
+        ledgerTurnKey: 'goal-prompt/goal/goal-runtime:t1',
+      });
+    });
     it('should yield content events for text parts', async () => {
       const reqParts: Part[] = [{ text: 'Hi' }];
       const events = await run(

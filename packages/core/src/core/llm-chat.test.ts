@@ -7777,10 +7777,14 @@ describe('LlmChat', async () => {
       vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(fallbacks);
       // The ledger keys fallbacks by resolved route identity; give each model
       // a distinct identity so the fallback tests discriminate routes (the
-      // constant default would collapse every fallback onto one key).
+      // constant default would collapse every fallback onto one key). Include
+      // the route's authType when a fallback config carries one, so the helper
+      // can also express same-model different-route health (R15).
       vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
-        (model?: string) =>
-          model ? `${model}@test0001` : 'gemini-pro@test0001',
+        (model?: string, config?: { authType?: string }) =>
+          model
+            ? `${model}@${config?.authType ?? 'test0001'}`
+            : 'gemini-pro@test0001',
       );
       return mockResolver(resolveForModel);
     }
@@ -8971,9 +8975,21 @@ describe('LlmChat', async () => {
 
       // A background send (no isSessionTurn) served by the recovered primary
       // must not rotate the turn key or clear the live turn's consumed mark —
-      // not merely be skipped itself.
+      // not merely be skipped itself. Observe the write half directly: the
+      // background send issues no ledger write or turn-boundary call at all.
+      const ledgerWrites = [
+        vi.spyOn(service, 'markRetryOncePerTurn'),
+        vi.spyOn(service, 'consumeStickyAttempt'),
+        vi.spyOn(service, 'markHealthy'),
+        vi.spyOn(service, 'markTerminal'),
+        vi.spyOn(service, 'resetTurn'),
+        vi.spyOn(service, 'beginTurn'),
+      ];
       const events = await sendCollect('test', 'forked_query');
       expect(hasChunkText(events, 'primary ok')).toBe(true);
+      for (const write of ledgerWrites) {
+        expect(write).not.toHaveBeenCalled();
+      }
       expect(service.snapshot('fallback-a@test0001')).toEqual({
         available: false,
         reason: 'retry_once_per_turn',
@@ -9426,13 +9442,8 @@ describe('LlmChat', async () => {
           });
         }),
       );
-      // Route identity discriminates by authType, so two routes resolving to the
-      // same model id ('shared') keep separate health (override after
-      // wireFallbacks, which installs a per-model default).
-      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
-        (model?: string, config?: { authType?: string }) =>
-          `${model ?? 'gemini-pro'}@${config?.authType ?? 'default'}`,
-      );
+      // wireFallbacks keys route identity by model + authType, so the two
+      // routes resolving to the same model id ('shared') keep separate health.
       const capacityError = tpmCapacityError();
       streamMock().mockRejectedValue(capacityError);
       openaiShared.mockRejectedValue(capacityError);

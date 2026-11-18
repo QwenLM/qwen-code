@@ -2204,9 +2204,11 @@ describe('runNonInteractive', () => {
     // Each runtime Goal run opens its own ledger turn, derived from its stable
     // goalTurnKey and distinct from the base prompt id, so a fallback the
     // foreground turn exhausted is re-probed for the Goal run instead of
-    // staying skipped for the rest of the session.
-    expect(firstOptions.ledgerTurnKey).toBe(
-      `goal-ledger-key/goal/${firstOptions.goalTurnKey}`,
+    // staying skipped for the rest of the session. Pin the key shape concretely
+    // (not derived from the goalTurnKey field it must prove); the third call
+    // below pins the exact prompt_id + goalTurnKey formula.
+    expect(firstOptions.ledgerTurnKey).toMatch(
+      /^goal-ledger-key\/goal\/goal-runtime:[\w-]+$/,
     );
     expect(firstOptions.ledgerTurnKey).not.toBe(firstPromptId);
     expect(thirdOptions.ledgerTurnKey).toBe(

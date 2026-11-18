@@ -1098,6 +1098,29 @@ describe('useLlmStream', () => {
     expect(MockedUserPromptEvent).not.toHaveBeenCalled();
   });
 
+  it('advances the user statistic for a Cron send (R15)', async () => {
+    const { result, mockSendMessageStream: streamMock } = renderTestHook();
+    await act(async () => {
+      await result.current.submitQuery(
+        'scheduled prompt',
+        SendMessageType.Cron,
+      );
+    });
+    await waitFor(() => {
+      expect(streamMock).toHaveBeenCalledWith(
+        'scheduled prompt',
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({ type: SendMessageType.Cron }),
+      );
+    });
+    // Cron belongs to the historical prompt set, so the visible statistic
+    // advances (unlike Notification/Goal/Retry, which only mint). Positively
+    // pins the Cron arm of recordUserPrompt.
+    expect(mockStartNewPrompt).toHaveBeenCalledTimes(1);
+    expect(mockRecordUserPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it('advances the mint counter for a minted Goal id (R8-F5)', async () => {
     vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
       getAllToolNames: () => ['tool_search', 'tool_call'],
