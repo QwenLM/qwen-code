@@ -7385,6 +7385,406 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('carries the live artifact count in the session summary, omitting zero', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        expect(method).toBe('qwen/control/session/artifacts/persist');
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(
+      bridge.getSessionSummary(session.sessionId).artifactCount,
+    ).toBeUndefined();
+
+    await bridge.addSessionArtifact(
+      session.sessionId,
+      { title: 'Durable', url: 'https://example.com/summary-durable' },
+      { clientId: session.clientId },
+    );
+    await bridge.addSessionArtifact(
+      session.sessionId,
+      {
+        title: 'Ephemeral',
+        url: 'https://example.com/summary-ephemeral',
+        retention: 'ephemeral',
+      },
+      { clientId: session.clientId },
+    );
+
+    // The live summary count is the public list length (ephemeral included),
+    // matching what the header entry shows while the session is live.
+    expect(bridge.getSessionSummary(session.sessionId).artifactCount).toBe(2);
+    expect(
+      bridge
+        .listWorkspaceSessions(WS_A)
+        .find((s) => s.sessionId === session.sessionId)?.artifactCount,
+    ).toBe(2);
+
+    await bridge.shutdown();
+  });
+
+  it('keeps a restoring session visible with its artifact count withheld until the restore settles', async () => {
+    const sessionId = 'restore-window-summary';
+    const artifactUrl = 'https://example.com/restore-window';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${artifactUrl}`);
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (this: SessionArtifactStore, ...args) {
+        await restoreGate;
+        return originalRestore.apply(this, args);
+      });
+    // Release the gate and restore the prototype even when an assertion
+    // fails — otherwise one red case hangs every later restore in the file.
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 7,
+                artifacts: [
+                  {
+                    id: artifactId,
+                    kind: 'link',
+                    storage: 'external_url',
+                    source: 'client',
+                    status: 'available',
+                    title: 'Restore window link',
+                    url: artifactUrl,
+                    retention: 'restorable',
+                    clientRetained: true,
+                    createdAt: '2026-07-04T00:00:00.000Z',
+                    updatedAt: '2026-07-04T00:00:00.000Z',
+                  },
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const loadPromise = bridge.loadSession({ sessionId, workspaceCwd: WS_A });
+    // session/load registers the entry in byId before it awaits
+    // artifacts.restore(); getSessionSummary stops throwing once that
+    // registration lands, while the gated restore keeps the store empty.
+    await vi.waitFor(() => {
+      expect(() => bridge.getSessionSummary(sessionId)).not.toThrow();
+    });
+    // Inside that window the row must STAY visible (the accessor's contract
+    // is "all live sessions" — occupancy gates and live-state consume it),
+    // with the count withheld and the ambiguity carried explicitly so the
+    // list merge keeps the sidecar-enriched count instead of reading the
+    // omission as zero.
+    const pendingRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(pendingRow).toBeDefined();
+    expect(pendingRow?.artifactCount).toBeUndefined();
+    expect(pendingRow?.artifactCountPending).toBe(true);
+
+    releaseRestore();
+    const loaded = await loadPromise;
+    expect(loaded.artifacts).toMatchObject([{ id: artifactId }]);
+    const settledRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(settledRow?.artifactCount).toBe(1);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
+  it('withholds the partial count while a restore is repopulating the store', async () => {
+    const sessionId = 'restore-partial-summary';
+    const urls = [
+      'https://example.com/partial-a',
+      'https://example.com/partial-b',
+      'https://example.com/partial-c',
+    ];
+    const artifacts = urls.map((url) => ({
+      id: stableSessionArtifactId(sessionId, `url:${url}`),
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      status: 'available',
+      title: url,
+      url,
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    }));
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (
+        this: SessionArtifactStore,
+        snapshot,
+        options,
+      ) {
+        if (!snapshot) return originalRestore.call(this, snapshot, options);
+        // Apply the first artifact, then hold the restore mid-flight: the
+        // store now holds 1 of 3, the exact partial window a concurrent
+        // list request can land in.
+        const first = await originalRestore.call(
+          this,
+          { ...snapshot, artifacts: snapshot.artifacts.slice(0, 1) },
+          options,
+        );
+        await restoreGate;
+        const rest = await originalRestore.call(this, snapshot, options);
+        return [...first, ...rest];
+      });
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 7,
+                artifacts,
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const loadPromise = bridge.loadSession({ sessionId, workspaceCwd: WS_A });
+    // Wait until the store really holds 1 of 3 (count() is the synchronous
+    // value stamped into the row; list() would queue behind the restore).
+    // The spy records the store as the call's this context (vitest types
+    // instances loosely, hence the double cast).
+    const capturedStore = () =>
+      restoreSpy.mock.instances[0] as unknown as
+        | SessionArtifactStore
+        | undefined;
+    await vi.waitFor(() => {
+      expect(capturedStore()?.count()).toBe(1);
+    });
+    // Mid-repopulation the row must carry ONLY the marker — a partial
+    // count would overlay the sidecar-enriched one in the list merge.
+    const partialRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(partialRow).toBeDefined();
+    expect(partialRow?.artifactCount).toBeUndefined();
+    expect(partialRow?.artifactCountPending).toBe(true);
+
+    releaseRestore();
+    await loadPromise;
+    const settledRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(settledRow?.artifactCount).toBe(3);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
+  it('withholds the artifact count while a rewind restore is repopulating the store', async () => {
+    const urls = [
+      'https://example.com/rewind-partial-a',
+      'https://example.com/rewind-partial-b',
+      'https://example.com/rewind-partial-c',
+    ];
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (
+        this: SessionArtifactStore,
+        snapshot,
+        options,
+      ) {
+        if (!snapshot) return originalRestore.call(this, snapshot, options);
+        const first = await originalRestore.call(
+          this,
+          { ...snapshot, artifacts: snapshot.artifacts.slice(0, 1) },
+          options,
+        );
+        await restoreGate;
+        const rest = await originalRestore.call(this, snapshot, options);
+        return [...first, ...rest];
+      });
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+          artifactSnapshot: {
+            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+            sessionId: SESS_A,
+            sequence: 9,
+            artifacts: urls.map((url) => ({
+              id: stableSessionArtifactId(SESS_A, `url:${url}`),
+              kind: 'link',
+              storage: 'external_url',
+              source: 'client',
+              status: 'available',
+              title: url,
+              url,
+              retention: 'restorable',
+              clientRetained: true,
+              createdAt: '2026-07-04T00:00:00.000Z',
+              updatedAt: '2026-07-04T00:00:00.000Z',
+            })),
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
+          },
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(bridge, handle, session.sessionId);
+    // Two pre-rewind durables make the partial window observable: the count
+    // drops 2 → 1 only once the gated restore applied the first snapshot
+    // artifact, so the waitFor cannot land on the pre-rewind state.
+    for (const url of [
+      'https://example.com/pre-rewind-a',
+      'https://example.com/pre-rewind-b',
+    ]) {
+      await bridge.addSessionArtifact(
+        session.sessionId,
+        { title: url, url },
+        { clientId: session.clientId },
+      );
+    }
+
+    const rewindPromise = bridge.rewindSession(
+      session.sessionId,
+      { promptId: 'prompt-1' },
+      { clientId: session.clientId },
+    );
+    const capturedStore = () =>
+      restoreSpy.mock.instances[0] as unknown as
+        | SessionArtifactStore
+        | undefined;
+    await vi.waitFor(() => {
+      expect(capturedStore()?.count()).toBe(1);
+    });
+    const partialRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === session.sessionId);
+    expect(partialRow).toBeDefined();
+    expect(partialRow?.artifactCount).toBeUndefined();
+    expect(partialRow?.artifactCountPending).toBe(true);
+
+    releaseRestore();
+    await expect(rewindPromise).resolves.toMatchObject({ targetTurnIndex: 0 });
+    const settledRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === session.sessionId);
+    expect(settledRow?.artifactCount).toBe(3);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
+  it('clears the rewind pending marker when the restore rejects', async () => {
+    // A leaked marker would stamp artifactCountPending on every later
+    // summary (the merge keeps the stale sidecar count forever), block
+    // conditional close, and stall the drain predicate.
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockRejectedValueOnce(new Error('snapshot directory missing'));
+    onTestFinished(() => restoreSpy.mockRestore());
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+          artifactSnapshot: {
+            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+            sessionId: SESS_A,
+            sequence: 9,
+            artifacts: [
+              {
+                id: stableSessionArtifactId(
+                  SESS_A,
+                  'url:https://example.com/rewind-reject',
+                ),
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Rewind reject link',
+                url: 'https://example.com/rewind-reject',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-04T00:00:00.000Z',
+                updatedAt: '2026-07-04T00:00:00.000Z',
+              },
+            ],
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
+          },
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(bridge, handle, session.sessionId);
+
+    await expect(
+      bridge.rewindSession(
+        session.sessionId,
+        { promptId: 'prompt-1' },
+        { clientId: session.clientId },
+      ),
+    ).rejects.toThrow('snapshot directory missing');
+
+    const row = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === session.sessionId);
+    expect(row).toBeDefined();
+    expect(row?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
   it('clears durable artifacts but keeps live ephemerals when rewind returns an empty artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
     const handle = makeChannel({
