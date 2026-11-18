@@ -10117,6 +10117,7 @@ describe('Server Config (config.ts)', () => {
       '.worktree.json',
       '.pr.json',
       '.title.json',
+      '.branch.json',
       '.artifacts.json',
       '.goal.json',
     ]);
