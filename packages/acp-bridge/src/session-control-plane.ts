@@ -14922,8 +14922,11 @@ export function createSessionControlPlane(
         });
         const observer = onPromptWriteStarted;
         onPromptWriteStarted = () => {
-          observer?.();
-          resolveFirstWrite();
+          try {
+            observer?.();
+          } finally {
+            resolveFirstWrite();
+          }
         };
       }
 

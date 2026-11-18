@@ -18789,6 +18789,40 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('settles first dispatch even when the write observer throws', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionContinue) {
+            return {
+              accepted: true,
+              interruption: 'interrupted_prompt',
+            };
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const decision = bridge.continueSession(session.sessionId, {
+        promptId: 'throwing-observer',
+        requireDispatchAck: true,
+        onPromptWriteStarted: () => {
+          throw new Error('observer failed');
+        },
+      });
+
+      await expect(decision).resolves.toMatchObject({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      await bridge.shutdown();
+    });
+
     it('rejects continueSession with an unregistered client id before running the pre-check', async () => {
       const handle = makeChannel({
         extMethodImpl: (method) => {
