@@ -1204,6 +1204,64 @@ describe('Turn', () => {
       });
     });
 
+    // M13: the total − prompt preference over candidatesTokenCount is
+    // unpinned — when a provider reports both (Gemini-style with separate
+    // reasoning tokens in thoughtsTokenCount), the subtraction includes
+    // reasoning that a bare candidates count omits. Pin that the
+    // subtraction wins when the two disagree.
+    it('prefers total − prompt over candidatesTokenCount when both are reported (#16417 M13)', async () => {
+      const budgetTurn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+          getLastRequestMaxOutputTokens: () => 8_192,
+        } as unknown as LlmChat,
+        'prompt-budget-prefer-subtraction',
+      );
+      // total − prompt = 9200 − 1000 = 8200, but candidates = 1000 (the
+      // bare output count without reasoning). The subtraction must win.
+      mockSendMessageStream.mockResolvedValue(
+        streamOf(
+          chunk({
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/big.txt', content: 'x'.repeat(50_000) },
+              },
+            ],
+          }),
+          chunk({
+            candidates: [
+              { content: { parts: [] }, finishReason: 'MAX_TOKENS' },
+            ],
+            usageMetadata: {
+              totalTokenCount: 9_200,
+              promptTokenCount: 1_000,
+              candidatesTokenCount: 1_000,
+            },
+          }),
+        ),
+      );
+      await collect(
+        budgetTurn.run(
+          'test-model',
+          [{ text: 'Test' }],
+          new AbortController().signal,
+        ),
+      );
+
+      const tc = budgetTurn.pendingToolCalls[0];
+      expect(tc.wasOutputTruncated).toBe(true);
+      // 9200 − 1000 = 8200 (reasoning-inclusive), NOT 1000 (bare candidates).
+      expect(tc.outputBudgetAtTruncation).toEqual({
+        usedTokens: 8_200,
+        limitTokens: 8_192,
+      });
+    });
+
     it('falls back to candidatesTokenCount when total or prompt is missing (#16417 R1)', async () => {
       const budgetTurn = new Turn(
         {

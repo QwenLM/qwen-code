@@ -13800,6 +13800,24 @@ describe('LlmChat', async () => {
       ]);
     });
 
+    it('records the initial clamp as the request maxOutputTokens (#16417 M4)', async () => {
+      // M4: deleting the initial-clamp assignment leaves this getter
+      // undefined on the ordinary first-send path, so a MAX_TOKENS cut in
+      // that round cannot name the limit — the assignment is load-bearing
+      // even when no escalation or recovery follows.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 131_072,
+      });
+      serveStreams(streamOf(textChunk('hello', 'STOP')));
+      await drain(
+        await sendOn('claude-sonnet-4-6', 'hi', 'prompt-initial-clamp'),
+      );
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(
+        requestAt(0).config?.maxOutputTokens,
+      );
+    });
+
     it('re-clamps maxOutputTokens on each recovery send as the prompt grows (window invariant)', async () => {
       // #5950 at recovery time: 131,072 window, 71,349 prompt, 64K ceiling.
       // The initial 49,722 grant truncates; the ~121K recovery prompt would
