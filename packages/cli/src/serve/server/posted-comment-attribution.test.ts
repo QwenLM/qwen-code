@@ -174,6 +174,15 @@ describe('extractPostedCommentIds', () => {
     },
   );
 
+  it('does not stop at a status block without an error field in shell output', () => {
+    const entry = shellResult(
+      'gh pr comment 1 --body a',
+      'Status:\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)\n\n' +
+        'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
   it('does not treat standalone labels as a second complete header', () => {
     const entry = shellResult(
       "gh pr comment 1 --body 'Example:\nDirectory: sample'",
@@ -191,6 +200,51 @@ describe('extractPostedCommentIds', () => {
     );
     expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
   });
+
+  it.each([
+    { outputLabel: 'Output', errorLabel: 'Error' },
+    {
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+    },
+  ])(
+    'stops at the shell footer before appended context ($outputLabel)',
+    ({ outputLabel, errorLabel }) => {
+      const command = 'gh api repos/o/r/issues/1/comments -X POST --silent';
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const previousUrl = 'https://github.com/o/r/pull/1#issuecomment-99';
+      const footer = `\n${errorLabel}: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)`;
+      for (const context of [
+        previousUrl,
+        `Directory: (root)\n${outputLabel}: ${previousUrl}`,
+      ]) {
+        const transcript = (result: string) =>
+          shellResult(
+            command,
+            '',
+            `Command: ${command}\nDirectory: (root)\n${outputLabel}: ${result}${footer}\n\nPrevious run:\n${context}${footer}`,
+          );
+        expect(extractPostedCommentIds(transcript('(empty)'))).toEqual([]);
+        expect(extractPostedCommentIds(transcript(url))).toEqual(['ic:42']);
+      }
+    },
+  );
+
+  it.each(['', '\n\nEnd of example'])(
+    'does not trust a complete example quoted in a directory-less legacy record (suffix %j)',
+    (suffix) => {
+      const command =
+        "gh pr comment 1 --body 'Example:\nDirectory: (root)\n" +
+        'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
+        `Execution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)${suffix}'`;
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nOutput: https://github.com/o/r/pull/1#issuecomment-42\nError: (none)\nExit Code: 0\n`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual([]);
+    },
+  );
 
   it('attributes a creation from a working directory containing a newline', () => {
     const command =

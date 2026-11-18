@@ -361,6 +361,7 @@ function commandSegments(command: string): string[] {
     }
     current += ch;
   }
+  if (quote !== null) return [];
   segments.push(current);
   return segments;
 }
@@ -839,11 +840,9 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     const headerPattern =
       /\nDirectory: [^\n]*(?:\n(?!Directory: |Output(?: \(stdout and stderr combined\))?: )[^\n]*)*\n(Output(?: \(stdout and stderr combined\))?): /g;
     const header = headerPattern.exec(output);
-    if (header && headerPattern.exec(output)) continue;
     const outputPattern = /\n(Output(?: \(stdout and stderr combined\))?): /g;
     const boundary = header ?? outputPattern.exec(output);
     if (!boundary) continue;
-    if (!header && outputPattern.exec(output)) continue;
 
     const command = output.slice(commandPrefix.length, boundary.index);
     const segment = creationSegment(command);
@@ -851,19 +850,29 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     const resultStart = boundary.index + boundary[0].length;
     const errorPrefix =
       boundary[1] === 'Output' ? '\nError:' : '\nExecution Error:';
-    const successFooter = `${errorPrefix} (none)`;
-    const exitCodeStart = output.lastIndexOf('\nExit Code: ');
-    const successFooterStart = exitCodeStart - successFooter.length;
+    const firstError = output.indexOf(errorPrefix, resultStart);
+    const footerPattern =
+      /\nExit Code: (-?\d+|\(none\))(?:\nSignal: (?:-?\d+|\(none\))\nProcess Group PGID: (?:-?\d+|\(none\)))?(?=\n\n|\n?$)/g;
+    footerPattern.lastIndex = firstError === -1 ? output.length : firstError;
+    const footer = firstError === -1 ? null : footerPattern.exec(output);
+    const metadataStart = footer?.index ?? output.length;
+    const nextHeader = header ? headerPattern.exec(output) : null;
+    if (nextHeader && nextHeader.index < metadataStart) continue;
+
+    const successError = `${errorPrefix} (none)`;
+    const successErrorStart = metadataStart - successError.length;
     const resultEnd =
-      successFooterStart >= resultStart &&
-      output.startsWith(successFooter, successFooterStart) &&
-      /^\nExit Code: 0(?=\n|$)/.test(output.slice(exitCodeStart))
-        ? successFooterStart
-        : output.indexOf(errorPrefix, resultStart);
-    const result = output.slice(
-      resultStart,
-      resultEnd === -1 ? undefined : resultEnd,
-    );
+      footer?.[1] === '0' &&
+      successErrorStart >= resultStart &&
+      output.startsWith(successError, successErrorStart)
+        ? successErrorStart
+        : firstError === -1
+          ? metadataStart
+          : firstError;
+    outputPattern.lastIndex = header ? resultEnd : resultStart;
+    const nextOutput = outputPattern.exec(output);
+    if (nextOutput && nextOutput.index < metadataStart) continue;
+    const result = output.slice(resultStart, resultEnd);
 
     // The output must be attributable to the creation. When another gh/curl
     // command runs AFTER the creation, it may have produced the output —
