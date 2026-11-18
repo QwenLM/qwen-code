@@ -10085,7 +10085,10 @@ describe('Server Config (config.ts)', () => {
       'Of those, there are 1,000 tokens of context files, ' +
         '100 tokens of auto-memory policy, and 5,000 tokens of auto-memory catalog.',
     );
-    expect(warning).toContain('pruning stale memories');
+    expect(warning).toContain(
+      'Consider trimming context files or pruning stale memories, ' +
+        'or moving details into on-demand files.',
+    );
     expect(warning).not.toContain('disabling managed auto-memory');
   });
 
