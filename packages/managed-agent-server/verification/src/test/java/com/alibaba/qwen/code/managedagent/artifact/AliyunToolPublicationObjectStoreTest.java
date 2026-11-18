@@ -17,6 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -62,12 +63,15 @@ class AliyunToolPublicationObjectStoreTest {
                 .thenReturn(new BucketVersioningConfiguration(state));
         assertThatThrownBy(() -> objects.putIfAbsent("exact/key", new byte[] {1}))
                 .isInstanceOf(IllegalStateException.class);
-        // Cover the sibling stream overloads too: a refactor could write through
-        // putObject(bucket, key, stream[, metadata]) instead of PutObjectRequest,
-        // and never() on one overload alone would let that write slip through.
+        // Cover the sibling stream and File overloads too: a refactor could write
+        // through putObject(bucket, key, stream|file[, metadata]) instead of
+        // PutObjectRequest, and never() on one overload alone would let that write
+        // slip through. The URL overloads take a presigned URL this class never holds.
         verify(client, never()).putObject(any(PutObjectRequest.class));
         verify(client, never()).putObject(anyString(), anyString(), any(InputStream.class));
         verify(client, never()).putObject(anyString(), anyString(), any(InputStream.class), any(ObjectMetadata.class));
+        verify(client, never()).putObject(anyString(), anyString(), any(File.class));
+        verify(client, never()).putObject(anyString(), anyString(), any(File.class), any(ObjectMetadata.class));
     }
 
     @Test
