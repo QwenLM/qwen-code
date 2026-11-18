@@ -90,7 +90,10 @@ export interface DaemonChatIntents {
    * leaves it `unknown`) an exit: terminalize it as `failed`, never
    * `established`, so it stops holding the phase open. Unknown ids,
    * already-terminal attempts, and attempts with a confirmed admission are a
-   * no-op — a live accepted turn must keep its chance to settle.
+   * no-op — a live accepted turn must keep its chance to settle. While the POST
+   * is in flight, held `settled` evidence also blocks abandon (it may yet land
+   * on an accepted admission); once admission resolves `unknown` the held
+   * witness can never certify, so the attempt stays abandonable.
    */
   abandon(operationId: string): IntentResult | undefined;
   /**
