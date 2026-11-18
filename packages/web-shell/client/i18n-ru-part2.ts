@@ -350,6 +350,8 @@ export const RU_PART2: Record<
     'Откройте разговор, чтобы подтвердить отмену.',
   'restartRecovery.notContinuable': 'Задача больше не ждёт восстановления.',
   'restartRecovery.failed': 'Не удалось продолжить',
+  'restartRecovery.batchStopped':
+    'Нет ответа daemon. Предыдущие сессии могут уже выполняться; проверьте их состояние перед повторной попыткой.',
   'restartRecovery.loadFailed': 'Не удалось прочитать прерванные задачи',
   'restartRecovery.retry': 'Повторить',
   'restartRecovery.scanFailedWorkspaces': (v) =>

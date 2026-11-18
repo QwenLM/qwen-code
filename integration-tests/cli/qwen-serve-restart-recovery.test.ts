@@ -631,6 +631,6 @@ describeDaemon('qwen serve — restart recovery', () => {
     if (!fake) return;
     await expect(
       startDaemon(workspace, qwenHome, fake.baseUrl, '/nonexistent/qwen-cli'),
-    ).rejects.toThrow(/daemon exited before listening.*stdout=.*stderr=/s);
+    ).rejects.toThrow(/daemon exited before listening.+Cannot find module/s);
   });
 });

@@ -130,8 +130,8 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_148_100;
 // three locales) measures 2,145,251 bytes on the merged 0c28638cc7 tree;
 // combined with the Generic Webhook copy the merged 9de5d9a311 tree measures
 // 2,147,405, 1,295 above the previous 2,146,100 ceiling. Main 3d75b8ee60
-// measures 2,147,740, so the warning sits 360 above that measurement and the
-// ceiling 1,360 above it.
+// measures 2,147,740; adding the mid-batch failure notice brings the current
+// tree to 2,148,000, 100 below the warning and 1,100 below this ceiling.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_149_100;
 
 // Modules that must not be reachable from the document entry, checked against

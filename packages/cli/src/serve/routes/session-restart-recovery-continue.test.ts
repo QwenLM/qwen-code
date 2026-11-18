@@ -17,9 +17,12 @@ import {
   type PromptLedgerRecord,
 } from '@qwen-code/acp-bridge/promptLedger';
 import {
+  SessionArchivingError,
   SessionNotFoundError,
   type AcpSessionBridge,
 } from '../acp-session-bridge.js';
+import { DaemonDrainingError } from '../server/session-archive.js';
+import { RequestedSessionIdAdmissionError } from '../session-id-admission.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
@@ -49,6 +52,7 @@ interface Fixture {
   bridge: AcpSessionBridge;
   app: express.Express;
   sessionId: string;
+  lockDepth: () => number;
   runSharedMany: ReturnType<typeof vi.fn>;
   seed(records: readonly PromptLedgerRecord[], sessionId?: string): void;
 }
@@ -89,8 +93,16 @@ function makeFixture(trusted = true): Fixture {
       assertCanWrite: vi.fn(),
     } as WorkspaceFileSystemFactory,
   } as WorkspaceRuntime;
+  let lockDepth = 0;
   const runSharedMany = vi.fn(
-    async (_sessionIds: string[], fn: () => Promise<unknown>) => await fn(),
+    async (_sessionIds: string[], fn: () => Promise<unknown>) => {
+      lockDepth += 1;
+      try {
+        return await fn();
+      } finally {
+        lockDepth -= 1;
+      }
+    },
   );
   const app = express();
   app.use(express.json());
@@ -119,6 +131,7 @@ function makeFixture(trusted = true): Fixture {
     bridge,
     app,
     sessionId,
+    lockDepth: () => lockDepth,
     runSharedMany,
     seed(records, seedSessionId = sessionId) {
       const ledgerPath = sessionService.getPromptLedgerPath(seedSessionId);
@@ -206,16 +219,72 @@ describe('POST /sessions/recovery/continue', () => {
   it('holds the archive shared lock while continuing', async () => {
     const fixture = makeFixture();
     fixture.seed([inFlight('p1', Date.now())]);
+    const depths = { restore: [] as number[], continue: [] as number[] };
+    restoreMocks.restoreSessionCore.mockImplementationOnce(async () => {
+      depths.restore.push(fixture.lockDepth());
+      return {
+        kind: 'restored',
+        session: { sessionId: 'restored', clientId: 'batch-client' },
+      };
+    });
+    vi.mocked(fixture.bridge.continueSession).mockImplementationOnce(
+      async () => {
+        depths.continue.push(fixture.lockDepth());
+        return {
+          accepted: true,
+          interruption: 'interrupted_prompt',
+          promptId: 'prompt-1',
+        };
+      },
+    );
 
     const response = await request(fixture.app)
       .post('/sessions/recovery/continue')
       .send(requestBody(fixture));
 
     expect(response.status).toBe(200);
+    expect(response.body.results[0]).toEqual({
+      workspace: fixture.runtime.workspaceId,
+      sessionId: fixture.sessionId,
+      status: 'accepted',
+      kind: 'interrupted_prompt',
+      promptId: 'prompt-1',
+    });
     expect(fixture.runSharedMany).toHaveBeenCalledWith(
       [fixture.sessionId],
       expect.any(Function),
     );
+    expect(restoreMocks.restoreSessionCore).toHaveBeenCalledOnce();
+    expect(fixture.bridge.continueSession).toHaveBeenCalledOnce();
+    expect(depths).toEqual({ restore: [1], continue: [1] });
+    expect(fixture.lockDepth()).toBe(0);
+  });
+
+  it.each([
+    ['daemon_draining', new DaemonDrainingError()],
+    ['session_archiving', new SessionArchivingError('session-1')],
+    [
+      'session_workspace_conflict',
+      new RequestedSessionIdAdmissionError(
+        'session_workspace_conflict',
+        'session-1',
+        'Session belongs to another workspace',
+      ),
+    ],
+  ])('returns the transient conflict code %s', async (code, error) => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+    fixture.runSharedMany.mockRejectedValueOnce(error);
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.status).toBe(200);
+    expect(response.body.results[0]).toMatchObject({
+      status: 'error',
+      code,
+    });
   });
 
   it('does not load an already live session', async () => {

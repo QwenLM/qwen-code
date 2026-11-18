@@ -3811,6 +3811,23 @@ export class DaemonClient {
     );
   }
 
+  /** Deadline for the whole recovery batch. Explicit per-request/global values
+   * win. Otherwise each member gets the restore budget, capped by the platform
+   * timer limit; zero means no deadline.
+   */
+  private resolveRestartRecoveryTimeoutMs(
+    perRequestTimeoutMs: number | undefined,
+    memberCount: number,
+  ): number {
+    if (perRequestTimeoutMs !== undefined || this.hasExplicitFetchTimeout) {
+      return this.resolveRestoreTimeoutMs(perRequestTimeoutMs);
+    }
+    const perMember = this.resolveRestoreTimeoutMs(undefined);
+    if (perMember === 0) return 0;
+    const deadline = perMember * Math.max(1, memberCount);
+    return Math.min(MAX_TIMER_DELAY_MS, deadline);
+  }
+
   /**
    * List sessions whose newest prompt did not settle, via
    * `POST /sessions/recovery`. Read-only: no session is loaded and the
@@ -3829,7 +3846,10 @@ export class DaemonClient {
         body: request,
         mode: 'rest',
         signal: opts?.signal,
-        timeoutMs: opts?.timeoutMs,
+        timeoutMs: this.resolveRestartRecoveryTimeoutMs(
+          opts?.timeoutMs,
+          request.workspaces.length,
+        ),
       },
     );
   }
@@ -3851,7 +3871,10 @@ export class DaemonClient {
         body: request,
         mode: 'rest',
         signal: opts?.signal,
-        timeoutMs: opts?.timeoutMs,
+        timeoutMs: this.resolveRestartRecoveryTimeoutMs(
+          opts?.timeoutMs,
+          request.sessions.length,
+        ),
       },
     );
   }

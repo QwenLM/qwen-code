@@ -447,6 +447,123 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('sizes a continuation from the advertised restore budget instead of the generic deadline', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const body = {
+          results: [
+            {
+              workspace: 'workspace-a',
+              sessionId: 'session-1',
+              status: 'accepted' as const,
+              kind: 'interrupted_prompt' as const,
+              promptId: 'continue-1',
+            },
+          ],
+        };
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 60_000 },
+              }),
+            );
+          }
+          signal = init?.signal ?? undefined;
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(
+              () => resolve(jsonResponse(200, body)),
+              45_000,
+            );
+            signal?.addEventListener('abort', () => {
+              clearTimeout(timer);
+              reject(signal?.reason);
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.capabilities();
+
+        const outcome = client.continueRestartRecoveries({
+          sessions: [
+            { workspace: 'workspace-a', sessionId: 'session-1' },
+            { workspace: 'workspace-a', sessionId: 'session-2' },
+          ],
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(15_000);
+        await expect(outcome).resolves.toEqual(body);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('preserves an explicit zero deadline over the derived member budget', async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetch, calls } = recordingFetch(
+          () =>
+            new Promise<Response>((resolve) => {
+              setTimeout(
+                () => resolve(jsonResponse(200, { workspaces: [] })),
+                45_000,
+              );
+            }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 30_000,
+        });
+        const outcome = client.getRestartRecoveries(
+          { workspaces: Array.from({ length: 20 }, (_, i) => `ws-${i}`) },
+          { timeoutMs: 0 },
+        );
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(calls[0]?.signal?.aborted ?? false).toBe(false);
+        await vi.advanceTimersByTimeAsync(15_000);
+        await expect(outcome).resolves.toEqual({ workspaces: [] });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('lets an explicit global timeout win instead of multiplying the member count', async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetch, calls } = recordingFetch(({ signal }) => {
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        });
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          fetchTimeoutMs: 1_000,
+        });
+        const outcome = client
+          .getRestartRecoveries({
+            workspaces: Array.from({ length: 20 }, (_, i) => `ws-${i}`),
+          })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(999);
+        expect(calls[0]?.signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('preserves a per-workspace error and a route rejection', async () => {
       const member = {
         workspaces: [

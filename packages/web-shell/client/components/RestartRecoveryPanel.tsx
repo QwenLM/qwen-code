@@ -104,12 +104,15 @@ export function RestartRecoveryPanel({
           index < requestWorkspaces.length;
           index += WORKSPACE_BATCH_SIZE
         ) {
-          const result = await client.getRestartRecoveries({
-            workspaces: requestWorkspaces.slice(
-              index,
-              index + WORKSPACE_BATCH_SIZE,
-            ),
-          });
+          const result = await client.getRestartRecoveries(
+            {
+              workspaces: requestWorkspaces.slice(
+                index,
+                index + WORKSPACE_BATCH_SIZE,
+              ),
+            },
+            { timeoutMs: 0 },
+          );
           if (cancelled) return;
           for (const member of result.workspaces) {
             if (!('items' in member)) {
@@ -142,18 +145,21 @@ export function RestartRecoveryPanel({
       targets: readonly RestartRecoveryRow[],
       confirmToolTurn: boolean,
       options: { clearNotice?: boolean } = {},
-    ) => {
-      if (targets.length === 0) return;
+    ): Promise<boolean> => {
+      if (targets.length === 0) return true;
       setBusy(true);
       if (options.clearNotice !== false) setNotice(null);
       try {
-        const result = await client.continueRestartRecoveries({
-          sessions: targets.map((row) => ({
-            workspace: row.workspace,
-            sessionId: row.sessionId,
-          })),
-          ...(confirmToolTurn ? { confirmToolTurn: true } : {}),
-        });
+        const result = await client.continueRestartRecoveries(
+          {
+            sessions: targets.map((row) => ({
+              workspace: row.workspace,
+              sessionId: row.sessionId,
+            })),
+            ...(confirmToolTurn ? { confirmToolTurn: true } : {}),
+          },
+          { timeoutMs: 0 },
+        );
         const notContinuable = result.results.find(
           (entry) => entry.status === 'not_continuable',
         );
@@ -205,8 +211,10 @@ export function RestartRecoveryPanel({
             })`,
           );
         }
+        return true;
       } catch {
-        setNotice(t('restartRecovery.failed'));
+        setNotice(t('restartRecovery.batchStopped'));
+        return false;
       } finally {
         setBusy(false);
       }
@@ -220,9 +228,12 @@ export function RestartRecoveryPanel({
         row.needsToolConfirmation !== true && row.needsConversation !== true,
     );
     for (let index = 0; index < pending.length; index += BATCH_SIZE) {
-      await runBatch(pending.slice(index, index + BATCH_SIZE), false, {
-        clearNotice: index === 0,
-      });
+      const completed = await runBatch(
+        pending.slice(index, index + BATCH_SIZE),
+        false,
+        { clearNotice: index === 0 },
+      );
+      if (!completed) break;
     }
   }, [rows, runBatch]);
 

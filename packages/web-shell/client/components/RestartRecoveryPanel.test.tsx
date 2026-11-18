@@ -143,11 +143,16 @@ describe('RestartRecoveryPanel', () => {
       formatTimestamp(Date.parse('2026-11-17T09:12:31.000Z')),
     );
 
+    expect(client.getRestartRecoveries).toHaveBeenCalledWith(
+      { workspaces: ['/ws'] },
+      { timeoutMs: 0 },
+    );
     act(() => buttonByText('Continue').click());
     await waitFor(() =>
-      expect(client.continueRestartRecoveries).toHaveBeenCalledWith({
-        sessions: [{ workspace: '/ws', sessionId: SESSION_A }],
-      }),
+      expect(client.continueRestartRecoveries).toHaveBeenCalledWith(
+        { sessions: [{ workspace: '/ws', sessionId: SESSION_A }] },
+        { timeoutMs: 0 },
+      ),
     );
     await waitFor(() =>
       expect(
@@ -199,10 +204,13 @@ describe('RestartRecoveryPanel', () => {
     );
     act(() => buttonByText('Confirm and continue').click());
     await waitFor(() =>
-      expect(client.continueRestartRecoveries).toHaveBeenLastCalledWith({
-        sessions: [{ workspace: '/ws', sessionId: SESSION_A }],
-        confirmToolTurn: true,
-      }),
+      expect(client.continueRestartRecoveries).toHaveBeenLastCalledWith(
+        {
+          sessions: [{ workspace: '/ws', sessionId: SESSION_A }],
+          confirmToolTurn: true,
+        },
+        { timeoutMs: 0 },
+      ),
     );
   });
 
@@ -240,12 +248,15 @@ describe('RestartRecoveryPanel', () => {
     act(() => buttonByText('Continue all').click());
 
     await waitFor(() =>
-      expect(client.continueRestartRecoveries).toHaveBeenCalledWith({
-        sessions: [
-          { workspace: '/ws', sessionId: SESSION_A },
-          { workspace: '/ws', sessionId: SESSION_B },
-        ],
-      }),
+      expect(client.continueRestartRecoveries).toHaveBeenCalledWith(
+        {
+          sessions: [
+            { workspace: '/ws', sessionId: SESSION_A },
+            { workspace: '/ws', sessionId: SESSION_B },
+          ],
+        },
+        { timeoutMs: 0 },
+      ),
     );
     await waitFor(() =>
       expect(
@@ -276,9 +287,10 @@ describe('RestartRecoveryPanel', () => {
     render({ workspaceCwds: ['/ws\nline'] });
 
     await waitFor(() =>
-      expect(client.getRestartRecoveries).toHaveBeenCalledWith({
-        workspaces: ['/ws\nline'],
-      }),
+      expect(client.getRestartRecoveries).toHaveBeenCalledWith(
+        { workspaces: ['/ws\nline'] },
+        { timeoutMs: 0 },
+      ),
     );
   });
 
@@ -300,7 +312,9 @@ describe('RestartRecoveryPanel', () => {
     act(() => buttonByText('Continue').click());
 
     await waitFor(() =>
-      expect(container.textContent).toContain('Could not continue'),
+      expect(container.textContent).toContain(
+        'No reply from the daemon. Earlier sessions may already be running; check their state before retrying.',
+      ),
     );
   });
 
@@ -465,6 +479,31 @@ describe('RestartRecoveryPanel', () => {
     expect(
       client.continueRestartRecoveries.mock.calls[1]![0].sessions,
     ).toHaveLength(1);
+  });
+
+  it('stops later chunks when one batch has no daemon reply', async () => {
+    const items = Array.from({ length: 11 }, (_, index) => ({
+      sessionId: `session-${index}`,
+      interruption: 'daemon_shutdown',
+    }));
+    client.getRestartRecoveries.mockResolvedValue(recoveryResult(items));
+    client.continueRestartRecoveries.mockRejectedValue(new Error('offline'));
+    render();
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        '11 tasks interrupted by a restart',
+      ),
+    );
+    act(() => buttonByText('Review').click());
+    act(() => buttonByText('Continue all').click());
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        'No reply from the daemon. Earlier sessions may already be running; check their state before retrying.',
+      ),
+    );
+    expect(client.continueRestartRecoveries).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a not-continuable notice across later continue-all chunks', async () => {

@@ -120,6 +120,7 @@ import {
   InvalidSessionMetadataError,
   SessionArtifactValidationError,
   SessionArchivedError,
+  SessionArchivingError,
   SessionConflictError,
   SessionBusyError,
   SessionLimitExceededError,
@@ -170,6 +171,7 @@ import {
   deleteDaemonSessions,
   logSessionArchiveWarning,
   resolveSessionIdForRestore,
+  DaemonDrainingError,
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -11666,6 +11668,15 @@ export function registerSessionRoutes(
         } catch (error) {
           if (isSessionNotFoundError(error)) {
             return { ...base, status: 'error', code: 'session_not_found' };
+          }
+          if (error instanceof DaemonDrainingError) {
+            return { ...base, status: 'error', code: 'daemon_draining' };
+          }
+          if (error instanceof SessionArchivingError) {
+            return { ...base, status: 'error', code: 'session_archiving' };
+          }
+          if (error instanceof RequestedSessionIdAdmissionError) {
+            return { ...base, status: 'error', code: error.code };
           }
           if (isGenerationClosedError(error) || !isCurrent()) {
             return {

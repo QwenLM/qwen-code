@@ -102,7 +102,8 @@ prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终�
 不可读的 ledger 跳过（失败关闭）。尾部截断只丢失不完整的行：更早的有效记录仍能
 决定结果，因此崩溃在写入中断前留下 `in_flight` 记录时仍会列出。被跳过的会话绝不
 用猜测替代。跳过归档目录，丢弃早于请求时间窗的条目。每个 workspace 最多保留 200 条，
-按时间倒序；超过时返回 `truncated: true`。
+按时间倒序；超过时返回 `truncated: true`。枚举还沿用项目列表的 10,000 个会话文件上限：
+达到上限后遍历停止，因此 `truncated` 不能证明所有中断会话都已被枚举。
 
 扫描只报告 ledger 能证明的事实：某个 prompt 要么从未到达终态，要么到达了
 `interrupted` 终态，要么以 `daemon_shutdown`、`channel_closed` 等 daemon 生命周期错误
@@ -168,10 +169,11 @@ prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终�
    `code: 'already_moved'`。这覆盖扫描后被其他客户端继续到已结算轮次的会话。新的
    `in_flight` 记录表示轮次正在执行；第 5 步的 `canContinue` 检查会拒绝它。
    `daemon_shutdown`、`daemon_lost`、`channel_closed` 终态仍可恢复。
-2. 从请求指定的 workspace 解析所属 runtime，应用与 `POST /session/:id/continue`
-   相同的归属、信任和 generation 守卫，且不回退到主运行环境。持有与该路由相同的
-   archive shared lock，使归档或删除不能与 ledger 重读、恢复或派发竞争。standalone
-   会话不在范围内，会在冷加载时失败。
+2. 只从请求指定的 workspace 选择器解析 runtime，应用 workspace 信任、runtime generation
+   与 archive 协调守卫；不从会话 id 解析归属，也不回退到主运行环境。与
+   `POST /session/:id/continue` 不同，本批量路由不把 standalone 会话转交
+   `standaloneSessionService`。持有与该路由相同的 archive shared lock，使归档或删除不能
+   与 ledger 重读、恢复或派发竞争。standalone 会话不在范围内，会在冷加载时失败。
 3. 会话不在内存时，运行与 `POST /session/:id/load` 相同的冷恢复核心。不引入第二套
    加载路径。恢复过程产生的临时客户端 attachment 在续接请求返回时释放，无论接受还是
    拒绝。接受时 prompt 已先进入 pending，因此会保持会话打开；在派发前释放才会让空闲
@@ -223,8 +225,10 @@ prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终�
 `error`。`not_continuable` 携带 `already_moved`、`no_evidence`、`virtual_subagent`
 或 `invalid_session_id`（id 不符合持久化会话文件形状）；`confirmation_required` 携带
 `cancellation_confirmation` 或 `tool_turn`；`error` 携带 `workspace_not_found`、
-`untrusted_workspace`、`workspace_runtime_unavailable`、`session_not_found` 或
-`continue_failed`。
+`untrusted_workspace`、`workspace_runtime_unavailable`、`session_not_found`、
+`daemon_draining`、`session_archiving`、`session_id_conflict`、
+`session_workspace_conflict`、`session_id_admission_unavailable` 或
+`continue_failed`。draining 和 archiving 是可重试的暂时冲突，不是永久续接失败。
 
 单个失败不阻断其余条目。不保留客户端连接，也不建立 SSE 订阅；轮次在普通 prompt 准入
 下运行，之后任何打开该会话的客户端都能读取其事件。

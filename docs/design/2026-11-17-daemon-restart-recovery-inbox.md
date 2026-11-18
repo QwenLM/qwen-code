@@ -137,6 +137,9 @@ left an `in_flight` record before the torn write is still listed. Skipped
 sessions are never replaced with a guess. Skip the archive directory and drop
 entries older than the requested window. Keep at most 200 entries per
 workspace, newest first, and report `truncated: true` when more were present.
+Enumeration also inherits the project listing's 10,000-session-file cap: when
+that cap stops the walk, `truncated` does not prove every interrupted session
+was enumerated.
 
 The scan reports what the ledger proves: a prompt either never reached a
 terminal, reached an `interrupted` one, or ended with a daemon-lifecycle error
@@ -209,12 +212,14 @@ each entry:
    new `in_flight` record means a turn is active; the `canContinue` check in
    step 5 rejects it. `daemon_shutdown`, `daemon_lost`, and `channel_closed`
    terminals remain recoverable.
-2. Resolve the owner runtime from the requested workspace, applying the same
-   ownership, trust, and generation guards as `POST /session/:id/continue`,
-   with no primary-runtime fallback. Hold the same archive shared lock as that
-   route so archive or delete cannot race the ledger re-read, restore, or
-   dispatch. Standalone conversations are out of scope and fail at the cold
-   load.
+2. Resolve the runtime only from the requested workspace selector, applying
+   workspace trust, runtime-generation, and archive-coordination guards; never
+   resolve ownership from the session id or fall back to the primary runtime.
+   Unlike `POST /session/:id/continue`, the batch does not divert standalone
+   sessions through `standaloneSessionService`. Hold the same archive shared
+   lock as that route so archive or delete cannot race the ledger re-read,
+   restore, or dispatch. Standalone conversations are out of scope and fail
+   at the cold load.
 3. If the session is not live, run the same cold restore core that
    `POST /session/:id/load` uses. No second loading path is introduced. The
    restore's temporary client attachment is released when the continuation
@@ -274,7 +279,10 @@ The result is per session:
 match the persisted session-file shape); `confirmation_required` carries
 `cancellation_confirmation` or `tool_turn`; `error` carries
 `workspace_not_found`, `untrusted_workspace`, `workspace_runtime_unavailable`,
-`session_not_found`, or `continue_failed`.
+`session_not_found`, `daemon_draining`, `session_archiving`,
+`session_id_conflict`, `session_workspace_conflict`,
+`session_id_admission_unavailable`, or `continue_failed`. Draining and archiving
+are transient conflict codes rather than a permanent continuation failure.
 
 One failure does not stop the remaining entries. No client remains attached
 and no SSE subscription is created; the turn runs under normal prompt

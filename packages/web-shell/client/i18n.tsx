@@ -1411,6 +1411,8 @@ const EN: Messages = {
   'restartRecovery.notContinuable':
     'This task is no longer waiting for recovery.',
   'restartRecovery.failed': 'Could not continue',
+  'restartRecovery.batchStopped':
+    'No reply from the daemon. Earlier sessions may already be running; check their state before retrying.',
   'restartRecovery.loadFailed': 'Could not read interrupted tasks',
   'restartRecovery.retry': 'Retry',
   'restartRecovery.scanFailedWorkspaces': (v) =>
@@ -6820,6 +6822,8 @@ const ZH: Messages = {
   'restartRecovery.cancellationNeedsConversation': '请打开会话确认这次取消。',
   'restartRecovery.notContinuable': '该任务已不再等待恢复。',
   'restartRecovery.failed': '无法继续',
+  'restartRecovery.batchStopped':
+    'Daemon 未回复；前面的会话可能已在运行，请先确认会话状态再重试。',
   'restartRecovery.loadFailed': '无法读取中断任务',
   'restartRecovery.retry': '重试',
   'restartRecovery.scanFailedWorkspaces': (v) =>
