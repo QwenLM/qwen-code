@@ -149,4 +149,28 @@ describe('useWorktreeSession', () => {
       unmount();
     }
   });
+
+  it('reacts to a sidecar recreated after deletion on the same subscription', async () => {
+    await writeWorktreeSession(sidecarPath, sample);
+    const config = makeMockConfig(sidecarPath);
+    const { result, unmount } = renderHook(() => useWorktreeSession(config));
+    try {
+      await vi.waitFor(() => expect(result.current?.slug).toBe(sample.slug), {
+        timeout: 1000,
+      });
+      // exit_worktree unlinks the sidecar, then enter_worktree writes it again
+      // while the same stat subscription is still live.
+      await clearWorktreeSession(sidecarPath);
+      await vi.waitFor(() => expect(result.current).toBeNull(), {
+        timeout: 2000,
+      });
+      const reentered = { ...sample, slug: 'reentered' };
+      await writeWorktreeSession(sidecarPath, reentered);
+      await vi.waitFor(() => expect(result.current).toEqual(reentered), {
+        timeout: 2000,
+      });
+    } finally {
+      unmount();
+    }
+  });
 });

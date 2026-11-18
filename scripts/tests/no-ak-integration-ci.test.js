@@ -763,7 +763,7 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(gate).toContain('mkdir -p "$parity_evidence"');
     expect(gate).toContain(
-      'env ACP_PARITY_DUMP="$parity_evidence" npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/2',
+      `env ACP_PARITY_DUMP="$parity_evidence" npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/2`,
     );
     expect(gate).not.toContain('\n          ACP_PARITY_DUMP:');
     const upload = getWorkflowStep(job, 'Upload ACP retry parity evidence');

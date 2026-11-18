@@ -9,6 +9,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { useWorktreeSession } from './useWorktreeSession.js';
 
 const mocks = vi.hoisted(() => ({
@@ -236,5 +237,24 @@ describe('useWorktreeSession session ownership', () => {
     expect(result.current).toBeNull();
     await act(async () => subscriptions[0].notify());
     expect(result.current).toBe(worktree);
+  });
+
+  it('detaches the stat listener on unmount after final-exit preparation', async () => {
+    // prepareFileWatchersForProcessExit only marks the process on Darwin.
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    try {
+      const { result, unmount } = renderHook(() => useWorktreeSession(config));
+      await waitFor(() => expect(result.current).toBe(worktree));
+      prepareFileWatchersForProcessExit();
+      unmount();
+      expect(mocks.unwatchFile).toHaveBeenCalledExactlyOnceWith(
+        '/sessions/first.worktree.json',
+        subscriptions[0].notify,
+      );
+      expect(mocks.watch).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+    }
   });
 });
