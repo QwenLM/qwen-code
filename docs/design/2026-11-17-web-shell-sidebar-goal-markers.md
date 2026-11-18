@@ -3,11 +3,13 @@
 [English](2026-11-17-web-shell-sidebar-goal-markers.md) | [简体中文](2026-11-17-web-shell-sidebar-goal-markers.zh-CN.md)
 
 Status: landed (2026-11-18, merged as c98108ee13 via #17515). The sections below
-describe the design as written on 2026-11-17. Two things changed during review
-and are recorded here so the status line does not mislead: the
-completed-goals-hidden rule now lives in one shared `hasVisibleGoal` predicate
-read by the strip, the sidebar and the marker; and the goal sidecar coexists
-with main's separate artifact-count sidecar rather than being merged into it.
+describe the design as written on 2026-11-17, except for the validation plan,
+which is corrected to match what the tests actually exercise. Two things
+changed during review and are recorded here so the status line does not
+mislead: the completed-goals-hidden rule now lives in one shared
+`hasVisibleGoal` predicate read by the strip, the sidebar and the marker; and
+the goal sidecar coexists with main's separate artifact-count sidecar rather
+than being merged into it.
 One bounded candidate from the final review is tracked in #17731 — the
 objective is length-bounded only on the `propose_goal` path.
 
