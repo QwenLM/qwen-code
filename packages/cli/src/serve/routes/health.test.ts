@@ -33,7 +33,19 @@ function makeApp(workspaceRegistry: WorkspaceRegistry) {
   const { register } = createHealthRoutes({
     opts: { hostname: '127.0.0.1', requireAuth: false },
     workspaceRegistry,
-    getConnectedClients: () => 0,
+    getStreamOccupancy: () => ({
+      total: 0,
+      bySurface: {
+        restEvents: 0,
+        agentEvents: 0,
+        generation: 0,
+        artifactLibrary: 0,
+        hostedEvents: 0,
+        acpSse: 0,
+        acpWs: 0,
+      },
+      byListener: { primary: 0, 'local-control': 0, 'remote-access': 0 },
+    }),
     getRateLimiter: () => undefined,
   });
   register(app);

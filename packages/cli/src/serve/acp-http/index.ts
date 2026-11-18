@@ -1189,6 +1189,16 @@ export function mountAcpHttp(
       ? normalizeSessionIdForLookup(rawSessionId)
       : undefined;
 
+    // Authorization BEFORE resource admission (review R1-3): a foreign
+    // session id must keep its terminal 403 even at saturation — a retryable
+    // 503 would send the client into an endless back-off against a request
+    // that can never succeed, and log a refusal for a request that would
+    // have consumed no slot.
+    if (sessionId && !conn.ownsSession(sessionId)) {
+      res.status(403).json({ error: 'Session not owned by this connection' });
+      return;
+    }
+
     // Shared stream admission (issue #17554): ACP SSE pins a listener slot
     // exactly like the REST event stream, so it counts against the same
     // aggregate cap and per-listener clamps.
@@ -1260,13 +1270,9 @@ export function mountAcpHttp(
       return;
     }
 
-    // Session-scoped stream — only for a session THIS connection owns
-    // (created via session/new or attached via session/load|resume). Stops
-    // one connection eavesdropping on another's session event stream.
-    if (!conn.ownsSession(sessionId)) {
-      res.status(403).json({ error: 'Session not owned by this connection' });
-      return;
-    }
+    // Session-scoped stream — ownership was verified above the admission
+    // gate (created via session/new or attached via session/load|resume).
+    // Stops one connection eavesdropping on another's session event stream.
 
     // Fresh controller per stream so a reconnect gets a live (non-aborted)
     // signal; `attachSessionStream` installs it and tears down any prior
