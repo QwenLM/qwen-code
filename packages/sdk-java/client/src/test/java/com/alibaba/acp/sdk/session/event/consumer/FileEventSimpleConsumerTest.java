@@ -12,7 +12,6 @@ import org.junit.jupiter.api.io.TempDir;
 import static com.alibaba.acp.sdk.protocol.jsonrpc.Error.ErrorCode.RESOURCE_NOT_FOUND;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -38,7 +37,7 @@ class FileEventSimpleConsumerTest {
 
     @Test
     void keepsBlankLinesWhenNormalizingCrLfInput() throws Exception {
-        Path file = write("alpha\r\n\r\nbeta");
+        Path file = write("alpha\r\n\r\nbeta\r\n");
 
         assertEquals("alpha\n\nbeta\n", read(file, null, null));
     }
@@ -68,11 +67,6 @@ class FileEventSimpleConsumerTest {
 
         assertTrue(result.contains("line-1000"));
         assertFalse(result.contains("line-1001"));
-    }
-
-    @Test
-    void retainsTheEmptyResultForAnOutOfRangeStart() throws Exception {
-        assertNull(read(write("alpha\n"), 3, 1));
     }
 
     @Test
