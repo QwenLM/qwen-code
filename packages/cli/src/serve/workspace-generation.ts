@@ -8,17 +8,22 @@ import type { Application, Request, RequestHandler, Response } from 'express';
 import { GENERATION_MAX_PROMPT_BYTES } from '../acp-integration/generation.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { DaemonLogger } from './daemon-logger.js';
+import type { SseAdmissionCaps } from './daemon-status.js';
 import {
   formatGenerationSse,
   GENERATION_HEARTBEAT_MS,
   writeGenerationSseChunk,
 } from './generation-sse.js';
+import { checkSseAdmission, countSseStream } from './sse-occupancy.js';
 
 interface WorkspaceGenerationRouteDeps {
   bridge: AcpSessionBridge;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
+  sseAdmissionCaps?: SseAdmissionCaps;
+  daemonLog?: DaemonLogger;
 }
 
 export function mountWorkspaceGenerationRoutes(
@@ -49,6 +54,17 @@ export function mountWorkspaceGenerationRoutes(
       return;
     }
 
+    if (
+      !checkSseAdmission({
+        surface: 'generation',
+        req,
+        res,
+        caps: deps.sseAdmissionCaps,
+        daemonLog: deps.daemonLog,
+      })
+    ) {
+      return;
+    }
     const abort = new AbortController();
     let completed = false;
     const onClose = () => {
@@ -61,6 +77,7 @@ export function mountWorkspaceGenerationRoutes(
       abort.signal,
       clientId,
     );
+    countSseStream('generation', req, res);
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');

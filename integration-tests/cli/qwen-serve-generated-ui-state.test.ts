@@ -108,6 +108,27 @@ describe('Generated UI view state through the daemon', () => {
           { prompt: [{ type: 'text', text }] },
           target.clientId,
         );
+      const waitForCompletedTurn = async (response: Response) => {
+        const { promptId } = (await json(response, 202)) as {
+          promptId: string;
+        };
+        // Admission is asynchronous; closing the session can cancel the turn.
+        await expect
+          .poll(
+            async () =>
+              json(
+                await call(
+                  'GET',
+                  `/session/${session.sessionId}/turns/${promptId}`,
+                  undefined,
+                  session.clientId,
+                ),
+                200,
+              ),
+            { timeout: 60_000 },
+          )
+          .toMatchObject({ state: 'completed' });
+      };
       const put = (
         target: { sessionId: string; clientId: string },
         baseRevision: number,
@@ -123,8 +144,7 @@ describe('Generated UI view state through the daemon', () => {
         await json(await put(session, 0, { items: ['Agenda'] }), 200),
       ).toEqual({ outcome: 'saved', cardId: CARD, revision: 1 });
       release();
-      const first = await firstPrompt;
-      expect(first.status, await first.text()).toBeLessThan(300);
+      await waitForCompletedTurn(await firstPrompt);
 
       // An artifact registered after a save still lists after reload.
       await json(
@@ -189,8 +209,7 @@ describe('Generated UI view state through the daemon', () => {
         200,
       );
       expect(JSON.stringify(artifacts)).toContain('https://example.com/notes');
-      const second = await promptOf(session, 'second prompt');
-      expect(second.status, await second.text()).toBeLessThan(300);
+      await waitForCompletedTurn(await promptOf(session, 'second prompt'));
       await reload();
       expect(
         await json(

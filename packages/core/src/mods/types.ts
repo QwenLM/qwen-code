@@ -231,6 +231,8 @@ export type ModRequest =
       sites?: readonly ModRenderSite[];
       /** Whether the host raises `prompt.submit`; its hooks are skipped otherwise. */
       prompts?: boolean;
+      /** Whether the host raises `tool.call` and `tool.check`; their hooks are skipped otherwise. */
+      tools?: boolean;
       /** Whether the host runs the prompts `$.prompt.submit` submits. */
       submits?: boolean;
       /** Whether the host runs `$.model.complete` calls. */

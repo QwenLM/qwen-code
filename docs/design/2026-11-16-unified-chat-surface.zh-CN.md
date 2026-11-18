@@ -60,15 +60,15 @@ UI 基础组件已经共享，但其上的一切（页面布局、输入框接�
 
 ### 分叉（每个聊天列一份实现）
 
-| 关注点        | Daemon 路径                                                                                                                                         | Managed 路径                                                                                                                                       |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 主聊天编排    | 内联于 `App.tsx`（总计约 27k 行）                                                                                                                   | `components/managed/ManagedSessionsPage.tsx`（约 3.4k 行）                                                                                         |
-| 分屏/侧任务列 | `components/ChatPane.tsx`（约 2.2k 行），由 `components/SplitView.tsx` 与 `components/artifacts/SideTaskPanel.tsx` 渲染；`App.tsx` 渲染 `SplitView` | 缺席——managed 会话不在分屏或侧任务中打开                                                                                                           |
-| 会话状态      | `daemon/session/DaemonSessionProvider.tsx`（约 7.1k 行）及 `daemon/session/**`                                                                      | `components/managed/use-managed-session.ts` 与各 `use-managed-*` hooks                                                                             |
-| 后端契约      | `@qwen-code/sdk/daemon` 的 `DaemonSessionClient`                                                                                                    | `ManagedAgentProvider`（`components/managed/managed-agent-provider.ts`，约 910 行接口），走 `/api/agent/web-shell/v1/**`                           |
-| 状态展示      | `App.tsx` 与 `ChatPane.tsx` 里的内联状态栈 JSX（共用 `ComposerStatusStack.module.css`）、`ComposerUsageStats`、`GoalStatusStrip`                    | `ManagedSessionProgress`                                                                                                                           |
-| 会话内搜索    | `ConversationSearch`（主聊天列）                                                                                                                    | 缺失                                                                                                                                               |
-| 面板          | daemon 终端、artifacts、本地文件、git 模式、语音、Live                                                                                              | `ManagedTerminalPanel`、`ManagedToolResultPanel`、`ManagedTaskPanel`、`ManagedDiagnosticsPanel`、`ManagedRecoveryPanel`、`ManagedChildSessionView` |
+| 关注点        | Daemon 路径                                                                                                                                         | Managed 路径                                                                                                               |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 主聊天编排    | 内联于 `App.tsx`（总计约 27k 行）                                                                                                                   | `components/managed/ManagedSessionsPage.tsx`（约 3.4k 行）                                                                 |
+| 分屏/侧任务列 | `components/ChatPane.tsx`（约 2.2k 行），由 `components/SplitView.tsx` 与 `components/artifacts/SideTaskPanel.tsx` 渲染；`App.tsx` 渲染 `SplitView` | 缺席——managed 会话不在分屏或侧任务中打开                                                                                   |
+| 会话状态      | `daemon/session/DaemonSessionProvider.tsx`（约 7.1k 行）及 `daemon/session/**`                                                                      | `components/managed/use-managed-session.ts` 与各 `use-managed-*` hooks                                                     |
+| 后端契约      | `@qwen-code/sdk/daemon` 的 `DaemonSessionClient`                                                                                                    | `ManagedAgentProvider`（`components/managed/managed-agent-provider.ts`，约 910 行接口），走 `/api/agent/web-shell/v1/**`   |
+| 状态展示      | `App.tsx` 与 `ChatPane.tsx` 里的内联状态栈 JSX（共用 `ComposerStatusStack.module.css`）、`ComposerUsageStats`、`GoalStatusStrip`                    | `ManagedSessionProgress`                                                                                                   |
+| 会话内搜索    | `ConversationSearch`（主聊天列）                                                                                                                    | 缺失                                                                                                                       |
+| 面板          | daemon 终端、artifacts、本地文件、git 模式、语音、Live                                                                                              | `ManagedTerminalPanel`、`ManagedToolResultPanel`、`ManagedTaskPanel`、`ManagedDiagnosticsPanel`、`ManagedChildSessionView` |
 
 `ChatPane.tsx` 独立接线 `TranscriptViewport`、`ToolApproval`、
 `AskUserQuestion`、`GoalStatusStrip` 与 `ChatEditor`，拥有提交与取消，
@@ -270,7 +270,8 @@ capabilities 的既有能力风格。聊天面绝不在 `kind` 上分支：区�
 JSX 抽取——再加由 `statusFacts` 驱动的用量统计），以及面板插槽区。它接收
 控制器与插槽渲染器作为 props，不引入 `daemon/**`、`components/managed/**`
 或 `@qwen-code/sdk/daemon` 的任何内容。后端专属面板（daemon artifacts、
-managed 诊断/任务/恢复/终端）由所属页面以插槽传入。
+managed 诊断/任务/终端）由所属页面以插槽传入。Managed 恢复没有面板插槽：
+其裁决以对话消息呈现。
 
 ### 适配器
 
