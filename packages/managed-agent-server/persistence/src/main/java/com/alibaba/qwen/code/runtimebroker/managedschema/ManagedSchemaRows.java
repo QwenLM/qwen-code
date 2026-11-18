@@ -20,6 +20,7 @@ public final class ManagedSchemaRows {
             "is_archived",
             "owner_only",
             "is_cancel_requested",
+            "is_catalog_listed",
             "is_default",
             "is_deleted",
             "is_drain_requested",
