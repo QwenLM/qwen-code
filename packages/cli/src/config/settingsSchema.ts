@@ -4581,7 +4581,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+          'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.',
         showInDialog: true,
       },
       liveVoice: {

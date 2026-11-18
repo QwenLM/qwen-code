@@ -1397,7 +1397,9 @@ describe('Session', () => {
         },
       });
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      expect(session.pendingExternalAgentContext).toEqual([request.modelText]);
+      expect([...session.pendingExternalAgentContext.values()]).toEqual([
+        request.modelText,
+      ]);
     });
 
     it('returns a record already in the transcript, even mid-turn', async () => {
@@ -1423,7 +1425,7 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.recordExternalAgentRecordStrict,
       ).not.toHaveBeenCalled();
-      expect(session.pendingExternalAgentContext).toEqual([]);
+      expect(session.pendingExternalAgentContext.size).toBe(0);
       expect(
         vi
           .mocked(mockClient.sessionUpdate)
@@ -1458,7 +1460,7 @@ describe('Session', () => {
         mockChatRecordingService.recordExternalAgentRecordStrict,
       ).toHaveBeenCalledWith(request);
       // Nothing is shown or queued for a session that is going away.
-      expect(session.pendingExternalAgentContext).toEqual([]);
+      expect(session.pendingExternalAgentContext.size).toBe(0);
 
       // Written: a re-send now gets the record id back without a write.
       await expect(session.appendExternalRecord(request)).resolves.toEqual({
@@ -9995,6 +9997,69 @@ describe('Session', () => {
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('holds automatic work until the restored working directory is ready', async () => {
+    let cwd = '/workspace';
+    const starts: string[] = [];
+    const scheduler = {
+      hasPendingWork: false,
+      enableDurable: vi.fn(async () => {
+        starts.push(cwd);
+      }),
+      start: vi.fn(),
+      stop: vi.fn(),
+      list: vi.fn().mockReturnValue([]),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+    session.deferAutomaticWorkUntilCwdRestore();
+    session.startCronScheduler();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(scheduler.enableDurable).not.toHaveBeenCalled();
+    expect(session.isTurnIdle()).toBe(false);
+    expect(session.collectActiveWorkHolds()).toContainEqual({
+      category: 'session',
+      id: 'session:active-turn',
+    });
+    await expect(session.assertCanStartTurn()).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_busy' },
+    });
+
+    const releaseClose = session.beginClose();
+    await expect(session.waitForActiveTurnsToSettle()).resolves.toBeUndefined();
+    cwd = '/workspace/.qwen/worktrees/restored';
+    releaseClose();
+    session.releaseAutomaticWorkAfterCwdRestore();
+    session.releaseAutomaticWorkAfterCwdRestore();
+
+    await vi.waitFor(() =>
+      expect(scheduler.enableDurable).toHaveBeenCalledOnce(),
+    );
+    expect(starts).toEqual(['/workspace/.qwen/worktrees/restored']);
+    await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+    expect(session.collectActiveWorkHolds()).not.toContainEqual({
+      category: 'session',
+      id: 'session:active-turn',
+    });
+  });
+
+  it('does not start deferred automatic work after disposal', async () => {
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    const scheduler = {
+      enableDurable: vi.fn(),
+      stop: vi.fn(),
+      list: vi.fn().mockReturnValue([]),
+    };
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    session.deferAutomaticWorkUntilCwdRestore();
+    session.dispose();
+    session.releaseAutomaticWorkAfterCwdRestore();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(scheduler.enableDurable).not.toHaveBeenCalled();
+  });
+
   it('pins durable cron startup, prompt restart, and stop to the session runtime', async () => {
     const runtimeDir = path.resolve('runtime', 'cron-session');
     const observedStarts: string[] = [];
@@ -11558,6 +11623,43 @@ describe('Session', () => {
         },
       ];
     }
+
+    it('keeps automatic work held after cwd restore while a saved question is pending', async () => {
+      const history = danglingAuqHistory();
+      vi.mocked(mockChat.getHistory).mockImplementation(() => history);
+      const scheduler = {
+        hasPendingWork: false,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(),
+        stop: vi.fn(),
+        list: vi.fn().mockReturnValue([]),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+      session.deferAutomaticWorkUntilCwdRestore();
+      session.releaseAutomaticWorkAfterCwdRestore();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(scheduler.enableDurable).not.toHaveBeenCalled();
+      await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+      history.push({
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-auq',
+              name: 'ask_user_question',
+              response: { answer: 'Polling' },
+            },
+          },
+        ],
+      });
+      session.startCronScheduler();
+      await vi.waitFor(() =>
+        expect(scheduler.enableDurable).toHaveBeenCalledOnce(),
+      );
+    });
 
     it('does not classify a restorable question as an interrupted tool turn', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue(danglingAuqHistory());
@@ -23868,6 +23970,62 @@ describe('Session', () => {
       expect(
         queued.filter((item) => item.taskId === completion.taskId),
       ).toHaveLength(0);
+    });
+
+    it.each([
+      ['missing from history', false],
+      ['already in history', true],
+    ])('relays a send receipt %s', async (_scenario, receiptInHistory) => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const modelText =
+        '<task-notification><result>Done</result></task-notification>';
+      const sentMessageContext =
+        '<sent-message task-id="worker-reply">Original request</sent-message>';
+      const fromSession = { sessionId: 'worker', workspaceCwd: '/work/target' };
+      if (receiptInHistory) {
+        vi.mocked(mockChat.getHistory).mockReturnValue([
+          { role: 'user', parts: [{ text: sentMessageContext }] },
+        ]);
+      }
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker replied.',
+          modelText,
+          sentMessageContext,
+          taskId: 'worker-reply',
+          status: 'completed',
+          kind: 'agent',
+          structured: { fromSession },
+        }),
+      ).resolves.toEqual({ accepted: true });
+
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).toHaveBeenCalledExactlyOnceWith(
+        [{ text: modelText }],
+        'Worker replied.',
+        expect.objectContaining({ fromSession }),
+      );
+      const expectedText = receiptInHistory
+        ? modelText
+        : `<task-notification><result>Done</result>${sentMessageContext}</task-notification>`;
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({
+            message: expect.arrayContaining([{ text: expectedText }]),
+          }),
+          expect.any(String),
+          undefined,
+          undefined,
+        );
+      });
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
     });
 
     it('coalesces concurrent retries while daemon completion persistence is in flight', async () => {
