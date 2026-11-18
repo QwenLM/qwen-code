@@ -17,20 +17,22 @@ Deep health is a daemon-wide informational snapshot. It aggregates every
 runtime returned by `WorkspaceRegistry.listManaged()`, including workspaces
 that are draining but have not completed bridge cleanup.
 
-| Field                 | Aggregation                                              |
-| --------------------- | -------------------------------------------------------- |
-| `workspaceCount`      | Number of managed runtimes in the snapshot               |
-| `sessions`            | Sum                                                      |
-| `pendingPermissions`  | Sum                                                      |
-| `activePrompts`       | Sum                                                      |
-| `activeWork`          | True when any managed runtime reports active work        |
-| `activeWorkReporting` | Grade once after summing coverage counts across runtimes |
-| `activeWorkStaleMs`   | Age of the oldest snapshot behind it; `0` when uncovered |
-| `connectedClients`    | Existing daemon-wide REST SSE count                      |
-| `channelAlive`        | True when any managed runtime channel is live            |
-| `lastActivityAt`      | Latest non-null bridge activity time                     |
-| `idleSinceMs`         | One `Date.now()` snapshot minus the latest activity time |
-| `rateLimitHits`       | Existing optional daemon-wide rate-limit counts          |
+| Field                                                      | Aggregation                                                                                                                                                                       |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workspaceCount`                                           | Number of managed runtimes in the snapshot                                                                                                                                        |
+| `sessions`                                                 | Sum                                                                                                                                                                               |
+| `pendingPermissions`                                       | Sum                                                                                                                                                                               |
+| `activePrompts`                                            | Sum                                                                                                                                                                               |
+| `activeWork`                                               | True when any managed runtime reports active work                                                                                                                                 |
+| `activeWorkReporting`                                      | Grade once after summing coverage counts across runtimes                                                                                                                          |
+| `activeWorkStaleMs`                                        | Age of the oldest snapshot behind it; `0` when uncovered                                                                                                                          |
+| `connectedClients`                                         | Daemon-wide long-lived stream occupancy — every SSE surface plus ACP SSE/WS (REST-only scope superseded by [sse-unified-admission-occupancy](sse-unified-admission-occupancy.md)) |
+| `connectedClientsMax`                                      | Effective aggregate admission cap paired with `connectedClients`; `null` = unlimited                                                                                              |
+| `listenerConnectedClients` / `listenerConnectedClientsMax` | The arriving listener's own occupancy/clamp pair (pairing listeners refuse at their 51-stream clamp, not the aggregate)                                                           |
+| `channelAlive`                                             | True when any managed runtime channel is live                                                                                                                                     |
+| `lastActivityAt`                                           | Latest non-null bridge activity time                                                                                                                                              |
+| `idleSinceMs`                                              | One `Date.now()` snapshot minus the latest activity time                                                                                                                          |
+| `rateLimitHits`                                            | Existing optional daemon-wide rate-limit counts                                                                                                                                   |
 
 The route reads each runtime's required getters before combining the values.
 It does not short-circuit channel reads. If the registry or any getter throws,
@@ -58,10 +60,15 @@ still triggers runtime startup. The shallow bootstrap response remains
   identify the daemon-global contract.
 
 Deep health is not an all-workspace readiness check and not an atomic reclaim
-lease. Counter accessors do not ping child processes, and `connectedClients`
-only represents REST SSE. A reclaimer should require repeated idle samples and
-graceful shutdown; operators needing transport or per-workspace diagnostics
-should use the authenticated `/daemon/status` endpoint.
+lease. Counter accessors do not ping child processes. `connectedClients`
+originally represented REST SSE only; since
+[sse-unified-admission-occupancy](sse-unified-admission-occupancy.md) it is
+the aggregate long-lived stream occupancy (every SSE surface plus ACP
+SSE/WS), paired with `connectedClientsMax`, alongside the arriving listener's
+own `listenerConnectedClients` / `listenerConnectedClientsMax` pair. A
+reclaimer should require repeated idle samples and graceful shutdown;
+operators needing transport or per-workspace diagnostics should use the
+authenticated `/daemon/status` endpoint.
 
 ## Alternatives rejected
 

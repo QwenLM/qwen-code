@@ -2408,7 +2408,8 @@ export function createServeApp(
   const healthRoutes = createHealthRoutes({
     opts,
     workspaceRegistry,
-    getConnectedClients: () => getSseOccupancy().total,
+    getStreamOccupancy: getSseOccupancy,
+    sseAdmissionCaps,
     getRateLimiter: () => rateLimiter,
   });
   if (healthRoutes.exposeHealthPreAuth) {

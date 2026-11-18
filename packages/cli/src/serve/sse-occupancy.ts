@@ -12,6 +12,7 @@ import {
   listenerIdentityOf,
   type ListenerKind,
 } from './local-control/listener-identity.js';
+import { markAccessLogError } from './server/access-log.js';
 
 /**
  * Long-lived stream surfaces that pin one HTTP listener slot per connection
@@ -162,6 +163,10 @@ function refuseSseAdmission(
   } catch {
     // Diagnostics must not interfere with the rejection.
   }
+  // Attribute the refusal in the access log (the {error, code} convention).
+  // The ACP WS refusal writes the raw socket pre-upgrade and has no access
+  // log line, so this one call covers every HTTP surface.
+  markAccessLogError(res, 'sse_connection_limit_exceeded', scope);
   res.setHeader('Retry-After', '5');
   res.status(503).json({
     error:

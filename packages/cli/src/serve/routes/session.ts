@@ -11370,6 +11370,19 @@ export function registerSessionRoutes(
             });
             return;
           }
+          const { requestId, question, resume } = parsed.data;
+          // Terminal outcomes (409 conflict / 410 expired) must survive
+          // saturation: decide them BEFORE the admission gate, which stays
+          // immediately before open() so a refusal never starts the bridge
+          // side request (issue #17554 review R1-5).
+          btwStreams.precheck(
+            bridge,
+            sessionId,
+            clientId,
+            requestId,
+            question,
+            resume === true,
+          );
           if (
             !checkSseAdmission({
               surface: 'artifactLibrary',
@@ -11382,7 +11395,6 @@ export function registerSessionRoutes(
           ) {
             return;
           }
-          const { requestId, question, resume } = parsed.data;
           const request = btwStreams.open(
             bridge,
             sessionId,

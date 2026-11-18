@@ -2265,3 +2265,186 @@ describe('extra WS routes under SSE admission saturation (issue #17554)', () => 
     }
   });
 });
+
+describe('plural ACP mounts under SSE admission (issue #17554, review R1-3/R1-4)', () => {
+  let server: Server;
+  let handle: AcpHttpHandle | undefined;
+  let base: string;
+
+  beforeEach(async () => {
+    const primaryBridge = makeBridge();
+    const secondaryBridge = makeBridge();
+    const registry = createWorkspaceRegistry([
+      makeRuntime({
+        id: 'primary-id',
+        cwd: '/ws',
+        primary: true,
+        trusted: true,
+        bridge: primaryBridge,
+        env: PARENT_ENV,
+      }),
+      makeRuntime({
+        id: 'secondary-id',
+        cwd: '/ws-b',
+        primary: false,
+        trusted: true,
+        bridge: secondaryBridge,
+        env: PARENT_ENV,
+      }),
+    ]);
+    const app = express();
+    app.use(express.json());
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    handle = mountAcpHttp(app, primaryBridge, {
+      boundWorkspace: '/ws',
+      workspace: {} as unknown as DaemonWorkspaceService,
+      enabled: true,
+      archiveCoordinator,
+      requestedSessionIdAdmission: createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => registry.listManaged().map((r) => r.bridge),
+        getPersistenceTargets: () =>
+          registry.listManaged().map((r) => ({
+            workspaceCwd: r.workspaceCwd,
+            runtimeBaseDir: r.sessionRuntimeBaseDir,
+          })),
+        getBridgeWorkspaceId: (bridge) =>
+          registry
+            .listEntries()
+            .find((e) => e.current?.runtime.bridge === bridge)?.workspaceId,
+      }),
+      workspaceRegistry: registry,
+      workspaceRememberLane: new WorkspaceRememberTaskLane(primaryBridge),
+      sseAdmissionCaps: resolveSseAdmissionCaps({
+        maxConnections: 10,
+        maxSseConnections: 1,
+      }),
+    });
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, '127.0.0.1', () => {
+        base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        handle?.attachServer(server);
+        resolve();
+      });
+    });
+  });
+
+  afterEach(async () => {
+    handle?.dispose();
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  async function initialize(pathname: string): Promise<string> {
+    const res = await fetch(`${base}${pathname}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }),
+    });
+    expect(res.status).toBe(200);
+    const connId = res.headers.get('acp-connection-id');
+    expect(connId).toBeTruthy();
+    await res.json();
+    return connId!;
+  }
+
+  it('gates and counts the plural SSE mount like the primary', async () => {
+    // The issue's motivating shape: secondary workspace mounts must not
+    // bypass the shared gate/count just because they funnel through
+    // resolvePluralMount into the same handler.
+    const before = getSseOccupancy();
+    const connId = await initialize('/workspaces/secondary-id/acp');
+    const stream = await fetch(`${base}/workspaces/secondary-id/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+      },
+    });
+    expect(stream.status).toBe(200);
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().bySurface.acpSse).toBe(
+          before.bySurface.acpSse + 1,
+        );
+      },
+      { timeout: 5_000 },
+    );
+    // The cap is now full: a second plural stream is refused explicitly.
+    const connId2 = await initialize('/workspaces/secondary-id/acp');
+    const refused = await fetch(`${base}/workspaces/secondary-id/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId2,
+      },
+    });
+    expect(refused.status).toBe(503);
+    expect(((await refused.json()) as { code: string }).code).toBe(
+      'sse_connection_limit_exceeded',
+    );
+    await stream.body!.cancel();
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
+  });
+
+  it('refuses plural WS upgrades at the cap before the upgrade', async () => {
+    const release = countSseStream('restEvents', { socket: {} } as never);
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        let settled = false;
+        const ws = new WebSocket(
+          `${base.replace('http', 'ws')}/workspaces/secondary-id/acp`,
+          { handshakeTimeout: 2000 },
+        );
+        ws.on('unexpected-response', (_req, res) => {
+          if (settled) return;
+          settled = true;
+          ws.terminate();
+          resolve(res.statusCode ?? 0);
+        });
+        ws.on('open', () => {
+          if (settled) return;
+          settled = true;
+          ws.terminate();
+          reject(new Error('plural WS upgraded at saturation'));
+        });
+        ws.on('error', (err) => {
+          if (!settled) {
+            settled = true;
+            reject(err);
+          }
+        });
+      });
+      expect(status).toBe(503);
+    } finally {
+      release();
+    }
+  });
+
+  it('keeps the session-ownership 403 terminal at saturation', async () => {
+    // Authorization precedes resource admission: a foreign session id must
+    // get its terminal 403 even when the cap is full — a retryable 503
+    // would loop the client forever against a request that can never
+    // succeed (review R1-3).
+    const connB = await initialize('/workspaces/secondary-id/acp');
+    const release = countSseStream('restEvents', { socket: {} } as never);
+    try {
+      const foreign = await fetch(`${base}/workspaces/secondary-id/acp`, {
+        headers: {
+          accept: 'text/event-stream',
+          'acp-connection-id': connB,
+          'acp-session-id': 'secondary-session',
+        },
+      });
+      expect(foreign.status).toBe(403);
+      expect(((await foreign.json()) as { error: string }).error).toBe(
+        'Session not owned by this connection',
+      );
+    } finally {
+      release();
+    }
+  });
+});
