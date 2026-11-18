@@ -580,6 +580,8 @@ export interface BridgeRestoreSessionRequest {
   suppressWorktreeContextRestore?: boolean;
   /** Delay ask_user_question recovery until daemon route validation finishes. */
   deferRestoreAskUserQuestionPrompt?: boolean;
+  /** Hold cold-restored automatic work until the route reconciles cwd. */
+  deferAutomaticWorkUntilCwdRestore?: boolean;
   /**
    * Daemon-internal: session-level MCP servers for ACP `session/load` /
    * `session/resume` (see `BridgeSpawnRequest.mcpServers`). Absent means
@@ -1305,6 +1307,24 @@ export interface BridgeSessionSummary {
    */
   prs?: SessionPrInfo[];
   /**
+   * Session artifact count, present when non-zero. Live entries carry the
+   * live public count; there, absent means ZERO — the in-memory store is
+   * authoritative, and the list merge drops a stale sidecar-derived count
+   * when the live entry omits the field — EXCEPT while
+   * `artifactCountPending` is true (see there). Persisted summaries are
+   * enriched best-effort from the artifact summary sidecar with the
+   * restorable count; there, absent means unknown (no sidecar / older
+   * daemon), not zero.
+   */
+  artifactCount?: number;
+  /**
+   * True while the session's artifact restore is still in flight: the
+   * entry is live, but its store is not hydrated yet, so `artifactCount`
+   * is omitted and MUST NOT be read as zero. The list merge keeps the
+   * sidecar-enriched count for such rows. Absent once the restore settles.
+   */
+  artifactCountPending?: boolean;
+  /**
    * List-facing projection of the session's Goal, read from the goal
    * sidecar on disk — present for unloaded and archived sessions too,
    * unlike the live-only Goals listing. Absent when the session has no
@@ -1562,6 +1582,8 @@ export const DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.suppressRestoreAskUserQuestion';
 export const DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY =
   'qwen.daemon.suppressWorktreeContextRestore';
+export const DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY =
+  'qwen.daemon.deferAutomaticWorkUntilCwdRestore';
 export const DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY =
   'qwen.daemon.passiveManagedRuntimeRecovery';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =

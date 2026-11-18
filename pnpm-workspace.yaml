@@ -10,6 +10,7 @@ packages:
   - 'packages/channels/dws'
   - 'packages/channels/email'
   - 'packages/channels/feishu'
+  - 'packages/channels/generic-webhook'
   - 'packages/channels/github'
   - 'packages/channels/gitlab'
   - 'packages/channels/plugin-example'

@@ -348,6 +348,9 @@ export const RU_PART3: Record<
   'scheduledTasks.delivery.channel': 'Канал доставки',
   'scheduledTasks.delivery.configuredGroupHint':
     'Сообщения отправляются в группу, заданную для этого канала.',
+  'scheduledTasks.delivery.configuredEndpointHint':
+    'Сообщения отправляются на конечную точку, заданную для этого канала.',
+  'scheduledTasks.delivery.endpoint': 'Конечная точка',
   'scheduledTasks.delivery.configuredHint':
     'Сообщения отправляются по адресу, заданному для этого канала.',
   'scheduledTasks.delivery.useConfiguredDestination':

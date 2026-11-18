@@ -4806,6 +4806,7 @@ describe('createServeApp', () => {
       '/channel-events',
       '/live',
       '/scheduled-tasks',
+      '/pr-watches',
       '/goals',
       '/settings',
     ])(
@@ -19421,7 +19422,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('keeps a fired non-Channel restore prompt unattested instead of killing the session', async () => {
+    it('keeps a fired non-Channel restore prompt compatible on an older bridge', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
@@ -19433,8 +19434,9 @@ describe('createServeApp', () => {
           hasActivePrompt: true,
         }),
       });
-      // No persisted source and none requested, so this is not a Channel
-      // restore and the route asks the bridge for no deferral. With
+      delete (bridge as Partial<AcpSessionBridge>)
+        .fireDeferredRestoreAskUserQuestionPrompt;
+      // Without deferred admission the route keeps its older behavior. With
       // `restoreAskUserQuestion` enabled the bridge then FIRES the re-hung
       // question during the cold restore, and that response reports an
       // active prompt while carrying no `currentCwd` at all.
@@ -19672,78 +19674,88 @@ describe('createServeApp', () => {
       }
     });
 
-    it('relocates a cold Channel restore before firing its deferred question', async () => {
-      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
-      let relocated = false;
-      const bridge = fakeBridge({
-        loadImpl: async (req) => ({
-          sessionId: req.sessionId,
-          workspaceCwd: req.workspaceCwd,
-          attached: false,
-          clientId: 'client-load',
-          state: {},
-          hasActivePrompt: false,
-        }),
-        changeSessionCwdImpl: async (sessionId, req) => {
-          relocated = true;
-          return {
-            sessionId,
-            previousCwd: WS_BOUND,
-            newCwd: req.path,
-            warnings: [],
-          };
-        },
-        fireDeferredRestoreAskUserQuestionPromptImpl: () => {
-          expect(relocated).toBe(true);
-          return true;
-        },
-      });
-      const readCreationMetadata = vi
-        .spyOn(SessionService.prototype, 'readCreationMetadata')
-        .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
-      mockWt.realpath = (p) => p;
-      mockWt.readMarker = () =>
-        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
-      mockWt.readSidecar = () =>
-        Promise.resolve({
-          slug: 'my-task',
-          worktreePath,
-          worktreeBranch: 'worktree-my-task',
-          originalCwd: WS_BOUND,
-          workspaceCwd: WS_BOUND,
-          originalBranch: 'main',
-          originalHeadCommit: 'abc123',
+    it.each([true, false])(
+      'relocates a cold restore before its question (Channel=%s)',
+      async (channel) => {
+        const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+        let relocated = false;
+        const bridge = fakeBridge({
+          loadImpl: async (req) => ({
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-load',
+            state: {},
+            hasActivePrompt: false,
+          }),
+          changeSessionCwdImpl: async (sessionId, req) => {
+            relocated = true;
+            return {
+              sessionId,
+              previousCwd: WS_BOUND,
+              newCwd: req.path,
+              warnings: [],
+            };
+          },
+          fireDeferredRestoreAskUserQuestionPromptImpl: () => {
+            expect(relocated).toBe(true);
+            return true;
+          },
         });
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue(
+            channel ? { sourceType: 'channel', sourceId: 'telegram' } : {},
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        mockWt.realpath = (p) => p;
+        mockWt.readMarker = () =>
+          Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+        mockWt.readSidecar = () =>
+          Promise.resolve({
+            slug: 'my-task',
+            worktreePath,
+            worktreeBranch: 'worktree-my-task',
+            originalCwd: WS_BOUND,
+            workspaceCwd: WS_BOUND,
+            originalBranch: 'main',
+            originalHeadCommit: 'abc123',
+          });
 
-      try {
-        const res = await request(app)
-          .post('/session/wt-session/load')
-          .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .send({ cwd: WS_BOUND });
+        try {
+          const res = await request(app)
+            .post('/session/wt-session/load')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ cwd: WS_BOUND });
 
-        expect(res.status).toBe(200);
-        expect(res.body.hasActivePrompt).toBe(true);
-        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
-        expect(bridge.fireDeferredRestoreAskUserQuestionPromptCalls).toEqual([
-          { sessionId: 'wt-session', clientId: 'client-load' },
-        ]);
-        expect(bridge.killCalls).toHaveLength(0);
-        expect(bridge.loadCalls[0]).toMatchObject({
-          suppressWorktreeContextRestore: true,
-          deferRestoreAskUserQuestionPrompt: true,
-        });
-      } finally {
-        mockWt.readSidecar = undefined;
-        mockWt.readMarker = undefined;
-        mockWt.realpath = undefined;
-        readCreationMetadata.mockRestore();
-      }
-    });
+          expect(res.status).toBe(200);
+          expect(res.body.hasActivePrompt).toBe(true);
+          expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+          expect(bridge.fireDeferredRestoreAskUserQuestionPromptCalls).toEqual([
+            { sessionId: 'wt-session', clientId: 'client-load' },
+          ]);
+          expect(bridge.killCalls).toHaveLength(0);
+          expect(bridge.loadCalls[0]).toMatchObject({
+            deferRestoreAskUserQuestionPrompt: true,
+            deferAutomaticWorkUntilCwdRestore: true,
+          });
+          // Non-Channel restores keep the child's worktree restore (marker
+          // heal + resumed notice); only Channel restores suppress it.
+          expect(bridge.loadCalls[0].suppressWorktreeContextRestore).toBe(
+            channel ? true : undefined,
+          );
+        } finally {
+          mockWt.readSidecar = undefined;
+          mockWt.readMarker = undefined;
+          mockWt.realpath = undefined;
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
 
     it('serializes concurrent Channel worktree restores through integrity admission', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;

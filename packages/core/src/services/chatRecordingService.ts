@@ -58,6 +58,10 @@ import {
   truncateTitleForList,
   writeSessionTitleSidecar,
 } from './session-title-sidecar.js';
+import {
+  sessionArtifactSummarySidecarPath,
+  writeSessionArtifactSummarySidecar,
+} from './session-artifact-summary-sidecar.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -1536,6 +1540,13 @@ export class ChatRecordingService {
 
   private titleSidecarPath(): string {
     return sessionTitleSidecarPath(this.ensureChatsDir(), this.getSessionId());
+  }
+
+  private artifactSummarySidecarPath(): string {
+    return sessionArtifactSummarySidecarPath(
+      this.ensureChatsDir(),
+      this.getSessionId(),
+    );
   }
 
   /**
@@ -4651,6 +4662,14 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });
+    // Derived list cache, refreshed after the authoritative append. Older
+    // records carry no count; the load-time seed covers those sessions.
+    if (payload.artifactCount !== undefined) {
+      writeSessionArtifactSummarySidecar(
+        this.artifactSummarySidecarPath(),
+        payload.artifactCount,
+      );
+    }
   }
 
   async recordSessionArtifactSnapshot(
@@ -4663,6 +4682,10 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });
+    writeSessionArtifactSummarySidecar(
+      this.artifactSummarySidecarPath(),
+      payload.artifacts.length,
+    );
   }
   /** Identifies the current active branch; changes when it is replaced. */
   getBranchGeneration(): number {
