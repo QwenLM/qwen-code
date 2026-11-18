@@ -19364,6 +19364,42 @@ describe('Hosted Harness no-tool session', () => {
     expect(state.storeOptions).toHaveLength(descriptorCount);
   });
 
+  it('refuses a pr_event input to a Session with no wake pump', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-external-files/1',
+      })
+      .expect(200);
+    // The external-files profile installs neither automations nor channels,
+    // so there is no in-process wake pump. A pr_event input must be refused,
+    // not acknowledged into a Session that can never run it: a false 202 would
+    // make the adapter record the transition as fired and drop it, while the
+    // input also pins Workspace close/delete.
+    const response = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/channels/operations`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        operationId: randomUUID(),
+        kind: 'submit_pr_event_input',
+        inputId: `prw-${'a'.repeat(64)}:input`,
+        owner: 'Owner',
+        repo: 'Repo',
+        prNumber: 7,
+        transition: 'ci_failure',
+        headSha: 'a'.repeat(40),
+        evidence: 'Failed checks: build.',
+        text: 'Inspect the pull request.',
+        episode: 1,
+      });
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('pr_event_wake_unavailable');
+  });
+
   it('preserves external files on cold load without hidden lanes and closes with lifecycle v1', async () => {
     const profile = 'hosted-workspace-external-files/1';
     const server = await app(true);

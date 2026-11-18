@@ -19,6 +19,7 @@ import type { ManagedInboundEvent } from '@qwen-code/channel-base';
 import {
   DISPATCHED_COMMENTS_LIMIT,
   MANAGED_GITHUB_PENDING_LIMIT,
+  MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
   MANAGED_GITHUB_PR_WATCH_FIRED_LIMIT,
   MANAGED_GITHUB_PR_WATCH_PENDING_LIMIT,
   ManagedGithubStateStore,
@@ -284,6 +285,39 @@ describe('validManagedGithubState watch segment', () => {
         watch: { prs: { 'owner/repo#9': { headSha: 'sha-a' } } },
       }),
     ).toBe(true);
+  });
+
+  it('accepts a durable sweep offset and episode watermark, rejects malformed ones', () => {
+    const base = watchState();
+    const withWatch = (extra: Record<string, unknown>) => ({
+      ...freshState(),
+      watch: { ...base.watch!, ...extra },
+    });
+    // A restart must accept the persisted rotation offset and watermark.
+    expect(
+      validManagedGithubState(
+        withWatch({ sweepStart: 0, episodes: { 'owner/repo#9': 3 } }),
+      ),
+    ).toBe(true);
+    expect(validManagedGithubState(withWatch({ sweepStart: 30 }))).toBe(true);
+    expect(validManagedGithubState(withWatch({ sweepStart: -1 }))).toBe(false);
+    expect(validManagedGithubState(withWatch({ sweepStart: 1.5 }))).toBe(false);
+    expect(validManagedGithubState(withWatch({ sweepStart: '0' }))).toBe(false);
+    expect(
+      validManagedGithubState(withWatch({ episodes: { 'owner/repo#9': 0 } })),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(withWatch({ episodes: { 'owner/repo#9': 1.5 } })),
+    ).toBe(false);
+    expect(validManagedGithubState(withWatch({ episodes: [] }))).toBe(false);
+    expect(validManagedGithubState(withWatch({ episodes: null }))).toBe(false);
+    const overCap: Record<string, number> = {};
+    for (let i = 0; i <= MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT; i++) {
+      overCap[`owner/repo#${i}`] = 1;
+    }
+    expect(validManagedGithubState(withWatch({ episodes: overCap }))).toBe(
+      false,
+    );
   });
 
   it('accepts the fired ring and pending queue at their exact caps', () => {

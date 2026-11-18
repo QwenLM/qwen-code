@@ -2,14 +2,17 @@
 
 [English](2026-11-17-managed-github-pr-watch-bound-session.md) | [简体中文](2026-11-17-managed-github-pr-watch-bound-session.zh-CN.md)
 
-Status: confirmed scope, in implementation. Builds on the merged managed GitHub
-adapter (#17511, `2c23f72bef`).
+Status: confirmed scope; implemented in #17665, under review. Builds on the merged
+managed GitHub adapter (#17511, `2c23f72bef`).
 
 Confirmed decisions (2026-11-17): first slice = private-only bound injection (public
 reply, role templates, Web Shell UI deferred); **D1 = new `pr_event` input source**;
-**D3 = adapter-side detection**. D2 (dedicated PR-watch binding table) and D5
-(OPERATOR binding write surface / writer-binding injection route) adopted as
-recommended below.
+**D3 = adapter-side detection**. D2 (dedicated PR-watch binding table) adopted as
+recommended below. **D5 resolved to the internal channel-adapter surface** (tenant
+header + trusted adapter + enablement gate, `RuleClass.INTERNAL_CHANNEL_ADAPTER`),
+the same trust boundary as the merged channel register/inbound routes — not an
+OPERATOR public route and not a per-request writer credential. See the Binding
+routes contract below; the earlier OPERATOR/Session-owner wording is superseded.
 
 ## Problem
 
@@ -112,7 +115,7 @@ control plane:
 
 1. **Binding layer (control plane).** A PR-watch binding records
    `(tenant, channelInstance, owner/repo#pr) → targetSessionId + event filter +
-   role/action template`. New record body + table (or an extension of
+role/action template`. New record body + table (or an extension of
    `ma_channel_binding` with an externally-specified `session_id` write path). A
    register/list/retire route family, authenticated like the automation-session
    internal surface (writer binding + creator actor) or as an OPERATOR public route.
@@ -122,10 +125,10 @@ control plane:
    derives transitions with the daemon's semantics, and persists a durable
    pending + fired-ring in a new watch state segment. It does **not** post publicly.
 3. **Injection layer (control plane).** A new internal route submits a PR-event input
-   + wake to the **bound** Session (target forced from the binding, never
-   caller-chosen), reusing `submitInput`. The event carries a durable envelope
-   (PR identity, transition, head SHA, evidence) pinned before commit, and a derived
-   idempotent `inputId` so a crash replays to the same admission.
+   - wake to the **bound** Session (target forced from the binding, never
+     caller-chosen), reusing `submitInput`. The event carries a durable envelope
+     (PR identity, transition, head SHA, evidence) pinned before commit, and a derived
+     idempotent `inputId` so a crash replays to the same admission.
 
 ### Key design decisions (for confirmation)
 
@@ -149,9 +152,15 @@ control plane:
 - **D4 — Private-only first slice.** Watch events inject into the bound Session and do
   not auto-post a public reply. The public-reply delivery producer is a follow-up. This
   matches the Legacy decision and avoids the delivery-producer work in slice 1.
-- **D5 — Authorization role.** Binding register/retire is a new write surface; choose
-  OPERATOR (turn-submit family) or Session-owner, and register the routes in the
-  `SurfaceRegistry`. Injection internal route uses writer-binding + creator actor.
+- **D5 — Authorization role (resolved).** All four routes (`pr-watch:create`,
+  `pr-watch:list`, `pr-watch:retire`, `pr-watch:inject`) ride the existing internal
+  channel-adapter surface: tenant header + trusted adapter + enablement gate,
+  registered in the `SurfaceRegistry` as `RuleClass.INTERNAL_CHANNEL_ADAPTER`. There
+  is no per-request actor or writer credential; the trust boundary is the internal
+  listener, exactly as for the merged channel register/inbound routes. Injection
+  forces the bound Session as target (never caller-chosen). An OPERATOR public route
+  was considered and rejected for slice 1: it would add a second credential system
+  beside the adapter's token for no gain while the surface stays internal.
 
 ## Bounded first slice (proposed)
 
@@ -204,10 +213,11 @@ watch scope beyond keeping them disjoint; Web Shell binding UI.
 - **Binding storage (D2).** A plain SQL table `ma_pr_watch_binding` (like
   `ma_channel_binding`, not an extension-record domain):
   `(tenant_id, channel_id, binding_id, owner, repo, pr_number, session_id, events_json,
-  gmt_create)`, unique `(tenant_id, channel_id, owner, repo, pr_number)`, index on
-  `(tenant_id, session_id)`. `events_json` is the enabled transition set. The binding
-  write path validates the target Session exists and is ACTIVE in the instance's
-  Workspace, and authorizes per D5.
+gmt_create)`, unique `(tenant_id, channel_id, owner, repo, pr_number)`. No
+  session-scoped index ships: slice 1 has no session-scoped read (retire is by PR
+  business key), so a reader-less index is omitted rather than carried. `events_json`
+  is the enabled transition set. The binding write path validates the target Session
+  exists and is ACTIVE in the instance's Workspace, and authorizes per D5.
 - **Binding routes.** Under the existing internal channel prefix
   `/internal/managed-channels/v1/channels/{channelId}`: `pr-watch:create`,
   `pr-watch:list`, `pr-watch:retire`. Authenticated like the channel adapter internal
@@ -219,7 +229,7 @@ watch scope beyond keeping them disjoint; Web Shell binding UI.
   (source `pr_event`) via the existing `submitInput` primitive through the Harness
   `POST /session/:id/channels/operations` (a new operation kind `submit_pr_event_input`).
 - **Idempotent identity.** `inputId = "prw-" + sha256(tenant ∥ channelId ∥ owner ∥ repo ∥
-  prNumber ∥ transition ∥ headSha ∥ episode) + ":input"`; `turnId = inputId`. `episode`
+prNumber ∥ transition ∥ headSha ∥ episode) + ":input"`; `turnId = inputId`. `episode`
   is the adapter's durable per-PR occurrence counter, persisted with each pending entry:
   a legitimate recurrence (merge_conflict dirty→clean→dirty on the same head, or
   head_change A→B→A) is a NEW episode and derives a NEW input id, while a redelivery of
@@ -227,9 +237,9 @@ watch scope beyond keeping them disjoint; Web Shell binding UI.
   the control plane would dedupe a legitimate recurrence into the first admission. A crash
   between Harness commit and SQL ledger replays to the same admission (derived id),
   following the channel crash-safe discipline. The durable envelope pins the binding + PR
-  + transition + headSha before commit.
+  - transition + headSha before commit.
 - **Envelope.** A `managed-input` resource carrying `{ text, prWatch: { owner, repo,
-  prNumber, transition, headSha, evidence } }`; the wake pump reads `text` for the
+prNumber, transition, headSha, evidence } }`; the wake pump reads `text` for the
   prompt. Private-only: no `channel_delivery` is planned from a `pr_event` input.
 - **Detection (D3).** Adapter-side watch pass reusing the daemon transition semantics
   (once-per-head CI fire, edge-triggered conflict, head change). Minimal event set:
@@ -237,10 +247,42 @@ watch scope beyond keeping them disjoint; Web Shell binding UI.
   learns bound PRs via `pr-watch:list`. Watch state (baseline + fired-ring + pending)
   lives in a new `managed-state.ts` segment.
 
+## Review hardening (#17665 round 1)
+
+The first review round closed these gaps; each is pinned by a test that turns red
+when the guard is removed:
+
+- **Rotating observation window.** The per-tick observation cap truncates a
+  stably-ordered binding list; a durable `sweepStart` offset rotates the window so
+  every binding is observed across successive ticks, not only the first cap.
+- **Episode watermark survives prune/rebind.** The admission ledger is permanent and
+  keyed without a binding discriminant, so the per-PR occurrence counter lives in a
+  durable `episodes` map carried across baseline prune; a rebind resumes the counter
+  instead of re-deriving an already-admitted input id. The map is bounded separately
+  from the prunable baselines (oldest watermark evicted past the cap).
+- **Terminal PRs.** A merged/closed PR is terminal: it drives no transition and its
+  binding is retired (idempotent, re-driven while terminal), freeing the observation
+  slot and allowing rebind.
+- **Ownership-move guard counts both binding classes.** Channel re-registration
+  refuses an actor/Workspace/cwd move while retained bindings exist; the pre-check
+  and the in-statement guard now count `ma_pr_watch_binding` beside
+  `ma_channel_binding`, and `inject` re-validates the bound Session's Workspace on
+  every call (failing closed, lazily retiring a binding whose Session is gone).
+- **Wake pump is an admission precondition.** `submit_pr_event_input` is refused
+  (409) when the Session has no in-process wake pump (e.g. the external-files
+  profile), so an input is never acknowledged into a Session that cannot run it.
+- **Ingress bounds the wrapped envelope.** The route refuses a payload whose wrapped
+  prompt exceeds the Harness char/byte caps before staging, so an accepted request is
+  an admittable one (no permanently-staged un-injectable row). The wire limits stay
+  `text ≤ 32000`, `evidence ≤ 4000`.
+- **Per-entry drain isolation.** A transient injection failure isolates to that PR's
+  queue; one unhealthy Session does not starve the other bindings. A ring-suppressed
+  `ci_failure` still pins the head so the CI read is not re-issued every tick.
+
 ## Open questions
 
-1. ~~D1–D5~~ confirmed (see status). Remaining: binding-write authorization role
-   (OPERATOR vs Session-owner) to finalize in the Java implementation.
+1. ~~D1–D5~~ confirmed (see status); D5 resolved to the internal channel-adapter
+   surface (no further role decision pending).
 2. Double-watch with daemon `sessionPrWatch`: slice 1 keeps managed-watch scoped to
    managed-bound PRs only; reconciliation beyond disjointness is deferred.
 3. `state_change` and role/action templates are deferred beyond slice 1.

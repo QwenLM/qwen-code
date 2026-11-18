@@ -11781,6 +11781,14 @@ export function registerHostedHarnessSessionRoutes(
           const parsed = parsePrWatchSubmitInput(body);
           if (parsed === undefined)
             return error(res, 400, 'invalid_channel_operation');
+          // A pr_event input is driven into a turn only by the in-process
+          // wake pump. A Session without one (e.g. the external-files
+          // profile, which installs neither automations nor channels) would
+          // acknowledge the input and never run it, while the adapter records
+          // the transition as fired. Refuse so the adapter sees an actionable
+          // failure instead of a false 202.
+          if (!session.monitorWake)
+            return error(res, 409, 'pr_event_wake_unavailable');
           result = {
             ...(await submitPrEventInput(
               session.managed,

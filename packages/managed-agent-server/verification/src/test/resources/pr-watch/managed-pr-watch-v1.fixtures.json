@@ -1,11 +1,7 @@
 {
   "comment": "TS/Java parity fixture for the PR-watch identity derivation (episode revision). Generated from packages/core/src/managed-runtime/managed-pr-watch-operations.ts (the authoritative TS contract): inputId joins episode LAST, after headSha; bindingId carries no episode. The Java mirror (PrWatchOperations) must derive byte-identical ids and refuse the same invalid identities with the same messages. Owned by the Java control-plane slice; the TS test may read this same file.",
   "source": "pr_event",
-  "transitions": [
-    "ci_failure",
-    "merge_conflict",
-    "head_change"
-  ],
+  "transitions": ["ci_failure", "merge_conflict", "head_change"],
   "cases": [
     {
       "id": "identity-0",

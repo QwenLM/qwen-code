@@ -24,11 +24,50 @@ public final class PrWatchOperations {
     private static final long MAX_SAFE_INTEGER = 9007199254740991L;
     private static final String SEPARATOR = Character.toString((char) 0);
 
+    /** The TS envelope bounds (MANAGED_PR_WATCH_LIMITS), mirrored. */
+    public static final int MAX_TEXT_CHARS = 32_000;
+    public static final int MAX_ENVELOPE_BYTES = 64 * 1024;
+    public static final int MAX_EVIDENCE_CHARS = 4_000;
+
     private PrWatchOperations() {
     }
 
     public static boolean isPrWatchTransition(String value) {
         return PR_WATCH_TRANSITIONS.contains(value);
+    }
+
+    private static String escapeXml(String value) {
+        return value.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;");
+    }
+
+    /**
+     * Byte-for-byte mirror of the TS prWatchInputText: the model-facing prompt
+     * the Harness wraps the raw text in. The ingress bounds the WRAPPED prompt
+     * (not the raw wire text), so a request the route accepts is a request the
+     * Harness can admit; otherwise the row would stage permanently and every
+     * redelivery would replay the same un-admittable payload.
+     */
+    public static String prWatchInputText(String owner, String repo,
+            long prNumber, String transition, String headSha, String evidence,
+            String text) {
+        StringBuilder wrapped = new StringBuilder();
+        wrapped.append("<pr-watch-event>\n");
+        wrapped.append("<pr>")
+                .append(escapeXml(owner + "/" + repo + "#" + prNumber))
+                .append("</pr>\n");
+        wrapped.append("<transition>").append(escapeXml(transition))
+                .append("</transition>\n");
+        wrapped.append("<head-sha>").append(escapeXml(headSha))
+                .append("</head-sha>");
+        if (!evidence.isEmpty()) {
+            wrapped.append("\n<evidence untrusted=\"true\">")
+                    .append(escapeXml(evidence)).append("</evidence>");
+        }
+        wrapped.append("\n</pr-watch-event>\n").append(text);
+        return wrapped.toString();
     }
 
     /**

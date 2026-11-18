@@ -35,7 +35,9 @@ const KEY: ManagedSessionKey = {
 };
 const HEAD = 'a'.repeat(40);
 
-function params(overrides: Partial<PrWatchSubmitParams> = {}): PrWatchSubmitParams {
+function params(
+  overrides: Partial<PrWatchSubmitParams> = {},
+): PrWatchSubmitParams {
   const base: PrWatchSubmitParams = {
     inputId: prWatchInputId({
       tenantId: 't1',
@@ -116,7 +118,11 @@ describe('submitPrEventInput', () => {
     const { store, submits } = fakeStore();
     const p = params();
     const result = await submitPrEventInput(store, KEY, p);
-    expect(result).toEqual({ inputId: p.inputId, turnId: p.inputId, replayed: false });
+    expect(result).toEqual({
+      inputId: p.inputId,
+      turnId: p.inputId,
+      replayed: false,
+    });
     expect(submits).toHaveLength(1);
     const { command, input } = submits[0]!;
     expect(command.operation).toBe('submitPrEventInput');
@@ -201,7 +207,9 @@ describe('submitPrEventInput', () => {
     // XML wrapper, but JSON-encoding each \u0001 as six bytes crosses the
     // envelope byte bound.
     const p = params({ text: '\u0001'.repeat(31_000) });
-    await expect(submitPrEventInput(store, KEY, p)).rejects.toThrow(/byte_limit/u);
+    await expect(submitPrEventInput(store, KEY, p)).rejects.toThrow(
+      /byte_limit/u,
+    );
   });
 });
 

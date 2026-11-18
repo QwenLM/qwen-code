@@ -136,6 +136,26 @@ public class ManagedPrWatchService {
                     "pr_watch_transition_not_enabled",
                     "The binding does not enable this transition.");
         }
+        // Defence in depth: re-validate the bound Session against the
+        // instance's Workspace on every inject, so a binding that escaped the
+        // ownership-move guard (or whose Session was deleted or moved) fails
+        // closed instead of starting a turn outside the current owner's grant.
+        try {
+            requireTargetSession(tenantId, instance, binding.sessionId());
+        } catch (ManagedAgentException error) {
+            if (error.getStatus() == 404) {
+                // The bound Session is gone or left the Workspace (permanent):
+                // retire the dead binding so the PR can be bound to another
+                // Session instead of being blocked by it forever.
+                bindings.retire(tenantId, channelId, request.owner(),
+                        request.repo(), request.prNumber());
+            }
+            throw error;
+        }
+        // Refuse before staging any payload the Harness must reject: the
+        // Harness bounds the WRAPPED prompt, so a wire-max request would
+        // otherwise stage permanently and replay un-admittable forever.
+        validateEnvelopeBounds(request);
         String inputId;
         try {
             inputId = PrWatchOperations.prWatchInputId(tenantId, channelId,
@@ -181,6 +201,43 @@ public class ManagedPrWatchService {
                     "The injection row was admitted with another identity.");
         }
         return admission(result, row);
+    }
+
+    /**
+     * The ingress relationship the wire limits alone do not enforce: the
+     * Harness bounds the wrapped prompt (prWatchInputText) against the char
+     * and byte caps, so a request at the raw wire maximum can be accepted here
+     * yet always refused downstream. Bound the wrapped envelope before staging
+     * so an accepted request is an admittable one; the wire limits stay as they
+     * are (text ≤ 32000, evidence ≤ 4000).
+     */
+    private void validateEnvelopeBounds(PrWatchInjectRequest request) {
+        String wrapped = PrWatchOperations.prWatchInputText(request.owner(),
+                request.repo(), request.prNumber(), request.transition(),
+                request.headSha(), request.evidence(), request.text());
+        if (wrapped.length() > PrWatchOperations.MAX_TEXT_CHARS) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    "The PR-watch prompt exceeds the character bound.");
+        }
+        try {
+            com.fasterxml.jackson.databind.node.ObjectNode envelope =
+                    mapper.createObjectNode();
+            envelope.put("owner", request.owner());
+            envelope.put("repo", request.repo());
+            envelope.put("prNumber", request.prNumber());
+            envelope.put("transition", request.transition());
+            envelope.put("headSha", request.headSha());
+            envelope.put("evidence", request.evidence());
+            envelope.put("text", wrapped);
+            if (mapper.writeValueAsBytes(envelope).length
+                    > PrWatchOperations.MAX_ENVELOPE_BYTES) {
+                throw new ManagedAgentException(400, "invalid_request",
+                        "The PR-watch envelope exceeds the byte bound.");
+            }
+        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    "The PR-watch envelope is not serializable.");
+        }
     }
 
     /** The durable envelope pinned before the commit; a replay sends it byte-identical. */

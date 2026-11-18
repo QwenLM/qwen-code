@@ -434,6 +434,63 @@ class ManagedPrWatchServiceTest {
                                 .isEqualTo("channel_not_found"));
     }
 
+    @Test
+    void ownershipMoveRefusedWhilePrWatchBindingsRetained() {
+        String sessionId = createSession(WORKSPACE);
+        bind(sessionId); // a PR-watch binding, zero channel route bindings
+        // Re-registering the same channel into another Workspace must be
+        // refused: the retained PR-watch binding still names a Session of the
+        // old Workspace. Counting only ma_channel_binding would let the move
+        // through and inject into a Session the new owner's grant never covered.
+        assertThatThrownBy(() -> channels.register(TENANT, channel,
+                new RegisterChannelRequest("github", "bot-account", 2, ACTOR,
+                        OTHER_WORKSPACE, ".",
+                        new ChannelPolicy("github", "allowlist",
+                                List.of("maintainer"), "followup"))))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode())
+                            .isEqualTo("channel_ownership_conflict");
+                });
+    }
+
+    @Test
+    void injectRefusesAndRetiresWhenTheBoundSessionIsGone() {
+        String sessionId = createSession(WORKSPACE);
+        bind(sessionId);
+        jdbc.update("UPDATE ma_session SET status = 'DELETED'"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, sessionId);
+        // inject re-validates the bound Session's Workspace/liveness and fails
+        // closed instead of starting a turn in a Session that is gone.
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text")))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode())
+                                .isEqualTo("session_not_found"));
+        // The dead binding is lazily retired so the PR can be rebound.
+        assertThat(bindings.findBinding(TENANT, channel, OWNER, REPO, PR))
+                .isEmpty();
+        String fresh = createSession(WORKSPACE);
+        assertThat(bind(fresh).sessionId()).isEqualTo(fresh);
+    }
+
+    @Test
+    void injectRefusesAnUnadmittableWrappedPromptBeforeStaging() {
+        String sessionId = createSession(WORKSPACE);
+        bind(sessionId);
+        // A raw text at the wire maximum wraps past the Harness char cap. The
+        // route must refuse before staging, or the row would stay staged
+        // forever and every redelivery would replay the un-admittable payload.
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "x".repeat(32_000))))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(400);
+                    assertThat(error.getCode()).isEqualTo("invalid_request");
+                });
+        assertThat(ledgerRows(sessionId)).isEmpty();
+        assertThat(harness.calls).isEmpty();
+    }
+
     private record Call(String sessionId, Map<String, Object> body) {
     }
 

@@ -67,6 +67,12 @@ export type ManagedGithubCiAggregate =
 export const MANAGED_GITHUB_PR_WATCH_PENDING_LIMIT = 16;
 /** Fired-ring cap, the retired channel watch's bound (MAX_FIRED_KEYS). */
 export const MANAGED_GITHUB_PR_WATCH_FIRED_LIMIT = 64;
+/**
+ * Durable per-PR episode-watermark cap. The watermark outlives prune/rebind
+ * (the admission ledger is permanent), so it is bounded separately from the
+ * prunable baselines; overflow evicts the oldest watermark.
+ */
+export const MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT = 1024;
 
 /**
  * One detected transition durably queued for injection. The full inject
@@ -117,6 +123,20 @@ export interface ManagedGithubPrWatchEntry {
 export interface ManagedGithubWatchState {
   /** Keyed by lowercased `owner/repo#prNumber`. */
   prs: Record<string, ManagedGithubPrWatchEntry>;
+  /**
+   * Rotation offset into the stably-ordered binding list: each tick observes a
+   * capped window starting here and advances, so every binding is observed
+   * across successive ticks instead of only the first cap (the daemon's
+   * sweepStart). Absent means start at the head of the list.
+   */
+  sweepStart?: number;
+  /**
+   * Durable per-PR occurrence watermark keyed like `prs`, carried across
+   * prune/rebind: the admission ledger is permanent and keyed without a
+   * binding discriminant, so a rebind must resume the episode counter rather
+   * than restart it and re-derive an already-admitted input id.
+   */
+  episodes?: Record<string, number>;
 }
 
 export interface ManagedGithubPendingEvent {
@@ -263,7 +283,19 @@ export function validManagedGithubState(
         !!state.watch.prs &&
         typeof state.watch.prs === 'object' &&
         !Array.isArray(state.watch.prs) &&
-        Object.values(state.watch.prs).every(validPrWatchEntry)))
+        Object.values(state.watch.prs).every(validPrWatchEntry) &&
+        (state.watch.sweepStart === undefined ||
+          (Number.isSafeInteger(state.watch.sweepStart) &&
+            state.watch.sweepStart >= 0)) &&
+        (state.watch.episodes === undefined ||
+          (!!state.watch.episodes &&
+            typeof state.watch.episodes === 'object' &&
+            !Array.isArray(state.watch.episodes) &&
+            Object.keys(state.watch.episodes).length <=
+              MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT &&
+            Object.values(state.watch.episodes).every(
+              (episode) => Number.isSafeInteger(episode) && episode >= 1,
+            )))))
   );
 }
 

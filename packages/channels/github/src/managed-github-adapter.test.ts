@@ -298,13 +298,19 @@ function fakePrWatchPlane(journal: string[]) {
     transition: string;
     headSha: string;
     evidence: string;
+    episode: number;
   }> = [];
   // The state file's content at each inject call: pins that the durable
   // pending entry was persisted BEFORE the injection side effect.
   const injectSnapshots: Array<{ pendingKeys: string[]; fired: string[] }> = [];
+  const retired: Array<{ owner: string; repo: string; prNumber: number }> = [];
   let bindings: GithubPrWatchBinding[] = [];
   let injectError: (Error & { status?: number; code?: string }) | undefined;
+  let injectErrorFor:
+    | ((prNumber: number) => (Error & { status?: number }) | undefined)
+    | undefined;
   let listError: (Error & { status?: number; code?: string }) | undefined;
+  let retireError: (Error & { status?: number; code?: string }) | undefined;
   let onInject: (() => void) | undefined;
   let stateFile: string | undefined;
   const plane: GithubPrWatchControlPlane = {
@@ -312,6 +318,19 @@ function fakePrWatchPlane(journal: string[]) {
       journal.push('listPrWatchBindings');
       if (listError) throw listError;
       return bindings;
+    },
+    retirePrWatchBinding: async (pr) => {
+      journal.push('retirePrWatchBinding');
+      if (retireError) throw retireError;
+      retired.push(pr);
+      bindings = bindings.filter(
+        (b) =>
+          !(
+            b.owner === pr.owner &&
+            b.repo === pr.repo &&
+            b.prNumber === pr.prNumber
+          ),
+      );
     },
     injectPrEvent: async (event) => {
       journal.push(`inject:${event.transition}`);
@@ -332,6 +351,8 @@ function fakePrWatchPlane(journal: string[]) {
           fired: entries.flatMap((e) => e.fired ?? []),
         });
       }
+      const perPrError = injectErrorFor?.(event.prNumber);
+      if (perPrError) throw perPrError;
       if (injectError) throw injectError;
       onInject?.();
       injected.push(event);
@@ -341,6 +362,7 @@ function fakePrWatchPlane(journal: string[]) {
     plane,
     injected,
     injectSnapshots,
+    retired,
     setBindings: (value: GithubPrWatchBinding[]) => {
       bindings = value;
     },
@@ -349,10 +371,22 @@ function fakePrWatchPlane(journal: string[]) {
     ) => {
       injectError = value;
     },
+    setInjectErrorFor: (
+      value:
+        | ((prNumber: number) => (Error & { status?: number }) | undefined)
+        | undefined,
+    ) => {
+      injectErrorFor = value;
+    },
     setListError: (
       value: (Error & { status?: number; code?: string }) | undefined,
     ) => {
       listError = value;
+    },
+    setRetireError: (
+      value: (Error & { status?: number; code?: string }) | undefined,
+    ) => {
+      retireError = value;
     },
     setOnInject: (fn: (() => void) | undefined) => {
       onInject = fn;
@@ -2607,7 +2641,7 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.disconnect();
   });
 
-  it('caps the watched PRs per pass and surfaces the exclusion', async () => {
+  it('rotates the capped observation window so every binding is observed', async () => {
     const lines: string[] = [];
     const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
       log: (line) => lines.push(line),
@@ -2617,9 +2651,14 @@ describe('managed GitHub adapter PR watch', () => {
     );
     await adapter.tick();
     expect(fake.pullsSeen).toHaveLength(30);
-    expect(lines.some((l) => /cap exceeded: watching 30\/31/.test(l))).toBe(
-      true,
-    );
+    expect(lines.some((l) => /cap: observed 30\/31/.test(l))).toBe(true);
+    // The 31st binding is past the cap on the first tick...
+    expect(fake.pullsSeen.some((p) => p.prNumber === 31)).toBe(false);
+    // ...but the durable sweep offset rotates the window, so the second tick
+    // observes it. A plain break with no cursor would starve it forever.
+    await adapter.tick();
+    expect(fake.pullsSeen.some((p) => p.prNumber === 31)).toBe(true);
+    expect(new Set(fake.pullsSeen.map((p) => p.prNumber)).size).toBe(31);
     await adapter.disconnect();
   });
 
@@ -2810,6 +2849,110 @@ describe('managed GitHub adapter PR watch', () => {
     expect(entry.pending).toHaveLength(16);
     expect(lines.some((l) => /pending overflow.*dropped/.test(l))).toBe(true);
     expect(watch.injected).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('carries the episode watermark across prune and rebind (no id reuse)', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    await adapter.tick(); // baseline clean
+    const dirty = {
+      headSha: 'sha-a',
+      mergeable: false,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    fake.knobs.pull = dirty;
+    await adapter.tick(); // merge_conflict, episode 1
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.episode).toBe(1);
+    // Retire the binding: the baseline prunes, but the occurrence watermark
+    // must survive — the admission ledger is permanent and keyed without a
+    // binding discriminant.
+    watch.setBindings([]);
+    await adapter.tick();
+    expect(readState(adapter).watch!.prs[PR_KEY]).toBeUndefined();
+    expect(readState(adapter).watch!.episodes![PR_KEY]).toBe(1);
+    // Rebind to a second Session and recur: the episode resumes at 2, so the
+    // derived input id is new, never the already-admitted episode-1 id. A
+    // prune that dropped the counter would restart at 1 and collide.
+    watch.setBindings([
+      binding({ events: ['merge_conflict'], sessionId: 'session-2' }),
+    ]);
+    fake.knobs.pull = { ...dirty, mergeable: true, mergeableState: 'clean' };
+    await adapter.tick(); // rebind baseline (first observation, silent)
+    fake.knobs.pull = dirty;
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(2);
+    expect(watch.injected[1]!.episode).toBe(2);
+    await adapter.disconnect();
+  });
+
+  it('treats a merged/closed PR as terminal: no transition, binding retired', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline open
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeable: true,
+      mergeableState: 'clean',
+      state: 'closed',
+    };
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    // A check concluding after the merge must not drive a CI-failure turn.
+    expect(watch.injected).toHaveLength(0);
+    expect(watch.retired).toHaveLength(1);
+    expect(watch.retired[0]!.prNumber).toBe(9);
+    // The binding is gone, so the next tick no longer observes the PR.
+    const seenBefore = fake.pullsSeen.length;
+    await adapter.tick();
+    expect(fake.pullsSeen.length).toBe(seenBefore);
+    await adapter.disconnect();
+  });
+
+  it('pins a ring-suppressed ci_failure head so the CI read is not re-issued', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['ci_failure', 'head_change'] })]);
+    await adapter.tick(); // baseline sha-a passing
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick(); // ci_failure fires on sha-a, pin sha-a
+    expect(
+      watch.injected.filter((e) => e.transition === 'ci_failure'),
+    ).toHaveLength(1);
+    // Head moves to sha-b: the pin drops.
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    fake.knobs.ci = { aggregate: 'passing', failedChecks: [] };
+    await adapter.tick(); // head_change
+    // Force-push back to sha-a with CI failing: the fired ring still holds the
+    // sha-a ci_failure key so the event is suppressed, but the pin must be
+    // re-set so the next tick skips the CI read for a head that cannot fire.
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-a' };
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    expect(readState(adapter).watch!.prs[PR_KEY]!.ciFiredSha).toBe('sha-a');
+    const readsAfterSuppressed = fake.ciSeen.length;
+    await adapter.tick(); // same head, still failing: CI read must be skipped
+    expect(fake.ciSeen.length).toBe(readsAfterSuppressed);
+    await adapter.disconnect();
+  });
+
+  it('isolates a transient injection failure to its PR, drains the rest', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ prNumber: 9 }), binding({ prNumber: 12 })]);
+    await adapter.tick(); // baseline both
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectErrorFor((prNumber) =>
+      prNumber === 9 ? new Error('history maintenance') : undefined,
+    );
+    await adapter.tick();
+    // PR 9's inject fails transiently; PR 12 must still inject this tick. A
+    // whole-drain return would starve PR 12 behind the unhealthy PR 9.
+    expect(watch.injected.some((e) => e.prNumber === 12)).toBe(true);
+    expect(watch.injected.some((e) => e.prNumber === 9)).toBe(false);
+    expect(readState(adapter).watch!.prs['owner/repo#9']!.pending).toHaveLength(
+      1,
+    );
     await adapter.disconnect();
   });
 });

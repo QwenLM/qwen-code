@@ -2,9 +2,9 @@
 
 [English](2026-11-17-managed-github-pr-watch-bound-session.md) | [简体中文](2026-11-17-managed-github-pr-watch-bound-session.zh-CN.md)
 
-状态：范围已确认，实现中。基于已合入的 managed GitHub adapter（#17511，`2c23f72bef`）。
+状态：范围已确认；已在 #17665 实现，评审中。基于已合入的 managed GitHub adapter（#17511，`2c23f72bef`）。
 
-已确认决策（2026-11-17）：首切片 = private-only 绑定注入（公开回帖、角色模板、Web Shell UI 延后）；**D1 = 新 `pr_event` input source**；**D3 = adapter 侧检测**。D2（专用 PR-watch 绑定表）与 D5（OPERATOR 绑定写入面 / writer-binding 注入路由）按下文建议采纳。
+已确认决策（2026-11-17）：首切片 = private-only 绑定注入（公开回帖、角色模板、Web Shell UI 延后）；**D1 = 新 `pr_event` input source**；**D3 = adapter 侧检测**。D2（专用 PR-watch 绑定表）按下文建议采纳。**D5 定为 internal channel-adapter 面**（租户头 + 可信 adapter + 启用门，`RuleClass.INTERNAL_CHANNEL_ADAPTER`），与已合入的 channel register/inbound 路由同一信任边界——不是 OPERATOR 公共路由，也不是每请求 writer 凭据。见下文绑定路由契约；早先 OPERATOR/Session-owner 措辞已被取代。
 
 ## 问题
 
@@ -56,7 +56,7 @@ Legacy 世界**刚把 channel 侧 PR watch 退役、检测收敛进 daemon**（`
 - **D2 — 绑定存储。** 专用 PR-watch 绑定表 vs 扩展 `ma_channel_binding` vs route-rebind。route-rebind 契约就绪但 rebind 整个 channel route（也影响 @mention 投递），对 per-PR watch 目标多半不对。倾向：专用 PR-watch 绑定，不动 channel route。
 - **D3 — 检测归属。** adapter 侧 watch（adapter 持 token）调控制面注入路由，vs 控制面侧 watch。倾向：adapter 侧检测（持凭据与 poll loop），控制面持绑定 + 注入 + 授权。须与 daemon `sessionPrWatch` 作用域调和避免重复 watch。
 - **D4 — private-only 首切片。** watch 事件注入绑定 Session，不自动发公开回复。公开回复 delivery producer 是后续。对齐 Legacy 决策，避免切片 1 的 delivery-producer 工作。
-- **D5 — 授权角色。** 绑定 register/retire 是新写入面；选 OPERATOR（turn-submit 族）或 Session-owner，并把路由注册进 `SurfaceRegistry`。注入内部路由用 writer-binding + creator actor。
+- **D5 — 授权角色（已定）。** 四个路由（`pr-watch:create`、`pr-watch:list`、`pr-watch:retire`、`pr-watch:inject`）都走既有 internal channel-adapter 面：租户头 + 可信 adapter + 启用门，在 `SurfaceRegistry` 注册为 `RuleClass.INTERNAL_CHANNEL_ADAPTER`。没有每请求 actor 或 writer 凭据；信任边界是内部监听器，与已合入的 channel register/inbound 路由完全一致。注入强制绑定 Session 为目标（绝非调用方指定）。slice 1 考虑过 OPERATOR 公共路由并否决：在接口仍属内部时，它会在 adapter token 之外再加一套凭据系统，无收益。
 
 ## 有界首切片（拟议）
 
@@ -93,9 +93,10 @@ Legacy 世界**刚把 channel 侧 PR watch 退役、检测收敛进 daemon**（`
   当作不阻塞的背景 input。该处无需改码；省略是有意的。
 - **绑定存储（D2）。** 普通 SQL 表 `ma_pr_watch_binding`（照 `ma_channel_binding`，非
   extension-record 域）：`(tenant_id, channel_id, binding_id, owner, repo, pr_number,
-  session_id, events_json, gmt_create)`，UNIQUE`(tenant_id, channel_id, owner, repo,
-  pr_number)`，INDEX`(tenant_id, session_id)`。`events_json` 为启用的 transition 集。绑定
-  写入须校验目标 Session 存在、ACTIVE、属实例 Workspace，并按 D5 授权。
+session_id, events_json, gmt_create)`，UNIQUE`(tenant_id, channel_id, owner, repo,
+pr_number)`。不带 session 维度索引：slice 1 没有按 session 的读取（retire 按 PR 业务键），
+  故不留无读取方的索引。`events_json` 为启用的 transition 集。绑定写入须校验目标 Session
+  存在、ACTIVE、属实例 Workspace，并按 D5 授权。
 - **绑定路由。** 既有 internal channel 前缀
   `/internal/managed-channels/v1/channels/{channelId}` 下：`pr-watch:create`、
   `pr-watch:list`、`pr-watch:retire`。鉴权照 channel adapter internal 面（租户头 + 可信
@@ -105,24 +106,35 @@ Legacy 世界**刚把 channel 侧 PR watch 退役、检测收敛进 daemon**（`
   （`QwenHostedHarnessConnector.runChannelOperation` → `POST /session/:id/channels/operations`）
   以新 operation kind `submit_pr_event_input` 提交 input+wake（source `pr_event`）。
 - **幂等身份。** `inputId = "prw-" + sha256(tenant ∥ channelId ∥ owner ∥ repo ∥ prNumber ∥
-  transition ∥ headSha ∥ episode) + ":input"`；`turnId = inputId`。`episode` 是 adapter 的
+transition ∥ headSha ∥ episode) + ":input"`；`turnId = inputId`。`episode` 是 adapter 的
   持久 per-PR 发生计数，随每条 pending 落盘：合法复发（同 head 的 merge_conflict
   dirty→clean→dirty，或 head_change A→B→A）是新 episode、派生新 inputId；同一 pending 重投
   复用 episode、派生同一 id。缺 episode 控制面会把合法复发误 dedupe 成首次 admission。
   Harness 提交与 SQL 台账间崩溃重放到同一 admission（派生 id），沿用 channel 崩溃安全纪律。
   durable envelope 提交前钉住绑定 + PR + transition + headSha。
 - **Envelope。** `managed-input` 资源携 `{ text, prWatch: { owner, repo, prNumber,
-  transition, headSha, evidence } }`；wake pump 读 `text` 作 prompt。private-only：不从
+transition, headSha, evidence } }`；wake pump 读 `text` 作 prompt。private-only：不从
   `pr_event` input plan 任何 `channel_delivery`。
 - **检测（D3）。** adapter 侧 watch pass 复用 daemon transition 语义（每 head 一次 CI fire、
   边沿触发冲突、head 变化）。最小事件集 ci_failure/merge_conflict/head_change（state_change
   延后）。adapter 经 `pr-watch:list` 得知绑定 PR。watch state（baseline + fired-ring +
   pending）存于 `managed-state.ts` 新段。
 
+## 评审加固（#17665 第 1 轮）
+
+首轮评审闭环了这些缺口；每项都由「移除守卫即转红」的测试钉死：
+
+- **轮转观测窗口。** 每 tick 观测上限截断顺序稳定的绑定列表；持久 `sweepStart` 偏移轮转窗口，使每个绑定在后续 tick 都被观测，而非只有前 cap 个。
+- **episode 水位跨剪枝/改绑存活。** 准入台账永久且不含绑定维度，故 per-PR 发生计数存于持久 `episodes` 映射、跨 baseline 剪枝保留；改绑续用计数，而非重派生已准入的 inputId。该映射独立于可剪枝的 baseline 限界（超 cap 逐出最旧水位）。
+- **终态 PR。** merged/closed 为终态：不驱动 transition，其绑定被退订（幂等、终态期间重驱），释放观测名额并允许改绑。
+- **所有权迁移守卫统计两类绑定。** channel 重注册在存在遗留绑定时拒绝 actor/Workspace/cwd 迁移；预检查与同语句守卫现在同时统计 `ma_pr_watch_binding` 与 `ma_channel_binding`，且 `inject` 每次复核绑定 Session 的 Workspace（fail-closed，Session 已消失则惰性退订绑定）。
+- **wake pump 是准入前置。** Session 无进程内 wake pump（如 external-files profile）时拒绝 `submit_pr_event_input`（409），绝不把 input 确认进一个无法执行它的 Session。
+- **入口对包装后信封限界。** 路由在 staging 前拒绝包装后 prompt 超 Harness 字符/字节上限的负载，使被接受的请求即可准入（不留永久 staged、不可注入的行）。线上上限保持 `text ≤ 32000`、`evidence ≤ 4000`。
+- **按条目隔离 drain。** 瞬时注入失败隔离到该 PR 的队列；一个不健康 Session 不饿死其他绑定。被 fired 环抑制的 `ci_failure` 仍钉住该 head，CI 读取不会每 tick 重发。
+
 ## 开放问题
 
-1. ~~D1–D5~~ 已确认（见状态）。剩余：绑定写入授权角色（OPERATOR vs Session-owner）在 Java
-   实现中定稿。
+1. ~~D1–D5~~ 已确认（见状态）；D5 定为 internal channel-adapter 面（无进一步角色决策待定）。
 2. 与 daemon `sessionPrWatch` 的重复 watch：slice 1 将 managed-watch 限定于 managed 绑定 PR；
    超出「不相交」的调和延后。
 3. `state_change` 与角色/动作模板延后到 slice 1 之外。

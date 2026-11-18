@@ -106,4 +106,29 @@ class PrWatchOperationsParityTest {
             }
         }
     }
+
+    @Test
+    void wrapsThePromptByteForByteLikeTheTsContract() {
+        // Expected values generated from the authoritative TS prWatchInputText
+        // (packages/core/src/managed-runtime/managed-pr-watch-operations.ts);
+        // the ingress bounds the wrapped prompt, so the mirror must match it
+        // exactly, including the XML escaping of untrusted evidence.
+        assertThat(PrWatchOperations.prWatchInputText("octocat", "hello-world",
+                42, "ci_failure", "a".repeat(40), "checks: build",
+                "the build went red"))
+                .isEqualTo("<pr-watch-event>\n"
+                        + "<pr>octocat/hello-world#42</pr>\n"
+                        + "<transition>ci_failure</transition>\n"
+                        + "<head-sha>" + "a".repeat(40) + "</head-sha>\n"
+                        + "<evidence untrusted=\"true\">checks: build</evidence>\n"
+                        + "</pr-watch-event>\nthe build went red");
+        assertThat(PrWatchOperations.prWatchInputText("o&<>\"x", "r",
+                1, "head_change", "b".repeat(40), "a&b<c>d\"e", ""))
+                .isEqualTo("<pr-watch-event>\n"
+                        + "<pr>o&amp;&lt;&gt;&quot;x/r#1</pr>\n"
+                        + "<transition>head_change</transition>\n"
+                        + "<head-sha>" + "b".repeat(40) + "</head-sha>\n"
+                        + "<evidence untrusted=\"true\">a&amp;b&lt;c&gt;d&quot;e</evidence>\n"
+                        + "</pr-watch-event>\n");
+    }
 }

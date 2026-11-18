@@ -189,6 +189,30 @@ export class HttpManagedChannelControlPlane
     });
   }
 
+  /**
+   * Retire this channel's PR-watch binding so the PR stops consuming an
+   * observation slot and can be bound to another Session. Idempotent: a
+   * binding that is already gone answers 404, which is a tolerated no-op.
+   */
+  async retirePrWatchBinding(pr: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+  }): Promise<void> {
+    try {
+      await this.call('POST', '/pr-watch:retire', {
+        owner: pr.owner,
+        repo: pr.repo,
+        prNumber: pr.prNumber,
+      });
+    } catch (error) {
+      if (error instanceof ManagedChannelClientError && error.status === 404) {
+        return;
+      }
+      throw error;
+    }
+  }
+
   private async call(
     method: 'PUT' | 'POST',
     path: string,

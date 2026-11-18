@@ -1225,8 +1225,6 @@ CREATE TABLE ma_pr_watch_binding (
     CONSTRAINT pk_ma_pr_watch_binding_id PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Watched pull requests bound to existing Managed Sessions for private PR-event injection.';
 
-CREATE INDEX idx_ma_pr_watch_binding_session ON ma_pr_watch_binding (tenant_id, session_id);
-
 CREATE TABLE ma_delivery (
     delivery_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the scoped delivery.',
     delivery_kind VARCHAR(32) NOT NULL COMMENT 'Delivery type: CHANNEL, SESSION_MESSAGE, or CHILD_RESULT.',
