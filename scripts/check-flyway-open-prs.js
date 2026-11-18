@@ -199,6 +199,25 @@ function evaluate(modules, mainFiles, prs) {
     const kept = touched
       .filter((file) => file.changeType !== 'DELETED')
       .map((file) => file.path);
+    const added = kept.filter((file) => !onMain.has(file));
+    // A same-name deletion from main points to a move. Only the checkout
+    // check can confirm that the contents are unchanged.
+    const deletedPublishedNames = new Set(
+      [...deleted]
+        .filter((file) => onMain.has(file))
+        .map((file) => path.posix.basename(file)),
+    );
+    const outOfOrder = [
+      ...new Set(
+        added
+          .filter(
+            (file) => !deletedPublishedNames.has(path.posix.basename(file)),
+          )
+          .map(versionOf),
+      ),
+    ].filter(
+      (version) => compareMigrationVersions(version, newestVersion) <= 0,
+    );
     return {
       pr,
       // The merge result. The API does not name a renamed file's old path,
@@ -210,7 +229,8 @@ function evaluate(modules, mainFiles, prs) {
           ...kept,
         ]),
       ],
-      added: kept.filter((file) => !onMain.has(file)),
+      added,
+      outOfOrder,
     };
   });
   const claimedBy = new Map();
@@ -225,16 +245,14 @@ function evaluate(modules, mainFiles, prs) {
   }
   return claims
     .filter(({ pr, added }) => pr.incomplete || pr.current || added.length > 0)
-    .map(({ pr, merged, added }) => {
+    .map(({ pr, merged, added, outOfOrder }) => {
       const versions = [...new Set(added.map(versionOf))];
       return {
         number: pr.number,
         sha: pr.sha,
         incomplete: pr.incomplete,
         current: pr.current,
-        outOfOrder: versions.filter(
-          (version) => compareMigrationVersions(version, newestVersion) <= 0,
-        ),
+        outOfOrder,
         newestVersion,
         collisions: versions
           .map((version) => ({

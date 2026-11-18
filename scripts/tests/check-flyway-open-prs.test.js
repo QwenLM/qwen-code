@@ -228,6 +228,33 @@ describe('check-flyway-open-prs', () => {
     });
   });
 
+  it('ordering permits moving a published migration with the same name', async () => {
+    const { byPr } = await check([
+      pr(10001, [
+        [sql('V53__workspace_roles.sql'), 'DELETED'],
+        sql('archive/V53__workspace_roles.sql'),
+      ]),
+    ]);
+    expect(byPr[10001]).toMatchObject({
+      state: 'success',
+      description: 'No collision with main',
+    });
+  });
+
+  it('ordering rejects a move whose deleted path is absent from main', async () => {
+    const { byPr } = await check([
+      pr(10001, [
+        [sql('V52__unpublished.sql'), 'DELETED'],
+        sql('archive/V52__unpublished.sql'),
+      ]),
+    ]);
+    expect(byPr[10001]).toMatchObject({
+      state: 'failure',
+      description:
+        'Out of order when merged into main: V52 is not above V53 (newest on main)',
+    });
+  });
+
   it('fails a PR whose version main took after its own check passed', async () => {
     const { posts, failed, lines } = await check([
       pr(13325, ['README.md', sql('V53__session_index.sql')]),
