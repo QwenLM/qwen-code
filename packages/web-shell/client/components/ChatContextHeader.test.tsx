@@ -280,7 +280,7 @@ describe('ChatContextHeader', () => {
     );
 
     expect(entry).not.toBeNull();
-    expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (3)');
+    expect(entry!.getAttribute('aria-label')).toBe('Artifacts (3)');
     expect(entry!.textContent).toContain('3');
     act(() => entry!.click());
     expect(onOpenArtifacts).toHaveBeenCalledOnce();
@@ -331,7 +331,7 @@ describe('ChatContextHeader', () => {
       view
         .querySelector('[data-web-shell-artifacts-entry]')
         ?.getAttribute('aria-label'),
-    ).toBe('打开产物（3）');
+    ).toBe('产物（3）');
   });
 
   it('places the artifacts entry after the right-panel action', () => {
@@ -347,7 +347,7 @@ describe('ChatContextHeader', () => {
     expect(actions.map((button) => button.getAttribute('aria-label'))).toEqual([
       'Toggle environment information',
       'Toggle right panel',
-      'Open artifacts (2)',
+      'Artifacts (2)',
     ]);
   });
 });

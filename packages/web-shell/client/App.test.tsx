@@ -4370,7 +4370,7 @@ describe('task activity key', () => {
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
   });
 
-  it('shows the header artifacts entry with the session count and opens the environment panel', async () => {
+  it('shows the header artifacts entry with the session count and opens the right panel artifacts list', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
@@ -4393,58 +4393,136 @@ describe('task activity key', () => {
     const { container } = renderApp();
     await flush();
 
-    const entry = container.querySelector<HTMLButtonElement>(
-      '[data-web-shell-artifacts-entry]',
-    );
-    expect(entry).not.toBeNull();
-    expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (2)');
+    const entry = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-artifacts-entry]',
+      );
+    expect(entry()).not.toBeNull();
+    expect(entry()!.getAttribute('aria-label')).toBe('Artifacts (2)');
+    expect(entry()!.getAttribute('aria-pressed')).toBe('false');
 
     await act(async () => {
-      entry!.click();
+      entry()!.click();
     });
     await flush();
-    const panel = container.querySelector(
-      '[data-testid="environment-panel"]:not([hidden])',
-    );
-    expect(panel).not.toBeNull();
-    // The entry must reveal the artifact list, not just open the panel shell.
-    expect(panel?.textContent).toContain('report.html');
-    expect(panel?.textContent).toContain('chart.html');
-
-    // Collapse the artifacts section, close the panel, then re-click the entry:
-    // the App glue (signal bump + prop pass) must re-expand the section, since
-    // the panel keeps its local section state while hidden.
-    const sectionHeader = Array.from(
-      panel!.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
-    ).find((button) => button.textContent?.trim() === 'Artifacts');
-    expect(sectionHeader).toBeTruthy();
-    await act(async () => {
-      sectionHeader!.click();
-    });
-    await flush();
+    // The entry opens the right panel's artifacts list tab, not the
+    // environment panel.
+    const list = container.querySelector('[data-testid="artifacts-list"]');
+    expect(list).not.toBeNull();
+    expect(list?.textContent).toContain('report.html');
+    expect(list?.textContent).toContain('chart.html');
     expect(
-      container.querySelector('[data-testid="environment-panel"]')?.textContent,
-    ).not.toContain('report.html');
+      container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      ),
+    ).toBeNull();
+    expect(entry()!.getAttribute('aria-pressed')).toBe('true');
+
+    // A second click toggles the right panel closed.
     await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="chat-context-header"] button[aria-label="Toggle environment information"]',
-        )
-        ?.click();
+      entry()!.click();
     });
+    await flush();
+    expect(container.querySelector('[data-testid="artifacts-list"]')).toBeNull();
+    expect(entry()!.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('opens an artifact preview tab when a row in the artifacts list is clicked', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const { container } = renderApp();
     await flush();
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
-        ?.click();
+        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')!
+        .click();
     });
     await flush();
-    const reopened = container.querySelector(
-      '[data-testid="environment-panel"]:not([hidden])',
+    const row = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="artifacts-list"] button',
+      ),
+    ).find((button) => button.textContent?.includes('report.html'));
+    expect(row).toBeTruthy();
+    await act(async () => {
+      row!.click();
+    });
+    await flush();
+    // The row click reaches the real preview opener: an artifact tab for the
+    // clicked artifact becomes present in the right panel tab bar.
+    expect(
+      container.querySelector('button[title="report.html"]'),
+    ).not.toBeNull();
+  });
+
+  it('restores a persisted artifacts tab without re-clicking the entry', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    // Seed a persisted artifacts tab (parse + restore arm), independent of the
+    // serialize path: the app must reopen the list on load without a click.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'artifacts:session-1',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
     );
-    expect(reopened).not.toBeNull();
-    expect(reopened?.textContent).toContain('report.html');
-    expect(reopened?.textContent).toContain('chart.html');
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[data-testid="artifacts-list"]'),
+      ).not.toBeNull();
+    });
+    expect(
+      container.querySelector('[data-testid="artifacts-list"]')?.textContent,
+    ).toContain('report.html');
   });
 
   it('hides the header artifacts entry when the session has no artifacts', async () => {
