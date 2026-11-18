@@ -49,6 +49,7 @@ const NUMBER_OPTIONS = new Map<
   ['maxTotalSessions', 'max-total-sessions'],
   ['maxPendingPromptsPerSession', 'max-pending-prompts-per-session'],
   ['maxConnections', 'max-connections'],
+  ['maxSseConnections', 'max-sse-connections'],
   ['eventRingSize', 'event-ring-size'],
   ['eventRingMaxBytes', 'event-ring-max-bytes'],
   ['compactedReplayMaxBytes', 'compacted-replay-max-bytes'],

@@ -377,12 +377,17 @@ public class ChildResultRelay {
                 try {
                     harness.runMessageOperation(row.tenantId(), child, stop);
                 } catch (HarnessHttpFailure error) {
-                    // A child that waits on its recovery or is closing takes
-                    // no stop yet: the heartbeat asks again, spending no
-                    // attempt, and the bound above ends the wait.
+                    // A child that waits on its recovery, is closing, or is
+                    // out of cold-open slots takes no stop yet: the
+                    // heartbeat asks again, spending no attempt, and the
+                    // bound above ends the wait. A teardown that cannot
+                    // finish escalates to hosted_session_teardown_blocked,
+                    // which is a real fault and spends the attempt budget.
                     if (!"hosted_turn_recovery_required"
                             .equals(error.getErrorCode())
                             && !"hosted_session_closing"
+                                    .equals(error.getErrorCode())
+                            && !"hosted_session_open_busy"
                                     .equals(error.getErrorCode())) {
                         stopFailure = error;
                     }

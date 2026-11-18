@@ -16600,6 +16600,8 @@ describe('LlmChat', async () => {
       vi.mocked(promptMirror()).mockClear();
       vi.mocked(cachedMirror()).mockClear();
       catalog = 'catalog';
+      expect(chat.peekLastPromptTokenCount()).toBe(0);
+      expect(promptMirror()).not.toHaveBeenCalled();
       expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getLastOutputTokenCount()).toBe(0);
       expect(chat.getLastCachedContentTokenCount()).toBe(0);
@@ -16651,12 +16653,16 @@ describe('LlmChat', async () => {
     it('restores retained counts when the route switches back (#9506)', () => {
       chat.seedResumeTokenCounts(321, 45, true);
       switchRoute('anthropic-model@beef1234');
+      expect(chat.peekLastPromptTokenCount()).toBe(0);
       expect(chat.getLastPromptTokenCount()).toBe(0);
       expect(chat.getLastOutputTokenCount()).toBe(0);
 
       // Back on the original route: the exact retained prompt, output and
       // provenance, not the zero a foreign touch used to leave behind.
       switchRoute('gemini-pro@test0001');
+      vi.mocked(promptMirror()).mockClear();
+      expect(chat.peekLastPromptTokenCount()).toBe(321);
+      expect(promptMirror()).not.toHaveBeenCalled();
       expect(chat.getLastPromptTokenCount()).toBe(321);
       expect(chat.getLastOutputTokenCount()).toBe(45);
       expect(chat.isLastPromptTokenCountEstimated()).toBe(true);

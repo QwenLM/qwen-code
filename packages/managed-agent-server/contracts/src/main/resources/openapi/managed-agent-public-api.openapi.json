@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.120.0",
+    "version": "1.121.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -4393,7 +4393,7 @@
         "tags": ["WebShell"],
         "operationId": "queryWebShellSessionSkills",
         "x-qwen-implementation-status": "implemented",
-        "description": "Read only names and descriptions from the Session's pinned static Skill catalog. Requires a trusted actor and Workspace read access. Never resolves the latest AgentDefinition or discovers host Skills.",
+        "description": "Returns names and descriptions of user-invocable Skills for a readable Session. Includes its pinned static Skills and standalone Skills from its initial package selection until the first configuration becomes active. Thereafter the active configuration supplies the package Skills. Requires a trusted actor and Workspace read access.",
         "requestBody": {
           "required": true,
           "content": {
@@ -4406,7 +4406,7 @@
         },
         "responses": {
           "200": {
-            "description": "Session static Skill metadata.",
+            "description": "User-visible Session Skill metadata.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10925,7 +10925,7 @@
             "items": {
               "$ref": "#/components/schemas/SessionCreationSkill"
             },
-            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON; a caller loop whose body is the verbatim bundled import is superseded by the definition's entry or the server variant rather than rejected; a user-authored caller loop that collides with a definition-authored loop is still rejected. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing only the bundled caller import (carrying over its invocation flags) and added even when this array is empty; a user-authored caller loop or a definition-authored loop skill is preserved and suppresses the variant, and on a creator-less profile only the bundled caller import is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON; a caller loop whose body is the verbatim bundled import is superseded by the definition's entry or the server variant rather than rejected; a user-authored caller loop that collides with a definition-authored loop is still rejected. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing only the bundled caller import (carrying over its invocation flags) when the combined static and package Skill catalog has room, even if this array is empty; a user-authored caller loop or a definition-authored loop skill is preserved and suppresses the variant, and on a creator-less profile only the bundled caller import is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
           },
           "extensionPins": {
             "type": "array",
@@ -10933,7 +10933,7 @@
             "items": {
               "$ref": "#/components/schemas/ManagedExtensionPackagePin"
             },
-            "description": "Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime."
+            "description": "Optional immutable initial extension selection for a Workspace Session. If omitted and the caller supplies no static Skills, MAS selects defaults from the configured Skill catalog providers. With no defaults, omission preserves the existing configuration. An explicit array selects exactly those pins and disables provider defaults. An empty array starts the unified configuration with no initial packages. Explicit selection is included in creation idempotency. Selected packages are applied before the first model request and require session-extension-packages/1 and an extension-capable original Runtime."
           },
           "worktree": {
             "type": "object",
@@ -12016,7 +12016,7 @@
             "items": {
               "$ref": "#/components/schemas/SessionCreationSkill"
             },
-            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON; a caller loop whose body is the verbatim bundled import is superseded by the definition's entry or the server variant rather than rejected; a user-authored caller loop that collides with a definition-authored loop is still rejected. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing only the bundled caller import (carrying over its invocation flags) and added even when this array is empty; a user-authored caller loop or a definition-authored loop skill is preserved and suppresses the variant, and on a creator-less profile only the bundled caller import is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON; a caller loop whose body is the verbatim bundled import is superseded by the definition's entry or the server variant rather than rejected; a user-authored caller loop that collides with a definition-authored loop is still rejected. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing only the bundled caller import (carrying over its invocation flags) when the combined static and package Skill catalog has room, even if this array is empty; a user-authored caller loop or a definition-authored loop skill is preserved and suppresses the variant, and on a creator-less profile only the bundled caller import is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
           },
           "extensionPins": {
             "type": "array",
@@ -12024,7 +12024,7 @@
             "items": {
               "$ref": "#/components/schemas/ManagedExtensionPackagePin"
             },
-            "description": "Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime."
+            "description": "Optional immutable initial extension selection for a Workspace Session. If omitted and the caller supplies no static Skills, MAS selects defaults from the configured Skill catalog providers. With no defaults, omission preserves the existing configuration. An explicit array selects exactly those pins and disables provider defaults. An empty array starts the unified configuration with no initial packages. Explicit selection is included in creation idempotency. Selected packages are applied before the first model request and require session-extension-packages/1 and an extension-capable original Runtime."
           },
           "worktree": {
             "type": "object",
