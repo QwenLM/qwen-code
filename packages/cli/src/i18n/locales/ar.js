@@ -755,8 +755,8 @@ export default {
     'لرؤية التغييرات، يجب إعادة تشغيل Qwen Code. اضغط r للخروج وتطبيق التغييرات الآن.',
   'Code Mode Only (Experimental)': 'وضع الكود فقط (تجريبي)',
   'Mods (Experimental)': 'التعديلات Mods (تجريبي)',
-  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
-    'تفعيل Mods التجريبية من الإضافات المفعّلة في جلسات الطرفية المحلية الموثوقة والجلسات غير التفاعلية. يتطلب إعادة التشغيل.',
+  'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
+    'تفعيل Mods التجريبية من الإضافات المفعّلة في جلسات الطرفية المحلية الموثوقة والجلسات غير التفاعلية وجلسات ACP. يتطلب إعادة التشغيل.',
   'Vim Mode': 'وضع Vim',
   'Attribution: commit': 'الإسناد: commit',
   'Terminal Bell Notification': 'إشعار جرس الطرفية',
