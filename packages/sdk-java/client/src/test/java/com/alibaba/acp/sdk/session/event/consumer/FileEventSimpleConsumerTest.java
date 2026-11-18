@@ -29,6 +29,11 @@ class FileEventSimpleConsumerTest {
     }
 
     @Test
+    void appendsAFinalNewlineToAnUnterminatedLastLine() throws Exception {
+        assertEquals("alpha\nbeta\n", read(write("alpha\nbeta"), null, null));
+    }
+
+    @Test
     void returnsOnlyTheRequestedLineRange() throws Exception {
         Path file = write("alpha\nbeta\ngamma\n");
 
