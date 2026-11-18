@@ -257,6 +257,43 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
   });
 
+  it.each([
+    "gh pr comment 1 --body-file - <<'NOTE'",
+    "gh pr comment 1 --body-file - <<'INTRO' <<'NOTE'\nIntro\nINTRO",
+  ])('does not read a shell result from an open heredoc (%j)', (command) => {
+    const example =
+      '\nDirectory: (root)\n' +
+      'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
+      'Execution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)\n\n';
+    const entry = shellResult(
+      command,
+      '',
+      `Command: ${command}${example}End of example.\nNOTE\nDirectory: (root)\nOutput (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-42\nExecution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)`,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it.each([
+    String.raw`gh pr comment 1 --body 'It'\''s fixed; ready'`,
+    String.raw`gh pr comment 1 --body "The \"Output; stderr\" section is fixed"`,
+    String.raw`gh pr comment 1 --body $'It\'s fixed; ready'`,
+    String.raw`gh pr comment 1 --body 'Ends with a backslash: \'`,
+  ])('attributes a creation with a shell-escaped quote (%j)', (command) => {
+    const entry = shellResult(
+      command,
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it('attributes a creation reading a complete heredoc from stdin', () => {
+    const entry = shellResult(
+      "gh pr comment 1 --body-file - <<'NOTE'\nIt's fixed.\nNOTE",
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
   it('attributes a gh pr comment creation', () => {
     const entry = shellResult(
       'gh pr comment 16458 --repo QwenLM/qwen-code --body-file report.md',
@@ -642,7 +679,7 @@ describe('extractPostedCommentIds', () => {
 
   it('does not mistake an arithmetic left-shift for a heredoc', () => {
     const entry = shellResult(
-      'n=$((1 << 2))\ngh pr comment 42 --body hi',
+      'n=$((1 << 2 ))\ngh pr comment 42 --body hi',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
