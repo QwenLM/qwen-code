@@ -14,7 +14,7 @@ Qwen Code / any MCP client
 
 This checkout documents the upcoming CUA 0.27.0 release. The installation commands below require its native GitHub Release (`cua-driver-rs-v0.27.0`) and matching npm packages to be published; merging these sources does not publish them. Before publication, use the [local development setup](https://github.com/QwenLM/qwen-code/blob/890cb0349a259761a571da889f4fe1cccc6ed108/packages/node-repl/README.md#local-development-and-environment) to test a repository build.
 
-Node.js 22 or later and npm are required. Once the release is published, register the MCP server, then restart Qwen Code:
+Node.js 22 or later and npm are required. Once the release is published, register the MCP server; a running interactive session picks it up without a restart:
 
 ```bash
 qwen mcp add --scope user node-repl npx -y @qwen-code/node-repl-mcp@0.27.0
@@ -91,6 +91,6 @@ This uses the existing local launchd socket at `127.0.0.1:47821`. In a secure We
 
 `qwen-cua-driver mcp` exposes the same 19 native Computer Use operations directly. App calls use `app`; desktop-capable calls use `scope:"desktop"` instead. `key_down/key_up` are desktop-only. Advanced native tools remain available through the host opt-in `CUA_DRIVER_EXTRA_TOOLS=1`.
 
-If the server is unavailable, check `qwen mcp list` and restart the client after adding it. If capture fails, check the current desktop session and OS permissions. If native download fails, check the exact release version/checksum asset or supply a locally built matching payload through `QWEN_CUA_SDK_NATIVE_DIR`. A locked desktop cannot provide GUI acceptance evidence.
+If the server is unavailable, check `qwen mcp list` and, if the server does not appear, restart Qwen Code. If capture fails, check the current desktop session and OS permissions. If native download fails, check the exact release version/checksum asset or supply a locally built matching payload through `QWEN_CUA_SDK_NATIVE_DIR`. A locked desktop cannot provide GUI acceptance evidence.
 
 See [MCP servers](./mcp.md), [Approval Mode](./approval-mode.md) and [Sandboxing](./sandbox.md).
