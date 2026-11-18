@@ -2532,6 +2532,19 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
       ? { rateLimiter: makeRateLimiter(input.rateLimitHits) }
       : {}),
     getRestSseActive: () => 0,
+    getStreamOccupancy: () => ({
+      total: 0,
+      bySurface: {
+        restEvents: 0,
+        agentEvents: 0,
+        generation: 0,
+        artifactLibrary: 0,
+        hostedEvents: 0,
+        acpSse: 0,
+        acpWs: 0,
+      },
+      byListener: { primary: 0, 'local-control': 0, 'remote-access': 0 },
+    }),
     features: ['health', 'daemon_status'],
     protocolVersions: { current: 'v1', supported: ['v1'] },
     supportedDeviceFlowProviders: ['qwen-oauth'],

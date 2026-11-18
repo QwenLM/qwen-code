@@ -261,6 +261,8 @@ export class ModRuntime {
     completeModel?: ModModelHost,
     // Where each plugin's `$.store` is kept; absent, the host keeps none.
     store?: ModStore,
+    // Whether this host raises `tool.call` and `tool.check`.
+    tools = true,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -303,6 +305,7 @@ export class ModRuntime {
           version,
           sites: render?.sites ?? [],
           prompts,
+          tools,
           submits: queuePrompt !== undefined,
           models: completeModel !== undefined,
           stores: store !== undefined,

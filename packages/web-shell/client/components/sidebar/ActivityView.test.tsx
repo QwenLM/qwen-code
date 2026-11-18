@@ -467,6 +467,30 @@ describe('ActivityView', () => {
     ).toEqual(['a', 'b']);
   });
 
+  it('warns that background-only work will stop when archiving', async () => {
+    // Nothing else about this entry is busy: no turn, and the daemon grades it
+    // idle, so only the background flag can produce the warning and the
+    // stop-and-archive label.
+    const base = makeEntry('a');
+    props.entries = [
+      {
+        ...base,
+        session: {
+          ...base.session,
+          hasRunningBackgroundTasks: true,
+          activeWorkState: 'idle',
+        },
+      },
+    ];
+    await render();
+    await menuClick('Archive chats');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain(
+      'Running work in these conversations will stop.',
+    );
+    expect(dialog?.textContent).toContain('Stop and archive');
+  });
+
   it('excludes separate pinned and recent sections from bulk operations', async () => {
     const recentStamp = new Date().toISOString();
     props.entries = [

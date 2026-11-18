@@ -2,6 +2,19 @@
 
 Language: English | [中文](./2026-11-16-web-shell-change-overview.zh-CN.md)
 
+> **Superseded boundary mechanism.** This document describes the design as
+> shipped in #17378. Its commit-fallback boundary — the files route's
+> `git merge-base --is-ancestor` probe (`headIsAncestor`) and the hook's
+> newest-ancestor-head window — was **retired** by the follow-up
+> [change overview boundary fix](./2026-11-17-change-overview-boundary-fix.md),
+> which scopes the window to the session's immutable start commit and excludes
+> every commit reachable from any bound PR head (and the base branch's
+> remote-tracking refs, `origin/<base>` / `upstream/<base>`, not the local base
+> name) in one native `git log <range> --not <refs>`. The Files route, UI assembly,
+> Degradation, and Files affected sections below describe the original
+> ancestry-probe mechanism in the present tense for historical accuracy; read
+> them as superseded by the follow-up, not as the current behavior.
+
 ## Problem
 
 As a session runs, the agent edits many files. The user loses track of how large
@@ -263,24 +276,32 @@ Degradation:
 
 ## Known limitations
 
-- **Commit-fallback with no bound PR and no recorded base branch.** The
-  shipped default walks HEAD's recent history (capped at
-  `COMMIT_FALLBACK_LIMIT`, labelled by scope). The original justification —
-  "worktree sessions start fresh" — is false: a worktree branch is created at
-  the base tip, so its HEAD carries the base branch's history, and a plain
-  session's git cwd is the user's own checkout. Consequence: such a session
-  may list up to `COMMIT_FALLBACK_LIMIT` pre-session commits as loose
-  `commit:` units with subjects and `+/-` totals. Every neighbouring state
-  refuses the unscoped walk; this one is retained as a maintainer-accepted
-  residual (display-only, read-only panel, no write path). The boundary fix —
-  persisting the session start commit and composing `<startCommit>..HEAD`,
-  suppressing the fallback when no start commit is known — is deferred.
-- **Binding recency is not commit-graph order.** With two bound PR heads that
-  are both ancestors of HEAD but not of each other, the last-bound head's
-  window re-lists the sibling PR's commits as loose units. Also a
-  maintainer-accepted residual (display duplication only); the fix needs
-  pairwise ancestry / batch reachability the client does not have, and is
-  deferred.
+Both display residuals accepted at merge are **resolved** by the follow-up
+[change overview boundary fix](./2026-11-17-change-overview-boundary-fix.md),
+which replaces the newest-ancestor-head heuristic with a single
+`<start>..HEAD --not <bound heads>` window:
+
+- **Commit-fallback with no bound PR and no recorded base branch** (was R7-1).
+  The shipped default walked HEAD's recent history because the "worktree
+  sessions start fresh" premise was false. The follow-up records the session
+  start commit and composes `<startCommit>..HEAD`; with no start commit it
+  falls back to `<baseBranch>..HEAD` when a base branch is recorded, and
+  suppresses when neither exists or when the recorded boundary fails the
+  single-ref whitelist (fail-closed) — a range-less walk is never issued. (A
+  legacy worktree sidecar with `originalBranch` but an empty
+  `originalHeadCommit` therefore still gets a window bounded by the moving
+  local branch name.) The start commit is **durable for worktree sessions**
+  (the sidecar's `worktreeBase`, else `originalHeadCommit`) but **live-only
+  for branch and plain sessions**: branch metadata is not restored across a
+  daemon restart, and a plain session has no branch metadata at all — its
+  start commit is the spawn-time `getHeadCommit` read held only in the live
+  bridge entry, never persisted — so a restored branch/plain session
+  suppresses the fallback rather than walking HEAD.
+- **Binding recency is not commit-graph order** (was R7-2). Two incomparable
+  ancestor heads made the last-bound head's window re-list a sibling PR's
+  commits. The follow-up excludes every commit reachable from _any_ bound PR
+  head via one native `git log <range> --not <heads>`, so merged, parallel,
+  and incomparable heads are handled uniformly.
 
 ## Open questions
 

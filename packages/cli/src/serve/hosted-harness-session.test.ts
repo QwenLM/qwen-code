@@ -5,6 +5,10 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { create as createTar } from 'tar';
+import { compileManagedExtensionPackage } from '@qwen-code/qwen-code-core/extension/managed-package.js';
+import { prepareManagedPackageImport } from '@qwen-code/qwen-code-core/extension/managed-package-import.js';
 import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
 import {
@@ -24,6 +28,11 @@ import { createServer, type Server, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import express from 'express';
+import {
+  resolveSseAdmissionCaps,
+  type SseAdmissionCaps,
+} from './daemon-status.js';
+import { getSseOccupancy } from './sse-occupancy.js';
 import type { Part } from '@google/genai';
 import supertest from 'supertest';
 import {
@@ -124,6 +133,7 @@ import {
 } from './hosted-workspace-broker.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST } from './managed-extension-profile.js';
+import { ManagedExtensionRuntime } from './managed-extension-runtime.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 import {
@@ -316,6 +326,7 @@ const state = vi.hoisted(() => ({
     async (_input: {
       signal: AbortSignal;
       toolTurn?: HostedWorkspaceToolTurn;
+      skills?: import('./hosted-skill-catalog.js').HostedSkillCatalog;
       hooks?: import('./hosted-hook-session.js').HostedHookSession;
       promptId?: string;
       modelScope?: import('@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js').ManagedHookModelScope;
@@ -699,6 +710,7 @@ async function app(
     suspendReconcileMs?: number;
     coldOpenLimit?: number;
   },
+  caps?: SseAdmissionCaps,
 ) {
   const result = express();
   result.use(express.json());
@@ -723,7 +735,7 @@ async function app(
     contract,
     state.root,
     withBroker ? { baseUrl: 'http://127.0.0.1:1', token: 'test' } : undefined,
-    suspensionOptions,
+    { ...suspensionOptions, sseAdmissionCaps: caps },
   );
   const listener = createServer(result);
   (
@@ -23431,6 +23443,70 @@ describe('Hosted Harness no-tool session', () => {
     }
   });
 
+  it('counts hosted event streams in the shared occupancy and refuses at the cap', async () => {
+    const server = await app(
+      false,
+      undefined,
+      true,
+      undefined,
+      resolveSseAdmissionCaps({ maxConnections: 10, maxSseConnections: 1 }),
+    );
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No port');
+    const url = `http://127.0.0.1:${address.port}/session/${SESSION_ID}/events`;
+    const streamHeaders = {
+      'X-Qwen-Harness-Protocol-Version': '1',
+      'X-Qwen-Harness-Boot-Id': BOOT_ID,
+      'X-Qwen-Client-Id': created.body.clientId as string,
+    };
+    const before = getSseOccupancy();
+    const controller = new AbortController();
+    try {
+      const first = await fetch(url, {
+        headers: streamHeaders,
+        signal: controller.signal,
+      });
+      expect(first.status).toBe(200);
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().bySurface.hostedEvents).toBe(
+            before.bySurface.hostedEvents + 1,
+          );
+        },
+        { timeout: 5_000 },
+      );
+      const second = await fetch(url, {
+        headers: streamHeaders,
+        signal: controller.signal,
+      });
+      expect(second.status).toBe(503);
+      expect(second.headers.get('retry-after')).toBe('5');
+      expect(await second.json()).toEqual({
+        error:
+          'Daemon SSE connection limit reached (1/1). ' +
+          'Retry after the Retry-After interval.',
+        code: 'sse_connection_limit_exceeded',
+        limit: 1,
+        active: 1,
+        scope: 'daemon',
+      });
+    } finally {
+      controller.abort();
+      server.closeAllConnections();
+    }
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
+  });
+
   it('stops writing an event stream after backpressure ends it', async () => {
     const server = await app();
     const created = await headers(supertest(server).post('/session')).send({
@@ -27269,6 +27345,153 @@ describe('Hosted Harness tool approvals', () => {
       ).expect(204);
     },
   );
+
+  it('loads a pinned standalone Skill through the skill tool on the first Hosted turn', async () => {
+    const archive = path.join(state.root, 'source.tar.gz');
+    await writeFile(
+      path.join(state.root, 'SKILL.md'),
+      '---\nname: review\ndescription: Review changes\n---\nFollow PINNED_REVIEW_INSTRUCTIONS.',
+    );
+    await createTar({ cwd: state.root, file: archive, gzip: true }, [
+      'SKILL.md',
+    ]);
+    const target = { platform: 'linux', arch: 'any' } as const;
+    const prepared = await prepareManagedPackageImport(
+      archive,
+      {
+        sourceKind: 'skill',
+        sourceDigest: createHash('sha256')
+          .update(await readFile(archive))
+          .digest('hex'),
+        target,
+        compilerVersion: 1,
+      },
+      { destination: path.join(state.root, 'compiled') },
+    );
+    const runtime = new ManagedExtensionRuntime({
+      executionMode: 'developer-process-group',
+      directory: path.join(state.root, 'runtime'),
+      admitted: async (sessionId) => sessionId === SESSION_ID,
+      idle: () => true,
+      compile: async (root) =>
+        (await compileManagedExtensionPackage(root, { target })).contributions,
+      drain: async () => undefined,
+      install: async () => undefined,
+    });
+    await runtime.cache.upload(
+      prepared.packageDigest,
+      createReadStream(prepared.archivePath),
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'capabilityDigest',
+      'get',
+    ).mockReturnValue(MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST);
+    vi.mocked(HostedWorkspaceBroker.prototype.warm).mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'extensionControl',
+    ).mockImplementation(async (operation) => {
+      switch (operation.kind) {
+        case 'extension-status':
+          return {
+            ...(await runtime.operationStatus(
+              SESSION_ID,
+              operation.operationId,
+            )),
+          };
+        case 'extension-prepare':
+          return {
+            ...(await runtime.prepare(
+              SESSION_ID,
+              operation.command,
+              operation,
+            )),
+          };
+        case 'extension-activate':
+          return {
+            ...(await runtime.activate(SESSION_ID, operation.operationId)),
+          };
+        default:
+          throw new Error(`Unexpected extension operation: ${operation.kind}`);
+      }
+    });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        initialSelection: {
+          operationId: randomUUID(),
+          actorKey: 'a'.repeat(64),
+          expectedRevision: 0,
+          extensions: [
+            {
+              extensionId: 'sample',
+              packageRevision: 1,
+              packageDigest: prepared.packageDigest,
+            },
+          ],
+        },
+      })
+      .expect(200);
+    state.model.mockImplementationOnce(async ({ signal, toolTurn, skills }) => {
+      expect(skills?.invocations('/review:review')).toEqual(['review:review']);
+      expect(await toolTurn!.declarations(signal)).toContainEqual(
+        expect.objectContaining({ name: 'skill' }),
+      );
+      const args = { skill: 'review:review' };
+      const call = {
+        name: 'skill',
+        args,
+        callId: 'call-review',
+        prompt_id: PROMPT_ID,
+        isClientInitiated: false,
+      };
+      const result = await toolTurn!.execute(
+        [call],
+        [{ functionCall: { name: call.name, id: call.callId, args } }],
+        'test-model',
+        signal,
+      );
+      expect(JSON.stringify(result)).toContain('PINNED_REVIEW_INSTRUCTIONS');
+      return { text: 'Reviewed', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'Review these changes' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        promptId: PROMPT_ID,
+        prompt,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await waitFor(async () => {
+      expect(state.model).toHaveBeenCalledOnce();
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      )
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .expect(200);
+      expect(status.body).toMatchObject({
+        hasActivePrompt: false,
+        recoveryBlocked: false,
+      });
+    });
+    await expect(state.model.mock.results[0].value).resolves.toMatchObject({
+      text: 'Reviewed',
+    });
+  });
 
   it('loads a failed initial extension selection for management while keeping the first Prompt blocked', async () => {
     vi.spyOn(
