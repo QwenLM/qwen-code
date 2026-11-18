@@ -41,7 +41,7 @@ test.describe('session source switch sliding indicator', () => {
       String(testInfo.project.use.baseURL),
     );
 
-    const tasksTab = page.getByRole('tab', { name: 'Tasks' });
+    const tasksTab = page.getByRole('tab', { name: 'Tasks', exact: true });
     const channelsTab = page.getByRole('tab', { name: 'Channels' });
     const indicator = page.locator('[data-slot="tabs-list-indicator"]');
     await expect(indicator).toBeVisible();
@@ -106,7 +106,7 @@ test.describe('session source switch sliding indicator', () => {
     await expect(indicator).toBeVisible();
 
     const tasksLeft = (
-      await horizontalBox(page.getByRole('tab', { name: 'Tasks' }))
+      await horizontalBox(page.getByRole('tab', { name: 'Tasks', exact: true }))
     ).left;
     const channelsLeft = (
       await horizontalBox(page.getByRole('tab', { name: 'Channels' }))
