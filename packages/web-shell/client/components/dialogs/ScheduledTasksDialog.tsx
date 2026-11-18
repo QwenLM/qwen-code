@@ -2232,7 +2232,7 @@ export function ScheduledTasksDialog({
             task.workspaceCwd ??
             (!isMultiWorkspace ? primaryWorkspaceCwd : undefined);
           const deliveryLabel = task.delivery
-            ? `${t('scheduledTasks.delivery.cardPrefix')} ${task.delivery.target.channelName} · ${t(`scheduledTasks.delivery.${task.delivery.target.type}`)} · ${task.delivery.target.id}`
+            ? `${t('scheduledTasks.delivery.cardPrefix')} ${task.delivery.target.channelName} · ${task.delivery.target.id}`
             : undefined;
           const busy = busyId === taskKey(task);
           return (

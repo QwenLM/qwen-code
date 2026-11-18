@@ -14,6 +14,7 @@ import {
   readWorktreeSessionMarker,
   canonicalSessionPrUrl,
   readSessionPrsDetailed,
+  readSessionArtifactSummarySidecarAsync,
   toSessionPrInfo,
   type SessionArchiveState,
   type SessionGroupPresetColor,
@@ -548,6 +549,44 @@ async function enrichPrSidecars(
   }
 }
 
+/**
+ * Enrich persisted session summaries with the restorable artifact count from
+ * the summary sidecar so the header entry can show it at click time. Same
+ * best-effort pattern as {@link enrichPrSidecars}: a missing or unreadable
+ * sidecar is an UNKNOWN count, not zero artifacts, and leaves the field
+ * unset. Runs before the live merge; a live entry's own count supersedes it.
+ */
+async function enrichArtifactSummaries(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    let count: number | undefined;
+    try {
+      const sidecarPath = sessionService.getArtifactSummaryPathForArchiveState(
+        sessionId,
+        archiveState,
+      );
+      // Awaited per session like the sibling enrichers: the yield keeps a
+      // mid-scan abort observable and lets concurrent requests run between
+      // reads (the organized path can scan up to MAX_ORGANIZED_SESSIONS).
+      const sidecar = signal
+        ? await readSessionArtifactSummarySidecarAsync(sidecarPath, { signal })
+        : await readSessionArtifactSummarySidecarAsync(sidecarPath);
+      count = sidecar?.artifactCount;
+    } catch {
+      signal?.throwIfAborted();
+      count = undefined;
+    }
+    if (count !== undefined && count > 0) {
+      bySessionId.set(sessionId, { ...summary, artifactCount: count });
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -621,6 +660,15 @@ function mergeLiveSessionSummary(
   // it there, while the live entry is frozen at bind-time.
   if (existing.prs || live.prs) {
     merged.prs = mergeSummaryPrs(existing.prs, live.prs);
+  }
+  // The live entry is authoritative for its artifact count (the spread above
+  // already overlays a non-zero one). When it omits the field — count zero —
+  // a stale sidecar-derived count from the persisted summary must not survive.
+  // The exception is a pending restore: the entry is live but its store is
+  // not hydrated yet, so the omission is unknown, not zero, and the
+  // sidecar-enriched count stays until the restore settles.
+  if (live.artifactCount === undefined && live.artifactCountPending !== true) {
+    delete merged.artifactCount;
   }
   return merged;
 }
@@ -806,6 +854,12 @@ async function loadAllPersistedSummaries(
     signal,
   );
   await enrichPrSidecars(bySessionId, sessionService, archiveState, signal);
+  await enrichArtifactSummaries(
+    bySessionId,
+    sessionService,
+    archiveState,
+    signal,
+  );
   signal.throwIfAborted();
   return {
     sessions: [...bySessionId.values()],
@@ -1646,6 +1700,12 @@ async function listWorkspaceSessionsForResponseInRuntime(
     archiveState,
     readOptions.signal,
   );
+  await enrichArtifactSummaries(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
   readOptions.signal?.throwIfAborted();
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
@@ -1821,6 +1881,12 @@ export async function searchWorkspaceSessionsForResponse(
       readOptions.signal,
     );
     await enrichPrSidecars(
+      bySessionId,
+      sessionService,
+      'active',
+      readOptions.signal,
+    );
+    await enrichArtifactSummaries(
       bySessionId,
       sessionService,
       'active',

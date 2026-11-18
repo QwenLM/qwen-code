@@ -2763,6 +2763,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   sessionId: nextSession.sessionId,
                   restoredArtifacts: nextSession.restoredArtifacts,
                   restoredArtifactsSessionId: nextSession.sessionId,
+                  // Authoritative data landed; the click-time hint is retired.
+                  artifactCountHint: undefined,
+                  artifactCountHintSessionId: undefined,
                 }));
               });
             }
@@ -3520,6 +3523,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : undefined,
             restoredArtifacts: activeSession.restoredArtifacts,
             restoredArtifactsSessionId: activeSession.sessionId,
+            artifactCountHint: undefined,
+            artifactCountHintSessionId: undefined,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
