@@ -877,6 +877,16 @@ export class LlmClient {
     this.chat?.setCompressionObserver(observer, options);
   }
 
+  /**
+   * Drop the background prompt-id registry on a session swap. The registered
+   * Notification/Teammate/side-query ids belong to the outgoing conversation;
+   * a resumed transcript can reuse an id, so a stale registration must not
+   * exclude a new foreground turn from the ledger (P2).
+   */
+  clearBackgroundInteractionPromptIds(): void {
+    this.backgroundInteractionPromptIds.clear();
+  }
+
   async initialize(
     sessionStartSource?: SessionStartSource,
     signal?: AbortSignal,

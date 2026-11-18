@@ -6833,6 +6833,15 @@ export class Config {
     this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
+    // The availability ledger and the background prompt-id registry belong to
+    // the outgoing conversation. A rewind/resume can reuse a prompt id (the
+    // transcript seeds the mint counter), so carrying either across the swap
+    // would let a stale mark skip a recovered fallback, or a reused notification
+    // id exclude a new foreground turn. Reset both unconditionally — even a
+    // same-id resume replaces the conversation (P2). Dropping the lazy service
+    // instance discards every mark and the last turn key.
+    this.modelAvailabilityService = undefined;
+    this.llmClient?.clearBackgroundInteractionPromptIds?.();
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
     // and a session-scoped prompt counter — both stop being meaningful

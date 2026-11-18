@@ -13006,6 +13006,32 @@ Other open files:
         }
       });
 
+      it('clearBackgroundInteractionPromptIds lets a reused id be a member again (P2)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // A Notification first send registers its id and is excluded.
+        await run([{ text: 'notify' }], 'session########clear', {
+          type: SendMessageType.Notification,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+        // Its unflagged continuation is excluded by the registry.
+        await run([{ text: 'continue' }], 'session########clear', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The session-boundary clear drops the registration, so a foreground
+        // turn reusing the id is a ledger member again rather than excluded.
+        client.clearBackgroundInteractionPromptIds();
+        await run([{ text: 'user' }], 'session########clear', {
+          type: SendMessageType.UserQuery,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
+      });
+
       it('bounds the background-interaction registry FIFO (R8-F11)', async () => {
         // Pin the bound value itself: raising it must not silently pass (S2).
         expect(MAX_BACKGROUND_INTERACTION_PROMPT_IDS).toBe(32);

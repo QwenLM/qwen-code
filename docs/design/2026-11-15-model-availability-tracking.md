@@ -131,7 +131,12 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     on it (`prompt_id` keeps its prompt identity); otherwise each continuation
     would read as a new turn and reset the consumed marks. Direct background
     sends (forked queries, legacy speculation/subagent, suggestions) call
-    `sendMessageStream` without the flag. Background operations therefore neither rotate the live
+    `sendMessageStream` without the flag. The ACP background-notification
+    executor (`#executeBackgroundNotificationPromptInner`) likewise opts out:
+    it passes `isSessionTurn: false` for the whole notification loop, including
+    tool and stop-hook continuations, so a notification cannot skip a recovered
+    fallback for the live turn (P2 ACP-notification). Background operations
+    therefore neither rotate the live
     turn's key nor read or write its marks, and keep the gate-off fallback
     behaviour. This is an allowlist, not a prompt-id blacklist: background
     senders use ids (e.g. a subagent's `session#agent#ordinal`) that no fixed
@@ -144,16 +149,27 @@ no zod / no external deps, so no zod-4 migration is needed for it:
   from the ledger; the primary is still attempted each request and is not
   marked (marking it would be a dead write: the primary is attempted before the
   fallback chain and is never a fallback candidate, so the skip never reads its
-  mark):
-  - Before attempting a fallback model, consult `snapshot(model)`; skip models
-    reported unavailable (record them in the existing skip/debug path).
+  mark). The ledger key is the resolved provider route identity
+  (`getModelRouteIdentity(resolvedModel, fallbackConfig)` — model id plus an
+  auth/endpoint digest), not the bare model id: two fallbacks can resolve to the
+  same model id on different routes (e.g. `openai:shared` vs `anthropic:shared`),
+  and exhausting one route must not skip the other, while aliases of one route
+  still share health (P2 resolved-route):
+  - Before attempting a fallback model, consult `snapshot(routeKey)`; skip
+    routes reported unavailable (record them in the existing skip/debug path).
   - When a fallback exhausts retries on a fallback-eligible capacity error,
-    call `markRetryOncePerTurn(model)` then `consumeStickyAttempt(model)` so it
-    is skipped for the remainder of the turn. The marking happens even if the
-    fallback emitted output before failing (the chain still stops there to
+    call `markRetryOncePerTurn(routeKey)` then `consumeStickyAttempt(routeKey)`
+    so it is skipped for the remainder of the turn. The marking happens even if
+    the fallback emitted output before failing (the chain still stops there to
     avoid duplicating user-visible output); it stays gated on
     `isFallbackEligible` so a post-output auth/client error is not recorded.
-  - On a successful fallback response, `markHealthy(model)`.
+  - On a successful fallback response, `markHealthy(routeKey)`.
+- Session-swap reset: `Config.startNewSession` drops the lazy ledger instance
+  and clears the client's background prompt-id registry, unconditionally (even
+  a same-id resume). A rewind/resume can reuse a prompt id because the
+  transcript seeds the mint counter, so carrying a stale mark or registration
+  across the swap would skip a recovered fallback or exclude a new foreground
+  turn (P2 rewound-session).
 - Turn-key limitation: `lastTurnKey` is a single scalar on the session-scoped
   service, and marks are keyed by model alone with no attribution to the turn
   that wrote them. Internal background sends are excluded (above), so the
@@ -193,11 +209,15 @@ reversible; a later PR can flip the default once nightly evidence is in.
 
 - `packages/core/src/core/model-availability-service.ts` (new) + collocated test.
 - `packages/core/src/config/config.ts` — lazy getter owning the service + the
-  `modelAvailabilityTracking` parameter.
+  `modelAvailabilityTracking` parameter; `startNewSession` drops the service
+  instance and clears the client's background prompt-id registry on every
+  session swap (P2 rewound-session).
 - `packages/core/src/core/llm-chat.ts` — request-entry turn boundary plus
   fallback-chain consultation/marking behind the gate, allowlisting session
   turns; `isExplicitRetry`, `isSessionTurn` and `ledgerTurnKey` on
-  `LlmChatSendOptions` (`beginTurn` keys on `ledgerTurnKey ?? prompt_id`).
+  `LlmChatSendOptions` (`beginTurn` keys on `ledgerTurnKey ?? prompt_id`). The
+  fallback ledger key is the resolved route identity, not the bare model id
+  (P2 resolved-route).
 - `packages/core/src/core/turn.ts` + `packages/core/src/core/client.ts` — thread
   the explicit-Retry flag from `SendMessageType.Retry` to the send options, and
   decide ledger membership at the sender: `LlmClient` sets `isSessionTurn` per
@@ -205,11 +225,14 @@ reversible; a later PR can flip the default once nightly evidence is in.
   and a registry of concurrent side-query prompt ids excludes a side query's
   unflagged tool-result continuation. `SendMessageOptions.ledgerTurnKey` is
   threaded the same way (sender → `Turn` → send options) for the headless
-  runtime Goal run's fresh turn boundary.
+  runtime Goal run's fresh turn boundary. `clearBackgroundInteractionPromptIds`
+  empties the registry at the session boundary.
 - `packages/cli/src/acp-integration/session/Session.ts` +
   `packages/cli/src/acp-integration/session/ledger-turn-key.ts` — the ACP send
   sets `isSessionTurn`; `deriveLedgerTurnKey` normalizes mid-turn continuation
-  suffixes into `ledgerTurnKey` (prompt identity unchanged).
+  suffixes into `ledgerTurnKey` (prompt identity unchanged). The
+  background-notification executor passes `isSessionTurn: false` for the whole
+  notification loop (P2 ACP-notification).
 - `packages/cli/src/ui/hooks/use-llm-stream.ts` +
   `packages/cli/src/ui/contexts/SessionContext.tsx` — the prompt-id mint counter
   (`promptCount`) advances for every minting top-level turn (user query, cron,

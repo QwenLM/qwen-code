@@ -7775,6 +7775,13 @@ describe('LlmChat', async () => {
     ) {
       mockGeneratorConfig({ maxRetries: 0, ...generatorConfig });
       vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(fallbacks);
+      // The ledger keys fallbacks by resolved route identity; give each model
+      // a distinct identity so the fallback tests discriminate routes (the
+      // constant default would collapse every fallback onto one key).
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        (model?: string) =>
+          model ? `${model}@test0001` : 'gemini-pro@test0001',
+      );
       return mockResolver(resolveForModel);
     }
 
@@ -8676,8 +8683,9 @@ describe('LlmChat', async () => {
       // each request (it may have recovered), even when the ledger marks it
       // unavailable; a mutant gating the primary on the ledger would skip it.
       // fallback-a is marked unavailable so request 2 also exercises the skip read.
-      service.markTerminal('test-model', 'quota');
-      service.markTerminal('fallback-a', 'quota');
+      // Marks use the resolved route key the ledger keys on (wireFallbacks mock).
+      service.markTerminal('test-model@test0001', 'quota');
+      service.markTerminal('fallback-a@test0001', 'quota');
 
       // Request 1: the primary serves despite being marked unavailable.
       streamMock().mockImplementationOnce(async () => textStream('primary ok'));
@@ -8956,7 +8964,7 @@ describe('LlmChat', async () => {
         sendSessionCollect('test', 'prompt-live-mark'),
       ).rejects.toThrow();
       expect(fallbackA).toHaveBeenCalledTimes(1);
-      expect(service.snapshot('fallback-a')).toEqual({
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
         available: false,
         reason: 'retry_once_per_turn',
       });
@@ -8966,7 +8974,7 @@ describe('LlmChat', async () => {
       // not merely be skipped itself.
       const events = await sendCollect('test', 'forked_query');
       expect(hasChunkText(events, 'primary ok')).toBe(true);
-      expect(service.snapshot('fallback-a')).toEqual({
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
         available: false,
         reason: 'retry_once_per_turn',
       });
@@ -9262,6 +9270,11 @@ describe('LlmChat', async () => {
         vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
           service,
         );
+        // Distinct route identity per fallback model so the ledger discriminates
+        // them (the constant default would collapse both onto one key).
+        vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+          (model?: string) => (model ? `${model}@real` : 'gemini-pro@test0001'),
+        );
         vi.mocked(mockConfig.getContentGenerator).mockReturnValue(
           realGenerator('test-model'),
         );
@@ -9384,6 +9397,59 @@ describe('LlmChat', async () => {
       expect(aliasA).toHaveBeenCalledTimes(1);
       expect(aliasB).toHaveBeenCalledTimes(0);
       expect(healthy).toHaveBeenCalledTimes(2);
+    });
+
+    it('keys the ledger by resolved route so same-model different-route fallbacks keep separate health (P2)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const openaiShared = vi.fn();
+      const bridge = vi.fn();
+      const anthropicShared = vi.fn();
+      wireFallbacks(
+        ['openai-shared', 'bridge', 'anthropic-shared'],
+        vi.fn().mockImplementation(async (modelId: string) => {
+          if (modelId === 'openai-shared') {
+            return fallbackRoute('shared', openaiShared, {
+              authType: 'openai',
+            });
+          }
+          if (modelId === 'bridge') {
+            return fallbackRoute('bridge', bridge, { authType: 'openai' });
+          }
+          return fallbackRoute('shared', anthropicShared, {
+            authType: 'anthropic',
+          });
+        }),
+      );
+      // Route identity discriminates by authType, so two routes resolving to the
+      // same model id ('shared') keep separate health (override after
+      // wireFallbacks, which installs a per-model default).
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        (model?: string, config?: { authType?: string }) =>
+          `${model ?? 'gemini-pro'}@${config?.authType ?? 'default'}`,
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      openaiShared.mockRejectedValue(capacityError);
+      bridge.mockRejectedValue(capacityError);
+      anthropicShared.mockImplementation(async () =>
+        textStream('anthropic ok'),
+      );
+
+      // primary 429 -> openai:shared 429 (recorded) -> bridge 429 (intervening
+      // model resets the same-model guard) -> anthropic:shared resolves to the
+      // SAME model id 'shared' but a different route. It must be re-probed and
+      // serve, not skipped by the openai route's consumed mark.
+      const events = await sendSessionCollect('test', 'prompt-route-key');
+      expect(hasChunkText(events, 'anthropic ok')).toBe(true);
+      expect(openaiShared).toHaveBeenCalledTimes(1);
+      expect(bridge).toHaveBeenCalledTimes(1);
+      expect(anthropicShared).toHaveBeenCalledTimes(1);
     });
 
     it('keeps the ledger turn key stable across a continuation prompt-id rewrite', async () => {

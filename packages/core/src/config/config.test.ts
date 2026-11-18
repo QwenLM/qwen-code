@@ -421,6 +421,7 @@ vi.mock('../core/client.js', () => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     isInitialized: vi.fn().mockReturnValue(true),
     setTools: vi.fn(),
+    clearBackgroundInteractionPromptIds: vi.fn(),
   })),
 }));
 
@@ -4769,6 +4770,32 @@ describe('Server Config (config.ts)', () => {
         'replacement-session',
         'replacement-session',
       );
+    });
+
+    it('resets the availability ledger on a session swap, including a same-id resume (P2)', async () => {
+      const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
+      const service = config.getModelAvailabilityService();
+      service.beginTurn('A########2');
+      service.markRetryOncePerTurn('fallback-b');
+      service.consumeStickyAttempt('fallback-b');
+      expect(service.snapshot('fallback-b').available).toBe(false);
+
+      // A same-id resume replaces the conversation; the reused prompt id must
+      // not inherit the outgoing turn's consumed mark.
+      config.startNewSession(config.getSessionId());
+      const fresh = config.getModelAvailabilityService();
+      expect(fresh).not.toBe(service);
+      expect(fresh.snapshot('fallback-b').available).toBe(true);
+    });
+
+    it('clears the background prompt-id registry at the session boundary (P2)', async () => {
+      const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
+      const clear = vi.spyOn(
+        config.getLlmClient(),
+        'clearBackgroundInteractionPromptIds',
+      );
+      config.startNewSession(config.getSessionId());
+      expect(clear).toHaveBeenCalled();
     });
 
     it('clears loaded Skill state at the session boundary', async () => {

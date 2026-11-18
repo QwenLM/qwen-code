@@ -5946,10 +5946,21 @@ export class LlmChat {
                   continue;
                 }
 
+                // Key the ledger by the resolved provider route, not the bare
+                // model id: two fallbacks can resolve to the same model id on
+                // different routes (e.g. openai:shared vs anthropic:shared),
+                // and exhausting one route must not skip the other. Aliases of
+                // one route still share health (P2 resolved-route).
+                const fallbackRouteKey =
+                  self.config.getModelRouteIdentity?.(
+                    resolvedFallbackModel,
+                    fallbackConfig,
+                  ) ?? resolvedFallbackModel;
+
                 // Skip a fallback the health ledger already exhausted this turn.
                 if (
                   availability &&
-                  !availability.snapshot(resolvedFallbackModel).available
+                  !availability.snapshot(fallbackRouteKey).available
                 ) {
                   debugLogger.warn(
                     `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
@@ -6034,7 +6045,7 @@ export class LlmChat {
                   // Fallback succeeded
                   lastError = null;
                   fallbackSucceeded = true;
-                  availability?.markHealthy(resolvedFallbackModel);
+                  availability?.markHealthy(fallbackRouteKey);
                   debugLogger.info(
                     `[FALLBACK] Successfully completed request with ` +
                       `fallback model "${resolvedFallbackModel}".`,
@@ -6070,8 +6081,8 @@ export class LlmChat {
                   // the turn. Gated on fallback-eligibility so a post-output
                   // auth/client error is not recorded as turn-unavailable.
                   if (availability && canTryNextFallback) {
-                    availability.markRetryOncePerTurn(resolvedFallbackModel);
-                    availability.consumeStickyAttempt(resolvedFallbackModel);
+                    availability.markRetryOncePerTurn(fallbackRouteKey);
+                    availability.consumeStickyAttempt(fallbackRouteKey);
                   }
 
                   if (currentFallbackYieldedAnyChunk) {

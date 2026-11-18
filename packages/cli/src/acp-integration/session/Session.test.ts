@@ -21261,7 +21261,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        { isSessionTurn: true },
+        { isSessionTurn: false },
       );
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
@@ -21443,6 +21443,18 @@ describe('Session', () => {
       );
       expect(responseTurnIds[1]).toBe(responseTurnIds[0]);
       expect(responseTurnIds[2]).toBe(responseTurnIds[0]);
+      // The notification and its tool-result continuation both stay out of the
+      // foreground ledger (P2): every notification send carries isSessionTurn
+      // false, so a fallback the notification exhausts cannot skip a recovered
+      // fallback for the live turn. Call 0 is the user prompt; the rest are the
+      // notification's own sends.
+      const notificationSends = (
+        mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+      ).mock.calls.slice(1);
+      expect(notificationSends.length).toBeGreaterThanOrEqual(2);
+      for (const send of notificationSends) {
+        expect(send[4]).toMatchObject({ isSessionTurn: false });
+      }
       expect(responses).toEqual([
         expect.objectContaining({
           update: expect.objectContaining({
@@ -23848,7 +23860,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        { isSessionTurn: true },
+        { isSessionTurn: false },
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
