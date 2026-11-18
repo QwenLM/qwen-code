@@ -16,6 +16,7 @@ import {
 } from './managed-loop-skill.js';
 import { parseSkillContent } from '../../skill-load.js';
 import { compileCron } from '../../../managed-runtime/managed-automation-slots.js';
+import { parseCron } from '../../../utils/cronParser.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const contractsDir = join(here, '../../../managed-runtime/contracts');
@@ -337,6 +338,48 @@ describe('managed loop skill parity', () => {
     ]);
   });
 
+  it('each profile shell keeps its own Parsing rule inventory', () => {
+    // The bundled inventory above cannot see the managed-only rules the cron
+    // and wakeup shells write themselves: deleting the cron shell's "No
+    // interval" rule, or renaming wakeup's "Interval requested", would
+    // regenerate green. Pin each shell's rule names. The Record is keyed by
+    // ManagedLoopProfile, so a new profile cannot skip this pin.
+    const expected: Record<ManagedLoopProfile, readonly string[]> = {
+      union: [
+        'Empty input',
+        'Leading interval token',
+        'Trailing "every" clause',
+        'Prompt-only input',
+      ],
+      cron: [
+        'Leading interval token',
+        'Trailing "every" clause',
+        'No interval',
+      ],
+      wakeup: [
+        'Empty input',
+        'Interval requested',
+        'Interval with no prompt',
+        'Prompt-only input',
+      ],
+    };
+    for (const profile of MANAGED_LOOP_PROFILES) {
+      const text = asset(profile).body;
+      const start = text.indexOf('## Parsing');
+      expect(start).toBeGreaterThanOrEqual(0);
+      const rest = text.slice(start);
+      const next = rest.indexOf('\n## ', 1);
+      const section = next < 0 ? rest : rest.slice(0, next);
+      const rules = [...section.matchAll(/^\d+\. \*\*([^*]+)\*\*/gm)].map(
+        (match) => match[1],
+      );
+      expect({ profile, rules }).toEqual({
+        profile,
+        rules: [...expected[profile]],
+      });
+    }
+  });
+
   it('the committed sidecar set equals the declared profile set', () => {
     // The producer derives its targets from MANAGED_LOOP_PROFILES; this pins
     // the other direction — a profile removed without deleting its sidecar
@@ -360,13 +403,12 @@ describe('managed loop skill parity', () => {
     // Two hand-kept Java sites decide whether a profile gets a /loop skill,
     // and neither is bound to the TypeScript tuple: sidecars() only SUPPLIES
     // bodies, while forProfile()'s routing chain decides which workspace
-    // profile reaches one. A profile added to MANAGED_LOOP_PROFILES (and
-    // generated) but missing from either site would silently serve no /loop
-    // skill, so pin both key sets to the declared profiles. The
-    // provenance-only "bundled" key is allowed in sidecars() (it backs the
-    // bundled-import comparison, not a tool profile); the routing targets are
-    // exactly the declared profiles, since a creator-less profile routes to
-    // null and never assigns a key.
+    // profile reaches one. Pin the supply key set AND the profile→key mapping
+    // — a target set alone cannot see two profiles swapping bodies, which
+    // would hand a workspace the wrong creators. The provenance-only
+    // "bundled" key is allowed in sidecars() (it backs the bundled-import
+    // comparison, not a tool profile); a creator-less profile routes to null
+    // and never assigns a key, so it is absent from the mapping.
     const javaSource = readFileSync(
       join(
         here,
@@ -374,15 +416,38 @@ describe('managed loop skill parity', () => {
       ),
       'utf8',
     );
-    const javaKeys = [...javaSource.matchAll(/"(\w+)",\s*readSidecar\(/g)]
+    // Scrape code, not prose: a comment that happens to spell an assignment
+    // must not redden this suite. The file carries no string literal
+    // containing a comment marker, so the two comment forms strip cleanly.
+    const javaCode = javaSource
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/[^\n]*/g, '');
+    const javaKeys = [...javaCode.matchAll(/"(\w+)",\s*readSidecar\(/g)]
       .map((match) => match[1])
       .filter((key) => key !== 'bundled')
       .sort();
     expect(javaKeys).toEqual([...MANAGED_LOOP_PROFILES].sort());
-    const javaTargets = [...javaSource.matchAll(/key = "(\w+)";/g)]
-      .map((match) => match[1])
-      .sort();
-    expect(javaTargets).toEqual([...MANAGED_LOOP_PROFILES].sort());
+    // Each routing branch: the profile constants in its condition, then the
+    // key it assigns. A branch may serve several profiles (FILES_V4 and
+    // INTERNAL_TEAM_LEAD_V2 share cron), so the mapping is many-to-one.
+    const routing = [
+      ...javaCode.matchAll(
+        /((?:WorkspaceToolProfiles\.\w+\.equals\(profile\)[\s|)]*)+)\{\s*key = "(\w+)";/g,
+      ),
+    ].flatMap((match) =>
+      [...match[1]!.matchAll(/WorkspaceToolProfiles\.(\w+)\.equals/g)].map(
+        (profile) => [profile[1]!, match[2]!] as const,
+      ),
+    );
+    expect(Object.fromEntries(routing)).toEqual({
+      SHELL_V4: 'union',
+      FILES_V4: 'cron',
+      INTERNAL_TEAM_LEAD_V2: 'cron',
+      SHELL_V3: 'wakeup',
+    });
+    expect([...new Set(routing.map(([, key]) => key))].sort()).toEqual(
+      [...MANAGED_LOOP_PROFILES].sort(),
+    );
   });
 
   it('the Nd month-boundary caveat matches the Managed slot compiler', () => {
@@ -410,17 +475,33 @@ describe('managed loop skill parity', () => {
     // day 1, which the step always collects.
     const boundaryGap = (monthLength: number): number =>
       monthLength - lastFire(monthLength) + 1;
+    const ordinal = (day: number): string => {
+      const teen = day % 100 >= 11 && day % 100 <= 13;
+      return `${day}${teen ? 'th' : (['th', 'st', 'nd', 'rd'][day % 10] ?? 'th')}`;
+    };
+    // The caveat also reaches the local CLI scheduler, whose CronCreate
+    // validates with utils/cronParser. Bind the two evaluators: they expand
+    // */N identically today, and a divergence must redden here rather than
+    // leave one scheduler teaching a cadence the other does not honour.
+    for (let step = 1; step <= 31; step += 1) {
+      expect([...parseCron(`0 0 */${step} * *`).dayOfMonth].sort()).toEqual(
+        [...daySet(step)].sort(),
+      );
+    }
     for (const profile of ['cron', 'union'] as const) {
       const text = asset(profile).body;
       expect(text).toContain('day-of-month step, not a rolling N-day cadence');
       expect(text).toContain('at most N days');
       expect(text).toContain(`Keep N ≤ ${maxStep}`);
+      // Each worked example is asserted as ONE clause, so a gap cannot be
+      // swapped between the two month lengths: separate presence checks
+      // would both still pass while the pairing taught the wrong arithmetic.
       expect(text).toContain(
-        `in a 30-day month \`*/2\` fires on the ${lastFire(30)}`,
+        `in a 30-day month \`*/2\` fires on the ${ordinal(lastFire(30))} then the 1st — a ${boundaryGap(30)}-day gap`,
       );
-      expect(text).toContain(`in a 31-day month on the ${lastFire(31)}`);
-      expect(text).toContain(`a ${boundaryGap(30)}-day gap`);
-      expect(text).toContain(`a ${boundaryGap(31)}-day gap`);
+      expect(text).toContain(
+        `in a 31-day month on the ${ordinal(lastFire(31))} then the 1st — a ${boundaryGap(31)}-day gap`,
+      );
     }
   });
 
