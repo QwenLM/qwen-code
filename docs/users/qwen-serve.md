@@ -881,7 +881,12 @@ provider decision with their normal tool policy and isolation boundary.
 > Scope: the writer-stall reaper (layer 1) covers the REST session event
 > stream only; the other surfaces end with their own lifecycles (the
 > generator completes, ACP idle-TTL reaps, heartbeats keep flushing) and
-> are bounded by the shared cap meanwhile. Occupancy is reported twice:
+> are bounded by the shared cap meanwhile. A peer that stops reading
+> stalls writes on those surfaces with no reaper to reclaim the slot: the
+> stream holds its share of the cap until its lifecycle ends or shutdown
+> force-closes it, so a stalled non-REST fleet can consume headroom the
+> reaper would reclaim on REST; the shared cap bounds how many such slots
+> can exist at once. Occupancy is reported twice:
 > `restSseActive` stays the REST event surface alone, while
 > `runtime.transport.streamOccupancy` (total, by surface, by listener)
 > and deep-health `connectedClients` cover every surface against the

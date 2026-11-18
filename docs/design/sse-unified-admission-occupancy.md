@@ -300,7 +300,9 @@ documented as-is.
   default. Operators can raise or disable it with the existing flag.
 - **Reaper coverage unchanged.** A stalled writer on a non-REST surface still
   holds its slot until the client disconnects or the surface's own lifecycle
-  ends; the cap bounds how many such slots can exist at once.
+  ends; the cap bounds how many such slots can exist at once. Shutdown is
+  the backstop: the listener close force-closes remaining connections after
+  the close timeout, releasing their slots (pinned by the shutdown test).
 
 ## Files affected
 
@@ -387,6 +389,13 @@ documented as-is.
 
 - Follow-up 3 (Web Shell row) and follow-up 4 (deferred test pins) land as
   stacked PRs on top of this change.
-- Reaper coverage for non-REST surfaces and drain-wait coverage for the new
-  surfaces are candidates for a later issue; neither is required to close the
-  headroom gap this design addresses.
+- Resolved by #17712: reaper coverage stays REST-only by decision — the
+  non-REST surfaces have heterogeneous lifecycles (generator completion,
+  ACP idle-TTL, heartbeats), so a per-surface writer-stall reaper is a
+  separate design; the stalled non-reading peer bound is documented instead
+  (users guide scope note and Constraints above). The `remote-access`
+  pairing listener now carries the same end-to-end admission pin as
+  `local-control` (clamp, listener-scoped refusal, access-log attribution,
+  deep-health pair), and shutdown drain coverage for the counted non-REST
+  surfaces is pinned (open generation/ACP streams neither hang
+  `handle.close()` nor leak their slots).

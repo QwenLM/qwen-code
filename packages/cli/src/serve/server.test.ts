@@ -51445,6 +51445,186 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
     };
   }
 
+  // Remote-access twin of the pairing fixture (issue #17712): pin the
+  // interface list to loopback, enable through the real management routes,
+  // and reveal the remote bearer so the test drives the actual listener.
+  async function enableRemoteAccessListener(
+    opts: { maxConnections?: number; maxSseConnections?: number },
+    deps?: { daemonLogBaseDir?: string },
+  ) {
+    const interfacesSpy = vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+      test: [
+        {
+          address: '127.0.0.1',
+          family: 'IPv4',
+          internal: false,
+          netmask: '255.0.0.0',
+          mac: '00:00:00:00:00:00',
+          cidr: '127.0.0.1/8',
+        },
+      ],
+    });
+    const daemonHandle = await runQwenServe(
+      { ...baseOpts, port: 0, ...opts },
+      { bridge: parkedBridge(), ...deps },
+    );
+    await daemonHandle.runtimeReady;
+    const primaryPort = (daemonHandle.server.address() as AddressInfo).port;
+    const manage = (action: string, body: object = {}) =>
+      fetch(`http://127.0.0.1:${primaryPort}/remote-access/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const enabled = (await (await manage('enable', { port: 0 })).json()) as {
+      active?: boolean;
+      url?: string;
+    };
+    if (!enabled.active || !enabled.url) {
+      throw new Error('remote access listener did not activate');
+    }
+    const revealed = (await (await manage('reveal')).json()) as {
+      token?: string;
+    };
+    if (!revealed.token) throw new Error('remote access token not revealed');
+    return {
+      handle: daemonHandle,
+      primaryPort,
+      lanBase: enabled.url,
+      lanAuth: { Authorization: `Bearer ${revealed.token}` },
+      restore: () => {
+        interfacesSpy.mockRestore();
+      },
+    };
+  }
+
+  it('clamps the remote-access listener independently of the primary listener (issue #17712)', async () => {
+    const logDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sse-ra-log-'));
+    const pair = await enableRemoteAccessListener(
+      { maxConnections: 256 },
+      { daemonLogBaseDir: logDir },
+    );
+    handle = pair.handle;
+    const { lanBase, lanAuth, primaryPort } = pair;
+    try {
+      const before = getSseOccupancy();
+      // 51 = floor(64 × 0.8): the remote-access listener's own clamp.
+      const lanStreams: Response[] = [];
+      for (let i = 0; i < 51; i++) {
+        const res = await fetch(`${lanBase}/session/sess-ra-${i}/events`, {
+          headers: lanAuth,
+        });
+        expect(res.status).toBe(200);
+        lanStreams.push(res);
+      }
+      const overflow = await fetch(
+        `${lanBase}/session/sess-ra-overflow/events`,
+        { headers: lanAuth },
+      );
+      expect(overflow.status).toBe(503);
+      expect(overflow.headers.get('retry-after')).toBe('5');
+      expect(await overflow.json()).toEqual({
+        error:
+          'Daemon SSE connection limit reached (51/51). ' +
+          'Retry after the Retry-After interval.',
+        code: 'sse_connection_limit_exceeded',
+        limit: 51,
+        active: 51,
+        scope: 'listener',
+        listener: 'remote-access',
+      });
+      await vi.waitFor(
+        async () => {
+          const entries = await fsp.readdir(logDir, { recursive: true });
+          const logFile = entries.find((e) => e.endsWith('daemon.log'));
+          expect(logFile).toBeDefined();
+          const log = await fsp.readFile(path.join(logDir, logFile!), 'utf8');
+          expect(log).toMatch(
+            /code=sse_connection_limit_exceeded[^\n]*reason=listener[^\n]*status=503/,
+          );
+        },
+        { timeout: 5_000 },
+      );
+      // The primary listener still admits: its clamp is independent.
+      const primaryStream = await fetch(
+        `http://127.0.0.1:${primaryPort}/session/sess-ra-primary/events`,
+      );
+      expect(primaryStream.status).toBe(200);
+      const status = await statusOf(primaryPort);
+      expect(
+        status.runtime.transport.streamOccupancy.byListener['remote-access'],
+      ).toBe(before.byListener['remote-access'] + 51);
+      const deep = (await (
+        await fetch(`${lanBase}/health?deep=1`, { headers: lanAuth })
+      ).json()) as {
+        listenerConnectedClients: number;
+        listenerConnectedClientsMax: number | null;
+      };
+      expect(deep.listenerConnectedClients).toBe(51);
+      expect(deep.listenerConnectedClientsMax).toBe(51);
+
+      for (const stream of lanStreams) await stream.body!.cancel();
+      await primaryStream.body!.cancel();
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().total).toBe(before.total);
+        },
+        { timeout: 5_000 },
+      );
+    } finally {
+      pair.restore();
+      await fsp.rm(logDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('shutdown force-closes counted non-REST streams and releases their slots (issue #17712)', async () => {
+    // The reaper stays REST-only by decision; the bound for the other
+    // surfaces is their lifecycle plus the listener close force-close.
+    // Pin that open generation/ACP streams neither hang shutdown nor leak
+    // their shared slots.
+    const before = getSseOccupancy();
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const generation = await fetch(
+      `http://127.0.0.1:${port}/session/sess-shutdown/generate`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'hello' }),
+      },
+    );
+    expect(generation.status).toBe(200);
+    const connId = await acpInitialize(port);
+    const acpSse = await fetch(`http://127.0.0.1:${port}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+      },
+    });
+    expect(acpSse.status).toBe(200);
+    const ws = await openInitializedWs(port);
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total + 3);
+      },
+      { timeout: 5_000 },
+    );
+    await handle.close();
+    handle = undefined;
+    ws.close();
+    // Releases ride socket 'close' events, which land a tick after the
+    // listener close confirms; the pin is that they all land.
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
+  }, 20_000);
+
   it('clamps the pairing listener independently of the primary listener', async () => {
     // runQwenServe always boots its own logger, so the access-log
     // attribution is asserted against the real log file (review R3-5).

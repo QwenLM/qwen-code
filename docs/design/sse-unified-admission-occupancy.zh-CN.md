@@ -261,7 +261,9 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
   很多流的 hosted 部署会看到同样的 204 默认值。操作者可用既有 flag 调高
   或禁用。
 - **回收器覆盖不变。** 非 REST 表面的停滞 writer 仍持有槽位直到客户端
-  断开或该表面自身生命周期结束；cap 约束此类槽位同时存在的数量。
+  断开或该表面自身生命周期结束；cap 约束此类槽位同时存在的数量。shutdown
+  是兜底：listener close 在 close 超时后强制关闭剩余连接并释放其槽位
+  （由 shutdown 测试钉住）。
 
 ## 受影响文件
 
@@ -339,5 +341,10 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
 
 - 后续项 3（Web Shell 行）与后续项 4（延后测试钉）以堆叠 PR 落在本改动
   之上。
-- 非 REST 表面的回收器覆盖、新表面的 drain 等待覆盖是后续 issue 候选；
-  两者都不是关闭本设计所处理的余量缺口所必需。
+- 已由 #17712 决议：回收器覆盖按决定保持仅 REST——非 REST 表面生命周期
+  各异（生成器结束、ACP idle-TTL、心跳），逐表面 writer-stall 回收器是
+  另一个设计；停滞不读对端的边界改为文档化（用户指南范围注记与上文
+  约束）。`remote-access` 配对 listener 现在与 `local-control` 拥有相同
+  的端到端准入钉（钳制、listener 范围拒绝、访问日志归因、deep-health
+  对）；新计数非 REST 表面的 shutdown drain 覆盖也已钉住（开着的
+  生成/ACP 流既不挂死 `handle.close()` 也不泄漏槽位）。
