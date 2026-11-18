@@ -207,10 +207,39 @@ async function ensureBundledRipgrepExecutable(
   }
 }
 
+async function resolveSystemRipgrep(): Promise<RipgrepSelection | null> {
+  const { available, error } = isCommandAvailable(RIPGREP_COMMAND);
+  if (available) {
+    return { mode: 'system', command: RIPGREP_COMMAND };
+  }
+  if (error) {
+    throw error;
+  }
+  return null;
+}
+
+async function resolveBuiltinRipgrep(): Promise<RipgrepSelection | null> {
+  const rgPath = getBuiltinRipgrep();
+  if (rgPath && (await fileExists(rgPath))) {
+    await ensureBundledRipgrepExecutable(rgPath);
+    return { mode: 'builtin', command: rgPath };
+  }
+  return null;
+}
+
+function cacheSelection(
+  useBuiltin: boolean,
+  selection: RipgrepSelection,
+): RipgrepSelection {
+  cachedSelections.set(useBuiltin, selection);
+  return selection;
+}
+
 /**
  * Checks if ripgrep binary exists and returns its path
- * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
- *                   If false, only checks for system ripgrep.
+ * @param useBuiltin If true, prefers a PATH `rg` and uses the bundled binary
+ *                   only when system ripgrep is missing. If false, only checks
+ *                   for system ripgrep.
  * @returns The path to ripgrep binary ('rg' or 'rg.exe' for system ripgrep, or full path for bundled), or null if not available
  * @throws {Error} If an error occurs while resolving the ripgrep binary.
  */
@@ -220,30 +249,17 @@ export async function resolveRipgrep(
   const cachedSelection = cachedSelections.get(useBuiltin);
   if (cachedSelection) return cachedSelection;
 
-  if (useBuiltin) {
-    // Try bundled ripgrep first
-    const rgPath = getBuiltinRipgrep();
-    if (rgPath && (await fileExists(rgPath))) {
-      await ensureBundledRipgrepExecutable(rgPath);
-      const selection = { mode: 'builtin' as const, command: rgPath };
-      cachedSelections.set(useBuiltin, selection);
-      return selection;
-    }
-    // Fallback to system rg if bundled binary is not available
+  const system = await resolveSystemRipgrep();
+  if (system) {
+    return cacheSelection(useBuiltin, system);
   }
 
-  const { available, error } = isCommandAvailable(RIPGREP_COMMAND);
-  if (available) {
-    const selection = { mode: 'system' as const, command: RIPGREP_COMMAND };
-    cachedSelections.set(useBuiltin, selection);
-    return selection;
+  if (!useBuiltin) {
+    return null;
   }
 
-  if (error) {
-    throw error;
-  }
-
-  return null;
+  const builtin = await resolveBuiltinRipgrep();
+  return builtin ? cacheSelection(true, builtin) : null;
 }
 
 // execFile's abort callback can run before the child has exited.
@@ -356,9 +372,10 @@ export async function ensureMacBinarySigned(
 /**
  * Resolves ripgrep and verifies it actually runs.
  *
- * The bundled binary is selected by file existence alone, so a binary that
- * exists but cannot execute — e.g. arm64 kernels with 64K pages (#2676) —
- * would otherwise fail the whole session instead of using system rg.
+ * Default selection prefers a PATH `rg`. The bundled binary is only a
+ * fallback, so a system binary that exists but cannot execute still has to
+ * give way to the vendor copy — and a vendor copy that cannot execute (e.g.
+ * arm64 kernels with 64K pages, #2676) still has to give way to PATH `rg`.
  */
 async function resolveHealthyRipgrep(
   useBuiltin: boolean,
@@ -375,39 +392,42 @@ async function resolveHealthyRipgrep(
     return selection;
   } catch (error) {
     signal?.throwIfAborted();
-    if (selection.mode !== 'builtin') {
+    if (!useBuiltin) {
       throw error;
     }
-    debugLogger.warn(
-      `Bundled ripgrep at ${selection.command} is unusable (${error}); trying system rg.`,
-    );
 
-    let fallback: RipgrepSelection | null = null;
-    try {
-      fallback = await resolveRipgrep(false);
-      if (fallback) {
-        await ensureRipgrepHealthy(fallback, signal);
-      }
-    } catch (fallbackError) {
-      signal?.throwIfAborted();
-      // System rg is unusable too. The bundled failure is the root cause, but
-      // keep the system reason visible or it is lost entirely.
-      debugLogger.warn(`System rg is unusable as well: ${fallbackError}`);
-      throw error;
-    }
+    const fallback =
+      selection.mode === 'system'
+        ? await resolveBuiltinRipgrep()
+        : await resolveSystemRipgrep();
     if (!fallback) {
       throw error;
     }
 
-    cachedSelections.set(true, fallback);
-    return fallback;
+    debugLogger.warn(
+      `${selection.mode} ripgrep at ${selection.command} is unusable (${error}); trying ${fallback.mode} rg.`,
+    );
+
+    try {
+      await ensureRipgrepHealthy(fallback, signal);
+    } catch (fallbackError) {
+      signal?.throwIfAborted();
+      // The preferred selection is the root cause, but keep the other
+      // probe visible or it is lost entirely.
+      debugLogger.warn(
+        `${fallback.mode} ripgrep is unusable as well: ${fallbackError}`,
+      );
+      throw error;
+    }
+
+    return cacheSelection(true, fallback);
   }
 }
 
 /**
  * Checks if ripgrep binary is available
- * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
- *                   If false, only checks for system ripgrep.
+ * @param useBuiltin If true, prefers a healthy PATH `rg` and falls back to the
+ *                   bundled binary. If false, only checks for system ripgrep.
  * @returns True if ripgrep is available, false otherwise.
  * @throws {Error} If an error occurs while resolving the ripgrep binary.
  */
@@ -659,7 +679,7 @@ async function runRipgrepOnce(
  * Runs ripgrep with the provided arguments
  * @param args The arguments to pass to ripgrep
  * @param signal The signal to abort the ripgrep process
- * @param useBuiltin Whether to try the bundled ripgrep before falling back to system ripgrep
+ * @param useBuiltin Whether to allow the bundled ripgrep when PATH `rg` is missing or unusable
  * @returns The result of running ripgrep
  * @throws {Error} If an error occurs while running ripgrep.
  */

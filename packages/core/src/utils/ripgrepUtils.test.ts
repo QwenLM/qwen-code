@@ -152,6 +152,9 @@ describe('ripgrepUtils', () => {
       stderr: '',
       code: 0,
     });
+    // Default PATH has no rg so tests that only stub the bundled binary keep
+    // selecting it. Cases that need a system rg call stubInstall().
+    stubInstall({ system: false });
   });
 
   describe('getBuiltinRipgrep', () => {
@@ -221,15 +224,36 @@ describe('ripgrepUtils', () => {
   });
 
   describe('resolveRipgrep', () => {
-    it('keeps builtin and system selections cached separately', async () => {
+    it('prefers PATH rg over the bundled binary when both exist', async () => {
       stubInstall({ builtin: true, system: true });
+
+      await expect(resolveRipgrep(true)).resolves.toEqual({
+        mode: 'system',
+        command: 'rg',
+      });
+    });
+
+    it('uses the bundled binary when builtin is enabled and PATH rg is missing', async () => {
+      stubInstall({ builtin: true, system: false });
 
       await expect(resolveRipgrep(true)).resolves.toMatchObject({
         mode: 'builtin',
       });
+    });
+
+    it('keeps builtin-enabled and system-only selections cached separately', async () => {
+      stubInstall({ builtin: true, system: false });
+
+      await expect(resolveRipgrep(true)).resolves.toMatchObject({
+        mode: 'builtin',
+      });
+      stubInstall({ builtin: true, system: true });
       await expect(resolveRipgrep(false)).resolves.toEqual({
         mode: 'system',
         command: 'rg',
+      });
+      await expect(resolveRipgrep(true)).resolves.toMatchObject({
+        mode: 'builtin',
       });
     });
 
@@ -240,6 +264,13 @@ describe('ripgrepUtils', () => {
         mode: 'system',
         command: 'rg',
       });
+    });
+
+    it('does not use the bundled binary when useBuiltin is false', async () => {
+      stubInstall({ builtin: true, system: false });
+
+      await expect(resolveRipgrep(false)).resolves.toBeNull();
+      expect(fileExists).not.toHaveBeenCalled();
     });
   });
 
@@ -614,6 +645,15 @@ describe('ripgrepUtils', () => {
         return { stdout: 'ripgrep 14.1.1', stderr: '', code: 0 };
       });
     };
+    const systemFailsBuiltinWorks = () => {
+      stubInstall({ builtin: true, system: true });
+      vi.mocked(execCommand).mockImplementation(async (command: string) => {
+        if (command === 'rg') {
+          throw new Error('system rg broken');
+        }
+        return { stdout: 'ripgrep 14.1.1', stderr: '', code: 0 };
+      });
+    };
 
     it('does not resolve or execute ripgrep after cancellation', async () => {
       const controller = new AbortController();
@@ -656,16 +696,33 @@ describe('ripgrepUtils', () => {
 
       expect(execFile).toHaveBeenCalledOnce();
       expect(execCommand).not.toHaveBeenCalled();
-      expect(isCommandAvailable).not.toHaveBeenCalled();
+      expect(fileExists).not.toHaveBeenCalled();
     });
 
-    it('falls back to system rg when the bundled binary exists but cannot run', async () => {
+    it('uses PATH rg when it is healthy even if the bundled binary also exists', async () => {
       builtinFailsSystemWorks();
+
+      await expect(canUseRipgrep(true)).resolves.toBe(true);
+      expect(fileExists).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the bundled binary when PATH rg exists but cannot run', async () => {
+      systemFailsBuiltinWorks();
 
       await expect(canUseRipgrep(true)).resolves.toBe(true);
     });
 
-    it('caches the fallback selection and does not re-probe the broken builtin', async () => {
+    it('caches the bundled fallback and does not re-probe the broken PATH rg', async () => {
+      systemFailsBuiltinWorks();
+      await expect(canUseRipgrep(true)).resolves.toBe(true);
+
+      vi.mocked(execCommand).mockClear();
+      await expect(canUseRipgrep(true)).resolves.toBe(true);
+
+      expect(execCommand).not.toHaveBeenCalled();
+    });
+
+    it('caches the PATH selection and does not re-probe', async () => {
       builtinFailsSystemWorks();
       await expect(canUseRipgrep(true)).resolves.toBe(true);
 
@@ -675,7 +732,7 @@ describe('ripgrepUtils', () => {
       expect(execCommand).not.toHaveBeenCalled();
     });
 
-    it('reports the bundled failure when system rg is unusable too', async () => {
+    it('reports the PATH failure when the bundled binary is unusable too', async () => {
       stubInstall({ builtin: true, system: true });
       vi.mocked(execCommand).mockImplementation(async (command: string) => {
         throw new Error(
@@ -683,9 +740,9 @@ describe('ripgrepUtils', () => {
         );
       });
 
-      // The bundled failure is the root cause, so it must not be masked by the
-      // system probe that ran after it.
-      await expect(canUseRipgrep(true)).rejects.toThrow('bundled rg broken');
+      // PATH rg is preferred, so its failure is the root cause even after the
+      // bundled probe that ran after it.
+      await expect(canUseRipgrep(true)).rejects.toThrow('system rg broken');
       expect(execCommand).toHaveBeenCalledWith(
         'rg',
         ['--version'],
@@ -711,7 +768,7 @@ describe('ripgrepUtils', () => {
       ).resolves.toEqual([true, true]);
     });
 
-    it('lets runRipgrep fall back instead of throwing', async () => {
+    it('lets runRipgrep use PATH rg instead of throwing', async () => {
       builtinFailsSystemWorks();
       mockRipgrepAttempt({ stdout: 'ripgrep 14.1.1\n' });
 
