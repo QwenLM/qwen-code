@@ -52,9 +52,11 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
   private closePending?: Promise<void>;
   private appDrain?: () => Promise<void>;
   private readonly additionalAppDrains: Array<() => Promise<void>> = [];
-  // closeAllConnections() does not reach upgraded sockets; track them so
-  // the shutdown force timer can destroy a peer that never answers close.
-  private readonly upgradedSockets = new Set<Duplex>();
+  // closeAllConnections() does not reach sockets detached by an upgrade, so
+  // the shutdown force timer destroys whatever is still tracked here. Track
+  // from 'connection', not 'upgrade': any 'upgrade' listener suppresses
+  // Node's no-listener fall-through to the request handler (hidden 404).
+  private readonly openSockets = new Set<Duplex>();
   private hostDrain?: () => Promise<void>;
   private bootStarter?: () => Promise<void> | void;
   private bootPending?: Promise<void>;
@@ -72,9 +74,9 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
     this.server = server;
     this.hostDrain = options.drainHost;
     this.startupReady = options.startupReady === undefined;
-    server.on('upgrade', (_req, socket) => {
-      this.upgradedSockets.add(socket);
-      socket.once('close', () => this.upgradedSockets.delete(socket));
+    server.on('connection', (socket) => {
+      this.openSockets.add(socket);
+      socket.once('close', () => this.openSockets.delete(socket));
     });
     server.once('listening', () => {
       this.listenerReady = true;
@@ -242,8 +244,8 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
 
   private forceCloseConnections(server: Server): void {
     server.closeAllConnections();
-    for (const socket of this.upgradedSockets) socket.destroy();
-    this.upgradedSockets.clear();
+    for (const socket of this.openSockets) socket.destroy();
+    this.openSockets.clear();
   }
 
   private closeListener(timeoutMs: number): Promise<void> {

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createServer, get } from 'node:http';
+import { createServer, get, request } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -274,5 +274,47 @@ describe('ServeAppLifecycle', () => {
       code: 'conversation_runtime_unavailable',
       retryable: true,
     });
+  });
+
+  it('keeps the request-handler fall-through for upgrades while no transport owns them', async () => {
+    const app = express();
+    app.use((_req, res) => {
+      res.status(404).type('text/plain').send('Not Found');
+    });
+    const lifecycle = installServeAppLifecycle(app);
+    const server = createServer(app);
+    servers.add(server);
+    lifecycle.bindServer(server);
+    server.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const { port } = server.address() as { port: number };
+
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/acp',
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+          },
+        },
+        (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode ?? 0));
+        },
+      );
+      req.on('upgrade', (_res, socket) => {
+        socket.destroy();
+        reject(new Error('upgrade emitted instead of request fall-through'));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    expect(status).toBe(404);
+    await lifecycle.close();
   });
 });
