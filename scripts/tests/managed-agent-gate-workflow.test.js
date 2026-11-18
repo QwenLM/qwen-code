@@ -73,6 +73,7 @@ describe('Managed Agent gate scope', () => {
     'scripts/run-managed-agent-server-e2e.ts',
     'scripts/run-managed-pr-watch-e2e.mjs',
     'packages/channels/github/src/managed-github-adapter.ts',
+    'packages/cli/src/commands/channel.ts',
     'packages/cli/src/commands/channel/managed-channel-client.ts',
     '.github/workflows/sdk-java.yml',
     '.github/workflows/managed-agent-gate.yml',

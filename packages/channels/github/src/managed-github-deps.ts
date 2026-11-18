@@ -275,7 +275,6 @@ async function createClient(
         // Empty strings normalize to absent: the state validator refuses an
         // empty baseline field, so the writer must never persist one.
         headSha: data.head?.sha ? data.head.sha : undefined,
-        mergeable: data.mergeable,
         // mergeable === null means GitHub is still computing; the daemon maps
         // UNKNOWN to undefined so it never overwrites the last known state.
         mergeableState:

@@ -8,11 +8,14 @@ import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchRetireRequest;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.RegisterChannelRequest;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.PrWatchInjectionRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.PrWatchInjectionRepository.PrWatchInjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessTransportFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcPrWatchBindingStore;
@@ -33,6 +36,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -455,6 +459,147 @@ class ManagedPrWatchServiceTest {
     }
 
     @Test
+    void aStagedRowIsNotReplayedIntoASessionThatLeftTheWorkspace() {
+        // A staged receipt for Session A survives a retire. A then leaves the
+        // instance's Workspace (still ACTIVE). After rebind to Session B the
+        // re-inject must revalidate the pinned Session against the current
+        // Workspace and refuse to replay into A — release the row and deliver
+        // to B instead, never landing PR-watch content outside the owner's
+        // grant. The Harness resolves a Session by id and would answer A, so
+        // only the Workspace revalidation can refuse the replay.
+        String first = createSession(WORKSPACE);
+        bind(first);
+        harness.failTransientOnce = true;
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text")))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getStatus()).isEqualTo(503));
+        assertThat(ledgerRows(first)).singleElement()
+                .extracting(row -> row.get("state")).isEqualTo("staged");
+        service.retire(TENANT, channel,
+                new PrWatchRetireRequest(OWNER, REPO, PR));
+        jdbc.update("UPDATE ma_session SET workspace_id = ?"
+                + " WHERE tenant_id = ? AND session_id = ?",
+                OTHER_WORKSPACE, TENANT, first);
+        String second = createSession(WORKSPACE);
+        bind(second);
+        PrWatchAdmission admission = service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text"));
+        assertThat(admission.sessionId()).isEqualTo(second);
+        assertThat(admission.replayed()).isFalse();
+        assertThat(harness.commits).singleElement()
+                .satisfies(commit -> assertThat(commit.sessionId())
+                        .isEqualTo(second));
+        assertThat(ledgerRows(first)).isEmpty();
+        assertThat(ledgerRows(second)).singleElement()
+                .extracting(row -> row.get("state")).isEqualTo("admitted");
+    }
+
+    @Test
+    void anOutcomeUnknownReplayDoesNotReleaseThePinnedRow() {
+        // The replay against the pinned Session fails with an outcome-unknown
+        // transport error: it may have committed. The row must stay pinned to
+        // A (retryable), never released and re-delivered to B. Once the replay
+        // can answer, A's original admission is returned.
+        String first = createSession(WORKSPACE);
+        bind(first);
+        harness.failTransientOnce = true;
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text")))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getStatus()).isEqualTo(503));
+        service.retire(TENANT, channel,
+                new PrWatchRetireRequest(OWNER, REPO, PR));
+        String second = createSession(WORKSPACE);
+        bind(second);
+        harness.failUnknownOnce = true;
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text")))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getStatus()).isEqualTo(503));
+        assertThat(ledgerRows(first)).singleElement()
+                .extracting(row -> row.get("state")).isEqualTo("staged");
+        assertThat(ledgerRows(second)).isEmpty();
+        assertThat(harness.commits).isEmpty();
+        PrWatchAdmission admission = service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text"));
+        assertThat(admission.sessionId()).isEqualTo(first);
+        assertThat(admission.replayed()).isFalse();
+        assertThat(harness.commits).singleElement()
+                .satisfies(commit -> assertThat(commit.sessionId())
+                        .isEqualTo(first));
+        assertThat(ledgerRows(second)).isEmpty();
+    }
+
+    @Test
+    void aDeterministicRefusalReleasesTheStagedRow() {
+        String sessionId = createSession(WORKSPACE);
+        bind(sessionId);
+        harness.refuseDeterministicOnce = true;
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text")))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getStatus()).isEqualTo(400));
+        // A refusal verdict proves non-commit: the staged receipt is released,
+        // not orphaned for a binding the adapter will poison and unsubscribe.
+        String inputId = PrWatchOperations.prWatchInputId(TENANT, channel,
+                OWNER, REPO, PR, "ci_failure", HEAD, 1);
+        assertThat(injections.find(TENANT, inputId)).isEmpty();
+        assertThat(ledgerRows(sessionId)).isEmpty();
+    }
+
+    @Test
+    void aConcurrentAdmissionOfTheSameOccurrenceIsNotAConflict() {
+        // A concurrent inject of the same occurrence already admitted the row
+        // to this Session between submit and admit: admit() matches no staged
+        // row, but the re-read shows the same-Session admission — return it,
+        // not a false 409.
+        String sessionId = createSession(WORKSPACE);
+        bind(sessionId);
+        final boolean[] swallowOnce = {true};
+        PrWatchInjectionRepository racing = new PrWatchInjectionRepository() {
+            private final JdbcPrWatchInjectionRepository delegate =
+                    new JdbcPrWatchInjectionRepository(jdbc);
+
+            @Override
+            public PrWatchInjection findOrCreate(PrWatchInjection candidate) {
+                return delegate.findOrCreate(candidate);
+            }
+
+            @Override
+            public Optional<PrWatchInjection> find(String tenantId,
+                    String inputId) {
+                return delegate.find(tenantId, inputId);
+            }
+
+            @Override
+            public PrWatchInjection admit(String tenantId, String inputId,
+                    String admitSessionId) {
+                PrWatchInjection result = delegate.admit(tenantId, inputId,
+                        admitSessionId);
+                if (swallowOnce[0]) {
+                    swallowOnce[0] = false;
+                    return null;
+                }
+                return result;
+            }
+
+            @Override
+            public boolean releaseStaged(String tenantId, String inputId) {
+                return delegate.releaseStaged(tenantId, inputId);
+            }
+        };
+        ManagedPrWatchService racingService = new ManagedPrWatchService(
+                instances, sessionQueries, bindings, racing, harness, mapper);
+        PrWatchAdmission admission = racingService.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text"));
+        assertThat(admission.sessionId()).isEqualTo(sessionId);
+        assertThat(admission.replayed()).isFalse();
+        assertThat(ledgerRows(sessionId)).singleElement()
+                .extracting(row -> row.get("state")).isEqualTo("admitted");
+    }
+
+    @Test
     void findOrCreateRefusesACandidateThatClaimsAdmission() {
         String sessionId = createSession(WORKSPACE);
         PrWatchBindingView binding = bind(sessionId);
@@ -754,6 +899,8 @@ class ManagedPrWatchServiceTest {
         final List<Call> commits = new ArrayList<>();
         boolean loseAnswerOnce;
         boolean failTransientOnce;
+        boolean failUnknownOnce;
+        boolean refuseDeterministicOnce;
         private final SessionQueryStore sessions;
 
         RecordingHarness(SessionQueryStore sessions) {
@@ -813,6 +960,16 @@ class ManagedPrWatchServiceTest {
             if (failTransientOnce) {
                 failTransientOnce = false;
                 throw new HarnessFailure("transient harness failure");
+            }
+            if (failUnknownOnce) {
+                failUnknownOnce = false;
+                throw new HarnessTransportFailure("outcome unknown", null);
+            }
+            if (refuseDeterministicOnce) {
+                refuseDeterministicOnce = false;
+                throw new HarnessHttpFailure("refused", null, 400,
+                        "{\"code\":\"invalid_request\"}",
+                        Map.of("code", "invalid_request"));
             }
             String inputId = String.valueOf(body.get("inputId"));
             String journalKey = sessionId + "\u0000" + inputId;

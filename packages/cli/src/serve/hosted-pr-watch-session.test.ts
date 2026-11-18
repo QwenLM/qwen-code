@@ -176,6 +176,25 @@ describe('submitPrEventInput', () => {
     expect(published).toHaveLength(2);
   });
 
+  it('serializes concurrent deliveries of one input id into one admission', async () => {
+    // The guard reads the journal and the commit follows two awaits later, so
+    // without a per-Session lane both calls pass it: two envelope pairs are
+    // published and the loser reports `replayed: false` for an admission that
+    // did happen.
+    const { store, submits, published } = fakeStore();
+    const p = params();
+    const results = await Promise.all([
+      submitPrEventInput(store, KEY, p),
+      submitPrEventInput(store, KEY, p),
+    ]);
+    expect(results.map((result) => result.replayed).sort()).toEqual([
+      false,
+      true,
+    ]);
+    expect(submits).toHaveLength(1);
+    expect(published).toHaveLength(2);
+  });
+
   it('replay guard requires the pr_event source, not just the input id', async () => {
     const { store, events, submits } = fakeStore();
     const p = params();

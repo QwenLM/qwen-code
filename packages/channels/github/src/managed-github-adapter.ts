@@ -99,12 +99,11 @@ export interface GithubSendFailure extends Error {
 /** One PR observation as the watch reads it (the pulls.get fields it needs). */
 export interface GithubPullObservation {
   headSha?: string;
-  /** The raw pulls.get flag: null while GitHub computes mergeability. */
-  mergeable: boolean | null;
   /**
-   * undefined while mergeable is null (the daemon's UNKNOWN mapping). This is
-   * the field the watch compares and persists, and it never overwrites the
-   * baseline: an undefined value carries the previous mergeableState forward.
+   * undefined while GitHub reports mergeable null (the daemon's UNKNOWN
+   * mapping). This is the field the watch compares and persists, and it never
+   * overwrites the baseline: an undefined value carries the previous
+   * mergeableState forward.
    */
   mergeableState?: string;
   state: string;
@@ -119,12 +118,17 @@ export interface GithubCiObservation {
   namesIncomplete?: boolean;
 }
 
-/** One PR-watch binding as the control plane lists it (pr-watch:list). */
+/**
+ * One PR-watch binding as this watch consumes it: the pull request to observe
+ * and the transitions it subscribes to. The route's answer also names the
+ * binding's Session, which is deliberately absent here — the control plane
+ * forces the target Session from its own binding on every inject, so the
+ * adapter never chooses (or even sees) one.
+ */
 export interface GithubPrWatchBinding {
   owner: string;
   repo: string;
   prNumber: number;
-  sessionId: string;
   /** The enabled transition set; unknown/deferred members are ignored. */
   events: string[];
 }
@@ -900,9 +904,11 @@ export class ManagedGithubAdapter {
       // watch skipped pulls.get for a comment-only channel for the same reason).
       if (events.length === 0) continue;
       const key = prWatchKey(binding.owner, binding.repo, binding.prNumber);
-      // One baseline per PR however the list spells it. The control plane's
-      // binding identity is byte-exact owner/repo, so two spellings of one PR
-      // are two accepted rows and only the first listed one is served here.
+      // This key lowercases owner/repo, so case-variant spellings of one PR
+      // fold onto one observation. The control plane's binding identity hashes
+      // the raw owner/repo, so those variants are two accepted rows and only
+      // the first listed one is served here; any other difference (whitespace,
+      // punctuation) names a different PR to both.
       if (!byKey.has(key)) byKey.set(key, { ...binding, events });
       else folded += 1;
     }
@@ -1009,6 +1015,11 @@ export class ManagedGithubAdapter {
       binding.prNumber,
     );
     const firstObservation = previous === undefined;
+    // The baseline tick is deliberately silent, even for a PR that is already
+    // failing or conflicted when bound: only an edge observed after the
+    // binding fires, so a bind never replays pre-existing state into the
+    // Session. The baseline is still stored, and a head already red at bind
+    // time is pinned below so the CI read gate closes.
     // A missing head never overwrites the last known one (the daemon's
     // UNKNOWN no-overwrite rule).
     const headSha = pr.headSha ?? previous?.headSha;
@@ -1114,6 +1125,25 @@ export class ManagedGithubAdapter {
         ? { ciFiredSha: previous.ciFiredSha }
         : {}),
     };
+    // An observation with no head identity cannot produce a deliverable event
+    // (the inject identity needs one). Do not let it advance the mergeability
+    // baseline: a dirty value would swallow the merge_conflict edge, and the
+    // next headed observation would compare against 'dirty' and never fire for
+    // that episode. The first observation is exempt — it detects nothing by
+    // design, so the value it records is the baseline itself.
+    if (!firstObservation && headSha === undefined) {
+      if (previous?.mergeableState !== undefined)
+        next.mergeableState = previous.mergeableState;
+      else delete next.mergeableState;
+    }
+    // A head already failing when the PR was bound derives no event, but it is
+    // pinned exactly like a fired one: the CI read gate stops on the
+    // once-per-head pin, so without this pin a PR bound while red re-reads its
+    // checks on every tick until the head moves. Pinning injects nothing — the
+    // baseline tick stays silent.
+    if (firstObservation && ci?.aggregate === 'failing' && pr.headSha) {
+      next.ciFiredSha = pr.headSha;
+    }
     const detectedAt = (this.deps.now ?? Date.now)();
     const prId = `${binding.owner}/${binding.repo}#${binding.prNumber}`;
     // The occurrence watermark is durable per PR and outlives prune/rebind:

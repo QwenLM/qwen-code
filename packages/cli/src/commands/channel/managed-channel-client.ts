@@ -159,18 +159,45 @@ export class HttpManagedChannelControlPlane
     }>
   > {
     const answer = await this.call('POST', '/pr-watch:list', {});
-    const bindings = Array.isArray(answer['bindings'])
-      ? (answer['bindings'] as Array<Record<string, unknown>>)
-      : [];
-    return bindings.map((binding) => ({
-      owner: String(binding['owner']),
-      repo: String(binding['repo']),
-      prNumber: Number(binding['prNumber']),
-      sessionId: String(binding['sessionId']),
-      events: Array.isArray(binding['events'])
-        ? (binding['events'] as unknown[]).map(String)
-        : [],
-    }));
+    const bindings: unknown = answer['bindings'];
+    // A 200 that does not carry the documented rows is not an empty binding
+    // set: the adapter prunes every persisted watch the answer omits, so
+    // reading a malformed body as `[]` would delete each PR's baseline, fired
+    // ring and pending queue. Throw — the adapter's watch pass contains the
+    // failure and keeps its state for the next tick.
+    if (!Array.isArray(bindings)) {
+      throw new Error(
+        'Managed channel control plane answered pr-watch:list without a bindings array.',
+      );
+    }
+    return bindings.map((binding, index) => {
+      const row = (binding ?? {}) as Record<string, unknown>;
+      const owner = row['owner'];
+      const repo = row['repo'];
+      const prNumber = row['prNumber'];
+      const events = row['events'];
+      if (
+        typeof owner !== 'string' ||
+        owner.length === 0 ||
+        typeof repo !== 'string' ||
+        repo.length === 0 ||
+        !Number.isSafeInteger(prNumber) ||
+        (prNumber as number) < 1 ||
+        !Array.isArray(events) ||
+        events.some((event) => typeof event !== 'string')
+      ) {
+        throw new Error(
+          `Managed channel control plane answered pr-watch:list with a malformed binding at row ${index}.`,
+        );
+      }
+      return {
+        owner,
+        repo,
+        prNumber: prNumber as number,
+        sessionId: String(row['sessionId']),
+        events: (events as unknown[]).map(String),
+      };
+    });
   }
 
   /**

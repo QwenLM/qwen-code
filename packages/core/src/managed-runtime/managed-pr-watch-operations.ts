@@ -14,6 +14,11 @@ import { ManagedSessionRecordError } from './managed-session-records.js';
 // Session via the existing submitInput primitive. No channel_delivery is planned
 // from a pr_event input (private-only). See
 // docs/design/2026-11-17-managed-github-pr-watch-bound-session.md.
+//
+// A pr_event input is deliberately NOT in the workspace-lifecycle non-blocking
+// source set that lets monitor/automation/channel inputs outlive a close or
+// delete: this input's turn is the work a bound PR asked for, so it must block
+// the Workspace until the turn settles.
 
 /** The `source` of every PR-watch input, as the wake scheduler admits it. */
 export const PR_EVENT_INPUT_SOURCE = 'pr_event';

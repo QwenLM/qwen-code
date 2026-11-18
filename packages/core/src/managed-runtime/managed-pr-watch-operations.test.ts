@@ -225,6 +225,13 @@ describe('cross-language parity fixture (TS side)', () => {
       identity: Record<string, unknown>;
       message: string;
     }>;
+    wrappedTextRefusals: Array<{
+      id: string;
+      rawTextChars: number;
+      wrappedChars: number;
+      wrappedBytes: number;
+      message: string;
+    }>;
     texts: Array<{
       envelope: PrWatchInputEnvelope;
       expected: string;
@@ -271,6 +278,54 @@ describe('cross-language parity fixture (TS side)', () => {
   it('wraps every fixture prompt byte-for-byte', () => {
     for (const t of fixture.texts) {
       expect(prWatchInputText(t.envelope)).toBe(t.expected);
+    }
+  });
+
+  it('refuses a wrapped prompt by the character bound, not the byte bound', () => {
+    // A request at the raw wire maximum is still an accepted request, and the
+    // wrapper's header pushes the wrapped prompt past the character bound. The
+    // envelope stays far under the byte bound, so the character guard is the
+    // only thing that refuses it — and it must, or a committed envelope would
+    // be one the Java ingress refuses.
+    const base: PrWatchInputEnvelope = {
+      owner: 'Owner',
+      repo: 'Repo',
+      prNumber: 7,
+      transition: 'merge_conflict',
+      headSha: 'abc123',
+      evidence: 'mergeable_state=dirty',
+      text: '',
+    };
+    for (const r of fixture.wrappedTextRefusals) {
+      expect([r.id, r.rawTextChars]).toEqual([
+        r.id,
+        MANAGED_PR_WATCH_LIMITS.maxTextChars,
+      ]);
+      const text = prWatchInputText({
+        ...base,
+        text: 'x'.repeat(r.rawTextChars),
+      });
+      expect([r.id, text.length, Buffer.byteLength(text, 'utf8')]).toEqual([
+        r.id,
+        r.wrappedChars,
+        r.wrappedBytes,
+      ]);
+      expect(r.wrappedChars).toBeGreaterThan(
+        MANAGED_PR_WATCH_LIMITS.maxTextChars,
+      );
+      expect(r.wrappedBytes).toBeLessThan(
+        MANAGED_PR_WATCH_LIMITS.maxEnvelopeBytes,
+      );
+      // Exact equality, mirroring the refusal loop above: a message drift
+      // would make the Harness and the Java ingress disagree on the reason.
+      let error: unknown;
+      try {
+        encodePrWatchInputEnvelope({ ...base, text });
+      } catch (e) {
+        error = e;
+      }
+      expect([r.id, error instanceof Error]).toEqual([r.id, true]);
+      expect([r.id, (error as Error).message]).toEqual([r.id, r.message]);
     }
   });
 });

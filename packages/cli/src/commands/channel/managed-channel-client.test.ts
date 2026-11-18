@@ -165,6 +165,69 @@ describe('HttpManagedChannelControlPlane', () => {
     expect(body.text).not.toContain(evidence);
   });
 
+  it('returns the listed pr-watch bindings', async () => {
+    const { plane } = client([
+      {
+        status: 200,
+        body: {
+          bindings: [
+            {
+              owner: 'Owner',
+              repo: 'Repo',
+              prNumber: 7,
+              sessionId: 'session-1',
+              events: ['ci_failure', 'head_change'],
+            },
+          ],
+        },
+      },
+    ]);
+    await expect(plane.listPrWatchBindings()).resolves.toEqual([
+      {
+        owner: 'Owner',
+        repo: 'Repo',
+        prNumber: 7,
+        sessionId: 'session-1',
+        events: ['ci_failure', 'head_change'],
+      },
+    ]);
+  });
+
+  it('refuses a malformed pr-watch:list answer instead of reading it as empty', async () => {
+    // The adapter prunes every watch the answer omits, so coercing a bad body
+    // to `[]` would wipe each persisted baseline, fired ring and pending
+    // queue. Every shape below must throw out of the client.
+    for (const body of [
+      { bindings: null },
+      { bindings: 'Owner/Repo#7' },
+      {
+        bindings: [
+          { owner: 'Owner', repo: 'Repo', prNumber: 7, events: ['ci_failure'] },
+          { owner: 'Owner', repo: 'Repo', prNumber: 0, events: [] },
+        ],
+      },
+      {
+        bindings: [
+          { owner: 'Owner', repo: 'Repo', prNumber: 7, events: 'ci_failure' },
+        ],
+      },
+    ]) {
+      const { plane } = client([{ status: 200, body }]);
+      const refusal = await plane.listPrWatchBindings().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect([JSON.stringify(body), refusal instanceof Error]).toEqual([
+        JSON.stringify(body),
+        true,
+      ]);
+    }
+    const { plane } = client([{ status: 200, body: {} }]);
+    await expect(plane.listPrWatchBindings()).rejects.toThrow(
+      'without a bindings array',
+    );
+  });
+
   it('surfaces the server error code on a refusal', async () => {
     const { plane } = client([
       {

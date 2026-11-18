@@ -1,5 +1,5 @@
 {
-  "comment": "TS/Java parity fixture for the PR-watch identity derivation (episode revision). Generated from packages/core/src/managed-runtime/managed-pr-watch-operations.ts (the authoritative TS contract): inputId joins episode LAST, after headSha; bindingId carries no episode. The Java mirror (PrWatchOperations) must derive byte-identical ids and refuse the same invalid identities with the same messages. Two-directional: the TS contract test (managed-pr-watch-operations.test.ts) reads this file and asserts its own derivation/limits/refusals against it, and the Java parity test does the same, so a change on either side turns the other red.",
+  "comment": "TS/Java parity fixture for the PR-watch identity derivation (episode revision). Generated from packages/core/src/managed-runtime/managed-pr-watch-operations.ts (the authoritative TS contract): inputId joins episode LAST, after headSha; bindingId carries no episode. The Java mirror (PrWatchOperations) must derive byte-identical ids and refuse the same invalid identities with the same messages. Two-directional: the TS contract test (managed-pr-watch-operations.test.ts) reads this file and asserts its own derivation/limits/refusals against it, and the Java parity test does the same, so a change on either side turns the other red. wrappedTextRefusals is asserted by the TS contract test only: the wrapped prompt (prWatchInputText output) is what the envelope's character bound applies to, and a request at the raw wire maximum wraps past it while staying far under the byte bound. The Java service enforces the same relationship at ingress (ManagedPrWatchService.validateEnvelopeBounds), whose bounds are pinned against limits above.",
   "source": "pr_event",
   "transitions": ["ci_failure", "merge_conflict", "head_change"],
   "limits": {
@@ -554,6 +554,15 @@
         "prNumber": 42
       },
       "message": "repo must be non-empty and hold no NUL."
+    }
+  ],
+  "wrappedTextRefusals": [
+    {
+      "id": "wrapped-prompt-over-char-bound",
+      "rawTextChars": 32000,
+      "wrappedChars": 32185,
+      "wrappedBytes": 32185,
+      "message": "PR-watch input envelope text exceeds the character bound."
     }
   ],
   "texts": [

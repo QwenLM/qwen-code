@@ -9968,6 +9968,26 @@ describe('Hosted Harness no-tool session', () => {
       { timeout: settleTimeoutMs(), interval: 50 },
     );
     expect(state.model).toHaveBeenCalled();
+    // The pump reads the pinned envelope's `text`, not its raw bytes: the
+    // prompt must BE the wrapped text. The fragments are asserted from the
+    // edges because the raw JSON also carries them, escaped — only a
+    // startsWith/endsWith pair tells the prompt from the envelope bytes, and
+    // an empty read fails both.
+    const modelInput = state.model.mock.calls.at(-1)![0] as {
+      promptId?: string;
+      prompt?: string;
+    };
+    expect(modelInput.promptId).toBe(inputId);
+    expect(
+      modelInput.prompt?.startsWith(
+        '<pr-watch-event>\n<pr>Owner/Repo#7</pr>\n<transition>ci_failure</transition>\n',
+      ),
+    ).toBe(true);
+    expect(
+      modelInput.prompt?.endsWith(
+        '</pr-watch-event>\nInspect the pull request.',
+      ),
+    ).toBe(true);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
@@ -19744,6 +19764,54 @@ describe('Hosted Harness no-tool session', () => {
       });
     expect(response.status).toBe(409);
     expect(response.body.code).toBe('pr_event_wake_unavailable');
+  });
+
+  it('defers a pr_event input to a Session still in recovery cleanup', async () => {
+    // A resident opened for recovery cleanup registers before its funnel and
+    // pump exist, and the next full load replaces it with one that has both.
+    // The permanent refusal retires the PR-watch binding, so this window must
+    // answer retryably instead.
+    const f = await recoveryFileSession();
+    await f.submit();
+    await f.idle();
+    await f.owe();
+    f.resident.monitorWake?.close();
+    await f.resident.managed.close();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+        passiveManagedRuntimeRecovery: true,
+        cancellationTakeover: true,
+        cancellationPromptId: PROMPT_ID,
+      })
+      .expect(200);
+    expect(loaded.body.recoveryCleanupOnly).toBe(true);
+    const response = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/channels/operations`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        operationId: randomUUID(),
+        kind: 'submit_pr_event_input',
+        inputId: `prw-${'c'.repeat(64)}:input`,
+        owner: 'Owner',
+        repo: 'Repo',
+        prNumber: 7,
+        transition: 'ci_failure',
+        headSha: 'a'.repeat(40),
+        evidence: 'Failed checks: build.',
+        text: 'Inspect the pull request.',
+        episode: 1,
+      });
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('pr_event_wake_pending');
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .expect(204);
   });
 
   it('accepts a pr_event input into the resident Session that owns the wake pump', async () => {

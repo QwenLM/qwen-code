@@ -10,6 +10,10 @@ export const MANAGED_AGENT_PATHS = [
   /^packages\/sdk-java\//,
   /^packages\/cli\/src\/serve\//,
   /^packages\/cli\/src\/commands\/channel\//,
+  // The file that mounts the `channel` subcommand beside that directory: a
+  // subcommand added or rerouted here changes the managed adapters' entry
+  // points without touching anything under commands/channel/.
+  /^packages\/cli\/src\/commands\/channel\.ts$/,
   /^packages\/channels\/github\//,
   /^packages\/core\/src\/managed-runtime\//,
   /^integration-tests\/helpers\/hosted-/,

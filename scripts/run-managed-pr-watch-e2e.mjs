@@ -90,7 +90,6 @@ async function fakeGithub(pr) {
     ciReads: 0,
     ciRefs: [],
     statusRefs: [],
-    journal: [],
     port: 0,
   };
   const server = createServer((req, res) => {
@@ -115,7 +114,6 @@ async function fakeGithub(pr) {
       const pullMatch = url.pathname.match(/^\/repos\/Owner\/Repo\/pulls\/7$/);
       if (req.method === 'GET' && pullMatch) {
         state.pullsGets += 1;
-        state.journal.push('pulls.get');
         return send(200, {
           number: 7,
           state: state.pr.state,
@@ -130,7 +128,6 @@ async function fakeGithub(pr) {
       if (req.method === 'GET' && checksMatch) {
         state.ciReads += 1;
         state.ciRefs.push(checksMatch[1]);
-        state.journal.push('checks');
         return send(200, {
           total_count: state.pr.checks.length,
           check_runs: state.pr.checks,
@@ -153,7 +150,6 @@ async function fakeGithub(pr) {
       ) {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
         state.posted.push(body.body);
-        state.journal.push('postComment');
         return send(201, { id: 9000 + state.posted.length });
       }
       return send(404, { message: `unexpected ${req.method} ${url.pathname}` });
@@ -182,9 +178,8 @@ async function fakeControlPlane(opts = {}) {
     queue: [],
     deliveriesServed: 0,
     claims: 0,
-    journal: [],
     injectDelayMs: opts.injectDelayMs ?? 0,
-    bindings: opts.bindings ?? [
+    bindings: [
       {
         owner: 'Owner',
         repo: 'Repo',
@@ -207,7 +202,6 @@ async function fakeControlPlane(opts = {}) {
       const root = `/internal/managed-channels/v1/channels/${CHANNEL}`;
       if (req.method === 'PUT' && url.pathname === root) {
         state.register.push(body);
-        state.journal.push('register');
         return send(200, {});
       }
       if (req.method === 'POST' && url.pathname === `${root}/disconnect`) {
@@ -218,7 +212,6 @@ async function fakeControlPlane(opts = {}) {
         return send(200, { bindings: state.bindings });
       }
       if (req.method === 'POST' && url.pathname === `${root}/pr-watch:retire`) {
-        state.journal.push('retire');
         const before = state.bindings.length;
         state.bindings = state.bindings.filter(
           (b) =>
@@ -236,7 +229,6 @@ async function fakeControlPlane(opts = {}) {
       }
       if (req.method === 'POST' && url.pathname === `${root}/pr-watch:inject`) {
         state.injectSeen += 1;
-        state.journal.push('inject');
         const answer = () => {
           const inputId = inputIdFor(body);
           const replayed = state.admitted.has(inputId);
@@ -482,9 +474,19 @@ async function scenarioP1() {
     gh.state.ciRefs.length > 0 && gh.state.ciRefs.every((r) => r === SHA_A),
     gh.state.ciRefs,
   );
+  // The aggregate fallback: a head whose check runs all passed still reads the
+  // legacy combined status, so a lane that only ever read check-runs is not
+  // what this seed exercises.
+  check(
+    'legacy combined status read for the reported head',
+    gh.state.statusRefs.length > 0 &&
+      gh.state.statusRefs.every((r) => r === SHA_A),
+    gh.state.statusRefs,
+  );
   // The fired pin keeps ci_failure once-per-head: a flapping aggregate on the
   // same head must not re-fire, and the pin must also suppress the CI re-read.
   const ciReadsAfterFire = gh.state.ciReads;
+  const pullsGetsAfterFire = gh.state.pullsGets;
   gh.state.pr.checks = [
     { name: 'build', status: 'completed', conclusion: 'success' },
   ];
@@ -493,6 +495,14 @@ async function scenarioP1() {
     { name: 'build', status: 'completed', conclusion: 'failure' },
   ];
   await new Promise((r) => setTimeout(r, 2500));
+  // Both "must not happen" checks below are equalities against a snapshot, so
+  // they also hold over a window in which no tick ran at all. Prove the watch
+  // actually observed the PR inside it.
+  check(
+    'watch passes kept observing the PR through the flap window',
+    gh.state.pullsGets > pullsGetsAfterFire,
+    { pullsGetsAfterFire, now: gh.state.pullsGets },
+  );
   check(
     'ci_failure once-per-head (flap does not re-fire)',
     cp.state.injects.length === 1,
@@ -628,13 +638,20 @@ async function scenarioP3() {
     throw e;
   });
   const entry = watchEntry(ws);
+  const pending = entry?.pending?.[0];
   check(
     'pending persisted before inject answer',
-    entry?.pending?.length === 1 &&
-      entry.pending[0].transition === 'ci_failure',
+    pending?.transition === 'ci_failure',
     entry?.pending,
   );
-  const pending = entry.pending[0];
+  if (!pending) {
+    // Everything below reads the persisted occurrence; without it the probe
+    // would throw a TypeError and lose the recorded failures on the way out.
+    proc1.child.kill('SIGKILL');
+    throw new Error(
+      'P3 cannot continue: the pending entry was not persisted before the inject answer.',
+    );
+  }
   const replayId = inputIdFor(pending);
   check('pending carries a durable episode', pending.episode >= 1, pending);
   proc1.child.kill('SIGKILL');
@@ -763,6 +780,13 @@ try {
   await scenarioP2();
   await scenarioP3();
   await scenarioP4();
+} catch (error) {
+  // A scenario that throws (a precondition, a timeout) would otherwise leave
+  // the recorded failures unread behind the stack trace.
+  console.log(
+    `\nPR-WATCH E2E ABORTED with ${failures.length} recorded failure(s): ${failures.join('; ') || 'none'}`,
+  );
+  throw error;
 } finally {
   for (const cleanup of cleanups.reverse())
     await Promise.resolve(cleanup()).catch(() => {});

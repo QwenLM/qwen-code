@@ -504,7 +504,6 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
     }));
     expect(await client.getPullRequest('Owner', 'Repo', 9)).toEqual({
       headSha: 'sha-a',
-      mergeable: true,
       mergeableState: 'clean',
       state: 'open',
     });
@@ -521,7 +520,7 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
     }));
     expect(
       await computing.client.getPullRequest('Owner', 'Repo', 9),
-    ).toMatchObject({ mergeable: null, mergeableState: undefined });
+    ).toMatchObject({ mergeableState: undefined });
 
     // Empty strings normalize to absent: the state validator refuses an
     // empty baseline field, so the writer must never persist one.

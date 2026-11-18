@@ -50,12 +50,14 @@ Legacy 世界**刚把 channel 侧 PR watch 退役、检测收敛进 daemon**（`
 2. **检测层（managed adapter）。** adapter tick 里的 PR-watch pass，复用既有 Octokit deps、限流分类、poll-floor。观察绑定 PR（`pulls.get` head/mergeable/state + 条件 checks/status），按 daemon 语义推导 transition，持久 durable pending + fired-ring 于新 watch state 段。**不**公开发帖。
 3. **注入层（控制面）。** 新内部路由向**绑定** Session 提交 PR-event input + wake（目标由绑定强制，绝非调用方指定），复用 `submitInput`。事件携带 durable envelope（PR 身份、transition、head SHA、证据）在提交前钉住，派生幂等 `inputId` 使崩溃重放到同一 admission。
 
-### 关键设计决策（待确认）
+### 关键设计决策（已定）
 
-- **D1 — 注入 source。** (a) 新 `pr_event` input source（语义干净；须同时加进 TS `isWakeInputSource` 与 Java `JdbcWakeRecoveryStore.SOURCES` 双白名单及其钉死测试），或 (b) 复用既有白名单 source（经预留 webhook 槽的 `automation`，或 `channel`）以免改白名单但继承该域门。倾向：新 `pr_event` source 最贴切；复用 `automation` 会把 PR 事件耦合进 automation 域门。
-- **D2 — 绑定存储。** 专用 PR-watch 绑定表 vs 扩展 `ma_channel_binding` vs route-rebind。route-rebind 契约就绪但 rebind 整个 channel route（也影响 @mention 投递），对 per-PR watch 目标多半不对。倾向：专用 PR-watch 绑定，不动 channel route。
-- **D3 — 检测归属。** adapter 侧 watch（adapter 持 token）调控制面注入路由，vs 控制面侧 watch。倾向：adapter 侧检测（持凭据与 poll loop），控制面持绑定 + 注入 + 授权。须与 daemon `sessionPrWatch` 作用域调和避免重复 watch。
-- **D4 — private-only 首切片。** watch 事件注入绑定 Session，不自动发公开回复。公开回复 delivery producer 是后续。对齐 Legacy 决策，避免切片 1 的 delivery-producer 工作。
+五项均已定；D5 在初稿之后才裁定，完整结论见下方。各条保留备选方案，作为「否决了什么」的记录。
+
+- **D1 — 注入 source（已定：新增 `pr_event`）。** 选新增 `pr_event` input source，而不是复用既有白名单 source（经预留 webhook 槽的 `automation`，或 `channel`）：复用 `automation` 会把 PR 事件耦合进 automation 域门，专用 source 最贴切。它已同时加进 TS `isWakeInputSource` 与 Java `JdbcWakeRecoveryStore.SOURCES` 双白名单及其钉死测试，并与兄弟 wake source 一同在历史维护期间被准入。
+- **D2 — 绑定存储（已定：专用 PR-watch 绑定）。** 选新增专用 PR-watch 绑定表，不扩展 `ma_channel_binding`、也不走 route-rebind。route-rebind 契约就绪但 rebind 整个 channel route（也影响 @mention 投递），对 per-PR watch 目标不对；channel route 保持不动。
+- **D3 — 检测归属（已定：adapter 侧检测）。** adapter 持 token 与 poll loop，所以由它观察；控制面持绑定 + 注入 + 授权。managed 与 daemon `sessionPrWatch` 的作用域在切片 1 保持不相交，而不是调和。
+- **D4 — private-only 首切片（已定）。** watch 事件注入绑定 Session，不自动发公开回复。公开回复 delivery producer 是后续。对齐 Legacy 决策，避免切片 1 的 delivery-producer 工作。
 - **D5 — 授权角色（已定）。** 四个路由（`pr-watch:create`、`pr-watch:list`、`pr-watch:retire`、`pr-watch:inject`）都走既有 internal channel-adapter 面：租户头 + 可信 adapter + 启用门，在 `SurfaceRegistry` 注册为 `RuleClass.INTERNAL_CHANNEL_ADAPTER`。没有每请求 actor 或 writer 凭据；信任边界是内部监听器，与已合入的 channel register/inbound 路由完全一致。注入强制绑定 Session 为目标（绝非调用方指定）。slice 1 考虑过 OPERATOR 公共路由并否决：在接口仍属内部时，它会在 adapter token 之外再加一套凭据系统，无收益。
 
 ## 有界首切片（拟议）
@@ -129,7 +131,7 @@ headSha, evidence, text }`；`text` 存 XML 包裹后的提示词，wake pump �
 - **episode 水位跨剪枝/改绑存活。** 准入台账永久且不含绑定维度，故 per-PR 发生计数存于持久 `episodes` 映射、跨 baseline 剪枝保留；改绑续用计数，而非重派生已准入的 inputId。该映射独立于可剪枝的 baseline 限界（超 cap 逐出最旧水位）。
 - **终态 PR。** merged/closed 为终态：不驱动 transition，其绑定被退订（幂等、终态期间重驱），释放观测名额并允许改绑。
 - **所有权迁移守卫统计两类绑定。** channel 重注册在存在遗留绑定时拒绝 actor/Workspace/cwd 迁移；预检查与同语句守卫现在同时统计 `ma_pr_watch_binding` 与 `ma_channel_binding`，且 `inject` 每次复核绑定 Session 的 Workspace（fail-closed，Session 已消失则惰性退订绑定）。
-- **wake pump 是准入前置。** Session 无进程内 wake pump（如 external-files profile）时拒绝 `submit_pr_event_input`（409），绝不把 input 确认进一个无法执行它的 Session。
+- **wake pump 是准入前置。** Session 无进程内 wake pump（如 external-files profile）时拒绝 `submit_pr_event_input`（409），绝不把 input 确认进一个无法执行它的 Session。为恢复清理而打开的常驻 Session 在其 pump 存在之前就已注册，下一次完整 load 会把它换成两者兼备的实例；只有这个窗口返回可重试的 503，于是 adapter 既不退订绑定、也不记下假的已触发。
 - **入口对包装后信封限界。** 路由在 staging 前拒绝包装后 prompt 超 Harness 字符/字节上限的负载，使被接受的请求即可准入（不留永久 staged、不可注入的行）。线上上限保持 `text ≤ 32000`、`evidence ≤ 4000`。
 - **按条目隔离 drain。** 瞬时注入失败隔离到该 PR 的队列；一个不健康 Session 不饿死其他绑定。被 fired 环抑制的 `ci_failure` 仍钉住该 head，CI 读取不会每 tick 重发。
 - **已提交的真实进程见证。** adapter↔控制面 E2E 为永久脚本 `scripts/run-managed-pr-watch-e2e.mjs`（`npm run test:e2e:managed-pr-watch`），接入 Hosted failover E2E job 并由 `scripts/tests/hosted-process-ci.test.js` 钉死。它跑 bundled CLI + 真实 Octokit 对可变 fake GitHub 与 recording fake 控制面（用真实 core `prWatchInputId` 派生 id）；其 private-only、per-ref CI、once-per-head 检查读取记录计数器，故可失败。

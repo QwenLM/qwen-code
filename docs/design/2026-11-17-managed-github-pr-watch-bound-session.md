@@ -130,29 +130,32 @@ role/action template`. New record body + table (or an extension of
      (PR identity, transition, head SHA, evidence) pinned before commit, and a derived
      idempotent `inputId` so a crash replays to the same admission.
 
-### Key design decisions (for confirmation)
+### Key design decisions (settled)
 
-- **D1 — Injection source.** Either (a) a new `pr_event` input source (clean
-  semantics; requires adding it to BOTH the TS `isWakeInputSource` and Java
-  `JdbcWakeRecoveryStore.SOURCES` whitelists and their pin tests), or (b) reuse an
-  existing whitelisted source (`automation` via the reserved webhook slot, or
-  `channel`) to avoid whitelist changes but inherit that domain's gates. Recommendation
-  pending the wake/domain-gate analysis: a new `pr_event` source is the most honest
-  fit; reusing `automation` couples PR events to the automation domain gates.
-- **D2 — Binding storage.** New dedicated PR-watch binding table vs extending
-  `ma_channel_binding` vs route-rebind. Route-rebind is contract-ready but rebinds the
-  whole channel route (affects @mention delivery too), which is likely wrong for a
-  per-PR watch target. Recommendation: a dedicated PR-watch binding, leaving the
-  channel route untouched.
-- **D3 — Detection ownership.** Adapter-side watch (adapter holds the token) calling a
-  control-plane injection route, vs control-plane-side watch. Recommendation:
-  adapter-side detection (it owns the credential and the poll loop), control-plane
-  owns binding + injection + authorization. Must reconcile with daemon `sessionPrWatch`
-  scope to avoid double-watch.
-- **D4 — Private-only first slice.** Watch events inject into the bound Session and do
-  not auto-post a public reply. The public-reply delivery producer is a follow-up. This
-  matches the Legacy decision and avoids the delivery-producer work in slice 1.
-- **D5 — Authorization role (resolved).** All four routes (`pr-watch:create`,
+All five are settled; D5 was resolved after the first draft and is recorded in full
+below. The alternatives are kept as the record of what each decision rejected.
+
+- **D1 — Injection source (settled: a new `pr_event` source).** A new `pr_event`
+  input source was chosen over reusing an existing whitelisted one (`automation` via
+  the reserved webhook slot, or `channel`): reusing `automation` couples PR events to
+  the automation domain gates, and the clean source is the honest fit. It is added to
+  BOTH the TS `isWakeInputSource` and Java `JdbcWakeRecoveryStore.SOURCES` whitelists
+  and their pin tests, and admitted beside the sibling wake sources during history
+  maintenance.
+- **D2 — Binding storage (settled: a dedicated PR-watch binding).** A new dedicated
+  PR-watch binding table was chosen over extending `ma_channel_binding` or
+  route-rebind. Route-rebind is contract-ready but rebinds the whole channel route
+  (affects @mention delivery too), which is wrong for a per-PR watch target; the
+  channel route stays untouched.
+- **D3 — Detection ownership (settled: adapter-side detection).** The adapter holds
+  the token and the poll loop, so it observes; the control plane owns binding +
+  injection + authorization. Managed and daemon `sessionPrWatch` scopes stay disjoint
+  rather than reconciled in slice 1.
+- **D4 — Private-only first slice (settled).** Watch events inject into the bound
+  Session and do not auto-post a public reply. The public-reply delivery producer is a
+  follow-up. This matches the Legacy decision and avoids the delivery-producer work in
+  slice 1.
+- **D5 — Authorization role (settled).** All four routes (`pr-watch:create`,
   `pr-watch:list`, `pr-watch:retire`, `pr-watch:inject`) ride the existing internal
   channel-adapter surface: tenant header + trusted adapter + enablement gate,
   registered in the `SurfaceRegistry` as `RuleClass.INTERNAL_CHANNEL_ADAPTER`. There
@@ -272,7 +275,10 @@ when the guard is removed:
   every call (failing closed, lazily retiring a binding whose Session is gone).
 - **Wake pump is an admission precondition.** `submit_pr_event_input` is refused
   (409) when the Session has no in-process wake pump (e.g. the external-files
-  profile), so an input is never acknowledged into a Session that cannot run it.
+  profile), so an input is never acknowledged into a Session that cannot run it. A
+  resident opened for recovery cleanup registers before its pump exists, and the next
+  full load replaces it with one that has both; that one window answers a retryable
+  503, so the adapter neither retires the binding nor records a false fired.
 - **Ingress bounds the wrapped envelope.** The route refuses a payload whose wrapped
   prompt exceeds the Harness char/byte caps before staging, so an accepted request is
   an admittable one (no permanently-staged un-injectable row). The wire limits stay

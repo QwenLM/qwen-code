@@ -184,7 +184,6 @@ function fakeDeps(
     pollFloor: 0,
     pull: {
       headSha: 'sha-a',
-      mergeable: true,
       mergeableState: 'clean',
       state: 'open',
     } as GithubPullObservation,
@@ -410,7 +409,6 @@ function binding(
     owner: 'Owner',
     repo: 'Repo',
     prNumber: 9,
-    sessionId: 'session-1',
     events: ['ci_failure', 'merge_conflict', 'head_change'],
     ...overrides,
   };
@@ -2356,7 +2354,6 @@ describe('managed GitHub adapter PR watch', () => {
     fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
     fake.knobs.pull = {
       headSha: 'sha-a',
-      mergeable: false,
       mergeableState: 'dirty',
       state: 'open',
     };
@@ -2372,6 +2369,32 @@ describe('managed GitHub adapter PR watch', () => {
     // Staying red/dirty is not a transition: the second observation agrees.
     await adapter.tick();
     expect(watch.injected).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('pins a head already failing at bind time so later ticks skip its CI read', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['ci_failure'] })]);
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    await adapter.tick(); // baseline: already red, silent
+    expect(watch.injected).toHaveLength(0);
+    expect(readState(adapter).watch!.prs[PR_KEY]!.ciFiredSha).toBe('sha-a');
+    // The baseline pin closes the once-per-head gate: a head that already
+    // failed can never fire, so re-reading its checks is pure budget.
+    const reads = fake.ciSeen.length;
+    await adapter.tick();
+    await adapter.tick();
+    expect(fake.ciSeen.length).toBe(reads);
+    expect(watch.injected).toHaveLength(0);
+    // A new head is a fresh evaluation: it is read and fires once.
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick();
+    expect(fake.ciSeen.length).toBe(reads + 1);
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]).toMatchObject({
+      transition: 'ci_failure',
+      headSha: 'sha-b',
+    });
     await adapter.disconnect();
   });
 
@@ -2481,7 +2504,6 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.tick(); // baseline clean
     const dirty = {
       headSha: 'sha-a',
-      mergeable: false,
       mergeableState: 'dirty',
       state: 'open',
     };
@@ -2491,7 +2513,7 @@ describe('managed GitHub adapter PR watch', () => {
     expect(watch.injected[0]!.transition).toBe('merge_conflict');
     await adapter.tick(); // still dirty: no re-fire
     expect(watch.injected).toHaveLength(1);
-    fake.knobs.pull = { ...dirty, mergeable: true, mergeableState: 'clean' };
+    fake.knobs.pull = { ...dirty, mergeableState: 'clean' };
     await adapter.tick();
     fake.knobs.pull = dirty;
     await adapter.tick();
@@ -2502,13 +2524,12 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.disconnect();
   });
 
-  it('never overwrites mergeability with a computing (null) observation', async () => {
+  it('never overwrites mergeability with a computing (UNKNOWN) observation', async () => {
     const { adapter, fake, watch } = await watchAdapter();
     watch.setBindings([binding()]);
     await adapter.tick(); // baseline clean
     fake.knobs.pull = {
       headSha: 'sha-a',
-      mergeable: null,
       mergeableState: undefined,
       state: 'open',
     };
@@ -2517,7 +2538,6 @@ describe('managed GitHub adapter PR watch', () => {
     expect(readState(adapter).watch!.prs[PR_KEY]!.mergeableState).toBe('clean');
     fake.knobs.pull = {
       headSha: 'sha-a',
-      mergeable: false,
       mergeableState: 'dirty',
       state: 'open',
     };
@@ -2533,7 +2553,6 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.tick(); // baseline sha-a
     fake.knobs.pull = {
       headSha: undefined,
-      mergeable: true,
       mergeableState: 'clean',
       state: 'open',
     };
@@ -2551,19 +2570,100 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.disconnect();
   });
 
+  it('delivers a merge_conflict from a headless observation by carrying the known head', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    await adapter.tick(); // baseline clean on sha-a
+    // The observation names no head, but the baseline does: the carried head is
+    // the inject identity, so the dirty edge is deliverable right away (the
+    // baseline no-advance rule below only covers a never-known head).
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]).toMatchObject({
+      transition: 'merge_conflict',
+      headSha: 'sha-a',
+    });
+    expect(readState(adapter).watch!.prs[PR_KEY]!.mergeableState).toBe('dirty');
+    await adapter.disconnect();
+  });
+
+  it('does not advance the mergeability baseline from a headless observation', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    // A never-known head, with a known mergeability: a headless dirty answer
+    // cannot be injected here, so it must not advance the baseline past the
+    // edge either — the next headed observation still has to fire.
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: 'clean',
+      state: 'open',
+    };
+    await adapter.tick();
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(readState(adapter).watch!.prs[PR_KEY]!.mergeableState).toBe('clean');
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('records no mergeability from a headless observation with no baseline value', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    // A never-known head and mergeability: the first observation stores no
+    // mergeableState, so a later headless dirty answer must not create one.
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: undefined,
+      state: 'open',
+    };
+    await adapter.tick();
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(
+      readState(adapter).watch!.prs[PR_KEY]!.mergeableState,
+    ).toBeUndefined();
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
   it('fires merge_conflict from a never-known mergeability (undefined → dirty)', async () => {
     const { adapter, fake, watch } = await watchAdapter();
     watch.setBindings([binding()]);
     fake.knobs.pull = {
       headSha: 'sha-a',
-      mergeable: null,
       mergeableState: undefined,
       state: 'open',
     };
     await adapter.tick(); // first observation: UNKNOWN, silent
     fake.knobs.pull = {
       headSha: 'sha-a',
-      mergeable: false,
       mergeableState: 'dirty',
       state: 'open',
     };
@@ -2663,7 +2763,6 @@ describe('managed GitHub adapter PR watch', () => {
     fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
     fake.knobs.pull = {
       headSha: 'sha-b',
-      mergeable: false,
       mergeableState: 'dirty',
       state: 'open',
     };
@@ -2682,7 +2781,6 @@ describe('managed GitHub adapter PR watch', () => {
     fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
     fake.knobs.pull = {
       headSha: 'sha-a',
-      mergeable: false,
       mergeableState: 'dirty',
       state: 'open',
     };
@@ -2715,18 +2813,14 @@ describe('managed GitHub adapter PR watch', () => {
     const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
       log: (line) => lines.push(line),
     });
-    // The control plane's binding identity is byte-exact owner/repo, so both
-    // spellings are accepted rows. This watch keys case-insensitively and
-    // serves only the first: the folded row is inert, its Session never
-    // receives an event, so the fold must be visible instead of silent.
+    // The control plane's binding identity hashes the raw owner/repo, so both
+    // spellings are accepted rows (each bound to its own Session). This watch
+    // keys case-insensitively and serves only the first: the folded row is
+    // inert, its Session never receives an event, so the fold must be visible
+    // instead of silent.
     watch.setBindings([
       binding({ owner: 'octocat', repo: 'hello-world', prNumber: 7 }),
-      binding({
-        owner: 'Octocat',
-        repo: 'hello-world',
-        prNumber: 7,
-        sessionId: 'session-2',
-      }),
+      binding({ owner: 'Octocat', repo: 'hello-world', prNumber: 7 }),
     ]);
     await adapter.tick();
     expect(fake.pullsSeen).toEqual([
@@ -2781,6 +2875,77 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.disconnect();
   });
 
+  it('aborts the pass on a revoked credential (401), not just on a rate limit', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    // A revoked token is shared by every watched PR, and a 401 is deliberately
+    // NOT a definitive per-PR read failure: without the abort arm every tick
+    // issues one doomed pulls.get per binding.
+    fake.knobs.getPullRequestError = Object.assign(
+      new Error('401 Unauthorized'),
+      { status: 401 },
+    );
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(1);
+    expect(
+      lines.some((l) =>
+        /pass aborted at owner\/repo#9 \(credential\/rate limit\)/.test(l),
+      ),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('aborts the pass on a bare 429 with no rate-limit headers', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    // GitHub (or a proxy in front of it) may answer 429 without retry-after or
+    // a budget header: the status alone is the shared-limit signal, so the arm
+    // must not depend on isRateLimitAnswer's header checks.
+    fake.knobs.getPullRequestError = Object.assign(
+      new Error('429 Too Many Requests'),
+      { status: 429 },
+    );
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(1);
+    expect(
+      lines.some((l) =>
+        /pass aborted at owner\/repo#9 \(credential\/rate limit\)/.test(l),
+      ),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('aborts the pass when the CI read answers a shared credential failure', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    // A CI read degrades on transient failures, but a shared one must rethrow
+    // out of observePr and condemn the pass: swallowing it would walk every
+    // remaining binding into the same refusal.
+    fake.knobs.getCiStatusError = Object.assign(new Error('401 Unauthorized'), {
+      status: 401,
+    });
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(1);
+    expect(fake.ciSeen).toHaveLength(1);
+    expect(watch.injected).toHaveLength(0);
+    expect(
+      lines.some((l) =>
+        /pass aborted at owner\/repo#9 \(credential\/rate limit\)/.test(l),
+      ),
+    ).toBe(true);
+    expect(lines.some((l) => /continuing without CI/.test(l))).toBe(false);
+    await adapter.disconnect();
+  });
+
   it('isolates a permanently unreadable PR and keeps watching the rest', async () => {
     const { adapter, fake, watch } = await watchAdapter();
     watch.setBindings([binding(), binding({ prNumber: 10 })]);
@@ -2802,7 +2967,6 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.tick();
     fake.knobs.pull = {
       headSha: 'sha-a',
-      mergeable: false,
       mergeableState: 'dirty',
       state: 'open',
     };
@@ -2969,7 +3133,6 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.tick(); // baseline clean
     const dirty = {
       headSha: 'sha-a',
-      mergeable: false,
       mergeableState: 'dirty',
       state: 'open',
     };
@@ -2984,13 +3147,12 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.tick();
     expect(readState(adapter).watch!.prs[PR_KEY]).toBeUndefined();
     expect(readState(adapter).watch!.episodes![PR_KEY]).toBe(1);
-    // Rebind to a second Session and recur: the episode resumes at 2, so the
-    // derived input id is new, never the already-admitted episode-1 id. A
-    // prune that dropped the counter would restart at 1 and collide.
-    watch.setBindings([
-      binding({ events: ['merge_conflict'], sessionId: 'session-2' }),
-    ]);
-    fake.knobs.pull = { ...dirty, mergeable: true, mergeableState: 'clean' };
+    // Rebind (to a second Session, on the wire) and recur: the episode
+    // resumes at 2, so the derived input id is new, never the
+    // already-admitted episode-1 id. A prune that dropped the counter would
+    // restart at 1 and collide.
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    fake.knobs.pull = { ...dirty, mergeableState: 'clean' };
     await adapter.tick(); // rebind baseline (first observation, silent)
     fake.knobs.pull = dirty;
     await adapter.tick();
@@ -3019,7 +3181,6 @@ describe('managed GitHub adapter PR watch', () => {
     second.watch.setBindings([binding({ events: ['merge_conflict'] })]);
     second.fake.knobs.pull = {
       headSha: 'sha-a',
-      mergeable: false,
       mergeableState: 'dirty',
       state: 'open',
     };
@@ -3044,7 +3205,6 @@ describe('managed GitHub adapter PR watch', () => {
     await adapter.tick(); // baseline open
     fake.knobs.pull = {
       headSha: 'sha-a',
-      mergeable: true,
       mergeableState: 'clean',
       state: 'closed',
     };
@@ -3072,7 +3232,6 @@ describe('managed GitHub adapter PR watch', () => {
       prNumber === 9
         ? {
             headSha: 'sha-a',
-            mergeable: true,
             mergeableState: 'clean',
             state: 'closed',
           }
@@ -3209,7 +3368,6 @@ describe('managed GitHub adapter PR watch', () => {
       fake.compromise();
       return {
         headSha: 'sha-a',
-        mergeable: true,
         mergeableState: 'clean',
         state: 'closed',
       };

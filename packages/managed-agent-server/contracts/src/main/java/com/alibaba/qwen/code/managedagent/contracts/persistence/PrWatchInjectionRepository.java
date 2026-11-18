@@ -11,9 +11,6 @@ import java.util.Optional;
  * ingress discipline, design 2026-11-17-managed-github-pr-watch-bound-session).
  */
 public interface PrWatchInjectionRepository {
-    /** The states an injection row can be in. */
-    java.util.List<String> INJECTION_STATES = java.util.List.of("staged", "admitted");
-
     /** One pinned injection: the envelope as first admitted, any state. */
     public record PrWatchInjection(
             String tenantId,

@@ -97,6 +97,38 @@ export async function submitPrEventInput(
   key: ManagedSessionKey,
   params: PrWatchSubmitParams,
 ): Promise<PrWatchSubmitResult> {
+  return serial(store, () => inject(store, key, params));
+}
+
+/**
+ * One write lane per bound Session. The replay guard reads the journal and the
+ * commit follows two awaits later, so a concurrent duplicate delivery of one
+ * input id would otherwise pass the guard twice, orphan a second envelope pair
+ * and report `replayed: false` for an admission that already happened. The
+ * sibling channel funnel serializes the same read-then-commit shape.
+ */
+const lanes = new WeakMap<HostedPrWatchStore, Promise<unknown>>();
+
+function serial<T>(
+  store: HostedPrWatchStore,
+  work: () => Promise<T>,
+): Promise<T> {
+  const run = (lanes.get(store) ?? Promise.resolve()).then(work);
+  lanes.set(
+    store,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
+}
+
+async function inject(
+  store: HostedPrWatchStore,
+  key: ManagedSessionKey,
+  params: PrWatchSubmitParams,
+): Promise<PrWatchSubmitResult> {
   if (acceptedPrWatchInput(store, params.inputId) !== undefined) {
     return {
       inputId: params.inputId,

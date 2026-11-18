@@ -11796,8 +11796,16 @@ export function registerHostedHarnessSessionRoutes(
           // acknowledge the input and never run it, while the adapter records
           // the transition as fired. Refuse so the adapter sees an actionable
           // failure instead of a false 202.
+          //
+          // A resident opened for recovery cleanup is the one absence that is
+          // not permanent: it registers before its funnel and pump exist, and
+          // the next full load replaces it with one that has both. The
+          // permanent 409 below retires the binding, so that window answers a
+          // retryable 503 instead.
           if (!session.monitorWake)
-            return error(res, 409, 'pr_event_wake_unavailable');
+            return session.recoveryCleanupOnly
+              ? error(res, 503, 'pr_event_wake_pending')
+              : error(res, 409, 'pr_event_wake_unavailable');
           result = {
             ...(await submitPrEventInput(
               session.managed,

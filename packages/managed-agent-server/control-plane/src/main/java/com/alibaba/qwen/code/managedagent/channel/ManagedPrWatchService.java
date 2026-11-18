@@ -11,7 +11,14 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.PrWatchInjection
 import com.alibaba.qwen.code.managedagent.contracts.persistence.PrWatchInjectionRepository.PrWatchInjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilityFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapacityFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessGenerationFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessProtocolFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessSessionRefusedFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.ChannelInstance;
@@ -188,38 +195,59 @@ public class ManagedPrWatchService {
                         "pr_watch_injection_conflict",
                         "The PR event was already admitted to another Session.");
             }
+            // The pinned Session gets the same Workspace/ACTIVE revalidation
+            // as the bound Session: a row staged before an ownership move must
+            // not replay into a Session outside the current owner's grant. A
+            // pinned Session that is gone, closed, or left the Workspace is the
+            // dead-binding case below — release and re-stage, never deliver.
+            boolean pinnedAccepts;
             try {
-                Map<String, Object> replay = harness.runChannelOperation(
-                        tenantId, row.sessionId(), submitBody(row));
-                // The pinned Session has the input: admit its row and return
-                // the original admission. Releasing here would re-deliver an
-                // occurrence that Session already acted on.
-                if (injections.admit(tenantId, inputId,
-                        row.sessionId()) == null) {
-                    throw new ManagedAgentException(409,
-                            "pr_watch_injection_conflict",
-                            "The injection row was admitted with another"
-                                    + " identity.");
+                requireTargetSession(tenantId, instance, row.sessionId());
+                pinnedAccepts = true;
+            } catch (ManagedAgentException error) {
+                if (error.getStatus() != 404
+                        && !"session_not_active".equals(error.getCode())) {
+                    throw error;
                 }
-                return admission(replay, row);
-            } catch (HarnessFailure error) {
-                // The pinned Session cannot accept the input (dead or
-                // closed): the receipt never committed. Release it and
-                // re-stage under the current binding so a dead binding does
-                // not block the PR forever — the lazy-retire rule.
-                if (!injections.releaseStaged(tenantId, inputId)) {
-                    throw new ManagedAgentException(409,
-                            "pr_watch_injection_conflict",
-                            "The PR event was already admitted to another"
-                                    + " Session.");
+                pinnedAccepts = false;
+            }
+            if (pinnedAccepts) {
+                try {
+                    Map<String, Object> replay = harness.runChannelOperation(
+                            tenantId, row.sessionId(), submitBody(row));
+                    // The pinned Session has the input: admit its row and
+                    // return the original admission. Releasing here would
+                    // re-deliver an occurrence that Session already acted on.
+                    return admission(replay,
+                            admitOrConflict(tenantId, inputId, row));
+                } catch (HarnessFailure error) {
+                    if (!provesNonCommit(error)) {
+                        // Outcome unknown: the replay may have committed. Keep
+                        // the row pinned to its Session and retry; releasing
+                        // here could re-deliver an occurrence that Session
+                        // already acted on.
+                        throw ManagedChannelService.translate(error);
+                    }
+                    // A refusal verdict proves the receipt never committed:
+                    // fall through to release and re-stage.
                 }
-                row = injections.findOrCreate(candidate);
-                if (!row.sessionId().equals(binding.sessionId())) {
-                    throw new ManagedAgentException(409,
-                            "pr_watch_injection_conflict",
-                            "The PR event was already admitted to another"
-                                    + " Session.");
-                }
+            }
+            // The pinned Session cannot accept the input (dead, closed, or
+            // moved out of the Workspace): release the staged receipt and
+            // re-stage under the current binding so a dead binding does not
+            // block the PR forever — the lazy-retire rule.
+            if (!injections.releaseStaged(tenantId, inputId)) {
+                throw new ManagedAgentException(409,
+                        "pr_watch_injection_conflict",
+                        "The PR event was already admitted to another"
+                                + " Session.");
+            }
+            row = injections.findOrCreate(candidate);
+            if (!row.sessionId().equals(binding.sessionId())) {
+                throw new ManagedAgentException(409,
+                        "pr_watch_injection_conflict",
+                        "The PR event was already admitted to another"
+                                + " Session.");
             }
         }
         if ("admitted".equals(row.state())) {
@@ -240,13 +268,59 @@ public class ManagedPrWatchService {
             result = harness.runChannelOperation(tenantId, row.sessionId(),
                     submitBody(row));
         } catch (HarnessFailure error) {
+            // A refusal verdict proves the input never committed: release the
+            // staged receipt so a deterministic refusal does not orphan it. An
+            // outcome-unknown failure keeps the row staged for the retry.
+            if (provesNonCommit(error)) {
+                injections.releaseStaged(tenantId, inputId);
+            }
             throw ManagedChannelService.translate(error);
         }
-        if (injections.admit(tenantId, inputId, row.sessionId()) == null) {
-            throw new ManagedAgentException(409, "pr_watch_injection_conflict",
-                    "The injection row was admitted with another identity.");
+        return admission(result, admitOrConflict(tenantId, inputId, row));
+    }
+
+    /**
+     * Admits the staged row under the caller's identity. A null from admit()
+     * means no staged row matched: either a concurrent rebind re-staged it for
+     * another Session (a genuine conflict) or a concurrent inject of the same
+     * occurrence already admitted it to this Session — return that admission
+     * rather than a false conflict.
+     */
+    private PrWatchInjection admitOrConflict(String tenantId, String inputId,
+            PrWatchInjection row) {
+        PrWatchInjection admitted = injections.admit(tenantId, inputId,
+                row.sessionId());
+        if (admitted != null) {
+            return admitted;
         }
-        return admission(result, row);
+        PrWatchInjection current = injections.find(tenantId, inputId)
+                .orElse(null);
+        if (current != null && "admitted".equals(current.state())
+                && current.sessionId().equals(row.sessionId())) {
+            return current;
+        }
+        throw new ManagedAgentException(409, "pr_watch_injection_conflict",
+                "The injection row was admitted with another identity.");
+    }
+
+    /**
+     * Whether a Harness failure proves the input was NOT committed, so the
+     * staged receipt is releasable. Only a refusal verdict does: an
+     * outcome-unknown failure (a dropped connection, a mutation whose outcome
+     * the Harness could not determine, a 5xx after the journal may have
+     * committed) proves nothing — releasing on it could re-deliver an
+     * occurrence the pinned Session already acted on.
+     */
+    private static boolean provesNonCommit(HarnessFailure error) {
+        if (error instanceof HarnessHttpFailure http) {
+            return http.getStatusCode() < 500;
+        }
+        return error instanceof HarnessSessionRefusedFailure
+                || error instanceof HarnessAttachmentLostFailure
+                || error instanceof HarnessCapabilityFailure
+                || error instanceof HarnessGenerationFailure
+                || error instanceof HarnessProtocolFailure
+                || error instanceof HarnessCapacityFailure;
     }
 
     /**
