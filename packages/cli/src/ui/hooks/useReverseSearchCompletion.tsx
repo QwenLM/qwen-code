@@ -67,13 +67,6 @@ export function useReverseSearchCompletion(
     }
   }, [reverseSearchActive]);
 
-  // Also clear cache when history changes so new items are considered
-  useEffect(() => {
-    prevQueryRef.current = '';
-    prevMatchesRef.current = [];
-    prevHistoryRef.current = null;
-  }, [history]);
-
   const searchHistory = useCallback(
     (query: string, items: readonly string[]) => {
       const out: Suggestion[] = [];
