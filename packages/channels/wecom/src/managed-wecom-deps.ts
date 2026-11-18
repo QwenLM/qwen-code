@@ -60,6 +60,13 @@ function createStreamClient(
   if (settings.wsUrl) options.wsUrl = settings.wsUrl;
   const client = new WSClient(options);
   let authenticated = false;
+  // Whether the initial handshake ever completed, tracked separately from
+  // current send readiness: a server kick is terminal once this stream has been
+  // established, even while a replacement socket is still reauthenticating
+  // (authenticated false). Gating the kick on authenticated would ignore a kick
+  // that lands in that window, leaving the adapter holding its entry lock and
+  // deregistering the replacement owner's row on shutdown.
+  let established = false;
   let stopped = false;
   let loggedNonText = false;
   // Hoisted so disconnect() can interrupt a pending connect() instead of
@@ -106,7 +113,12 @@ function createStreamClient(
     }
   });
   client.on('event.disconnected_event', () => {
-    if (!authenticated || stopped) return;
+    // Gate on establishment, not current readiness: after the first successful
+    // connection every kick is fatal, including one that arrives while the
+    // replacement socket is still reauthenticating (authenticated false). The
+    // initial handshake's own onKicked listener handles a pre-establishment
+    // kick; this persistent handler owns every kick after it.
+    if (!established || stopped) return;
     stopped = true;
     authenticated = false;
     onReady(false);
@@ -167,6 +179,7 @@ function createStreamClient(
             }
             reject(error);
           } else {
+            established = true;
             authenticated = true;
             onReady(true);
             onClient(client);

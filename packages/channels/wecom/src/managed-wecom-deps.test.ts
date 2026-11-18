@@ -279,6 +279,27 @@ describe('managed WeCom deps stream lifecycle', () => {
     stream.disconnect();
   });
 
+  it('a kick during reauthentication still displaces the established adapter', async () => {
+    const { deps, stream, stops } = await authenticatedSetup();
+    // A transient disconnect clears send readiness, but the stream stays
+    // established (the initial handshake completed).
+    mockState.instance!.emit('disconnected', 'network blip');
+    expect(deps.isConnected()).toBe(false);
+    // The replacement socket is kicked BEFORE it re-authenticates. The kick is
+    // terminal regardless of current readiness: the displacement handler must
+    // fire once, not be ignored because authenticated is false (the SDK treats
+    // the kick as terminal and disables reconnect, so an ignored kick would
+    // leave the adapter holding its lock and deregistering the new owner).
+    mockState.instance!.emit('event.disconnected_event', {});
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toContain('displaced');
+    expect(deps.isConnected()).toBe(false);
+    // A second kick must not stop the adapter twice.
+    mockState.instance!.emit('event.disconnected_event', {});
+    expect(stops).toHaveLength(1);
+    stream.disconnect();
+  });
+
   it('disconnect clears the send path', async () => {
     const { deps, stream } = await authenticatedSetup();
     stream.disconnect();
