@@ -120,10 +120,12 @@ const fencedShellBlocks = (text) =>
 // see comments, so prose naming a binding moves nothing. Tool-name sites carry
 // their fake-model callback so loopClassifierScope can confine the loop pin to
 // the loop fakes and leave an unrelated arm's respond_in_schema answer alone.
-const IN_PLACE_WRITERS = {
-  Object: new Set(['assign', 'defineProperty', 'defineProperties']),
-  Reflect: new Set(['set', 'defineProperty']),
-};
+// A Map, not an object literal: an ordinary object would resolve keys like
+// `constructor` or `toString` to prototype functions and then throw on `.has`.
+const IN_PLACE_WRITERS = new Map([
+  ['Object', new Set(['assign', 'defineProperty', 'defineProperties'])],
+  ['Reflect', new Set(['set', 'defineProperty'])],
+]);
 
 const loopClassifierWiring = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
@@ -242,7 +244,7 @@ const loopClassifierWiring = (text) => {
       isCallExpression(node) &&
       isPropertyAccessExpression(node.expression) &&
       isIdentifier(node.expression.expression) &&
-      IN_PLACE_WRITERS[node.expression.expression.text]?.has(
+      IN_PLACE_WRITERS.get(node.expression.expression.text)?.has(
         node.expression.name.text,
       ) &&
       node.arguments.length > 0 &&
@@ -3915,6 +3917,9 @@ describe('managed-agent-server e2e runner', () => {
       "Object.defineProperties(blockProperties, { shouldBlock: { value: { type: 'boolean' } } });",
       'const propsAlias = blockProperties;',
       "propsAlias['shouldBlock'] = { type: 'boolean' };",
+      // A receiver that resolves to a prototype function must not crash the
+      // writer lookup, and is not a writer of the decision input.
+      'toString.assign(blockProperties, {});',
       'let blockAnswer = classifierBlockAnswer(blockProperties);',
       'blockAnswer ??= { shouldBlock: false };',
       'if (blockAnswer !== undefined) {',
