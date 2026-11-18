@@ -277,6 +277,13 @@ async function sendWebhook(
     // send mid-batch, settling the tail unknown (#17173 R10).
     let delivered = 0;
     for (const chunk of splitChunks(text)) {
+      // No aggregate ceiling on purpose: each chunk is already capped at its
+      // own 30s budget, so an aggregate cap could only refuse chunks that
+      // answered inside that budget — a bound on healthy sends, not on an
+      // unbounded tick. A send that outlives the claim lease is reconciled to
+      // unknown, but a late receipt moves unknown → partial → delivered, so
+      // the ledger converges while the tail keeps arriving. Refusing the tail
+      // instead strands it at unknown for good; #17529 has the full trace.
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), WEBHOOK_TIMEOUT_MS);
       try {

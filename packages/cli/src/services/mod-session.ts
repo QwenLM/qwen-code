@@ -258,12 +258,8 @@ export class ModSession implements ICommandLoader {
     this.sessionId = config.getSessionId();
     uiTelemetryService.on('update', this.observe);
     this.unregisterCleanup = registerCleanup(
-      () => {
-        // Exit cleanup iterates its registry; do not splice its current item.
-        this.unregisterCleanup = () => {};
-        // No result follows an exit, so a note of the turn it ended is due.
-        return this.close().then(() => this.flushOutput());
-      },
+      // No result follows an exit, so a note of the turn it ended is due.
+      () => this.close().then(() => this.flushOutput()),
       { first: Boolean(this.terminal) },
     );
   }
