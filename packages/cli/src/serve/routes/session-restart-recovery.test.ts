@@ -27,6 +27,7 @@ import { registerSessionRoutes } from './session.js';
 const roots: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -294,6 +295,24 @@ describe('POST /sessions/recovery', () => {
     expect(response.body.workspaces[0]).toMatchObject({
       workspace: fixture.runtime.workspaceId,
       error: { code: 'untrusted_workspace', status: 403 },
+    });
+  });
+
+  it('reports a member read failure as restart_recovery_failed', async () => {
+    const fixture = makeFixture();
+    vi.spyOn(
+      SessionService.prototype,
+      'listAllProjectSessionIds',
+    ).mockRejectedValueOnce(new Error('storage read failed'));
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({ workspaces: [fixture.runtime.workspaceId] });
+
+    expect(response.status).toBe(200);
+    expect(response.body.workspaces[0]).toMatchObject({
+      workspace: fixture.runtime.workspaceId,
+      error: { code: 'restart_recovery_failed', status: 500 },
     });
   });
 
