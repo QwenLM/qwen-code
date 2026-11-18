@@ -316,7 +316,10 @@ options)` posts `/workspaces/artifacts/query` with
   next cursor page; empty, loading, and error states are explicit, and a
   `404` answers with the library-unavailable message rather than an empty
   list. Strings live in a new `managed-artifact-library-messages.ts`
-  (EN/ZH/RU) registered in `i18n.tsx`. The library is interactive-only, so a
+  (EN/ZH/RU) registered in `i18n.tsx`; the hand-maintained `i18n-zh-tw.ts`
+  catalog carries the nine keys in Traditional glyphs, and `i18n.test.ts`
+  pins both their presence (no English fallback) and the absence of
+  Simplified-only glyphs. The library is interactive-only, so a
   `managed-artifact-library-messages.transcript-stub.ts` of three empty
   objects replaces the module in the transcript build (registered in
   `vite.lib.config.ts` beside the other `managed-*` stubs): the copy ships in
@@ -351,8 +354,9 @@ TypeScript:
   `managed-agent-provider.ts`, `managed-tool-result-types.ts`,
   `ManagedWorkspaceNavigation.tsx`, `ManagedSessionsPage.tsx`, the new
   `ManagedArtifactLibraryPage.tsx` and messages module with its transcript
-  stub, `i18n.tsx`, `vite.lib.config.ts` (stub registration),
-  `build-artifact.test.ts` (transcript boundary), and collocated tests.
+  stub, `i18n.tsx`, `i18n-zh-tw.ts` (Traditional catalog), `i18n.test.ts`,
+  `vite.lib.config.ts` (stub registration), `build-artifact.test.ts`
+  (transcript boundary), and collocated tests.
 - `packages/web-templates`: `src/export-html/build.mjs` — the renderer budget
   constants stay at main's tracking; the measurement record notes the stub.
 

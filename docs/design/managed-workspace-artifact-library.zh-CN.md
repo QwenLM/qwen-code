@@ -256,8 +256,10 @@ options)` 经共享 JSON RPC 路径 POST `/workspaces/artifacts/query`，body
   它按 `artifact.session_id` 重取产物元数据，用既有 64 KiB 读取器分页字节，
   预览与下载门控（`reader.canDownload`）不变。加载更多追加下一游标页；
   空、加载、错误状态显式，`404` 回产物库不可用消息而非空列表。文案在新
-  `managed-artifact-library-messages.ts`（EN/ZH/RU），注册进 `i18n.tsx`。
-  产物库仅交互态可达，故 transcript 构建用
+  `managed-artifact-library-messages.ts`（EN/ZH/RU），注册进 `i18n.tsx`；
+  手工维护的 `i18n-zh-tw.ts` 目录以繁体字形承载这九个键，`i18n.test.ts`
+  钉住其在场（不回退英文）与无简体专用字形。产物库仅交互态可达，故
+  transcript 构建用
   `managed-artifact-library-messages.transcript-stub.ts`（三个空对象）替换
   该模块（在 `vite.lib.config.ts` 中与其他 `managed-*` stub 并列注册）：
   文案不进任何导出文档，渲染器预算保持 main 的钉值。
@@ -289,7 +291,8 @@ TypeScript：
   `java-managed-agent-provider.ts`、`managed-agent-provider.ts`、
   `managed-tool-result-types.ts`、`ManagedWorkspaceNavigation.tsx`、
   `ManagedSessionsPage.tsx`、新 `ManagedArtifactLibraryPage.tsx` 与文案
-  模块及其 transcript stub、`i18n.tsx`、`vite.lib.config.ts`（stub 注册）、
+  模块及其 transcript stub、`i18n.tsx`、`i18n-zh-tw.ts`（繁体目录）、
+  `i18n.test.ts`、`vite.lib.config.ts`（stub 注册）、
   `build-artifact.test.ts`（transcript 边界），及同址测试。
 - `packages/web-templates`：`src/export-html/build.mjs`——渲染器预算常量
   保持 main 的钉值；测量记录注明 stub。
