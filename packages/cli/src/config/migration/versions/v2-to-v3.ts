@@ -115,9 +115,11 @@ export class V2ToV3Migration implements SettingsMigration {
    * claims this shape, and the loader would otherwise stamp the current
    * `$version` over keys nothing reads any more: the setting would be ignored
    * for good. Same approach as V3 -> V4's versionless `gitCoAuthor` branch.
-   * A versionless file that V5 -> V4 would unwrap is left to it: once this
-   * migration stamps a `$version`, V5 -> V4 no longer recognises the file
-   * (any `disable*` keys in that mixed file stay unmigrated, as on `main`).
+   * A versionless file that V5 -> V4 would unwrap is skipped here because
+   * once an earlier migration stamps a `$version`, V5 -> V4 no longer
+   * recognises the file: V5 -> V4 unwraps it unless V3 -> V4 claims a
+   * legacy `gitCoAuthor` key first, and any `disable*` keys in that mixed
+   * file stay unmigrated (both matching `main`).
    */
   shouldMigrate(settings: unknown): boolean {
     if (typeof settings !== 'object' || settings === null) {
@@ -130,8 +132,9 @@ export class V2ToV3Migration implements SettingsMigration {
       return true;
     }
     if (s['$version'] === undefined) {
-      // Defer to V5 -> V4 so wrapped modelProviders still unwrap; any
-      // disable* keys in such a mixed file stay unmigrated, as on main.
+      // Defer to V5 -> V4 so wrapped modelProviders still unwrap unless
+      // V3 -> V4 claims a legacy gitCoAuthor key first; both that ordering
+      // and leaving disable* keys unmigrated in the mixed file match main.
       if (v5ToV4Migration.shouldMigrate(s)) {
         return false;
       }
