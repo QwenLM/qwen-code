@@ -28,6 +28,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   session_info: [],
   session_source_metadata: [],
   session_side_task: ['tasks'],
+  session_sub_session_send: [],
   session_prompt: [],
   session_turn_status: [],
   session_attachments: [],
