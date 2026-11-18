@@ -46911,41 +46911,16 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     // queue a FIN a stalled peer never ACKs (FIN-WAIT-1 linger). The
     // buffered-frame case (write returns false) is covered by the
     // paused-resume regression below.
-    const http = await import('node:http');
     const net = await import('node:net');
-    type WriteCallback = (error?: Error | null) => void;
-    const originalWrite = http.ServerResponse.prototype.write as unknown as (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ) => boolean;
-    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
-    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
-    let forcedStall = false;
-    writeSpy.mockImplementation(function (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ): boolean {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString();
-      if (!forcedStall && text.includes('event: session_update')) {
-        forcedStall = true;
-        return false;
-      }
-      if (forcedStall) {
-        // The terminal frame cannot be queued at all: the write throws
-        // (socket already errored). That is the immediate-RST branch.
-        if (text.includes('event: client_evicted')) {
-          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
-        }
-        return false;
-      }
-      return typeof encodingOrCb === 'function'
-        ? originalWrite.call(this, chunk, encodingOrCb)
-        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    // The shared fixture's 'throw' mode is this test's stall model: the
+    // terminal frame's write throws EPIPE, driving the immediate-RST
+    // branch. Keep evicted: 'throw' — the resetSpy pin below depends on
+    // the throw, not the helper's default 'pass' (review R1-1).
+    const { writeSpy, isStalled } = spyOnForcedSseStall({
+      stallMarker: 'event: session_update',
+      evicted: 'throw',
     });
+    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
     try {
       const beforeActive = getActiveSseCount();
       const bridge = fakeBridge({
@@ -46971,7 +46946,7 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
       // Past the 200ms budget + the 250ms polling floor.
       await new Promise((r) => setTimeout(r, 800));
 
-      expect(forcedStall).toBe(true);
+      expect(isStalled()).toBe(true);
       expect(resetSpy).toHaveBeenCalled();
       expect(getActiveSseCount()).toBe(beforeActive);
       await res.body!.cancel().catch(() => undefined);
@@ -47012,7 +46987,10 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
       ['event: client_evicted'],
       700,
     );
-    expect(text).toContain('event: session_update');
+    // A complete frame, not a substring: a writer that drops the \n\n
+    // terminator (EventSource dispatches nothing) or hides the event name
+    // in a comment/data payload must red this pin (review R1-2).
+    expect(text).toMatch(/event: session_update\ndata: [^\n]*\n\n/);
     expect(sawMarker).toBe(false);
   });
 
@@ -47039,7 +47017,9 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
       ['event: client_evicted'],
       600,
     );
-    expect(text).toContain('event: session_update');
+    // Frame-aware pin, same contract as the explicit-budget case above
+    // (review R1-2).
+    expect(text).toMatch(/event: session_update\ndata: [^\n]*\n\n/);
     expect(sawMarker).toBe(false);
   });
 
