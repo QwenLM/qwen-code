@@ -8,6 +8,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -531,6 +533,52 @@ class SessionTest {
 
         @Override
         public void inputNoWaitResponse(String message) throws IOException {
+        }
+    }
+
+    @Test
+    void completeAssistantContentCallbacksPreserveEnvelopeUuid() throws Exception {
+        assertAssistantContentCallbackUuids(false,
+                "{\"type\":\"assistant\",\"uuid\":\"frame-a\",\"message\":{\"id\":\"message-a\","
+                        + "\"content\":[{\"type\":\"text\",\"text\":\"alpha\"}]}}",
+                "{\"type\":\"assistant\",\"uuid\":\"frame-b\",\"message\":{\"id\":\"message-b\","
+                        + "\"content\":[{\"type\":\"text\",\"text\":\"beta\"}]}}");
+    }
+
+    @Test
+    void streamingAssistantContentCallbacksPreserveEnvelopeUuid() throws Exception {
+        assertAssistantContentCallbackUuids(true,
+                "{\"type\":\"stream_event\",\"uuid\":\"frame-a\",\"event\":{\"type\":\"content_block_delta\","
+                        + "\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"alpha\"}}}",
+                "{\"type\":\"stream_event\",\"uuid\":\"frame-b\",\"event\":{\"type\":\"content_block_delta\","
+                        + "\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"beta\"}}}");
+    }
+
+    private void assertAssistantContentCallbackUuids(boolean streaming, String firstFrame, String secondFrame)
+            throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                firstFrame, secondFrame, "{\"type\":\"result\",\"subtype\":\"success\"}") {
+            @Override
+            public TransportOptions getTransportOptions() {
+                return new TransportOptions().setIncludePartialMessages(streaming);
+            }
+        };
+        List<String> texts = new ArrayList<>();
+        List<String> messageIds = new ArrayList<>();
+        Session session = new Session(transport);
+        try {
+            session.sendPrompt("fixture", new SessionEventSimpleConsumers().setAssistantContentConsumer(
+                    new AssistantContentSimpleConsumers() {
+                        @Override
+                        public void onText(Session current, TextAssistantContent content) {
+                            texts.add(content.getText());
+                            messageIds.add(content.getMessageId());
+                        }
+                    }));
+            assertEquals(List.of("alpha", "beta"), texts);
+            assertEquals(List.of("frame-a", "frame-b"), messageIds);
+        } finally {
+            session.close();
         }
     }
 

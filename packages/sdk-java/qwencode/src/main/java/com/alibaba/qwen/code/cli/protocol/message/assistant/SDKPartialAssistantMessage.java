@@ -42,6 +42,12 @@ public class SDKPartialAssistantMessage extends MessageBase {
         this.type = "stream_event";
     }
 
+    /** {@inheritDoc} */
+    @Override
+    public String getMessageId() {
+        return this.getUuid();
+    }
+
     /**
      * Gets the UUID of the message.
      *
