@@ -4618,12 +4618,15 @@ class QwenHostedHarnessConnectorTest {
     // The wake fence proved no live writer, so a cached reference is stale
     // (a suspended Session's sealed writer leaves one behind): the wake
     // evicts exactly that reference and its marker, then recovery-loads.
+    // The management cache holds a distinct reference (a management-only
+    // load never publishes into attachments), and it is evicted too.
     @Test
     @SuppressWarnings("unchecked")
     void wakeActivationEvictsAStaleAttachmentAndLoadsUnderTheFence() {
         var client = harnessClient();
         var connector = connector(client);
         var stale = mock(HarnessSessionRef.class);
+        var managementStale = mock(HarnessSessionRef.class);
         var fresh = mock(HarnessSessionRef.class);
         when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
         when(fresh.getRuntimeRecovery()).thenReturn(mock(HarnessRuntimeRecovery.class));
@@ -4631,77 +4634,57 @@ class QwenHostedHarnessConnectorTest {
         Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
         Map<Object, HarnessSessionRef> refs =
                 (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "attachments");
+        Map<Object, HarnessSessionRef> management =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "mcpManagementAttachments");
         Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
         refs.put(key, stale);
+        management.put(key, managementStale);
         markers.add(key);
 
         boolean activated = connector.activateForWake("tenant-a", SESSION_ID);
 
         assertThat(activated).isTrue();
         assertThat(refs.get(key)).isSameAs(fresh);
+        assertThat(management).isEmpty();
         assertThat(markers).contains(key);
         verify(client).loadSession(any());
     }
 
     // A load that publishes a newer attachment while the wake evicts the
     // stale one keeps its reference and marker; the wake reports the
-    // Session already attached and loads nothing.
+    // Session already attached and loads nothing. The publication happens
+    // inside the removal call itself, so the identity guard is asked to
+    // remove a stale reference while a newer one is already held — deleting
+    // the guard lets the wake evict the live attachment and load over it.
     @Test
     @SuppressWarnings("unchecked")
-    void wakeActivationKeepsAConcurrentlyPublishedAttachment() throws Exception {
+    void wakeActivationKeepsAConcurrentlyPublishedAttachment() {
         var client = harnessClient();
         var connector = connector(client);
         var stale = mock(HarnessSessionRef.class);
         var fresh = mock(HarnessSessionRef.class);
-        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
-        when(fresh.getRuntimeRecovery()).thenReturn(mock(HarnessRuntimeRecovery.class));
-        var removed = new CountDownLatch(1);
-        var release = new CountDownLatch(1);
-        var refs = new ConcurrentHashMap<Object, HarnessSessionRef>() {
-            @Override
-            public HarnessSessionRef computeIfPresent(Object key,
-                    BiFunction<? super Object, ? super HarnessSessionRef, ? extends HarnessSessionRef> update) {
-                HarnessSessionRef result = super.computeIfPresent(key, update);
-                if (result == null) {
-                    removed.countDown();
-                    try {
-                        if (!release.await(5, TimeUnit.SECONDS)) {
-                            throw new AssertionError("Replacement was not published");
-                        }
-                    } catch (InterruptedException error) {
-                        Thread.currentThread().interrupt();
-                        throw new AssertionError(error);
-                    }
-                }
-                return result;
-            }
-        };
-        ReflectionTestUtils.setField(connector, "attachments", refs);
+        var managementStale = mock(HarnessSessionRef.class);
         Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
         Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
         Map<Object, HarnessSessionRef> management =
                 (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "mcpManagementAttachments");
+        var refs = new ConcurrentHashMap<Object, HarnessSessionRef>() {
+            @Override
+            public HarnessSessionRef computeIfPresent(Object k,
+                    BiFunction<? super Object, ? super HarnessSessionRef, ? extends HarnessSessionRef> update) {
+                super.put(k, fresh);
+                markers.add(k);
+                return super.computeIfPresent(k, update);
+            }
+        };
+        ReflectionTestUtils.setField(connector, "attachments", refs);
         refs.put(key, stale);
         markers.add(key);
-        management.put(key, stale);
-        var result = new AtomicReference<Boolean>();
-        var failure = new AtomicReference<Throwable>();
-        var worker = new Thread(() -> {
-            try {
-                result.set(connector.activateForWake("tenant-a", SESSION_ID));
-            } catch (Throwable error) {
-                failure.set(error);
-            }
-        });
-        worker.start();
-        assertThat(removed.await(5, TimeUnit.SECONDS)).isTrue();
-        refs.put(key, fresh);
-        markers.add(key);
-        release.countDown();
-        worker.join(5_000);
+        management.put(key, managementStale);
 
-        assertThat(failure.get()).isNull();
-        assertThat(result.get()).isFalse();
+        boolean activated = connector.activateForWake("tenant-a", SESSION_ID);
+
+        assertThat(activated).isFalse();
         assertThat(refs.get(key)).isSameAs(fresh);
         assertThat(markers).contains(key);
         assertThat(management).isEmpty();

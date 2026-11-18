@@ -1722,9 +1722,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 // attached" would strand the wake on the slow SQL scan.
                 // Remove exactly the observed reference and its marker; a
                 // concurrent load that published a newer attachment keeps
-                // it, and the recheck below then reports it attached.
+                // it, and the recheck below then reports it attached. The
+                // management cache is published separately (a management-only
+                // load returns before the attachments publish), so its entries
+                // never alias the reference observed above: evict its own
+                // observed reference under the same per-key identity rule.
+                HarnessSessionRef observedManagement = mcpManagementAttachments.get(key);
                 removeAttachment(key, observed);
-                mcpManagementAttachments.remove(key, observed);
+                if (observedManagement != null) {
+                    mcpManagementAttachments.remove(key, observedManagement);
+                }
                 if (attachments.containsKey(key)) {
                     return false;
                 }
