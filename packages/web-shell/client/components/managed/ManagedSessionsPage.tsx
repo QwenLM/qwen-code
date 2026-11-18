@@ -870,7 +870,13 @@ function ManagedSessionsContent({
   // disabled with nothing on the page explaining why.
   const recoveryNotice = recovery.error
     ? recoveryText('managed.recovery.requestFailed')
-    : interactive && sendsBlocked && recovery.value === undefined
+    : interactive &&
+        sendsBlocked &&
+        // Only a recovery-driven restriction may claim reconciliation. A
+        // Session the server simply refuses to send to is not recovering,
+        // and saying so would promise an outcome that never arrives.
+        summary?.recovery !== undefined &&
+        recovery.value === undefined
       ? recoveryText('managed.recovery.explanation.recovering')
       : undefined;
   const messages = useMemo<Message[]>(() => {

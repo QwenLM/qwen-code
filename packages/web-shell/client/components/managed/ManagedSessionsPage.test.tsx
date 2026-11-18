@@ -6563,6 +6563,19 @@ describe('ManagedSessionsPage', () => {
     expect(messageErrors().some((message) => message.retryable)).toBe(false);
   });
 
+  it('does not claim reconciliation for a Session the server simply refuses to send to', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false },
+      }),
+    );
+    await render('s1');
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+    // No recovery verdict exists at all: this restriction is the server's own
+    // send policy, so promising an outcome after reconciliation is a lie.
+    expect(messageErrorTexts()).toEqual([]);
+  });
+
   it('offers discard on the binding creation page that renders no transcript', async () => {
     const bindingProvider = {
       ...provider,
