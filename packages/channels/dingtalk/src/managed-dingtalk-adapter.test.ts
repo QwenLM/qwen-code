@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CHANNEL_INBOUND_TRUNCATION_NOTICE,
   MANAGED_OUTBOUND_LIMIT,
   type ManagedChannelControlPlane,
   type ManagedClaimedDelivery,
@@ -579,16 +580,23 @@ describe('managed DingTalk adapter inbound', () => {
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
-    expect(plane.submit[0]!.text).toHaveLength(32_000);
+    const text = plane.submit[0]!.text;
+    // The notice is reserved inside the char cap, so the marked result still
+    // fits the 32,000-unit bound and ends with the notice.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'x'.repeat(32_000 - CHANNEL_INBOUND_TRUNCATION_NOTICE.length) +
+        CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
+    expect(text).toHaveLength(32_000);
     await adapter.disconnect();
   });
 
   it('clamps a CJK text to the byte envelope even under the character bound', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // The leading ASCII byte makes the 61,440-byte budget land MID-code-point
-    // for the 3-byte CJK char (61,439 is not divisible by 3), so the
-    // code-point walk must actually reject a partial character instead of
-    // landing on an exact boundary (#17173 R2-6).
+    // The leading ASCII byte makes the reduced byte budget land MID-code-point
+    // for the 3-byte CJK char, so the code-point walk must actually reject a
+    // partial character instead of landing on an exact boundary (#17173 R2-6).
     fake.push(
       'msg-cjk',
       messageData({
@@ -602,15 +610,20 @@ describe('managed DingTalk adapter inbound', () => {
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(
       64 * 1024 - 4096,
     );
-    expect(text).toBe('a' + '中'.repeat(20_479));
+    // The notice's escaped bytes (73) are reserved from the 61,440-byte budget,
+    // leaving 61,367 for the core: 'a' + floor((61367-1)/3) = 20,455 CJK chars.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'a' + '中'.repeat(20_455) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     await adapter.disconnect();
   });
 
   it('the byte cut keeps astral code points whole at a mid-pair budget', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // 4-byte astral chars at a budget with a 3-byte remainder: the exact
-    // expected string pins the maximal whole-code-point fit, so an off-by-one
-    // in the walk or a miscomputed byte budget reds it (#17173 R2-6).
+    // 4-byte astral chars at a budget with a remainder: the exact expected
+    // string pins the maximal whole-code-point fit, so an off-by-one in the
+    // walk or a miscomputed byte budget reds it (#17173 R2-6).
     fake.push(
       'msg-astral',
       messageData({
@@ -620,7 +633,12 @@ describe('managed DingTalk adapter inbound', () => {
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
-    expect(plane.submit[0]!.text).toBe('a' + '😀'.repeat(15_359));
+    const text = plane.submit[0]!.text;
+    // Core budget 61,367 bytes: 'a' + floor((61367-1)/4) = 15,341 astral chars.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'a' + '😀'.repeat(15_341) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     await adapter.disconnect();
   });
 
@@ -1300,6 +1318,7 @@ describe('managed DingTalk adapter review fixes', () => {
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
     const text = plane.submit[0]!.text;
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(text), 'utf8')).toBeLessThanOrEqual(
       64 * 1024,
     );
@@ -1309,8 +1328,8 @@ describe('managed DingTalk adapter review fixes', () => {
 
   it('does not admit a lone surrogate at the character-cap boundary (F1)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // 31,001 ASCII + 1,000 emoji: the 32,000-UTF-16-unit cap lands inside a
-    // surrogate pair; the admitted text must stay well-formed.
+    // 31,001 ASCII + 1,000 emoji: the reduced core char cap lands inside a
+    // surrogate pair; the admitted text must stay well-formed and marked.
     fake.push(
       'msg-astral',
       messageData({
@@ -1321,6 +1340,9 @@ describe('managed DingTalk adapter review fixes', () => {
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
     expect(plane.submit[0]!.text.isWellFormed()).toBe(true);
+    expect(
+      plane.submit[0]!.text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE),
+    ).toBe(true);
     await adapter.disconnect();
   });
 

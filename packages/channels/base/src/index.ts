@@ -250,4 +250,6 @@ export type {
 export {
   MANAGED_OUTBOUND_LIMIT,
   validManagedReceipt,
+  CHANNEL_INBOUND_TRUNCATION_NOTICE,
+  fitInboundText,
 } from './managed-channel.js';
