@@ -2326,6 +2326,7 @@ or contract version too.
   finding. Probe the **default** path of manual dispatch/config combinations
   (what happens when an operator submits the pre-filled form as-is), not
   just the documented happy path.
+- **Web Shell**: read [the Web Shell verification recipes](references/web-shell.md) for daemon capability fallbacks, partial settings writes, channel sessions, and model turns.
 - **Native Android (`packages/mobile-shell/`)** and changes to the
   daemon-served Web Shell it renders (`packages/web-shell/` and the serve
   routes it calls): read

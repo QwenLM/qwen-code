@@ -6410,6 +6410,11 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(targetedGates).toContain('is a semantic merge conflict');
     expect(targetedGates).toContain('`expected 112 to be 104`');
 
+    expect(flat).toContain('references/web-shell.md');
+    expect(readdirSync('.qwen/skills/verify-pr/references')).toContain(
+      'web-shell.md',
+    );
+
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
     expect(flat).toContain('references/android.md');
