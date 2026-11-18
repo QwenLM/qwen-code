@@ -88,6 +88,10 @@ import {
   readSessionPrsDetailed,
 } from './session-pr-service.js';
 import {
+  deleteSessionGoalSidecar,
+  moveSessionGoalSidecar,
+} from './session-goal-sidecar.js';
+import {
   moveSessionTitleSidecar,
   readSessionTitleSidecar,
   removeSessionTitleSidecar,
@@ -96,6 +100,11 @@ import {
   writeSessionTitleSidecar,
   type SessionTitleSidecar,
 } from './session-title-sidecar.js';
+import {
+  moveSessionBranchSidecar,
+  removeSessionBranchSidecar,
+  sessionBranchSidecarPath,
+} from './session-branch-sidecar.js';
 import {
   moveSessionArtifactSummarySidecar,
   readSessionArtifactSummarySidecar,
@@ -943,6 +952,7 @@ export class SessionService {
     sessionId: string,
     pr: { number: number; url: string },
   ) => void;
+  private sessionGoalChangedCallback?: (sessionId: string) => void;
 
   constructor(cwd: string, options: SessionServiceOptions = {}) {
     this.storage = new Storage(cwd, options.runtimeBaseDir);
@@ -1084,11 +1094,25 @@ export class SessionService {
     return this.getArtifactSummaryPathForState(sessionId, state);
   }
 
+  private getGoalSessionPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(this.getChatsDirForState(state), `${sessionId}.goal.json`);
+  }
+
   private getSessionTitleSidecarPathForState(
     sessionId: string,
     state: SessionArchiveState,
   ): string {
     return sessionTitleSidecarPath(this.getChatsDirForState(state), sessionId);
+  }
+
+  private getSessionBranchSidecarPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return sessionBranchSidecarPath(this.getChatsDirForState(state), sessionId);
   }
 
   /**
@@ -1242,6 +1266,31 @@ export class SessionService {
   }
 
   /**
+   * Returns the absolute path to the sidecar JSON file that stores the
+   * immutable start commit recorded when a session was branched from a
+   * checkpoint. The file may not exist yet — consumers must handle ENOENT as
+   * "no recorded branch point".
+   */
+  getBranchSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getSessionBranchSidecarPathForState(sessionId, state);
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that stores the
+   * session's Goal list projection for the given session id. The file may
+   * not exist yet — consumers must handle ENOENT as "no goal".
+   */
+  getGoalSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getGoalSessionPathForState(sessionId, state);
+  }
+
+  /**
    * Fires when the shell tool persists a `gh pr create` binding for a
    * session (agent process). The serve host wires this to mark the session
    * catalog so clients refetch the binding; unwired it is a no-op.
@@ -1269,6 +1318,31 @@ export class SessionService {
     pr: { number: number; url: string },
   ): void {
     this.sessionPrBoundCallback?.(sessionId, pr);
+  }
+
+  /**
+   * Fires when the session's Goal projection changes (agent process journal
+   * hook). The serve host wires this to mark the session catalog so clients
+   * refetch the marker; unwired it is a no-op. Carries only the session id:
+   * the notification is a pure catalog-clock mark, and the sidecar on disk
+   * is the single source of the projected values.
+   */
+  setSessionGoalChangedCallback(
+    callback: ((sessionId: string) => void) | undefined,
+  ): void {
+    this.sessionGoalChangedCallback = callback;
+  }
+
+  /**
+   * Exposes the registered callback so `Config.relocateWorkingDirectory`
+   * can carry it onto the replacement service when it resets this one.
+   */
+  getSessionGoalChangedCallback(): ((sessionId: string) => void) | undefined {
+    return this.sessionGoalChangedCallback;
+  }
+
+  emitSessionGoalChanged(sessionId: string): void {
+    this.sessionGoalChangedCallback?.(sessionId);
   }
 
   /**
@@ -1900,10 +1974,27 @@ export class SessionService {
     }
   }
 
+  private removeGoalSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const sidecar = this.getGoalSessionPathForState(sessionId, state);
+      if (fs.existsSync(sidecar)) {
+        this.removeFileIfExists(sidecar);
+      }
+    }
+  }
+
   private removeSessionTitleSidecars(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       removeSessionTitleSidecar(
         this.getSessionTitleSidecarPathForState(sessionId, state),
+      );
+    }
+  }
+
+  private removeSessionBranchSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      removeSessionBranchSidecar(
+        this.getSessionBranchSidecarPathForState(sessionId, state),
       );
     }
   }
@@ -2066,6 +2157,43 @@ export class SessionService {
     );
   }
 
+  // The kept transcript's Goal is authoritative. Unlike a title label, an
+  // absent goal sidecar is a VALUE: the surviving session's goal may have
+  // been cleared, so adopting the dropped lineage's projection would
+  // resurrect a goal the kept transcript no longer records (and an archived
+  // survivor is never reloaded to repair it). Always discard the dropped
+  // projection; the survivor's marker is rebuilt from its own transcript on
+  // the next transition or restore — a missing marker beats a wrong one.
+  private async reconcileGoalSidecarOnConflict(
+    sessionId: string,
+    droppedState: SessionArchiveState,
+  ): Promise<void> {
+    const dropped = this.getGoalSessionPathForState(sessionId, droppedState);
+    await deleteSessionGoalSidecar(dropped);
+  }
+
+  /**
+   * The kept transcript's recorded branch point wins; mirror the title
+   * sidecar's conflict policy so a checkpoint-branch start commit follows the
+   * surviving transcript.
+   */
+  private reconcileBranchSidecarOnConflict(
+    sessionId: string,
+    keptState: SessionArchiveState,
+    droppedState: SessionArchiveState,
+  ): void {
+    const kept = this.getSessionBranchSidecarPathForState(sessionId, keptState);
+    const dropped = this.getSessionBranchSidecarPathForState(
+      sessionId,
+      droppedState,
+    );
+    if (fs.existsSync(kept)) {
+      removeSessionBranchSidecar(dropped);
+    } else {
+      moveSessionBranchSidecar(dropped, kept);
+    }
+  }
+
   private async moveArchiveSidecars(
     sessionId: string,
     action: 'archive' | 'unarchive',
@@ -2107,6 +2235,18 @@ export class SessionService {
         `${action}Sessions: failed to move pr sidecar for ${sessionId}: ${error}`,
       );
     }
+    try {
+      assertCleanupOwned?.();
+      await moveSessionGoalSidecar(
+        this.getGoalSessionPathForState(sessionId, sourceState),
+        this.getGoalSessionPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move goal sidecar for ${sessionId}: ${error}`,
+      );
+    }
     const sourceLedger = this.getPromptLedgerPathForState(
       sessionId,
       sourceState,
@@ -2140,6 +2280,18 @@ export class SessionService {
       assertCleanupOwned?.();
       this.warn(
         `${action}Sessions: failed to move title sidecar for ${sessionId}: ${error}`,
+      );
+    }
+    try {
+      assertCleanupOwned?.();
+      moveSessionBranchSidecar(
+        this.getSessionBranchSidecarPathForState(sessionId, sourceState),
+        this.getSessionBranchSidecarPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move branch sidecar for ${sessionId}: ${error}`,
       );
     }
     try {
@@ -4261,7 +4413,11 @@ export class SessionService {
     assertCleanupOwned?.();
     this.removePrSidecars(sessionId);
     assertCleanupOwned?.();
+    this.removeGoalSidecars(sessionId);
+    assertCleanupOwned?.();
     this.removeSessionTitleSidecars(sessionId);
+    assertCleanupOwned?.();
+    this.removeSessionBranchSidecars(sessionId);
     assertCleanupOwned?.();
     this.removeArtifactSummarySidecars(sessionId);
     assertCleanupOwned?.();
@@ -4342,6 +4498,15 @@ export class SessionService {
               `archiveSessions: failed to merge active pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
+          try {
+            options.assertCleanupOwned?.();
+            await this.reconcileGoalSidecarOnConflict(sessionId, 'active');
+          } catch (sidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `archiveSessions: failed to reconcile active goal sidecar for ${sessionId}: ${sidecarError}`,
+            );
+          }
           options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getWorktreeSessionPathForState(sessionId, 'active'),
@@ -4357,6 +4522,19 @@ export class SessionService {
             options.assertCleanupOwned?.();
             this.warn(
               `archiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileBranchSidecarOnConflict(
+              sessionId,
+              'archived',
+              'active',
+            );
+          } catch (branchSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `archiveSessions: failed to reconcile branch sidecar for ${sessionId}: ${branchSidecarError}`,
             );
           }
           archived.push(sessionId);
@@ -4500,6 +4678,15 @@ export class SessionService {
               `unarchiveSessions: failed to merge archived pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
+          try {
+            options.assertCleanupOwned?.();
+            await this.reconcileGoalSidecarOnConflict(sessionId, 'archived');
+          } catch (sidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `unarchiveSessions: failed to reconcile archived goal sidecar for ${sessionId}: ${sidecarError}`,
+            );
+          }
           options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getWorktreeSessionPathForState(sessionId, 'archived'),
@@ -4515,6 +4702,19 @@ export class SessionService {
             options.assertCleanupOwned?.();
             this.warn(
               `unarchiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileBranchSidecarOnConflict(
+              sessionId,
+              'active',
+              'archived',
+            );
+          } catch (branchSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `unarchiveSessions: failed to reconcile branch sidecar for ${sessionId}: ${branchSidecarError}`,
             );
           }
           unarchived.push(sessionId);

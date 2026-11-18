@@ -20,6 +20,7 @@ import type {
   ManagedClaimedDelivery,
   ManagedInboundEvent,
 } from '@qwen-code/channel-base';
+import { CHANNEL_INBOUND_TRUNCATION_NOTICE } from '@qwen-code/channel-base';
 import {
   ManagedGithubAdapter,
   githubSettings,
@@ -921,6 +922,7 @@ describe('managed GitHub adapter inbound', () => {
     await adapter.tick();
     const ascii = plane.submit[0]!.text;
     expect(ascii.length).toBeLessThanOrEqual(32_000);
+    expect(ascii.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     // 25,000 CJK characters sit under the 32,000 character line but their
     // 75,000 UTF-8 bytes overflow the 64 KiB JSON envelope; the byte cut must
     // land on a code-point boundary.
@@ -934,24 +936,28 @@ describe('managed GitHub adapter inbound', () => {
     await adapter.tick();
     const cjk = plane.submit[1]!.text;
     expect(cjk.length).toBeLessThan(25_000);
+    expect(cjk.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     // Mirror the production budget exactly: JSON-serialized bytes minus the
     // two quote characters (fitInboundText's encodedBytes).
     expect(
       Buffer.byteLength(JSON.stringify(cjk), 'utf8') - 2,
     ).toBeLessThanOrEqual(64 * 1024 - 4096);
     expect(/[\uD800-\uDBFF]$/.test(cjk)).toBe(false);
-    // Astral plane: the 32,000-unit UTF-16 slice lands inside the first
-    // surrogate pair; the backoff must drop the lone high surrogate. BMP-only
-    // fixtures above can never exercise this branch.
+    // Astral plane: the reduced core char cap lands inside a surrogate pair;
+    // the backoff must drop the lone high surrogate. BMP-only fixtures above
+    // can never exercise this branch. The '@bot-user ' prefix is 10 units, so
+    // coreCharLimit - 11 x's place the pair's high surrogate at the core cut.
+    const coreCharLimit = 32_000 - CHANNEL_INBOUND_TRUNCATION_NOTICE.length;
     fake.knobs.comments = [
       comment({
         id: 3,
         node_id: 'IC_astral',
-        body: `@bot-user ${'x'.repeat(31_989)}${'😀'.repeat(100)}`,
+        body: `@bot-user ${'x'.repeat(coreCharLimit - 11)}${'😀'.repeat(100)}`,
       }),
     ];
     await adapter.tick();
     const astral = plane.submit[2]!.text;
+    expect(astral.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     expect(astral.length).toBe(31_999);
     expect(/[\uD800-\uDBFF]$/.test(astral)).toBe(false);
     // Escape inflation: 30,000 control characters are only 30,010 raw UTF-8
@@ -967,6 +973,7 @@ describe('managed GitHub adapter inbound', () => {
     await adapter.tick();
     const ctrl = plane.submit[3]!.text;
     expect(ctrl.length).toBeLessThan(30_010);
+    expect(ctrl.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     expect(
       Buffer.byteLength(JSON.stringify(ctrl), 'utf8') - 2,
     ).toBeLessThanOrEqual(64 * 1024 - 4096);

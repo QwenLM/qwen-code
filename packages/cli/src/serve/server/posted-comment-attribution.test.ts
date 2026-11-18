@@ -16,7 +16,11 @@ import {
   reviewCommentKey,
 } from './posted-comment-attribution.js';
 
-function shellResult(command: string, output: string): unknown {
+function shellResult(
+  command: string,
+  output: string,
+  text = `Command: ${command}\nDirectory: (root)\nOutput (stdout and stderr combined): ${output}\nExecution Error: (none)\nExit Code: 0\n`,
+): unknown {
   return {
     type: 'tool_result',
     message: {
@@ -26,7 +30,7 @@ function shellResult(command: string, output: string): unknown {
           functionResponse: {
             name: 'run_shell_command',
             response: {
-              output: `Command: ${command}\nDirectory: (root)\nOutput: ${output}\nError: (none)\nExit Code: 0\n`,
+              output: text,
             },
           },
         },
@@ -44,6 +48,296 @@ describe('extractPostedCommentIds', () => {
     expect(reviewCommentKey(2)).toBe('rc:2');
     const entry = shellResult(
       'gh pr comment 1 --body a',
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it('attributes a creation recorded with the earlier Output/Error labels', () => {
+    const command = 'gh pr comment 1 --body a';
+    const entry = shellResult(
+      command,
+      '',
+      `Command: ${command}\nDirectory: (root)\nOutput: https://github.com/o/r/pull/1#issuecomment-42\nError: (none)\nExit Code: 0\n`,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('42')]);
+  });
+
+  it.each([
+    { outputLabel: 'Output', errorLabel: 'Error' },
+    {
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+    },
+  ])(
+    'ignores shell result labels quoted in the command ($outputLabel)',
+    ({ outputLabel, errorLabel }) => {
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const command =
+        "gh pr comment 1 --body 'Example:\n" +
+        'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
+        "Execution Error: (none)'";
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: (root)\n${outputLabel}: ${url}\n${errorLabel}: (none)\nExit Code: 0\n`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+    },
+  );
+
+  it.each([
+    {
+      outputLabel: 'Output',
+      errorLabel: 'Error',
+      diagnostic: 'Execution Error',
+    },
+    {
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+      diagnostic: 'Error',
+    },
+  ])(
+    'does not treat a $diagnostic diagnostic as the $errorLabel footer',
+    ({ outputLabel, errorLabel, diagnostic }) => {
+      const command = 'gh pr comment 1 --body a';
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: (root)\n${outputLabel}: notice\n${diagnostic}: retrying\n${url}\n${errorLabel}: (none)\nExit Code: 0\n`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+    },
+  );
+
+  it.each([
+    { directory: '(root)', outputLabel: 'Output', errorLabel: 'Error' },
+    {
+      directory: '/repository/notes\n2026',
+      outputLabel: 'Output',
+      errorLabel: 'Error',
+    },
+    {
+      directory: '/repository/notes\n2026',
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+    },
+  ])(
+    'does not attribute an ambiguous header ($outputLabel, $directory)',
+    ({ directory, outputLabel, errorLabel }) => {
+      const command =
+        "gh pr comment 1 --body 'Example:\nDirectory: (root)\n" +
+        'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
+        "Execution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)'";
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: ${directory}\n${outputLabel}: ${url}\n${errorLabel}: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual([]);
+    },
+  );
+
+  it.each([
+    { outputLabel: 'Output', errorLabel: 'Error' },
+    {
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+    },
+  ])(
+    'retains same-label diagnostics before the real $errorLabel footer',
+    ({ outputLabel, errorLabel }) => {
+      const command = 'gh pr comment 1 --body a';
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: (root)\n${outputLabel}: notice\n${errorLabel}: retrying\n${url}\n${errorLabel}: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+    },
+  );
+
+  it.each(['', '\nExecution Error: (none)'])(
+    'does not attribute a URL found only in the execution error (suffix %j)',
+    (suffix) => {
+      const command = 'gh pr comment 1 --body a';
+      const url = 'https://github.com/o/r/pull/1#issuecomment-99';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: (root)\nOutput (stdout and stderr combined): (empty)\nExecution Error: could not post ${url}${suffix}\nExit Code: (none)\nSignal: (none)\nProcess Group PGID: (none)`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual([]);
+    },
+  );
+
+  it('does not stop at a status block without an error field in shell output', () => {
+    const entry = shellResult(
+      'gh pr comment 1 --body a',
+      'Status:\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)\n\n' +
+        'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it('does not treat standalone labels as a second complete header', () => {
+    const entry = shellResult(
+      "gh pr comment 1 --body 'Example:\nDirectory: sample'",
+      'notice\nOutput: retrying\nhttps://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it('still attributes a legacy transcript without a Directory line', () => {
+    const command = 'gh pr comment 1 --body a';
+    const entry = shellResult(
+      command,
+      '',
+      `Command: ${command}\nOutput: https://github.com/o/r/pull/1#issuecomment-42\nError: (none)\nExit Code: 0\n`,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it.each([
+    { outputLabel: 'Output', errorLabel: 'Error' },
+    {
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+    },
+  ])(
+    'stops at the shell footer before appended context ($outputLabel)',
+    ({ outputLabel, errorLabel }) => {
+      const command = 'gh api repos/o/r/issues/1/comments -X POST --silent';
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const previousUrl = 'https://github.com/o/r/pull/1#issuecomment-99';
+      const footer = `\n${errorLabel}: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)`;
+      for (const context of [
+        previousUrl,
+        `Directory: (root)\n${outputLabel}: ${previousUrl}`,
+      ]) {
+        const transcript = (result: string) =>
+          shellResult(
+            command,
+            '',
+            `Command: ${command}\nDirectory: (root)\n${outputLabel}: ${result}${footer}\n\nPrevious run:\n${context}${footer}`,
+          );
+        expect(extractPostedCommentIds(transcript('(empty)'))).toEqual([]);
+        expect(extractPostedCommentIds(transcript(url))).toEqual(['ic:42']);
+      }
+    },
+  );
+
+  it.each(['', '\n\nEnd of example'])(
+    'does not trust a complete example quoted in a directory-less legacy record (suffix %j)',
+    (suffix) => {
+      const command =
+        "gh pr comment 1 --body 'Example:\nDirectory: (root)\n" +
+        'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
+        `Execution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)${suffix}'`;
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nOutput: https://github.com/o/r/pull/1#issuecomment-42\nError: (none)\nExit Code: 0\n`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual([]);
+    },
+  );
+
+  it('attributes a creation from a working directory containing a newline', () => {
+    const command =
+      "gh pr comment 1 --body 'Example:\nOutput: (empty)\nError: (none)'";
+    const entry = shellResult(
+      command,
+      '',
+      `Command: ${command}\nDirectory: /repository/notes\n2026\nOutput (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-42\nExecution Error: (none)\nExit Code: 0\n`,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it.each([
+    "gh pr comment 1 --body-file - <<'NOTE'",
+    "gh pr comment 1 --body-file - <<'INTRO' <<'NOTE'\nIntro\nINTRO",
+  ])('does not read a shell result from an open heredoc (%j)', (command) => {
+    const example =
+      '\nDirectory: (root)\n' +
+      'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
+      'Execution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)\n\n';
+    const entry = shellResult(
+      command,
+      '',
+      `Command: ${command}${example}End of example.\nNOTE\nDirectory: (root)\nOutput (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-42\nExecution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)`,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it.each([
+    ['END\\\\MARK', 'ENDMARK', 'END\\MARK'],
+    ['END\u00a0OF_NOTE', 'END', 'END\u00a0OF_NOTE'],
+    ["'NOTE'", 'NOTE\r', 'NOTE'],
+  ])(
+    'does not end a heredoc at a lookalike delimiter (%j, %j)',
+    (opener, bodyLine, delimiter) => {
+      const command = `gh pr comment 1 --body-file - <<${opener}\n${bodyLine}`;
+      const header =
+        '\nDirectory: (root)\nOutput (stdout and stderr combined): ';
+      const footer =
+        '\nExecution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)';
+      const exampleUrl = 'https://github.com/o/r/pull/1#issuecomment-99';
+      const postedUrl = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}${header}${exampleUrl}${footer}\n\nEnd of example.\n${delimiter}${header}${postedUrl}${footer}`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual([]);
+    },
+  );
+
+  it.each([
+    String.raw`gh pr comment 1 --body 'It'\''s fixed; ready'`,
+    String.raw`gh pr comment 1 --body "The \"Output; stderr\" section is fixed"`,
+    String.raw`gh pr comment 1 --body $'It\'s fixed; ready'`,
+    String.raw`gh pr comment 1 --body 'Ends with a backslash: \'`,
+  ])('attributes a creation with a shell-escaped quote (%j)', (command) => {
+    const entry = shellResult(
+      command,
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it('attributes a creation reading a complete heredoc from stdin', () => {
+    const entry = shellResult(
+      "gh pr comment 1 --body-file - <<'NOTE'\nIt's fixed.\nNOTE",
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it.each([
+    'cat > note.md <<"END\\MARK"\nbody\nEND\\MARK',
+    "cat > note.md <<'NOTE'\n# trailing \\\nNOTE",
+    'cat > note.md <<NOTE\nbody\nNO\\\nTE',
+    'cat > note.md <<END\\\\MARK\nbody\nEND\\MARK',
+    'cat > note.md <<END\\ MARK\\;\nbody\nEND MARK;',
+    'cat > note.md <<NO\\\nTE\nbody\nNO\\\nTE',
+  ])('preserves backslashes according to heredoc quoting (%j)', (setup) => {
+    const entry = shellResult(
+      `${setup}\ngh pr comment 1 --body-file note.md`,
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it.each([
+    'cat > note.md <<END\u00a0OF_NOTE\nbody\nEND\u00a0OF_NOTE',
+    "cat > note.md <<'NOTE\r'\nbody\nNOTE\r",
+  ])('attributes a complete heredoc with a literal delimiter (%j)', (setup) => {
+    const entry = shellResult(
+      `${setup}\ngh pr comment 1 --body-file note.md`,
       'https://github.com/o/r/pull/1#issuecomment-42',
     );
     expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
@@ -434,7 +728,7 @@ describe('extractPostedCommentIds', () => {
 
   it('does not mistake an arithmetic left-shift for a heredoc', () => {
     const entry = shellResult(
-      'n=$((1 << 2))\ngh pr comment 42 --body hi',
+      'n=$((1 << 2 ))\ngh pr comment 42 --body hi',
       'https://github.com/o/r/pull/42#issuecomment-111',
     );
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('111')]);
