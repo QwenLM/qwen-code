@@ -494,9 +494,11 @@ export function readDaemonDiscoveryRecord(
   dir: string = resolveDaemonDiscoveryDir(),
 ): DaemonDiscoveryRecord | undefined {
   try {
-    const parsed: unknown = JSON.parse(
-      fs.readFileSync(daemonDiscoveryFilePath(port, dir), 'utf8'),
-    );
+    const filePath = daemonDiscoveryFilePath(port, dir);
+    // Mirror readDaemonDiscoveries: a FIFO would block readFileSync forever
+    // and a symlink is not trusted, even when it points at a valid record.
+    if (!fs.lstatSync(filePath).isFile()) return undefined;
+    const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     if (!isValidRecord(parsed) || parsed.port !== port) return undefined;
     return parsed;
   } catch {

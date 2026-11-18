@@ -11886,20 +11886,34 @@ async function runQwenServeImpl(
           nextPort <= 65535 &&
           attempt < MAX_PORT_ATTEMPTS - 1
         ) {
-          // An explicit --port is an operator contract: when the holder is a
-          // live qwen serve daemon, silently moving to the next port starts
-          // a duplicate daemon (#17479). Identity is positive-only — a
+          // The operator names exactly one port — an explicit --port or the
+          // default. When that port's holder is a live qwen serve daemon,
+          // silently moving to the next port starts a duplicate daemon
+          // (#17479). Later fallback candidates keep the #6513 bump because
+          // the operator never named them. Identity is positive-only — a
           // missing or unverifiable record says nothing about who holds the
           // port, so the fallback for unrelated squatters still applies.
-          const holder = readDaemonDiscoveryRecord(attemptPort);
+          const holder =
+            attempt === 0 ? readDaemonDiscoveryRecord(attemptPort) : undefined;
           if (holder && listenerIdentityVerified(holder)) {
+            // Identity is verified, so Date.parse is finite; normalise to
+            // ISO so record-derived text cannot carry terminal escape bytes
+            // to stderr.
+            const holderStartedAt = new Date(
+              Date.parse(holder.startedAt),
+            ).toISOString();
+            const stopCommand =
+              process.platform === 'win32'
+                ? `qwen daemon stop --port ${attemptPort} --force`
+                : `qwen daemon stop --port ${attemptPort}`;
+            // Callers print `qwen serve: ${err.message}`, so the message
+            // must not carry its own prefix or it is printed twice.
             const holderError = new Error(
-              `qwen serve: port ${attemptPort} is held by a live qwen serve ` +
-                `daemon (pid ${holder.pid}, started at ${holder.startedAt}). ` +
-                `Stop it with 'qwen daemon stop --port ${attemptPort}' or ` +
-                `choose a different --port.`,
+              `port ${attemptPort} is held by a live qwen serve daemon ` +
+                `(pid ${holder.pid}, started at ${holderStartedAt}). ` +
+                `Stop it with '${stopCommand}' or choose a different ` +
+                `--port.`,
             );
-            writeStderrLine(holderError.message);
             removeCurrentServePidfile();
             markServeAppStartupFailed(holderError);
             void serveAppLifecycle.close().then(

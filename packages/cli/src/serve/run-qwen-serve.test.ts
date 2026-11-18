@@ -22845,6 +22845,15 @@ describe('runQwenServe channel worker supervisor', () => {
     );
     const startedAt = processStartTime(process.pid);
     expect(startedAt).toBeDefined();
+    // A legacy date string carries a parseable trailing comment — a record
+    // field is same-user writable, so ESC bytes must never reach the
+    // printed refusal.
+    const esc = String.fromCharCode(27);
+    const bel = String.fromCharCode(7);
+    const maliciousStartedAt = new Date(startedAt!)
+      .toString()
+      .replace(/\([^)]*\)$/, `(${esc}[2J${esc}]0;pwned${bel})`);
+    expect(Number.isFinite(Date.parse(maliciousStartedAt))).toBe(true);
     const holder: DaemonDiscoveryRecord = {
       v: 1,
       pid: process.pid,
@@ -22853,7 +22862,7 @@ describe('runQwenServe channel worker supervisor', () => {
       url: 'http://127.0.0.1:4170',
       workspaces: [tmpDir],
       primaryWorkspace: tmpDir,
-      startedAt: new Date(startedAt!).toISOString(),
+      startedAt: maliciousStartedAt,
       auth: 'none',
     };
     writeDaemonDiscovery(holder);
@@ -22877,31 +22886,119 @@ describe('runQwenServe channel worker supervisor', () => {
       return testServer;
     }) as unknown as typeof testServer.listen;
 
+    let rejection: unknown;
     try {
-      await expect(
-        runQwenServe(
-          {
-            port: 4170,
-            hostname: '127.0.0.1',
-            mode: 'http-bridge',
-            workspace: tmpDir,
-            serveWebShell: false,
-          },
-          {
-            bridge: makeFakeBridge(),
-            httpServerFactory: () => testServer,
-            resolveOnListen: true,
-          },
-        ),
-      ).rejects.toThrow(/held by a live qwen serve daemon/);
+      await runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeFakeBridge(),
+          httpServerFactory: () => testServer,
+          resolveOnListen: true,
+        },
+      );
+    } catch (error) {
+      rejection = error;
     } finally {
       stderrSpy.mockRestore();
       removeDaemonDiscovery(4170);
     }
+    expect(rejection).toBeInstanceOf(Error);
+    const message = (rejection as Error).message;
+    expect(message).toMatch(/held by a live qwen serve daemon/);
+    expect(message).not.toContain('\u001b');
+    expect(message).toContain(
+      new Date(Date.parse(maliciousStartedAt)).toISOString(),
+    );
+    expect(message).not.toMatch(/^qwen serve: /);
     expect(portsAttempted).toEqual([4170]);
+    // Callers own the `qwen serve: <message>` line; the serve path must not
+    // print the refusal in caller format itself or every caller prints it
+    // twice (the `runtime startup failed:` diagnostic is a separate line).
     expect(
-      stderrWrites.some((w) => w.includes('held by a live qwen serve daemon')),
-    ).toBe(true);
+      stderrWrites.some((w) => w.includes('qwen serve: qwen serve:')),
+    ).toBe(false);
+    expect(
+      stderrWrites.some((w) => w.includes(`qwen serve: port 4170 is held`)),
+    ).toBe(false);
+  });
+
+  it('keeps bumping ports when the holder record cannot be verified', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-stale-holder-')),
+    );
+    // A leftover record whose startedAt sits outside the identity window
+    // (a SIGKILLed daemon, or a recycled pid) says nothing reliable about
+    // the current holder, so the start must keep the next-port fallback.
+    const staleHolder: DaemonDiscoveryRecord = {
+      v: 1,
+      pid: process.pid,
+      port: 4170,
+      hostname: '127.0.0.1',
+      url: 'http://127.0.0.1:4170',
+      workspaces: [tmpDir],
+      primaryWorkspace: tmpDir,
+      startedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+      auth: 'none',
+    };
+    writeDaemonDiscovery(staleHolder);
+    const portsAttempted: number[] = [];
+    const stderrWrites: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        stderrWrites.push(String(chunk));
+        return true;
+      });
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      locals: {},
+    } as unknown as express.Application);
+    const testServer = createServer();
+    const nativeListen = testServer.listen.bind(testServer);
+    testServer.listen = vi.fn((port: number) => {
+      portsAttempted.push(port);
+      if (portsAttempted.length === 1) {
+        const err = new Error('address in use') as NodeJS.ErrnoException;
+        err.code = 'EADDRINUSE';
+        setImmediate(() => testServer.emit('error', err));
+      } else {
+        nativeListen(0, '127.0.0.1');
+      }
+      return testServer;
+    }) as unknown as typeof testServer.listen;
+
+    const handle = await runQwenServe(
+      {
+        port: 4170,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeFakeBridge(),
+        httpServerFactory: () => testServer,
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      stderrSpy.mockRestore();
+      expect(portsAttempted).toEqual([4170, 4171]);
+      expect(handle.server.listening).toBe(true);
+      expect(
+        stderrWrites.some((w) =>
+          w.includes('port 4170 is in use, trying 4171'),
+        ),
+      ).toBe(true);
+    } finally {
+      await handle.close();
+    }
   });
 
   it('keeps the Hosted Harness on its requested port', async () => {

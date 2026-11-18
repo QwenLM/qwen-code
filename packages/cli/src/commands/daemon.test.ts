@@ -33,6 +33,16 @@ vi.mock('../serve/daemon-discovery.js', async (importOriginal) => {
     ...actual,
     currentPidNamespace: () => 'pid:[1]',
     isProcessAlive: () => false,
+    // The moved helpers close over this module's real bindings in their
+    // default arguments, so re-route the defaults through the pinned
+    // namespace and liveness above; a mock of isProcessAlive alone cannot
+    // reach them.
+    listenerIdentityVerified: (
+      record: DaemonDiscoveryRecord,
+      ns = 'pid:[1]',
+      alive = () => false,
+      startedAt = actual.processStartTime,
+    ) => actual.listenerIdentityVerified(record, ns, alive, startedAt),
   };
 });
 
@@ -880,6 +890,18 @@ describe('qwen daemon command', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it('refuses a live same-namespace record through the default-argument seam', () => {
+    // With the real host process table this record verifies, and
+    // daemonRejectsToken would leak the bearer token the fixture means to
+    // refuse — so the seam must stay routed through the pinned defaults.
+    const live: DaemonDiscoveryRecord = {
+      ...entry(4170).record,
+      pid: process.pid,
+      startedAt: new Date(processStartTime(process.pid)!).toISOString(),
+    };
+    expect(listenerIdentityVerified(live)).toBe(false);
   });
 
   it('verifies the recorded listener before trusting a bearer', () => {

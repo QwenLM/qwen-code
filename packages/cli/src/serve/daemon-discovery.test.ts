@@ -222,5 +222,20 @@ describe('daemon discovery records', () => {
       );
       expect(readDaemonDiscoveryRecord(4171, dir)).toBeUndefined();
     });
+
+    it('returns undefined for a symlinked record', (t) => {
+      writeDaemonDiscovery(record(), dir);
+      try {
+        fs.symlinkSync(
+          daemonDiscoveryFilePath(4170, dir),
+          daemonDiscoveryFilePath(4171, dir),
+        );
+      } catch {
+        // Creating symlinks needs elevated privileges on some platforms.
+        t.skip();
+        return;
+      }
+      expect(readDaemonDiscoveryRecord(4171, dir)).toBeUndefined();
+    });
   });
 });
