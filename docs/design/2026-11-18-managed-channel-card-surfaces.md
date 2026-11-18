@@ -36,9 +36,9 @@ exactly as they are.
 
 ## Current state
 
-Facts verified against `3d75b8ee60` (the merge-base with `main` for this
-change). Symbol names, not line numbers, anchor the sites so the census does
-not drift.
+Facts verified against `3d75b8ee60` and re-checked after merging `main` at
+`164bb1eb58` (the merge-base with `main` for this change). Symbol names, not
+line numbers, anchor the sites so the census does not drift.
 
 - **The record contract forbids post-hoc edits.** `ChannelDelivery` in
   `packages/core/src/managed-runtime/managed-channel-record.ts` closes the

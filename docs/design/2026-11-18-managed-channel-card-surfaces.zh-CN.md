@@ -30,8 +30,8 @@ H5e 在一个 provider 上补上这个缺口，同时不另造第二条交付来
 
 ## 现状
 
-以下事实按 `3d75b8ee60`（本次改动与 `main` 的 merge-base）核实。站点用符号名
-锚定，不写行号，避免清单漂移。
+以下事实按 `3d75b8ee60` 核实，并在合入 `main`（`164bb1eb58`，本次改动与 `main`
+的 merge-base）后复核。站点用符号名锚定，不写行号，避免清单漂移。
 
 - **记录契约禁止事后编辑。**
   `packages/core/src/managed-runtime/managed-channel-record.ts` 的
