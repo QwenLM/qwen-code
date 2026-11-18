@@ -109,7 +109,7 @@ Unit (`packages/web-shell`):
 - `client/components/sidebar/WebShellSidebar.collapse-persist.test.tsx` — 85
   passed, including the extended state matrix and a new background-only case
   with `activeWorkState: 'idle'`.
-- `client/components/sidebar/SessionDetailsTooltip.test.tsx` — 19 passed.
+- `client/components/sidebar/SessionDetailsTooltip.test.tsx` — 20 passed.
 - `client/components/sidebar/WebShellSidebar.css.test.ts` and
   `client/visual-capture-contracts.test.ts` — 16 passed.
 - `npm run typecheck`, ESLint and Prettier clean on the changed files.

@@ -92,7 +92,7 @@
 
 - `client/components/sidebar/WebShellSidebar.collapse-persist.test.tsx` —— 85
   通过，含扩展后的状态矩阵与新增的 `activeWorkState: 'idle'` 仅后台用例。
-- `client/components/sidebar/SessionDetailsTooltip.test.tsx` —— 19 通过。
+- `client/components/sidebar/SessionDetailsTooltip.test.tsx` —— 20 通过。
 - `client/components/sidebar/WebShellSidebar.css.test.ts` 与
   `client/visual-capture-contracts.test.ts` —— 16 通过。
 - 改动文件的 `npm run typecheck`、ESLint、Prettier 均干净。
