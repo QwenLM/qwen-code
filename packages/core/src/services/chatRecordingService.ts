@@ -660,6 +660,7 @@ export interface NotificationRecordPayload {
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    fromSession?: { sessionId: string; workspaceCwd: string };
   };
 }
 

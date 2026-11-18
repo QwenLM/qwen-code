@@ -124,6 +124,203 @@ describe('session history media continuations', () => {
     },
   );
 
+  const mediaJsonFields = [
+    {
+      name: 'inline_data',
+      field: '"inline_data":{"mime_type":"image/png","data":"R9_MEDIA_CANARY"}',
+    },
+    {
+      name: 'escaped inline_data key',
+      field: String.raw`"inline\u005fdata":{"mime_type":"image/png","data":"R9_MEDIA_CANARY"}`,
+    },
+    {
+      name: 'fileData',
+      field: '"fileData":{"mimeType":"image/png","fileUri":"R9_MEDIA_CANARY"}',
+    },
+    { name: 'b64_json', field: '"b64_json":"R9_MEDIA_CANARY"' },
+    {
+      name: 'bytesBase64Encoded',
+      field: '"bytesBase64Encoded":"R9_MEDIA_CANARY"',
+    },
+    {
+      name: 'typed image',
+      field: '"payload":{"type":"image","data":"R9_MEDIA_CANARY"}',
+    },
+    {
+      name: 'MIME source',
+      field: '"payload":{"mime_type":"audio/wav","source":"R9_MEDIA_CANARY"}',
+    },
+    {
+      name: 'typed base64',
+      field: '"payload":{"type":"base64","data":"R9_MEDIA_CANARY"}',
+    },
+    {
+      name: 'array media item',
+      field: '"payload":[{"type":"image","data":"R9_MEDIA_CANARY"}]',
+    },
+  ];
+
+  for (const media of mediaJsonFields) {
+    it.each(['text', 'read-file-output', 'mcp-text', 'nested-json'] as const)(
+      `omits ${media.name} inside JSON strings in %s without changing evidence`,
+      async (kind) => {
+        const json =
+          '{"request_id":9007199254740993,"amount":1.2300e+4,' +
+          '"evidence":"SIBLING_JSON_EVIDENCE",' +
+          media.field +
+          '}';
+        const part: Part =
+          kind === 'text'
+            ? { text: json }
+            : kind === 'nested-json'
+              ? { text: JSON.stringify({ encoded: json }) }
+              : {
+                  functionResponse: {
+                    name: kind === 'mcp-text' ? 'mcp_read_asset' : 'read_file',
+                    response:
+                      kind === 'mcp-text'
+                        ? { content: [{ type: 'text', text: json }] }
+                        : { output: json },
+                  },
+                };
+        const ref = await append(
+          kind === 'text' || kind === 'nested-json' ? 'user' : 'tool_result',
+          part,
+        );
+        for (const request of [
+          { action: 'list' as const },
+          { action: 'read' as const, ref },
+          { action: 'search' as const, query: 'SIBLING_JSON_EVIDENCE' },
+        ]) {
+          const result = await service.query(request, signal);
+          expect.soft(result).not.toContain('R9_MEDIA_CANARY');
+          expect.soft(result).toContain('[Recorded media omitted]');
+          if (request.action !== 'search') {
+            expect.soft(result).toContain('9007199254740993');
+            expect.soft(result).toContain('1.2300e+4');
+          }
+          expect.soft(result).toContain('SIBLING_JSON_EVIDENCE');
+        }
+        expect(
+          JSON.parse(
+            await service.query(
+              { action: 'search', query: 'R9_MEDIA_CANARY' },
+              signal,
+            ),
+          ).entries,
+        ).toEqual([]);
+      },
+    );
+  }
+
+  it.each([
+    '90071992547409931234567890',
+    '1.2300e+4',
+    '-0',
+    '0.0000',
+    '1e-999',
+    '1e999',
+  ])(
+    'preserves numeric spelling %s when an adjacent JSON media field changes',
+    async (literal) => {
+      const json =
+        `{"retained":${literal},"inline_data":{"data":"R9_NUMERIC_MEDIA_CANARY"},` +
+        '"evidence":"NUMERIC_SIBLING_EVIDENCE"}';
+      const ref = await append('tool_result', {
+        functionResponse: { name: 'read_file', response: { output: json } },
+      });
+      const result = await service.query({ action: 'read', ref }, signal);
+      const text = JSON.parse(result).entries[0].text as string;
+      const projected = JSON.parse(text.slice(text.indexOf('\n') + 1)) as {
+        output: string;
+      };
+      expect.soft(projected.output).toContain(`"retained":${literal}`);
+      expect.soft(text).toContain('[Recorded media omitted]');
+      expect.soft(text).toContain('NUMERIC_SIBLING_EVIDENCE');
+      expect.soft(text).not.toContain('R9_NUMERIC_MEDIA_CANARY');
+    },
+  );
+
+  it.each(['text', 'read-file-output'] as const)(
+    'does not expose media when valid JSON exceeds the redactor stack in %s',
+    async (kind) => {
+      const json =
+        '['.repeat(4000) +
+        '{"inline_data":{"data":"DEEP_MEDIA_CANARY"},"evidence":"safe"}' +
+        ']'.repeat(4000);
+      expect(() => JSON.parse(json)).not.toThrow();
+      const part: Part =
+        kind === 'text'
+          ? { text: json }
+          : {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: json, evidence: 'OUTSIDE_DEEP_EVIDENCE' },
+              },
+            };
+      const ref = await append(kind === 'text' ? 'user' : 'tool_result', part);
+      const result = await service.query({ action: 'read', ref }, signal);
+      expect.soft(result).not.toContain('DEEP_MEDIA_CANARY');
+      expect(
+        JSON.parse(
+          await service.query(
+            { action: 'search', query: '[Recorded media omitted]' },
+            signal,
+          ),
+        ).entries,
+      ).toHaveLength(1);
+      if (kind === 'read-file-output') {
+        expect(
+          JSON.parse(
+            await service.query(
+              { action: 'search', query: 'OUTSIDE_DEEP_EVIDENCE' },
+              signal,
+            ),
+          ).entries,
+        ).toHaveLength(1);
+      }
+      expect(
+        JSON.parse(
+          await service.query(
+            { action: 'search', query: 'DEEP_MEDIA_CANARY' },
+            signal,
+          ),
+        ).entries,
+      ).toEqual([]);
+    },
+  );
+
+  it('keeps ordinary brace-prefixed text after a JSON syntax failure', async () => {
+    const text = '{request failed: MALFORMED_LOG_RECOVERY_KEY';
+    const ref = await append('user', { text });
+    const result = await service.query({ action: 'read', ref }, signal);
+    expect(JSON.parse(result).entries[0].text).toBe(text);
+    expect(result).not.toContain('[Recorded media omitted]');
+  });
+
+  it.each([
+    'screenshot data:image/png;base64,iVBORw0KGgoAAAA\nexit code 1: tests failed',
+    'BEFORE data:image/png;base64,iVBORw0KGgo AAAANSUhEUg AFTER_ERROR',
+  ])(
+    'keeps the documented ambiguous inline-URL tail omitted: %j',
+    async (text) => {
+      const ref = await append('tool_result', {
+        functionResponse: {
+          name: 'read_file',
+          response: { text, evidence: 'SEPARATE_FIELD_EVIDENCE' },
+        },
+      });
+      const result = await service.query({ action: 'read', ref }, signal);
+      expect(result).toContain('[Recorded media omitted]');
+      expect(result).toContain('SEPARATE_FIELD_EVIDENCE');
+      expect(result).not.toContain('iVBORw0KGgo');
+      expect(result).not.toContain('AAAANSUhEUg');
+      expect(result).not.toContain('tests failed');
+      expect(result).not.toContain('AFTER_ERROR');
+      expect(JSON.parse(result).entries[0].truncated).toBeUndefined();
+    },
+  );
+
   const variants = [
     {
       name: 'space',
