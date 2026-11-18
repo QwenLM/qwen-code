@@ -7,7 +7,6 @@
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as net from 'node:net';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -17,7 +16,7 @@ import {
   MAX_FRAME_CHARS,
 } from '../../../src/peer/frames.js';
 import { startPeerInbox, type PeerInbox } from '../../../src/peer/inbox.js';
-import { noUnixSockets } from './helpers.js';
+import { makeTempRoot, noUnixSockets } from './helpers.js';
 
 vi.mock('node:net', async (importOriginal) => ({
   ...(await importOriginal<typeof net>()),
@@ -44,7 +43,7 @@ describe.skipIf(noUnixSockets)('peer inbox frame limits', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    root = fs.mkdtempSync(path.join(os.tmpdir(), 'qp-'));
+    root = makeTempRoot();
     const server = Object.assign(new EventEmitter(), {
       listen: (target: string, onListening: () => void) => {
         fs.writeFileSync(target, '');
@@ -96,6 +95,33 @@ describe.skipIf(noUnixSockets)('peer inbox frame limits', () => {
 
   it('accepts a completed frame exactly at the limit', () => {
     socket.emit('data', frameOfLength(MAX_FRAME_CHARS));
+    expect(onFrame).toHaveBeenCalledOnce();
+    expect(socket.destroy).not.toHaveBeenCalled();
+  });
+
+  it('delivers valid frames before an oversized frame but not after it', () => {
+    socket.emit(
+      'data',
+      encodePeerFrame(buildUserFrame({ content: 'before overflow' })) +
+        frameOfLength(MAX_FRAME_CHARS + 1) +
+        encodePeerFrame(buildUserFrame({ content: 'after overflow' })),
+    );
+    expect(onFrame).toHaveBeenCalledOnce();
+    expect(onFrame).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.objectContaining({ content: 'before overflow' }),
+      }),
+    );
+    expect(socket.destroy).toHaveBeenCalledOnce();
+  });
+
+  it('accepts an at-limit frame whose newline arrives in a later chunk', () => {
+    const frame = frameOfLength(MAX_FRAME_CHARS);
+    socket.emit('data', frame.slice(0, -1));
+    expect(onFrame).not.toHaveBeenCalled();
+    expect(socket.destroy).not.toHaveBeenCalled();
+
+    socket.emit('data', '\n');
     expect(onFrame).toHaveBeenCalledOnce();
     expect(socket.destroy).not.toHaveBeenCalled();
   });
