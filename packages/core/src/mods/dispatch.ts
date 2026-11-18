@@ -19,6 +19,7 @@ import {
 import {
   INVALIDATABLE_EVENTS,
   MOD_RENDER_PINNED_PROPS,
+  MOD_ROW_SITES,
   invalidRenderText,
   validateRenderTree,
   type ModRenderSite,
@@ -485,7 +486,7 @@ function validateRenderInput(value: ModInput, original: ModInput): void {
   }
   // Checked only once rewritten: the reply's own text may hold anything.
   if (
-    original['component'] === 'AssistantMessage' &&
+    MOD_ROW_SITES.has(original['component'] as string) &&
     props['text'] !== before['text']
   ) {
     const why = invalidRenderText(props['text'] as string);

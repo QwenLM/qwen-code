@@ -140,7 +140,18 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
       },
       capabilities: { features: [] },
     }),
-    useOptionalWorkspace: () => uploadWorkspaceState.current,
+    useOptionalWorkspace: () => {
+      throw new Error('composer must not read the daemon workspace hook');
+    },
+  };
+});
+
+vi.mock('../hooks/useComposerWorkspace.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../hooks/useComposerWorkspace.js')>();
+  return {
+    ...actual,
+    useOptionalComposerWorkspace: () => uploadWorkspaceState.current,
   };
 });
 
@@ -178,7 +189,10 @@ const composerCoreState = vi.hoisted(() => ({
   workspaceUploadBusy: false,
 }));
 
-// Controllable `useOptionalWorkspace()` value for file-upload gating tests.
+// Controllable `useOptionalComposerWorkspace()` value for file-upload gating
+// tests, supplied through the neutral hook mock above. The daemon-barrel
+// `useOptionalWorkspace` entry throws, so re-coupling the composer to the
+// daemon hook reddens this suite instead of passing silently.
 // Defaults to undefined (upload disabled) so existing tests are unaffected.
 const uploadWorkspaceState = vi.hoisted(() => ({
   current: undefined as
@@ -4586,12 +4600,28 @@ describe('ChatEditor toolbar popovers', () => {
           controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
         ).map((button) => button.getAttribute('data-web-shell-effort')),
       ).toEqual(efforts);
+      expect(
+        controls?.querySelector('[data-web-shell-effort="high"]')?.className,
+      ).toContain('reasoningEffortRowActive');
+      expect(
+        controls?.querySelector('[data-web-shell-effort="max"]')?.className,
+      ).not.toContain('reasoningEffortRowActive');
       await act(async () =>
         controls
           ?.querySelector<HTMLButtonElement>('[data-web-shell-effort="max"]')
           ?.click(),
       );
       expect(onSelectReasoningEffort).toHaveBeenLastCalledWith('max');
+      rerenderChatEditor(container, {
+        ...props,
+        reasoning: { ...props.reasoning!, effort: 'max' },
+      });
+      expect(
+        controls?.querySelector('[data-web-shell-effort="max"]')?.className,
+      ).toContain('reasoningEffortRowActive');
+      expect(
+        controls?.querySelector('[data-web-shell-effort="high"]')?.className,
+      ).not.toContain('reasoningEffortRowActive');
       await act(async () =>
         controls
           ?.querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')

@@ -21,8 +21,10 @@ const windowsRun = [
   `node -e "const r = require('./integration-tests/hosted-process-suite.json'); if (r.numTotalTests === 0 || r.numPassedTests !== r.numTotalTests) { console.error('::error::' + r.numPassedTests + ' of ' + r.numTotalTests + ' Hosted cases passed; Windows must run every case'); process.exit(1); }"`,
 ].join('\n');
 
-// One row per failover arm the Hosted failover job runs: step name, npm
-// script, and the runner flags that make the row a different arm.
+// One row per deterministic E2E arm the Hosted failover job runs: step name,
+// npm script, and the runner flags that make the row a different arm. The
+// failover arms plus the /loop skill model-turn and scheduled-fire arms,
+// which share the same packaged-stack prerequisites.
 const failoverArms = [
   [
     'Run in-flight owner failover E2E',
@@ -43,6 +45,16 @@ const failoverArms = [
     'Run long-answer persistence E2E',
     'test:e2e:managed-big-output',
     ['--big-output'],
+  ],
+  [
+    'Run /loop skill model-turn E2E',
+    'test:e2e:managed-loop-skill',
+    ['--loop-skill'],
+  ],
+  [
+    'Run /loop scheduled-fire E2E',
+    'test:e2e:managed-loop-fire',
+    ['--loop-fire'],
   ],
   [
     'Run Harness-restart session failover E2E',
@@ -723,9 +735,10 @@ describe('Hosted real-process gates', () => {
     // and now that path too can fill all four ceilings, so a slow setup
     // must still leave the O4 gates time to run.
     ['hosted-harness-mysql', 299, 332, 33],
-    // Twenty-eight failover arms at 10 each plus the capped rewritten-command
-    // cgroup delegation at 10; the allowance is ~13 minutes of setup plus 2.
-    ['hosted-failover-e2e', 290, 305, 15],
+    // Thirty deterministic E2E arms at 10 each plus the capped
+    // rewritten-command cgroup delegation at 10; the allowance is ~13 minutes
+    // of setup plus 2.
+    ['hosted-failover-e2e', 310, 325, 15],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling, allowance) => {
@@ -847,6 +860,8 @@ describe('Hosted real-process gates', () => {
         '--frozen-control-plane',
         '--g3-verify',
         '--big-output',
+        '--loop-skill',
+        '--loop-fire',
       ]) {
         if (!flags.some((entry) => entry.split(' ')[0] === flag)) {
           expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(

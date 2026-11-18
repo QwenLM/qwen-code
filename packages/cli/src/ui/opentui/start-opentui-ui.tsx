@@ -398,10 +398,11 @@ function OpenTuiEntryApp({
   });
 
   // --- seams handed to the shell ---------------------------------------------
-  // The main transcript's reply rows, which the Mods may draw.
+  const modsEnabled = settings.merged.experimental?.mods === true;
   const modRows = useMemo(
-    () => ({ config, sessionId: transcriptSessionId }),
-    [config, transcriptSessionId],
+    () =>
+      modsEnabled ? { config, sessionId: transcriptSessionId } : undefined,
+    [config, modsEnabled, transcriptSessionId],
   );
   const renderMain = useCallback(
     (shell?: { owner: ForegroundShellOwner | null; focused: boolean }) => (
