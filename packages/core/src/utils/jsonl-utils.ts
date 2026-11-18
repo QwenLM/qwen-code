@@ -50,6 +50,10 @@ interface ParsedJsonlLine<T> {
  */
 const fileLocks = new Map<string, Mutex>();
 
+export function _getFileLockCountForTest(): number {
+  return fileLocks.size;
+}
+
 /**
  * Gets or creates a mutex for a specific file path.
  */
@@ -349,23 +353,29 @@ export async function writeLine(
   data: unknown,
 ): Promise<void> {
   const lock = getFileLock(filePath);
-  await lock.runExclusive(async () => {
-    const line = `${JSON.stringify(data)}\n`;
-    const dir = path.dirname(filePath);
-    if (!ensuredDirs.has(dir)) {
-      await fs.promises.mkdir(dir, { recursive: true });
-      ensuredDirs.add(dir);
-    }
-    // flush:true fsyncs after each line so a process killed mid-write
-    // doesn't leave a glued `}{` record on disk (closes #3681). On
-    // Node v22/v24 strace shows string + utf8 + flush:true does fsync
-    // correctly; passing a Buffer is forward-compat insurance against
-    // any future C++ fast path that might bypass JS-side flush logic
-    // for the string case, with no behavior delta on tested versions.
-    await fs.promises.appendFile(filePath, Buffer.from(line, 'utf8'), {
-      flush: true,
+  try {
+    await lock.runExclusive(async () => {
+      const line = `${JSON.stringify(data)}\n`;
+      const dir = path.dirname(filePath);
+      if (!ensuredDirs.has(dir)) {
+        await fs.promises.mkdir(dir, { recursive: true });
+        ensuredDirs.add(dir);
+      }
+      // flush:true fsyncs after each line so a process killed mid-write
+      // doesn't leave a glued `}{` record on disk (closes #3681). On
+      // Node v22/v24 strace shows string + utf8 + flush:true does fsync
+      // correctly; passing a Buffer is forward-compat insurance against
+      // any future C++ fast path that might bypass JS-side flush logic
+      // for the string case, with no behavior delta on tested versions.
+      await fs.promises.appendFile(filePath, Buffer.from(line, 'utf8'), {
+        flush: true,
+      });
     });
-  });
+  } finally {
+    if (fileLocks.get(filePath) === lock && !lock.isLocked()) {
+      fileLocks.delete(filePath);
+    }
+  }
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   createSidebarMocks,
   DAEMON_APPROVAL_MODES,
   installSidebarDomShims,
+  makeSidebarSession,
   resolveWebShellSessions,
 } from '../../test/sidebarHarness';
 import { setLivePresence } from '../../live/live-presence';
@@ -8272,5 +8273,161 @@ describe('WebShellSidebar standalone grouping', () => {
         callsBeforeRetry,
       );
     });
+  });
+});
+
+describe('WebShellSidebar goal markers', () => {
+  const goalSession = (
+    goal: NonNullable<DaemonSessionSummary['goal']>,
+  ): DaemonSessionSummary =>
+    makeSidebarSession('goal-session', { displayName: 'Goal session', goal });
+
+  const rowFor = (label: string, root: ParentNode = container) =>
+    Array.from(
+      root.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes(label));
+
+  it('renders the running marker and opens the session on marker click', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'active',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+    );
+    const onLoadSession = vi.fn();
+    renderSidebar({ onLoadSession });
+    await ensureWorkspaceExpanded('project');
+
+    const row = rowFor('Goal session');
+    expect(row).toBeDefined();
+    const marker = row!.querySelector<HTMLElement>(
+      '[data-testid="session-goal-marker"]',
+    );
+    expect(marker).not.toBeNull();
+    expect(marker!.querySelector('svg')!.getAttribute('data-status')).toBe(
+      'running',
+    );
+    expect(marker!.tagName).toBe('BUTTON');
+    expect(marker!.getAttribute('aria-label')).toBe(
+      'Goal: In progress — ship it',
+    );
+
+    await act(async () => click(marker!));
+    expect(onLoadSession).toHaveBeenCalledOnce();
+    expect(onLoadSession).toHaveBeenCalledWith('goal-session', '/tmp/project');
+  });
+
+  it('reserves the actions width for a goal-only row without a PR badge', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'active',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+      {
+        sessionId: 'plain-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Plain session',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const goalRow = rowFor('Goal session')!;
+    // No PR badge is rendered, so the reservation must come from the goal
+    // marker alone (reserveActionsWidth's `|| hasGoalMarker` arm).
+    expect(goalRow.querySelector('[class*="sessionPrBadge"]')).toBeNull();
+    expect(
+      goalRow.querySelector('[data-testid="session-goal-marker"]'),
+    ).not.toBeNull();
+    expect(
+      goalRow.querySelector('[class*="sessionMetaSlotReserved"]'),
+    ).not.toBeNull();
+
+    // A goal-less, PR-less row reserves nothing.
+    expect(
+      rowFor('Plain session')!.querySelector(
+        '[class*="sessionMetaSlotReserved"]',
+      ),
+    ).toBeNull();
+  });
+
+  it('paints the attention tone for a paused goal', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const marker = rowFor('Goal session')!.querySelector(
+      '[data-testid="session-goal-marker"]',
+    );
+    expect(marker?.querySelector('svg')?.getAttribute('data-status')).toBe(
+      'attention',
+    );
+  });
+
+  it('renders no marker for a completed goal or a goal-less session', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'complete',
+        objective: 'done',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+      {
+        sessionId: 'plain-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Plain session',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(
+      rowFor('Goal session')!.querySelector(
+        '[data-testid="session-goal-marker"]',
+      ),
+    ).toBeNull();
+    expect(
+      rowFor('Plain session')!.querySelector(
+        '[data-testid="session-goal-marker"]',
+      ),
+    ).toBeNull();
+    // The goal-only reservation above already pins the || hasGoalMarker arm
+    // (a goal without a PR badge forces the reservation). This case adds the
+    // completed-specific arm: dropping status !== 'complete' would reserve
+    // the hover-actions slot on every completed row, shifting its icons left.
+    for (const name of ['Goal session', 'Plain session']) {
+      expect(
+        rowFor(name)!.querySelector('[class*="sessionMetaSlotReserved"]'),
+      ).toBeNull();
+    }
+  });
+
+  it('renders the archived-row marker as a pure indicator', async () => {
+    archived.sessions.push({
+      ...goalSession({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+      isArchived: true,
+    });
+    renderSidebar();
+    await openArchiveSettings();
+
+    const marker = archivedSessionsTarget.querySelector<HTMLElement>(
+      '[data-testid="session-goal-marker"]',
+    );
+    expect(marker).not.toBeNull();
+    expect(marker!.tagName).toBe('SPAN');
+    expect(marker!.querySelector('svg')!.getAttribute('data-status')).toBe(
+      'attention',
+    );
   });
 });

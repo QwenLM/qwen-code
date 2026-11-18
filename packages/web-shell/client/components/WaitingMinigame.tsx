@@ -742,7 +742,13 @@ export function WaitingMinigame({
   ]);
 
   const locale =
-    language === 'zh-CN' ? 'zh-CN' : language === 'ru' ? 'ru-RU' : 'en';
+    language === 'zh-CN'
+      ? 'zh-CN'
+      : language === 'zh-TW'
+        ? 'zh-TW'
+        : language === 'ru'
+          ? 'ru-RU'
+          : 'en';
   const { formatDay, formatMonth } = useMemo(() => {
     const dayFormatter = new Intl.DateTimeFormat(locale, {
       year: 'numeric',

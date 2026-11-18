@@ -55,6 +55,12 @@ export type CaptureResult =
       ok: false;
       reason: 'not-ready' | 'busy' | 'dirty' | 'stopped' | 'error';
     }>;
+/** Where a card's saved state comes from and where each change goes. */
+export interface ViewStateHost {
+  /** JSON text of the saved state, or null; rejects when it cannot be read. */
+  load(document: GeneratedDocument): Promise<string | null>;
+  save(json: string): void;
+}
 type ViewWorker = Pick<
   Worker,
   'postMessage' | 'terminate' | 'onmessage' | 'onerror'
@@ -112,6 +118,10 @@ export class ViewController {
     private readonly createWorker: () => Promise<ViewWorker>,
     private readonly onDocument: (document: GeneratedDocument) => void,
     private readonly onStatus: (state: ViewState) => void,
+    private readonly state: ViewStateHost = {
+      load: async () => null,
+      save: () => {},
+    },
   ) {}
 
   async receive(result: unknown): Promise<void> {
@@ -124,6 +134,9 @@ export class ViewController {
       this.documentId = document.documentId;
       this.onDocument(document);
       this.publish();
+      // A card whose state cannot be read starts without it; the host shows
+      // that nothing is saved. The load has its own time limit.
+      const saved = this.state.load(document).catch(() => null);
       this.watch(5_000);
       const [inputs, worker] = await Promise.all([
         this.surface.mount(document.html, document.css),
@@ -134,6 +147,10 @@ export class ViewController {
         }),
       ]);
       if (this.terminal) return;
+      clearTimeout(this.timer);
+      const state = await saved;
+      if (this.terminal) return;
+      this.watch(5_000);
       worker.onmessage = (message: MessageEvent<UiWorkerResponse>) => {
         if (this.terminal || !this.inflight || this.worker !== worker) return;
         const response = message.data;
@@ -145,9 +162,10 @@ export class ViewController {
           }
           const { request, baseInputRevision } = this.inflight;
           if (
-            request.type === 'init'
+            (request.type === 'init'
               ? response.execution !== 'initialized'
-              : !['handled', 'unhandled'].includes(response.execution)
+              : !['handled', 'unhandled'].includes(response.execution)) ||
+            (response.state !== undefined && typeof response.state !== 'string')
           ) {
             throw new Error('Invalid execution result.');
           }
@@ -158,6 +176,8 @@ export class ViewController {
             this.stop();
             return;
           }
+          // Persist only validated rounds, including superseded patches.
+          if (response.state !== undefined) this.state.save(response.state);
           this.observeInputs(outcome.inputs);
           if (outcome.kind === 'superseded') {
             this.lastUpdate = 'superseded';
@@ -198,6 +218,7 @@ export class ViewController {
         sequence: ++this.sequence,
         javascript: document.javascript,
         inputs: this.inputs!,
+        state,
       });
       this.publish();
     } catch (error) {
