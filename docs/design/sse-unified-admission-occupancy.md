@@ -68,8 +68,12 @@ Two gaps follow:
   `scope` (and listener-scoped `listener`) refusal fields, the new
   pairing-listener clamp (a REST stream arriving on a pairing listener is
   refused at that listener's 51-stream clamp, or at the aggregate cap when
-  that is lower), and the `connectedClients`
-  re-scope from REST-only to the aggregate.
+  that is lower), the `connectedClients`
+  re-scope from REST-only to the aggregate, and the refusal's `active`
+  value (with the `activeSseCount` log field): a daemon-scope refusal now
+  reports `active` = `streamOccupancy.total`, a listener-scope refusal that
+  listener's own count — not the REST-only count the base implementation
+  logged and returned.
 
 ## Non-goals
 
@@ -155,7 +159,10 @@ The shared gate reproduces the REST refusal exactly for aggregate rejections:
   where `scope` is `"daemon"` for the aggregate cap. Listener-scoped refusals
   use the listener's `active`/`limit` and add `scope: "listener"` plus the
   `listener` kind. `scope`/`listener` are additive fields; existing clients
-  branch on `code`.
+  branch on `code`. `active` is the occupancy of the population the binding
+  cap governs: the daemon total for a daemon-scope refusal, the arriving
+  listener's own count for a listener-scope refusal — never the REST-only
+  count, even when the refused request is a REST stream.
 - `daemonLog.warn('SSE connection limit reached', { surface, listener, scope, activeSseCount, limit, ...logContext })`;
   the stderr fallback keeps today's byte-identical line
   `qwen serve: SSE connection limit reached (active=<n>, limit=<n>); rejecting new SSE client with 503`.
@@ -201,11 +208,14 @@ fixtures that omit caps keep today's unlimited behavior.
   this design widens it deliberately and documents the change.
   `connectedClientsMax` stays the aggregate cap. Additive
   `listenerConnectedClients` / `listenerConnectedClientsMax` report the
-  arriving listener's own occupancy and the bound that governs its
-  admissions — the tighter of the aggregate cap and the listener's clamp
-  from the same `caps.byListener` the gate uses, since the gate tests the
-  aggregate first and a lower aggregate binds on every listener (review
-  R1-6).
+  arriving listener's governing pair: the bound is the tighter of the
+  aggregate cap and that listener's clamp from the same `caps.byListener`
+  the gate uses (the aggregate itself on primary, 51 on pairing listeners;
+  `null` = unlimited), since the gate tests the aggregate first and a lower
+  aggregate binds on every listener; the numerator counts the population
+  that bound governs — the daemon total when the aggregate cap binds, the
+  listener's own streams when its clamp binds — so the pair cannot read as
+  free headroom on a listener that is already refusing (review R1-6).
 - Every HTTP saturation refusal calls `markAccessLogError` with
   `sse_connection_limit_exceeded` so the access log attributes the branch
   (the `{error, code}` convention); the ACP WS refusal writes the raw socket

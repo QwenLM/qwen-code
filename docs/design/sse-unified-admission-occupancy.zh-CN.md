@@ -59,8 +59,11 @@ Risk & Scope 所述，cap、回收器与占用计数**仅覆盖
   计数时机保留，**但排除本设计明确文档化的变更**：additive 的 `scope`
   （listener 范围另加 `listener`）拒绝字段、新的配对 listener 钳制
   （到达配对 listener 的 REST 流在该 listener 的 51 流钳制处被拒；聚合
-  cap 更低时则在聚合 cap 处被拒），以及
-  `connectedClients` 从仅 REST 改义为聚合。
+  cap 更低时则在聚合 cap 处被拒）、
+  `connectedClients` 从仅 REST 改义为聚合，以及拒绝正文的 `active`
+  （连同 `activeSseCount` 日志字段）：daemon 范围拒绝现在上报
+  `active` = `streamOccupancy.total`，listener 范围拒绝上报该 listener
+  自身计数——不再是基线实现记录并返回的仅 REST 计数。
 
 ## 非目标
 
@@ -137,6 +140,9 @@ cap 低于 51 时对所有 listener（含配对）先生效。
   聚合 cap 的 `scope` 为 `"daemon"`。listener 范围的拒绝使用该 listener 的
   `active`/`limit`，并追加 `scope: "listener"` 与 `listener` kind。
   `scope`/`listener` 是 additive 字段；既有客户端按 `code` 分支。
+  `active` 是生效上限所管辖人群的占用：daemon 范围拒绝为 daemon 总数，
+  listener 范围拒绝为到达 listener 自身计数——即使被拒的是 REST 流，
+  也绝不是仅 REST 计数。
 - `daemonLog.warn('SSE connection limit reached', { surface, listener, scope, activeSseCount, limit, ...logContext })`；
   stderr 兜底保留今天逐字节相同的行
   `qwen serve: SSE connection limit reached (active=<n>, limit=<n>); rejecting new SSE client with 503`。
@@ -180,9 +186,12 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
   引入、当时口径仅 REST；本设计有意扩展并文档化该变化。
   `connectedClientsMax` 仍为聚合 cap。additive 的
   `listenerConnectedClients` / `listenerConnectedClientsMax` 上报到达
-  listener 自身的占用与管辖其准入的边界——聚合 cap 与该 listener 钳制
-  （经门禁所用的同一 `caps.byListener`）中更紧者：门禁先判聚合，更低的
-  聚合 cap 对所有 listener 先生效（评审 R1-6）。
+  listener 的管辖对：边界为聚合 cap 与该 listener 钳制（经门禁所用的同一
+  `caps.byListener`；主 listener 即聚合值，配对 listener 为 51；`null` =
+  不设限）中更紧者——门禁先判聚合，更低的聚合 cap 对所有 listener 先生效；
+  分子为该边界所管辖的人群——聚合 cap 生效时为 daemon 总数，钳制生效时
+  为该 listener 自身流数——因此已在拒绝的 listener 上这对读数不会被误读
+  为尚有余量（评审 R1-6）。
 - 每个 HTTP 饱和拒绝调用 `markAccessLogError` 记录
   `sse_connection_limit_exceeded`，使访问日志归因该分支（`{error, code}`
   约定）；ACP WS 拒绝在 upgrade 前写裸 socket，本就没有访问日志行

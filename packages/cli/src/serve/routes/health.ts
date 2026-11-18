@@ -24,10 +24,11 @@ interface CreateHealthRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   /**
    * Long-lived stream occupancy (issue #17554). The aggregate total pairs
-   * with the daemon-wide cap; the arriving listener's share pairs with the
-   * bound that governs its admissions — the tighter of the aggregate cap
-   * and the listener's own clamp, since a lower aggregate binds first
-   * (review R1-6).
+   * with the daemon-wide cap; the arriving listener's pair counts the
+   * population its governing bound caps — the daemon total when the
+   * aggregate cap binds, the listener's own count when its clamp binds —
+   * against the tighter of the aggregate cap and that clamp, since a
+   * lower aggregate binds first (review R1-6).
    */
   getStreamOccupancy: () => StreamOccupancySnapshot;
   sseAdmissionCaps?: SseAdmissionCaps;
@@ -154,6 +155,17 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
           : listenerClamp === null
             ? aggregateCap
             : Math.min(aggregateCap, listenerClamp);
+      // The population that bound governs: when the aggregate cap is the
+      // governing bound (always on the primary listener, and on pairing
+      // listeners under a low explicit cap) the gate sheds on the daemon
+      // total, so the pair must count the total — a listener-local
+      // numerator would read as free headroom on a listener that is
+      // already refusing (review R1-6, round 3). Only a binding pairing
+      // clamp governs a listener-local population.
+      const listenerOccupancy =
+        listenerMax === aggregateCap
+          ? occupancy.total
+          : occupancy.byListener[listener];
       res.status(200).json({
         status: 'ok',
         workspaceCount: runtimes.length,
@@ -175,10 +187,12 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
         // Effective SSE admission cap paired with the live occupancy above
         // so a probe can see saturation approaching (null = unlimited).
         connectedClientsMax: aggregateCap,
-        // The arriving listener's own pair (review R1-6): its occupancy
-        // and the bound that governs its admissions — the pairing clamp
-        // (51) at the defaults, or the aggregate cap when that is lower.
-        listenerConnectedClients: occupancy.byListener[listener],
+        // The arriving listener's governing pair (review R1-6): the
+        // occupancy of the population its bound governs — the daemon
+        // total when the aggregate cap binds (primary always; pairing
+        // under a low explicit cap), the listener's own count when its
+        // 51-stream clamp binds — and that bound (null = unlimited).
+        listenerConnectedClients: listenerOccupancy,
         listenerConnectedClientsMax: listenerMax,
         channelAlive,
         lastActivityAt:

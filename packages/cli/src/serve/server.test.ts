@@ -47310,7 +47310,10 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
         350,
       );
       expect(forcedBackpressure).toBe(true);
-      expect(text).toMatch(/(^|\n)event: session_update\n/);
+      // Frame-complete, like its two siblings: this is the only one of the
+      // three written through a real socket under backpressure, so a
+      // dropped terminator must red it too (PR #17663 review R2-2).
+      expect(text).toMatch(/event: session_update\ndata: [^\n]*\n\n/);
       expect(sawMarker).toBe(false);
     } finally {
       writeSpy.mockRestore();
@@ -51386,10 +51389,14 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
     for (const stream of streams.slice(1)) await stream.body!.cancel();
   }, 20_000);
 
-  it('clamps the pairing listener independently of the primary listener', async () => {
-    // Drive the REAL Local Control listener (pairing credential included)
-    // with the LAN selection pinned to loopback so the test is deterministic
-    // on hosts without a usable LAN interface.
+  // Shared Local Control fixture (review R3-4): pin the LAN selection to
+  // loopback so the pairing listener is deterministic on hosts without a
+  // usable LAN interface, boot the daemon, enable pairing, and hand back
+  // the LAN authority + credential plus a restore() for the finally block.
+  async function enablePairingListener(
+    opts: { maxConnections?: number; maxSseConnections?: number },
+    deps?: { daemonLogBaseDir?: string },
+  ) {
     const lanInterfaces = await import('./local-control/lan-interfaces.js');
     const candidate = { interfaceName: 'en0', address: '127.0.0.1' };
     const selectSpy = vi
@@ -51402,22 +51409,42 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
     const sleepSpy = vi
       .spyOn(sleepInhibitor, 'acquire')
       .mockReturnValue({ release: vi.fn() } as never);
-    let service: ReturnType<RunHandle['getLocalControl']> | undefined;
+    const daemonHandle = await runQwenServe(
+      { ...baseOpts, port: 0, ...opts },
+      { bridge: parkedBridge(), ...deps },
+    );
+    await daemonHandle.runtimeReady;
+    const service = daemonHandle.getLocalControl();
+    if (!service) throw new Error('local control service unavailable');
+    const lanStatus = await service.enable();
+    if (!lanStatus.active) throw new Error('LAN listener did not activate');
+    const pairingSecret = decodeURIComponent(
+      new URL(lanStatus.url!).hash.match(/token=([^&]+)/)![1]!,
+    );
+    return {
+      handle: daemonHandle,
+      lanBase: `http://${lanStatus.address}:${lanStatus.port}`,
+      lanAuth: { Authorization: `Bearer ${pairingSecret}` },
+      restore: async () => {
+        await service.disable().catch(() => {});
+        selectSpy.mockRestore();
+        listSpy.mockRestore();
+        sleepSpy.mockRestore();
+      },
+    };
+  }
+
+  it('clamps the pairing listener independently of the primary listener', async () => {
+    // runQwenServe always boots its own logger, so the access-log
+    // attribution is asserted against the real log file (review R3-5).
+    const logDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sse-clamp-log-'));
+    const pair = await enablePairingListener(
+      { maxConnections: 256 },
+      { daemonLogBaseDir: logDir },
+    );
+    handle = pair.handle;
+    const { lanBase, lanAuth } = pair;
     try {
-      handle = await runQwenServe(
-        { ...baseOpts, port: 0, maxConnections: 256 },
-        { bridge: parkedBridge() },
-      );
-      await handle.runtimeReady;
-      service = handle.getLocalControl();
-      expect(service).toBeDefined();
-      const lanStatus = await service!.enable();
-      expect(lanStatus.active).toBe(true);
-      const pairingSecret = decodeURIComponent(
-        new URL(lanStatus.url!).hash.match(/token=([^&]+)/)![1]!,
-      );
-      const lanBase = `http://${lanStatus.address}:${lanStatus.port}`;
-      const lanAuth = { Authorization: `Bearer ${pairingSecret}` };
       const primaryPort = (handle.server.address() as AddressInfo).port;
       const before = getSseOccupancy();
 
@@ -51446,6 +51473,20 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         scope: 'listener',
         listener: 'local-control',
       });
+      // The listener-scope refusal must attribute its own scope in the
+      // access log, not the daemon's (review R3-5).
+      await vi.waitFor(
+        async () => {
+          const entries = await fsp.readdir(logDir, { recursive: true });
+          const logFile = entries.find((e) => e.endsWith('daemon.log'));
+          expect(logFile).toBeDefined();
+          const log = await fsp.readFile(path.join(logDir, logFile!), 'utf8');
+          expect(log).toMatch(
+            /code=sse_connection_limit_exceeded[^\n]*reason=listener[^\n]*status=503/,
+          );
+        },
+        { timeout: 5_000 },
+      );
 
       // The primary listener still admits: its clamp is independent and the
       // aggregate (204) is far from reached.
@@ -51479,10 +51520,8 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         { timeout: 5_000 },
       );
     } finally {
-      await service?.disable().catch(() => {});
-      selectSpy.mockRestore();
-      listSpy.mockRestore();
-      sleepSpy.mockRestore();
+      await pair.restore();
+      await fsp.rm(logDir, { recursive: true, force: true });
     }
   }, 30_000);
 
@@ -51739,43 +51778,30 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       'local-control': null,
       'remote-access': null,
     });
+    // The unlimited sentinel must reach deep health as null, not a
+    // coerced 0: monitors comparing connected >= max would otherwise read
+    // an intentionally unlimited daemon as saturated (review R3-8).
+    const deep2 = (await (
+      await fetch(`http://127.0.0.1:${port2}/health?deep=1`)
+    ).json()) as {
+      connectedClientsMax: number | null;
+      listenerConnectedClientsMax: number | null;
+    };
+    expect(deep2.connectedClientsMax).toBeNull();
+    expect(deep2.listenerConnectedClientsMax).toBeNull();
   }, 20_000);
 
   it('deep health reports the arriving listener pair on pairing listeners (review R1-6)', async () => {
     // A probe on the pairing listener is governed by that listener's 51
-    // clamp, not the aggregate: its listenerConnectedClients/Max pair must
-    // read the LAN-only occupancy and the LAN clamp while the aggregate
-    // pair stays daemon-wide. The fixture keeps the two readings apart
-    // (2 LAN + 1 primary streams; 51 vs 204) so an aggregate-only report
-    // cannot pass.
-    const lanInterfaces = await import('./local-control/lan-interfaces.js');
-    const candidate = { interfaceName: 'en0', address: '127.0.0.1' };
-    const selectSpy = vi
-      .spyOn(lanInterfaces, 'selectLanAddress')
-      .mockReturnValue(candidate);
-    const listSpy = vi
-      .spyOn(lanInterfaces, 'listLanCandidates')
-      .mockReturnValue([candidate]);
-    const { sleepInhibitor } = await import('@qwen-code/qwen-code-core');
-    const sleepSpy = vi
-      .spyOn(sleepInhibitor, 'acquire')
-      .mockReturnValue({ release: vi.fn() } as never);
-    let service: ReturnType<RunHandle['getLocalControl']> | undefined;
+    // clamp, not the aggregate: its pair must read the LAN-only occupancy
+    // and the LAN clamp while the aggregate pair stays daemon-wide. The
+    // primary listener's bound IS the aggregate, so its pair counts the
+    // daemon total (review R1-6 round 3). The fixture keeps the readings
+    // apart (2 LAN + 1 primary streams; 51 vs 204).
+    const pair = await enablePairingListener({ maxConnections: 256 });
+    handle = pair.handle;
+    const { lanBase, lanAuth } = pair;
     try {
-      handle = await runQwenServe(
-        { ...baseOpts, port: 0, maxConnections: 256 },
-        { bridge: parkedBridge() },
-      );
-      await handle.runtimeReady;
-      service = handle.getLocalControl();
-      expect(service).toBeDefined();
-      const lanStatus = await service!.enable();
-      expect(lanStatus.active).toBe(true);
-      const pairingSecret = decodeURIComponent(
-        new URL(lanStatus.url!).hash.match(/token=([^&]+)/)![1]!,
-      );
-      const lanBase = `http://${lanStatus.address}:${lanStatus.port}`;
-      const lanAuth = { Authorization: `Bearer ${pairingSecret}` };
       const primaryPort = (handle.server.address() as AddressInfo).port;
       const before = getSseOccupancy();
 
@@ -51809,9 +51835,9 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       expect(primaryDeep.connectedClientsMax).toBe(204);
       expect(lanDeep.connectedClients).toBe(total);
       expect(lanDeep.connectedClientsMax).toBe(204);
-      expect(primaryDeep.listenerConnectedClients).toBe(
-        before.byListener.primary + 1,
-      );
+      // Primary's governing bound is the aggregate, so its pair counts the
+      // daemon total, not the primary-local share (review R1-6 round 3).
+      expect(primaryDeep.listenerConnectedClients).toBe(total);
       expect(primaryDeep.listenerConnectedClientsMax).toBe(204);
       expect(lanDeep.listenerConnectedClients).toBe(
         before.byListener['local-control'] + 2,
@@ -51827,10 +51853,7 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         { timeout: 5_000 },
       );
     } finally {
-      await service?.disable().catch(() => {});
-      selectSpy.mockRestore();
-      listSpy.mockRestore();
-      sleepSpy.mockRestore();
+      await pair.restore();
     }
   }, 30_000);
 
@@ -51886,34 +51909,13 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
     // With --max-sse-connections 5 the aggregate binds on EVERY listener
     // (the gate tests it first), so a pairing-listener probe must read 5 —
     // not the 51 clamp that no request on that listener can ever reach.
-    const lanInterfaces = await import('./local-control/lan-interfaces.js');
-    const candidate = { interfaceName: 'en0', address: '127.0.0.1' };
-    const selectSpy = vi
-      .spyOn(lanInterfaces, 'selectLanAddress')
-      .mockReturnValue(candidate);
-    const listSpy = vi
-      .spyOn(lanInterfaces, 'listLanCandidates')
-      .mockReturnValue([candidate]);
-    const { sleepInhibitor } = await import('@qwen-code/qwen-code-core');
-    const sleepSpy = vi
-      .spyOn(sleepInhibitor, 'acquire')
-      .mockReturnValue({ release: vi.fn() } as never);
-    let service: ReturnType<RunHandle['getLocalControl']> | undefined;
+    const pair = await enablePairingListener({
+      maxConnections: 10,
+      maxSseConnections: 5,
+    });
+    handle = pair.handle;
+    const { lanBase, lanAuth } = pair;
     try {
-      handle = await runQwenServe(
-        { ...baseOpts, port: 0, maxConnections: 10, maxSseConnections: 5 },
-        { bridge: parkedBridge() },
-      );
-      await handle.runtimeReady;
-      service = handle.getLocalControl();
-      expect(service).toBeDefined();
-      const lanStatus = await service!.enable();
-      expect(lanStatus.active).toBe(true);
-      const pairingSecret = decodeURIComponent(
-        new URL(lanStatus.url!).hash.match(/token=([^&]+)/)![1]!,
-      );
-      const lanBase = `http://${lanStatus.address}:${lanStatus.port}`;
-      const lanAuth = { Authorization: `Bearer ${pairingSecret}` };
       const primaryPort = (handle.server.address() as AddressInfo).port;
       const deepOf = async (base: string, headers?: Record<string, string>) =>
         (await (await fetch(`${base}/health?deep=1`, { headers })).json()) as {
@@ -51928,11 +51930,32 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       expect(primaryDeep.listenerConnectedClientsMax).toBe(5);
       expect(lanDeep.connectedClientsMax).toBe(5);
       expect(primaryDeep.connectedClientsMax).toBe(5);
+
+      // Saturate on the PRIMARY listener: the pairing listener's next
+      // stream is refused by the aggregate while its own count stays 0,
+      // so its reported pair must show that saturation, not free headroom
+      // (review R1-6 round 3 acceptance).
+      const streams: Response[] = [];
+      for (let i = 0; i < 5; i++) {
+        const res = await fetch(
+          `http://127.0.0.1:${primaryPort}/session/sess-gov-${i}/events`,
+        );
+        expect(res.status).toBe(200);
+        streams.push(res);
+      }
+      const lanSat = await deepOf(lanBase, lanAuth);
+      expect(lanSat.listenerConnectedClients).toBe(5);
+      expect(lanSat.listenerConnectedClientsMax).toBe(5);
+      const lanRefused = await fetch(`${lanBase}/session/sess-gov-lan/events`, {
+        headers: lanAuth,
+      });
+      expect(lanRefused.status).toBe(503);
+      expect(((await lanRefused.json()) as { scope: string }).scope).toBe(
+        'daemon',
+      );
+      for (const stream of streams) await stream.body!.cancel();
     } finally {
-      await service?.disable().catch(() => {});
-      selectSpy.mockRestore();
-      listSpy.mockRestore();
-      sleepSpy.mockRestore();
+      await pair.restore();
     }
   }, 30_000);
 });
