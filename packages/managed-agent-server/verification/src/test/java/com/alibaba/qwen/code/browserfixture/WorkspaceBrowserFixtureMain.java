@@ -94,7 +94,10 @@ public final class WorkspaceBrowserFixtureMain {
             };
             FilterRegistrationBean<Filter> registration =
                     new FilterRegistrationBean<>(filter);
-            registration.setUrlPatterns(List.of("/api/agent/web-shell/v1/*"));
+            // The migrated browser fixtures call the Public surface; the
+            // WebShell pattern stays until slice 4c removes that surface.
+            registration.setUrlPatterns(
+                    List.of("/api/agent/web-shell/v1/*", "/v1/agents/*"));
             registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
             return registration;
         }

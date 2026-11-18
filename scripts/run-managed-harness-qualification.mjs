@@ -14,7 +14,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { signedManagedHeaders } from '../packages/cli/src/serve/managed-local-web.js';
 
 const publicSessions = '/v1/agents/sessions';
-const workspaceFiles = '/api/agent/web-shell/v1/workspaces/files';
+const workspaceFiles = '/v1/agents/workspace-files';
 const limit = 1024 * 1024;
 
 export function validateConfig(config) {
@@ -228,11 +228,10 @@ export async function qualify(config, signingKey, save) {
     throw new Error(`Timed out at ${stage}`);
   };
   const fileState = async (owner, file, absent = false) => {
-    const base = { workspaceId: owner.workspaceId, cwdRelative: '.' };
+    const scope = { workspace_id: owner.workspaceId, cwd_relative: '.' };
     const { data: listing } = await request(
       owner.actor,
-      `${workspaceFiles}/query`,
-      { method: 'POST', body: { ...base, directory: '.', query: file } },
+      `${workspaceFiles}?${new URLSearchParams({ ...scope, directory: '.', query: file })}`,
     );
     if (absent) {
       assert.ok(
@@ -250,14 +249,14 @@ export async function qualify(config, signingKey, save) {
       return;
     }
     if (!listing.entries.some((entry) => entry.path === file)) return null;
-    const { data } = await request(owner.actor, `${workspaceFiles}/read`, {
-      method: 'POST',
-      body: {
-        ...base,
+    const { data } = await request(
+      owner.actor,
+      `${workspaceFiles}/content?${new URLSearchParams({
+        ...scope,
         path: file,
-        expectedScopeRevision: listing.scopeRevision,
-      },
-    });
+        expected_scope_revision: listing.scope_revision,
+      })}`,
+    );
     report.effects.push({
       workspaceId: owner.workspaceId,
       path: file,
@@ -463,37 +462,35 @@ export async function qualify(config, signingKey, save) {
     for (const [index, actor] of config.actors.entries()) {
       const { data: workspace } = await request(
         actor,
-        '/api/agent/web-shell/v1/workspaces/create',
+        '/v1/agents/workspaces',
         {
           method: 'POST',
-          body: {
-            displayName: `${config.runId}-${index}`,
-            idempotencyKey: `${config.runId}-workspace-${index}`,
-          },
+          body: { display_name: `${config.runId}-${index}` },
+          key: `${config.runId}-workspace-${index}`,
         },
       );
       assert.ok(
-        typeof workspace.workspaceId === 'string' &&
-          workspace.workspaceId.length > 0,
+        typeof workspace.workspace_id === 'string' &&
+          workspace.workspace_id.length > 0,
       );
       report.workspaces.push({
         tenantId: actor.tenantId,
         actorId: actor.actorId,
-        id: workspace.workspaceId,
+        id: workspace.workspace_id,
       });
       await save(report);
       const own = await request(
         actor,
-        `/v1/agents/workspaces/${encodeURIComponent(workspace.workspaceId)}`,
+        `/v1/agents/workspaces/${encodeURIComponent(workspace.workspace_id)}`,
       );
-      assert.equal(own.data.id, workspace.workspaceId);
+      assert.equal(own.data.id, workspace.workspace_id);
       for (const intruder of config.actors.filter(
         (other) =>
           other.tenantId !== actor.tenantId || other.actorId !== actor.actorId,
       ))
         await request(
           intruder,
-          `/v1/agents/workspaces/${encodeURIComponent(workspace.workspaceId)}`,
+          `/v1/agents/workspaces/${encodeURIComponent(workspace.workspace_id)}`,
           { expected: 404 },
         );
       for (const [lane, agentId] of [
@@ -504,7 +501,10 @@ export async function qualify(config, signingKey, save) {
         const body = {
           agent_id: agentId,
           input: [],
-          workspace: { workspace_id: workspace.workspaceId, cwd_relative: '.' },
+          workspace: {
+            workspace_id: workspace.workspace_id,
+            cwd_relative: '.',
+          },
         };
         const { data: session } = await request(actor, publicSessions, {
           method: 'POST',
@@ -518,7 +518,7 @@ export async function qualify(config, signingKey, save) {
         );
         const owner = {
           actor,
-          workspaceId: workspace.workspaceId,
+          workspaceId: workspace.workspace_id,
           id: session.id,
           lane,
         };

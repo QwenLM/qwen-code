@@ -11,11 +11,18 @@ test('creates a fixed empty Session against Spring and SQL at desktop and mobile
   page,
 }) => {
   let dropNextCreate = false;
-  const createRequests: unknown[] = [];
+  const createRequests: Array<{
+    body: unknown;
+    idempotencyKey: string | undefined;
+  }> = [];
   const createdIds: string[] = [];
-  await page.route('**/api/agent/web-shell/v1/**', async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    if (path.endsWith('/events/stream')) {
+  await page.route('**/v1/agents/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const isCreate =
+      path === '/v1/agents/sessions' && request.method() === 'POST';
+    if (path.endsWith('/events') && url.searchParams.get('stream') === 'true') {
       await route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
@@ -23,15 +30,19 @@ test('creates a fixed empty Session against Spring and SQL at desktop and mobile
       });
       return;
     }
-    if (path.endsWith('/sessions/create')) {
-      createRequests.push(route.request().postDataJSON());
+    if (isCreate) {
+      createRequests.push({
+        body: request.postDataJSON(),
+        idempotencyKey: request.headers()['idempotency-key'],
+      });
     }
+    // The Public reads carry their filters in the query string.
     const response = await route.fetch({
-      url: new URL(path, springUrl!).toString(),
+      url: new URL(path + url.search, springUrl!).toString(),
     });
-    if (path.endsWith('/sessions/create')) {
-      const admission = await response.json();
-      createdIds.push(admission.sessionId as string);
+    if (isCreate) {
+      const session = await response.json();
+      createdIds.push(session.id as string);
       if (dropNextCreate) {
         dropNextCreate = false;
         await route.abort('failed');
@@ -77,11 +88,11 @@ test('creates a fixed empty Session against Spring and SQL at desktop and mobile
       page.locator('[data-managed-workspace-binding]'),
     ).toContainText('ws-default');
     if (size.width === 390) {
-      // requestId is trace-only, so a retry carries a fresh one.
-      expect(createRequests[2]).toEqual({
-        ...(createRequests[1] as Record<string, unknown>),
-        requestId: expect.stringMatching(/^managed_/),
-      });
+      // The Public create body carries no requestId: the retry repeats it
+      // verbatim under the same Idempotency-Key, and Spring replays the
+      // original Session.
+      expect(createRequests[1].idempotencyKey).toEqual(expect.any(String));
+      expect(createRequests[2]).toEqual(createRequests[1]);
       expect(createdIds[2]).toBe(createdIds[1]);
     }
     await expect(page.locator('[data-managed-progress]')).toHaveCount(0);

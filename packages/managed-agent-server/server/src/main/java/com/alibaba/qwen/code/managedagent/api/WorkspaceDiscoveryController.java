@@ -11,12 +11,14 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -44,7 +46,8 @@ public class WorkspaceDiscoveryController {
                 page.defaultWorkspace() == null ? null
                         : publicItem(page.defaultWorkspace()),
                 page.hasMore(), page.nextCursor(),
-                new PublicCapabilities(true, false)));
+                new PublicCapabilities(true, false, creation.enabled(), true,
+                        creation.directorySelectionEnabled(), creation.localDirectoryImportEnabled())));
     }
 
     @GetMapping("/v1/agents/workspaces/{workspaceId}")
@@ -52,6 +55,42 @@ public class WorkspaceDiscoveryController {
             @PathVariable String workspaceId) {
         return noStore(publicItem(service.get(tenant.tenantId(),
                 tenant.requireActorId(), workspaceId)));
+    }
+
+    @PostMapping("/v1/agents/workspaces")
+    public ResponseEntity<PublicWorkspaceSummary> publicCreate(TenantContext tenant,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody PublicCreateRequest request) {
+        String actor = tenant.requireActorId();
+        if (StringUtils.isBlank(idempotencyKey)) {
+            throw new ManagedAgentException(400, "invalid_request", "Idempotency-Key must not be blank.");
+        }
+        return noStore(PublicWorkspaceSummary.from(creation.create(tenant.tenantId(), actor,
+                request.displayName(), idempotencyKey, request.sourceWorkspaceId(), request.cwdRelative(),
+                request.localPath())));
+    }
+
+    @GetMapping("/v1/agents/workspaces/directories")
+    public ResponseEntity<PublicDirectoryPage> publicDirectories(TenantContext tenant,
+            @RequestParam(name = "workspace_id", required = false) String workspaceId,
+            @RequestParam(name = "cwd_relative", required = false) String cwdRelative,
+            @RequestParam(name = "local_path", required = false) String localPath) {
+        String actor = tenant.requireActorId();
+        if (localPath != null) {
+            if (workspaceId != null || cwdRelative != null) {
+                throw new ManagedAgentException(
+                        400, "invalid_request",
+                        "Local path and source Workspace must not be combined.");
+            }
+            return noStore(PublicDirectoryPage.from(creation.localDirectories(localPath)));
+        }
+        if (workspaceId == null || cwdRelative == null) {
+            throw new ManagedAgentException(
+                    400, "invalid_request",
+                    "Source Workspace and directory are required.");
+        }
+        return noStore(PublicDirectoryPage.from(creation.directories(tenant.tenantId(), actor,
+                workspaceId, cwdRelative)));
     }
 
     @PostMapping("/api/agent/web-shell/v1/workspaces/query")
@@ -122,7 +161,8 @@ public class WorkspaceDiscoveryController {
         return new PublicItem(item.workspaceId(), "agent.workspace",
                 item.displayName(),
                 item.state().toLowerCase(Locale.ROOT),
-                item.canCreateSession());
+                item.canCreateSession(),
+                item.defaultCwdRelative(), item.canSelectDirectory());
     }
 
     private static WorkspaceSummary webShellItem(WorkspaceSummary item) {
@@ -168,13 +208,19 @@ public class WorkspaceDiscoveryController {
 
     public record PublicCapabilities(
             @JsonProperty("workspace_binding") boolean workspaceBinding,
-            @JsonProperty("workspace_context") boolean workspaceContext) {
+            @JsonProperty("workspace_context") boolean workspaceContext,
+            @JsonProperty("workspace_creation") boolean workspaceCreation,
+            @JsonProperty("approval_mode_selection") boolean approvalModeSelection,
+            @JsonProperty("directory_selection") boolean directorySelection,
+            @JsonProperty("local_directory_import") boolean localDirectoryImport) {
     }
 
     public record PublicItem(String id, String object,
             @JsonProperty("display_name") String displayName,
             String state,
-            @JsonProperty("can_create_session") boolean canCreateSession) {
+            @JsonProperty("can_create_session") boolean canCreateSession,
+            @JsonProperty("default_cwd_relative") String defaultCwdRelative,
+            @JsonProperty("can_select_directory") boolean canSelectDirectory) {
     }
 
     public record PublicPage(String object, List<PublicItem> data,
@@ -182,5 +228,48 @@ public class WorkspaceDiscoveryController {
             @JsonProperty("has_more") boolean hasMore,
             @JsonProperty("next_cursor") String nextCursor,
             PublicCapabilities capabilities) {
+    }
+
+    public record PublicCreateRequest(
+            @JsonProperty("display_name") @NotBlank String displayName,
+            @JsonProperty("source_workspace_id") String sourceWorkspaceId,
+            @JsonProperty("cwd_relative") String cwdRelative,
+            @JsonProperty("local_path") String localPath) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException("Unknown Workspace creation field");
+        }
+    }
+
+    public record PublicWorkspaceSummary(
+            @JsonProperty("workspace_id") String workspaceId,
+            @JsonProperty("display_name") String displayName,
+            String state,
+            @JsonProperty("can_create_session") boolean canCreateSession,
+            @JsonProperty("default_cwd_relative") String defaultCwdRelative,
+            @JsonProperty("can_select_directory") boolean canSelectDirectory) {
+        static PublicWorkspaceSummary from(WorkspaceSummary item) {
+            return new PublicWorkspaceSummary(item.workspaceId(), item.displayName(),
+                    item.state().toLowerCase(Locale.ROOT), item.canCreateSession(),
+                    item.defaultCwdRelative(), item.canSelectDirectory());
+        }
+    }
+
+    public record PublicDirectoryEntry(String name,
+            @JsonProperty("cwd_relative") String cwdRelative) {
+        static PublicDirectoryEntry from(WorkspaceCreationStore.Directory directory) {
+            return new PublicDirectoryEntry(directory.name(), directory.cwdRelative());
+        }
+    }
+
+    public record PublicDirectoryPage(String root,
+            @JsonProperty("cwd_relative") String cwdRelative,
+            List<PublicDirectoryEntry> directories,
+            boolean truncated) {
+        static PublicDirectoryPage from(WorkspaceCreationStore.DirectoryPage page) {
+            return new PublicDirectoryPage(page.root(), page.cwdRelative(),
+                    page.directories().stream().map(PublicDirectoryEntry::from).toList(),
+                    page.truncated());
+        }
     }
 }

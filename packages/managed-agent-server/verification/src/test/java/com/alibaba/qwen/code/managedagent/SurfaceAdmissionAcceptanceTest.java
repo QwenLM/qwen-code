@@ -609,7 +609,8 @@ public class SurfaceAdmissionAcceptanceTest {
                 }
                 var operation = JSON.readTree(expect(entry, OWNER, 200, null)
                         .getResponse().getContentAsString());
-                assertThat(operation.path("operationId").asText())
+                assertThat(operation.path(entry.surface() == Surface.PUBLIC
+                        ? "operation_id" : "operationId").asText())
                         .isEqualTo(registrationOperation);
                 assertThat(operation.path("status").asText()).isEqualTo("recovery_blocked");
                 assertThat(operation.path("replayed").asBoolean()).isTrue();
@@ -1516,7 +1517,9 @@ public class SurfaceAdmissionAcceptanceTest {
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
         variables.put("queryId", "11111111-1111-4111-8111-111111111111");
-        variables.put("operationId", (entry.capabilities().contains(Capability.MCP_MANAGEMENT) || entry.capabilities().contains(Capability.EXTENSION_CONFIG_GET)
+        variables.put("operationId", entry.capabilities().contains(Capability.WORKSPACE_REGISTRATION_GET)
+                ? registrationOperation
+                : (entry.capabilities().contains(Capability.MCP_MANAGEMENT) || entry.capabilities().contains(Capability.EXTENSION_CONFIG_GET)
                 || entry.capabilities().contains(Capability.EXTENSION_CONFIG_APPLY))
                 ? "11111111-1111-4111-8111-111111111111" : "op_0000000000000000");
         variables.put("taskId", entry.capabilities().contains(
@@ -1536,6 +1539,8 @@ public class SurfaceAdmissionAcceptanceTest {
                                 ? pendingActionPublic : pendingActionWeb
                 : pendingAction);
         variables.put("workspaceId", "ws");
+        variables.put("nodeId", "node-probe");
+        variables.put("uploadId", "11111111-1111-4111-8111-111111111111");
         variables.put("worktreeId", "worktree-probe");
         variables.put("extensionId", "ext_11111111-1111-4111-8111-111111111111");
         variables.put("packageRevision", "1");
@@ -1564,12 +1569,42 @@ public class SurfaceAdmissionAcceptanceTest {
         if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.SESSION_ACTIVITY)) {
             query.add("kind=tools");
         }
-        if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
-            query.add("workspaceId=workspace");
-            query.add("cwdRelative=.");
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.CLIENT_FILES_STREAM)) {
+            query.add("generation=1");
+            query.add("connection_id=conn-probe");
+        }
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.WORKSPACE_FILES_QUERY)) {
+            query.add("workspace_id=workspace");
+            query.add("cwd_relative=.");
+            query.add("directory=.");
+        }
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.WORKSPACE_FILES_READ)) {
+            query.add("workspace_id=workspace");
+            query.add("cwd_relative=.");
             query.add("path=file.txt");
-            query.add("expectedScopeRevision=" + digest());
-            query.add("uploadId=11111111-1111-4111-8111-111111111111");
+            query.add("expected_scope_revision=revision");
+        }
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.WORKSPACE_DIRECTORIES)) {
+            query.add("workspace_id=workspace");
+            query.add("cwd_relative=.");
+        }
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.SESSION_OPTIONS)) {
+            query.add("agent_id=qwen-code");
+        }
+        if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
+            if (entry.surface() == Surface.PUBLIC) {
+                query.add("workspace_id=workspace");
+                query.add("cwd_relative=.");
+                query.add("path=file.txt");
+                query.add("expected_scope_revision=" + digest());
+                query.add("upload_id=11111111-1111-4111-8111-111111111111");
+            } else {
+                query.add("workspaceId=workspace");
+                query.add("cwdRelative=.");
+                query.add("path=file.txt");
+                query.add("expectedScopeRevision=" + digest());
+                query.add("uploadId=11111111-1111-4111-8111-111111111111");
+            }
         }
         if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
                 && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
@@ -1680,13 +1715,17 @@ public class SurfaceAdmissionAcceptanceTest {
             case SIDE_QUERY_CREATE -> publicSurface ? "{\"kind\":\"btw\",\"question\":\"probe\"}"
                     : "{\"sessionId\":\"" + session + "\",\"kind\":\"btw\",\"question\":\"probe\",\"idempotencyKey\":\"" + nextKey() + "\"}";
             case SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT -> "{\"sessionId\":\"" + session + "\"}";
-            case CLIENT_FILES_REGISTER ->
-                    "{\"sessionId\":\"" + session + "\",\"connectionId\":\"conn-probe\"}";
-            case CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS ->
-                    "{\"sessionId\":\"" + session + "\"}";
-            case CLIENT_FILES_STREAM ->
-                    "{\"sessionId\":\"" + session + "\",\"generation\":1,\"connectionId\":\"conn-probe\"}";
-            case CLIENT_FILES_RESPOND -> "{\"sessionId\":\"" + session
+            case CLIENT_FILES_REGISTER -> publicSurface
+                    ? "{\"connection_id\":\"conn-probe\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"connectionId\":\"conn-probe\"}";
+            case CLIENT_FILES_UNREGISTER -> publicSurface ? "{}"
+                    : "{\"sessionId\":\"" + session + "\"}";
+            case CLIENT_FILES_STATUS -> "{\"sessionId\":\"" + session + "\"}";
+            case CLIENT_FILES_STREAM -> publicSurface ? "{}"
+                    : "{\"sessionId\":\"" + session + "\",\"generation\":1,\"connectionId\":\"conn-probe\"}";
+            case CLIENT_FILES_RESPOND -> publicSurface
+                    ? "{\"generation\":1,\"connection_id\":\"conn-probe\",\"rpc_request_id\":\"probe\",\"response_json\":\"{}\"}"
+                    : "{\"sessionId\":\"" + session
                     + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}";
             case INTERNAL_CLIENT_FILES_MCP -> "{\"jsonrpc\":\"2.0\",\"id\":\"probe\",\"method\":\"tools/list\"}";
             case SIDE_QUERY_GET, SIDE_QUERY_STREAM, SIDE_QUERY_CANCEL -> "{\"sessionId\":\"" + session
@@ -1806,7 +1845,9 @@ public class SurfaceAdmissionAcceptanceTest {
             case ARTIFACT_GET -> "{\"sessionId\":\"" + session
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
-            case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
+            case WORKSPACE_CREATE -> publicSurface
+                    ? "{\"display_name\":\"New workspace\"}"
+                    : "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
             case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
             case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
             case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";
@@ -1826,16 +1867,23 @@ public class SurfaceAdmissionAcceptanceTest {
                 yield "{" + (publicSurface ? "" : "\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"mcp-management\",")
                         + "\"action\":\"restart\",\"serverId\":\"docs\",\"expectedRevision\":0}";
             }
-            case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
+            case SESSION_APPROVAL_CHANGE -> publicSurface
+                    ? "{\"approval_mode\":\"yolo\",\"expected_revision\":0}"
+                    : "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"approval-change\",\"approvalMode\":\"yolo\",\"expectedRevision\":0}";
-            case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session
+            case SESSION_MODEL_CHANGE -> publicSurface
+                    ? "{\"model_id\":\"model-a\",\"expected_revision\":0}"
+                    : "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"model-change\",\"modelId\":\"model-a\",\"expectedRevision\":0}";
             case WORKSPACE_LIST -> "{}";
             case WORKSPACE_GET -> "{\"workspaceId\":\"ws\"}";
             case RUNTIME_NODE_LIST -> "{}";
-            case WORKSPACE_DIRECTORY_CHECK ->
-                "{\"nodeId\":\"node-probe\",\"path\":\"/work/project\"}";
-            case WORKSPACE_REGISTER -> "{\"nodeId\":\"node-probe\",\"path\":\"/work/project\","
+            case WORKSPACE_DIRECTORY_CHECK -> publicSurface
+                    ? "{\"path\":\"/work/project\"}"
+                    : "{\"nodeId\":\"node-probe\",\"path\":\"/work/project\"}";
+            case WORKSPACE_REGISTER -> publicSurface
+                    ? "{\"node_id\":\"node-probe\",\"path\":\"/work/project\",\"display_name\":\"Project\"}"
+                    : "{\"nodeId\":\"node-probe\",\"path\":\"/work/project\","
                     + "\"displayName\":\"Project\",\"idempotencyKey\":\"" + nextKey() + "\"}";
             case WORKSPACE_REGISTRATION_GET ->
                 "{\"operationId\":\"" + registrationOperation + "\"}";

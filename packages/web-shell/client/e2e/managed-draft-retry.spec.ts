@@ -1,62 +1,104 @@
 import { expect, test } from '@playwright/test';
-import type { JavaAgentSession } from '../components/managed/java-managed-agent-client';
+import type { components } from '../components/managed/generated/managed-agent-api';
+
+type Schemas = components['schemas'];
 
 for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
   test(`accepted retry from ${retryFrom} clears the remounted owning composer and preserves a foreign draft @smoke`, async ({
     page,
   }) => {
-    const sessions: JavaAgentSession[] = ['a', 'b'].map((id) => ({
-      sessionId: `session-${id}`,
+    // Public wire: Session timestamps are epoch seconds.
+    const sessions: Schemas['PublicSession'][] = ['a', 'b'].map((id) => ({
+      id: `session-${id}`,
+      object: 'agent.session',
       title: `Conversation ${id.toUpperCase()}`,
-      agentId: 'agent-a',
+      agent_id: 'agent-a',
+      agent_revision: '1',
       status: 'active',
-      createdAt: 1,
-      updatedAt: 1,
-      lastSequence: 0,
+      created_at: 1790777114,
+      updated_at: 1790777114,
+      last_event_id: 0,
       capabilities: {
+        items: false,
+        snapshots: false,
+        resync: false,
         actions: false,
         artifacts: false,
         tasks: false,
-        workspaceTurns: false,
+        workspace_turns: false,
       },
     }));
     const requests: Record<string, unknown>[] = [];
     const unexpected: string[] = [];
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
-    await page.route('**/api/agent/web-shell/v1/**', async (route) => {
-      if (
-        new URL(route.request().url()).pathname.endsWith('/runtime-nodes/query')
-      )
+    await page.route('**/v1/agents/**', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const path = url.pathname;
+      const method = request.method();
+      const sessionRoute = /^\/v1\/agents\/sessions\/([^/]+)(\/.*)?$/.exec(
+        path,
+      );
+      const sessionId = sessionRoute?.[1];
+      const suffix = sessionRoute?.[2] ?? '';
+      const body = request.postDataJSON();
+      if (path === '/v1/agents/runtime-nodes')
         return route.fulfill({ json: { supported: false, data: [] } });
-      const path = new URL(route.request().url()).pathname;
-      const body = route.request().postDataJSON();
-      if (path.endsWith('/user-messages/query'))
+      if (sessionId && suffix === '/user-messages')
         return route.fulfill({ json: { paused: false, messages: [] } });
-      if (path.endsWith('/sessions/query'))
-        return route.fulfill({ json: { data: sessions, hasMore: false } });
-      if (path.endsWith('/sessions/get'))
-        return route.fulfill({
-          json: sessions.find(
-            (session) => session.sessionId === body.sessionId,
-          ),
-        });
-      if (path.endsWith('/workspaces/query'))
+      if (path === '/v1/agents/sessions' && method === 'GET')
         return route.fulfill({
           json: {
-            data: [],
-            hasMore: false,
-            capabilities: { workspaceBinding: true },
+            object: 'list',
+            data: sessions,
+            has_more: false,
+            next_cursor: null,
           },
         });
-      if (path.endsWith('/transcript/query'))
+      if (sessionId && suffix === '' && method === 'GET')
         return route.fulfill({
-          json: { items: [], events: [], lastSequence: 0, hasMore: false },
+          json: sessions.find((session) => session.id === sessionId),
         });
-      if (path.endsWith('/events/stream'))
+      if (path === '/v1/agents/workspaces')
+        return route.fulfill({
+          json: {
+            object: 'list',
+            data: [],
+            has_more: false,
+            next_cursor: null,
+            capabilities: {
+              workspace_context: false,
+              workspace_binding: true,
+            },
+            default_workspace: null,
+          },
+        });
+      if (sessionId && suffix === '/transcript')
+        return route.fulfill({
+          json: {
+            items: [],
+            events: [],
+            last_sequence: 0,
+            covered_sequence: 0,
+            older_cursor: null,
+            has_more: false,
+          },
+        });
+      if (
+        sessionId &&
+        suffix === '/events' &&
+        url.searchParams.get('stream') === 'true'
+      )
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
-      if (path.endsWith('/turns/submit')) {
-        requests.push(body);
+      if (sessionId && suffix === '/events' && method === 'POST') {
+        // The Public input event carries type + input only; the idempotency
+        // key travels as a header and the Session identity as the path.
+        requests.push({
+          sessionId,
+          ...body,
+          idempotencyKey: request.headers()['idempotency-key'],
+        });
         return requests.length === 1
           ? route.fulfill({
               status: 503,
@@ -70,11 +112,11 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
           : route.fulfill({
               status: 202,
               json: {
-                sessionId: body.sessionId,
-                turnId: 'accepted-turn',
-                operationId: 'submit-accepted-turn',
-                admissionStage: 'java_durable',
-                deliveryState: 'pending',
+                session_id: sessionId,
+                turn_id: 'accepted-turn',
+                operation_id: 'submit-accepted-turn',
+                admission_stage: 'java_durable',
+                delivery_state: 'pending',
                 status: 'accepted',
                 replayed: true,
               },
@@ -136,8 +178,11 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     await expect(editor).not.toContainText('Accepted A input');
     await expect(send).toBeDisabled();
     expect(requests).toHaveLength(2);
+    expect(requests[0].sessionId).toBe('session-a');
+    expect(requests[0].idempotencyKey).toEqual(expect.any(String));
     expect(requests[1]).toMatchObject({
       sessionId: 'session-a',
+      type: 'agent.session.input.message',
       input: requests[0].input,
       idempotencyKey: requests[0].idempotencyKey,
     });
@@ -153,56 +198,97 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
 test('a foreign pending keeps its composer editable and resolves through its owner @smoke', async ({
   page,
 }) => {
-  const sessions: JavaAgentSession[] = ['a', 'b'].map((id) => ({
-    sessionId: `session-${id}`,
+  // Public wire: Session timestamps are epoch seconds.
+  const sessions: Schemas['PublicSession'][] = ['a', 'b'].map((id) => ({
+    id: `session-${id}`,
+    object: 'agent.session',
     title: `Conversation ${id.toUpperCase()}`,
-    agentId: 'agent-a',
+    agent_id: 'agent-a',
+    agent_revision: '1',
     status: 'active',
-    createdAt: 1,
-    updatedAt: 1,
-    lastSequence: 0,
+    created_at: 1790777114,
+    updated_at: 1790777114,
+    last_event_id: 0,
     capabilities: {
+      items: false,
+      snapshots: false,
+      resync: false,
       actions: false,
       artifacts: false,
       tasks: false,
-      workspaceTurns: false,
+      workspace_turns: false,
     },
   }));
   const requests: Record<string, unknown>[] = [];
   const unexpected: string[] = [];
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await page.route('**/api/agent/web-shell/v1/**', async (route) => {
-    if (
-      new URL(route.request().url()).pathname.endsWith('/runtime-nodes/query')
-    )
+  await page.route('**/v1/agents/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const method = request.method();
+    const sessionRoute = /^\/v1\/agents\/sessions\/([^/]+)(\/.*)?$/.exec(path);
+    const sessionId = sessionRoute?.[1];
+    const suffix = sessionRoute?.[2] ?? '';
+    const body = request.postDataJSON();
+    if (path === '/v1/agents/runtime-nodes')
       return route.fulfill({ json: { supported: false, data: [] } });
-    const path = new URL(route.request().url()).pathname;
-    const body = route.request().postDataJSON();
-    if (path.endsWith('/user-messages/query'))
+    if (sessionId && suffix === '/user-messages')
       return route.fulfill({ json: { paused: false, messages: [] } });
-    if (path.endsWith('/sessions/query'))
-      return route.fulfill({ json: { data: sessions, hasMore: false } });
-    if (path.endsWith('/sessions/get'))
-      return route.fulfill({
-        json: sessions.find((session) => session.sessionId === body.sessionId),
-      });
-    if (path.endsWith('/workspaces/query'))
+    if (path === '/v1/agents/sessions' && method === 'GET')
       return route.fulfill({
         json: {
-          data: [],
-          hasMore: false,
-          capabilities: { workspaceBinding: true },
+          object: 'list',
+          data: sessions,
+          has_more: false,
+          next_cursor: null,
         },
       });
-    if (path.endsWith('/transcript/query'))
+    if (sessionId && suffix === '' && method === 'GET')
       return route.fulfill({
-        json: { items: [], events: [], lastSequence: 0, hasMore: false },
+        json: sessions.find((session) => session.id === sessionId),
       });
-    if (path.endsWith('/events/stream'))
+    if (path === '/v1/agents/workspaces')
+      return route.fulfill({
+        json: {
+          object: 'list',
+          data: [],
+          has_more: false,
+          next_cursor: null,
+          capabilities: {
+            workspace_context: false,
+            workspace_binding: true,
+          },
+          default_workspace: null,
+        },
+      });
+    if (sessionId && suffix === '/transcript')
+      return route.fulfill({
+        json: {
+          items: [],
+          events: [],
+          last_sequence: 0,
+          covered_sequence: 0,
+          older_cursor: null,
+          has_more: false,
+        },
+      });
+    if (
+      sessionId &&
+      suffix === '/events' &&
+      url.searchParams.get('stream') === 'true'
+    )
       return route.fulfill({ contentType: 'text/event-stream', body: '' });
-    if (path.endsWith('/turns/submit')) {
-      requests.push(body);
+    if (sessionId && suffix === '/events' && method === 'POST') {
+      // The Public input event carries type + input only; the idempotency
+      // key travels as a header and the Session identity as the path. This
+      // foreign-pending case never confirms: every submit stays 503.
+      requests.push({
+        sessionId,
+        ...body,
+        idempotencyKey: request.headers()['idempotency-key'],
+      });
       return route.fulfill({
         status: 503,
         json: {

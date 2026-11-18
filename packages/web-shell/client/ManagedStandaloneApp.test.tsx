@@ -114,12 +114,15 @@ describe('Managed standalone application', () => {
         'workspace-binding-v1',
       ]),
     );
-    fetch.mockResolvedValueOnce(Response.json({ data: [], hasMore: false }));
+    fetch.mockResolvedValueOnce(
+      Response.json({ object: 'list', data: [], has_more: false }),
+    );
     await provider?.listSessions({ clientId: 'browser-client' });
     expect(fetch.mock.calls.at(-1)?.[0]).toBe(
-      `${window.location.origin}/api/agent/web-shell/v1/sessions/query`,
+      `${window.location.origin}/v1/agents/sessions`,
     );
     const request = fetch.mock.calls.at(-1)?.[1] as RequestInit;
+    expect(request.method).toBe('GET');
     const headers = new Headers(request.headers);
     expect(headers.get('authorization')).toBe('Bearer browser-token');
     expect(headers.get('x-qwen-tenant-id')).toBeNull();

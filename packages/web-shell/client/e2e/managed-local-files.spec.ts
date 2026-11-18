@@ -17,6 +17,8 @@ test.use({
  * A disposable control-plane peer with a real, kept-open SSE downlink —
  * Playwright's route.fulfill cannot hold a stream open, so the browser
  * talks to this node server directly (the fixture takes ?api=<origin>).
+ * The peer speaks the Public REST wire: snake_case, epoch seconds for the
+ * Session projection, per-session client-files paths, GET status/downlink.
  */
 function startPeer(clientFilesEnabled: boolean): Promise<{
   server: Server;
@@ -33,23 +35,28 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
   let summaryReads = 0;
   const heartbeats = new Set<NodeJS.Timeout>();
   const summary = {
-    sessionId: 's1',
-    title: 'Local files task',
+    id: 's1',
+    object: 'agent.session',
+    agent_id: 'qwen-code',
+    agent_revision: '1',
     status: 'active',
-    createdAt: 1,
-    updatedAt: 2,
-    lastSequence: 1,
+    created_at: 1_790_777_114,
+    updated_at: 1_790_777_115,
+    last_event_id: 1,
+    title: 'Local files task',
     capabilities: {
-      tasks: true,
+      items: true,
+      snapshots: true,
       artifacts: false,
+      resync: true,
+      tasks: true,
       actions: false,
-      workspaceTurns: true,
-      sessionClose: false,
-      sessionArchive: false,
-      sessionUnarchive: false,
-      sessionDelete: false,
-      diagnostics: true,
-      ...(clientFilesEnabled ? { clientFiles: true } : {}),
+      workspace_turns: true,
+      session_close: false,
+      session_archive: false,
+      session_unarchive: false,
+      session_delete: false,
+      ...(clientFilesEnabled ? { client_files: true } : {}),
     },
   };
   const server = createServer((req, res) => {
@@ -58,7 +65,7 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
       'Access-Control-Allow-Origin': origin,
       'Access-Control-Allow-Credentials': 'true',
       'Access-Control-Allow-Headers': 'content-type,x-qwen-tenant-id',
-      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       // Chrome's Local Network Access check gates cross-port loopback
       // fetches; the preflight must acknowledge the private address space.
       'Access-Control-Allow-Private-Network': 'true',
@@ -71,7 +78,8 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
     let body = '';
     req.on('data', (chunk) => (body += chunk));
     req.on('end', () => {
-      const path = new URL(req.url ?? '/', 'http://local').pathname;
+      const url = new URL(req.url ?? '/', 'http://local');
+      const path = url.pathname;
       const json = (status: number, data: unknown) => {
         res.writeHead(status, {
           ...cors,
@@ -81,84 +89,106 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
         res.end(JSON.stringify(data));
       };
       const parsed = body ? (JSON.parse(body) as Record<string, unknown>) : {};
-      if (path.endsWith('/sessions/query')) {
+      if (path === '/v1/agents/sessions' && req.method === 'GET') {
         summaryReads += 1;
-        return json(200, { data: [summary], hasMore: false });
+        return json(200, {
+          object: 'list',
+          data: [summary],
+          has_more: false,
+          next_cursor: null,
+        });
       }
-      if (path.endsWith('/sessions/get')) {
+      if (path === '/v1/agents/sessions/s1' && req.method === 'GET') {
         summaryReads += 1;
         return json(200, summary);
       }
-      if (path.endsWith('/transcript/query'))
+      if (path === '/v1/agents/sessions/s1/transcript')
         return json(200, {
           items: [],
           events: [],
-          coveredSequence: 0,
-          olderCursor: null,
-          hasMore: false,
-          lastSequence: 0,
+          covered_sequence: 0,
+          older_cursor: null,
+          has_more: false,
+          last_sequence: 0,
         });
-      if (path.endsWith('/user-messages/query'))
+      if (path === '/v1/agents/sessions/s1/user-messages')
         return json(200, { paused: false, messages: [] });
-      if (path.endsWith('/runtime-nodes/query'))
+      if (path === '/v1/agents/runtime-nodes')
         return json(200, { supported: false, data: [] });
-      if (path.endsWith('/workspaces/query'))
+      if (path === '/v1/agents/workspaces')
         return json(200, {
+          object: 'list',
           data: [],
-          hasMore: false,
-          capabilities: { workspaceBinding: true },
+          has_more: false,
+          next_cursor: null,
+          default_workspace: null,
+          capabilities: { workspace_context: false, workspace_binding: true },
         });
-      if (path.endsWith('/client-files/register')) {
-        registered.push(parsed);
-        relayConnectionId = parsed.connectionId;
+      if (
+        path === '/v1/agents/sessions/s1/client-files/register' &&
+        req.method === 'POST'
+      ) {
+        registered.push({ ...parsed, path });
+        relayConnectionId = parsed.connection_id;
         return json(200, {
-          serverId: 'local-files',
+          server_id: 'local-files',
           generation: 1,
-          token: 'fixture-token',
-          expiresAt: Date.now() + 3_600_000,
-          toolCount: 1,
-          connectionId: relayConnectionId,
+          expires_at: Date.now() + 3_600_000,
+          tool_count: 1,
+          connection_id: relayConnectionId,
         });
       }
-      if (path.endsWith('/client-files/status')) {
+      if (
+        path === '/v1/agents/sessions/s1/client-files' &&
+        req.method === 'GET'
+      ) {
         // Mirror the server's ownership gate: the generation/identity is echoed
         // only to a caller that proves it knows the registration identity.
+        const connectionId = url.searchParams.get('connection_id');
         const owned =
-          parsed.connectionId !== undefined &&
-          parsed.connectionId === relayConnectionId;
+          connectionId !== null && connectionId === relayConnectionId;
         return json(
           200,
           owned
             ? {
-                serverId: 'local-files',
+                server_id: 'local-files',
                 generation: 1,
                 state: 'active',
-                expiresAt: Date.now() + 3_600_000,
-                connectionId: relayConnectionId,
+                expires_at: Date.now() + 3_600_000,
+                connection_id: relayConnectionId,
                 owned: true,
               }
             : {
-                serverId: 'local-files',
+                server_id: 'local-files',
                 state: 'active',
-                expiresAt: Date.now() + 3_600_000,
+                expires_at: Date.now() + 3_600_000,
                 owned: false,
               },
         );
       }
-      if (path.endsWith('/client-files/unregister')) {
+      if (
+        path === '/v1/agents/sessions/s1/client-files/unregister' &&
+        req.method === 'POST'
+      ) {
         unregistered.push(parsed);
         return json(200, {
-          serverId: 'local-files',
+          server_id: 'local-files',
           generation: 1,
           state: 'closed',
-          expiresAt: Date.now() + 3_600_000,
+          expires_at: Date.now() + 3_600_000,
         });
       }
-      if (path.endsWith('/client-files/responses')) {
-        responses.push(parsed);
+      if (
+        path === '/v1/agents/sessions/s1/client-files/responses' &&
+        req.method === 'POST'
+      ) {
+        responses.push({ ...parsed, path });
         return json(200, { settled: true });
       }
-      if (path.endsWith('/events/stream')) {
+      if (
+        path === '/v1/agents/sessions/s1/events' &&
+        url.searchParams.get('stream') === 'true'
+      ) {
         res.writeHead(200, {
           ...cors,
           'Content-Type': 'text/event-stream',
@@ -173,7 +203,10 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
         });
         return;
       }
-      if (path.endsWith('/client-files/requests/stream')) {
+      if (
+        path === '/v1/agents/sessions/s1/client-files/requests' &&
+        req.method === 'GET'
+      ) {
         res.writeHead(200, {
           ...cors,
           'Content-Type': 'text/event-stream',
@@ -182,8 +215,8 @@ function startPeer(clientFilesEnabled: boolean): Promise<{
         res.write(': open\n\n');
         res.write(
           `event: request\ndata: ${JSON.stringify({
-            requestId: 'd1',
-            payloadJson: JSON.stringify({
+            request_id: 'd1',
+            payload_json: JSON.stringify({
               jsonrpc: '2.0',
               id: 'd1',
               method: 'tools/list',
@@ -315,16 +348,21 @@ test('Managed local files entry connects a directory through the relay peer @smo
       panel.getByRole('button', { name: 'Change directory…' }),
     ).toBeVisible();
     expect(peer.registered.length).toBeGreaterThanOrEqual(1);
-    expect(peer.registered[0]).toMatchObject({ sessionId: 's1' });
+    // The Session rides in the per-session path; the register body carries
+    // only the connection identity.
+    expect(peer.registered[0]).toMatchObject({
+      path: '/v1/agents/sessions/s1/client-files/register',
+      connection_id: expect.any(String),
+    });
     await expect
       .poll(() => peer.responses.length, { timeout: 10_000 })
       .toBeGreaterThanOrEqual(1);
     expect(peer.responses[0]).toMatchObject({
-      sessionId: 's1',
+      path: '/v1/agents/sessions/s1/client-files/responses',
       generation: 1,
-      rpcRequestId: 'd1',
+      rpc_request_id: 'd1',
     });
-    const answer = JSON.parse(peer.responses[0].responseJson as string);
+    const answer = JSON.parse(peer.responses[0].response_json as string);
     expect(answer.result.tools.length).toBeGreaterThanOrEqual(1);
     await page.getByRole('button', { name: 'Disconnect' }).click();
     await expect

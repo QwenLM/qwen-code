@@ -7,8 +7,8 @@ import { cleanupReact, flushReact, mountReact } from '../../test/reactHarness';
 import { createJavaManagedAgentProvider } from './java-managed-agent-provider';
 import {
   corruptFrame as corrupt,
-  javaDeltaEvent as javaDelta,
-  javaSessionPayload,
+  publicDeltaEvent as publicDelta,
+  publicSessionPayload,
   sseFrame,
 } from './managed-agent-sse.test-fixtures';
 import type {
@@ -18,6 +18,10 @@ import type {
   ManagedAgentSessionSummary,
 } from './managed-agent-provider';
 import { failureRetryDelayMs, useManagedSession } from './use-managed-session';
+
+// The fetch mocks below play the SERVER: Public wire shapes, snake_case,
+// epoch SECONDS for Session/Turn/Event/Item timestamps.
+const SECONDS = 1_790_777_114;
 
 function event(
   id: number,
@@ -5400,41 +5404,46 @@ describe('useManagedSession', () => {
         items: [],
         events:
           lastSequence === 2
-            ? [JSON.parse(javaDelta(1, 'one')), JSON.parse(javaDelta(2, 'two'))]
+            ? [
+                JSON.parse(publicDelta(1, 'one')),
+                JSON.parse(publicDelta(2, 'two')),
+              ]
             : [
                 // The corrupt run 3-6 is absent; the transcript head is 7.
-                JSON.parse(javaDelta(1, 'one')),
-                JSON.parse(javaDelta(2, 'two')),
-                JSON.parse(javaDelta(7, 'after')),
+                JSON.parse(publicDelta(1, 'one')),
+                JSON.parse(publicDelta(2, 'two')),
+                JSON.parse(publicDelta(7, 'after')),
               ],
-        coveredSequence: lastSequence,
-        hasMore: false,
-        lastSequence,
+        covered_sequence: lastSequence,
+        has_more: false,
+        last_sequence: lastSequence,
       });
     let transcriptCalls = 0;
     const streamCursors: Array<unknown> = [];
-    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
-      const path = String(url);
-      if (path.endsWith('/sessions/get')) {
-        return new Response(javaSessionPayload(2), {
+    const fetchImpl = vi.fn<typeof fetch>(async (rawUrl) => {
+      const url = new URL(String(rawUrl));
+      const path = url.pathname;
+      if (path === '/v1/agents/sessions/session-1') {
+        return new Response(publicSessionPayload(2), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
       }
-      if (path.endsWith('/transcript/query')) {
+      if (path === '/v1/agents/sessions/session-1/transcript') {
         transcriptCalls += 1;
         return new Response(transcriptPayload(transcriptCalls === 1 ? 2 : 7), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
       }
-      if (path.endsWith('/events/stream')) {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        streamCursors.push(body['afterSequence']);
+      if (path === '/v1/agents/sessions/session-1/events') {
+        expect(url.searchParams.get('stream')).toBe('true');
+        const after = Number(url.searchParams.get('after'));
+        streamCursors.push(after);
         const encoder = new TextEncoder();
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
-            if (body['afterSequence'] === 2) {
+            if (after === 2) {
               controller.enqueue(
                 encoder.encode(
                   corrupt(3) + corrupt(4) + corrupt(5) + corrupt(6),
@@ -5446,7 +5455,7 @@ describe('useManagedSession', () => {
         });
         return new Response(stream, { status: 200 });
       }
-      throw new Error(`Unexpected request: ${path}`);
+      throw new Error(`Unexpected request: ${String(rawUrl)}`);
     });
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
@@ -5473,31 +5482,31 @@ describe('useManagedSession', () => {
   it('surfaces an error when repeated resyncs cannot advance the cursor', async () => {
     vi.useFakeTimers();
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const fetchImpl = vi.fn<typeof fetch>(async (url) => {
-      const path = String(url);
-      if (path.endsWith('/sessions/get')) {
-        return new Response(javaSessionPayload(2), {
+    const fetchImpl = vi.fn<typeof fetch>(async (rawUrl) => {
+      const path = new URL(String(rawUrl)).pathname;
+      if (path === '/v1/agents/sessions/session-1') {
+        return new Response(publicSessionPayload(2), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
       }
-      if (path.endsWith('/transcript/query')) {
+      if (path === '/v1/agents/sessions/session-1/transcript') {
         // The transcript head never advances past the corrupt run.
         return new Response(
           JSON.stringify({
             items: [],
             events: [
-              JSON.parse(javaDelta(1, 'one')),
-              JSON.parse(javaDelta(2, 'two')),
+              JSON.parse(publicDelta(1, 'one')),
+              JSON.parse(publicDelta(2, 'two')),
             ],
-            coveredSequence: 2,
-            hasMore: false,
-            lastSequence: 2,
+            covered_sequence: 2,
+            has_more: false,
+            last_sequence: 2,
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (path.endsWith('/events/stream')) {
+      if (path === '/v1/agents/sessions/session-1/events') {
         const encoder = new TextEncoder();
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
@@ -5509,7 +5518,7 @@ describe('useManagedSession', () => {
         });
         return new Response(stream, { status: 200 });
       }
-      throw new Error(`Unexpected request: ${path}`);
+      throw new Error(`Unexpected request: ${String(rawUrl)}`);
     });
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
@@ -5603,9 +5612,9 @@ describe('useManagedSession', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     let streamHangs = false;
     let blipNextSummary = false;
-    const fetchImpl = vi.fn<typeof fetch>(async (url) => {
-      const path = String(url);
-      if (path.endsWith('/sessions/get')) {
+    const fetchImpl = vi.fn<typeof fetch>(async (rawUrl) => {
+      const path = new URL(String(rawUrl)).pathname;
+      if (path === '/v1/agents/sessions/session-1') {
         if (blipNextSummary) {
           blipNextSummary = false;
           return new Response(
@@ -5613,27 +5622,27 @@ describe('useManagedSession', () => {
             { status: 500, headers: { 'content-type': 'application/json' } },
           );
         }
-        return new Response(javaSessionPayload(2), {
+        return new Response(publicSessionPayload(2), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
       }
-      if (path.endsWith('/transcript/query')) {
+      if (path === '/v1/agents/sessions/session-1/transcript') {
         return new Response(
           JSON.stringify({
             items: [],
             events: [
-              JSON.parse(javaDelta(1, 'one')),
-              JSON.parse(javaDelta(2, 'two')),
+              JSON.parse(publicDelta(1, 'one')),
+              JSON.parse(publicDelta(2, 'two')),
             ],
-            coveredSequence: 2,
-            hasMore: false,
-            lastSequence: 2,
+            covered_sequence: 2,
+            has_more: false,
+            last_sequence: 2,
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (path.endsWith('/events/stream')) {
+      if (path === '/v1/agents/sessions/session-1/events') {
         if (streamHangs) {
           // A resubscribe that never yields again: no further gap can
           // re-assert the alert from the stream side.
@@ -5652,7 +5661,7 @@ describe('useManagedSession', () => {
         });
         return new Response(stream, { status: 200 });
       }
-      throw new Error(`Unexpected request: ${path}`);
+      throw new Error(`Unexpected request: ${String(rawUrl)}`);
     });
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
@@ -5812,15 +5821,16 @@ describe('useManagedSession', () => {
   it('restores a pending action whose streamed frame was corrupt', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     let transcriptCalls = 0;
-    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
-      const path = String(url);
-      if (path.endsWith('/sessions/get')) {
-        return new Response(javaSessionPayload(2), {
+    const fetchImpl = vi.fn<typeof fetch>(async (rawUrl) => {
+      const url = new URL(String(rawUrl));
+      const path = url.pathname;
+      if (path === '/v1/agents/sessions/session-1') {
+        return new Response(publicSessionPayload(2), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
       }
-      if (path.endsWith('/transcript/query')) {
+      if (path === '/v1/agents/sessions/session-1/transcript') {
         transcriptCalls += 1;
         return new Response(
           JSON.stringify(
@@ -5828,48 +5838,52 @@ describe('useManagedSession', () => {
               ? {
                   items: [],
                   events: [
-                    JSON.parse(javaDelta(1, 'one')),
-                    JSON.parse(javaDelta(2, 'two')),
+                    JSON.parse(publicDelta(1, 'one')),
+                    JSON.parse(publicDelta(2, 'two')),
                   ],
-                  coveredSequence: 2,
-                  hasMore: false,
-                  lastSequence: 2,
+                  covered_sequence: 2,
+                  has_more: false,
+                  last_sequence: 2,
                 }
               : {
                   items: [],
                   events: [
-                    JSON.parse(javaDelta(1, 'one')),
-                    JSON.parse(javaDelta(2, 'two')),
+                    JSON.parse(publicDelta(1, 'one')),
+                    JSON.parse(publicDelta(2, 'two')),
                     {
+                      schema_version: 1,
+                      projection_version: 1,
                       sequence: 3,
-                      eventId: 'evt_3',
-                      sessionId: 'session-1',
-                      turnId: 'turn-1',
+                      event_id: 'evt_3',
+                      session_id: 'session-1',
+                      turn_id: 'turn-1',
                       type: 'action.updated',
-                      createdAt: 3,
+                      created_at: SECONDS + 3,
+                      // Event data payloads are shared record bodies: they
+                      // stay camelCase on both wires.
                       data: { actionId: 'act-1', state: 'requested' },
                       terminal: false,
                     },
-                    JSON.parse(javaDelta(4, 'four')),
+                    JSON.parse(publicDelta(4, 'four')),
                   ],
-                  coveredSequence: 4,
-                  hasMore: false,
-                  lastSequence: 4,
+                  covered_sequence: 4,
+                  has_more: false,
+                  last_sequence: 4,
                 },
           ),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (path.endsWith('/events/stream')) {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (path === '/v1/agents/sessions/session-1/events') {
+        const after = Number(url.searchParams.get('after'));
         const encoder = new TextEncoder();
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
-            if (body['afterSequence'] === 2) {
+            if (after === 2) {
               // The persisted action.updated frame at sequence 3 is corrupt.
               controller.enqueue(
                 encoder.encode(
-                  'id: 3\r\nevent: action.updated\r\ndata: {"sequence":3,"eventId":"evt_3"\r\n\r\n',
+                  'id: 3\r\nevent: action.updated\r\ndata: {"sequence":3,"event_id":"evt_3"\r\n\r\n',
                 ),
               );
             }
@@ -5878,7 +5892,7 @@ describe('useManagedSession', () => {
         });
         return new Response(stream, { status: 200 });
       }
-      throw new Error(`Unexpected request: ${path}`);
+      throw new Error(`Unexpected request: ${String(rawUrl)}`);
     });
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
@@ -5899,42 +5913,44 @@ describe('useManagedSession', () => {
 
   it('skips a corrupt streamed frame and keeps rendering later events', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const streamBodies: Array<Record<string, unknown>> = [];
-    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
-      const path = String(url);
-      if (path.endsWith('/sessions/get')) {
-        return new Response(javaSessionPayload(2), {
+    const streamCursors: Array<number | null> = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (rawUrl) => {
+      const url = new URL(String(rawUrl));
+      const path = url.pathname;
+      if (path === '/v1/agents/sessions/session-1') {
+        return new Response(publicSessionPayload(2), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
       }
-      if (path.endsWith('/transcript/query')) {
+      if (path === '/v1/agents/sessions/session-1/transcript') {
         return new Response(
           JSON.stringify({
             items: [],
             events: [
-              JSON.parse(javaDelta(1, 'one')),
-              JSON.parse(javaDelta(2, 'two')),
+              JSON.parse(publicDelta(1, 'one')),
+              JSON.parse(publicDelta(2, 'two')),
             ],
-            coveredSequence: 2,
-            hasMore: false,
-            lastSequence: 2,
+            covered_sequence: 2,
+            has_more: false,
+            last_sequence: 2,
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (path.endsWith('/events/stream')) {
-        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        streamBodies.push(body);
+      if (path === '/v1/agents/sessions/session-1/events') {
+        expect(url.searchParams.get('stream')).toBe('true');
+        const after = url.searchParams.get('after');
+        streamCursors.push(after === null ? null : Number(after));
         // The persisted frame at sequence 3 is corrupt; a valid frame sits
         // behind it at sequence 4. Later resubscribes get an empty stream.
         const encoder = new TextEncoder();
         const stream = new ReadableStream<Uint8Array>({
           start(controller) {
-            if (body['afterSequence'] === 2) {
+            if (after === '2') {
               controller.enqueue(
                 encoder.encode(
-                  'id: 3\r\nevent: item.output_text.delta\r\ndata: {"sequence":3,"eventId":"evt_3"\r\n\r\n' +
+                  'id: 3\r\nevent: item.output_text.delta\r\ndata: {"sequence":3,"event_id":"evt_3"\r\n\r\n' +
                     sseFrame(4, 'after-corrupt'),
                 ),
               );
@@ -5944,7 +5960,7 @@ describe('useManagedSession', () => {
         });
         return new Response(stream, { status: 200 });
       }
-      throw new Error(`Unexpected request: ${path}`);
+      throw new Error(`Unexpected request: ${String(rawUrl)}`);
     });
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',
@@ -5960,8 +5976,7 @@ describe('useManagedSession', () => {
     );
     expect(latest?.error).toBeUndefined();
     // The single stream request started from the snapshot cursor.
-    expect(streamBodies).toHaveLength(1);
-    expect(streamBodies[0]?.['afterSequence']).toBe(2);
+    expect(streamCursors).toEqual([2]);
   });
 
   it('clears the stream error on its clean pass even when the poll raised the identical message', async () => {
@@ -7519,28 +7534,28 @@ describe('useManagedSession', () => {
       return {};
     });
     let cursorGone = true;
-    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
-      const path = String(url);
+    const fetchImpl = vi.fn<typeof fetch>(async (rawUrl, init) => {
+      const url = new URL(String(rawUrl));
+      const path = url.pathname;
       if (init?.signal?.aborted) {
         throw new DOMException('This operation was aborted', 'AbortError');
       }
-      if (path.endsWith('/sessions/get')) {
-        return new Response(javaSessionPayload(1), {
+      if (/^\/v1\/agents\/sessions\/[^/]+$/.test(path)) {
+        return new Response(publicSessionPayload(1), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
       }
-      if (path.endsWith('/transcript/query')) {
-        const body = JSON.parse(String(init?.body)) as { cursor?: string };
-        if (body.cursor === 'cursor-1') {
+      if (path.endsWith('/transcript')) {
+        if (url.searchParams.get('cursor') === 'cursor-1') {
           if (cursorGone) return new Response('gone', { status: 410 });
           return new Response(
             JSON.stringify({
               items: [],
               events: [],
-              coveredSequence: 1,
-              hasMore: false,
-              lastSequence: 1,
+              covered_sequence: 1,
+              has_more: false,
+              last_sequence: 1,
             }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
@@ -7548,21 +7563,21 @@ describe('useManagedSession', () => {
         return new Response(
           JSON.stringify({
             items: [],
-            events: [JSON.parse(javaDelta(1, 'one'))],
-            coveredSequence: 1,
-            hasMore: true,
-            lastSequence: 1,
-            olderCursor: 'cursor-1',
+            events: [JSON.parse(publicDelta(1, 'one'))],
+            covered_sequence: 1,
+            has_more: true,
+            last_sequence: 1,
+            older_cursor: 'cursor-1',
           }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (path.endsWith('/events/stream')) {
+      if (path.endsWith('/events')) {
         return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
           status: 200,
         });
       }
-      throw new Error('Unexpected request: ' + String(url));
+      throw new Error('Unexpected request: ' + String(rawUrl));
     });
     const provider = createJavaManagedAgentProvider({
       baseUrl: 'https://product.example',

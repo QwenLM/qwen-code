@@ -45,10 +45,12 @@ it('streams original inputs with scoped credentials and leaves pure preview with
   for (const [index, [raw, init]] of fetchImpl.mock.calls.entries()) {
     const url = new URL(String(raw));
     expect(url.pathname).toBe(
-      `/api/agent/web-shell/v1/workspace-extensions/imports${index === 0 ? '/preview' : ''}`,
+      `/v1/agents/workspaces/workspace/extensions/imports${index === 0 ? '/preview' : ''}`,
     );
-    expect(url.searchParams.get('workspaceId')).toBe('workspace');
+    // The Workspace rides in the path now; the metadata query stays camel.
+    expect(url.searchParams.get('workspaceId')).toBeNull();
     expect(JSON.parse(url.searchParams.get('metadata')!)).toEqual(metadata);
+    expect(init?.method).toBe('POST');
     expect(init?.body).toBe(source);
     expect(init?.signal).toBe(abort.signal);
     expect(init?.credentials).toBe('include');
@@ -64,7 +66,7 @@ it('streams original inputs with scoped credentials and leaves pure preview with
 it('looks up publication/settings and apply receipts without replaying mutations', async () => {
   const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (url) =>
     response(
-      String(url).includes('session-extensions')
+      String(url).includes('/sessions/session/extensions/operations/lookup')
         ? {
             sessionId: 'session',
             supported: true,
@@ -95,19 +97,29 @@ it('looks up publication/settings and apply receipts without replaying mutations
   expect(
     fetchImpl.mock.calls.map(([url]) => new URL(String(url)).pathname),
   ).toEqual([
-    '/api/agent/web-shell/v1/workspace-extensions/inspection/query',
-    '/api/agent/web-shell/v1/workspace-extensions/operations/lookup',
-    '/api/agent/web-shell/v1/session-extensions/operations/lookup',
+    `/v1/agents/workspaces/workspace/extensions/${pin.extensionId}/packages/${pin.packageRevision}/inspection`,
+    '/v1/agents/workspaces/workspace/extensions/operations/lookup',
+    '/v1/agents/sessions/session/extensions/operations/lookup',
   ]);
+  expect(fetchImpl.mock.calls.map(([, init]) => init?.method)).toEqual([
+    'GET',
+    'POST',
+    'POST',
+  ]);
+  // Inspection is a GET carrying the digest as a query parameter; the
+  // lookups keep their camelCase bodies but drop the path identifiers.
   expect(
-    fetchImpl.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
+    new URL(String(fetchImpl.mock.calls[0][0])).searchParams.get(
+      'packageDigest',
+    ),
+  ).toBe(pin.packageDigest);
+  expect(fetchImpl.mock.calls[0][1]?.body).toBeUndefined();
+  expect(
+    fetchImpl.mock.calls
+      .slice(1)
+      .map(([, init]) => JSON.parse(String(init?.body))),
   ).toEqual([
-    { workspaceId: 'workspace', pin },
-    {
-      workspaceId: 'workspace',
-      kind: 'settings',
-      idempotencyKey: 'settings-key',
-    },
-    { sessionId: 'session', idempotencyKey: 'apply-key' },
+    { kind: 'settings', idempotencyKey: 'settings-key' },
+    { idempotencyKey: 'apply-key' },
   ]);
 });

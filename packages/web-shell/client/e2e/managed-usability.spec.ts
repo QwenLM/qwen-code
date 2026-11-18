@@ -1,83 +1,117 @@
 import { expect, test } from '@playwright/test';
-import type { JavaAgentSession } from '../components/managed/java-managed-agent-client';
+import type { components } from '../components/managed/generated/managed-agent-api';
+
+type Schemas = components['schemas'];
 
 for (const width of [1280, 390]) {
   test(`Managed native creation freezes model, Workspace and first input at ${width}px @smoke`, async ({
     page,
   }) => {
     const requests: Record<string, unknown>[] = [];
-    let summary: JavaAgentSession | undefined;
+    let summary: Schemas['PublicSession'] | undefined;
     let laterInputs = 0;
     let skillQueries = 0;
     let skillInput: unknown;
     let loseResponse = width === 390;
-    const workspaces = ['a', 'b'].map((id) => ({
-      workspaceId: `ws-${id}`,
-      displayName: `Project ${id.toUpperCase()}`,
-      canCreateSession: true,
+    const workspaces: Schemas['PublicWorkspace'][] = ['a', 'b'].map((id) => ({
+      id: `ws-${id}`,
+      object: 'agent.workspace',
+      display_name: `Project ${id.toUpperCase()}`,
+      can_create_session: true,
       state: 'active',
-      defaultCwdRelative: id === 'b' ? 'qwen-code' : '.',
+      ...(id === 'b' ? { default_cwd_relative: 'qwen-code' } : {}),
     }));
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
-    await page.route('**/api/agent/web-shell/v1/**', async (route) => {
+    await page.route('**/v1/agents/**', async (route) => {
       const request = route.request();
-      const path = new URL(request.url()).pathname;
+      const url = new URL(request.url());
+      const path = url.pathname;
+      const method = request.method();
       const body = request.postDataJSON();
-      if (path.endsWith('/user-messages/query'))
+      if (path.endsWith('/user-messages'))
         return route.fulfill({ json: { paused: false, messages: [] } });
-      if (path.endsWith('/workspace-extensions/query'))
+      if (/^\/v1\/agents\/workspaces\/[^/]+\/extensions$/.test(path))
         return route.fulfill({ json: { supported: false, extensions: [] } });
-      if (path.endsWith('/workspaces/worktrees/options'))
+      if (/^\/v1\/agents\/workspaces\/[^/]+\/worktrees\/options$/.test(path))
         return route.fulfill({
           json: {
             supported: true,
-            baseCommit: 'a'.repeat(40),
+            base_commit: 'a'.repeat(40),
             branches: ['main'],
-            currentBranch: 'main',
+            current_branch: 'main',
           },
         });
-      if (path.endsWith('/runtime-nodes/query'))
+      if (path === '/v1/agents/runtime-nodes')
         return route.fulfill({ json: { supported: false, data: [] } });
-      if (path.endsWith('/sessions/query'))
-        return route.fulfill({
-          json: { data: summary ? [summary] : [], hasMore: false },
-        });
-      if (path.endsWith('/workspaces/query'))
+      if (path === '/v1/agents/sessions' && method === 'GET')
         return route.fulfill({
           json: {
-            data: workspaces,
-            hasMore: false,
-            capabilities: { workspaceBinding: true },
+            object: 'list',
+            data: summary ? [summary] : [],
+            has_more: false,
+            next_cursor: null,
           },
         });
-      if (path.endsWith('/workspaces/get'))
+      if (path === '/v1/agents/workspaces' && method === 'GET')
+        return route.fulfill({
+          json: {
+            object: 'list',
+            data: workspaces,
+            has_more: false,
+            next_cursor: null,
+            capabilities: {
+              workspace_context: false,
+              workspace_binding: true,
+            },
+            default_workspace: null,
+          },
+        });
+      if (/^\/v1\/agents\/workspaces\/ws-[ab]$/.test(path))
         return route.fulfill({
           json: workspaces.find(
-            (item) => item.workspaceId === body.workspaceId,
+            (item) => `/v1/agents/workspaces/${item.id}` === path,
           ),
         });
-      if (path.endsWith('/sessions/create')) {
-        requests.push(body);
+      if (path === '/v1/agents/sessions' && method === 'POST') {
+        // The Public create body is snake_case, carries no requestId and
+        // takes the idempotency key as a header; the admission is synthesized
+        // from the returned Session's latest_turn.
+        requests.push({
+          ...body,
+          idempotencyKey: request.headers()['idempotency-key'],
+        });
         summary = {
-          sessionId: 'managed-ui-session',
-          agentId: body.agentId,
+          id: 'managed-ui-session',
+          object: 'agent.session',
+          agent_id: body.agent_id,
+          agent_revision: '1',
           status: 'active',
-          createdAt: 1,
-          updatedAt: 1,
-          lastSequence: 0,
-          activeTurn: {
-            sessionId: 'managed-ui-session',
-            turnId: 'initial-turn',
+          created_at: 1790777114,
+          updated_at: 1790777114,
+          last_event_id: 0,
+          latest_turn: {
+            id: 'initial-turn',
+            object: 'agent.turn',
+            session_id: 'managed-ui-session',
             status: 'completed',
-            submittedAt: 1,
+            created_at: 1790777114,
+            completed_at: 1790777115,
           },
-          workspace: { ...body.workspace, contextRevision: 1, state: 'ready' },
+          workspace: {
+            workspace_id: body.workspace.workspace_id,
+            cwd_relative: body.workspace.cwd_relative,
+            context_revision: 1,
+            state: 'ready',
+          },
           capabilities: {
+            items: false,
+            snapshots: false,
+            resync: false,
             actions: false,
             artifacts: false,
             tasks: false,
-            workspaceTurns: true,
+            workspace_turns: true,
           },
         };
         if (loseResponse) {
@@ -86,24 +120,32 @@ for (const width of [1280, 390]) {
         }
         return route.fulfill({
           status: 202,
-          json: {
-            sessionId: summary.sessionId,
-            turnId: 'initial-turn',
-            status: 'accepted',
-            replayed: requests.length > 1,
+          headers: {
+            'x-qwen-idempotent-replay': requests.length > 1 ? 'true' : 'false',
           },
+          json: summary,
         });
       }
-      if (path.endsWith('/sessions/get'))
+      if (path === '/v1/agents/sessions/managed-ui-session')
         return route.fulfill({ json: summary });
-      if (path.endsWith('/transcript/query'))
+      if (path === '/v1/agents/sessions/managed-ui-session/transcript')
         return route.fulfill({
-          json: { items: [], events: [], lastSequence: 0, hasMore: false },
+          json: {
+            items: [],
+            events: [],
+            last_sequence: 0,
+            covered_sequence: 0,
+            older_cursor: null,
+            has_more: false,
+          },
         });
-      if (path.endsWith('/events/stream'))
+      if (
+        path === '/v1/agents/sessions/managed-ui-session/events' &&
+        url.searchParams.get('stream') === 'true'
+      )
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
-      if (path.endsWith('/session-skills/query')) {
-        expect(body).toEqual({ sessionId: 'managed-ui-session' });
+      if (path === '/v1/agents/sessions/managed-ui-session/skills') {
+        expect(method).toBe('GET');
         skillQueries++;
         return route.fulfill({
           json: {
@@ -116,17 +158,20 @@ for (const width of [1280, 390]) {
           },
         });
       }
-      if (path.endsWith('/turns/submit')) {
+      if (
+        path === '/v1/agents/sessions/managed-ui-session/events' &&
+        method === 'POST'
+      ) {
         laterInputs++;
         skillInput = body.input;
         return route.fulfill({
           status: 202,
           json: {
-            sessionId: summary!.sessionId,
-            turnId: 'skill-turn',
-            operationId: 'submit-skill-turn',
-            admissionStage: 'java_durable',
-            deliveryState: 'pending',
+            session_id: summary!.id,
+            turn_id: 'skill-turn',
+            operation_id: 'submit-skill-turn',
+            admission_stage: 'java_durable',
+            delivery_state: 'pending',
             status: 'accepted',
             replayed: false,
           },
@@ -218,14 +263,18 @@ for (const width of [1280, 390]) {
     await expect(page.locator('[data-managed-model]')).toContainText('agent-b');
     expect(requests).toHaveLength(width === 390 ? 2 : 1);
     expect(requests[0]).toMatchObject({
-      agentId: 'agent-b',
-      workspace: { workspaceId: 'ws-b', cwdRelative: 'qwen-code/services/api' },
+      agent_id: 'agent-b',
+      workspace: {
+        workspace_id: 'ws-b',
+        cwd_relative: 'qwen-code/services/api',
+      },
       input: [{ type: 'input_text', text: '!inspect\nx' }],
     });
+    expect(requests[0].idempotencyKey).toEqual(expect.any(String));
     if (width === 390) {
-      const { requestId: _first, ...first } = requests[0];
-      const { requestId: _second, ...second } = requests[1];
-      expect(second).toEqual(first);
+      // No requestId rides the Public body: the retry repeats it verbatim
+      // under the same Idempotency-Key header.
+      expect(requests[1]).toEqual(requests[0]);
     }
     expect(laterInputs).toBe(0);
     expect(skillQueries).toBe(0);
@@ -253,7 +302,7 @@ for (const width of [1280, 390]) {
 test('abandoning an unconfirmed first input warns about execution and refreshes Sessions @smoke', async ({
   page,
 }) => {
-  let admitted: JavaAgentSession | undefined;
+  let admitted: Schemas['PublicSession'] | undefined;
   const requests: Record<string, unknown>[] = [];
   const errors: string[] = [];
   const unexpected: string[] = [];
@@ -263,62 +312,84 @@ test('abandoning an unconfirmed first input warns about execution and refreshes 
     release = resolve;
   });
   page.on('pageerror', (error) => errors.push(error.message));
-  const workspace = {
-    workspaceId: 'ws-a',
-    displayName: 'Project A',
-    canCreateSession: true,
+  const workspace: Schemas['PublicWorkspace'] = {
+    id: 'ws-a',
+    object: 'agent.workspace',
+    display_name: 'Project A',
+    can_create_session: true,
     state: 'active',
   };
-  await page.route('**/api/agent/web-shell/v1/**', async (route) => {
-    const path = new URL(route.request().url()).pathname;
-    const body = route.request().postDataJSON();
-    if (path.endsWith('/user-messages/query'))
+  await page.route('**/v1/agents/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const method = request.method();
+    const body = request.postDataJSON();
+    if (path.endsWith('/user-messages'))
       return route.fulfill({ json: { paused: false, messages: [] } });
-    if (path.endsWith('/workspace-extensions/query'))
+    if (/^\/v1\/agents\/workspaces\/[^/]+\/extensions$/.test(path))
       return route.fulfill({ json: { supported: false, extensions: [] } });
-    if (path.endsWith('/workspaces/worktrees/options'))
+    if (/^\/v1\/agents\/workspaces\/[^/]+\/worktrees\/options$/.test(path))
       return route.fulfill({
         json: {
           supported: true,
-          baseCommit: 'a'.repeat(40),
+          base_commit: 'a'.repeat(40),
           branches: ['main'],
-          currentBranch: 'main',
+          current_branch: 'main',
         },
       });
-    if (path.endsWith('/runtime-nodes/query'))
+    if (path === '/v1/agents/runtime-nodes')
       return route.fulfill({ json: { supported: false, data: [] } });
-    if (path.endsWith('/sessions/query')) {
+    if (path === '/v1/agents/sessions' && method === 'GET') {
       queries++;
       return route.fulfill({
-        json: { data: admitted ? [admitted] : [], hasMore: false },
-      });
-    }
-    if (path.endsWith('/workspaces/query'))
-      return route.fulfill({
         json: {
-          data: [workspace],
-          hasMore: false,
-          capabilities: { workspaceBinding: true },
+          object: 'list',
+          data: admitted ? [admitted] : [],
+          has_more: false,
+          next_cursor: null,
         },
       });
-    if (path.endsWith('/workspaces/get'))
+    }
+    if (path === '/v1/agents/workspaces' && method === 'GET')
+      return route.fulfill({
+        json: {
+          object: 'list',
+          data: [workspace],
+          has_more: false,
+          next_cursor: null,
+          capabilities: { workspace_context: false, workspace_binding: true },
+          default_workspace: null,
+        },
+      });
+    if (path === '/v1/agents/workspaces/ws-a')
       return route.fulfill({ json: workspace });
-    if (path.endsWith('/sessions/create')) {
+    if (path === '/v1/agents/sessions' && method === 'POST') {
       requests.push(body);
       admitted = {
-        sessionId: 'orphan-session',
+        id: 'orphan-session',
+        object: 'agent.session',
         title: 'Possibly admitted task',
-        agentId: body.agentId,
+        agent_id: body.agent_id,
+        agent_revision: '1',
         status: 'active',
-        createdAt: 1,
-        updatedAt: 1,
-        lastSequence: 0,
-        workspace: { ...body.workspace, contextRevision: 1, state: 'ready' },
+        created_at: 1790777114,
+        updated_at: 1790777114,
+        last_event_id: 0,
+        workspace: {
+          workspace_id: body.workspace.workspace_id,
+          cwd_relative: body.workspace.cwd_relative,
+          context_revision: 1,
+          state: 'ready',
+        },
         capabilities: {
+          items: false,
+          snapshots: false,
+          resync: false,
           actions: false,
           artifacts: false,
           tasks: false,
-          workspaceTurns: true,
+          workspace_turns: true,
         },
       };
       await held;

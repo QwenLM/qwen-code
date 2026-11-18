@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.120.0",
+    "version": "1.122.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -1576,6 +1576,45 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      },
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "createPublicWorkspace",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Admits actor-scoped, idempotent creation of a Workspace from a source Workspace directory or an explicit local import. The Idempotency-Key header carries the idempotency key; a retry with the same content returns the original Workspace. Creation rechecks ACL, state and Agent/config compatibility and starts no Runtime worker.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicWorkspaceCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The created Workspace summary.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceSummary"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
       }
     },
     "/v1/agents/workspaces/{workspaceId}": {
@@ -1618,6 +1657,1023 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files/register": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "registerPublicClientFiles",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Registers the calling actor's client directory grant into the Session and dispatches the one-time relay credential to the Harness server-side for the Runtime MCP leg; the credential is never part of the response. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state: the bounded TTL queue holds size-bounded JSON-RPC bodies only until they settle or expire, no credential or directory path is persisted, and no file content enters the journal or public events beyond the normal durable tool-result policy.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicClientFilesConnectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The registration ack; the relay credential stays on the server-to-harness path.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicClientFilesRegistration"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files/unregister": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "unregisterPublicClientFiles",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Closes the calling actor's registration (or an operator's teardown of it) and fails every queued request with the structured offline error.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicClientFilesConnectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The closed binding summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicClientFilesStatus"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicClientFilesStatus",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads the Session's binding summary without the credential; an absent binding answers an empty 200.",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The binding summary, or an empty body when nothing is registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicClientFilesStatus"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files/requests": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "streamPublicClientFilesRequests",
+        "x-qwen-implementation-status": "implemented",
+        "description": "The browser downlink: SSE events named request carrying opaque JSON-RPC payloads for the registering actor's own active binding generation. Each poll revalidates the read grant.",
+        "parameters": [
+          {
+            "name": "generation",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "integer", "minimum": 0 }
+          },
+          {
+            "name": "connection_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "maxLength": 128 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Queued JSON-RPC requests as SSE events.",
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files/responses": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "respondPublicClientFiles",
+        "x-qwen-implementation-status": "implemented",
+        "description": "The browser uplink: settles one queued JSON-RPC request with either a response payload or a structured error code, never both.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicClientFilesRespondRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The request was settled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicClientFilesRespondReceipt"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/runtime-nodes": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "listPublicRuntimeNodes",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists only administrator-configured SSH nodes authorized for the current tenant and actor. Requires a trusted actor. Registration is disabled by default and answers 200 with supported=false and an empty data array; an enabled deployment may answer supported=true with no authorized nodes. Node credentials, SSH aliases and server paths are not exposed. This read starts no worker.",
+        "responses": {
+          "200": {
+            "description": "SSH registration capability and authorized machine display names.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicRuntimeNodePage"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/agents/runtime-nodes/{nodeId}/check-directory": {
+      "parameters": [
+        {
+          "name": "nodeId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      ],
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "checkPublicWorkspaceDirectory",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Checks the configured Node.js and pinned qwen-code versions, allowed directory range, existing canonical directory and access permissions over SSH. Requires an enabled deployment and an exact tenant/actor node grant; disabled registration answers 404 ssh_runtime_disabled and an unknown or unauthorized node answers 403 runtime_node_forbidden. This is a preview: registration revalidates the directory and never creates a directory, clones a repository or starts a worker.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicWorkspaceDirectoryCheckRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validated canonical directory on the selected Linux or macOS node.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceDirectory"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "502": {
+            "description": "The SSH bootstrap response is invalid.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/workspaces/registrations": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "registerPublicWorkspace",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Admits actor-scoped, idempotent registration of an existing remote directory. The Idempotency-Key header carries the idempotency key; a retry with the same node_id, path and display_name returns the original operation and its latest durable state, even after new registration is disabled or node admission is revoked. Reusing the key for different content answers 409 idempotency_conflict. Fresh admission requires an enabled deployment and an authorized node (404 ssh_runtime_disabled or 403 runtime_node_forbidden). A completed operation atomically creates the Workspace and creator OWNER grant. 202 does not mean registration is complete; query the operation, then read the Workspace and its can_create_session hint. This operation creates no Session and starts no Runtime worker.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicWorkspaceRegistrationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Durable registration operation; repeated requests retain the original identity.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceRegistrationOperation"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/workspaces/registrations/{operationId}": {
+      "parameters": [
+        {
+          "name": "operationId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getPublicWorkspaceRegistration",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. A registration refused before it reserved its directory fails. One that may have reached its node is recovery_blocked and keeps the directory reserved while Java reads the node again, never registering anything. Querying never unlocks it or starts a Runtime worker.",
+        "responses": {
+          "200": {
+            "description": "Latest durable state of the original actor-owned registration.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceRegistrationOperation"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/workspace-files": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "listPublicWorkspaceFiles",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists a bounded directory page of the authorized Workspace or Session scope. Requires a trusted actor and a rechecked scope revision; refuses traversal and never starts a Runtime.",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 1024 }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 256 }
+          },
+          {
+            "name": "expected_scope_revision",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 64 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized directory page.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicFileQueryResult"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/workspace-files/content": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "readPublicWorkspaceFile",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads one bounded text file of the authorized Workspace or Session scope at the expected scope revision. Requires a trusted actor; refuses traversal and never starts a Runtime.",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 1024 }
+          },
+          {
+            "name": "expected_scope_revision",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized file content.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicFileResult" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/workspace-files/uploads": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "uploadPublicWorkspaceFile",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Uploads one bounded file into the authorized Workspace or Session scope as an idempotent upload operation. The body is application/octet-stream; encoded uploads are refused. Requires a trusted actor.",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 1024 }
+          },
+          {
+            "name": "expected_scope_revision",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          {
+            "name": "upload_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 36 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": { "type": "string", "format": "binary" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable upload result.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicFileUploadResult"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": {
+            "description": "Encoded Workspace uploads are unsupported.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspace-files/uploads/{uploadId}": {
+      "parameters": [
+        {
+          "name": "uploadId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "minLength": 1, "maxLength": 36 }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getPublicWorkspaceFileUpload",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads the durable state of one actor-owned upload operation; an unknown or foreign upload answers 404.",
+        "responses": {
+          "200": {
+            "description": "Latest durable upload state.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicFileUploadStatus"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/workspaces/directories": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "listPublicWorkspaceDirectories",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists bounded immediate real directories on the selected Workspace storage host, or a local import root when local_path is given. Requires an authenticated OWNER of the ACTIVE ROOT Workspace and verified storage; refuses traversal, symlinks and reserved maintenance directories.",
+        "parameters": [
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          },
+          {
+            "name": "local_path",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized directory page.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceDirectoryPage"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/items/{itemId}/tool-details": {
+      "parameters": [
+        { "$ref": "#/components/parameters/SessionId" },
+        {
+          "name": "itemId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicToolDetails",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads the inline input, output and structured shell result of one tool item in an authorized workspace-bound Session. Requires a trusted actor with read access.",
+        "responses": {
+          "200": {
+            "description": "Tool details for the authorized item.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "private, no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicToolDetails" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/session-options": {
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "queryPublicSessionOptions",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Returns the approval, plan-mode, attachment, skill and model-selection options available when creating a Session for the given agent. Requires a trusted actor.",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session creation options for the agent.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicSessionOptions"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/models": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicSessionModels",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists the selectable models and the current model selection for a workspace-bound Session. Requires a trusted actor with read access.",
+        "responses": {
+          "200": {
+            "description": "Model options and current selection.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicSessionModels" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "changePublicSessionModel",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Idempotently changes the Session model at the expected revision. Requires a trusted actor with operator access.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicChangeModelRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated model selection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicModelChangeResult"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/approval": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicSessionApproval",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads the approval mode, revision and available modes for a workspace-bound Session. Requires a trusted actor with read access.",
+        "responses": {
+          "200": {
+            "description": "Approval selection and capabilities.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicSessionApproval"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "changePublicSessionApproval",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Idempotently changes the approval mode, plan mode and permission rules at the expected revision. Requires the Session owner.",
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicChangeApprovalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated approval selection.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicApprovalChangeResult"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/skills": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicSessionSkills",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists the skills available to a workspace-bound Session. Requires a trusted actor with read access.",
+        "responses": {
+          "200": {
+            "description": "Session skills.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicSessionSkills" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/transcript": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicTranscript",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads a bounded page of transcript items and projected events for the Session, with a cursor for older pages.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 4096 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transcript page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicTranscript" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/transcript/items": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "listPublicTranscriptItems",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads a bounded reverse-ordered page of transcript items for the Session.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 4096 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transcript item page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicItemList" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/export": {
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "exportPublicSession",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads a bounded forward page of Session items for export, with a snapshot watermark.",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 4096 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Export item page.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicItemList" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
     },
@@ -7310,6 +8366,7 @@
     "/v1/agents/workspaces/{workspaceId}/worktrees/options": {
       "get": {
         "operationId": "sessionWorktreeOptions",
+        "tags": ["Public Resources"],
         "x-qwen-implementation-status": "implemented",
         "x-qwen-admission-rule": "session_worktree",
         "parameters": [
@@ -7370,6 +8427,7 @@
     "/v1/agents/workspaces/{workspaceId}/worktrees": {
       "get": {
         "operationId": "sessionWorktreeQuery",
+        "tags": ["Public Resources"],
         "x-qwen-implementation-status": "implemented",
         "x-qwen-admission-rule": "session_worktree",
         "parameters": [
@@ -7415,6 +8473,7 @@
     "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}": {
       "get": {
         "operationId": "sessionWorktreeInspect",
+        "tags": ["Public Resources"],
         "x-qwen-implementation-status": "implemented",
         "x-qwen-admission-rule": "session_worktree",
         "parameters": [
@@ -7468,6 +8527,7 @@
     "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}/cleanup": {
       "post": {
         "operationId": "sessionWorktreeCleanup",
+        "tags": ["Public Resources"],
         "x-qwen-implementation-status": "implemented",
         "x-qwen-admission-rule": "session_worktree",
         "parameters": [
@@ -10953,6 +12013,25 @@
             "minLength": 1,
             "maxLength": 128,
             "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
+          },
+          "title": {
+            "type": ["string", "null"],
+            "maxLength": 256,
+            "description": "The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title."
+          },
+          "approval_mode": {
+            "type": "string",
+            "enum": ["default", "auto-edit", "yolo"],
+            "description": "Optional initial execution policy for Workspace creation, validated against the resolved Agent and profile. Omission preserves its default and idempotency digest. Independent of plan_mode. Requires workspace."
+          },
+          "plan_mode": {
+            "type": "boolean",
+            "description": "Persisted public Plan overlay, independent of execution permission. Requires workspace; omission starts with plan mode inactive."
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional host-catalog model for a bound built-in qwen-code Session. Requires workspace and model_selection_supported. Persisted atomically before the first Turn and included in creation idempotency; omission preserves the default model and old digest."
           }
         }
       },
@@ -11206,6 +12285,51 @@
           "owner_only": {
             "type": "boolean",
             "description": "When true, only the owning actor with existing Workspace grants may access this Session. Private children inherit visibility without inheriting the Store binding."
+          },
+          "title": {
+            "type": ["string", "null"]
+          },
+          "environment": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          },
+          "approval_mode": {
+            "type": "string",
+            "enum": ["default", "auto", "auto-edit", "yolo"],
+            "description": "Current effective approval policy; initial_approval_mode retains the immutable creation policy. Absent for unbound catalog Sessions, which predate policy selection."
+          },
+          "approval_revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "initial_approval_mode": {
+            "type": "string",
+            "enum": ["default", "auto-edit", "yolo"],
+            "description": "Immutable creation-time policy, used to confirm creation replay."
+          },
+          "plan_mode": {
+            "type": "boolean",
+            "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "plan_mode_supported": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false."
+          },
+          "model_context": {
+            "$ref": "#/components/schemas/PublicModelContext"
+          },
+          "model_selection": {
+            "$ref": "#/components/schemas/PublicModelSelection"
+          },
+          "lifecycle_operation": {
+            "$ref": "#/components/schemas/PublicLifecycleOperation",
+            "description": "Current unsettled lifecycle operation, queried in batch under Session read authorization. A failed close/delete may leave the Session closing/deleting; only explicit retry starts a new operation. Settled Sessions omit this projection."
+          },
+          "latest_turn": {
+            "$ref": "#/components/schemas/PublicTurn",
+            "description": "The latest Turn regardless of status, including settled Turns; absent when the Session has no Turn. active_turn remains limited to ACCEPTED/RUNNING/CANCELLING Turns. A RUNNING/ACCEPTED Turn whose error_code is hosted_harness_recovery_blocked reports status recovery_blocked on both projections."
           }
         }
       },
@@ -11218,7 +12342,8 @@
           "artifacts",
           "resync",
           "tasks",
-          "actions"
+          "actions",
+          "workspace_turns"
         ],
         "properties": {
           "items": {
@@ -11242,7 +12367,9 @@
           "cwd_change": {
             "type": "boolean",
             "default": false,
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "implemented",
+            "description": "Retired: Session directory-change submission has been removed; always false.",
+            "deprecated": true
           },
           "actions": {
             "type": "boolean",
@@ -11259,25 +12386,25 @@
           "session_close": {
             "type": "boolean",
             "default": false,
-            "description": "Deployment support for close independently of archive/delete; bound files Sessions require durable worker stop support. This is not actor authorization: admission also requires Session ownership and current read access."
+            "description": "Close support including current actor authority. Workspace-bound Sessions require the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server."
           },
           "session_archive": {
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+            "description": "Archive support including current actor authority. Workspace-bound Sessions require completed reliable-close evidence, the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server."
           },
           "session_unarchive": {
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply."
+            "description": "Unarchive support including current actor authority. Workspace-bound Sessions require completed reliable-close evidence, the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server."
           },
           "session_delete": {
             "type": "boolean",
             "default": false,
             "x-qwen-implementation-status": "implemented",
-            "description": "Optional support capability. ACTIVE Workspace files Sessions require L3 lifecycle protocol and reliable original Runtime stop; CLOSED/ARCHIVED Sessions use independent L2 close evidence. Current creator/read authorization and idle/source-state admission checks still apply. The aggregate session lifecycle capability is unchanged."
+            "description": "Delete support including current actor authority. ACTIVE Workspace Sessions require a supported reliable-close protocol; CLOSED/ARCHIVED Sessions use completed close evidence. Workspace-bound Sessions require the recorded Session owner and current read access. Source-state and idle admission remain authoritative on the server. The aggregate session lifecycle capability is unchanged."
           },
           "foreground_shell": {
             "type": "boolean",
@@ -11287,7 +12414,7 @@
           "context_compression": {
             "type": "boolean",
             "default": false,
-            "description": "Requires a compatible Hosted Harness and an active Workspace Session. WebShell also reflects the current caller OPERATOR or OWNER grant; admission separately checks idle state."
+            "description": "Requires a compatible Hosted Harness and an active Workspace Session. Also reflects the current caller OPERATOR or OWNER grant; admission separately checks idle state."
           },
           "child_agents": {
             "type": "boolean",
@@ -11301,6 +12428,40 @@
           "recap": {
             "type": "boolean",
             "default": false
+          },
+          "workspace_turns": {
+            "type": "boolean",
+            "default": false,
+            "description": "True when the caller may submit later Turns of this Workspace-bound Session: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session or a Session pinned to a stored definition (both on the Workspace's frozen execution profile). Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it. Shell Sessions also require foreground_shell=true for fresh sending; workspace_turns may remain true with Shell admission disabled and is not sufficient Shell Turn admission. Manual rename uses the independent rename capability."
+          },
+          "model_change": {
+            "type": "boolean",
+            "description": "The caller may change the Session model selection for later Turns using the server model catalog, including while a Turn or approval is active. Missing means unsupported; authorization, recovery and revision admission still apply."
+          },
+          "approval_mode_change": {
+            "type": "boolean",
+            "description": "The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false."
+          },
+          "input_attachments": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false."
+          },
+          "rename": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "implemented",
+            "description": "True for a visible ACTIVE Session when the Harness supports fenced title persistence and is available. Workspace-bound Sessions additionally require Workspace files admission, current OPERATOR access and the original binding's frozen execution facts, independently of approval or fresh Turn sending support. Unbound Sessions use the existing tenant-scoped rename permission. An active Turn does not itself make this false. Missing means false. This advertises fresh rename only; authorized completed original-key replay remains available under the rename service's replay rules."
+          },
+          "client_files": {
+            "type": "boolean",
+            "default": false,
+            "description": "Browser local-files registration is available for this Session: the Session is bound to a Workspace, the caller holds current execution authority, the deployment enables the client-files relay and the Harness supports it. A Workspace-less Session never advertises this capability. Registration admission still checks the actor grant and idle state separately.",
+            "x-qwen-implementation-status": "implemented"
+          },
+          "terminal": {
+            "type": ["boolean", "null"],
+            "description": "UI hint that this Session may open a Managed Web Terminal: the terminal deployment opt-in is enabled, the caller may submit (OPERATOR on the bound Workspace), and the Session is a Shell Session. The relay re-runs the full admission on the WebSocket attach; this field does not gate it. The ticket mint and WebSocket upgrade themselves travel the broker-mounted WebShell surface.",
+            "x-qwen-implementation-status": "implemented"
           }
         }
       },
@@ -11333,7 +12494,8 @@
               "failed",
               "cancelled",
               "recovery_blocked"
-            ]
+            ],
+            "description": "recovery_blocked with hosted_harness_recovery_blocked means the Harness stopped without a safely settled Turn. The input remains active internally. Execution redispatch is parked, while bounded read-only observation of the original Harness journal may settle a later terminal result. Policy changes and lifecycle close wait for settlement; explicit cancellation remains available."
           },
           "created_at": {
             "type": "integer",
@@ -12836,6 +13998,16 @@
           "state": {
             "type": "string",
             "enum": ["active", "draining", "removed"]
+          },
+          "default_cwd_relative": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Persisted default working directory for new Sessions; absent means dot."
+          },
+          "can_select_directory": {
+            "type": "boolean",
+            "description": "Current actor owns this active root Workspace; directory discovery rechecks authorization and native storage."
           }
         },
         "x-qwen-implementation-status": "partial"
@@ -12879,6 +14051,22 @@
               "workspace_binding": {
                 "type": "boolean",
                 "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Turn at creation: Read/Write/Edit under hosted-workspace-files/1, or file tools plus mandatory-approval foreground Shell under hosted-workspace-shell/1 when the Shell opt-in is enabled. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Callers holding the OPERATOR role may submit later Turns or rename under the same opt-in while the registry row stays ACTIVE and still backs the Session's binding and the actor recorded by the Workspace create command keeps OPERATOR or above, and may cancel a running Turn (its delivery re-checks no grants). Shell fresh sending also requires foreground_shell=true. Public Shell close and active delete require lifecycle v2 and reliable original-Worker stop support; archive and unarchive require completed close proof, while close of other profiles follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close."
+              },
+              "workspace_creation": {
+                "type": "boolean",
+                "description": "Supports creating empty Workspaces under the operator-controlled root. Missing or false means unsupported; current actor and server admission checks still apply."
+              },
+              "approval_mode_selection": {
+                "type": "boolean",
+                "description": "Supports effective Session policy options and explicit Workspace-bound creation policy. Missing or false means unsupported."
+              },
+              "directory_selection": {
+                "type": "boolean",
+                "description": "Supports browsing and selecting existing directories on authorized Linux or macOS storage; absent means unsupported."
+              },
+              "local_directory_import": {
+                "type": "boolean",
+                "description": "Trusted single-user local deployment can browse and import existing host directories without a pre-registered Workspace. Missing or false means unsupported."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -15097,6 +16285,11 @@
           "next_cursor": {
             "type": ["string", "null"],
             "maxLength": 512
+          },
+          "active_child_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The total number of nonterminal child Agent tasks in this Session, independent of pagination."
           }
         },
         "x-qwen-implementation-status": "partial",
@@ -17519,6 +18712,693 @@
             "description": "Immutable rules snapshot for this Turn; omitted when empty."
           }
         }
+      },
+      "PublicSessionOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "approval_mode",
+          "available_approval_modes",
+          "plan_mode_supported",
+          "input_attachments",
+          "skills_supported",
+          "model_selection_supported"
+        ],
+        "properties": {
+          "approval_mode": { "type": ["string", "null"] },
+          "available_approval_modes": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "plan_mode_supported": { "type": "boolean" },
+          "input_attachments": { "type": "boolean" },
+          "skills_supported": { "type": "boolean" },
+          "model_selection_supported": { "type": "boolean" }
+        }
+      },
+      "PublicModelOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["model_id", "label"],
+        "properties": {
+          "model_id": { "type": "string" },
+          "label": { "type": "string" }
+        }
+      },
+      "PublicModelSelection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision"],
+        "properties": {
+          "model_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "revision": { "type": "integer" }
+        }
+      },
+      "PublicModelContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["observed_at"],
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Actual model identity from the committed main-model usage resource."
+          },
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Provider prompt token count for the latest successfully committed main-model request; not cumulative billing usage."
+          },
+          "context_window_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Context capacity from the same resolved model configuration. Missing means unknown."
+          },
+          "observed_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Timestamp of the committed source observation, in Unix epoch milliseconds."
+          }
+        },
+        "description": "Safe allowlisted observation for a Workspace-bound Session. Unknown counts are omitted, never estimated."
+      },
+      "PublicLifecycleOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation_id", "type", "status"],
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "type": {
+            "type": "string",
+            "enum": ["close", "archive", "delete"]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "recovery_blocked"
+            ]
+          },
+          "failure_code": {
+            "type": ["string", "null"]
+          }
+        }
+      },
+      "PublicSessionModels": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["models", "model_selection", "supported"],
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicModelOption" }
+          },
+          "model_selection": {
+            "$ref": "#/components/schemas/PublicModelSelection"
+          },
+          "supported": { "type": "boolean" }
+        }
+      },
+      "PublicModelChangeResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session_id", "model_selection", "replayed"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "model_selection": {
+            "$ref": "#/components/schemas/PublicModelSelection"
+          },
+          "replayed": { "type": "boolean" }
+        }
+      },
+      "PublicSessionApproval": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "approval_mode",
+          "approval_revision",
+          "available_approval_modes",
+          "supported",
+          "plan_mode",
+          "plan_mode_supported",
+          "live_supported",
+          "permission_rules_supported"
+        ],
+        "properties": {
+          "approval_mode": { "type": ["string", "null"] },
+          "approval_revision": { "type": "integer" },
+          "available_approval_modes": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "supported": { "type": "boolean" },
+          "plan_mode": { "type": "boolean" },
+          "plan_mode_supported": { "type": "boolean" },
+          "live_supported": { "type": "boolean" },
+          "permission_rules_supported": { "type": "boolean" },
+          "permission_rules": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      },
+      "PublicApprovalChangeResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "session_id",
+          "approval_mode",
+          "approval_revision",
+          "replayed",
+          "plan_mode"
+        ],
+        "properties": {
+          "session_id": { "type": "string" },
+          "approval_mode": { "type": ["string", "null"] },
+          "approval_revision": { "type": "integer" },
+          "replayed": { "type": "boolean" },
+          "plan_mode": { "type": "boolean" },
+          "permission_rules": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      },
+      "PublicChangeModelRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["model_id", "expected_revision"],
+        "properties": {
+          "model_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "PublicChangeApprovalRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["approval_mode", "expected_revision"],
+        "properties": {
+          "approval_mode": { "type": "string", "minLength": 1 },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "plan_mode": { "type": ["boolean", "null"] },
+          "permission_rules": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          }
+        }
+      },
+      "PublicSkill": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      },
+      "PublicSessionSkills": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["skills"],
+        "properties": {
+          "skills": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicSkill" }
+          }
+        }
+      },
+      "PublicTranscript": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "events",
+          "covered_sequence",
+          "has_more",
+          "last_sequence"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicItem" }
+          },
+          "events": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicEvent" }
+          },
+          "covered_sequence": { "type": "integer" },
+          "older_cursor": { "type": ["string", "null"] },
+          "has_more": { "type": "boolean" },
+          "last_sequence": { "type": "integer" }
+        }
+      },
+      "PublicFileEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "name", "kind"],
+        "properties": {
+          "path": { "type": "string" },
+          "name": { "type": "string" },
+          "kind": { "type": "string" }
+        }
+      },
+      "PublicFileQueryResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope_revision", "directory", "entries", "truncated"],
+        "properties": {
+          "scope_revision": { "type": "string" },
+          "directory": { "type": "string" },
+          "entries": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicFileEntry" }
+          },
+          "truncated": { "type": "boolean" },
+          "max_upload_bytes": { "type": ["integer", "null"] }
+        }
+      },
+      "PublicFileResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope_revision",
+          "path",
+          "name",
+          "mime_type",
+          "text",
+          "byte_length",
+          "sha256"
+        ],
+        "properties": {
+          "scope_revision": { "type": "string" },
+          "path": { "type": "string" },
+          "name": { "type": "string" },
+          "mime_type": { "type": "string" },
+          "text": { "type": "string" },
+          "byte_length": { "type": "integer" },
+          "sha256": { "type": "string" }
+        }
+      },
+      "PublicFileUploadResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope_revision",
+          "upload_id",
+          "path",
+          "size_bytes",
+          "sha256"
+        ],
+        "properties": {
+          "scope_revision": { "type": "string" },
+          "upload_id": { "type": "string" },
+          "path": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": { "type": "string" }
+        }
+      },
+      "PublicFileUploadStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "scope_revision",
+          "upload_id",
+          "state",
+          "path",
+          "size_bytes"
+        ],
+        "properties": {
+          "scope_revision": { "type": "string" },
+          "upload_id": { "type": "string" },
+          "state": { "type": "string" },
+          "path": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": { "type": ["string", "null"] },
+          "code": { "type": ["string", "null"] }
+        }
+      },
+      "PublicWorkspaceCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["display_name"],
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "source_workspace_id": {
+            "type": ["string", "null"],
+            "maxLength": 128
+          },
+          "cwd_relative": { "type": ["string", "null"], "maxLength": 1024 },
+          "local_path": { "type": ["string", "null"], "maxLength": 1024 }
+        }
+      },
+      "PublicWorkspaceSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "workspace_id",
+          "display_name",
+          "state",
+          "can_create_session",
+          "default_cwd_relative",
+          "can_select_directory"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "display_name": { "type": "string", "maxLength": 512 },
+          "state": {
+            "type": "string",
+            "enum": ["active", "draining", "removed"]
+          },
+          "can_create_session": { "type": "boolean" },
+          "default_cwd_relative": { "type": ["string", "null"] },
+          "can_select_directory": { "type": "boolean" }
+        }
+      },
+      "PublicWorkspaceDirectoryEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "cwd_relative"],
+        "properties": {
+          "name": { "type": "string" },
+          "cwd_relative": { "type": "string" }
+        }
+      },
+      "PublicWorkspaceDirectoryPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["root", "cwd_relative", "directories", "truncated"],
+        "properties": {
+          "root": { "type": "string" },
+          "cwd_relative": { "type": "string" },
+          "directories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicWorkspaceDirectoryEntry"
+            }
+          },
+          "truncated": { "type": "boolean" }
+        }
+      },
+      "PublicToolDetails": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["input", "output", "truncated"],
+        "properties": {
+          "input": {
+            "type": ["object", "null"],
+            "additionalProperties": true,
+            "description": "Allowlisted display arguments, or null when unavailable or larger than 4 KiB."
+          },
+          "output": {
+            "type": ["string", "null"],
+            "description": "Recorded text or error, bounded to 8 KiB and 200 lines; null means unavailable, an empty string means recorded empty output."
+          },
+          "truncated": { "type": "boolean" },
+          "shell_result": {
+            "$ref": "#/components/schemas/PublicShellResult",
+            "description": "Validated saved Shell display, when available."
+          }
+        }
+      },
+      "PublicShellResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "version",
+          "text",
+          "output",
+          "directory",
+          "exit_code",
+          "signal",
+          "pid",
+          "error",
+          "outcome",
+          "notices",
+          "truncated",
+          "output_files"
+        ],
+        "properties": {
+          "type": { "type": "string", "const": "shell_result" },
+          "version": { "type": "integer", "const": 1 },
+          "text": { "type": "string" },
+          "output": { "type": "string" },
+          "directory": { "type": "string" },
+          "exit_code": {
+            "type": ["integer", "null"],
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "signal": {
+            "type": ["integer", "null"],
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "pid": {
+            "type": ["integer", "null"],
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "error": { "type": ["string", "null"] },
+          "outcome": {
+            "type": "string",
+            "enum": ["completed", "failed", "cancelled", "timed_out"]
+          },
+          "notices": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string" }
+          },
+          "truncated": { "type": "boolean" },
+          "output_files": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "PublicClientFilesConnectionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Optional caller-chosen registration identity echoed for downlink correlation."
+          }
+        }
+      },
+      "PublicClientFilesRegistration": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The registration ack. The relay credential is dispatched server-to-harness and is never part of this response; the bridge correlates on generation, tool_count and connection_id.",
+        "required": ["server_id", "generation", "expires_at", "tool_count"],
+        "properties": {
+          "server_id": { "type": "string" },
+          "generation": { "type": "integer", "minimum": 1 },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Binding deadline in Unix epoch milliseconds."
+          },
+          "tool_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of browser tools the Harness discovered during registration."
+          },
+          "connection_id": {
+            "type": ["string", "null"],
+            "description": "Echo of the registration identity the caller supplied, for downlink correlation."
+          }
+        }
+      },
+      "PublicClientFilesStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The binding summary. Every field is optional because an absent binding answers 200 with an empty summary. generation and connection_id are the fence for the downlink and settlement, so they are echoed only when the request's connection_id proves the caller owns the binding (owned=true); otherwise they are 0 / null.",
+        "properties": {
+          "server_id": { "type": ["string", "null"] },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The binding generation, echoed only when owned; 0 otherwise."
+          },
+          "state": { "enum": ["active", "closed", null] },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Binding deadline in Unix epoch milliseconds."
+          },
+          "connection_id": {
+            "type": ["string", "null"],
+            "description": "The binding's registration identity, echoed only when owned=true; null otherwise."
+          },
+          "owned": {
+            "type": "boolean",
+            "description": "Whether the request's connection_id matched the live binding, gating the generation/connection_id echo."
+          }
+        }
+      },
+      "PublicClientFilesRespondRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["generation", "connection_id", "rpc_request_id"],
+        "properties": {
+          "generation": { "type": "integer", "minimum": 0 },
+          "connection_id": { "type": "string", "maxLength": 128 },
+          "rpc_request_id": { "type": "string", "maxLength": 128 },
+          "response_json": {
+            "type": ["string", "null"],
+            "description": "Opaque JSON-RPC response payload; mutually exclusive with error_code."
+          },
+          "error_code": {
+            "type": ["string", "null"],
+            "description": "Structured offline/error code; mutually exclusive with response_json."
+          }
+        }
+      },
+      "PublicClientFilesRespondReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["settled"],
+        "properties": {
+          "settled": { "type": "boolean" }
+        }
+      },
+      "PublicRuntimeNode": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "display_name"],
+        "properties": {
+          "node_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "display_name": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "PublicRuntimeNodePage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["supported", "data"],
+        "properties": {
+          "supported": { "type": "boolean", "default": false },
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicRuntimeNode" }
+          }
+        },
+        "x-qwen-implementation-status": "implemented",
+        "description": "Disabled registration returns supported=false and no nodes. This capability controls fresh registration only; existing operation queries remain available.",
+        "allOf": [
+          {
+            "if": { "properties": { "supported": { "const": false } } },
+            "then": { "properties": { "data": { "maxItems": 0 } } }
+          }
+        ]
+      },
+      "PublicWorkspaceDirectoryCheckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Existing absolute directory on the selected node; no directory or repository is created."
+          }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "PublicWorkspaceDirectory": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "canonical_path", "platform"],
+        "properties": {
+          "node_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "canonical_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Canonical absolute path after remote directory validation."
+          },
+          "platform": { "type": "string", "enum": ["linux", "darwin"] }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "PublicWorkspaceRegistrationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "path", "display_name"],
+        "properties": {
+          "node_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "display_name": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "PublicWorkspaceRegistrationOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation_id", "type", "status", "replayed"],
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "type": { "type": "string", "const": "workspace_create" },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "cancelled",
+              "recovery_blocked"
+            ]
+          },
+          "workspace_id": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "failure_code": { "type": ["string", "null"] },
+          "replayed": { "type": "boolean" }
+        },
+        "x-qwen-implementation-status": "implemented",
+        "description": "workspace_id is returned only after completed registration. recovery_blocked keeps the original ownership until Java reads the node and completes it, or fails it and releases the directory. failed releases the directory if the registration reserved it. replayed=true identifies an existing operation returned by a repeated key or a query."
       },
       "WebShellRuntimeNode": {
         "type": "object",

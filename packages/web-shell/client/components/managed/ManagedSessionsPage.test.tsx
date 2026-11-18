@@ -693,7 +693,7 @@ describe('ManagedSessionsPage', () => {
         ...provider,
         clientFiles: {
           transport: () => ({
-            baseUrl: 'http://managed-test/api/agent/web-shell/v1',
+            baseUrl: 'http://managed-test',
             fetch: async () => new Response('{}', { status: 200 }),
           }),
         },

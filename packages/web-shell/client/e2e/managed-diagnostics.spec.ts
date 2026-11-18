@@ -1,5 +1,4 @@
 import { expect, test } from '@playwright/test';
-import type { JavaAgentSession } from '../components/managed/java-managed-agent-client';
 import {
   diagnosticContext,
   diagnosticResources,
@@ -12,6 +11,60 @@ import {
 } from '../components/managed/managed-activity.test-fixtures';
 import type { components } from '../components/managed/generated/managed-agent-api';
 
+type Schemas = components['schemas'];
+
+// The diagnostics snapshots are shared camelCase/millis bodies on both wires;
+// only the Session projection and the routes change.
+const session = (
+  title: string,
+  lastSequence: number,
+): Schemas['PublicSession'] => ({
+  id: 's1',
+  object: 'agent.session',
+  agent_id: 'agent-a',
+  agent_revision: '1',
+  title,
+  status: 'closed',
+  created_at: 1790777114,
+  updated_at: 1790777114,
+  last_event_id: lastSequence,
+  capabilities: {
+    items: false,
+    snapshots: false,
+    resync: false,
+    // The Public contract derives diagnostics from tasks.
+    tasks: true,
+    actions: false,
+    artifacts: false,
+    workspace_turns: false,
+  },
+});
+
+const sessionList = (summary: Schemas['PublicSession']) => ({
+  object: 'list',
+  data: [summary],
+  has_more: false,
+  next_cursor: null,
+});
+
+const workspaceList = {
+  object: 'list',
+  data: [],
+  has_more: false,
+  next_cursor: null,
+  capabilities: { workspace_context: false, workspace_binding: false },
+  default_workspace: null,
+};
+
+const transcript = (lastSequence: number) => ({
+  items: [],
+  events: [],
+  last_sequence: lastSequence,
+  covered_sequence: lastSequence,
+  older_cursor: null,
+  has_more: false,
+});
+
 for (const width of [1280, 390]) {
   test(`Managed diagnostics read persisted snapshots at ${width}px @smoke`, async ({
     page,
@@ -20,59 +73,41 @@ for (const width of [1280, 390]) {
     const errors: string[] = [];
     const diagnosticRequests: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
-    const session: JavaAgentSession = {
-      sessionId: 's1',
-      agentId: 'agent-a',
-      title: 'Persisted diagnostics',
-      status: 'closed',
-      createdAt: 1,
-      updatedAt: 1,
-      lastSequence: 0,
-      capabilities: {
-        tasks: true,
-        actions: false,
-        artifacts: false,
-        diagnostics: true,
-        workspaceTurns: false,
-      },
-    };
-    await page.route('**/api/agent/web-shell/v1/**', async (route) => {
-      const path = new URL(route.request().url()).pathname;
-      const body = route.request().postDataJSON();
-      if (path.endsWith('/sessions/query'))
-        return route.fulfill({ json: { data: [session], hasMore: false } });
-      if (path.endsWith('/sessions/get'))
-        return route.fulfill({ json: session });
-      if (path.endsWith('/workspaces/query'))
-        return route.fulfill({ json: { data: [], hasMore: false } });
-      if (path.endsWith('/runtime-nodes/query'))
+    const summary = session('Persisted diagnostics', 0);
+    await page.route('**/v1/agents/**', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const path = url.pathname;
+      const method = request.method();
+      if (path === '/v1/agents/sessions' && method === 'GET')
+        return route.fulfill({ json: sessionList(summary) });
+      if (path === '/v1/agents/sessions/s1')
+        return route.fulfill({ json: summary });
+      if (path === '/v1/agents/workspaces')
+        return route.fulfill({ json: workspaceList });
+      if (path === '/v1/agents/runtime-nodes')
         return route.fulfill({ json: { supported: false, data: [] } });
-      if (path.endsWith('/user-messages/query'))
+      if (path === '/v1/agents/sessions/s1/user-messages')
         return route.fulfill({ json: { paused: false, messages: [] } });
-      if (path.endsWith('/transcript/query'))
-        return route.fulfill({
-          json: {
-            items: [],
-            events: [],
-            lastSequence: 0,
-            coveredSequence: 0,
-            hasMore: false,
-          },
-        });
-      if (path.endsWith('/events/stream'))
+      if (path === '/v1/agents/sessions/s1/transcript')
+        return route.fulfill({ json: transcript(0) });
+      if (
+        path === '/v1/agents/sessions/s1/events' &&
+        url.searchParams.get('stream') === 'true'
+      )
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
-      const snapshots = {
-        'session-context-usage': { ...diagnosticContext, stale: true },
-        'session-stats': diagnosticStats,
-        'session-resources': diagnosticResources,
-        'session-agent-trace': {
+      const snapshots: Record<string, unknown> = {
+        'context-usage': { ...diagnosticContext, stale: true },
+        stats: diagnosticStats,
+        resources: diagnosticResources,
+        'agent-trace': {
           ...diagnosticTrace,
           items: [{ ...diagnosticTrace.items[0], childSessionId: null }],
         },
       };
       for (const [name, snapshot] of Object.entries(snapshots)) {
-        if (path.endsWith(`/${name}/query`)) {
-          expect(body.sessionId).toBe('s1');
+        if (path === `/v1/agents/sessions/s1/${name}`) {
+          expect(method).toBe('GET');
           diagnosticRequests.push(name);
           return route.fulfill({ json: snapshot });
         }
@@ -156,10 +191,10 @@ for (const width of [1280, 390]) {
     await expect(dialog).toHaveCount(0);
     await expect(trigger).toBeFocused();
     expect(diagnosticRequests).toEqual([
-      'session-context-usage',
-      'session-stats',
-      'session-resources',
-      'session-agent-trace',
+      'context-usage',
+      'stats',
+      'resources',
+      'agent-trace',
     ]);
     expect(unexpected).toEqual([]);
     expect(errors).toEqual([]);
@@ -168,7 +203,6 @@ for (const width of [1280, 390]) {
   test(`Managed activity and lazy child diagnostics at ${width}px @smoke`, async ({
     page,
   }, testInfo) => {
-    type Schemas = components['schemas'];
     const measuredItem: Schemas['ManagedActivityInvocation'] = {
       ...activityItem,
       measurements: {
@@ -184,16 +218,7 @@ for (const width of [1280, 390]) {
     const traceRequests: string[] = [];
     const statisticsRequests: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
-    const session: JavaAgentSession = {
-      sessionId: 's1',
-      agentId: 'agent-a',
-      title: 'Persisted activity',
-      status: 'closed',
-      createdAt: 1,
-      updatedAt: 1,
-      lastSequence: 20,
-      capabilities: { diagnostics: true, workspaceTurns: false },
-    };
+    const summary = session('Persisted activity', 20);
     const skill: Schemas['ManagedActivitySkill'] = {
       resourceKind: 'skill',
       name: 'review-skill',
@@ -260,41 +285,40 @@ for (const width of [1280, 390]) {
       },
     };
     const { statistics: _statistics, ...header } = activityStatistics;
-    await page.route('**/api/agent/web-shell/v1/**', async (route) => {
-      const path = new URL(route.request().url()).pathname;
-      const body = route.request().postDataJSON();
-      if (path.endsWith('/sessions/query'))
-        return route.fulfill({ json: { data: [session], hasMore: false } });
-      if (path.endsWith('/sessions/get'))
-        return route.fulfill({ json: session });
-      if (path.endsWith('/workspaces/query'))
-        return route.fulfill({ json: { data: [], hasMore: false } });
-      if (path.endsWith('/runtime-nodes/query'))
+    await page.route('**/v1/agents/**', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const path = url.pathname;
+      const method = request.method();
+      const sessionId = /^\/v1\/agents\/sessions\/([^/]+)/.exec(path)?.[1];
+      if (path === '/v1/agents/sessions' && method === 'GET')
+        return route.fulfill({ json: sessionList(summary) });
+      // Any Session read answers the parent summary, as the WebShell stub did.
+      if (sessionId && path === `/v1/agents/sessions/${sessionId}`)
+        return route.fulfill({ json: summary });
+      if (path === '/v1/agents/workspaces')
+        return route.fulfill({ json: workspaceList });
+      if (path === '/v1/agents/runtime-nodes')
         return route.fulfill({ json: { supported: false, data: [] } });
-      if (path.endsWith('/user-messages/query'))
+      if (path === `/v1/agents/sessions/${sessionId}/user-messages`)
         return route.fulfill({ json: { paused: false, messages: [] } });
-      if (path.endsWith('/transcript/query'))
-        return route.fulfill({
-          json: {
-            items: [],
-            events: [],
-            lastSequence: 20,
-            coveredSequence: 20,
-            hasMore: false,
-          },
-        });
-      if (path.endsWith('/events/stream'))
+      if (path === `/v1/agents/sessions/${sessionId}/transcript`)
+        return route.fulfill({ json: transcript(20) });
+      if (
+        path === `/v1/agents/sessions/${sessionId}/events` &&
+        url.searchParams.get('stream') === 'true'
+      )
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
-      if (path.endsWith('/session-context-usage/query'))
+      if (path === '/v1/agents/sessions/s1/context-usage')
         return route.fulfill({ json: diagnosticContext });
-      if (path.endsWith('/session-stats/query')) {
-        statisticsRequests.push(body.sessionId);
+      if (path === `/v1/agents/sessions/${sessionId}/stats`) {
+        statisticsRequests.push(sessionId!);
         return route.fulfill({
           json: {
             ...diagnosticStats,
-            sessionId: body.sessionId,
+            sessionId,
             statistics:
-              body.sessionId === 'child-a'
+              sessionId === 'child-a'
                 ? {
                     ...diagnosticStats.statistics!,
                     totals: {
@@ -318,35 +342,37 @@ for (const width of [1280, 390]) {
           },
         });
       }
-      if (path.endsWith('/session-activity-stats/query')) {
-        expect(body.sessionId).toBe('s1');
+      if (path === '/v1/agents/sessions/s1/activity-stats') {
+        expect(sessionId).toBe('s1');
         return route.fulfill({ json: statistics });
       }
-      if (path.endsWith('/session-activity/query')) {
-        expect(body.sessionId).toBe('s1');
-        expect(body.limit).toBe(50);
-        activityRequests.push({ kind: body.kind, cursor: body.cursor });
-        const firstToolsPage = body.kind === 'tools' && !body.cursor;
+      if (path === '/v1/agents/sessions/s1/activity') {
+        expect(sessionId).toBe('s1');
+        expect(url.searchParams.get('limit')).toBe('50');
+        const kind = url.searchParams.get('kind')!;
+        const cursor = url.searchParams.get('cursor') ?? undefined;
+        activityRequests.push({ kind, cursor });
+        const firstToolsPage = kind === 'tools' && !cursor;
         const items =
-          body.kind === 'skills'
+          kind === 'skills'
             ? [skillItem]
-            : body.cursor
+            : cursor
               ? [deniedItem]
               : [measuredItem];
         return route.fulfill({
           json: {
             ...header,
-            kind: body.kind,
+            kind,
             items,
             hasMore: firstToolsPage,
             nextCursor: firstToolsPage ? 'tools-page-2' : null,
           },
         });
       }
-      if (path.endsWith('/session-agent-trace/query')) {
-        traceRequests.push(body.sessionId);
-        expect(body.cursor).toBeUndefined();
-        if (body.sessionId === 's1')
+      if (path === `/v1/agents/sessions/${sessionId}/agent-trace`) {
+        traceRequests.push(sessionId!);
+        expect(url.searchParams.get('cursor')).toBeNull();
+        if (sessionId === 's1')
           return route.fulfill({
             json: {
               ...diagnosticTrace,
@@ -364,7 +390,7 @@ for (const width of [1280, 390]) {
               ],
             },
           });
-        if (body.sessionId === 'child-a')
+        if (sessionId === 'child-a')
           return route.fulfill({
             json: {
               ...diagnosticTrace,

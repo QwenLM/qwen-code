@@ -1,5 +1,4 @@
 import { requireExtensionSnapshot } from './managed-extension-types';
-import type { components } from './generated/managed-agent-api';
 import {
   isJavaAgentResyncRequired,
   JavaManagedAgentClient,
@@ -31,6 +30,7 @@ import type {
   ManagedModelPreset,
 } from './managed-agent-provider';
 
+import type { WebShellCommandOperation } from './java-agent-contract-types';
 export interface JavaManagedAgentProviderOptions
   extends JavaManagedAgentClientOptions {
   agentId?: string;
@@ -243,7 +243,7 @@ export function createJavaManagedAgentProvider(
         );
         if (!['close', 'archive', 'delete'].includes(operation.type))
           throw new Error('Unexpected lifecycle operation type');
-        return operation as components['schemas']['WebShellCommandOperation'];
+        return operation as WebShellCommandOperation;
       },
     },
     exportSnapshot: (sessionId, request) =>

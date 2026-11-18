@@ -35,7 +35,8 @@ export type ManagedFetch = (
 }>;
 
 export interface ManagedClientFilesOptions {
-  /** The Managed WebShell API base, e.g. `/api/agent/web-shell/v1`. */
+  /** The Managed API origin base, e.g. `https://host`; the bridge appends
+   * the per-session Public client-files path. */
   baseUrl: string;
   sessionId: string;
   server: LocalFilesRpcServer;
@@ -91,8 +92,12 @@ export class ManagedClientFilesBridge {
     return json ? { 'Content-Type': 'application/json' } : {};
   }
 
+  private clientFilesBase(): string {
+    return `${this.options.baseUrl.replace(/\/+$/, '')}/v1/agents/sessions/${encodeURIComponent(this.options.sessionId)}/client-files`;
+  }
+
   private url(path: string): string {
-    return `${this.options.baseUrl.replace(/\/+$/, '')}/client-files/${path}`;
+    return `${this.clientFilesBase()}/${path}`;
   }
 
   /** Registers the directory grant and opens the SSE downlink. */
@@ -117,10 +122,7 @@ export class ManagedClientFilesBridge {
         .fetch(this.url('register'), {
           method: 'POST',
           headers: this.headers(true),
-          body: JSON.stringify({
-            sessionId: this.options.sessionId,
-            connectionId,
-          }),
+          body: JSON.stringify({ connection_id: connectionId }),
           signal: abort.signal,
         })
         .then(async (response) => {
@@ -129,8 +131,8 @@ export class ManagedClientFilesBridge {
           }
           return (await response.json()) as {
             generation?: number;
-            toolCount?: number;
-            connectionId?: string;
+            tool_count?: number;
+            connection_id?: string;
           };
         });
       // The binding poll may settle before anyone awaits registering.
@@ -156,8 +158,8 @@ export class ManagedClientFilesBridge {
       );
       let registered: {
         generation?: number;
-        toolCount?: number;
-        connectionId?: string;
+        tool_count?: number;
+        connection_id?: string;
       };
       try {
         registered = await registering;
@@ -172,7 +174,7 @@ export class ManagedClientFilesBridge {
       // The registration reply must name the same connection we correlated;
       // otherwise another tab replaced us mid-discovery and we must not serve.
       if (
-        registered.connectionId !== connectionId ||
+        registered.connection_id !== connectionId ||
         registered.generation !== generation
       ) {
         registerFailed = true;
@@ -183,7 +185,7 @@ export class ManagedClientFilesBridge {
       this.setState({
         phase: 'connected',
         generation,
-        toolCount: registered.toolCount ?? 0,
+        toolCount: registered.tool_count ?? 0,
       });
       await draining;
       if (drainError !== undefined) throw drainError;
@@ -228,31 +230,26 @@ export class ManagedClientFilesBridge {
       () => false,
     );
     const readOwnBinding = async (): Promise<number | undefined> => {
-      const status = await this.options.fetch(this.url('status'), {
-        method: 'POST',
-        headers: this.headers(true),
-        // Prove the identity we are asking about: the server echoes the live
-        // generation/identity only to a caller that already knows it, so a
-        // second tab cannot read them off status and take over this downlink.
-        body: JSON.stringify({
-          sessionId: this.options.sessionId,
-          connectionId,
-        }),
-        signal,
-      });
+      // Prove the identity we are asking about: the server echoes the live
+      // generation/identity only to a caller that already knows it, so a
+      // second tab cannot read them off status and take over this downlink.
+      const status = await this.options.fetch(
+        `${this.clientFilesBase()}?connection_id=${encodeURIComponent(connectionId)}`,
+        { method: 'GET', headers: this.headers(false), signal },
+      );
       if (status.ok) {
         // An absent binding answers 200 with an empty body.
         const body = (await status.json().catch(() => ({}))) as {
           state?: string;
           generation?: number;
-          connectionId?: string;
+          connection_id?: string;
           owned?: boolean;
         };
         if (
           body.owned === true &&
           body.state === 'active' &&
           typeof body.generation === 'number' &&
-          body.connectionId === connectionId
+          body.connection_id === connectionId
         ) {
           return body.generation;
         }
@@ -287,15 +284,10 @@ export class ManagedClientFilesBridge {
     connectionId: string,
     generation: number,
   ): Promise<boolean> {
-    const status = await this.options.fetch(this.url('status'), {
-      method: 'POST',
-      headers: this.headers(true),
-      body: JSON.stringify({
-        sessionId: this.options.sessionId,
-        connectionId,
-      }),
-      signal,
-    });
+    const status = await this.options.fetch(
+      `${this.clientFilesBase()}?connection_id=${encodeURIComponent(connectionId)}`,
+      { method: 'GET', headers: this.headers(false), signal },
+    );
     if (status.status >= 500) {
       // A server-side probe failure is transient, not proof the binding is
       // gone; surface it so the drain retries instead of permanently ending a
@@ -313,14 +305,14 @@ export class ManagedClientFilesBridge {
     const body = (await status.json().catch(() => ({}))) as {
       state?: string;
       generation?: number;
-      connectionId?: string;
+      connection_id?: string;
       owned?: boolean;
     };
     return (
       body.owned === true &&
       body.state === 'active' &&
       body.generation === generation &&
-      body.connectionId === connectionId
+      body.connection_id === connectionId
     );
   }
 
@@ -346,10 +338,7 @@ export class ManagedClientFilesBridge {
       await this.options.fetch(this.url('unregister'), {
         method: 'POST',
         headers: this.headers(true),
-        body: JSON.stringify({
-          sessionId: this.options.sessionId,
-          connectionId,
-        }),
+        body: JSON.stringify({ connection_id: connectionId }),
       });
     } catch {
       // best-effort: the control plane also drops the binding on SSE close.
@@ -363,16 +352,10 @@ export class ManagedClientFilesBridge {
   ): Promise<void> {
     while (this.running) {
       signal.throwIfAborted();
-      const response = await this.options.fetch(this.url('requests/stream'), {
-        method: 'POST',
-        headers: this.headers(true),
-        body: JSON.stringify({
-          sessionId: this.options.sessionId,
-          generation,
-          connectionId,
-        }),
-        signal,
-      });
+      const response = await this.options.fetch(
+        `${this.url('requests')}?generation=${generation}&connection_id=${encodeURIComponent(connectionId)}`,
+        { method: 'GET', headers: this.headers(false), signal },
+      );
       if (!response.ok || !response.body) {
         throw new Error(`request stream failed with HTTP ${response.status}`);
       }
@@ -431,24 +414,24 @@ export class ManagedClientFilesBridge {
     generation: number,
     connectionId: string,
   ): Promise<void> {
-    let payload: { requestId?: string; payloadJson?: string };
+    let payload: { request_id?: string; payload_json?: string };
     try {
       payload = JSON.parse(data) as {
-        requestId?: string;
-        payloadJson?: string;
+        request_id?: string;
+        payload_json?: string;
       };
     } catch {
       return;
     }
     if (
-      typeof payload.requestId !== 'string' ||
-      typeof payload.payloadJson !== 'string'
+      typeof payload.request_id !== 'string' ||
+      typeof payload.payload_json !== 'string'
     ) {
       return;
     }
     let request: JsonRpcRequest;
     try {
-      request = JSON.parse(payload.payloadJson) as JsonRpcRequest;
+      request = JSON.parse(payload.payload_json) as JsonRpcRequest;
     } catch {
       return;
     }
@@ -459,18 +442,17 @@ export class ManagedClientFilesBridge {
         method: 'POST',
         headers: this.headers(true),
         body: JSON.stringify({
-          sessionId: this.options.sessionId,
           generation,
-          connectionId,
-          rpcRequestId: payload.requestId,
+          connection_id: connectionId,
+          rpc_request_id: payload.request_id,
           ...body,
         }),
         signal,
       });
     const posted = await post(
       response !== undefined
-        ? { responseJson: JSON.stringify(response) }
-        : { errorCode: 'client_files_offline' },
+        ? { response_json: JSON.stringify(response) }
+        : { error_code: 'client_files_offline' },
     );
     if (!posted.ok) {
       // A refused answer must never be silently dropped: the queued request
@@ -487,7 +469,7 @@ export class ManagedClientFilesBridge {
         // isError result so the model learns to page with offset/limit instead
         // of receiving nothing; the bound is server-side, so keep this tiny.
         const bounded = await post({
-          responseJson: JSON.stringify({
+          response_json: JSON.stringify({
             jsonrpc: '2.0',
             id: request.id ?? null,
             result: {

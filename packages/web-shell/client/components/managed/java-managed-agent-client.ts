@@ -14,6 +14,48 @@ import type {
   ManagedRuntimeSkillOwner,
 } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
+import {
+  publicActionPageToJava,
+  publicAdmissionFromSession,
+  publicApprovalChangeResultToJava,
+  publicCommandOperationToJava,
+  publicContextCompressionToJava,
+  publicDirectoryPageToJava,
+  publicDirectoryToJava,
+  publicEventToJava,
+  publicFileQueryResultToJava,
+  publicFileResultToJava,
+  publicFileUploadResultToJava,
+  publicFileUploadStatusToJava,
+  publicItemListToJava,
+  publicModelChangeResultToJava,
+  publicOperationToJava,
+  publicResyncToJava,
+  publicRuntimeNodePageToJava,
+  publicSessionApprovalToJava,
+  publicSessionModelsToJava,
+  publicSessionOptionsToJava,
+  publicSessionPageToJava,
+  publicSessionSkillsToJava,
+  publicSessionToJava,
+  publicSideQueryContextToJava,
+  publicSideQueryPageToJava,
+  publicSideQueryToJava,
+  publicTaskEventPageToJava,
+  publicTaskPageToJava,
+  publicTaskToJava,
+  publicToolDetailsToJava,
+  publicTranscriptToJava,
+  publicTurnAdmissionToJava,
+  publicWorktreeInspectionToJava,
+  publicWorktreeOptionsToJava,
+  publicWorktreePageToJava,
+  publicWorktreeToJava,
+  publicWorkspacePageToJava,
+  publicWorkspaceRegistrationToJava,
+  publicWorkspaceSummaryToJava,
+  publicWorkspaceToJava,
+} from './java-managed-public-adapter';
 import type { ManagedMcpManagementSnapshot } from './managed-mcp-management-types';
 import type {
   ManagedWorkspaceFileQueryRequest,
@@ -28,14 +70,79 @@ import type {
 } from './managed-tool-result-types';
 import type {
   ManagedSideQuery,
-  ManagedSideQueryContext,
   ManagedSideQueryCreate,
   ManagedSideQueryPage,
 } from './managed-side-query-types';
 
+import type {
+  WebShellAction,
+  WebShellActionPage,
+  WebShellActionQueryRequest,
+  WebShellActionRespondRequest,
+  WebShellActivityQueryRequest,
+  WebShellAdmission,
+  WebShellApprovalChangeResult,
+  WebShellCancelRequest,
+  WebShellChangeApprovalRequest,
+  WebShellChangeModelRequest,
+  WebShellCommandOperation,
+  WebShellContentPart,
+  WebShellContextCompressionOperation,
+  WebShellContextCompressionRequest,
+  WebShellCreateRequest,
+  WebShellDiagnosticTraceRequest,
+  WebShellEvent,
+  WebShellExportPage,
+  WebShellExportRequest,
+  WebShellItem,
+  WebShellLifecycleRequest,
+  WebShellListRequest,
+  WebShellMcpManagementOperationQuery,
+  WebShellMcpManagementQuery,
+  WebShellMcpManagementSubmit,
+  WebShellModelChangeResult,
+  WebShellOperation,
+  WebShellOperationRequest,
+  WebShellRenameRequest,
+  WebShellRenameResult,
+  WebShellResyncRequired,
+  WebShellSession,
+  WebShellSessionApproval,
+  WebShellSessionOptions,
+  WebShellSessionPage,
+  WebShellSessionWorktree,
+  WebShellSessionWorktreeCleanupRequest,
+  WebShellSessionWorktreeInspection,
+  WebShellSessionWorktreeOptions,
+  WebShellSessionWorktreeOptionsRequest,
+  WebShellSessionWorktreePage,
+  WebShellStreamRequest,
+  WebShellSubmitRequest,
+  WebShellTaskCancelRequest,
+  WebShellTaskEventQueryRequest,
+  WebShellTaskGetRequest,
+  WebShellTaskQueryRequest,
+  WebShellTerminalTicket,
+  WebShellTranscript,
+  WebShellTranscriptRequest,
+  WebShellTurn,
+  WebShellTurnAdmission,
+  WebShellWorkspace,
+  WebShellWorkspaceCreateRequest,
+  WebShellWorkspaceDirectoryPage,
+  WebShellWorkspaceDirectoryQueryRequest,
+  WebShellWorkspaceDirectoryRequest,
+  WebShellWorkspaceFilePage,
+  WebShellWorkspaceFileSnapshot,
+  WebShellWorkspaceFileUploadResult,
+  WebShellWorkspaceFileUploadStatus,
+  WebShellWorkspacePage,
+  WebShellWorkspaceQueryRequest,
+  WebShellWorkspaceRegisterRequest,
+} from './java-agent-contract-types';
 type Schemas = components['schemas'];
 
-export type JavaAgentTurn = Schemas['WebShellTurn'];
+export type JavaAgentTurn = WebShellTurn;
 
 export interface JavaAgentEnvironment {
   environmentId?: string;
@@ -43,29 +150,23 @@ export interface JavaAgentEnvironment {
   errorCode?: string;
 }
 
-export type JavaAgentSession = Omit<
-  Schemas['WebShellSession'],
-  'environment'
-> & {
+export type JavaAgentSession = Omit<WebShellSession, 'environment'> & {
   environment?: JavaAgentEnvironment | null;
 };
 
-export type JavaAgentWorkspace = Schemas['WebShellWorkspace'];
+export type JavaAgentWorkspace = WebShellWorkspace;
 
-export type JavaAgentWorkspacePage = Schemas['WebShellWorkspacePage'];
+export type JavaAgentWorkspacePage = WebShellWorkspacePage;
 
-export type JavaAgentSessionPage = Omit<
-  Schemas['WebShellSessionPage'],
-  'data'
-> & {
+export type JavaAgentSessionPage = Omit<WebShellSessionPage, 'data'> & {
   data: JavaAgentSession[];
 };
 
-export type JavaAgentEvent = Schemas['WebShellEvent'];
+export type JavaAgentEvent = WebShellEvent;
 
-export type JavaAgentResyncRequired = Schemas['WebShellResyncRequired'];
+export type JavaAgentResyncRequired = WebShellResyncRequired;
 
-export type JavaAgentTerminalTicket = Schemas['WebShellTerminalTicket'];
+export type JavaAgentTerminalTicket = WebShellTerminalTicket;
 
 const RESYNC_REQUIRED = 'agent.session.resync_required';
 
@@ -94,16 +195,16 @@ export function isJavaAgentResyncRequired(
   return frame.type === RESYNC_REQUIRED && !('sequence' in frame);
 }
 
-export type JavaAgentContentPart = Schemas['WebShellContentPart'];
+export type JavaAgentContentPart = WebShellContentPart;
 
-export type JavaAgentItem = Schemas['WebShellItem'];
+export type JavaAgentItem = WebShellItem;
 
-export type JavaAgentCommandAdmission = Schemas['WebShellAdmission'];
-export type JavaAgentTurnAdmission = Schemas['WebShellTurnAdmission'];
+export type JavaAgentCommandAdmission = WebShellAdmission;
+export type JavaAgentTurnAdmission = WebShellTurnAdmission;
 
-export type JavaAgentTranscript = Schemas['WebShellTranscript'];
-export type JavaAgentAction = Schemas['WebShellAction'];
-export type JavaAgentActionPage = Schemas['WebShellActionPage'];
+export type JavaAgentTranscript = WebShellTranscript;
+export type JavaAgentAction = WebShellAction;
+export type JavaAgentActionPage = WebShellActionPage;
 
 export interface JavaManagedAgentClientOptions {
   baseUrl: string;
@@ -124,7 +225,88 @@ export class JavaManagedAgentHttpError extends Error {
   }
 }
 
-const API_PREFIX = '/api/agent/web-shell/v1';
+const API_PREFIX = '/v1/agents';
+
+// The Managed Web Terminal ticket mint and WebSocket upgrade stay on the
+// broker-mounted WebShell surface: that is where the deployment authentication
+// headers are available and where the Runtime Broker mounts the relay. Every
+// other client method uses the Public surface above.
+const WEBSHELL_API_PREFIX = '/api/agent/web-shell/v1';
+
+/** Builds a Public query string, dropping null/undefined parameters. */
+function query(
+  params: Record<string, string | number | boolean | null | undefined>,
+): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) search.set(key, String(value));
+  }
+  const encoded = search.toString();
+  return encoded ? `?${encoded}` : '';
+}
+
+/** The create/rename replay flag rides this response header on the Public
+ * surface instead of a body field. */
+const REPLAY_HEADER = 'x-qwen-idempotent-replay';
+
+function replayedFrom(response: Response): boolean {
+  return response.headers.get(REPLAY_HEADER) === 'true';
+}
+
+const enc = encodeURIComponent;
+
+/** The Public create body; requestId is dropped (the server assigns its own
+ * X-Request-Id) and idempotencyKey travels as a header, not a body field. */
+function publicCreateBody(
+  request: WebShellCreateRequest,
+): Schemas['CreateSessionRequest'] {
+  return {
+    agent_id: request.agentId,
+    model_config: request.modelConfig,
+    input: request.input,
+    metadata: request.metadata ?? undefined,
+    workspace: request.workspace
+      ? {
+          workspace_id: request.workspace.workspaceId,
+          cwd_relative: request.workspace.cwdRelative,
+        }
+      : undefined,
+    skills: request.skills,
+    // The Public create contract keeps this one camelCase field.
+    extensionPins: request.extensionPins,
+    worktree: request.worktree
+      ? { base_ref: request.worktree.baseRef }
+      : undefined,
+    memory_store_id: request.memoryStoreId,
+    title: request.title,
+    approval_mode: request.approvalMode,
+    plan_mode: request.planMode,
+    model_id: request.modelId,
+  };
+}
+
+function publicActionResponse(
+  response: WebShellActionRespondRequest['response'],
+): Schemas['PermissionResponse'] | Schemas['QuestionResponse'] {
+  if (response.kind === 'permission') {
+    return {
+      kind: 'permission',
+      input_revision: response.inputRevision,
+      policy_revision: response.policyRevision,
+      option_id: response.optionId,
+    };
+  }
+  return {
+    kind: 'question',
+    input_revision: response.inputRevision,
+    policy_revision: response.policyRevision,
+    answers: response.answers.map((answer) => ({
+      question_id: answer.questionId,
+      option_ids: answer.optionIds,
+      text: answer.text,
+    })),
+  };
+}
 
 export class JavaManagedAgentClient {
   private readonly baseUrl: string;
@@ -145,15 +327,28 @@ export class JavaManagedAgentClient {
     this.credentials = options.credentials ?? 'include';
   }
 
-  listSessions(
-    request: Schemas['WebShellListRequest'],
+  async listSessions(
+    request: WebShellListRequest,
     signal?: AbortSignal,
   ): Promise<JavaAgentSessionPage> {
-    return this.post('/sessions/query', request, signal);
+    const page = await this.get<Schemas['PublicSessionList']>(
+      `/sessions${query({
+        cursor: request.cursor,
+        limit: request.limit,
+        archive_state: request.archiveState,
+        title_query: request.titleQuery,
+      })}`,
+      signal,
+    );
+    return publicSessionPageToJava(page) as JavaAgentSessionPage;
   }
 
-  getSession(sessionId: string, signal?: AbortSignal) {
-    return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
+  async getSession(sessionId: string, signal?: AbortSignal) {
+    const session = await this.get<Schemas['PublicSession']>(
+      `/sessions/${enc(sessionId)}`,
+      signal,
+    );
+    return publicSessionToJava(session) as JavaAgentSession;
   }
 
   terminalTicket(
@@ -165,12 +360,14 @@ export class JavaManagedAgentClient {
       '/sessions/terminal-ticket',
       { sessionId, terminalId },
       signal,
+      undefined,
+      WEBSHELL_API_PREFIX,
     );
   }
 
   terminalWebSocketUrl(sessionId: string, terminalId: string): string {
     const url = new URL(
-      `${this.baseUrl}${API_PREFIX}/sessions/${encodeURIComponent(sessionId)}/terminal`,
+      `${this.baseUrl}${WEBSHELL_API_PREFIX}/sessions/${encodeURIComponent(sessionId)}/terminal`,
     );
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     url.searchParams.set('terminalId', terminalId);
@@ -179,30 +376,32 @@ export class JavaManagedAgentClient {
   }
 
   getRecovery(sessionId: string, signal?: AbortSignal) {
-    return this.post<Schemas['SessionRecovery']>(
-      '/session-recovery/query',
-      { sessionId },
+    return this.get<Schemas['SessionRecovery']>(
+      `/sessions/${enc(sessionId)}/recovery`,
       signal,
     );
   }
 
   recheckRecovery(sessionId: string, turnId: string, signal?: AbortSignal) {
+    // The Public recheck body keeps the camelCase turnId field.
     return this.post<Schemas['SessionRecovery']>(
-      '/session-recovery/recheck',
-      { sessionId, turnId },
+      `/sessions/${enc(sessionId)}/recovery/recheck`,
+      { turnId },
       signal,
     );
   }
 
   async renameSession(
-    request: Schemas['WebShellRenameRequest'],
+    request: WebShellRenameRequest,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellRenameResult']> {
+  ): Promise<WebShellRenameResult> {
     const response = await this.request(
-      '/sessions/rename',
-      request,
+      `/sessions/${enc(request.sessionId)}`,
+      { title: request.title },
       signal,
       false,
+      'PATCH',
+      request.idempotencyKey,
     );
     if (response.status !== 200) {
       throw new JavaManagedAgentHttpError(
@@ -211,391 +410,607 @@ export class JavaManagedAgentClient {
         'Managed Agent rename was not confirmed',
       );
     }
-    return (await response.json()) as Schemas['WebShellRenameResult'];
+    const session = (await response.json()) as Schemas['PublicSession'];
+    return {
+      sessionId: session.id,
+      // A confirmed rename always carries the stored title; an absent or
+      // null one is an anomalous confirmation. Yield '' so the provider's
+      // trim guard refuses it, as the WebShell-era required-title contract
+      // did — do not paper over it with the requested title.
+      title: session.title ?? '',
+      replayed: replayedFrom(response),
+    };
   }
 
-  listWorkspaces(
-    request: Schemas['WebShellWorkspaceQueryRequest'],
+  async listWorkspaces(
+    request: WebShellWorkspaceQueryRequest,
     signal?: AbortSignal,
   ): Promise<JavaAgentWorkspacePage> {
-    return this.post('/workspaces/query', request, signal);
-  }
-
-  getWorkspace(workspaceId: string, signal?: AbortSignal) {
-    return this.post<JavaAgentWorkspace>(
-      '/workspaces/get',
-      { workspaceId },
+    const page = await this.get<Schemas['PublicWorkspaceList']>(
+      `/workspaces${query({ cursor: request.cursor, limit: request.limit })}`,
       signal,
     );
+    return publicWorkspacePageToJava(page);
   }
 
-  listRuntimeNodes(signal?: AbortSignal) {
-    return this.post<Schemas['WebShellRuntimeNodePage']>(
-      '/runtime-nodes/query',
-      {},
+  async getWorkspace(workspaceId: string, signal?: AbortSignal) {
+    const workspace = await this.get<Schemas['PublicWorkspace']>(
+      `/workspaces/${enc(workspaceId)}`,
       signal,
     );
+    return publicWorkspaceToJava(workspace);
   }
 
-  checkWorkspaceDirectory(
-    request: Schemas['WebShellWorkspaceDirectoryRequest'],
+  async listRuntimeNodes(signal?: AbortSignal) {
+    const page = await this.get<Schemas['PublicRuntimeNodePage']>(
+      '/runtime-nodes',
+      signal,
+    );
+    return publicRuntimeNodePageToJava(page);
+  }
+
+  async checkWorkspaceDirectory(
+    request: WebShellWorkspaceDirectoryRequest,
     signal?: AbortSignal,
   ) {
-    return this.post<Schemas['WebShellWorkspaceDirectory']>(
-      '/workspaces/check-directory',
-      request,
+    const directory = await this.post<Schemas['PublicWorkspaceDirectory']>(
+      `/runtime-nodes/${enc(request.nodeId)}/check-directory`,
+      { path: request.path },
       signal,
     );
+    return publicDirectoryToJava(directory);
   }
 
-  registerWorkspace(
-    request: Schemas['WebShellWorkspaceRegisterRequest'],
+  async registerWorkspace(
+    request: WebShellWorkspaceRegisterRequest,
     signal?: AbortSignal,
   ) {
-    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
-      '/workspaces/register',
-      request,
+    const operation = await this.post<
+      Schemas['PublicWorkspaceRegistrationOperation']
+    >(
+      '/workspaces/registrations',
+      {
+        node_id: request.nodeId,
+        path: request.path,
+        display_name: request.displayName,
+      },
       signal,
+      request.idempotencyKey,
     );
+    return publicWorkspaceRegistrationToJava(operation);
   }
 
-  getWorkspaceOperation(operationId: string, signal?: AbortSignal) {
-    return this.post<Schemas['WebShellWorkspaceCreateOperation']>(
-      '/workspaces/operations/get',
-      { operationId },
-      signal,
-    );
+  async getWorkspaceOperation(operationId: string, signal?: AbortSignal) {
+    const operation = await this.get<
+      Schemas['PublicWorkspaceRegistrationOperation']
+    >(`/workspaces/registrations/${enc(operationId)}`, signal);
+    return publicWorkspaceRegistrationToJava(operation);
   }
 
-  createWorkspace(
-    request: Schemas['WebShellWorkspaceCreateRequest'],
+  async createWorkspace(
+    request: WebShellWorkspaceCreateRequest,
     signal?: AbortSignal,
   ): Promise<JavaAgentWorkspace> {
-    return this.post('/workspaces/create', request, signal);
+    const summary = await this.post<Schemas['PublicWorkspaceSummary']>(
+      '/workspaces',
+      {
+        display_name: request.displayName,
+        source_workspace_id: request.sourceWorkspaceId,
+        cwd_relative: request.cwdRelative,
+        local_path: request.localPath,
+      },
+      signal,
+      request.idempotencyKey,
+    );
+    return publicWorkspaceSummaryToJava(summary);
   }
 
-  queryWorkspaceFiles(
+  async queryWorkspaceFiles(
     request: ManagedWorkspaceFileQueryRequest,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellWorkspaceFilePage']> {
-    return this.post('/workspaces/files/query', request, signal);
+  ): Promise<WebShellWorkspaceFilePage> {
+    const result = await this.get<Schemas['PublicFileQueryResult']>(
+      `/workspace-files${query({
+        session_id: request.sessionId,
+        workspace_id: request.workspaceId,
+        cwd_relative: request.cwdRelative,
+        directory: request.directory,
+        query: request.query,
+        expected_scope_revision: request.expectedScopeRevision,
+      })}`,
+      signal,
+    );
+    return publicFileQueryResultToJava(result);
   }
 
-  readWorkspaceFile(
+  async readWorkspaceFile(
     request: ManagedWorkspaceFileReadRequest,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellWorkspaceFileSnapshot']> {
-    return this.post('/workspaces/files/read', request, signal);
+  ): Promise<WebShellWorkspaceFileSnapshot> {
+    const result = await this.get<Schemas['PublicFileResult']>(
+      `/workspace-files/content${query({
+        session_id: request.sessionId,
+        workspace_id: request.workspaceId,
+        cwd_relative: request.cwdRelative,
+        path: request.path,
+        expected_scope_revision: request.expectedScopeRevision,
+      })}`,
+      signal,
+    );
+    return publicFileResultToJava(result);
   }
 
   async uploadWorkspaceFile(
     request: ManagedWorkspaceFileUploadRequest,
     data: Blob,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellWorkspaceFileUploadResult']> {
-    const query = new URLSearchParams();
-    for (const [key, value] of Object.entries(request)) {
-      if (value !== undefined) query.set(key, value);
-    }
+  ): Promise<WebShellWorkspaceFileUploadResult> {
+    const search = query({
+      session_id: request.sessionId,
+      workspace_id: request.workspaceId,
+      cwd_relative: request.cwdRelative,
+      path: request.path,
+      expected_scope_revision: request.expectedScopeRevision,
+      upload_id: request.uploadId,
+    });
     const response = await this.fetchRequest(
-      `/workspaces/files/upload?${query}`,
+      `/workspace-files/uploads${search}`,
       data,
       signal,
       false,
       'application/octet-stream',
     );
-    return (await response.json()) as Schemas['WebShellWorkspaceFileUploadResult'];
+    return publicFileUploadResultToJava(
+      (await response.json()) as Schemas['PublicFileUploadResult'],
+    );
   }
 
-  queryWorkspaceFileUpload(
+  async queryWorkspaceFileUpload(
     uploadId: string,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellWorkspaceFileUploadStatus']> {
-    return this.post('/workspaces/files/uploads/query', { uploadId }, signal);
+  ): Promise<WebShellWorkspaceFileUploadStatus> {
+    const status = await this.get<Schemas['PublicFileUploadStatus']>(
+      `/workspace-files/uploads/${enc(uploadId)}`,
+      signal,
+    );
+    return publicFileUploadStatusToJava(status);
   }
 
-  workspaceDirectories(
-    request: Schemas['WebShellWorkspaceDirectoryQueryRequest'],
+  async workspaceDirectories(
+    request: WebShellWorkspaceDirectoryQueryRequest,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellWorkspaceDirectoryPage']> {
-    return this.post('/workspaces/directories/query', request, signal);
+  ): Promise<WebShellWorkspaceDirectoryPage> {
+    const page = await this.get<Schemas['PublicWorkspaceDirectoryPage']>(
+      `/workspaces/directories${query(
+        'workspaceId' in request
+          ? {
+              workspace_id: request.workspaceId,
+              cwd_relative: request.cwdRelative,
+            }
+          : { local_path: request.localPath },
+      )}`,
+      signal,
+    );
+    return publicDirectoryPageToJava(page);
   }
 
-  getSessionApproval(
+  async getSessionApproval(
     sessionId: string,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellSessionApproval']> {
-    return this.post('/session-approval/query', { sessionId }, signal);
+  ): Promise<WebShellSessionApproval> {
+    const approval = await this.get<Schemas['PublicSessionApproval']>(
+      `/sessions/${enc(sessionId)}/approval`,
+      signal,
+    );
+    return publicSessionApprovalToJava(approval);
   }
 
-  changeApproval(
-    request: Schemas['WebShellChangeApprovalRequest'],
+  async changeApproval(
+    request: WebShellChangeApprovalRequest,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellApprovalChangeResult']> {
-    return this.post('/session-approval/change', request, signal);
+  ): Promise<WebShellApprovalChangeResult> {
+    const result = await this.post<Schemas['PublicApprovalChangeResult']>(
+      `/sessions/${enc(request.sessionId)}/approval`,
+      {
+        approval_mode: request.approvalMode,
+        expected_revision: request.expectedRevision,
+        plan_mode: request.planMode,
+        permission_rules: request.permissionRules,
+      },
+      signal,
+      request.idempotencyKey,
+    );
+    return publicApprovalChangeResultToJava(result);
   }
 
-  getSessionOptions(
+  async getSessionOptions(
     agentId: string,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellSessionOptions']> {
-    return this.post('/session-options/query', { agentId }, signal);
+  ): Promise<WebShellSessionOptions> {
+    const options = await this.get<Schemas['PublicSessionOptions']>(
+      `/session-options${query({ agent_id: agentId })}`,
+      signal,
+    );
+    return publicSessionOptionsToJava(options);
   }
 
-  lifecycleCommand(
+  async lifecycleCommand(
     kind: 'close' | 'archive' | 'delete',
-    request: Schemas['WebShellLifecycleRequest'],
+    request: WebShellLifecycleRequest,
     signal?: AbortSignal,
   ) {
-    return this.post<Schemas['WebShellCommandOperation']>(
-      `/sessions/${kind}`,
-      request,
+    const path =
+      kind === 'delete'
+        ? `/sessions/${enc(request.sessionId)}`
+        : `/sessions/${enc(request.sessionId)}/${kind}`;
+    const operation = await this.request(
+      path,
+      undefined,
       signal,
+      false,
+      kind === 'delete' ? 'DELETE' : 'POST',
+      request.idempotencyKey,
+    );
+    return publicCommandOperationToJava(
+      (await operation.json()) as Schemas['PublicCommandOperation'],
     );
   }
 
-  unarchiveSession(
-    request: Schemas['WebShellLifecycleRequest'],
+  async unarchiveSession(
+    request: WebShellLifecycleRequest,
     signal?: AbortSignal,
   ) {
-    return this.post<JavaAgentSession>('/sessions/unarchive', request, signal);
+    const response = await this.request(
+      `/sessions/${enc(request.sessionId)}/unarchive`,
+      undefined,
+      signal,
+      false,
+      'POST',
+      request.idempotencyKey,
+    );
+    return publicSessionToJava(
+      (await response.json()) as Schemas['PublicSession'],
+    ) as JavaAgentSession;
   }
 
-  exportSnapshot(
-    request: Schemas['WebShellExportRequest'],
+  async exportSnapshot(
+    request: WebShellExportRequest,
     signal?: AbortSignal,
-  ) {
-    return this.post<Schemas['WebShellExportPage']>(
-      '/sessions/export/query',
-      request,
+  ): Promise<WebShellExportPage> {
+    const page = await this.get<Schemas['PublicItemList']>(
+      `/sessions/${enc(request.sessionId)}/export${query({
+        cursor: request.cursor,
+        limit: request.limit,
+      })}`,
       signal,
     );
+    return publicItemListToJava(page);
   }
 
-  getTranscript(
-    request: Schemas['WebShellTranscriptRequest'],
+  async getTranscript(
+    request: WebShellTranscriptRequest,
     signal?: AbortSignal,
   ): Promise<JavaAgentTranscript> {
-    return this.post('/transcript/query', request, signal);
+    const transcript = await this.get<Schemas['PublicTranscript']>(
+      `/sessions/${enc(request.sessionId)}/transcript${query({
+        cursor: request.cursor,
+        limit: request.limit,
+      })}`,
+      signal,
+    );
+    return publicTranscriptToJava(transcript);
   }
 
-  getRecentTranscriptItems(
-    request: Schemas['WebShellExportRequest'],
+  async getRecentTranscriptItems(
+    request: WebShellExportRequest,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellExportPage']> {
-    return this.post('/transcript/items/query', request, signal);
+  ): Promise<WebShellExportPage> {
+    const page = await this.get<Schemas['PublicItemList']>(
+      `/sessions/${enc(request.sessionId)}/transcript/items${query({
+        cursor: request.cursor,
+        limit: request.limit,
+      })}`,
+      signal,
+    );
+    return publicItemListToJava(page);
   }
 
-  createSession(
-    request: Schemas['WebShellCreateRequest'],
+  async createSession(
+    request: WebShellCreateRequest,
     signal?: AbortSignal,
   ): Promise<JavaAgentCommandAdmission> {
-    return this.post('/sessions/create', request, signal);
+    const response = await this.request(
+      '/sessions',
+      publicCreateBody(request),
+      signal,
+      false,
+      'POST',
+      request.idempotencyKey,
+    );
+    const session = (await response.json()) as Schemas['PublicSession'];
+    return publicAdmissionFromSession(session, replayedFrom(response));
   }
 
-  worktreeOptions(
-    request: Schemas['WebShellSessionWorktreeOptionsRequest'],
+  async worktreeOptions(
+    request: WebShellSessionWorktreeOptionsRequest,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellSessionWorktreeOptions']> {
-    return this.post('/workspaces/worktrees/options', request, signal);
+  ): Promise<WebShellSessionWorktreeOptions> {
+    const options = await this.get<Schemas['SessionWorktreeOptions']>(
+      `/workspaces/${enc(request.workspaceId)}/worktrees/options${query({
+        cwd_relative: request.cwdRelative,
+        base_ref: request.baseRef,
+      })}`,
+      signal,
+    );
+    return publicWorktreeOptionsToJava(options);
   }
 
-  listSessionWorktrees(
+  async listSessionWorktrees(
     workspaceId: string,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellSessionWorktreePage']> {
-    return this.post('/workspaces/worktrees/query', { workspaceId }, signal);
+  ): Promise<WebShellSessionWorktreePage> {
+    const page = await this.get<Schemas['SessionWorktreePage']>(
+      `/workspaces/${enc(workspaceId)}/worktrees`,
+      signal,
+    );
+    return publicWorktreePageToJava(page);
   }
 
-  inspectSessionWorktree(
+  async inspectSessionWorktree(
     workspaceId: string,
     worktreeId: string,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellSessionWorktreeInspection']> {
-    return this.post(
-      '/workspaces/worktrees/inspect',
-      { workspaceId, worktreeId },
+  ): Promise<WebShellSessionWorktreeInspection> {
+    const inspection = await this.get<Schemas['SessionWorktreeInspection']>(
+      `/workspaces/${enc(workspaceId)}/worktrees/${enc(worktreeId)}`,
       signal,
+    );
+    return publicWorktreeInspectionToJava(inspection);
+  }
+
+  async cleanupSessionWorktree(
+    request: WebShellSessionWorktreeCleanupRequest,
+    signal?: AbortSignal,
+  ): Promise<WebShellSessionWorktree> {
+    const response = await this.request(
+      `/workspaces/${enc(request.workspaceId)}/worktrees/${enc(request.worktreeId)}/cleanup`,
+      undefined,
+      signal,
+      false,
+      'POST',
+      request.idempotencyKey,
+    );
+    return publicWorktreeToJava(
+      (await response.json()) as Schemas['SessionWorktree'],
     );
   }
 
-  cleanupSessionWorktree(
-    request: Schemas['WebShellSessionWorktreeCleanupRequest'],
-    signal?: AbortSignal,
-  ): Promise<Schemas['WebShellSessionWorktree']> {
-    return this.post('/workspaces/worktrees/cleanup', request, signal);
-  }
-
-  submitTurn(
-    request: Schemas['WebShellSubmitRequest'],
+  async submitTurn(
+    request: WebShellSubmitRequest,
     signal?: AbortSignal,
   ): Promise<JavaAgentTurnAdmission> {
-    return this.post('/turns/submit', request, signal);
+    // The Public input event carries only type + input; the WebShell
+    // metadata echo has no Public counterpart and is dropped.
+    const admission = await this.post<Schemas['TurnCommandAdmission']>(
+      `/sessions/${enc(request.sessionId)}/events`,
+      { type: 'agent.session.input.message', input: request.input ?? [] },
+      signal,
+      request.idempotencyKey,
+    );
+    return publicTurnAdmissionToJava(admission);
   }
 
-  cancelTurn(
-    request: Schemas['WebShellCancelRequest'],
+  async cancelTurn(
+    request: WebShellCancelRequest,
     signal?: AbortSignal,
   ): Promise<JavaAgentTurnAdmission> {
-    return this.post('/turns/cancel', request, signal);
+    const admission = await this.post<Schemas['TurnCommandAdmission']>(
+      `/sessions/${enc(request.sessionId)}/events`,
+      { type: 'agent.session.cancel', turn_id: request.turnId },
+      signal,
+      request.idempotencyKey,
+    );
+    return publicTurnAdmissionToJava(admission);
   }
 
-  queryActions(
-    request: Schemas['WebShellActionQueryRequest'],
+  async queryActions(
+    request: WebShellActionQueryRequest,
     signal?: AbortSignal,
   ): Promise<JavaAgentActionPage> {
-    return this.post('/actions/query', request, signal);
+    const page = await this.get<Schemas['PublicActionList']>(
+      `/sessions/${enc(request.sessionId)}/actions${query({
+        cursor: request.cursor,
+        limit: request.limit,
+        include_children: request.includeChildren,
+      })}`,
+      signal,
+    );
+    return publicActionPageToJava(page);
   }
 
-  listTasks(
-    request: Schemas['WebShellTaskQueryRequest'],
+  async listTasks(request: WebShellTaskQueryRequest, signal?: AbortSignal) {
+    const page = await this.get<Schemas['PublicTaskList']>(
+      `/sessions/${enc(request.sessionId)}/tasks${query({
+        cursor: request.cursor,
+        limit: request.limit,
+      })}`,
+      signal,
+    );
+    return publicTaskPageToJava(page);
+  }
+
+  async getTask(request: WebShellTaskGetRequest, signal?: AbortSignal) {
+    const task = await this.get<Schemas['PublicTask']>(
+      `/sessions/${enc(request.sessionId)}/tasks/${enc(request.taskId)}`,
+      signal,
+    );
+    return publicTaskToJava(task);
+  }
+
+  async listTaskEvents(
+    request: WebShellTaskEventQueryRequest,
     signal?: AbortSignal,
   ) {
-    return this.post<Schemas['WebShellTaskPage']>(
-      '/tasks/query',
-      request,
+    const page = await this.get<{
+      object: 'list';
+      data: Schemas['PublicTaskEvent'][];
+      has_more: boolean;
+      next_cursor?: string | null;
+    }>(
+      `/sessions/${enc(request.sessionId)}/tasks/${enc(request.taskId)}/events${query(
+        { after: request.after, limit: request.limit },
+      )}`,
       signal,
+    );
+    return publicTaskEventPageToJava(page);
+  }
+
+  async cancelTask(
+    request: WebShellTaskCancelRequest,
+    signal?: AbortSignal,
+  ): Promise<WebShellCommandOperation> {
+    const operation = await this.request(
+      `/sessions/${enc(request.sessionId)}/tasks/${enc(request.taskId)}/cancel`,
+      undefined,
+      signal,
+      false,
+      'POST',
+      request.idempotencyKey,
+    );
+    return publicCommandOperationToJava(
+      (await operation.json()) as Schemas['PublicCommandOperation'],
     );
   }
 
-  getTask(request: Schemas['WebShellTaskGetRequest'], signal?: AbortSignal) {
-    return this.post<Schemas['WebShellTask']>('/tasks/get', request, signal);
-  }
-
-  listTaskEvents(
-    request: Schemas['WebShellTaskEventQueryRequest'],
+  async respondAction(
+    request: WebShellActionRespondRequest,
     signal?: AbortSignal,
-  ) {
-    return this.post<Schemas['WebShellTaskEventPage']>(
-      '/tasks/events/query',
-      request,
+  ): Promise<WebShellCommandOperation> {
+    const operation = await this.post<Schemas['PublicCommandOperation']>(
+      `/sessions/${enc(request.sessionId)}/actions/${enc(request.actionId)}/responses`,
+      publicActionResponse(request.response),
       signal,
+      request.idempotencyKey,
     );
-  }
-
-  cancelTask(
-    request: Schemas['WebShellTaskCancelRequest'],
-    signal?: AbortSignal,
-  ) {
-    return this.post<Schemas['WebShellCommandOperation']>(
-      '/tasks/cancel',
-      request,
-      signal,
-    );
-  }
-
-  respondAction(
-    request: Schemas['WebShellActionRespondRequest'],
-    signal?: AbortSignal,
-  ): Promise<Schemas['WebShellCommandOperation']> {
-    return this.post('/actions/respond', request, signal);
+    return publicCommandOperationToJava(operation);
   }
 
   /** Reads an operation's latest durable status; polling is not a replay. */
-  queryOperation(
-    request: Schemas['WebShellOperationRequest'],
+  async queryOperation(
+    request: WebShellOperationRequest,
     signal?: AbortSignal,
-  ): Promise<Schemas['WebShellOperation']> {
-    return this.post('/operations/query', request, signal);
-  }
-
-  compressContext(
-    request: Schemas['WebShellContextCompressionRequest'],
-    signal?: AbortSignal,
-  ): Promise<Schemas['WebShellContextCompressionOperation']> {
-    return this.post('/sessions/compress', request, signal);
-  }
-
-  getSessionModels(sessionId: string, signal?: AbortSignal) {
-    return this.post<Schemas['WebShellSessionModels']>(
-      '/session-models/query',
-      { sessionId },
+  ): Promise<WebShellOperation> {
+    const operation = await this.get<Schemas['PublicOperation']>(
+      `/sessions/${enc(request.sessionId)}/operations/${enc(request.operationId)}`,
       signal,
     );
+    return publicOperationToJava(operation);
   }
 
-  getSessionSkills(sessionId: string, signal?: AbortSignal) {
-    return this.post<Schemas['WebShellSessionSkills']>(
-      '/session-skills/query',
-      { sessionId },
+  async compressContext(
+    request: WebShellContextCompressionRequest,
+    signal?: AbortSignal,
+  ): Promise<WebShellContextCompressionOperation> {
+    const operation = await this.post<
+      Schemas['PublicContextCompressionOperation']
+    >(
+      `/sessions/${enc(request.sessionId)}/compress`,
+      { expected_compaction_revision: request.expectedCompactionRevision },
+      signal,
+      request.idempotencyKey,
+    );
+    return publicContextCompressionToJava(operation);
+  }
+
+  async getSessionModels(sessionId: string, signal?: AbortSignal) {
+    const models = await this.get<Schemas['PublicSessionModels']>(
+      `/sessions/${enc(sessionId)}/models`,
       signal,
     );
+    return publicSessionModelsToJava(models);
+  }
+
+  async getSessionSkills(sessionId: string, signal?: AbortSignal) {
+    const skills = await this.get<Schemas['PublicSessionSkills']>(
+      `/sessions/${enc(sessionId)}/skills`,
+      signal,
+    );
+    return publicSessionSkillsToJava(skills);
   }
 
   getDiagnosticContextUsage(sessionId: string, signal?: AbortSignal) {
-    return this.post<Schemas['ManagedDiagnosticContextUsage']>(
-      '/session-context-usage/query',
-      { sessionId },
+    return this.get<Schemas['ManagedDiagnosticContextUsage']>(
+      `/sessions/${enc(sessionId)}/context-usage`,
       signal,
     );
   }
 
   getDiagnosticStatistics(sessionId: string, signal?: AbortSignal) {
-    return this.post<Schemas['ManagedDiagnosticStats']>(
-      '/session-stats/query',
-      { sessionId },
+    return this.get<Schemas['ManagedDiagnosticStats']>(
+      `/sessions/${enc(sessionId)}/stats`,
       signal,
     );
   }
 
   getActivityStatistics(sessionId: string, signal?: AbortSignal) {
-    return this.post<Schemas['ManagedDiagnosticActivityStats']>(
-      '/session-activity-stats/query',
-      { sessionId },
+    return this.get<Schemas['ManagedDiagnosticActivityStats']>(
+      `/sessions/${enc(sessionId)}/activity-stats`,
       signal,
     );
   }
 
-  listActivity(
-    request: Schemas['WebShellActivityQueryRequest'],
-    signal?: AbortSignal,
-  ) {
-    return this.post<Schemas['ManagedDiagnosticActivityPage']>(
-      '/session-activity/query',
-      request,
+  listActivity(request: WebShellActivityQueryRequest, signal?: AbortSignal) {
+    return this.get<Schemas['ManagedDiagnosticActivityPage']>(
+      `/sessions/${enc(request.sessionId)}/activity${query({
+        kind: request.kind,
+        cursor: request.cursor,
+        limit: request.limit,
+      })}`,
       signal,
     );
   }
 
   getDiagnosticResources(sessionId: string, signal?: AbortSignal) {
-    return this.post<Schemas['ManagedDiagnosticResources']>(
-      '/session-resources/query',
-      { sessionId },
+    return this.get<Schemas['ManagedDiagnosticResources']>(
+      `/sessions/${enc(sessionId)}/resources`,
       signal,
     );
   }
 
   listDiagnosticAgentTrace(
-    request: Schemas['WebShellDiagnosticTraceRequest'],
+    request: WebShellDiagnosticTraceRequest,
     signal?: AbortSignal,
   ) {
-    return this.post<Schemas['ManagedDiagnosticAgentTrace']>(
-      '/session-agent-trace/query',
-      request,
+    return this.get<Schemas['ManagedDiagnosticAgentTrace']>(
+      `/sessions/${enc(request.sessionId)}/agent-trace${query({
+        cursor: request.cursor,
+        limit: request.limit,
+      })}`,
       signal,
     );
   }
 
   getSessionMcp(sessionId: string, signal?: AbortSignal) {
-    return this.post<Schemas['PublicMcpCatalog']>(
-      '/session-mcp/query',
-      { sessionId },
+    return this.get<Schemas['PublicMcpCatalog']>(
+      `/sessions/${enc(sessionId)}/mcp-catalog`,
       signal,
     );
   }
 
   /**
-   * The transport the client filesystem bridge drives: the WebShell API base
-   * plus a fetch that attaches the provider's auth headers (resolved per call
-   * so token refresh is honoured) and credentials. The bridge owns the
-   * register/SSE/response exchange; this only supplies the authenticated pipe.
+   * The transport the client filesystem bridge drives: the Managed API
+   * origin base plus a fetch that attaches the provider's auth headers
+   * (resolved per call so token refresh is honoured) and credentials. The
+   * bridge owns the register/SSE/response exchange and appends the
+   * per-session Public client-files path; this only supplies the
+   * authenticated pipe.
    */
   clientFilesTransport(): {
     baseUrl: string;
     fetch: import('../../local-files/managed-client-files-bridge.js').ManagedFetch;
   } {
     return {
-      baseUrl: `${this.baseUrl}${API_PREFIX}`,
+      baseUrl: this.baseUrl,
       fetch: async (url, init) => {
         const supplied = await this.options.getHeaders?.();
         const headers = new Headers(supplied);
@@ -619,9 +1034,8 @@ export class JavaManagedAgentClient {
   }
 
   listExtensionPackages(workspaceId: string, signal?: AbortSignal) {
-    return this.post<ManagedExtensionCatalog>(
-      '/workspace-extensions/query',
-      { workspaceId },
+    return this.get<ManagedExtensionCatalog>(
+      `/workspaces/${enc(workspaceId)}/extensions`,
       signal,
     );
   }
@@ -645,25 +1059,21 @@ export class JavaManagedAgentClient {
       .replaceAll('+', '-')
       .replaceAll('/', '_')
       .replace(/=+$/, '');
-    const query = new URLSearchParams({
-      workspaceId,
-      packageDigest,
-      manifest: encoded,
-    });
-    if (extensionId) query.set('extensionId', extensionId);
+    // Publishing a new package creates the extension; publishing a new
+    // revision of an existing one targets it directly.
+    const target = extensionId
+      ? `${this.baseUrl}${API_PREFIX}/workspaces/${enc(workspaceId)}/extensions/${enc(extensionId)}/packages/${enc(packageDigest)}?${new URLSearchParams({ manifest: encoded })}`
+      : `${this.baseUrl}${API_PREFIX}/workspaces/${enc(workspaceId)}/extensions?${new URLSearchParams({ packageDigest, manifest: encoded })}`;
     const headers = new Headers(await this.options.getHeaders?.());
     headers.set('Content-Type', 'application/octet-stream');
     headers.set('Idempotency-Key', idempotencyKey);
-    const response = await this.fetchImpl(
-      `${this.baseUrl}${API_PREFIX}/workspace-extensions/publish?${query}`,
-      {
-        method: 'POST',
-        headers,
-        body: archive,
-        credentials: this.credentials,
-        signal,
-      },
-    );
+    const response = await this.fetchImpl(target, {
+      method: extensionId ? 'PUT' : 'POST',
+      headers,
+      body: archive,
+      credentials: this.credentials,
+      signal,
+    });
     if (!response.ok) throw await toHttpError(response);
     return response.json();
   }
@@ -673,9 +1083,8 @@ export class JavaManagedAgentClient {
     extensionId: string,
     signal?: AbortSignal,
   ) {
-    return this.post<ManagedExtensionSettings>(
-      '/workspace-extensions/settings/query',
-      { workspaceId, extensionId },
+    return this.get<ManagedExtensionSettings>(
+      `/workspaces/${enc(workspaceId)}/extensions/${enc(extensionId)}/settings`,
       signal,
     );
   }
@@ -690,16 +1099,15 @@ export class JavaManagedAgentClient {
   ): Promise<ManagedExtensionPackageOperation> {
     if (source.size > 100 * 1024 * 1024)
       throw new Error('Managed package exceeds 100 MiB');
-    const query = new URLSearchParams({
-      workspaceId,
+    const search = new URLSearchParams({
       metadata: JSON.stringify(metadata),
     });
-    if (extensionId) query.set('extensionId', extensionId);
+    if (extensionId) search.set('extensionId', extensionId);
     const headers = new Headers(await this.options.getHeaders?.());
     headers.set('Content-Type', 'application/octet-stream');
     headers.set('Idempotency-Key', idempotencyKey);
     const response = await this.fetchImpl(
-      `${this.baseUrl}${API_PREFIX}/workspace-extensions/imports?${query}`,
+      `${this.baseUrl}${API_PREFIX}/workspaces/${enc(workspaceId)}/extensions/imports?${search}`,
       {
         method: 'POST',
         headers,
@@ -717,9 +1125,8 @@ export class JavaManagedAgentClient {
     pin: ManagedExtensionPin,
     signal?: AbortSignal,
   ) {
-    return this.post<ManagedExtensionInspection>(
-      '/workspace-extensions/inspection/query',
-      { workspaceId, pin },
+    return this.get<ManagedExtensionInspection>(
+      `/workspaces/${enc(workspaceId)}/extensions/${enc(pin.extensionId)}/packages/${enc(String(pin.packageRevision))}/inspection${query({ packageDigest: pin.packageDigest })}`,
       signal,
     );
   }
@@ -732,14 +1139,13 @@ export class JavaManagedAgentClient {
   ): Promise<ManagedExtensionInspection> {
     if (source.size > 100 * 1024 * 1024)
       throw new Error('Managed package exceeds 100 MiB');
-    const query = new URLSearchParams({
-      workspaceId,
+    const search = new URLSearchParams({
       metadata: JSON.stringify(metadata),
     });
     const headers = new Headers(await this.options.getHeaders?.());
     headers.set('Content-Type', 'application/octet-stream');
     const response = await this.fetchImpl(
-      `${this.baseUrl}${API_PREFIX}/workspace-extensions/imports/preview?${query}`,
+      `${this.baseUrl}${API_PREFIX}/workspaces/${enc(workspaceId)}/extensions/imports/preview?${search}`,
       {
         method: 'POST',
         headers,
@@ -758,9 +1164,11 @@ export class JavaManagedAgentClient {
     idempotencyKey: string,
     signal?: AbortSignal,
   ) {
+    // The lookup body keeps camelCase and carries the key in the body: it
+    // is a read-only receipt query, not a mutation.
     return this.post<ManagedExtensionPackageOperation>(
-      '/workspace-extensions/operations/lookup',
-      { workspaceId, kind, idempotencyKey },
+      `/workspaces/${enc(workspaceId)}/extensions/operations/lookup`,
+      { kind, idempotencyKey },
       signal,
     );
   }
@@ -771,16 +1179,15 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ) {
     return this.post<ManagedExtensionSnapshot>(
-      '/session-extensions/operations/lookup',
-      { sessionId, idempotencyKey },
+      `/sessions/${enc(sessionId)}/extensions/operations/lookup`,
+      { idempotencyKey },
       signal,
     );
   }
 
   getRuntimeSkillCandidates(sessionId: string, signal?: AbortSignal) {
-    return this.post<ManagedRuntimeSkillCandidates>(
-      '/session-extensions/skills/candidates/query',
-      { sessionId },
+    return this.get<ManagedRuntimeSkillCandidates>(
+      `/sessions/${enc(sessionId)}/extensions/skills/candidates`,
       signal,
     );
   }
@@ -796,8 +1203,8 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ) {
     return this.post<ManagedRuntimeSkillSnapshot>(
-      '/session-extensions/skills/snapshot',
-      { sessionId, ...input },
+      `/sessions/${enc(sessionId)}/extensions/skills/snapshot`,
+      input,
       signal,
     );
   }
@@ -809,9 +1216,10 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ) {
     return this.post<ManagedExtensionPackageOperation>(
-      '/session-extensions/skills/imports',
-      { ...input, sessionId, idempotencyKey },
+      `/sessions/${enc(sessionId)}/extensions/skills/imports`,
+      input,
       signal,
+      idempotencyKey,
     );
   }
 
@@ -824,9 +1232,10 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ) {
     return this.post<ManagedExtensionPackageOperation>(
-      '/workspace-extensions/settings/submit',
-      { workspaceId, extensionId, expectedRevision, values, idempotencyKey },
+      `/workspaces/${enc(workspaceId)}/extensions/${enc(extensionId)}/settings`,
+      { expectedRevision, values },
       signal,
+      idempotencyKey,
     );
   }
 
@@ -835,9 +1244,10 @@ export class JavaManagedAgentClient {
     operationId?: string,
     signal?: AbortSignal,
   ) {
-    return this.post<ManagedExtensionSnapshot>(
-      '/session-extensions/query',
-      { sessionId, ...(operationId ? { operationId } : {}) },
+    return this.get<ManagedExtensionSnapshot>(
+      operationId
+        ? `/sessions/${enc(sessionId)}/extensions/operations/${enc(operationId)}`
+        : `/sessions/${enc(sessionId)}/extensions`,
       signal,
     );
   }
@@ -849,9 +1259,10 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ) {
     return this.post<ManagedExtensionSnapshot>(
-      '/session-extensions/submit',
-      { sessionId, command, idempotencyKey },
+      `/sessions/${enc(sessionId)}/extensions`,
+      command,
       signal,
+      idempotencyKey,
     );
   }
 
@@ -862,8 +1273,8 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ) {
     return this.post<ManagedExtensionSnapshot>(
-      `/session-extensions/${recoverPrevious ? 'recover-previous' : 'continue'}`,
-      { sessionId, operationId },
+      `/sessions/${enc(sessionId)}/extensions/operations/${enc(operationId)}/${recoverPrevious ? 'recover-previous' : 'continue'}`,
+      undefined,
       signal,
     );
   }
@@ -873,84 +1284,107 @@ export class JavaManagedAgentClient {
     pin: ManagedExtensionPin,
     signal?: AbortSignal,
   ) {
-    return this.post<ManagedExtensionCatalog['extensions'][number]>(
-      '/workspace-extensions/packages/query',
-      { workspaceId, pin },
+    return this.get<ManagedExtensionCatalog['extensions'][number]>(
+      `/workspaces/${enc(workspaceId)}/extensions/${enc(pin.extensionId)}/packages/${enc(String(pin.packageRevision))}${query({ packageDigest: pin.packageDigest })}`,
       signal,
     );
   }
 
   queryMcpManagement(
-    request: Schemas['WebShellMcpManagementQuery'],
+    request: WebShellMcpManagementQuery,
     signal?: AbortSignal,
   ) {
-    return this.post<ManagedMcpManagementSnapshot>(
-      '/session-mcp/management/query',
-      request,
+    return this.get<ManagedMcpManagementSnapshot>(
+      `/sessions/${enc(request.sessionId)}/mcp-management`,
       signal,
     );
   }
 
   submitMcpManagement(
-    request: Schemas['WebShellMcpManagementSubmit'],
+    request: WebShellMcpManagementSubmit,
     signal?: AbortSignal,
   ) {
+    // The Public command body keeps the camelCase server pin fields.
     return this.post<ManagedMcpManagementSnapshot>(
-      '/session-mcp/management/submit',
-      request,
+      `/sessions/${enc(request.sessionId)}/mcp-management/commands`,
+      {
+        action: request.action,
+        serverId: request.serverId,
+        expectedRevision: request.expectedRevision,
+        server: request.server,
+      },
       signal,
+      request.idempotencyKey,
     );
   }
 
   getMcpManagementOperation(
-    request: Schemas['WebShellMcpManagementOperationQuery'],
+    request: WebShellMcpManagementOperationQuery,
     signal?: AbortSignal,
   ) {
-    return this.post<ManagedMcpManagementSnapshot>(
-      '/session-mcp/management/operations/query',
-      request,
+    return this.get<ManagedMcpManagementSnapshot>(
+      `/sessions/${enc(request.sessionId)}/mcp-management/commands/${enc(request.operationId)}`,
       signal,
     );
   }
 
-  changeModel(
-    request: Schemas['WebShellChangeModelRequest'],
+  async changeModel(
+    request: WebShellChangeModelRequest,
     signal?: AbortSignal,
-  ) {
-    return this.post<Schemas['WebShellModelChangeResult']>(
-      '/session-models/change',
-      request,
+  ): Promise<WebShellModelChangeResult> {
+    const result = await this.post<Schemas['PublicModelChangeResult']>(
+      `/sessions/${enc(request.sessionId)}/models`,
+      {
+        model_id: request.modelId,
+        expected_revision: request.expectedRevision,
+      },
       signal,
+      request.idempotencyKey,
     );
+    return publicModelChangeResultToJava(result);
   }
 
-  getToolDetails(sessionId: string, itemId: string, signal?: AbortSignal) {
-    return this.post<Schemas['WebShellToolDetails']>(
-      '/tool-details/get',
-      { sessionId, itemId },
+  async getToolDetails(
+    sessionId: string,
+    itemId: string,
+    signal?: AbortSignal,
+  ) {
+    const details = await this.get<Schemas['PublicToolDetails']>(
+      `/sessions/${enc(sessionId)}/items/${enc(itemId)}/tool-details`,
       signal,
     );
+    return publicToolDetailsToJava(details);
   }
 
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {
-    return this.post<ManagedToolResultResponse>(
-      '/tool-results/get',
-      { sessionId, itemId },
+    return this.get<ManagedToolResultResponse>(
+      `/sessions/${enc(sessionId)}/items/${enc(itemId)}/tool-result`,
       signal,
     );
   }
 
-  listArtifacts(
+  async listArtifacts(
     request: { sessionId: string; cursor?: string; limit?: number },
     signal?: AbortSignal,
   ) {
-    return this.post<ManagedArtifactPage>('/artifacts/query', request, signal);
+    const page = await this.get<Schemas['PublicArtifactList']>(
+      `/sessions/${enc(request.sessionId)}/artifacts${query({
+        cursor: request.cursor,
+        limit: request.limit,
+      })}`,
+      signal,
+    );
+    const adapted: ManagedArtifactPage = {
+      data: page.data,
+      nextCursor: page.next_cursor ?? null,
+      hasMore: page.has_more,
+    };
+    return adapted;
   }
 
   getArtifact(sessionId: string, artifactId: string, signal?: AbortSignal) {
-    return this.post<ManagedArtifactResponse>(
-      '/artifacts/get',
-      { sessionId, artifactId },
+    return this.get<ManagedArtifactResponse>(
+      `/sessions/${enc(sessionId)}/artifacts/${enc(artifactId)}`,
       signal,
     );
   }
@@ -1108,16 +1542,20 @@ export class JavaManagedAgentClient {
   }
 
   async *streamEvents(
-    request: Schemas['WebShellStreamRequest'],
+    request: WebShellStreamRequest,
     signal?: AbortSignal,
     onOpen?: () => void,
     onAlive?: () => void,
   ): AsyncGenerator<JavaAgentEvent | JavaAgentResyncRequired> {
     const response = await this.request(
-      '/events/stream',
-      request,
+      `/sessions/${enc(request.sessionId)}/events${query({
+        stream: 'true',
+        after: request.afterSequence,
+      })}`,
+      undefined,
       signal,
       true,
+      'GET',
     );
     if (!response.body) {
       throw new JavaManagedAgentHttpError(
@@ -1252,52 +1690,68 @@ export class JavaManagedAgentClient {
     }
   }
 
-  sideQueryContext(sessionId: string, signal?: AbortSignal) {
-    return this.post<ManagedSideQueryContext>(
-      '/session-side-queries/context',
-      { sessionId },
+  async sideQueryContext(sessionId: string, signal?: AbortSignal) {
+    const context = await this.get<Schemas['SideQueryContext']>(
+      `/sessions/${enc(sessionId)}/side-queries/context`,
       signal,
     );
+    return publicSideQueryContextToJava(context);
   }
 
-  createSideQuery(
+  async createSideQuery(
     sessionId: string,
     request: ManagedSideQueryCreate,
     idempotencyKey: string,
     signal?: AbortSignal,
   ) {
-    return this.post<ManagedSideQuery>(
-      '/session-side-queries/create',
-      { sessionId, ...request, idempotencyKey },
+    const query_ = await this.post<Schemas['SideQuery']>(
+      `/sessions/${enc(sessionId)}/side-queries`,
+      {
+        kind: request.kind,
+        trigger: request.trigger,
+        question: request.question,
+        expected_content_version: request.expectedContentVersion,
+        expected_main_input_boundary: request.expectedMainInputBoundary,
+      },
       signal,
+      idempotencyKey,
     );
+    return publicSideQueryToJava(query_);
   }
 
-  listSideQueries(
+  async listSideQueries(
     request: { sessionId: string; cursor?: string; limit?: number },
     signal?: AbortSignal,
+  ): Promise<ManagedSideQueryPage> {
+    const page = await this.get<Schemas['SideQueryPage']>(
+      `/sessions/${enc(request.sessionId)}/side-queries${query({
+        cursor: request.cursor,
+        limit: request.limit,
+      })}`,
+      signal,
+    );
+    return publicSideQueryPageToJava(page);
+  }
+
+  async getSideQuery(sessionId: string, queryId: string, signal?: AbortSignal) {
+    const value = await this.get<Schemas['SideQuery']>(
+      `/sessions/${enc(sessionId)}/side-queries/${enc(queryId)}`,
+      signal,
+    );
+    return publicSideQueryToJava(value);
+  }
+
+  async cancelSideQuery(
+    sessionId: string,
+    queryId: string,
+    signal?: AbortSignal,
   ) {
-    return this.post<ManagedSideQueryPage>(
-      '/session-side-queries/list',
-      request,
+    const value = await this.post<Schemas['SideQuery']>(
+      `/sessions/${enc(sessionId)}/side-queries/${enc(queryId)}/cancel`,
+      undefined,
       signal,
     );
-  }
-
-  getSideQuery(sessionId: string, queryId: string, signal?: AbortSignal) {
-    return this.post<ManagedSideQuery>(
-      '/session-side-queries/get',
-      { sessionId, queryId },
-      signal,
-    );
-  }
-
-  cancelSideQuery(sessionId: string, queryId: string, signal?: AbortSignal) {
-    return this.post<ManagedSideQuery>(
-      '/session-side-queries/cancel',
-      { sessionId, queryId },
-      signal,
-    );
+    return publicSideQueryToJava(value);
   }
 
   async *streamSideQuery(
@@ -1305,10 +1759,11 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): AsyncGenerator<ManagedSideQuery> {
     const response = await this.request(
-      '/session-side-queries/stream',
-      request,
+      `/sessions/${enc(request.sessionId)}/side-queries/${enc(request.queryId)}/events`,
+      undefined,
       signal,
       true,
+      'GET',
     );
     if (!response.body) throw new Error('Side query stream is unavailable');
     const reader = response.body.getReader();
@@ -1325,7 +1780,9 @@ export class JavaManagedAgentClient {
           buffer = buffer.slice(boundary.index + boundary.length);
           const { data } = parseEventFrameFields(frame);
           if (data.length) {
-            const value = JSON.parse(data.join('\n')) as ManagedSideQuery;
+            const value = publicSideQueryToJava(
+              JSON.parse(data.join('\n')) as Schemas['SideQuery'],
+            );
             if (
               value.sessionId !== request.sessionId ||
               value.queryId !== request.queryId ||
@@ -1347,9 +1804,9 @@ export class JavaManagedAgentClient {
   }
 
   queryUserMessages(sessionId: string, signal?: AbortSignal) {
-    return this.post<
+    return this.get<
       import('./use-managed-user-messages').ManagedUserMessageSnapshot
-    >('/user-messages/query', { sessionId }, signal);
+    >(`/sessions/${enc(sessionId)}/user-messages`, signal);
   }
 
   commandUserMessages(
@@ -1358,17 +1815,45 @@ export class JavaManagedAgentClient {
     idempotencyKey: string,
     signal?: AbortSignal,
   ) {
+    // The Public command body is the camelCase command itself.
     return this.post<
       import('./use-managed-user-messages').ManagedUserMessageSnapshot
-    >('/user-messages/command', { sessionId, command, idempotencyKey }, signal);
+    >(
+      `/sessions/${enc(sessionId)}/user-messages`,
+      command,
+      signal,
+      idempotencyKey,
+    );
   }
 
   private async post<T>(
     path: string,
     body: unknown,
     signal?: AbortSignal,
+    idempotencyKey?: string,
+    prefix: string = API_PREFIX,
   ): Promise<T> {
-    const response = await this.request(path, body, signal, false);
+    const response = await this.request(
+      path,
+      body,
+      signal,
+      false,
+      'POST',
+      idempotencyKey,
+      prefix,
+    );
+    return (await response.json()) as T;
+  }
+
+  private async get<T>(path: string, signal?: AbortSignal): Promise<T> {
+    const response = await this.fetchRequest(
+      path,
+      undefined,
+      signal,
+      false,
+      'application/json',
+      'GET',
+    );
     return (await response.json()) as T;
   }
 
@@ -1377,42 +1862,52 @@ export class JavaManagedAgentClient {
     body: unknown,
     signal: AbortSignal | undefined,
     stream: boolean,
+    method: string = 'POST',
+    idempotencyKey?: string,
+    prefix: string = API_PREFIX,
   ): Promise<Response> {
     return this.fetchRequest(
       path,
-      JSON.stringify(body),
+      body === undefined ? undefined : JSON.stringify(body),
       signal,
       stream,
       'application/json',
+      method,
+      idempotencyKey,
+      prefix,
     );
   }
 
   private async fetchRequest(
     path: string,
-    body: BodyInit,
+    body: BodyInit | undefined,
     signal: AbortSignal | undefined,
     stream: boolean,
     contentType: string,
+    method: string = 'POST',
+    idempotencyKey?: string,
+    prefix: string = API_PREFIX,
   ): Promise<Response> {
     const supplied = await this.options.getHeaders?.();
     const headers = new Headers(supplied);
     if (
-      contentType === 'application/octet-stream' ||
-      !headers.has('content-type')
+      body !== undefined &&
+      (contentType === 'application/octet-stream' ||
+        !headers.has('content-type'))
     ) {
       headers.set('content-type', contentType);
     }
     headers.set('accept', stream ? 'text/event-stream' : 'application/json');
-    const response = await this.fetchImpl(
-      `${this.baseUrl}${API_PREFIX}${path}`,
-      {
-        method: 'POST',
-        headers,
-        credentials: this.credentials,
-        body,
-        signal,
-      },
-    );
+    if (idempotencyKey !== undefined) {
+      headers.set('idempotency-key', idempotencyKey);
+    }
+    const response = await this.fetchImpl(`${this.baseUrl}${prefix}${path}`, {
+      method,
+      headers,
+      credentials: this.credentials,
+      body,
+      signal,
+    });
     if (!response.ok) {
       throw await toHttpError(response);
     }
@@ -1457,7 +1952,7 @@ function decodeEventFrame(
   if (data.length === 0) return undefined;
   const parsed: unknown = JSON.parse(data.join('\n'));
   // Both frame shapes this stream carries are objects with a string `type`
-  // (WebShellEvent and WebShellResyncRequired); anything else is corrupt.
+  // (PublicEvent and SessionResyncRequired); anything else is corrupt.
   if (
     typeof parsed !== 'object' ||
     parsed === null ||
@@ -1467,12 +1962,14 @@ function decodeEventFrame(
   // The server's only frame without an id: the cursor fell below the replay
   // floor, and the stream ends after it.
   if (name === RESYNC_REQUIRED && id === undefined) {
-    return parsed as JavaAgentResyncRequired;
+    return publicResyncToJava(parsed as Schemas['SessionResyncRequired']);
   }
-  const event = parsed as JavaAgentEvent;
-  return id === undefined || event.sequence === id
-    ? event
-    : { ...event, sequence: id };
+  const event = parsed as Schemas['PublicEvent'];
+  return publicEventToJava(
+    id === undefined || event.sequence === id
+      ? event
+      : { ...event, sequence: id },
+  );
 }
 
 async function toHttpError(

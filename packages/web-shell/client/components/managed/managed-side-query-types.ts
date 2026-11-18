@@ -2,18 +2,21 @@ import type {
   ManagedAgentCommandOptions,
   ManagedAgentRequestOptions,
 } from './managed-agent-provider';
-import type { components } from './generated/managed-agent-api';
 
-export type ManagedSideQuery = components['schemas']['WebShellSideQuery'];
+import type {
+  WebShellSideQuery,
+  WebShellSideQueryContext,
+  WebShellSideQueryCreateRequest,
+  WebShellSideQueryPage,
+} from './java-agent-contract-types';
+export type ManagedSideQuery = WebShellSideQuery;
 export type ManagedSideQueryKind = ManagedSideQuery['kind'];
 export type ManagedSideQueryCreate = Omit<
-  components['schemas']['WebShellSideQueryCreateRequest'],
+  WebShellSideQueryCreateRequest,
   'sessionId' | 'idempotencyKey' | 'requestId'
 >;
-export type ManagedSideQueryContext =
-  components['schemas']['WebShellSideQueryContext'];
-export type ManagedSideQueryPage =
-  components['schemas']['WebShellSideQueryPage'];
+export type ManagedSideQueryContext = WebShellSideQueryContext;
+export type ManagedSideQueryPage = WebShellSideQueryPage;
 
 export interface ManagedSideQueriesProvider {
   context(

@@ -61,7 +61,7 @@ const peerFetch = ((url: string, init?: RequestInit) =>
 function startPeer(unregisterGate?: Promise<void>): Promise<{
   server: Server;
   baseUrl: string;
-  unregistered: Array<{ connectionId?: string }>;
+  unregistered: Array<{ connection_id?: string }>;
   registeredConnectionId: () => string | undefined;
 }> {
   // Like the real control plane: register blocks on the discovery the
@@ -69,7 +69,7 @@ function startPeer(unregisterGate?: Promise<void>): Promise<{
   let binding:
     | { generation: number; state: string; connectionId?: string }
     | undefined;
-  const unregistered: Array<{ connectionId?: string }> = [];
+  const unregistered: Array<{ connection_id?: string }> = [];
   let resolveRegister: (() => void) | undefined;
   const registerDone = new Promise<void>((resolve) => {
     resolveRegister = resolve;
@@ -78,28 +78,38 @@ function startPeer(unregisterGate?: Promise<void>): Promise<{
     let body = '';
     req.on('data', (chunk) => (body += chunk));
     req.on('end', async () => {
-      const path = req.url ?? '';
-      if (path.endsWith('/client-files/register')) {
-        const parsed = body
-          ? (JSON.parse(body) as Record<string, unknown>)
-          : {};
+      const url = new URL(req.url ?? '', 'http://127.0.0.1');
+      // The bridge appends the per-session Public client-files path to the
+      // origin base; the Session id varies across these tests.
+      const route =
+        /^\/v1\/agents\/sessions\/[^/]+\/client-files(?:\/(register|requests|responses|unregister))?$/.exec(
+          url.pathname,
+        );
+      if (!route) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const action = route[1];
+      const parsed = body ? (JSON.parse(body) as Record<string, unknown>) : {};
+      if (req.method === 'POST' && action === 'register') {
         binding = {
           generation: 1,
           state: 'active',
-          connectionId: parsed.connectionId as string | undefined,
+          connectionId: parsed.connection_id as string | undefined,
         };
         await registerDone;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
             generation: 1,
-            toolCount: 2,
-            connectionId: parsed.connectionId,
+            tool_count: 2,
+            connection_id: parsed.connection_id,
           }),
         );
         return;
       }
-      if (path.endsWith('/client-files/status')) {
+      if (req.method === 'GET' && action === undefined) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         if (!binding) {
           res.end('');
@@ -107,28 +117,31 @@ function startPeer(unregisterGate?: Promise<void>): Promise<{
         }
         // Mirror the server's ownership gate: the generation/identity is echoed
         // only to a caller that proves it knows the registration identity.
-        const parsed = body
-          ? (JSON.parse(body) as Record<string, unknown>)
-          : {};
+        const askedConnectionId = url.searchParams.get('connection_id');
         const owned =
-          parsed.connectionId !== undefined &&
-          parsed.connectionId === binding.connectionId;
+          askedConnectionId !== null &&
+          askedConnectionId === binding.connectionId;
         res.end(
           JSON.stringify(
             owned
-              ? { ...binding, owned: true }
+              ? {
+                  generation: binding.generation,
+                  state: binding.state,
+                  connection_id: binding.connectionId,
+                  owned: true,
+                }
               : { state: binding.state, owned: false },
           ),
         );
         return;
       }
-      if (path.endsWith('/client-files/requests/stream')) {
+      if (req.method === 'GET' && action === 'requests') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write(': open\n\n');
         res.write(
           `event: request\ndata: ${JSON.stringify({
-            requestId: 'd1',
-            payloadJson: JSON.stringify({
+            request_id: 'd1',
+            payload_json: JSON.stringify({
               jsonrpc: '2.0',
               id: 'd1',
               method: 'tools/list',
@@ -137,27 +150,31 @@ function startPeer(unregisterGate?: Promise<void>): Promise<{
         );
         return;
       }
-      if (path.endsWith('/client-files/responses')) {
+      if (req.method === 'POST' && action === 'responses') {
         resolveRegister?.();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ settled: true }));
         return;
       }
-      if (path.endsWith('/client-files/unregister')) {
-        const parsed = body
-          ? (JSON.parse(body) as Record<string, unknown>)
-          : {};
+      if (req.method === 'POST' && action === 'unregister') {
         unregistered.push({
-          connectionId: parsed.connectionId as string | undefined,
+          connection_id: parsed.connection_id as string | undefined,
         });
         if (unregisterGate) await unregisterGate;
-        if (binding) binding.state = 'closed';
+        // Mirror the control plane: a stale teardown (connection identity no
+        // longer current) is a no-op, so a superseded bridge's late unregister
+        // cannot close the binding the live bridge now owns.
+        const stale =
+          binding !== undefined &&
+          parsed.connection_id !== undefined &&
+          parsed.connection_id !== binding.connectionId;
+        if (binding && !stale) binding.state = 'closed';
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ registered: false }));
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end('{}');
+      res.writeHead(404);
+      res.end();
     });
   });
   return new Promise((resolve) => {
@@ -165,7 +182,7 @@ function startPeer(unregisterGate?: Promise<void>): Promise<{
       const port = (server.address() as AddressInfo).port;
       resolve({
         server,
-        baseUrl: `http://127.0.0.1:${port}/api/agent/web-shell/v1`,
+        baseUrl: `http://127.0.0.1:${port}`,
         unregistered,
         registeredConnectionId: () => binding?.connectionId,
       });
@@ -423,10 +440,10 @@ describe('useManagedLocalFilesBridge', () => {
     // binding, not merely that the local panel resets: observe the actual
     // unregister POST carrying the owned registration identity.
     await waitFor(() => expect(peer.unregistered).toHaveLength(1));
-    expect(peer.unregistered[0].connectionId).toBe(
+    expect(peer.unregistered[0].connection_id).toBe(
       peer.registeredConnectionId(),
     );
-    expect(peer.unregistered[0].connectionId).toBeTruthy();
+    expect(peer.unregistered[0].connection_id).toBeTruthy();
   });
 
   it('ignores a re-entrant connect while one is already in flight', async () => {

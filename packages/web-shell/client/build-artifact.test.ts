@@ -520,15 +520,15 @@ describe('build artifact — transcript entry (#11031)', () => {
   });
 
   it('keeps Managed tool-detail transport out of the transcript entry', () => {
-    expect(readPackageJavascript()).toContain('/tool-details/get');
-    expect(readTranscriptBundle()).not.toContain('/tool-details/get');
+    expect(readPackageJavascript()).toContain('/tool-details');
+    expect(readTranscriptBundle()).not.toContain('/tool-details');
   });
 
   it('keeps Managed MCP management transport and copy out of the transcript entry', () => {
     const transcript = readTranscriptBundle();
     const packaged = readPackageJavascript();
     for (const content of [
-      '/session-mcp/management/submit',
+      '/mcp-management/commands',
       'Choose an exact definition published for this Runtime and Workspace.',
       '原命令仍需确认，请先查询该命令，再开始其他修改。',
     ]) {

@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTask;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellTaskEvent;
@@ -46,15 +47,16 @@ public class ManagedTaskService {
         this.events = events;
     }
 
-    public PublicList<PublicTask> listPublicTasks(String tenantId,
+    public PublicTaskList listPublicTasks(String tenantId,
             String actorId, String sessionId, String cursor, int limit) {
         Viewed<TaskPage> viewed = page(tenantId, actorId, sessionId, cursor,
                 limit);
         TaskPage page = viewed.value();
-        return new PublicList<>("list", page.tasks().stream()
+        return new PublicTaskList("list", page.tasks().stream()
                 .map(task -> publicTask(tenantId, sessionId, task,
                         viewed.sessionActive())).toList(),
-                page.hasMore(), nextCursor(page));
+                page.hasMore(), nextCursor(page),
+                records.activeChildCount(tenantId, sessionId));
     }
 
     public PublicTask getPublicTask(String tenantId, String actorId,

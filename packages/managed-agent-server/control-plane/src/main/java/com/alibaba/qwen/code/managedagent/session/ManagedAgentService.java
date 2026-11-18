@@ -13,12 +13,22 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContentPart;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItem;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicModelChangeResult;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicModelContext;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicModelOption;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicModelSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionApproval;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionModels;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionOptions;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicWorkspace;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionCapabilities;
@@ -421,6 +431,86 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection(),
                 planMode, harness.supportsPlanMode(), harness.supportsLiveApprovalSelection(), rules,
                 harness.supportsPermissionRules(), harness.supportsAutoApproval());
+    }
+
+    public PublicSessionOptions queryPublicSessionOptions(String tenantId, String actorId, String agentId) {
+        WebShellSessionOptions options = queryWebShellSessionOptions(tenantId, actorId, agentId);
+        return new PublicSessionOptions(options.approvalMode(), options.availableApprovalModes(),
+                options.planModeSupported(), options.inputAttachments(), options.skillsSupported(),
+                options.modelSelectionSupported());
+    }
+
+    public PublicSessionModels queryPublicSessionModels(String tenantId, String actorId, String sessionId) {
+        WebShellSessionModels models = queryWebShellSessionModels(tenantId, actorId, sessionId);
+        return new PublicSessionModels(models.models().stream()
+                .map(option -> new PublicModelOption(option.modelId(), option.label())).toList(),
+                publicModelSelection(models.modelSelection()), models.supported());
+    }
+
+    public PublicModelChangeResult changePublicSessionModel(String tenantId, String actorId,
+            String sessionId, String key, String modelId, long expectedRevision) {
+        WebShellModelChangeResult result = changeWebShellSessionModel(tenantId, actorId, sessionId,
+                key, modelId, expectedRevision);
+        return new PublicModelChangeResult(result.sessionId(),
+                publicModelSelection(result.modelSelection()), result.replayed());
+    }
+
+    public PublicSessionApproval queryPublicSessionApproval(String tenantId, String actorId, String sessionId) {
+        WebShellSessionApproval approval = queryWebShellSessionApproval(tenantId, actorId, sessionId);
+        return new PublicSessionApproval(approval.approvalMode(), approval.approvalRevision(),
+                approval.availableApprovalModes(), approval.supported(), approval.planMode(),
+                approval.planModeSupported(), approval.liveSupported(), approval.permissionRulesSupported(),
+                approval.permissionRules());
+    }
+
+    public PublicApprovalChangeResult changePublicSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String mode, long expectedRevision, Boolean planMode,
+            Map<?, ?> requestedRules) {
+        WebShellApprovalChangeResult result = changeWebShellSessionApproval(tenantId, actorId, sessionId,
+                key, mode, expectedRevision, planMode, requestedRules);
+        return new PublicApprovalChangeResult(result.sessionId(), result.approvalMode(),
+                result.approvalRevision(), result.replayed(), result.planMode(), result.permissionRules());
+    }
+
+    private static PublicModelSelection publicModelSelection(WebShellModelSelection selection) {
+        return selection == null ? null : new PublicModelSelection(selection.modelId(), selection.revision());
+    }
+
+    private static PublicModelContext publicModelContext(WebShellModelContext context) {
+        return context == null ? null : new PublicModelContext(context.modelId(),
+                context.inputTokens(), context.contextWindowSize(), context.observedAt());
+    }
+
+    private static PublicLifecycleOperation publicLifecycleOperation(WebShellLifecycleOperation operation) {
+        return operation == null ? null : new PublicLifecycleOperation(operation.operationId(),
+                operation.type(), operation.status(), operation.failureCode());
+    }
+
+    public PublicTranscript publicTranscript(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        requireReadableSession(tenantId, actorId, sessionId);
+        var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, true);
+        return new PublicTranscript(page.items().stream().map(this::publicItem).toList(),
+                page.events().stream().map(this::publicEvent).toList(), page.coveredSequence(),
+                page.nextCursor(), page.hasMore(), page.coveredSequence());
+    }
+
+    public PublicItemList publicRecentTranscriptItems(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        return publicMessageExportPage(tenantId, actorId, sessionId, cursor, requestedLimit, true);
+    }
+
+    public PublicItemList publicExportPage(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        return publicMessageExportPage(tenantId, actorId, sessionId, cursor, requestedLimit, false);
+    }
+
+    private PublicItemList publicMessageExportPage(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit, boolean backward) {
+        requireReadableSession(tenantId, actorId, sessionId);
+        var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, backward);
+        return new PublicItemList("list", page.items().stream().map(this::publicItem).toList(),
+                page.hasMore(), page.nextCursor(), page.throughSequence());
     }
 
     private static void requireModelActor(String actorId) {
@@ -1030,7 +1120,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                             digests.digest(Map.of("sessionId", sessionId,
                                     "title", title)))) {
                 return new SessionMutationResult<>(publicSession(
-                        asLastVisible(session)), true);
+                        asLastVisible(session), actorId), true);
             }
         }
         // The fresh-key half answers a tombstone 404, as every other
@@ -1068,7 +1158,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             }
         }
         return new SessionMutationResult<>(publicSession(
-                asLastVisible(result.session())), result.replayed());
+                asLastVisible(result.session()), actorId), result.replayed());
     }
 
     // An archived Session stays closed, so unarchive needs neither the
@@ -1078,7 +1168,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         var result = unarchive(tenantId, actorId, idempotencyKey, sessionId);
         SessionRecord session = result.replayed()
                 ? asLastVisible(result.session()) : result.session();
-        return new SessionMutationResult<>(publicSession(session),
+        return new SessionMutationResult<>(publicSession(session, actorId),
                 result.replayed());
     }
 
@@ -1133,7 +1223,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String sessionId) {
         SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
         var recovery = recoveryServices == null ? null : recoveryServices.getIfAvailable();
-        return publicSession(session).withRecovery(recovery == null
+        return publicSession(session, actorId).withRecovery(recovery == null
                 ? null : recovery.projection(session, actorId));
     }
 
@@ -1158,7 +1248,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         int limit = limit(requestedLimit);
         SessionCursor decoded = decodeCursor(cursor, archiveState, titleQuery);
         SessionPage page = filteredSessions(tenantId, actorId, decoded, limit, archiveState, titleQuery);
-        return new PublicList<>("list", publicSessions(page.sessions(), page.worktrees()), page.hasMore(),
+        return new PublicList<>("list", publicSessions(page.sessions(), actorId, page.worktrees()), page.hasMore(),
                 nextSessionCursor(page, archiveState, titleQuery));
     }
 
@@ -1336,13 +1426,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     /** A page assembled from grouped batch reads instead of per-row ones. */
-    private List<PublicSession> publicSessions(List<SessionRecord> sessions) {
-        return publicSessions(sessions, sessions.isEmpty() ? Map.of() : store.findSessionWorktrees(
+    private List<PublicSession> publicSessions(List<SessionRecord> sessions, String actorId) {
+        return publicSessions(sessions, actorId, sessions.isEmpty() ? Map.of() : store.findSessionWorktrees(
                 sessions.getFirst().tenantId(), sessions.stream().filter(session -> session.workspace() != null)
                         .map(SessionRecord::sessionId).toList()));
     }
 
-    private List<PublicSession> publicSessions(List<SessionRecord> sessions,
+    private List<PublicSession> publicSessions(List<SessionRecord> sessions, String actorId,
             Map<String, SessionWorktreeStore.Descriptor> worktrees) {
         if (sessions.isEmpty()) {
             return List.of();
@@ -1355,14 +1445,78 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         Map<String, Long> coveredSequences = store
                 .findMessageCoveredSequences(tenantId, ids);
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
-        var compressions = store.contextCompressionStates(tenantId, sessions.stream()
-                .filter(session -> session.workspace() != null).map(SessionRecord::sessionId).toList());
+        List<String> boundIds = sessions.stream().filter(session -> session.workspace() != null)
+                .map(SessionRecord::sessionId).toList();
+        var compressions = store.contextCompressionStates(tenantId, boundIds);
+        // The enriched fields and actor-scoped capability flags read the
+        // same batches as webShellSessions, so both surfaces report one
+        // authority's answers for the same caller.
+        Map<String, TurnSummary> latestTurns = store.findLatestTurns(tenantId, ids);
+        Map<String, EventRecord> environmentEvents = store
+                .findLatestEnvironmentEvents(tenantId, latestTurns);
+        Set<String> lifecycleOwners = store.findApprovalOwners(tenantId, actorId, boundIds);
+        var lifecycleOperations = store.findLatestLifecycleOperations(tenantId, ids);
+        List<String> approvalIds = sessions.stream().filter(WorkspaceToolProfiles::supportsApprovalSelection)
+                .map(SessionRecord::sessionId).toList();
+        Map<String, WebShellApprovalSelection> approvalSelections = store.findApprovalSelections(tenantId, approvalIds);
+        boolean approvalSupported = !approvalIds.isEmpty() && harness.supportsApprovalSelection();
+        boolean definitionApprovalSupported = approvalSupported
+                && sessions.stream().anyMatch(session -> session.agentDefinitionDigest() != null)
+                && harness.supportsAgentDefinitionApprovalSelection();
+        Map<String, WebShellModelSelection> modelSelections = store.findModelSelections(tenantId, boundIds);
+        Map<String, WebShellModelContext> modelContexts = store.findModelContexts(tenantId, boundIds);
+        boolean modelSelectionSupported = !store.modelOptions().isEmpty() && harness.supportsModelSelection();
+        boolean renameSupported = harness.isAvailable() && harness.supportsFencedTitles();
+        boolean compressionSupported = harness.supportsContextCompression();
+        // The grant and facts batches cover exactly the shapes the
+        // actor-scoped flags read, as in webShellSessions.
+        Set<String> shaped = sessions.stream().filter(session -> inputPolicy.maySubmitShape(session, worktrees.get(session.sessionId())))
+                .map(SessionRecord::sessionId)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> contextShaped = sessions.stream().filter(session -> mayChangeContextShape(session, worktrees.get(session.sessionId())))
+                .map(SessionRecord::sessionId)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> compressShaped = sessions.stream().filter(session -> mayCompressShape(session, worktrees.get(session.sessionId())))
+                .map(SessionRecord::sessionId)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> candidateIds = new java.util.HashSet<>(shaped);
+        candidateIds.addAll(contextShaped);
+        candidateIds.addAll(compressShaped);
+        Set<String> grantWorkspaces = candidateIds.isEmpty() ? Set.of()
+                : sessions.stream()
+                        .filter(session -> candidateIds.contains(
+                                session.sessionId()))
+                        .map(session -> session.workspace().getWorkspaceId())
+                        .collect(java.util.stream.Collectors.toSet());
+        Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants =
+                grantWorkspaces.isEmpty() || actorId == null
+                        || actorId.isEmpty() ? Map.of()
+                        : submitterGrants(tenantId, actorId, grantWorkspaces);
+        boolean operatorGrant = grants.values().stream().anyMatch(
+                ManagedWorkspaceRegistry.ReadableGrant::canCreateSession);
+        Set<String> executable =
+                candidateIds.isEmpty() || !operatorGrant ? Set.of()
+                        : store.sessionsWithExecutionRegistryFacts(tenantId,
+                                candidateIds);
         return sessions.stream()
                 .map(session -> publicSession(session,
                         activeTurns.get(session.sessionId()),
+                        latestTurns.get(session.sessionId()),
                         coveredSequences.getOrDefault(session.sessionId(), 0L),
                         retention(session, closed), compressions.getOrDefault(session.sessionId(),
-                                new AgentStateStore.ContextCompressionState(0, null)), worktrees.get(session.sessionId())))
+                                new AgentStateStore.ContextCompressionState(0, null)), worktrees.get(session.sessionId()),
+                        environmentEvents.get(session.sessionId()),
+                        lifecycleOperations.get(session.sessionId()),
+                        inputPolicy.maySubmitWorkspaceTurn(session, grants, executable, worktrees.get(session.sessionId())),
+                        mayChangeContext(session, grants, executable, worktrees.get(session.sessionId())),
+                        modelContexts.get(session.sessionId()),
+                        modelSelections.get(session.sessionId()), modelSelectionSupported, renameSupported,
+                        approvalSelections.get(session.sessionId()), approvalSupported
+                                && WorkspaceToolProfiles.supportsApprovalSelection(session)
+                                && (session.agentDefinitionDigest() == null || definitionApprovalSupported)
+                                && lifecycleOwners.contains(session.sessionId()),
+                        session.workspace() == null || lifecycleOwners.contains(session.sessionId()),
+                        compressionSupported && mayCompressContext(session, grants, executable, worktrees.get(session.sessionId()))))
                 .toList();
     }
 
@@ -1385,13 +1539,19 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                                         && List.of("CLOSED", "ARCHIVED").contains(session.status()));
     }
 
-    private PublicSession publicSession(SessionRecord session) {
-        return publicSessions(List.of(session)).getFirst();
+    private PublicSession publicSession(SessionRecord session, String actorId) {
+        return publicSessions(List.of(session), actorId).getFirst();
     }
 
     private PublicSession publicSession(SessionRecord session,
-            TurnSummary activeTurn, long snapshotCoveredSequence,
-            boolean retention, AgentStateStore.ContextCompressionState compression, SessionWorktreeStore.Descriptor worktree) {
+            TurnSummary activeTurn, TurnSummary latestTurn, long snapshotCoveredSequence,
+            boolean retention, AgentStateStore.ContextCompressionState compression, SessionWorktreeStore.Descriptor worktree,
+            EventRecord environmentEvent, WebShellLifecycleOperation lifecycleOperation,
+            boolean maySubmit, boolean mayChangeContext,
+            WebShellModelContext modelContext, WebShellModelSelection modelSelection,
+            boolean modelSelectionSupported, boolean renameSupported,
+            WebShellApprovalSelection approvalSelection, boolean approvalSupported,
+            boolean lifecycleOwner, boolean compressionSupported) {
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
         // Every route these capabilities gate reads through
@@ -1400,11 +1560,26 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         // 404. DELETING stays advertised: those routes still answer while
         // the delete drains.
         boolean visible = session.deletedAt() == null;
-        // The lifecycle affordances 404/409 on a tombstone exactly like the
-        // content routes, so they take the same gate — as a conjunction,
-        // never a replacement: a live Session keeps every flag it had.
-        boolean close = visible && supportsClose(session);
-        boolean keep = visible && retention;
+        // The lifecycle affordances take the same gates as webShellSession:
+        // visibility plus, for bound Sessions, the recorded lifecycle owner.
+        // Advertising them to other readers would promise buttons the
+        // admission then refuses.
+        boolean close = visible && lifecycleOwner && supportsClose(session);
+        boolean keep = visible && lifecycleOwner && retention;
+        // The actor-scoped flags mirror webShellSession's conjuncts, including
+        // the public-child suppression and the executable-approval gate.
+        boolean publicChild = session.publicChildAgentsVersion() == 1
+                && store.findChildLineage(session.tenantId(), session.sessionId()) != null;
+        maySubmit = maySubmit && !publicChild;
+        mayChangeContext = mayChangeContext && !publicChild;
+        boolean approvalExecutable = approvalSelection == null || approvalSelection.revision() == 0
+                || supportsApprovalSelection(session);
+        approvalExecutable = approvalExecutable && (approvalSelection == null
+                || !approvalSelection.planMode() || harness.supportsPlanMode());
+        approvalExecutable = approvalExecutable && (approvalSelection == null
+                || (!"auto".equals(approvalSelection.mode()) || harness.supportsAutoApproval())
+                && (approvalSelection.permissionRules() == null || harness.supportsPermissionRules()));
+        boolean policySurface = session.workspace() != null || session.agentDefinitionDigest() != null;
         return new PublicSession(
                 session.sessionId(),
                 "agent.session",
@@ -1428,13 +1603,39 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         session.workspace() == null && visible,
                         visible,
                         hasActions(session), close, keep, keep,
-                        visible && supportsDelete(session, retention),
+                        visible && lifecycleOwner && supportsDelete(session, retention),
                         foregroundShell(session, worktree),
-                        visible && "ACTIVE".equals(session.status()) && session.workspace() != null
-                                && ready(worktree) && store.workspaceFilesEnabled() && compression.available() && harness.supportsContextCompression(),
-                        childAgentsCapability(session, worktree), supportsSideQueries(session), supportsSideQueries(session)),
+                        visible && approvalExecutable && compressionSupported && compression.available(),
+                        childAgentsCapability(session, worktree),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session),
+                        (session.workspace() == null || maySubmit) && supportsSideQueries(session),
+                        maySubmit && approvalExecutable,
+                        false,
+                        visible && session.modelConfigDigest() == null && modelSelectionSupported && mayChangeContext,
+                        visible && approvalSupported && mayChangeContext && !Boolean.FALSE.equals(foregroundShell(session, worktree)),
+                        visible && maySubmit && harness.supportsInputAttachments(),
+                        visible && "ACTIVE".equals(session.status()) && renameSupported
+                                && (session.workspace() == null || maySubmit),
+                        session.workspace() != null && maySubmit && supportsClientFiles(session),
+                        // Same UI hint as webShellSession; the relay re-runs the
+                        // full admission on attach. Null while the opt-in is off
+                        // so both surfaces omit it alike.
+                        terminalEnabled.getAsBoolean()
+                                ? maySubmit && Boolean.TRUE.equals(foregroundShell(session, worktree))
+                                        && terminalPlacementCapable.test(session)
+                                : null),
                 publicWorkspace(session, worktree), compression.available() ? compression.compactionRevision() : null,
-                compression.operationId(), null, null, session.memoryStoreId(), session.ownerOnly() ? true : null)
+                compression.operationId(), null, null, session.memoryStoreId(), session.ownerOnly() ? true : null,
+                session.title(),
+                webShellEnvironment(environmentEvent),
+                policySurface ? approvalSelection == null ? session.approvalMode() : approvalSelection.mode() : null,
+                approvalSelection == null ? null : approvalSelection.revision(),
+                policySurface ? session.approvalMode() : null,
+                approvalSelection != null && approvalSelection.planMode(),
+                visible && approvalSupported && mayChangeContext && harness.supportsPlanMode() && store.supportsPlanMode(session),
+                publicModelContext(modelContext), publicModelSelection(modelSelection),
+                publicLifecycleOperation(lifecycleOperation),
+                latestTurn == null ? null : publicTurn(latestTurn))
                 .withWorktree(worktree);
     }
 
@@ -1696,7 +1897,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private static PublicTurn publicTurn(TurnSummary turn) {
         return new PublicTurn(turn.turnId(), "agent.turn",
                 turn.sessionId(), StoreModels.inputItemId(turn.turnId()),
-                turn.status().toLowerCase(Locale.ROOT),
+                AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(turn.errorCode())
+                        && ("RUNNING".equals(turn.status()) || "ACCEPTED".equals(turn.status()))
+                        ? "recovery_blocked" : turn.status().toLowerCase(Locale.ROOT),
                 turn.createdAt() / 1000,
                 turn.completedAt() == null ? null
                         : turn.completedAt() / 1000,

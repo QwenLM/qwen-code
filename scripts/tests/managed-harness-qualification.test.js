@@ -77,20 +77,27 @@ async function fixture(fault) {
       if (url.pathname === '/v1/agents') return json(405, {});
       if (url.pathname === '/v1/agents/files-agent' && req.method === 'GET')
         return json(200, { id: 'files-agent', object: 'agent' });
-      if (url.pathname === '/api/agent/web-shell/v1/workspaces/create') {
+      if (url.pathname === '/v1/agents/workspaces' && req.method === 'POST') {
         let workspace = [...workspaces.values()].find(
-          (value) => value.key === `${identity}:${body.idempotencyKey}`,
+          (value) => value.key === `${identity}:${mutation}`,
         );
         if (!workspace) {
           workspace = {
             id: `workspace-${workspaces.size + 1}`,
             owner: identity,
-            key: `${identity}:${body.idempotencyKey}`,
+            key: `${identity}:${mutation}`,
             files: new Map(),
           };
           workspaces.set(workspace.id, workspace);
         }
-        return json(200, { workspaceId: workspace.id });
+        return json(200, {
+          workspace_id: workspace.id,
+          display_name: body.display_name,
+          state: 'active',
+          can_create_session: true,
+          default_cwd_relative: '.',
+          can_select_directory: true,
+        });
       }
       if (url.pathname.startsWith('/v1/agents/workspaces/')) {
         const workspace = workspaces.get(url.pathname.split('/').at(-1));
@@ -99,28 +106,48 @@ async function fixture(fault) {
               id: workspace.id,
               object: 'agent.workspace',
               display_name: workspace.id,
-              state: 'ready',
+              state: 'active',
               can_create_session: true,
+              default_cwd_relative: '.',
+              can_select_directory: true,
             })
           : json(404, {});
       }
       if (
-        url.pathname.startsWith('/api/agent/web-shell/v1/workspaces/files/')
+        url.pathname === '/v1/agents/workspace-files' &&
+        req.method === 'GET'
       ) {
-        const workspace = workspaces.get(body.workspaceId);
+        const workspace = workspaces.get(url.searchParams.get('workspace_id'));
         if (workspace?.owner !== identity) return json(404, {});
-        if (url.pathname.endsWith('/query'))
-          return json(200, {
-            scopeRevision: 'scope-1',
-            truncated: false,
-            entries: [...workspace.files.keys()].map((file) => ({
-              path: file,
-              name: file,
-            })),
-          });
-        return workspace.files.has(body.path)
-          ? json(200, { text: workspace.files.get(body.path) })
-          : json(404, {});
+        return json(200, {
+          scope_revision: 'scope-1',
+          directory: url.searchParams.get('directory'),
+          truncated: false,
+          entries: [...workspace.files.keys()].map((file) => ({
+            path: file,
+            name: file,
+            kind: 'file',
+          })),
+        });
+      }
+      if (
+        url.pathname === '/v1/agents/workspace-files/content' &&
+        req.method === 'GET'
+      ) {
+        const workspace = workspaces.get(url.searchParams.get('workspace_id'));
+        if (workspace?.owner !== identity) return json(404, {});
+        const path = url.searchParams.get('path');
+        if (!workspace.files.has(path)) return json(404, {});
+        const text = workspace.files.get(path);
+        return json(200, {
+          scope_revision: 'scope-1',
+          path,
+          name: path,
+          mime_type: 'text/plain',
+          text,
+          byte_length: Buffer.byteLength(text),
+          sha256: createHash('sha256').update(text).digest('hex'),
+        });
       }
       if (url.pathname === '/v1/agents/sessions' && req.method === 'POST') {
         const previous = mutations.get(`${identity}:${mutation}`);

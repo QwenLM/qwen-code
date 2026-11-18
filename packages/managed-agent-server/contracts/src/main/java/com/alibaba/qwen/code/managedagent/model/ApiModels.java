@@ -76,7 +76,14 @@ public final class ApiModels {
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
             @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree,
             @JsonProperty("model_config") JsonNode modelConfig,
-            @JsonProperty("memory_store_id") @Size(min = 1, max = 128) String memoryStoreId) {
+            @JsonProperty("memory_store_id") @Size(min = 1, max = 128) String memoryStoreId,
+            // Single policy owner: ManagedAgentService.validRenameTitle via
+            // metadataTitle (256 + control-characters + non-blank), as on
+            // WebShellCreateRequest, so creation answers invalid_title.
+            String title,
+            @JsonProperty("approval_mode") String approvalMode,
+            @JsonProperty("plan_mode") Boolean planMode,
+            @JsonProperty("model_id") String modelId) {
     }
 
     public record SessionEventRequest(@NotBlank String type,
@@ -152,7 +159,15 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("foreground_shell") Boolean foregroundShell,
             @JsonProperty("context_compression") boolean contextCompression,
             @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("child_agents") Boolean childAgents,
-            boolean btw, boolean recap) {
+            boolean btw, boolean recap,
+            @JsonProperty("workspace_turns") boolean workspaceTurns,
+            @JsonProperty("cwd_change") boolean cwdChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("model_change") Boolean modelChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("approval_mode_change") Boolean approvalModeChange,
+            @JsonInclude(JsonInclude.Include.NON_NULL) @JsonProperty("input_attachments") Boolean inputAttachments,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename,
+            @JsonProperty("client_files") boolean clientFiles,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean terminal) {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
@@ -193,13 +208,26 @@ public final class ApiModels {
             SessionRecovery recovery,
             PublicSessionWorktree worktree,
             @JsonProperty("memory_store_id") String memoryStoreId,
-            @JsonProperty("owner_only") Boolean ownerOnly) {
+            @JsonProperty("owner_only") Boolean ownerOnly,
+            String title,
+            Map<String, Object> environment,
+            @JsonProperty("approval_mode") String approvalMode,
+            @JsonProperty("approval_revision") Long approvalRevision,
+            @JsonProperty("initial_approval_mode") String initialApprovalMode,
+            @JsonProperty("plan_mode") boolean planMode,
+            @JsonProperty("plan_mode_supported") boolean planModeSupported,
+            @JsonProperty("model_context") PublicModelContext modelContext,
+            @JsonProperty("model_selection") PublicModelSelection modelSelection,
+            @JsonProperty("lifecycle_operation") PublicLifecycleOperation lifecycleOperation,
+            @JsonProperty("latest_turn") PublicTurn latestTurn) {
         public PublicSession withRecovery(SessionRecovery value) {
             return new PublicSession(id, object, agentId, agentRevision,
                     agentDefinitionDigest, status, createdAt, updatedAt,
                     metadata, activeTurn, lastEventId, replayFloorSequence,
                     snapshotThroughSequence, capabilities, workspace,
-                    compactionRevision, contextCompressionOperationId, value, worktree, memoryStoreId, ownerOnly);
+                    compactionRevision, contextCompressionOperationId, value, worktree, memoryStoreId, ownerOnly,
+                    title, environment, approvalMode, approvalRevision, initialApprovalMode,
+                    planMode, planModeSupported, modelContext, modelSelection, lifecycleOperation, latestTurn);
         }
 
         public PublicSession withWorktree(SessionWorktreeStore.Descriptor value) {
@@ -210,7 +238,9 @@ public final class ApiModels {
                     compactionRevision, contextCompressionOperationId, recovery,
                     value == null ? null : new PublicSessionWorktree(value.id(), value.sessionId(), value.workspaceId(),
                             value.state(), value.branch(), value.baseCommit(), value.cwdRelative(), value.operationId(),
-                            value.revision(), value.errorCode()), memoryStoreId, ownerOnly);
+                            value.revision(), value.errorCode()), memoryStoreId, ownerOnly,
+                    title, environment, approvalMode, approvalRevision, initialApprovalMode,
+                    planMode, planModeSupported, modelContext, modelSelection, lifecycleOperation, latestTurn);
         }
     }
 
@@ -307,6 +337,96 @@ public final class ApiModels {
             @JsonProperty("next_cursor") String nextCursor,
             @JsonProperty("snapshot_through_sequence")
                     long snapshotThroughSequence) {
+    }
+
+    public record PublicTaskList(String object, List<PublicTask> data,
+            @JsonProperty("has_more") boolean hasMore,
+            @JsonProperty("next_cursor") String nextCursor,
+            @JsonInclude(JsonInclude.Include.NON_NULL)
+            @JsonProperty("active_child_count") Long activeChildCount) {
+    }
+
+    public record PublicSessionOptions(
+            @JsonProperty("approval_mode") String approvalMode,
+            @JsonProperty("available_approval_modes") List<String> availableApprovalModes,
+            @JsonProperty("plan_mode_supported") boolean planModeSupported,
+            @JsonProperty("input_attachments") boolean inputAttachments,
+            @JsonProperty("skills_supported") boolean skillsSupported,
+            @JsonProperty("model_selection_supported") boolean modelSelectionSupported) {
+    }
+
+    public record PublicModelOption(@JsonProperty("model_id") String modelId, String label) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicModelSelection(@JsonProperty("model_id") String modelId, long revision) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicModelContext(@JsonProperty("model_id") String modelId,
+            @JsonProperty("input_tokens") Long inputTokens,
+            @JsonProperty("context_window_size") Long contextWindowSize,
+            @JsonProperty("observed_at") long observedAt) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicLifecycleOperation(@JsonProperty("operation_id") String operationId,
+            String type, String status, @JsonProperty("failure_code") String failureCode) {
+    }
+
+    public record PublicSessionModels(List<PublicModelOption> models,
+            @JsonProperty("model_selection") PublicModelSelection modelSelection, boolean supported) {
+    }
+
+    public record PublicModelChangeResult(@JsonProperty("session_id") String sessionId,
+            @JsonProperty("model_selection") PublicModelSelection modelSelection, boolean replayed) {
+    }
+
+    public record PublicSessionApproval(
+            @JsonProperty("approval_mode") String approvalMode,
+            @JsonProperty("approval_revision") long approvalRevision,
+            @JsonProperty("available_approval_modes") List<String> availableApprovalModes,
+            boolean supported,
+            @JsonProperty("plan_mode") boolean planMode,
+            @JsonProperty("plan_mode_supported") boolean planModeSupported,
+            @JsonProperty("live_supported") boolean liveSupported,
+            @JsonProperty("permission_rules_supported") boolean permissionRulesSupported,
+            @JsonInclude(JsonInclude.Include.NON_NULL)
+            @JsonProperty("permission_rules") Map<String, List<String>> permissionRules) {
+    }
+
+    public record PublicApprovalChangeResult(@JsonProperty("session_id") String sessionId,
+            @JsonProperty("approval_mode") String approvalMode,
+            @JsonProperty("approval_revision") long approvalRevision, boolean replayed,
+            @JsonProperty("plan_mode") boolean planMode,
+            @JsonInclude(JsonInclude.Include.NON_NULL)
+            @JsonProperty("permission_rules") Map<String, List<String>> permissionRules) {
+    }
+
+    public record PublicChangeModelRequest(
+            @JsonProperty("model_id") @NotBlank @Size(max = 512) String modelId,
+            @JsonProperty("expected_revision") @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision) {
+    }
+
+    public record PublicChangeApprovalRequest(
+            @JsonProperty("approval_mode") @NotBlank String approvalMode,
+            @JsonProperty("expected_revision") @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision,
+            @JsonProperty("plan_mode") Boolean planMode,
+            @JsonProperty("permission_rules") Map<String, Object> permissionRules) {
+    }
+
+    public record PublicSkill(String name, String description) {
+    }
+
+    public record PublicSessionSkills(List<PublicSkill> skills) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicTranscript(List<PublicItem> items, List<PublicEvent> events,
+            @JsonProperty("covered_sequence") long coveredSequence,
+            @JsonProperty("older_cursor") String olderCursor,
+            @JsonProperty("has_more") boolean hasMore,
+            @JsonProperty("last_sequence") long lastSequence) {
     }
 
     public record WebShellListRequest(String cursor, Integer limit, String archiveState,

@@ -11,12 +11,22 @@ import {
   validEventFrame as valid,
 } from './managed-agent-sse.test-fixtures';
 
-function jsonResponse(value: unknown, status = 200): Response {
+function jsonResponse(
+  value: unknown,
+  status = 200,
+  headers: Record<string, string> = {},
+): Response {
   return new Response(JSON.stringify(value), {
     status,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...headers },
   });
 }
+
+// The Public wire carries epoch SECONDS for Session/Turn/Event/Item and
+// MILLIS for every other family. Realistic epochs prove the unit: a fixture
+// of 0 or 1 would pass under either.
+const SECONDS = 1_790_777_114;
+const MILLIS = 1_790_777_114_231;
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -26,7 +36,34 @@ describe('JavaManagedAgentClient', () => {
   it('sends Session file locators without a caller-selected Workspace or cwd', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockImplementation(async () => jsonResponse({}));
+      .mockResolvedValueOnce(
+        jsonResponse({
+          scope_revision: 'scope',
+          directory: '.',
+          entries: [],
+          truncated: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          scope_revision: 'scope',
+          path: 'file.txt',
+          name: 'file.txt',
+          mime_type: 'text/plain',
+          text: 'text',
+          byte_length: 4,
+          sha256: 'a'.repeat(64),
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          scope_revision: 'scope',
+          upload_id: 'upload-id',
+          path: 'file.txt',
+          size_bytes: 4,
+          sha256: 'a'.repeat(64),
+        }),
+      );
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
       fetch: fetchImpl,
@@ -49,25 +86,32 @@ describe('JavaManagedAgentClient', () => {
       },
       new Blob(['text']),
     );
-    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
-      sessionId: 'session-a',
+    const queryCall = new URL(String(fetchImpl.mock.calls[0][0]));
+    expect(queryCall.pathname).toBe('/v1/agents/workspace-files');
+    expect(Object.fromEntries(queryCall.searchParams)).toEqual({
+      session_id: 'session-a',
       directory: '.',
     });
-    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
-      sessionId: 'session-a',
+    expect(fetchImpl.mock.calls[0][1]?.method).toBe('GET');
+    expect(fetchImpl.mock.calls[0][1]?.body).toBeUndefined();
+    const readCall = new URL(String(fetchImpl.mock.calls[1][0]));
+    expect(readCall.pathname).toBe('/v1/agents/workspace-files/content');
+    expect(Object.fromEntries(readCall.searchParams)).toEqual({
+      session_id: 'session-a',
       path: 'file.txt',
-      expectedScopeRevision: 'scope',
+      expected_scope_revision: 'scope',
     });
-    expect(
-      Object.fromEntries(
-        new URL(String(fetchImpl.mock.calls[2][0])).searchParams,
-      ),
-    ).toEqual({
-      sessionId: 'session-a',
+    expect(fetchImpl.mock.calls[1][1]?.method).toBe('GET');
+    expect(fetchImpl.mock.calls[1][1]?.body).toBeUndefined();
+    const uploadCall = new URL(String(fetchImpl.mock.calls[2][0]));
+    expect(uploadCall.pathname).toBe('/v1/agents/workspace-files/uploads');
+    expect(Object.fromEntries(uploadCall.searchParams)).toEqual({
+      session_id: 'session-a',
       path: 'file.txt',
-      expectedScopeRevision: 'scope',
-      uploadId: 'upload-id',
+      expected_scope_revision: 'scope',
+      upload_id: 'upload-id',
     });
+    expect(fetchImpl.mock.calls[2][1]?.method).toBe('POST');
   });
 
   it('mints a terminal ticket through the authenticated WebShell POST', async () => {
@@ -114,6 +158,13 @@ describe('JavaManagedAgentClient', () => {
   });
 
   it('uploads raw bytes to the authenticated Workspace route and queries the same upload ID', async () => {
+    const wireResult = {
+      scope_revision: 'scope',
+      upload_id: 'upload-id',
+      path: 'folder/你好.pdf',
+      size_bytes: 4,
+      sha256: 'a'.repeat(64),
+    };
     const result = {
       scopeRevision: 'scope',
       uploadId: 'upload-id',
@@ -123,7 +174,10 @@ describe('JavaManagedAgentClient', () => {
     };
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockImplementation(async () => jsonResponse(result));
+      .mockResolvedValueOnce(jsonResponse(wireResult))
+      .mockResolvedValueOnce(
+        jsonResponse({ ...wireResult, state: 'completed', code: null }),
+      );
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example/gateway',
       getHeaders: () => ({
@@ -146,10 +200,15 @@ describe('JavaManagedAgentClient', () => {
     );
     const [url, init] = fetchImpl.mock.calls[0];
     const parsed = new URL(String(url));
-    expect(parsed.pathname).toBe(
-      '/gateway/api/agent/web-shell/v1/workspaces/files/upload',
-    );
-    expect(Object.fromEntries(parsed.searchParams)).toEqual(request);
+    expect(parsed.pathname).toBe('/gateway/v1/agents/workspace-files/uploads');
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      workspace_id: 'workspace',
+      cwd_relative: 'src',
+      path: result.path,
+      expected_scope_revision: 'scope',
+      upload_id: result.uploadId,
+    });
+    expect(init?.method).toBe('POST');
     expect(init?.body).toBe(data);
     expect(init?.signal).toBe(signal);
     expect(init?.credentials).toBe('include');
@@ -159,20 +218,49 @@ describe('JavaManagedAgentClient', () => {
     expect(new Headers(init?.headers).get('authorization')).toBe(
       'Bearer scoped',
     );
-    await client.queryWorkspaceFileUpload(result.uploadId, signal);
+    expect(
+      await client.queryWorkspaceFileUpload(result.uploadId, signal),
+    ).toEqual({ ...result, state: 'completed', code: undefined });
     expect(fetchImpl.mock.calls[1][0]).toBe(
-      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/files/uploads/query',
+      'https://product.example/gateway/v1/agents/workspace-files/uploads/upload-id',
     );
-    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
-      uploadId: result.uploadId,
-    });
+    expect(fetchImpl.mock.calls[1][1]?.method).toBe('GET');
+    expect(fetchImpl.mock.calls[1][1]?.body).toBeUndefined();
+    expect(fetchImpl.mock.calls[1][1]?.signal).toBe(signal);
   });
 
-  it('renames through the authenticated WebShell POST using the original key and signal', async () => {
-    const result = { sessionId: 's1', title: 'Confirmed', replayed: false };
+  it('renames through the authenticated Public PATCH using the original key and signal', async () => {
+    const sessionBody = {
+      id: 's1',
+      object: 'agent.session',
+      agent_id: 'dataworks_data_agent',
+      agent_revision: '1',
+      status: 'active',
+      title: 'Confirmed',
+      created_at: SECONDS,
+      updated_at: SECONDS + 5,
+      last_event_id: 9,
+      capabilities: {
+        items: true,
+        snapshots: true,
+        artifacts: false,
+        resync: true,
+        actions: false,
+        tasks: true,
+        workspace_turns: false,
+      },
+    };
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockResolvedValue(jsonResponse(result));
+      .mockResolvedValueOnce(jsonResponse(sessionBody))
+      // A replay returns the settled Session body; the replay flag rides
+      // the response header. A title-less confirmation yields an empty
+      // title, which the provider's trim guard refuses.
+      .mockResolvedValueOnce(
+        jsonResponse({ ...sessionBody, title: null }, 200, {
+          'x-qwen-idempotent-replay': 'true',
+        }),
+      );
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example/gateway',
       getHeaders: () => ({ authorization: 'Bearer scoped' }),
@@ -184,25 +272,37 @@ describe('JavaManagedAgentClient', () => {
       title: 'Confirmed',
       idempotencyKey: 'original',
     };
-    expect(await client.renameSession(request, abort.signal)).toEqual(result);
+    expect(await client.renameSession(request, abort.signal)).toEqual({
+      sessionId: 's1',
+      title: 'Confirmed',
+      replayed: false,
+    });
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe(
-      'https://product.example/gateway/api/agent/web-shell/v1/sessions/rename',
-    );
-    expect(init?.method).toBe('POST');
+    expect(url).toBe('https://product.example/gateway/v1/agents/sessions/s1');
+    expect(init?.method).toBe('PATCH');
     expect(init?.credentials).toBe('include');
     expect(init?.signal).toBe(abort.signal);
     expect(new Headers(init?.headers).get('authorization')).toBe(
       'Bearer scoped',
     );
-    expect(JSON.parse(String(init?.body))).toEqual(request);
+    expect(new Headers(init?.headers).get('idempotency-key')).toBe('original');
+    // The body carries only the new title: no sessionId, no body key.
+    expect(JSON.parse(String(init?.body))).toEqual({ title: 'Confirmed' });
+    expect(await client.renameSession(request, abort.signal)).toEqual({
+      sessionId: 's1',
+      title: '',
+      replayed: true,
+    });
+    expect(
+      new Headers(fetchImpl.mock.calls[1][1]?.headers).get('idempotency-key'),
+    ).toBe('original');
   });
 
   it('does not treat an accepted or refused rename as confirmed', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
-        jsonResponse({ sessionId: 's1', title: 'Unconfirmed' }, 202),
+        jsonResponse({ id: 's1', title: 'Unconfirmed' }, 202),
       )
       .mockResolvedValueOnce(
         jsonResponse(
@@ -234,10 +334,27 @@ describe('JavaManagedAgentClient', () => {
     });
   });
 
-  it('uses authorized Workspace registration POST routes without putting credentials in request bodies', async () => {
+  it('uses authorized Workspace registration routes without putting credentials in request bodies', async () => {
+    const registration = {
+      operation_id: 'operation-a',
+      type: 'workspace_create',
+      status: 'completed',
+      workspace_id: 'workspace-a',
+      failure_code: null,
+      replayed: false,
+    };
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockImplementation(async () => jsonResponse({}));
+      .mockResolvedValueOnce(jsonResponse({ supported: true, data: [] }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          node_id: 'mac',
+          canonical_path: '/project',
+          platform: 'darwin',
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse(registration, 202))
+      .mockResolvedValueOnce(jsonResponse(registration));
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example/gateway',
       getHeaders: () => ({ authorization: 'Bearer short-lived' }),
@@ -261,26 +378,36 @@ describe('JavaManagedAgentClient', () => {
     );
     await client.getWorkspaceOperation('operation-a', abort.signal);
     expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
-      'https://product.example/gateway/api/agent/web-shell/v1/runtime-nodes/query',
-      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/check-directory',
-      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/register',
-      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/operations/get',
+      'https://product.example/gateway/v1/agents/runtime-nodes',
+      'https://product.example/gateway/v1/agents/runtime-nodes/mac/check-directory',
+      'https://product.example/gateway/v1/agents/workspaces/registrations',
+      'https://product.example/gateway/v1/agents/workspaces/registrations/operation-a',
     ]);
+    expect(fetchImpl.mock.calls.map(([, init]) => init?.method)).toEqual([
+      'GET',
+      'POST',
+      'POST',
+      'GET',
+    ]);
+    // Reads carry no body; the mutations carry only their Public fields.
+    expect(fetchImpl.mock.calls[0][1]?.body).toBeUndefined();
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      path: '/project',
+    });
+    expect(JSON.parse(String(fetchImpl.mock.calls[2][1]?.body))).toEqual({
+      node_id: 'mac',
+      path: '/project',
+      display_name: 'Project',
+    });
+    expect(fetchImpl.mock.calls[3][1]?.body).toBeUndefined();
+    // The key travels as a header on the registration mutation only.
     expect(
-      fetchImpl.mock.calls.map(([, init]) => JSON.parse(String(init?.body))),
-    ).toEqual([
-      {},
-      { nodeId: 'mac', path: '/project' },
-      {
-        nodeId: 'mac',
-        path: '/project',
-        displayName: 'Project',
-        idempotencyKey: 'original',
-      },
-      { operationId: 'operation-a' },
-    ]);
+      new Headers(fetchImpl.mock.calls[2][1]?.headers).get('idempotency-key'),
+    ).toBe('original');
+    expect(
+      new Headers(fetchImpl.mock.calls[0][1]?.headers).get('idempotency-key'),
+    ).toBeNull();
     for (const [, request] of fetchImpl.mock.calls) {
-      expect(request?.method).toBe('POST');
       expect(request?.credentials).toBe('include');
       expect(request?.signal).toBe(abort.signal);
       expect(new Headers(request?.headers).get('authorization')).toBe(
@@ -289,54 +416,78 @@ describe('JavaManagedAgentClient', () => {
     }
   });
 
-  it('queries and changes Session models using authenticated cancellable POSTs', async () => {
+  it('queries and changes Session models using authenticated cancellable requests', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockImplementation(async () => jsonResponse({}));
+      .mockResolvedValueOnce(
+        jsonResponse({
+          models: [{ model_id: 'published', label: 'Published' }],
+          model_selection: { model_id: 'published', revision: 2 },
+          supported: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: 'session-a',
+          model_selection: { model_id: 'published', revision: 3 },
+          replayed: false,
+        }),
+      );
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
       fetch: fetchImpl,
       getHeaders: () => ({ 'x-tenant': 'tenant-a' }),
     });
     const abort = new AbortController();
-    await client.getSessionModels('session-a', abort.signal);
+    expect(await client.getSessionModels('session-a', abort.signal)).toEqual({
+      models: [{ modelId: 'published', label: 'Published' }],
+      modelSelection: { modelId: 'published', revision: 2 },
+      supported: true,
+    });
     const request = {
       sessionId: 'session-a',
       modelId: 'published',
       expectedRevision: 2,
       idempotencyKey: 'frozen',
     };
-    await client.changeModel(request, abort.signal);
-    expect(
-      fetchImpl.mock.calls.map(([url, init]) => [
-        url,
-        JSON.parse(String(init?.body)),
-      ]),
-    ).toEqual([
-      [
-        'https://product.example/api/agent/web-shell/v1/session-models/query',
-        { sessionId: 'session-a' },
-      ],
-      [
-        'https://product.example/api/agent/web-shell/v1/session-models/change',
-        request,
-      ],
+    expect(await client.changeModel(request, abort.signal)).toEqual({
+      sessionId: 'session-a',
+      modelSelection: { modelId: 'published', revision: 3 },
+      replayed: false,
+    });
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://product.example/v1/agents/sessions/session-a/models',
+      'https://product.example/v1/agents/sessions/session-a/models',
     ]);
+    expect(fetchImpl.mock.calls.map(([, init]) => init?.method)).toEqual([
+      'GET',
+      'POST',
+    ]);
+    expect(fetchImpl.mock.calls[0][1]?.body).toBeUndefined();
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      model_id: 'published',
+      expected_revision: 2,
+    });
+    expect(
+      new Headers(fetchImpl.mock.calls[1][1]?.headers).get('idempotency-key'),
+    ).toBe('frozen');
     for (const [, init] of fetchImpl.mock.calls) {
-      expect(init?.method).toBe('POST');
       expect(init?.credentials).toBe('include');
       expect(init?.signal).toBe(abort.signal);
       expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant-a');
     }
   });
   it('queries effective Session options for the selected Agent with authenticated headers', async () => {
-    const options = {
-      approvalMode: 'default',
-      availableApprovalModes: ['default', 'auto-edit'],
-    };
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(jsonResponse(options));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        approval_mode: 'default',
+        available_approval_modes: ['default', 'auto-edit'],
+        plan_mode_supported: false,
+        input_attachments: false,
+        skills_supported: false,
+        model_selection_supported: false,
+      }),
+    );
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
       fetch: fetchImpl,
@@ -345,29 +496,35 @@ describe('JavaManagedAgentClient', () => {
     const abort = new AbortController();
     expect(
       await client.getSessionOptions('model-specific-agent', abort.signal),
-    ).toEqual(options);
+    ).toEqual({
+      approvalMode: 'default',
+      availableApprovalModes: ['default', 'auto-edit'],
+      planModeSupported: false,
+      inputAttachments: false,
+      skillsSupported: false,
+      modelSelectionSupported: false,
+    });
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe(
-      'https://product.example/api/agent/web-shell/v1/session-options/query',
+      'https://product.example/v1/agents/session-options?agent_id=model-specific-agent',
     );
-    expect(JSON.parse(String(init?.body))).toEqual({
-      agentId: 'model-specific-agent',
-    });
-    expect(init?.method).toBe('POST');
+    expect(init?.method).toBe('GET');
+    expect(init?.body).toBeUndefined();
     expect(init?.credentials).toBe('include');
     expect(init?.signal).toBe(abort.signal);
     expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant-a');
   });
   it('creates a Workspace with the frozen name and key through the authenticated POST route', async () => {
-    const workspace = {
-      workspaceId: 'created-a',
-      displayName: 'A',
-      state: 'active',
-      canCreateSession: true,
-    };
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(jsonResponse(workspace));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        workspace_id: 'created-a',
+        display_name: 'A',
+        state: 'active',
+        can_create_session: true,
+        default_cwd_relative: null,
+        can_select_directory: false,
+      }),
+    );
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
       fetch: fetchImpl,
@@ -375,24 +532,67 @@ describe('JavaManagedAgentClient', () => {
     });
     const abort = new AbortController();
     const request = { displayName: 'A', idempotencyKey: 'saved-key' };
-    expect(await client.createWorkspace(request, abort.signal)).toEqual(
-      workspace,
-    );
+    expect(await client.createWorkspace(request, abort.signal)).toEqual({
+      workspaceId: 'created-a',
+      displayName: 'A',
+      state: 'active',
+      canCreateSession: true,
+      canSelectDirectory: false,
+    });
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe(
-      'https://product.example/api/agent/web-shell/v1/workspaces/create',
-    );
+    expect(url).toBe('https://product.example/v1/agents/workspaces');
     expect(init?.method).toBe('POST');
     expect(init?.credentials).toBe('include');
     expect(init?.signal).toBe(abort.signal);
     expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant-a');
-    expect(JSON.parse(String(init?.body))).toEqual(request);
+    expect(new Headers(init?.headers).get('idempotency-key')).toBe('saved-key');
+    expect(JSON.parse(String(init?.body))).toEqual({ display_name: 'A' });
   });
-  it('uses all existing task POST routes with headers, credentials and cancellation', async () => {
+  it('uses the task read and cancel routes with headers, credentials and cancellation', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockImplementation(async () =>
-        jsonResponse({ data: [], hasMore: false, nextCursor: 'floor' }),
+      .mockResolvedValueOnce(
+        jsonResponse({
+          object: 'list',
+          data: [],
+          has_more: false,
+          next_cursor: 'floor',
+          active_child_count: 0,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: 'task1',
+          object: 'agent.task',
+          session_id: 's1',
+          kind: 'child_agent',
+          state: 'running',
+          // Tasks carry MILLIS on the Public wire: never scaled.
+          created_at: MILLIS,
+          artifact_refs: [],
+          action_capabilities: ['cancel', 'read_output'],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          object: 'list',
+          data: [],
+          has_more: false,
+          next_cursor: null,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: 'cancel-op',
+          session_id: 's1',
+          type: 'task_cancel',
+          task_id: 'task1',
+          status: 'completed',
+          admission_stage: 'harness_confirmed',
+          delivery_state: 'confirmed',
+          receipt_id: 'receipt-1',
+          replayed: false,
+        }),
       );
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
@@ -404,45 +604,68 @@ describe('JavaManagedAgentClient', () => {
       { sessionId: 's1', cursor: 'page', limit: 50 },
       abort.signal,
     );
-    await client.getTask({ sessionId: 's1', taskId: 'task1' }, abort.signal);
+    expect(
+      await client.getTask({ sessionId: 's1', taskId: 'task1' }, abort.signal),
+    ).toMatchObject({ taskId: 'task1', createdAt: MILLIS });
     await client.listTaskEvents(
       { sessionId: 's1', taskId: 'task1', after: 'checkpoint', limit: 50 },
       abort.signal,
     );
-    await client.cancelTask(
-      {
-        sessionId: 's1',
-        taskId: 'task1',
-        idempotencyKey: 'saved',
-        requestId: 'trace',
-      },
-      abort.signal,
-    );
     expect(
-      fetchImpl.mock.calls.map(([url]) => String(url).split('/v1')[1]),
-    ).toEqual([
-      '/tasks/query',
-      '/tasks/get',
-      '/tasks/events/query',
-      '/tasks/cancel',
+      await client.cancelTask(
+        {
+          sessionId: 's1',
+          taskId: 'task1',
+          idempotencyKey: 'saved',
+          requestId: 'trace',
+        },
+        abort.signal,
+      ),
+    ).toEqual({
+      operationId: 'cancel-op',
+      sessionId: 's1',
+      type: 'task_cancel',
+      taskId: 'task1',
+      status: 'completed',
+      admissionStage: 'harness_confirmed',
+      deliveryState: 'confirmed',
+      receiptId: 'receipt-1',
+      replayed: false,
+    });
+    expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+      'https://product.example/v1/agents/sessions/s1/tasks?cursor=page&limit=50',
+      'https://product.example/v1/agents/sessions/s1/tasks/task1',
+      'https://product.example/v1/agents/sessions/s1/tasks/task1/events?after=checkpoint&limit=50',
+      'https://product.example/v1/agents/sessions/s1/tasks/task1/cancel',
+    ]);
+    expect(fetchImpl.mock.calls.map(([, init]) => init?.method)).toEqual([
+      'GET',
+      'GET',
+      'GET',
+      'POST',
     ]);
     for (const [, init] of fetchImpl.mock.calls) {
-      expect(init?.method).toBe('POST');
       expect(init?.credentials).toBe('include');
       expect(init?.signal).toBe(abort.signal);
       expect(new Headers(init?.headers).get('x-tenant')).toBe('tenant');
     }
-    expect(JSON.parse(String(fetchImpl.mock.calls[2][1]?.body))).toEqual({
-      sessionId: 's1',
-      taskId: 'task1',
-      after: 'checkpoint',
-      limit: 50,
-    });
+    // Reads carry their locators in the query, never a body; the cancel
+    // carries the key as a header and drops the trace-only requestId.
+    for (const index of [0, 1, 2]) {
+      expect(fetchImpl.mock.calls[index][1]?.body).toBeUndefined();
+    }
+    expect(fetchImpl.mock.calls[3][1]?.body).toBeUndefined();
+    expect(
+      new Headers(fetchImpl.mock.calls[3][1]?.headers).get('idempotency-key'),
+    ).toBe('saved');
+    expect(String(fetchImpl.mock.calls[3][0])).not.toContain('trace');
   });
   it('binds the default browser fetch to the global object', async () => {
     const fetchImpl = vi.fn(function (this: unknown) {
       if (this !== globalThis) throw new TypeError('Illegal invocation');
-      return Promise.resolve(jsonResponse({ data: [], hasMore: false }));
+      return Promise.resolve(
+        jsonResponse({ object: 'list', data: [], has_more: false }),
+      );
     });
     vi.stubGlobal('fetch', fetchImpl);
     const client = new JavaManagedAgentClient({
@@ -455,34 +678,103 @@ describe('JavaManagedAgentClient', () => {
   });
 
   it('uses the private gateway with product credentials and headers', async () => {
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(jsonResponse({ data: [], hasMore: false }));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        object: 'list',
+        data: [
+          {
+            id: 'session-a',
+            object: 'agent.session',
+            agent_id: 'dataworks_data_agent',
+            agent_revision: '1',
+            status: 'active',
+            title: 'Session',
+            created_at: SECONDS,
+            updated_at: SECONDS + 5,
+            last_event_id: 42,
+            // The WebShell activeTurn projection is the latest Turn
+            // regardless of status: active_turn stays null here.
+            active_turn: null,
+            latest_turn: {
+              id: 'turn-1',
+              object: 'agent.turn',
+              session_id: 'session-a',
+              status: 'completed',
+              created_at: SECONDS + 1,
+              completed_at: SECONDS + 4,
+              error_code: null,
+            },
+            capabilities: {
+              items: true,
+              snapshots: true,
+              artifacts: false,
+              resync: true,
+              actions: false,
+              tasks: true,
+              workspace_turns: false,
+            },
+          },
+        ],
+        has_more: false,
+        next_cursor: null,
+      }),
+    );
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example/',
       fetch: fetchImpl,
       getHeaders: () => ({ authorization: 'Bearer short-lived' }),
     });
 
-    await client.listSessions({ limit: 20 });
+    const page = await client.listSessions({ limit: 20 });
 
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe(
-      'https://product.example/api/agent/web-shell/v1/sessions/query',
-    );
+    expect(url).toBe('https://product.example/v1/agents/sessions?limit=20');
+    expect(init?.method).toBe('GET');
+    expect(init?.body).toBeUndefined();
     expect(init?.credentials).toBe('include');
     expect(new Headers(init?.headers).get('authorization')).toBe(
       'Bearer short-lived',
     );
-    expect(JSON.parse(String(init?.body))).toEqual({ limit: 20 });
+    expect(page).toEqual({
+      data: [
+        {
+          sessionId: 'session-a',
+          title: 'Session',
+          agentId: 'dataworks_data_agent',
+          status: 'active',
+          createdAt: SECONDS * 1000,
+          updatedAt: (SECONDS + 5) * 1000,
+          activeTurn: {
+            turnId: 'turn-1',
+            sessionId: 'session-a',
+            status: 'completed',
+            submittedAt: (SECONDS + 1) * 1000,
+            completedAt: (SECONDS + 4) * 1000,
+            errorCode: null,
+          },
+          lastSequence: 42,
+          capabilities: {
+            tasks: true,
+            artifacts: false,
+            actions: false,
+            workspaceTurns: false,
+            // The Public contract keeps only tasks; the adapter restores
+            // the derived diagnostics flag.
+            diagnostics: true,
+          },
+        },
+      ],
+      nextCursor: null,
+      hasMore: false,
+    });
   });
 
   it('parses chunked CRLF SSE frames and ignores heartbeats', async () => {
     const encoder = new TextEncoder();
     const chunks = [
-      ': keepalive\r\n\r\nid: 7\r\nevent: item.output_text.delta\r\ndata: {"sequence":7,"eventId":"evt_7",',
-      '"sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":7,"data":{"text":"hi"},"terminal":false}\r\n\r\n',
+      ': keepalive\r\n\r\nid: 7\r\nevent: item.output_text.delta\r\ndata: {"schema_version":1,"projection_version":1,"sequence":7,"event_id":"evt_7",',
+      `"session_id":"session-1","turn_id":"turn-1","type":"item.output_text.delta","created_at":${SECONDS + 7},"data":{"text":"hi"},"terminal":false}\r\n\r\n`,
     ];
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -507,12 +799,21 @@ describe('JavaManagedAgentClient', () => {
     }
 
     expect(events).toEqual([
-      expect.objectContaining({ sequence: 7, data: { text: 'hi' } }),
+      expect.objectContaining({
+        sequence: 7,
+        // The wire carries seconds; the frozen contract is millis.
+        createdAt: (SECONDS + 7) * 1000,
+        data: { text: 'hi' },
+      }),
     ]);
-    expect(JSON.parse(String(fetchImpl.mock.calls[0][1]?.body))).toEqual({
-      sessionId: 'session-1',
-      afterSequence: 6,
-    });
+    expect(String(fetchImpl.mock.calls[0][0])).toBe(
+      'https://product.example/v1/agents/sessions/session-1/events?stream=true&after=6',
+    );
+    expect(fetchImpl.mock.calls[0][1]?.method).toBe('GET');
+    expect(fetchImpl.mock.calls[0][1]?.body).toBeUndefined();
+    expect(new Headers(fetchImpl.mock.calls[0][1]?.headers).get('accept')).toBe(
+      'text/event-stream',
+    );
   });
 
   it('reports the stream as open once the response arrives, and not when it fails', async () => {
@@ -556,7 +857,7 @@ describe('JavaManagedAgentClient', () => {
     const encoder = new TextEncoder();
     const chunks = [
       ': keepalive\r\n\r\n',
-      'id: 7\r\nevent: item.output_text.delta\r\ndata: {"sequence":7,"eventId":"evt_7","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":7,"data":{"text":"hi"},"terminal":false}\r\n\r\n',
+      `id: 7\r\nevent: item.output_text.delta\r\ndata: {"schema_version":1,"projection_version":1,"sequence":7,"event_id":"evt_7","session_id":"session-1","turn_id":"turn-1","type":"item.output_text.delta","created_at":${SECONDS + 7},"data":{"text":"hi"},"terminal":false}\r\n\r\n`,
       ': keepalive\r\n\r\n',
       // A leftover partial frame at end of stream is a mid-frame
       // disconnect, never a complete heartbeat: it is not reported.
@@ -588,7 +889,11 @@ describe('JavaManagedAgentClient', () => {
     }
 
     expect(events).toEqual([
-      expect.objectContaining({ sequence: 7, data: { text: 'hi' } }),
+      expect.objectContaining({
+        sequence: 7,
+        createdAt: (SECONDS + 7) * 1000,
+        data: { text: 'hi' },
+      }),
     ]);
     expect(onAlive).toHaveBeenCalledTimes(2);
   });
@@ -596,14 +901,13 @@ describe('JavaManagedAgentClient', () => {
   it('decodes the resync frame that ends an expired stream', async () => {
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
-      fetch: vi
-        .fn<typeof fetch>()
-        .mockResolvedValue(
-          new Response(
-            'event:agent.session.resync_required\ndata:{"type":"agent.session.resync_required","sessionId":"session-1","replayFloorSequence":40,"snapshotThroughSequence":42,"action":"reload_snapshot"}\n\n',
-            { status: 200 },
-          ),
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        // The server's only frame without an id: line, snake_case.
+        new Response(
+          'event:agent.session.resync_required\ndata:{"type":"agent.session.resync_required","session_id":"session-1","replay_floor_sequence":40,"snapshot_through_sequence":42,"action":"reload_snapshot"}\n\n',
+          { status: 200 },
         ),
+      ),
     });
 
     const frames = [];
@@ -633,8 +937,8 @@ describe('JavaManagedAgentClient', () => {
       fetch: vi.fn<typeof fetch>().mockResolvedValue(
         new Response(
           // The persisted frame at sequence 2 has a truncated JSON payload.
-          'id: 2\r\nevent: item.output_text.delta\r\ndata: {"sequence":2,"eventId":"evt_2"\r\n\r\n' +
-            'id: 3\r\nevent: item.output_text.delta\r\ndata: {"sequence":3,"eventId":"evt_3","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":3,"data":{"text":"after"},"terminal":false}\r\n\r\n',
+          'id: 2\r\nevent: item.output_text.delta\r\ndata: {"sequence":2,"event_id":"evt_2"\r\n\r\n' +
+            `id: 3\r\nevent: item.output_text.delta\r\ndata: {"schema_version":1,"projection_version":1,"sequence":3,"event_id":"evt_3","session_id":"session-1","turn_id":"turn-1","type":"item.output_text.delta","created_at":${SECONDS + 3},"data":{"text":"after"},"terminal":false}\r\n\r\n`,
           { status: 200 },
         ),
       ),
@@ -649,7 +953,11 @@ describe('JavaManagedAgentClient', () => {
     }
 
     expect(events).toEqual([
-      expect.objectContaining({ sequence: 3, data: { text: 'after' } }),
+      expect.objectContaining({
+        sequence: 3,
+        createdAt: (SECONDS + 3) * 1000,
+        data: { text: 'after' },
+      }),
     ]);
     expect(warn).toHaveBeenCalledOnce();
   });
@@ -745,7 +1053,7 @@ describe('JavaManagedAgentClient', () => {
           // A skipped action update leaves a pending approval unreachable.
           // The valid frame behind it disables the end-of-stream fallback,
           // so only the name-based resync can produce the first frame.
-          'id: 2\r\nevent: action.updated\r\ndata: {"sequence":2,"eventId":"evt_2"\r\n\r\n' +
+          'id: 2\r\nevent: action.updated\r\ndata: {"sequence":2,"event_id":"evt_2"\r\n\r\n' +
             valid(3),
           { status: 200 },
         ),
@@ -854,7 +1162,8 @@ describe('JavaManagedAgentClient', () => {
         .fn<typeof fetch>()
         .mockResolvedValue(
           new Response(
-            'id: 2\r\ndata: {"sequence":2,"eventId":"evt_2"\r\n\r\n' + valid(3),
+            'id: 2\r\ndata: {"sequence":2,"event_id":"evt_2"\r\n\r\n' +
+              valid(3),
             { status: 200 },
           ),
         ),
@@ -991,7 +1300,7 @@ describe('JavaManagedAgentClient', () => {
       baseUrl: 'https://product.example',
       fetch: vi.fn<typeof fetch>().mockResolvedValue(
         new Response(
-          'id: 2\r\nevent: item.output_text.delta\r\ndata: {"sequence":2,"eventId":"evt_2","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":2,"data":{},"terminal":true}\r\n\r\n' +
+          `id: 2\r\nevent: item.output_text.delta\r\ndata: {"schema_version":1,"projection_version":1,"sequence":2,"event_id":"evt_2","session_id":"session-1","turn_id":"turn-1","type":"item.output_text.delta","created_at":${SECONDS + 2},"data":{},"terminal":true}\r\n\r\n` +
             // Truncated final frame without the terminating blank line.
             'id: 3\r\nevent: item.output_text.delta\r\ndata: {"sequence":3,"ev',
           { status: 200 },
@@ -1139,7 +1448,7 @@ describe('JavaManagedAgentClient', () => {
         .mockResolvedValue(
           new Response(
             ': keepalive\r\n\r\n'.repeat(5) +
-              'id: 2\r\nevent: item.output_text.delta\r\ndata: {"sequence":2,"eventId":"evt_2","sessionId":"session-1","turnId":"turn-1","type":"item.output_text.delta","createdAt":2,"data":{},"terminal":false}\r\n\r\n',
+              `id: 2\r\nevent: item.output_text.delta\r\ndata: {"schema_version":1,"projection_version":1,"sequence":2,"event_id":"evt_2","session_id":"session-1","turn_id":"turn-1","type":"item.output_text.delta","created_at":${SECONDS + 2},"data":{},"terminal":false}\r\n\r\n`,
             { status: 200 },
           ),
         ),
@@ -1235,7 +1544,7 @@ describe('JavaManagedAgentClient', () => {
       baseUrl: 'https://product.example',
       fetch: vi.fn<typeof fetch>().mockResolvedValue(
         new Response(
-          'event:agent.session.resync_required\r\ndata:{"type":"agent.session.resync_required","sessionId":"sess\r\n\r\n' +
+          'event:agent.session.resync_required\r\ndata:{"type":"agent.session.resync_required","session_id":"sess\r\n\r\n' +
             // The valid frame behind it disables the end-of-stream fallback,
             // so only the fail-closed resync rule can produce the first
             // frame.
@@ -1256,6 +1565,104 @@ describe('JavaManagedAgentClient', () => {
     expect(frames).toHaveLength(2);
     expect(isJavaAgentResyncRequired(frames[0]!)).toBe(true);
     expect(frames[1]).toEqual(expect.objectContaining({ sequence: 4 }));
+  });
+
+  it('creates a Session and synthesizes the admission from the Public Session body', async () => {
+    const sessionBody = {
+      id: 'session-new',
+      object: 'agent.session',
+      agent_id: 'dataworks_data_agent',
+      agent_revision: '1',
+      status: 'active',
+      title: 'A title',
+      created_at: SECONDS,
+      updated_at: SECONDS,
+      last_event_id: 1,
+      latest_turn: {
+        id: 'turn-initial',
+        object: 'agent.turn',
+        session_id: 'session-new',
+        status: 'accepted',
+        created_at: SECONDS,
+        completed_at: null,
+        error_code: null,
+      },
+      capabilities: {
+        items: true,
+        snapshots: true,
+        artifacts: false,
+        resync: true,
+        actions: false,
+        tasks: true,
+        workspace_turns: false,
+      },
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(sessionBody))
+      // A replay returns the same Session body; the replay flag rides the
+      // response header, not a body field.
+      .mockResolvedValueOnce(
+        jsonResponse(sessionBody, 200, {
+          'x-qwen-idempotent-replay': 'true',
+        }),
+      );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    const request = {
+      requestId: 'rid-create',
+      idempotencyKey: 'key-create',
+      agentId: 'dataworks_data_agent',
+      title: 'A title',
+      input: [{ type: 'input_text' as const, text: 'hello' }],
+      metadata: { clientId: 'client-1' },
+      workspace: { workspaceId: 'workspace-1', cwdRelative: 'src' },
+      worktree: { baseRef: 'main' },
+      memoryStoreId: 'store-1',
+      approvalMode: 'auto-edit' as const,
+      planMode: true,
+      modelId: 'model-a',
+      extensionPins: [
+        { extensionId: 'ext-1', packageRevision: 2, packageDigest: 'digest' },
+      ],
+    };
+    expect(await client.createSession(request)).toEqual({
+      sessionId: 'session-new',
+      turnId: 'turn-initial',
+      status: 'accepted',
+      replayed: false,
+    });
+    expect(await client.createSession(request)).toEqual({
+      sessionId: 'session-new',
+      turnId: 'turn-initial',
+      status: 'accepted',
+      replayed: true,
+    });
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(String(url)).toBe('https://product.example/v1/agents/sessions');
+    expect(init?.method).toBe('POST');
+    expect(new Headers(init?.headers).get('idempotency-key')).toBe(
+      'key-create',
+    );
+    // The create body is snake_case except extensionPins; requestId and the
+    // body idempotencyKey never travel.
+    expect(JSON.parse(String(init?.body))).toEqual({
+      agent_id: 'dataworks_data_agent',
+      input: [{ type: 'input_text', text: 'hello' }],
+      metadata: { clientId: 'client-1' },
+      workspace: { workspace_id: 'workspace-1', cwd_relative: 'src' },
+      worktree: { base_ref: 'main' },
+      extensionPins: [
+        { extensionId: 'ext-1', packageRevision: 2, packageDigest: 'digest' },
+      ],
+      memory_store_id: 'store-1',
+      title: 'A title',
+      approval_mode: 'auto-edit',
+      plan_mode: true,
+      model_id: 'model-a',
+    });
   });
 
   it('maps the stable Java error envelope', async () => {
@@ -1295,13 +1702,13 @@ describe('JavaManagedAgentClient', () => {
   it('sends the cancel-critical fields verbatim', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({
-        sessionId: 's1',
-        turnId: 'p1',
+        session_id: 's1',
+        turn_id: 'p1',
         status: 'accepted',
         replayed: false,
-        operationId: 'cancel-1',
-        admissionStage: 'java_durable',
-        deliveryState: 'pending',
+        operation_id: 'cancel-1',
+        admission_stage: 'java_durable',
+        delivery_state: 'pending',
       }),
     );
     const client = new JavaManagedAgentClient({
@@ -1309,36 +1716,67 @@ describe('JavaManagedAgentClient', () => {
       fetch: fetchImpl,
     });
 
-    await client.cancelTurn({
-      requestId: 'rid-1',
-      idempotencyKey: 'key-cancel',
+    expect(
+      await client.cancelTurn({
+        requestId: 'rid-1',
+        idempotencyKey: 'key-cancel',
+        sessionId: 's1',
+        turnId: 'p1',
+      }),
+    ).toEqual({
       sessionId: 's1',
       turnId: 'p1',
+      status: 'accepted',
+      replayed: false,
+      operationId: 'cancel-1',
+      admissionStage: 'java_durable',
+      deliveryState: 'pending',
     });
 
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(String(url)).toBe(
-      'https://product.example/api/agent/web-shell/v1/turns/cancel',
+      'https://product.example/v1/agents/sessions/s1/events',
     );
-    // A dropped turnId or idempotencyKey cancels nothing and dedupe-breaks.
+    expect(init?.method).toBe('POST');
+    // A dropped turn_id or Idempotency-Key cancels nothing and dedupe-breaks;
+    // the trace-only requestId never travels.
     expect(JSON.parse(String(init?.body))).toEqual({
-      requestId: 'rid-1',
-      idempotencyKey: 'key-cancel',
-      sessionId: 's1',
-      turnId: 'p1',
+      type: 'agent.session.cancel',
+      turn_id: 'p1',
     });
+    expect(new Headers(init?.headers).get('idempotency-key')).toBe(
+      'key-cancel',
+    );
   });
 
   it('loads one recent Item page and passes its opaque older cursor verbatim', async () => {
-    const page = {
-      items: [{ id: 'recent-item' }],
-      nextCursor: 'signed-backward.cursor',
-      hasMore: true,
-      snapshotThroughSequence: 120,
+    const wirePage = {
+      object: 'list',
+      data: [
+        {
+          id: 'recent-item',
+          object: 'agent.item',
+          session_id: 's1',
+          turn_id: 'turn-1',
+          type: 'message',
+          role: 'assistant',
+          revision: 1,
+          status: 'completed',
+          first_sequence: 118,
+          last_sequence: 120,
+          content: [],
+          attributes: {},
+          created_at: SECONDS,
+          updated_at: SECONDS + 2,
+        },
+      ],
+      next_cursor: 'signed-backward.cursor',
+      has_more: true,
+      snapshot_through_sequence: 120,
     };
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockResolvedValue(jsonResponse(page));
+      .mockResolvedValue(jsonResponse(wirePage));
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
       fetch: fetchImpl,
@@ -1349,17 +1787,35 @@ describe('JavaManagedAgentClient', () => {
         { sessionId: 's1', cursor: 'signed-backward.cursor', limit: 2 },
         signal,
       ),
-    ).toEqual(page);
+    ).toEqual({
+      items: [
+        {
+          itemId: 'recent-item',
+          sessionId: 's1',
+          turnId: 'turn-1',
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [],
+          attributes: {},
+          firstSequence: 118,
+          lastSequence: 120,
+          // Item timestamps are seconds on the wire, millis in the contract.
+          createdAt: SECONDS * 1000,
+          updatedAt: (SECONDS + 2) * 1000,
+        },
+      ],
+      nextCursor: 'signed-backward.cursor',
+      hasMore: true,
+      snapshotThroughSequence: 120,
+    });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [url, init] = fetchImpl.mock.calls[0]!;
     expect(String(url)).toBe(
-      'https://product.example/api/agent/web-shell/v1/transcript/items/query',
+      'https://product.example/v1/agents/sessions/s1/transcript/items?cursor=signed-backward.cursor&limit=2',
     );
-    expect(JSON.parse(String(init?.body))).toEqual({
-      sessionId: 's1',
-      cursor: 'signed-backward.cursor',
-      limit: 2,
-    });
+    expect(init?.method).toBe('GET');
+    expect(init?.body).toBeUndefined();
     expect(init?.signal).toBe(signal);
   });
 
@@ -1392,13 +1848,57 @@ describe('JavaManagedAgentClient', () => {
   it('sends getSession, transcript and submit surfaces verbatim', async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockImplementation(async () => jsonResponse({}));
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: 's1',
+          object: 'agent.session',
+          agent_id: 'dataworks_data_agent',
+          agent_revision: '1',
+          status: 'active',
+          created_at: SECONDS,
+          updated_at: SECONDS,
+          last_event_id: 9,
+          capabilities: {
+            items: true,
+            snapshots: true,
+            artifacts: false,
+            resync: true,
+            actions: false,
+            tasks: true,
+            workspace_turns: false,
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          items: [],
+          events: [],
+          covered_sequence: 50,
+          has_more: false,
+          last_sequence: 50,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: 's1',
+          turn_id: 'turn-9',
+          status: 'accepted',
+          replayed: false,
+          operation_id: 'op-9',
+          admission_stage: 'java_durable',
+          delivery_state: 'pending',
+        }),
+      );
     const client = new JavaManagedAgentClient({
       baseUrl: 'https://product.example',
       fetch: fetchImpl,
     });
 
-    await client.getSession('s1');
+    expect(await client.getSession('s1')).toMatchObject({
+      sessionId: 's1',
+      createdAt: SECONDS * 1000,
+      lastSequence: 9,
+    });
     await client.getTranscript({
       sessionId: 's1',
       cursor: 'before-1',
@@ -1409,32 +1909,35 @@ describe('JavaManagedAgentClient', () => {
       idempotencyKey: 'key-submit',
       sessionId: 's1',
       input: [{ type: 'input_text', text: 'go' }],
+      metadata: { clientId: 'client-1' },
     });
 
     const getCall = fetchImpl.mock.calls[0]!;
     const txCall = fetchImpl.mock.calls[1]!;
     const submitCall = fetchImpl.mock.calls[2]!;
     expect(String(getCall[0])).toBe(
-      'https://product.example/api/agent/web-shell/v1/sessions/get',
+      'https://product.example/v1/agents/sessions/s1',
     );
-    expect(JSON.parse(String(getCall[1]?.body))).toEqual({ sessionId: 's1' });
+    expect(getCall[1]?.method).toBe('GET');
+    expect(getCall[1]?.body).toBeUndefined();
     expect(String(txCall[0])).toBe(
-      'https://product.example/api/agent/web-shell/v1/transcript/query',
+      'https://product.example/v1/agents/sessions/s1/transcript?cursor=before-1&limit=50',
     );
-    expect(JSON.parse(String(txCall[1]?.body))).toEqual({
-      sessionId: 's1',
-      cursor: 'before-1',
-      limit: 50,
-    });
+    expect(txCall[1]?.method).toBe('GET');
+    expect(txCall[1]?.body).toBeUndefined();
     expect(String(submitCall[0])).toBe(
-      'https://product.example/api/agent/web-shell/v1/turns/submit',
+      'https://product.example/v1/agents/sessions/s1/events',
     );
+    expect(submitCall[1]?.method).toBe('POST');
+    // The Public input event carries only type + input: the WebShell
+    // metadata echo, requestId and body key are all dropped.
     expect(JSON.parse(String(submitCall[1]?.body))).toEqual({
-      requestId: 'rid-2',
-      idempotencyKey: 'key-submit',
-      sessionId: 's1',
+      type: 'agent.session.input.message',
       input: [{ type: 'input_text', text: 'go' }],
     });
+    expect(new Headers(submitCall[1]?.headers).get('idempotency-key')).toBe(
+      'key-submit',
+    );
   });
 
   it('falls back to the stable http error code for a non-JSON gateway error', async () => {

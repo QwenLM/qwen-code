@@ -257,11 +257,12 @@ class ManagedAgentApiContractTest {
                     entry(SessionCapabilities.class,
                             List.of("SessionCapabilities")),
                     entry(PublicList.class, List.of("PublicSessionList",
-                            "PublicEventList", "PublicTaskList",
+                            "PublicEventList",
                             "PublicTaskEventList", "PublicTurnList",
                             "PublicArtifactList", "PublicAutomationList",
                             "PublicAutomationRunList", "PublicChannelList",
                             "PublicChannelDeliveryList")),
+                    entry(ApiModels.PublicTaskList.class, List.of("PublicTaskList")),
                     entry(ApiModels.AutomationDefinitionRequest.class,
                             List.of("AutomationDefinitionRequest")),
                     entry(ApiModels.PublicAutomation.class,
@@ -285,6 +286,20 @@ class ManagedAgentApiContractTest {
                             List.of("PublicContentPart")),
                     entry(PublicItem.class, List.of("PublicItem")),
                     entry(PublicItemList.class, List.of("PublicItemList")),
+                    entry(ApiModels.PublicSessionOptions.class, List.of("PublicSessionOptions")),
+                    entry(ApiModels.PublicModelOption.class, List.of("PublicModelOption")),
+                    entry(ApiModels.PublicModelSelection.class, List.of("PublicModelSelection")),
+                    entry(ApiModels.PublicModelContext.class, List.of("PublicModelContext")),
+                    entry(ApiModels.PublicLifecycleOperation.class, List.of("PublicLifecycleOperation")),
+                    entry(ApiModels.PublicSessionModels.class, List.of("PublicSessionModels")),
+                    entry(ApiModels.PublicModelChangeResult.class, List.of("PublicModelChangeResult")),
+                    entry(ApiModels.PublicSessionApproval.class, List.of("PublicSessionApproval")),
+                    entry(ApiModels.PublicApprovalChangeResult.class, List.of("PublicApprovalChangeResult")),
+                    entry(ApiModels.PublicChangeModelRequest.class, List.of("PublicChangeModelRequest")),
+                    entry(ApiModels.PublicChangeApprovalRequest.class, List.of("PublicChangeApprovalRequest")),
+                    entry(ApiModels.PublicSkill.class, List.of("PublicSkill")),
+                    entry(ApiModels.PublicSessionSkills.class, List.of("PublicSessionSkills")),
+                    entry(ApiModels.PublicTranscript.class, List.of("PublicTranscript")),
                     entry(WebShellListRequest.class,
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
@@ -891,6 +906,9 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getWebShellToolDetails", 401,
                 post("/api/agent/web-shell/v1/tool-details/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
+        exchange(drift, "getPublicToolDetails", 401,
+                get("/v1/agents/sessions/%s/items/item_missing/tool-details".formatted(sessionId))
+                        .header(TENANT, tenant), null);
         exchange(drift, "getWebShellToolResult", 401,
                 post("/api/agent/web-shell/v1/tool-results/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
@@ -1574,6 +1592,32 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/files/uploads/query")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"uploadId\":\"" + UUID.randomUUID() + "\"}");
+        exchange(drift, "createPublicWorkspace", 409,
+                post("/v1/agents/workspaces")
+                        .header(TENANT, workspaceTenant).principal(actor).header(IDEMPOTENCY_KEY, "workspace-create"),
+                "{\"display_name\":\"New workspace\"}");
+        exchange(drift, "listPublicWorkspaceDirectories", 409,
+                get("/v1/agents/workspaces/directories")
+                        .param("workspace_id", "ws-default").param("cwd_relative", ".")
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "listPublicWorkspaceFiles", 409,
+                get("/v1/agents/workspace-files")
+                        .param("workspace_id", "ws-default").param("cwd_relative", ".").param("directory", ".")
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "readPublicWorkspaceFile", 409,
+                get("/v1/agents/workspace-files/content")
+                        .param("workspace_id", "ws-default").param("cwd_relative", ".")
+                        .param("path", "a.txt").param("expected_scope_revision", "old")
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "uploadPublicWorkspaceFile", 409,
+                post("/v1/agents/workspace-files/uploads")
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .param("workspace_id", "ws-default").param("cwd_relative", ".").param("path", "file.bin")
+                        .param("expected_scope_revision", "a".repeat(64)).param("upload_id", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_OCTET_STREAM).content(new byte[] {0}), null);
+        exchange(drift, "getPublicWorkspaceFileUpload", 404,
+                get("/v1/agents/workspace-files/uploads/{uploadId}", UUID.randomUUID().toString())
+                        .header(TENANT, workspaceTenant).principal(actor), null);
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),
@@ -1647,6 +1691,64 @@ class ManagedAgentApiContractTest {
         exchange(drift, "changeWebShellSessionModel", 401,
                 post(WEB_SHELL + "/session-models/change").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\",\"modelId\":\"model-a\",\"expectedRevision\":0,\"idempotencyKey\":\"model-key\"}");
+        exchange(drift, "queryPublicSessionOptions", 200,
+                get("/v1/agents/session-options").param("agent_id", "qwen-code")
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "queryPublicSessionOptions", 401,
+                get("/v1/agents/session-options").param("agent_id", "qwen-code")
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getPublicSessionModels", 200,
+                get("/v1/agents/sessions/{sessionId}/models", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "getPublicSessionModels", 401,
+                get("/v1/agents/sessions/{sessionId}/models", webBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "changePublicSessionModel", 409,
+                post("/v1/agents/sessions/{sessionId}/models", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor).header(IDEMPOTENCY_KEY, "model-key"),
+                "{\"model_id\":\"model-a\",\"expected_revision\":0}");
+        exchange(drift, "changePublicSessionModel", 401,
+                post("/v1/agents/sessions/{sessionId}/models", webBoundId)
+                        .header(TENANT, workspaceTenant).header(IDEMPOTENCY_KEY, "model-key"),
+                "{\"model_id\":\"model-a\",\"expected_revision\":0}");
+        exchange(drift, "getPublicSessionApproval", 200,
+                get("/v1/agents/sessions/{sessionId}/approval", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "getPublicSessionApproval", 401,
+                get("/v1/agents/sessions/{sessionId}/approval", webBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "changePublicSessionApproval", 409,
+                post("/v1/agents/sessions/{sessionId}/approval", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor).header(IDEMPOTENCY_KEY, "approval-key"),
+                "{\"approval_mode\":\"yolo\",\"expected_revision\":0}");
+        exchange(drift, "changePublicSessionApproval", 401,
+                post("/v1/agents/sessions/{sessionId}/approval", webBoundId)
+                        .header(TENANT, workspaceTenant).header(IDEMPOTENCY_KEY, "approval-key"),
+                "{\"approval_mode\":\"yolo\",\"expected_revision\":0}");
+        exchange(drift, "getPublicSessionSkills", 200,
+                get("/v1/agents/sessions/{sessionId}/skills", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "getPublicSessionSkills", 401,
+                get("/v1/agents/sessions/{sessionId}/skills", webBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getPublicTranscript", 200,
+                get("/v1/agents/sessions/{sessionId}/transcript", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "getPublicTranscript", 404,
+                get("/v1/agents/sessions/{sessionId}/transcript", webBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "listPublicTranscriptItems", 200,
+                get("/v1/agents/sessions/{sessionId}/transcript/items", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "listPublicTranscriptItems", 404,
+                get("/v1/agents/sessions/{sessionId}/transcript/items", webBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "exportPublicSession", 200,
+                get("/v1/agents/sessions/{sessionId}/export", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "exportPublicSession", 404,
+                get("/v1/agents/sessions/{sessionId}/export", webBoundId)
+                        .header(TENANT, otherTenant), null);
         exchangeAutomations(drift, workspaceTenant, otherTenant, actor,
                 publicBoundId);
         exchangeDiagnostics(drift, workspaceTenant, otherTenant, actor, publicBoundId);
@@ -1826,6 +1928,20 @@ class ManagedAgentApiContractTest {
         exchange(drift, "respondWebShellClientFiles", 404,
                 post(WEB_SHELL + "/client-files/responses").header(TENANT, tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"" + sideSession + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}");
+        String clientBase = "/v1/agents/sessions/" + sideSession + "/client-files";
+        exchange(drift, "registerPublicClientFiles", 404,
+                post(clientBase + "/register").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"connection_id\":\"conn-contract\"}");
+        exchange(drift, "unregisterPublicClientFiles", 404,
+                post(clientBase + "/unregister").header(TENANT, tenant).principal(actor(tenant)), "{}");
+        exchange(drift, "getPublicClientFilesStatus", 404,
+                get(clientBase).param("connection_id", "conn-contract").header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "streamPublicClientFilesRequests", 404,
+                get(clientBase + "/requests").param("generation", "1").param("connection_id", "conn-contract")
+                        .header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "respondPublicClientFiles", 404,
+                post(clientBase + "/responses").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"generation\":1,\"connection_id\":\"conn-contract\",\"rpc_request_id\":\"probe\",\"response_json\":\"{}\"}");
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -1933,6 +2049,32 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant), create);
         exchange(drift, "webShellGetWorkspaceOperation", 401,
                 post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant), "{\"operationId\":\"missing\"}");
+        JsonNode publicNodes = json(exchange(drift, "listPublicRuntimeNodes", 200,
+                get("/v1/agents/runtime-nodes").header(TENANT, tenant).principal(owner), null));
+        assertThat(publicNodes.path("supported").asBoolean()).isFalse();
+        assertThat(publicNodes.path("data")).isEmpty();
+        String publicDirectory = "{\"path\":\"/work/project\"}";
+        String publicCreate = "{\"node_id\":\"mac\",\"path\":\"/work/project\",\"display_name\":\"Project\"}";
+        for (String code : List.of(
+                exchange(drift, "checkPublicWorkspaceDirectory", 404,
+                        post("/v1/agents/runtime-nodes/mac/check-directory").header(TENANT, tenant).principal(owner),
+                        publicDirectory),
+                exchange(drift, "registerPublicWorkspace", 404,
+                        post("/v1/agents/workspaces/registrations").header(TENANT, tenant).principal(owner)
+                                .header(IDEMPOTENCY_KEY, "contract-registration"), publicCreate))) {
+            assertThat(json(code).at("/error/code").asText()).isEqualTo("ssh_runtime_disabled");
+        }
+        exchange(drift, "getPublicWorkspaceRegistration", 404,
+                get("/v1/agents/workspaces/registrations/missing").header(TENANT, tenant).principal(owner), null);
+        exchange(drift, "listPublicRuntimeNodes", 401,
+                get("/v1/agents/runtime-nodes").header(TENANT, tenant), null);
+        exchange(drift, "checkPublicWorkspaceDirectory", 401,
+                post("/v1/agents/runtime-nodes/mac/check-directory").header(TENANT, tenant), publicDirectory);
+        exchange(drift, "registerPublicWorkspace", 401,
+                post("/v1/agents/workspaces/registrations").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-registration"), publicCreate);
+        exchange(drift, "getPublicWorkspaceRegistration", 401,
+                get("/v1/agents/workspaces/registrations/missing").header(TENANT, tenant), null);
     }
 
     @Test
@@ -3164,7 +3306,9 @@ class ManagedAgentApiContractTest {
             JsonNode capabilities = json("""
                     {"items":true,"snapshots":true,"artifacts":false,
                      "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
-                     "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false,"btw":false,"recap":false}
+                     "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false,"btw":false,"recap":false,
+                     "workspace_turns":false,"cwd_change":false,"model_change":false,"approval_mode_change":false,
+                     "input_attachments":false,"rename":true,"client_files":false}
                     """);
             assertThat(session.get("capabilities")).isEqualTo(capabilities);
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
@@ -3185,6 +3329,64 @@ class ManagedAgentApiContractTest {
                                  "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false,"clientFiles":false}
                                 """);
                 assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
+                // The enriched Public fields report the same authority's
+                // answers as the WebShell twins for the same caller,
+                // snake_case on the Public wire.
+                assertThat(session.get("title")).isEqualTo(other.get("title"));
+                assertThat(session.get("environment"))
+                        .isEqualTo(other.get("environment"));
+                assertThat(session.get("approval_mode"))
+                        .isEqualTo(other.get("approvalMode"));
+                assertThat(session.get("approval_revision"))
+                        .isEqualTo(other.get("approvalRevision"));
+                assertThat(session.get("initial_approval_mode"))
+                        .isEqualTo(other.get("initialApprovalMode"));
+                assertThat(session.get("plan_mode"))
+                        .isEqualTo(other.get("planMode"));
+                assertThat(session.get("plan_mode_supported"))
+                        .isEqualTo(other.get("planModeSupported"));
+                assertThat(session.get("model_context")).isEqualTo(snakeKeys(
+                        other.get("modelContext"), Map.of(
+                                "modelId", "model_id",
+                                "inputTokens", "input_tokens",
+                                "contextWindowSize", "context_window_size",
+                                "observedAt", "observed_at")));
+                assertThat(session.get("model_selection")).isEqualTo(snakeKeys(
+                        other.get("modelSelection"),
+                        Map.of("modelId", "model_id")));
+                assertThat(session.get("lifecycle_operation"))
+                        .isEqualTo(snakeKeys(other.get("lifecycleOperation"),
+                                Map.of("operationId", "operation_id",
+                                        "failureCode", "failure_code")));
+                // latest_turn mirrors the WebShell activeTurn projection
+                // (the latest Turn regardless of status, seconds on the
+                // Public wire); active_turn stays ACTIVE-only, so the
+                // settled initial Turn of this fixture omits it.
+                assertThat(session.has("active_turn")).isFalse();
+                JsonNode latest = session.get("latest_turn");
+                JsonNode webTurn = other.get("activeTurn");
+                assertThat(latest.get("id")).isEqualTo(webTurn.get("turnId"));
+                assertThat(latest.get("session_id"))
+                        .isEqualTo(webTurn.get("sessionId"));
+                assertThat(latest.get("status")).isEqualTo(webTurn.get("status"));
+                assertThat(latest.get("created_at").asLong())
+                        .isEqualTo(webTurn.get("submittedAt").asLong() / 1000);
+                assertThat(latest.get("completed_at").asLong())
+                        .isEqualTo(webTurn.get("completedAt").asLong() / 1000);
+                assertThat(latest.get("error_code"))
+                        .isEqualTo(webTurn.get("errorCode"));
+                for (var flag : Map.of("workspace_turns", "workspaceTurns",
+                        "cwd_change", "cwdChange",
+                        "model_change", "modelChange",
+                        "approval_mode_change", "approvalModeChange",
+                        "input_attachments", "inputAttachments",
+                        "rename", "rename",
+                        "client_files", "clientFiles").entrySet()) {
+                    assertThat(session.get("capabilities").get(flag.getKey()))
+                            .as("capabilities.%s", flag.getKey())
+                            .isEqualTo(other.get("capabilities")
+                            .get(flag.getValue()));
+                }
             }
         }
 
@@ -3947,6 +4149,19 @@ class ManagedAgentApiContractTest {
 
     private JsonNode json(String content) throws IOException {
         return objectMapper.readTree(content);
+    }
+
+    /** A WebShell object re-keyed to its Public snake_case twin; an absent
+     * or null projection stays absent or null on both wires. */
+    private JsonNode snakeKeys(JsonNode node, Map<String, String> names) {
+        if (node == null || !node.isObject()) {
+            return node;
+        }
+        ObjectNode mapped = objectMapper.createObjectNode();
+        node.fields().forEachRemaining(field -> mapped.set(
+                names.getOrDefault(field.getKey(), field.getKey()),
+                field.getValue()));
+        return mapped;
     }
 
     private ObjectNode mcpManagementSnapshot(int live, int removed) {

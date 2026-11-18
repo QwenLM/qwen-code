@@ -10,6 +10,8 @@ interface Peer {
   registered: Array<Record<string, unknown>>;
   unregistered: Array<Record<string, unknown>>;
   responses: Array<Record<string, unknown>>;
+  /** Every request the bridge made, as `METHOD /path` (no query). */
+  calls: string[];
   /** How many times the SSE downlink was opened. */
   streamOpens: number;
   /** Resolves once the browser posts its first response. */
@@ -35,7 +37,7 @@ interface PeerOptions {
    * replaces the binding after register settled, so only the poll-time identity
    * fence (not the reply-time one) can catch it. */
   statusConnectionId?: string;
-  /** Refuse any /responses POST whose responseJson exceeds this many bytes with
+  /** Refuse any /responses POST whose response_json exceeds this many bytes with
    * 400 client_files_payload_too_large, mirroring the relay's requirePayloadSize. */
   payloadBound?: number;
   /** Refuse every /responses POST with this status + code (production envelope),
@@ -47,10 +49,14 @@ interface PeerOptions {
   reopenProbeFailures?: number;
 }
 
+/** The full per-session Public client-files base the bridge must call. */
+const CLIENT_FILES_BASE = '/v1/agents/sessions/session-1/client-files';
+
 function startPeer(opts: PeerOptions = {}): Promise<Peer> {
   const registered: Array<Record<string, unknown>> = [];
   const unregistered: Array<Record<string, unknown>> = [];
   const responses: Array<Record<string, unknown>> = [];
+  const calls: string[] = [];
   const peerState = { streamOpens: 0 };
   let reopenProbeFailuresRemaining = opts.reopenProbeFailures ?? 0;
   let resolveFirst: (value: Record<string, unknown>) => void;
@@ -76,12 +82,14 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
     req.on('data', (chunk) => (body += chunk));
     req.on('end', async () => {
       const parsed = body ? (JSON.parse(body) as Record<string, unknown>) : {};
-      const path = req.url ?? '';
-      if (path.endsWith('/client-files/register')) {
+      const url = new URL(req.url ?? '', 'http://127.0.0.1');
+      const path = url.pathname;
+      calls.push(`${req.method} ${path}`);
+      if (req.method === 'POST' && path === `${CLIENT_FILES_BASE}/register`) {
         registered.push(parsed);
         const connectionId =
           opts.hijackConnectionId ??
-          (parsed.connectionId as string | undefined);
+          (parsed.connection_id as string | undefined);
         binding = {
           generation: registerGeneration,
           state: 'active',
@@ -97,13 +105,13 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
         res.end(
           JSON.stringify({
             generation: registerGeneration,
-            toolCount: 1,
-            connectionId,
+            tool_count: 1,
+            connection_id: connectionId,
           }),
         );
         return;
       }
-      if (path.endsWith('/client-files/status')) {
+      if (req.method === 'GET' && path === CLIENT_FILES_BASE) {
         // Transient reopen-probe failures: only after the first downlink has
         // opened, so the initial binding poll is unaffected.
         if (peerState.streamOpens >= 1 && reopenProbeFailuresRemaining > 0) {
@@ -127,16 +135,16 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
           opts.statusConnectionId !== undefined
             ? opts.statusConnectionId
             : binding.connectionId;
+        const askedConnectionId = url.searchParams.get('connection_id');
         const owned =
-          parsed.connectionId !== undefined &&
-          parsed.connectionId === liveConnectionId;
+          askedConnectionId !== null && askedConnectionId === liveConnectionId;
         res.end(
           JSON.stringify(
             owned
               ? {
                   generation: binding.generation,
                   state: binding.state,
-                  connectionId: liveConnectionId,
+                  connection_id: liveConnectionId,
                   owned: true,
                 }
               : { state: binding.state, owned: false },
@@ -144,19 +152,19 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
         );
         return;
       }
-      if (path.endsWith('/client-files/unregister')) {
+      if (req.method === 'POST' && path === `${CLIENT_FILES_BASE}/unregister`) {
         unregistered.push(parsed);
         // A stale teardown (connection identity no longer current) is a no-op.
         const stale =
           binding !== undefined &&
-          parsed.connectionId !== undefined &&
-          parsed.connectionId !== binding.connectionId;
+          parsed.connection_id !== undefined &&
+          parsed.connection_id !== binding.connectionId;
         if (binding && !stale) binding.state = 'closed';
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ registered: false }));
         return;
       }
-      if (path.endsWith('/client-files/requests/stream')) {
+      if (req.method === 'GET' && path === `${CLIENT_FILES_BASE}/requests`) {
         peerState.streamOpens += 1;
         if (opts.streamStatus !== undefined) {
           res.writeHead(opts.streamStatus, {
@@ -176,7 +184,7 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
         if (opts.endStream && peerState.streamOpens === 1) res.end();
         return;
       }
-      if (path.endsWith('/client-files/responses')) {
+      if (req.method === 'POST' && path === `${CLIENT_FILES_BASE}/responses`) {
         responses.push(parsed);
         resolveFirst(parsed);
         resolveRegister?.();
@@ -189,7 +197,7 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
           );
           return;
         }
-        const responseJson = parsed.responseJson as string | undefined;
+        const responseJson = parsed.response_json as string | undefined;
         if (
           opts.payloadBound !== undefined &&
           responseJson !== undefined &&
@@ -220,10 +228,11 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
       const port = (server.address() as AddressInfo).port;
       resolve({
         server,
-        baseUrl: `http://127.0.0.1:${port}/api/agent/web-shell/v1`,
+        baseUrl: `http://127.0.0.1:${port}`,
         registered,
         unregistered,
         responses,
+        calls,
         get streamOpens() {
           return peerState.streamOpens;
         },
@@ -231,8 +240,8 @@ function startPeer(opts: PeerOptions = {}): Promise<Peer> {
         push(requestId, payload) {
           streamRes?.write(
             `event: request\ndata: ${JSON.stringify({
-              requestId,
-              payloadJson: JSON.stringify(payload),
+              request_id: requestId,
+              payload_json: JSON.stringify(payload),
             })}\n\n`,
           );
         },
@@ -294,12 +303,19 @@ describe('ManagedClientFilesBridge', () => {
       },
     });
     void b.connect();
-    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    // A push only lands on an open downlink: the bodyless GET status probe can
+    // overtake the register POST, so the binding (and the stream) may settle a
+    // poll after register was observed.
+    await vi.waitFor(() => {
+      expect(p.registered.length).toBe(1);
+      expect(p.streamOpens).toBeGreaterThanOrEqual(1);
+    });
     p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
     const response = await p.firstResponse;
-    expect(response.rpcRequestId).toBe('7');
+    expect(response.rpc_request_id).toBe('7');
     expect(response.generation).toBe(1);
-    expect(JSON.parse(response.responseJson as string)).toMatchObject({
+    expect(response.connection_id).toBe(p.registered[0].connection_id);
+    expect(JSON.parse(response.response_json as string)).toMatchObject({
       id: '7',
       result: { tools: [] },
     });
@@ -307,6 +323,12 @@ describe('ManagedClientFilesBridge', () => {
     await vi.waitFor(() =>
       expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 }),
     );
+    // The bridge appends the per-session Public path to the origin base and
+    // drives register/status/requests/responses with the Public verbs.
+    expect(p.calls).toContain(`POST ${CLIENT_FILES_BASE}/register`);
+    expect(p.calls).toContain(`GET ${CLIENT_FILES_BASE}`);
+    expect(p.calls).toContain(`GET ${CLIENT_FILES_BASE}/requests`);
+    expect(p.calls).toContain(`POST ${CLIENT_FILES_BASE}/responses`);
   });
 
   it('registers a connection id without crypto.randomUUID (non-secure context)', async () => {
@@ -328,7 +350,7 @@ describe('ManagedClientFilesBridge', () => {
       });
       void b.connect();
       await vi.waitFor(() => expect(p.registered.length).toBe(1));
-      expect(p.registered[0]!.connectionId).toMatch(
+      expect(p.registered[0]!.connection_id).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
       );
     } finally {
@@ -348,12 +370,15 @@ describe('ManagedClientFilesBridge', () => {
       },
     });
     void b.connect();
-    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    await vi.waitFor(() => {
+      expect(p.registered.length).toBe(1);
+      expect(p.streamOpens).toBeGreaterThanOrEqual(1);
+    });
     p.push('n-1', { jsonrpc: '2.0', method: 'notifications/initialized' });
     const response = await p.firstResponse;
-    expect(response.rpcRequestId).toBe('n-1');
-    expect(response.errorCode).toBe('client_files_offline');
-    expect(response.responseJson).toBeUndefined();
+    expect(response.rpc_request_id).toBe('n-1');
+    expect(response.error_code).toBe('client_files_offline');
+    expect(response.response_json).toBeUndefined();
   });
 
   it('disconnect unregisters and stops the bridge', async () => {
@@ -398,7 +423,10 @@ describe('ManagedClientFilesBridge', () => {
       },
     });
     void b.connect();
-    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    await vi.waitFor(() => {
+      expect(p.registered.length).toBe(1);
+      expect(p.streamOpens).toBeGreaterThanOrEqual(1);
+    });
     p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
     const response = await p.firstResponse;
     expect(response.generation).toBe(2);
@@ -422,7 +450,7 @@ describe('ManagedClientFilesBridge', () => {
     await vi.waitFor(() => expect(p.streamOpens).toBeGreaterThanOrEqual(2));
     p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
     const response = await p.firstResponse;
-    expect(response.rpcRequestId).toBe('7');
+    expect(response.rpc_request_id).toBe('7');
     await vi.waitFor(() =>
       expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 }),
     );
@@ -447,7 +475,7 @@ describe('ManagedClientFilesBridge', () => {
     await vi.waitFor(() => expect(p.streamOpens).toBeGreaterThanOrEqual(2));
     p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
     const response = await p.firstResponse;
-    expect(response.rpcRequestId).toBe('7');
+    expect(response.rpc_request_id).toBe('7');
     await vi.waitFor(() =>
       expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 }),
     );
@@ -489,7 +517,7 @@ describe('ManagedClientFilesBridge', () => {
   it('the poll-time identity fence refuses a binding replaced after register settled', async () => {
     // The register reply names this bridge, so the reply-time fence passes; but
     // the status poll reports another tab's identity. Only the poll-time
-    // connectionId clause in waitForBinding can refuse it. Deleting that clause
+    // connection_id clause in waitForBinding can refuse it. Deleting that clause
     // lets the bridge adopt the foreign generation and open a downlink, so this
     // case (failed + zero stream opens) turns red.
     const p = await peer({ statusConnectionId: 'other-tab' });
@@ -524,7 +552,10 @@ describe('ManagedClientFilesBridge', () => {
       },
     });
     void b.connect();
-    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    await vi.waitFor(() => {
+      expect(p.registered.length).toBe(1);
+      expect(p.streamOpens).toBeGreaterThanOrEqual(1);
+    });
     p.push('r1', {
       jsonrpc: '2.0',
       id: 'r1',
@@ -536,7 +567,7 @@ describe('ManagedClientFilesBridge', () => {
     await vi.waitFor(() =>
       expect(p.responses.length).toBeGreaterThanOrEqual(2),
     );
-    const bounded = JSON.parse(p.responses[1].responseJson as string) as {
+    const bounded = JSON.parse(p.responses[1].response_json as string) as {
       result?: { isError?: boolean };
     };
     expect(bounded.result?.isError).toBe(true);
@@ -562,7 +593,10 @@ describe('ManagedClientFilesBridge', () => {
       },
     });
     void b.connect();
-    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    await vi.waitFor(() => {
+      expect(p.registered.length).toBe(1);
+      expect(p.streamOpens).toBeGreaterThanOrEqual(1);
+    });
     p.push('r1', {
       jsonrpc: '2.0',
       id: 'r1',
@@ -595,7 +629,10 @@ describe('ManagedClientFilesBridge', () => {
       },
     });
     void b.connect();
-    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    await vi.waitFor(() => {
+      expect(p.registered.length).toBe(1);
+      expect(p.streamOpens).toBeGreaterThanOrEqual(1);
+    });
     // Answer the discovery so register settles; its answer is refused as
     // TTL-settled but must not tear the registration down.
     p.push('d1', { jsonrpc: '2.0', id: 'd1', method: 'tools/list' });
@@ -647,9 +684,10 @@ describe('ManagedClientFilesBridge', () => {
     await b.connect();
     expect(b.getState()).toMatchObject({ phase: 'failed' });
     // The register created a live binding; the failure exit must release it
-    // exactly once, fenced by this connection's identity.
+    // exactly once, fenced by this connection's identity. The Session identity
+    // rides the per-session unregister path, not the body.
     expect(p.unregistered.length).toBe(1);
-    expect(p.unregistered[0].sessionId).toBe('session-1');
-    expect(p.unregistered[0].connectionId).toBeTypeOf('string');
+    expect(p.calls).toContain(`POST ${CLIENT_FILES_BASE}/unregister`);
+    expect(p.unregistered[0].connection_id).toBeTypeOf('string');
   });
 });

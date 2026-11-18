@@ -1,11 +1,15 @@
 import { expect, test } from '@playwright/test';
-import type { JavaAgentSession } from '../components/managed/java-managed-agent-client';
+import type { components } from '../components/managed/generated/managed-agent-api';
+
+type Schemas = components['schemas'];
+
+const SESSION_ID = 'managed-mcp-session';
 
 for (const width of [1280, 390]) {
   test(`Managed MCP references use the selected Session catalog at ${width}px @smoke`, async ({
     page,
   }) => {
-    let summary: JavaAgentSession | undefined;
+    let summary: Schemas['PublicSession'] | undefined;
     let queries = 0;
     let fail = true;
     let empty = false;
@@ -13,55 +17,91 @@ for (const width of [1280, 390]) {
     const unexpected: string[] = [];
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
-    const workspace = {
-      workspaceId: 'ws-mcp',
-      displayName: 'MCP project',
-      canCreateSession: true,
+    const workspace: Schemas['PublicWorkspace'] = {
+      id: 'ws-mcp',
+      object: 'agent.workspace',
+      display_name: 'MCP project',
+      can_create_session: true,
       state: 'active',
     };
-    await page.route('**/api/agent/web-shell/v1/**', async (route) => {
-      const path = new URL(route.request().url()).pathname;
-      const body = route.request().postDataJSON();
-      if (path.endsWith('/user-messages/query'))
+    await page.route('**/v1/agents/**', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const path = url.pathname;
+      const method = request.method();
+      const body = request.postDataJSON();
+      if (path.endsWith('/user-messages'))
         return route.fulfill({ json: { paused: false, messages: [] } });
-      if (path.endsWith('/workspace-extensions/query'))
+      if (/^\/v1\/agents\/workspaces\/[^/]+\/extensions$/.test(path))
         return route.fulfill({ json: { supported: false, extensions: [] } });
-      if (path.endsWith('/workspaces/worktrees/options'))
+      if (/^\/v1\/agents\/workspaces\/[^/]+\/worktrees\/options$/.test(path))
         return route.fulfill({
           json: {
             supported: true,
-            baseCommit: 'a'.repeat(40),
+            base_commit: 'a'.repeat(40),
             branches: ['main'],
-            currentBranch: 'main',
+            current_branch: 'main',
           },
         });
-      if (path.endsWith('/runtime-nodes/query'))
+      if (path === '/v1/agents/runtime-nodes')
         return route.fulfill({ json: { supported: false, data: [] } });
-      if (path.endsWith('/sessions/query'))
-        return route.fulfill({
-          json: { data: summary ? [summary] : [], hasMore: false },
-        });
-      if (path.endsWith('/workspaces/query'))
+      if (path === '/v1/agents/sessions' && method === 'GET')
         return route.fulfill({
           json: {
-            data: [workspace],
-            hasMore: false,
-            capabilities: { workspaceBinding: true },
+            object: 'list',
+            data: summary ? [summary] : [],
+            has_more: false,
+            next_cursor: null,
           },
         });
-      if (path.endsWith('/workspaces/get'))
+      if (path === '/v1/agents/workspaces' && method === 'GET')
+        return route.fulfill({
+          json: {
+            object: 'list',
+            data: [workspace],
+            has_more: false,
+            next_cursor: null,
+            capabilities: {
+              workspace_context: false,
+              workspace_binding: true,
+            },
+            default_workspace: null,
+          },
+        });
+      if (path === '/v1/agents/workspaces/ws-mcp')
         return route.fulfill({ json: workspace });
-      if (path.endsWith('/sessions/create')) {
+      if (path === '/v1/agents/sessions' && method === 'POST') {
+        // Public wire: Session/Turn timestamps are epoch seconds; the create
+        // response is the Session itself, with the initial Turn in
+        // latest_turn and the replay flag on a response header.
         summary = {
-          sessionId: 'managed-mcp-session',
-          agentId: body.agentId,
+          id: SESSION_ID,
+          object: 'agent.session',
+          agent_id: body.agent_id,
+          agent_revision: '1',
           status: 'active',
-          createdAt: 1,
-          updatedAt: 1,
-          lastSequence: 0,
-          workspace: { ...body.workspace, contextRevision: 1, state: 'ready' },
+          created_at: 1790777114,
+          updated_at: 1790777114,
+          last_event_id: 0,
+          latest_turn: {
+            id: 'first',
+            object: 'agent.turn',
+            session_id: SESSION_ID,
+            status: 'completed',
+            created_at: 1790777114,
+            completed_at: 1790777115,
+          },
+          workspace: {
+            workspace_id: body.workspace.workspace_id,
+            cwd_relative: body.workspace.cwd_relative,
+            context_revision: 1,
+            state: 'ready',
+          },
           capabilities: {
-            workspaceTurns: true,
+            items: false,
+            snapshots: false,
+            resync: false,
+            workspace_turns: true,
             actions: false,
             artifacts: false,
             tasks: false,
@@ -69,31 +109,37 @@ for (const width of [1280, 390]) {
         };
         return route.fulfill({
           status: 202,
-          json: {
-            sessionId: summary.sessionId,
-            turnId: 'first',
-            status: 'accepted',
-            replayed: false,
-          },
+          headers: { 'x-qwen-idempotent-replay': 'false' },
+          json: summary,
         });
       }
-      if (path.endsWith('/sessions/get'))
+      if (path === `/v1/agents/sessions/${SESSION_ID}`)
         return route.fulfill({ json: summary });
-      if (path.endsWith('/transcript/query'))
+      if (path === `/v1/agents/sessions/${SESSION_ID}/transcript`)
         return route.fulfill({
-          json: { items: [], events: [], lastSequence: 0, hasMore: false },
+          json: {
+            items: [],
+            events: [],
+            last_sequence: 0,
+            covered_sequence: 0,
+            older_cursor: null,
+            has_more: false,
+          },
         });
-      if (path.endsWith('/events/stream'))
+      if (
+        path === `/v1/agents/sessions/${SESSION_ID}/events` &&
+        url.searchParams.get('stream') === 'true'
+      )
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
-      if (path.endsWith('/session-mcp/query')) {
-        expect(body).toEqual({ sessionId: 'managed-mcp-session' });
+      if (path === `/v1/agents/sessions/${SESSION_ID}/mcp-catalog`) {
+        expect(method).toBe('GET');
         queries++;
         if (fail)
           return route.fulfill({ status: 503, json: { error: 'offline' } });
         return route.fulfill({
           json: {
             object: 'agent.mcp_catalog',
-            session_id: 'managed-mcp-session',
+            session_id: SESSION_ID,
             servers: empty
               ? []
               : [
@@ -114,16 +160,19 @@ for (const width of [1280, 390]) {
           },
         });
       }
-      if (path.endsWith('/turns/submit')) {
+      if (
+        path === `/v1/agents/sessions/${SESSION_ID}/events` &&
+        method === 'POST'
+      ) {
         submitted = body.input;
         return route.fulfill({
           status: 202,
           json: {
-            sessionId: summary!.sessionId,
-            turnId: 'mcp-turn',
-            operationId: 'submit-mcp-turn',
-            admissionStage: 'java_durable',
-            deliveryState: 'pending',
+            session_id: SESSION_ID,
+            turn_id: 'mcp-turn',
+            operation_id: 'submit-mcp-turn',
+            admission_stage: 'java_durable',
+            delivery_state: 'pending',
             status: 'accepted',
             replayed: false,
           },
