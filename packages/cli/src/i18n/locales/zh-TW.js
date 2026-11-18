@@ -347,6 +347,7 @@ export default {
   Auth: '認證',
   Model: '模型',
   'Fast Model': '快速模型',
+  'Agent Loop': 'Agent 迴圈',
   Sandbox: '沙箱',
   'Session ID': '會話 ID',
   'Base URL': 'Base URL',

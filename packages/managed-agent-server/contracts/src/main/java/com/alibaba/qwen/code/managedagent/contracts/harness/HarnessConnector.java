@@ -181,6 +181,10 @@ public interface HarnessConnector extends AutoCloseable {
         return WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
     }
 
+    default boolean supportsSavedLifecycle(String profile) {
+        return supportsLifecycle(profile);
+    }
+
     public default void prepareLifecycleResources(StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
     }

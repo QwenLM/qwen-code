@@ -48,8 +48,11 @@ import type {
   DaemonAssistantMessage,
 } from '../adapters/messageTypes';
 import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
+import { HookStatistics } from './messages/HookStatistics';
+import type { HookStatisticsTurn } from './messages/hook-statistics-context';
 
 interface MessageItemProps {
+  hookTurn?: HookStatisticsTurn;
   message: Message;
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
@@ -130,6 +133,7 @@ export const MessageItem = memo(function MessageItem({
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
+  hookTurn,
   assistantFooterAlwaysVisible = false,
   showAssistantBranch = false,
   assistantFeedbackTurnId,
@@ -228,11 +232,14 @@ export const MessageItem = memo(function MessageItem({
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
             author={message.author}
+            sentFrom={message.sentFrom}
+            sentTo={message.agentMessage?.sentTo}
           />
         );
       case 'assistant':
         return (
           <AssistantMessage
+            hookTurn={hookTurn}
             content={message.content}
             author={message.author}
             agentMessage={message.agentMessage}
@@ -394,6 +401,11 @@ export const MessageItem = memo(function MessageItem({
   const selectableSafeBody = (
     <div data-user-selectable="true" style={{ display: 'contents' }}>
       {safeBody}
+      {hookTurn && message.role !== 'assistant' && (
+        <div className="flex items-center pb-6">
+          <HookStatistics turn={hookTurn} />
+        </div>
+      )}
     </div>
   );
 
@@ -512,6 +524,12 @@ function areMessageItemPropsEqual(
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
+  if (
+    prev.hookTurn?.sessionId !== next.hookTurn?.sessionId ||
+    prev.hookTurn?.promptId !== next.hookTurn?.promptId ||
+    prev.hookTurn?.recordId !== next.hookTurn?.recordId
+  )
+    return false;
   if (prev.assistantFooterAlwaysVisible !== next.assistantFooterAlwaysVisible)
     return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;

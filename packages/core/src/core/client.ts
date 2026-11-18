@@ -32,6 +32,7 @@ import type {
 import { buildAdvisorReminder } from './advisor-policy.js';
 import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
 import { createUserContent } from './genai-compat.js';
+import type { Span } from '@opentelemetry/api';
 import process from 'node:process';
 
 // Config
@@ -117,7 +118,10 @@ import {
   LoopDetectionService,
 } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
-import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
+import type {
+  NotificationRecordPayload,
+  UserPromptRecordPayload,
+} from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -286,8 +290,9 @@ function hostContinuationOptions(
 ): Partial<SendMessageOptions> {
   return {
     ...(options?.toolCallPreparations && { toolCallPreparations: true }),
-    ...(options?.interactionSpanByHost && { interactionSpanByHost: true }),
-    ...(options?.toolLoopGuardsByHost && { toolLoopGuardsByHost: true }),
+    ...(options?.interactionSpan && {
+      interactionSpan: options.interactionSpan,
+    }),
     ...(options?.skipMemoryExtraction && { skipMemoryExtraction: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
     // A Goal turn's continuation runs under the same permit.
@@ -304,6 +309,90 @@ function hostContinuationOptions(
 
 /** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
 export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
+
+export type UserTurnRecord =
+  | {
+      kind: 'user';
+      message: PartListUnion;
+      payload?: UserPromptRecordPayload;
+      promptId?: string;
+      daemonPromptId?: string;
+      goalPermit?: GoalTurnPermit;
+    }
+  | {
+      kind: 'goal';
+      message: PartListUnion;
+      goalPermit: GoalTurnPermit;
+    }
+  | {
+      kind: 'cron';
+      message: PartListUnion;
+      displayText?: string;
+    }
+  | {
+      kind: 'notification';
+      message: PartListUnion;
+      displayText?: string;
+      backgroundTask?: NotificationRecordPayload['backgroundTask'];
+    };
+
+/**
+ * What the host already recorded and set up for this turn: either it wrote the
+ * record through {@link recordUserTurn} at its existing timing, or the message
+ * is already in history. A matching `promptId` tells core to record nothing
+ * itself.
+ */
+export interface UserTurnInput {
+  promptId: string;
+  todoWorkChain?: { promptId: string };
+  /**
+   * Present when the host ran the snapshot phase for this turn, in any of its
+   * three outcomes: the snapshot was taken, it was deliberately skipped for a
+   * restore, or it was attempted and failed. Core records no snapshot of its
+   * own either way and does not retry a failed one.
+   */
+  fileHistory?: { promptId: string };
+}
+
+/** Writes the host's record at its existing timing. */
+export function recordUserTurn(config: Config, record: UserTurnRecord): void {
+  const recorder = config.getChatRecordingService();
+  switch (record.kind) {
+    case 'user':
+      recorder?.recordUserMessage(
+        record.message,
+        record.goalPermit,
+        record.payload,
+        record.promptId,
+        record.daemonPromptId,
+      );
+      break;
+    case 'goal':
+      recorder?.recordGoalRuntimeMessage(record.message, record.goalPermit);
+      break;
+    case 'cron':
+      recorder?.recordCronPrompt(record.message, record.displayText);
+      break;
+    case 'notification':
+      if (record.backgroundTask !== undefined) {
+        recorder?.recordNotification(
+          record.message,
+          record.displayText,
+          record.backgroundTask,
+        );
+      } else {
+        recorder?.recordNotification(record.message, record.displayText);
+      }
+      break;
+    default: {
+      // A new kind without a case has to fail HERE, at compile time. This runs
+      // outside the caller's `try` (Session.ts), so a runtime throw escapes the
+      // turn handler instead of being turned into a turn error.
+      const _exhaustive: never = record;
+      void _exhaustive;
+    }
+  }
+}
 
 interface StopHookChain {
   count: number;
@@ -355,17 +444,7 @@ export interface SendMessageOptions {
    * round it sends; the client carries it to the continuations it starts.
    */
   skipMemoryExtraction?: boolean;
-  /**
-   * The host already recorded this UserQuery's user message, started its todo
-   * work chain and took its file-history snapshot, as ACP does when it admits
-   * a prompt, so the client does none of them. On a Retry, the host started
-   * the todo work chain and keeps the attempt's recorded user message, so the
-   * client neither starts the chain nor records the message again. On a Goal
-   * turn, the host recorded the runtime continuation's message. On a Cron or
-   * Notification send, the host records the prompt or the notification
-   * itself.
-   */
-  userTurnRecordedByHost?: boolean;
+  userTurn?: UserTurnInput;
   /**
    * The rewindable identity a Retry's request carries in history: that of the
    * attempt it replaces. Spent by the first request.
@@ -379,18 +458,16 @@ export interface SendMessageOptions {
    */
   stopPolicies?: readonly StopPolicy[];
   /**
-   * The host keeps the interaction span open around its turn, so this send
-   * neither starts nor ends one.
+   * The host owns this span: it starts and ends it, and owns its attributes.
+   * Passing it here does NOT hand the lifecycle to core — this client never
+   * starts or ends the span, never writes the input-message or
+   * resolved-request attributes, and only records activity on it. This is the
+   * one field that turns core's own span bookkeeping off
+   * (`startInteractionSpan`, `addAgentInputMessageAttributes`,
+   * `addUserPromptAttributes`, and `endCurrentInteraction` all step aside), so
+   * a caller that passes a span it does not own gets no lifecycle at all.
    */
-  interactionSpanByHost?: boolean;
-  /**
-   * The host runs its own tool-call guards and exploration budget and builds
-   * the tool-result message with its todo reminder, so this send checks no
-   * tool-call patterns and adds neither reminder. The content and thought
-   * heuristics still run, and a tool-result send still carries their loop
-   * reminder and the memory recall.
-   */
-  toolLoopGuardsByHost?: boolean;
+  interactionSpan?: Span;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -3947,11 +4024,15 @@ export class LlmClient {
       messageType === SendMessageType.Notification ||
       messageType === SendMessageType.Teammate ||
       messageType === SendMessageType.Goal;
-    const interactionSpanByHost = options?.interactionSpanByHost === true;
+    const userTurn =
+      options?.userTurn?.promptId === prompt_id ? options.userTurn : undefined;
+    const hasUserTurnRecord = userTurn !== undefined;
+    const hasTodoWorkChain = userTurn?.todoWorkChain?.promptId === prompt_id;
+    const hasFileHistory = userTurn?.fileHistory?.promptId === prompt_id;
+    const hostInteractionSpan = options?.interactionSpan;
     let interactionOwner =
-      startsInteraction || interactionSpanByHost
-        ? undefined
-        : getActiveInteractionSpan(prompt_id);
+      hostInteractionSpan ??
+      (startsInteraction ? undefined : getActiveInteractionSpan(prompt_id));
     if (interactionOwner) {
       recordInteractionActivity(prompt_id, interactionOwner);
     }
@@ -3961,6 +4042,10 @@ export class LlmClient {
       errorMessage?: string,
       errorType?: string,
     ) => {
+      if (hostInteractionSpan) {
+        this.interactionStartTypes.delete(prompt_id);
+        return;
+      }
       if (
         interactionOwner &&
         getActiveInteractionSpan(prompt_id) !== interactionOwner
@@ -4293,7 +4378,7 @@ export class LlmClient {
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
       this.clearStopHookChain(prompt_id);
-      if (!interactionSpanByHost) {
+      if (!hostInteractionSpan) {
         startInteractionSpan(this.config, {
           promptId: prompt_id,
           model: options?.modelOverride ?? this.config.getModel(),
@@ -4305,6 +4390,7 @@ export class LlmClient {
       this.interactionStartTypes.set(prompt_id, messageType);
       if (
         interactionOwner &&
+        !hostInteractionSpan &&
         messageType === SendMessageType.UserQuery &&
         typeof options?.submittedPrompt === 'string'
       ) {
@@ -4636,7 +4722,7 @@ export class LlmClient {
       // under them without losing the resumed info item this record exists to
       // restore. See `ChatRecord.deliveredTurn` for that accepted imprecision
       // and the test pinning it.
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasUserTurnRecord) {
         this.config
           .getChatRecordingService()
           ?.recordNotification(
@@ -4654,7 +4740,7 @@ export class LlmClient {
     // LoopDetected early on the notification turn.
     if (messageType === SendMessageType.UserQuery) {
       this.activeAutomaticTodoWorkChainPromptIds.clear();
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasTodoWorkChain) {
         // A registered reminder means the previous chain's plan still has
         // unfinished items (todo_write deletes it on completion): continue
         // that chain instead of discarding its context with the very turn
@@ -4673,7 +4759,7 @@ export class LlmClient {
       }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasTodoWorkChain) {
         this.config.startActiveTodoWorkChain(
           prompt_id,
           this.activeTodoWorkChainPromptId,
@@ -4698,7 +4784,7 @@ export class LlmClient {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
     }
-    if (startsInteraction) {
+    if (startsInteraction && !hostInteractionSpan) {
       const interactionSpan = interactionOwner;
       if (
         interactionSpan &&
@@ -4738,8 +4824,7 @@ export class LlmClient {
     const ownsExplorationBudget =
       !options?.isConcurrentSideQuery &&
       prompt_id === this.toolExplorationBudgetPromptId;
-    const ownsToolLoopGuards =
-      ownsExplorationBudget && !options?.toolLoopGuardsByHost;
+    const ownsToolLoopGuards = ownsExplorationBudget;
     // The delivery was prepared before the request went out, so commit vs
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
@@ -4765,7 +4850,7 @@ export class LlmClient {
     let messageDisplay: MessageDisplayDispatcher | null = null;
     try {
       if (messageType === SendMessageType.Goal) {
-        if (!options?.userTurnRecordedByHost) {
+        if (!hasUserTurnRecord) {
           this.config
             .getChatRecordingService()
             ?.recordGoalRuntimeMessage(request, goalPermit!);
@@ -4803,7 +4888,7 @@ export class LlmClient {
 
         // record user/cron message for session management
         if (messageType === SendMessageType.Cron) {
-          if (!options?.userTurnRecordedByHost) {
+          if (!hasUserTurnRecord) {
             this.config
               .getChatRecordingService()
               ?.recordCronPrompt(
@@ -4812,7 +4897,7 @@ export class LlmClient {
                 goalPermit,
               );
           }
-        } else if (!options?.userTurnRecordedByHost) {
+        } else if (!hasUserTurnRecord) {
           const recorder = this.config.getChatRecordingService();
           recorder?.recordUserMessage(
             request,
@@ -4875,10 +4960,7 @@ export class LlmClient {
 
         this.sessionTurnCount++;
 
-        if (
-          messageType === SendMessageType.UserQuery &&
-          !options?.userTurnRecordedByHost
-        ) {
+        if (messageType === SendMessageType.UserQuery && !hasFileHistory) {
           try {
             await this.config.getFileHistoryService().makeSnapshot(prompt_id);
             try {
@@ -5363,132 +5445,126 @@ export class LlmClient {
 
       if (messageType === SendMessageType.ToolResult) {
         let carriesAgentToolResult = false;
-        // A host that runs its own tool-call guards also builds the
-        // tool-result message with its own todo reminder.
-        if (!options?.toolLoopGuardsByHost) {
-          // Record executed tool results for stateful read tools (task_list)
-          // so the loop guards can distinguish productive re-polling — the
-          // shared task board changed between identical calls — from a stuck
-          // loop (issue #9450). A detection here (the result-aware global
-          // duplicate count) halts the turn exactly like the event-loop
-          // guards below.
-          for (const part of requestToSend) {
-            if (
-              typeof part !== 'object' ||
-              part === null ||
-              !('functionResponse' in part)
-            ) {
-              continue;
-            }
-            const functionResponseId = (part as Part).functionResponse?.id;
-            if (!functionResponseId) continue;
-            if (
-              this.loopDetector.recordToolResultByCallId(
-                functionResponseId,
-                [part as Part],
-                { queueReminders: ownsExplorationBudget },
-              )
-            ) {
-              for (const goalEvent of await finalizeInterruptedGoalTurn(
-                undefined,
-                'loop detected',
-              )) {
-                yield goalEvent;
-              }
-              const loopType = this.loopDetector.getLastLoopType();
-              yield {
-                type: LlmEventType.LoopDetected,
-                ...(loopType && {
-                  value: { loopType, ...this.loopDetector.getLastLoopDetail() },
-                }),
-              };
-              await arenaAgentClient?.reportError('Loop detected');
-              this.lastApiCompletionTimestamp = Date.now();
-              endCurrentInteraction('error', 'loop detected', 'loop_detected');
-              this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-              this.fireLoopDetectedStopFailure(loopType);
-              return turn;
-            }
+        // Record executed tool results for stateful read tools (task_list)
+        // so the loop guards can distinguish productive re-polling — the
+        // shared task board changed between identical calls — from a stuck
+        // loop (issue #9450). A detection here (the result-aware global
+        // duplicate count) halts the turn exactly like the event-loop
+        // guards below.
+        for (const part of requestToSend) {
+          if (
+            typeof part !== 'object' ||
+            part === null ||
+            !('functionResponse' in part)
+          ) {
+            continue;
           }
-          // A top-level Agent tool result means a delegated execution just
-          // returned (#10953): real work advanced while the parent earned a
-          // single tool turn, so the turn budget cannot come due on its own.
-          // Force the reminder exactly where the progress information arrives.
-          // A bridged delegation returns under the tool_call envelope (the
-          // scheduler keeps the model-facing request name on the response
-          // part), so also correlate by call id with the functionCall recorded
-          // in history and unwrap the resolved target — the same correlation
-          // seedRecentCompletedToolNamesFromHistory uses. The force stays
-          // specific to calls that actually resolved to Agent: the goal tools
-          // are bridged too, and per-turn injection grows context linearly.
-          let bridgedResponseIds: Set<string> | undefined;
-          for (const part of requestToSend) {
-            if (typeof part !== 'object' || part === null) {
-              continue;
+          const functionResponseId = (part as Part).functionResponse?.id;
+          if (!functionResponseId) continue;
+          if (
+            this.loopDetector.recordToolResultByCallId(
+              functionResponseId,
+              [part as Part],
+              { queueReminders: ownsExplorationBudget },
+            )
+          ) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              undefined,
+              'loop detected',
+            )) {
+              yield goalEvent;
             }
-            const response = part.functionResponse;
-            if (!response) {
-              continue;
-            }
-            if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
-              carriesAgentToolResult = true;
-              break;
-            }
-            if (response.name === ToolNames.TOOL_CALL && response.id) {
-              // The bridge prefixes mark calls that never started. A bridged
-              // Agent that ran before failing or being cancelled carries an
-              // unprefixed error: real work advanced, so force the reminder
-              // like the direct-Agent branch and the history seeding pass.
-              const errorText = (
-                response.response as Record<string, unknown> | undefined
-              )?.['error'];
-              if (
-                typeof errorText === 'string' &&
-                (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
-                  errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
-              ) {
-                continue;
-              }
-              (bridgedResponseIds ??= new Set<string>()).add(response.id);
-            }
-          }
-          if (!carriesAgentToolResult && bridgedResponseIds) {
-            // Newest-first over raw history: the matching functionCall is the
-            // model message that just ran, so the scan exits at the first
-            // hit instead of cloning and walking the whole history per send.
-            carriesAgentToolResult =
-              this.getChat().findLastHistoryEntry((message) =>
-                (message.parts ?? []).some((historyPart) => {
-                  const call = historyPart.functionCall;
-                  if (
-                    call?.name !== ToolNames.TOOL_CALL ||
-                    !call.id ||
-                    !bridgedResponseIds.has(call.id)
-                  ) {
-                    return false;
-                  }
-                  const bridgedName = (
-                    call.args as Record<string, unknown> | undefined
-                  )?.['name'];
-                  if (typeof bridgedName !== 'string') {
-                    return false;
-                  }
-                  const targetName = canonicalToolName(bridgedName);
-                  return (
-                    (resolveRegisteredToolName(
-                      targetName,
-                      this.config.getToolRegistry().getAllToolNames(),
-                    ) ?? targetName) === ToolNames.AGENT
-                  );
-                }),
-              ) !== undefined;
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: LlmEventType.LoopDetected,
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
+            };
+            await arenaAgentClient?.reportError('Loop detected');
+            this.lastApiCompletionTimestamp = Date.now();
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
+            return turn;
           }
         }
-        const activeTodoReminder = options?.toolLoopGuardsByHost
-          ? undefined
-          : carriesAgentToolResult
-            ? this.config.takeActiveTodoReminder(prompt_id, true)
-            : this.config.takeActiveTodoReminder(prompt_id);
+        // A top-level Agent tool result means a delegated execution just
+        // returned (#10953): real work advanced while the parent earned a
+        // single tool turn, so the turn budget cannot come due on its own.
+        // Force the reminder exactly where the progress information arrives.
+        // A bridged delegation returns under the tool_call envelope (the
+        // scheduler keeps the model-facing request name on the response
+        // part), so also correlate by call id with the functionCall recorded
+        // in history and unwrap the resolved target — the same correlation
+        // seedRecentCompletedToolNamesFromHistory uses. The force stays
+        // specific to calls that actually resolved to Agent: the goal tools
+        // are bridged too, and per-turn injection grows context linearly.
+        let bridgedResponseIds: Set<string> | undefined;
+        for (const part of requestToSend) {
+          if (typeof part !== 'object' || part === null) {
+            continue;
+          }
+          const response = part.functionResponse;
+          if (!response) {
+            continue;
+          }
+          if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
+            carriesAgentToolResult = true;
+            break;
+          }
+          if (response.name === ToolNames.TOOL_CALL && response.id) {
+            // The bridge prefixes mark calls that never started. A bridged
+            // Agent that ran before failing or being cancelled carries an
+            // unprefixed error: real work advanced, so force the reminder
+            // like the direct-Agent branch and the history seeding pass.
+            const errorText = (
+              response.response as Record<string, unknown> | undefined
+            )?.['error'];
+            if (
+              typeof errorText === 'string' &&
+              (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
+                errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
+            ) {
+              continue;
+            }
+            (bridgedResponseIds ??= new Set<string>()).add(response.id);
+          }
+        }
+        if (!carriesAgentToolResult && bridgedResponseIds) {
+          // Newest-first over raw history: the matching functionCall is the
+          // model message that just ran, so the scan exits at the first
+          // hit instead of cloning and walking the whole history per send.
+          carriesAgentToolResult =
+            this.getChat().findLastHistoryEntry((message) =>
+              (message.parts ?? []).some((historyPart) => {
+                const call = historyPart.functionCall;
+                if (
+                  call?.name !== ToolNames.TOOL_CALL ||
+                  !call.id ||
+                  !bridgedResponseIds.has(call.id)
+                ) {
+                  return false;
+                }
+                const bridgedName = (
+                  call.args as Record<string, unknown> | undefined
+                )?.['name'];
+                if (typeof bridgedName !== 'string') {
+                  return false;
+                }
+                const targetName = canonicalToolName(bridgedName);
+                return (
+                  (resolveRegisteredToolName(
+                    targetName,
+                    this.config.getToolRegistry().getAllToolNames(),
+                  ) ?? targetName) === ToolNames.AGENT
+                );
+              }),
+            ) !== undefined;
+        }
+        const activeTodoReminder = carriesAgentToolResult
+          ? this.config.takeActiveTodoReminder(prompt_id, true)
+          : this.config.takeActiveTodoReminder(prompt_id);
         const explorationReminder =
           this.loopDetector.isDisabledForSession() || !ownsToolLoopGuards
             ? undefined
@@ -5678,7 +5754,6 @@ export class LlmClient {
           // whether they remind or stop.
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
-            !options?.toolLoopGuardsByHost &&
             this.loopDetector.checkAlwaysOnSafeties(event, {
               queueReminders: ownsExplorationBudget,
             });
@@ -5761,7 +5836,7 @@ export class LlmClient {
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event, {
               queueReminders: ownsExplorationBudget,
-              toolCallPatterns: !options?.toolLoopGuardsByHost,
+              toolCallPatterns: true,
             });
           if (heuristicLoop) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(

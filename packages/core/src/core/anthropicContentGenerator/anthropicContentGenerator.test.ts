@@ -1687,7 +1687,9 @@ describe('AnthropicContentGenerator', () => {
     });
   });
 
-  describe('Anthropic-compatible proxy thinking history', () => {
+  describe('Anthropic thinking history', () => {
+    afterEach(() => vi.unstubAllEnvs());
+
     const unsignedThinkingConversation = [
       userText('First'),
       content(
@@ -1716,16 +1718,227 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
-    it('does not rewrite unsigned history for the native Anthropic API', async () => {
-      const request = await sendWithBaseUrl(NATIVE);
+    it.each(
+      ['claude-opus-4-5', 'claude-opus-4-6', 'claude-opus-5-5'].flatMap(
+        (model) =>
+          [true, false].map((includeThoughts) => ({ model, includeThoughts })),
+      ),
+    )(
+      'cleans native history for $model with includeThoughts=$includeThoughts',
+      async ({ model, includeThoughts }) => {
+        const { req } = await send(
+          maxCfg(64_000, {
+            model,
+            baseUrl: NATIVE,
+            reasoning: { effort: 'medium' },
+          }),
+          {
+            contents: [
+              userText('First'),
+              content(
+                'model',
+                { text: 'unsigned reasoning', thought: true },
+                {
+                  text: 'empty signature',
+                  thought: true,
+                  thoughtSignature: '',
+                },
+                {
+                  text: 'signed reasoning',
+                  thought: true,
+                  thoughtSignature: 'native-signature',
+                },
+                { text: 'Visible answer' },
+              ),
+              userText('Second'),
+            ],
+            config: { thinkingConfig: { includeThoughts } },
+          },
+        );
 
-      expect(request.messages[1]).toEqual({
-        role: 'assistant',
-        content: [
-          { type: 'thinking', thinking: 'unsigned reasoning' },
+        expect(req.messages[1]).toEqual({
+          role: 'assistant',
+          content: [
+            {
+              type: 'thinking',
+              thinking: 'signed reasoning',
+              signature: 'native-signature',
+            },
+            { type: 'text', text: 'Visible answer' },
+          ],
+        });
+        if (includeThoughts) expect(req.thinking).toBeDefined();
+        else expect(req.thinking).toBeUndefined();
+      },
+    );
+
+    it('cleans native history when reasoning is disabled in model configuration', async () => {
+      const { req } = await send(
+        nativeCfg('claude-opus-5-5', { reasoning: false }),
+        { contents: unsignedThinkingConversation },
+      );
+
+      expect(req.thinking).toBeUndefined();
+      expect(req.messages[1].content).toEqual([
+        { type: 'text', text: 'Visible answer' },
+      ]);
+    });
+
+    it.each(['default', 'environment'])(
+      'cleans history when the native endpoint comes from the SDK %s',
+      async (source) => {
+        vi.stubEnv(
+          'ANTHROPIC_BASE_URL',
+          source === 'environment' ? NATIVE : undefined,
+        );
+        const { req } = await send(cfg({ model: 'claude-opus-5-5' }), {
+          contents: unsignedThinkingConversation,
+        });
+
+        expect(req.messages[1].content).toEqual([
           { type: 'text', text: 'Visible answer' },
+        ]);
+      },
+    );
+
+    it.each([NATIVE, PROXY])(
+      'demotes foreign reasoning only for an adaptive proxy at %s',
+      async (baseUrl) => {
+        const { req } = await send(nativeCfg('claude-opus-4-6', { baseUrl }), {
+          contents: [
+            userText('First'),
+            content(
+              'model',
+              {
+                text: 'Foreign reasoning summary',
+                thought: true,
+                thoughtSignature: JSON.stringify({
+                  id: 'rs_1',
+                  encrypted_content: 'opaque',
+                }),
+              },
+              { text: 'Visible answer' },
+            ),
+            userText('Second'),
+          ],
+        });
+
+        expect(req.messages[1].content).toEqual([
+          ...(baseUrl === NATIVE
+            ? []
+            : [{ type: 'text', text: 'Foreign reasoning summary' }]),
+          { type: 'text', text: 'Visible answer' },
+        ]);
+      },
+    );
+
+    it('removes a native thinking-only turn without changing the stored history', async () => {
+      const contents = [
+        userText('First'),
+        content('model', { text: 'unsigned reasoning', thought: true }),
+        userText('Second'),
+      ];
+      const original = structuredClone(contents);
+      const { req } = await send(
+        nativeCfg('claude-opus-5-5', { enableCacheControl: false }),
+        { contents },
+      );
+
+      expect(req.messages).toHaveLength(1);
+      expect(req.messages[0].content).toEqual([
+        { type: 'text', text: 'First' },
+        { type: 'text', text: 'Second' },
+      ]);
+      expect(contents).toEqual(original);
+    });
+
+    it('keeps sanitized native history stable when replaying the next signed response', async () => {
+      const contents = structuredClone(unsignedThinkingConversation);
+      const original = structuredClone(contents);
+      const { req, generator } = await send(
+        nativeCfg('claude-opus-5-5', {
+          enableCacheControl: false,
+        }),
+        { contents },
+      );
+      const firstMessages = structuredClone(req.messages);
+
+      await generator.generateContent(
+        hello({
+          contents: [
+            ...contents,
+            content(
+              'model',
+              { text: '', thought: true, thoughtSignature: 'next-signature' },
+              { text: 'Second answer' },
+            ),
+            userText('Third'),
+          ],
+        }),
+      );
+
+      const next = lastCall().req;
+      expect(next.messages.slice(0, firstMessages.length)).toEqual(
+        firstMessages,
+      );
+      expect(next.messages[3].content).toEqual([
+        { type: 'thinking', thinking: '', signature: 'next-signature' },
+        { type: 'text', text: 'Second answer' },
+      ]);
+      expect(next.thinking).toEqual(
+        expect.objectContaining({
+          block_binding: { prefix_mismatch_behavior: 'drop_block' },
+        }),
+      );
+      expect(contents).toEqual(original);
+    });
+
+    it('cleans a completed native tool turn while preserving its tool exchange', async () => {
+      const { req } = await send(nativeCfg('claude-opus-5-5'), {
+        contents: [
+          userText('Run tool'),
+          content(
+            'model',
+            { text: 'unsigned reasoning', thought: true },
+            fnCall('tool', {}, 't1'),
+          ),
+          content('user', fnResponse('tool', { output: 'ok' }, 't1')),
+          modelText('Finished'),
+          userText('Next'),
         ],
       });
+
+      expect(req.messages[1].content).toEqual([
+        { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+      ]);
+      expect(req.messages[2].content).toEqual([
+        expect.objectContaining({ type: 'tool_result', tool_use_id: 't1' }),
+      ]);
+    });
+
+    it('rejects an unsigned earlier step in a native tool loop before empty-block cleanup', async () => {
+      await expect(
+        sendWithBaseUrl(NATIVE, [
+          userText('Run tools'),
+          content(
+            'model',
+            { text: '', thought: true },
+            fnCall('first', {}, 't1'),
+          ),
+          content('user', fnResponse('first', { output: 'ok' }, 't1')),
+          content(
+            'model',
+            {
+              text: 'signed reasoning',
+              thought: true,
+              thoughtSignature: 'sig',
+            },
+            fnCall('second', {}, 't2'),
+          ),
+          content('user', fnResponse('second', { output: 'ok' }, 't2')),
+        ]),
+      ).rejects.toThrow('thinking signature');
+      expect(createImpl).not.toHaveBeenCalled();
     });
 
     it('fills an empty signature for unsigned history through a strict non-4.6 proxy', async () => {
@@ -1734,7 +1947,7 @@ describe('AnthropicContentGenerator', () => {
       // expected to behave the same but untested) accepts an empty
       // signature, so we fill `signature: ''` instead of shipping a
       // `thinking` block with no `signature` field (HTTP 400). Unlike 4.6+
-      // the block is NOT dropped, and unlike the native API it IS rewritten.
+      // the block is filled rather than dropped.
       // https://github.com/QwenLM/qwen-code/issues/11772
       const request = (
         await send(
@@ -1813,25 +2026,25 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
-    it('fails before sending an unsigned tool-use turn through a proxy', async () => {
-      const toolUseConversation = [
-        userText('Run tool'),
-        content(
-          'model',
-          { text: 'unsigned reasoning', thought: true },
-          fnCall('tool', {}, 't1'),
-        ),
-        content('user', fnResponse('tool', { output: 'ok' }, 't1')),
-      ];
+    it.each([NATIVE, PROXY])(
+      'fails before sending an unsigned tool-use turn at %s',
+      async (baseUrl) => {
+        const toolUseConversation = [
+          userText('Run tool'),
+          content(
+            'model',
+            { text: 'unsigned reasoning', thought: true },
+            fnCall('tool', {}, 't1'),
+          ),
+          content('user', fnResponse('tool', { output: 'ok' }, 't1')),
+        ];
 
-      await expect(
-        sendWithBaseUrl(
-          'https://internal-proxy.example/anthropic',
-          toolUseConversation,
-        ),
-      ).rejects.toThrow('proxy omitted the thinking signature');
-      expect(createImpl).not.toHaveBeenCalled();
-    });
+        await expect(
+          sendWithBaseUrl(baseUrl, toolUseConversation),
+        ).rejects.toThrow('thinking signature');
+        expect(createImpl).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // Regression: Anthropic rejects a thinking-enabled tool loop whose final
@@ -1944,6 +2157,28 @@ describe('AnthropicContentGenerator', () => {
           request,
         )
       ).req;
+
+    it('preserves unsigned reasoning and fills its signature instead of dropping it', async () => {
+      const req = await sendDeepSeek(
+        {},
+        {
+          contents: [
+            userText('First'),
+            content(
+              'model',
+              { text: 'DeepSeek reasoning', thought: true },
+              { text: 'Answer' },
+            ),
+            userText('Second'),
+          ],
+        },
+      );
+
+      expect(req.messages[1].content).toEqual([
+        { type: 'thinking', thinking: 'DeepSeek reasoning', signature: '' },
+        { type: 'text', text: 'Answer' },
+      ]);
+    });
 
     it.each([
       [

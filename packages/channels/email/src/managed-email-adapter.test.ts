@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImapFlow } from 'imapflow';
 import type { Transporter } from 'nodemailer';
 import { simpleParser } from 'mailparser';
+import { MANAGED_OUTBOUND_LIMIT } from '@qwen-code/channel-base';
 import {
   ManagedEmailAdapter,
   type ManagedChannelControlPlane,
@@ -382,6 +383,43 @@ describe('managed email inbound', () => {
     // Nothing is admitted or claimed after a compromise reaps the lock.
     expect(plane.events).toHaveLength(0);
     expect(state(adapter).pending).toEqual([]);
+    await adapter.disconnect();
+  });
+
+  it('stops persisting after the state lock is compromised (#17173 R6/R7 parity)', async () => {
+    const adapter = make();
+    await adapter.connect();
+    const store = (
+      adapter as unknown as { store: { save: (s: unknown) => void } }
+    ).store;
+    const saveSpy = vi.spyOn(store, 'save');
+    // Park the tick inside submitInbound so its post-answer persist lands after
+    // the compromise — the in-flight tick, not a shutdown drain, is the writer
+    // the ownership guard must silence.
+    let releaseSubmit!: () => void;
+    const submitGate = new Promise<void>((resolve) => {
+      releaseSubmit = resolve;
+    });
+    let submitEntered!: () => void;
+    const enteredSubmit = new Promise<void>((resolve) => {
+      submitEntered = resolve;
+    });
+    const originalSubmit = plane.submitInbound.bind(plane);
+    plane.submitInbound = async (event) => {
+      submitEntered();
+      await submitGate;
+      return originalSubmit(event);
+    };
+    append(raw('m1', 'hello'));
+    const ticking = adapter.tick();
+    // The email tick polls the mailbox before it submits; wait until it is
+    // actually parked inside submitInbound, not merely started.
+    await enteredSubmit;
+    saveSpy.mockClear();
+    lockCompromised!(); // a second owner won the mailbox mid-tick
+    releaseSubmit();
+    await ticking;
+    expect(saveSpy).not.toHaveBeenCalled();
     await adapter.disconnect();
   });
 
@@ -1544,6 +1582,23 @@ describe('managed email outbound', () => {
       segments: [{ ordinal: 0, segmentId: `${id}:0`, text }],
     };
   }
+
+  it('caps the persisted outbound ledger at the shared limit (R1-3)', async () => {
+    const adapter = make();
+    await adapter.connect();
+    // Receipt answers are lost so every sent segment stays in the ledger.
+    plane.receipt = async () => {
+      throw Object.assign(new Error('answer lost'), { status: 503 });
+    };
+    plane.outbox = Array.from({ length: MANAGED_OUTBOUND_LIMIT + 1 }, (_, i) =>
+      delivery(`d-${i}`),
+    );
+    await adapter.tick();
+    expect(sent).toHaveBeenCalledTimes(MANAGED_OUTBOUND_LIMIT + 1);
+    // The append slices to the cap, so the persisted ledger stays loadable.
+    expect(state(adapter).outbound).toHaveLength(MANAGED_OUTBOUND_LIMIT);
+    await adapter.disconnect();
+  });
 
   it('sends a claimed reply into the thread and reports the provider acceptance', async () => {
     const adapter = make();

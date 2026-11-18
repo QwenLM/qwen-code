@@ -95,7 +95,7 @@ class ManagedStoreDecompositionTest {
                 insertSessionCommand/11::REQUIRED:DEFAULT:false
                 insertSessionCommand/12::REQUIRED:DEFAULT:false
                 insertWorkspaceSessionCommand/1::REQUIRED:DEFAULT:false insertInternalTeamLeadSessionCommand/6::REQUIRED:DEFAULT:false findWorkspaceCreateReplay/4:-
-                replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false insertCsiSessionCommand/7:- requireCsiRequest/2:-
+                replayWorkspaceSessionCommand/4::REQUIRED:DEFAULT:false
                 insertChildSessionCommand/8::REQUIRED:DEFAULT:false insertChildSessionCommand/9::REQUIRED:DEFAULT:false findChildWorkspaceCwd/3:-
                 insertPublicChildSessionCommand/9::REQUIRED:DEFAULT:false replayChildSessionCommand/4::REQUIRED:DEFAULT:false findChildLineage/2:-
                 workspaceSessionOptions/2::REQUIRED:DEFAULT:false supportsPlanMode/1:- hasMcpServers/1:-
@@ -146,6 +146,7 @@ class ManagedStoreDecompositionTest {
         assertEntries(JdbcManagedSessionStore.class, """
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-
                 lockBoundedResult/1:- namedRootDeadlock/1:- authorizeOrdinary/4::REQUIRED:DEFAULT:false
+                creatorActor/2:-
                 approvalSelection/4::REQUIRED:DEFAULT:false usesDataSource/1:- lockSnapshotWriter/4:-
                 lockPublicationWriter/6:- lockPublicationWriter/8:- acquireWriter/4::NOT_SUPPORTED:DEFAULT:false acquireWriter/5::NOT_SUPPORTED:DEFAULT:false
                 renewWriter/4::REQUIRED:DEFAULT:false renewWriter/5::REQUIRED:DEFAULT:false sealWriter/4::REQUIRED:DEFAULT:false
@@ -155,9 +156,8 @@ class ManagedStoreDecompositionTest {
                 commandTransaction/7::REQUIRED:READ_COMMITTED:true hasPristineInitialJournal/3::NOT_SUPPORTED:DEFAULT:true readResource/5:-
                 readSnapshotResource/5:- readOwnerResource/5:- publishAgentInstructions/4::REQUIRED:DEFAULT:false
                 publishAgentSkills/4::REQUIRED:DEFAULT:false publishInheritedExtensionResource/4::REQUIRED:DEFAULT:false publishToolResult/4::REQUIRED:DEFAULT:false
-                publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:- requireCsiApplicationCredential/3:-
-                requireCsiHistoricalCredential/5:- preflightCsiTerminal/5:- commitCsiTerminal/5:-
-                validateCsiTerminalBytes/1:- lockCsiOriginal/2:- hasLiveWriter/2::REQUIRED:DEFAULT:false
+                publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:-
+                hasLiveWriter/2::REQUIRED:DEFAULT:false
                 commandKeyHash/2:- journalCorrupt/0:- journalPacks/0:-
                 """);
     }

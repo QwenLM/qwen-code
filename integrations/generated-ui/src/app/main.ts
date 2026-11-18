@@ -8,10 +8,12 @@ import {
   applyDocumentTheme,
   applyHostStyleVariables,
 } from '@modelcontextprotocol/ext-apps';
+import { z } from 'zod';
 import { ViewController } from './controller.js';
-import type { CaptureResult, ViewState } from './controller.js';
+import type { CaptureResult, ViewState, ViewStateHost } from './controller.js';
 import { buildContinuationText } from './continuation.js';
 import { translator, type MessageKey } from './messages.js';
+import { MAX_STATE_BYTES } from './runtime-contract.js';
 import { ViewSurface, type HostStyle } from './surface.js';
 import './styles.css';
 
@@ -46,6 +48,15 @@ const REVIEW_OUTCOME = 'qwen-code/message-review';
 const REVIEW_REASON = 'qwen-code/message-error';
 // Values settle for this long before they are offered as model context.
 const CONTEXT_SYNC_DELAY = 800;
+// The host keeps the card's saved state. It knows which card this frame shows,
+// so requests never name one; it also reports each save's outcome itself.
+const STATE_CAPABILITY = 'qwen-code/generated-ui-state';
+const STATE_LOAD = 'qwen-code/generated-ui-state/load';
+const STATE_SAVE = 'qwen-code/generated-ui-state/save';
+// Give the host's daemon read (30 seconds) time to return or report a failure.
+const STATE_LOAD_TIMEOUT_MS = 35_000;
+const stateLoadResult = z.object({ value: z.unknown() });
+const stateSaveResult = z.object({});
 
 let t = translator(undefined);
 let documentTitle = '';
@@ -64,6 +75,10 @@ let syncedContext = '';
 // Host-provided reason a message was not sent, shown after the status.
 let continuationDetail = '';
 let interacted = false;
+// Saves are sent only after the saved state was read; then the host, not
+// this frame's page-local notice, says what is kept.
+let canSaveState = false;
+let savingState = false;
 let hostStyle: HostStyle = {};
 let continuationState:
   | 'idle'
@@ -168,7 +183,7 @@ function renderState(): void {
   const message = notices.join(' ');
   setText(notice, message);
   notice.hidden = !message;
-  localNotice.hidden = !interacted || terminal;
+  localNotice.hidden = !interacted || terminal || savingState;
   renderContinuation();
 }
 
@@ -382,6 +397,53 @@ function onState(next: ViewState): void {
   renderState();
 }
 
+// ext-apps types only its own methods; the host registers these two.
+function hostRequest<T extends z.ZodType>(
+  method: string,
+  params: Record<string, unknown>,
+  schema: T,
+  timeout = 15_000,
+): Promise<z.output<T>> {
+  return app.request(
+    { method, params } as unknown as Parameters<App['request']>[0],
+    schema,
+    { timeout },
+  ) as Promise<z.output<T>>;
+}
+
+const stateHost: ViewStateHost = {
+  async load(document) {
+    if (
+      !document.cardId ||
+      !app.getHostCapabilities()?.experimental?.[STATE_CAPABILITY]
+    )
+      return null;
+    const { value } = await hostRequest(
+      STATE_LOAD,
+      {},
+      stateLoadResult,
+      STATE_LOAD_TIMEOUT_MS,
+    );
+    const json = JSON.stringify(value ?? null);
+    if (new TextEncoder().encode(json).byteLength > MAX_STATE_BYTES)
+      throw new Error('Saved view state is too large.');
+    canSaveState = true;
+    return json;
+  },
+  save(json) {
+    if (!canSaveState) return;
+    if (!savingState) {
+      savingState = true;
+      renderState();
+    }
+    void hostRequest(
+      STATE_SAVE,
+      { value: JSON.parse(json) as unknown },
+      stateSaveResult,
+    ).catch(() => {});
+  },
+};
+
 const surface = new ViewSurface(
   frame,
   (event) => {
@@ -403,6 +465,7 @@ const controller = new ViewController(
     fitSummary();
   },
   onState,
+  stateHost,
 );
 
 app.addEventListener('toolresult', (result) => {

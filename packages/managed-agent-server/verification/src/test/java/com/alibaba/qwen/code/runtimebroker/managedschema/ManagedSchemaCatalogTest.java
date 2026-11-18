@@ -158,16 +158,16 @@ class ManagedSchemaCatalogTest {
 
     @Test
     void acceptsNumericGeneratedBooleansWithoutAcceptingExpressionDrift() throws Exception {
-        String body = "\n    is_csi_guard BOOLEAN GENERATED ALWAYS AS (COALESCE("
-                + "tool_profile = 'csi-files-retirement/1' OR runtime_request_key IS NOT NULL, FALSE))\n";
-        String numeric = "coalesce(`tool_profile` = 'csi-files-retirement/1'"
-                + " or `runtime_request_key` is not null,0)";
+        String body = "\n    is_probe_pending BOOLEAN GENERATED ALWAYS AS (COALESCE("
+                + "probe_kind = 'probe/1' OR probe_key IS NOT NULL, FALSE))\n";
+        String numeric = "coalesce(`probe_kind` = 'probe/1'"
+                + " or `probe_key` is not null,0)";
         try (var data = fixture(false); var update = data.prepareStatement(
                 "UPDATE catalog_fixture.columns SET generation_expression=?")) {
             Connection connection = mariaDb(data, "MySQL", 1, 1);
             update.setString(1, numeric);
             update.executeUpdate();
-            ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body);
+            ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_generated_probe", body);
             for (String changed : new String[] {
                     numeric.replace(",0)", ",1)"),
                     numeric.replace(",0)", ",'FALSE')"),
@@ -175,7 +175,7 @@ class ManagedSchemaCatalogTest {
                 update.setString(1, changed);
                 update.executeUpdate();
                 assertThrows(SQLException.class,
-                        () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_session", body),
+                        () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, "ma_generated_probe", body),
                         changed);
             }
         }
@@ -225,6 +225,46 @@ class ManagedSchemaCatalogTest {
         }
     }
 
+    @Test
+    void parsesUnindentedMultiLineAndQuotedSemicolonDdlWithoutFormattingSensitivity() throws Exception {
+        String body = """
+            -- unindented column with same-line generated comment and semicolons/parens in comments
+            is_probe_pending
+                BOOLEAN
+                GENERATED ALWAYS AS (
+                    COALESCE(probe_kind = 'probe/1' OR probe_key IS NOT NULL, FALSE)
+                ) COMMENT 'same-line comment; with (parentheses), commas, and -- dashes',
+            CONSTRAINT
+                ck_probe
+                CHECK (
+                    state = 'OK'
+                )
+            """;
+        String numeric = "coalesce(`probe_kind` = 'probe/1' or `probe_key` is not null,0)";
+        try (var data = fixture(true);
+                var updateGen = data.prepareStatement(
+                        "UPDATE catalog_fixture.columns SET generation_expression=?");
+                var updateChk = data.prepareStatement(
+                        "UPDATE catalog_fixture.check_constraints SET check_clause=?")) {
+            updateGen.setString(1, numeric);
+            updateGen.executeUpdate();
+            updateChk.setString(1, "(state = 'OK')");
+            updateChk.executeUpdate();
+            ManagedSchemaCatalog.validateGeneratedColumns(
+                    mariaDb(data, "MySQL", 1, 1), "ma_generated_probe", body);
+            ManagedSchemaCatalog.validateChecks(data, "ma_operation", body);
+        }
+
+        // Canonical V1 DDL remains valid when arbitrary 4-space indentation is collapsed or tabs are used.
+        String unindentedDdl = ManagedSchema.ddl().replaceAll("(?m)^    ", "\t");
+        var statements = ManagedSchemaDdlParser.splitStatements(
+                "CREATE TABLE ma_probe (id BIGINT COMMENT 'semi;colon') ENGINE=InnoDB;\n-- trailing\n");
+        assertTrue(statements.size() == 1 && statements.getFirst().contains("semi;colon"));
+        var parsedCanonical = ManagedSchemaDdlParser.parse(ManagedSchema.ddl());
+        var parsedTabIndented = ManagedSchemaDdlParser.parse(unindentedDdl);
+        org.junit.jupiter.api.Assertions.assertEquals(parsedCanonical, parsedTabIndented);
+    }
+
     private static Connection fixture(boolean enforcedColumn) throws SQLException {
         Connection data = DriverManager.getConnection("jdbc:h2:mem:catalog-" + UUID.randomUUID());
         try (var statement = data.createStatement()) {
@@ -232,7 +272,7 @@ class ManagedSchemaCatalogTest {
             statement.execute("CREATE TABLE catalog_fixture.columns"
                     + " (column_name VARCHAR, generation_expression VARCHAR, table_schema VARCHAR, table_name VARCHAR)");
             statement.execute("INSERT INTO catalog_fixture.columns"
-                    + " VALUES ('is_csi_guard',NULL,'PUBLIC','MA_SESSION')");
+                    + " VALUES ('is_probe_pending',NULL,'PUBLIC','MA_GENERATED_PROBE')");
             statement.execute("CREATE TABLE catalog_fixture.table_constraints"
                     + " (constraint_name VARCHAR, constraint_schema VARCHAR, table_schema VARCHAR,"
                     + " table_name VARCHAR, constraint_type VARCHAR"

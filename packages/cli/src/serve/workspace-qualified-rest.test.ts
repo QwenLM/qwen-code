@@ -25,6 +25,7 @@ import {
   type WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
 import {
   WorkspaceSkillNotFoundError,
   type DaemonWorkspaceService,
@@ -114,6 +115,23 @@ function makeBridge(): AcpSessionBridge {
       sessions: [],
     })),
     listWorkspaceSessions: vi.fn(() => []),
+    getSessionGoal: vi.fn(async () => ({
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'qualified objective',
+          status: 'active',
+          evidenceCursor: { recordId: null },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1000,
+          updatedAt: 1000,
+        },
+      },
+    })),
     getSessionSummary: vi.fn(() => {
       throw new Error('not found');
     }),
@@ -238,6 +256,7 @@ async function makeHarness(opts?: {
   token?: string;
   persistSetting?: boolean;
   primaryWriteHold?: { hold: Promise<void>; onWriteStart?: () => void };
+  liveConversation?: boolean;
 }) {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), 'qwen-workspace-qualified-rest-'),
@@ -328,6 +347,29 @@ async function makeHarness(opts?: {
     generationGuard: createWorkspaceGenerationGuard(),
   };
 
+  const conversationsCwd = canonicalizeWorkspace(
+    path.join(scratch, 'conversations'),
+  );
+  const conversations: WorkspaceRuntime | undefined = opts?.liveConversation
+    ? {
+        workspaceId: 'conversations-id',
+        workspaceCwd: conversationsCwd,
+        sessionRuntimeBaseDir: path.join(conversationsCwd, '.runtime'),
+        primary: false,
+        trusted: true,
+        provenance: 'live-conversation',
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: makeBridge(),
+        workspaceService: makeWorkspaceService('conversations'),
+        routeFileSystemFactory: createWorkspaceFileSystemFactory({
+          boundWorkspaces: [conversationsCwd],
+          trusted: true,
+          emit: () => {},
+        }),
+        clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+      }
+    : undefined;
+
   // Really apply Workspace-scope writes to the workspace settings file. The
   // Session Workflow route pushes the post-write EFFECTIVE value read back
   // via loadSettings, so a pure spy would leave the read-back at the mercy of
@@ -355,7 +397,11 @@ async function makeHarness(opts?: {
       await fsp.writeFile(file, JSON.stringify(current, null, 2));
     },
   );
-  const workspaceRegistry = createWorkspaceRegistry([primary, secondary]);
+  const workspaceRegistry = createWorkspaceRegistry([
+    primary,
+    secondary,
+    ...(conversations ? [conversations] : []),
+  ]);
   const app = createServeApp(
     { ...baseOpts, workspace: primaryCwd, token: opts?.token },
     undefined,
@@ -371,6 +417,7 @@ async function makeHarness(opts?: {
     primaryCwd,
     secondaryCwd,
     secondaryId: secondary.workspaceId,
+    conversationsId: conversations?.workspaceId,
     primaryBridge: primary.bridge,
     secondaryBridge: secondary.bridge,
     secondaryWorkspaceService,
@@ -456,6 +503,86 @@ describe('workspace-qualified file deletion isolation', () => {
 });
 
 describe('workspace-qualified core REST', () => {
+  it('serves the workspace-qualified goals listing through createServeApp', async () => {
+    // Pins the server.ts registration itself: deleting it would 404 the
+    // qualified path while every route-local suite stayed green.
+    const h = await makeHarness();
+    try {
+      const sessions = h.secondaryBridge
+        .listWorkspaceSessions as unknown as ReturnType<typeof vi.fn>;
+      sessions.mockReturnValue([
+        {
+          sessionId: 'sec-goal-session',
+          workspaceCwd: h.secondaryCwd,
+          createdAt: new Date(0).toISOString(),
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+      ]);
+
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/goals`)
+        .set('Host', host());
+
+      expect(res.status).toBe(200);
+      expect(res.body.v).toBe(1);
+      expect(res.body.goals).toHaveLength(1);
+      expect(res.body.goals[0]).toMatchObject({
+        sessionId: 'sec-goal-session',
+        condition: 'qualified objective',
+      });
+      expect(sessions).toHaveBeenCalledWith(h.secondaryCwd);
+
+      const primaryRes = await request(h.app).get('/goals').set('Host', host());
+      expect(primaryRes.status).toBe(200);
+      expect(primaryRes.body.goals).toEqual([]);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects the qualified goals listing for an untrusted workspace', async () => {
+    const h = await makeHarness({ secondaryTrusted: false });
+    try {
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/goals`)
+        .set('Host', host());
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('wires the Conversations activity gate into the qualified goals listing', async () => {
+    // Pins the server.ts wiring itself: dropping conversationRuntimeActivity
+    // from the registration would turn every live-conversation listing into
+    // 503 conversation_runtime_unavailable while every route-local suite
+    // stayed green. The open-gate 200 reds on that mutation; the sealed-gate
+    // 503 additionally pins that the listing runs INSIDE the gate.
+    const h = await makeHarness({ liveConversation: true });
+    try {
+      const goalsPath = `/workspaces/${encodeURIComponent(h.conversationsId!)}/goals`;
+      const open = await request(h.app).get(goalsPath).set('Host', host());
+      expect(open.status).toBe(200);
+      expect(open.body.v).toBe(1);
+
+      const gate = (
+        h.app.locals as {
+          conversationRuntimeActivity?: ConversationRuntimeActivityGate;
+        }
+      ).conversationRuntimeActivity;
+      expect(gate).toBeDefined();
+      await gate!.sealAndWait();
+
+      const sealed = await request(h.app).get(goalsPath).set('Host', host());
+      expect(sealed.status).toBe(503);
+      expect(sealed.body.code).toBe('daemon_draining');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('routes file reads to the workspace selected by id', async () => {
     const h = await makeHarness();
     try {

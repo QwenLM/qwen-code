@@ -704,6 +704,7 @@ export function llmPreparedProviderPin(
     'thinkingMandatory',
     'extra_body',
     'modalities',
+    'imageDetail',
     'schemaCompliance',
     'contextWindowSize',
     'splitToolMedia',
@@ -1721,6 +1722,73 @@ function isDegradedPlaceholderTurn(content: Content): boolean {
       .join('')
       .trim() === UPSTREAM_DEGRADED_PLACEHOLDER
   );
+}
+
+async function abortableProviderStream(
+  pending: Promise<AsyncGenerator<GenerateContentResponse>>,
+  signal?: AbortSignal,
+): Promise<AsyncGenerator<GenerateContentResponse>> {
+  if (!signal) return pending;
+
+  const wait = async <T>(operation: Promise<T>): Promise<T> => {
+    let onAbort!: () => void;
+    let abortImmediate: ReturnType<typeof setImmediate> | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        // Let a cooperative provider report its original error this turn.
+        abortImmediate = setImmediate(() => reject(signal.reason));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+    try {
+      const result = await Promise.race([operation, aborted]);
+      signal.throwIfAborted();
+      return result;
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+      clearImmediate(abortImmediate);
+    }
+  };
+
+  let stream: AsyncGenerator<GenerateContentResponse>;
+  try {
+    stream = await wait(pending);
+  } catch (error) {
+    if (signal.aborted) {
+      void pending.then((late) => late.return(undefined)).catch(() => {});
+    }
+    throw error;
+  }
+
+  return (async function* () {
+    let finished = false;
+    try {
+      for (;;) {
+        let next: IteratorResult<GenerateContentResponse>;
+        try {
+          next = await wait(stream.next());
+        } catch (error) {
+          // Iterator failures already own their cleanup; preserve their error.
+          finished = !signal.aborted;
+          throw error;
+        }
+        if (next.done) {
+          finished = true;
+          return;
+        }
+        yield next.value;
+      }
+    } finally {
+      if (!finished) {
+        // A provider's return can queue behind the next() that ignored abort.
+        // Let the chat unwind and release its send lock without waiting for it.
+        const closing = Promise.resolve().then(() => stream.return(undefined));
+        if (signal.aborted) void closing.catch(() => {});
+        else await wait(closing);
+      }
+    }
+  })();
 }
 
 async function* rejectDegradedPlaceholderResponse(
@@ -3121,6 +3189,11 @@ export class LlmChat {
       config: this.config,
       consecutiveFailures: this.consecutiveFailures,
       originalTokenCount,
+      unaccountedOutputTokens:
+        !originalTokenCountIsEstimated &&
+        originalTokenCountOverride === undefined
+          ? this.lastOutputTokenCount
+          : 0,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       observedServerCeiling: options?.observedServerCeiling,
@@ -3160,7 +3233,7 @@ export class LlmChat {
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
             : newHistory,
-          summaryPrefixLength: newHistory.length,
+          summaryPrefixLength: info.summaryPrefixLength ?? newHistory.length,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -3303,6 +3376,9 @@ export class LlmChat {
     this.chatRecordingService?.recordChatCompression({
       info,
       compressedHistory: newHistory,
+      summaryPrefixLength:
+        getStartupContextLength(newHistory, { includeCompressed: true }) ||
+        undefined,
       completedToolCallIds: this.completedToolCallIds,
     });
     logChatCompression(
@@ -4120,7 +4196,9 @@ export class LlmChat {
           await this.recordCompression({
             info: compressionInfo,
             compressedHistory: [...this.getHistoryShallow(), userContent],
-            summaryPrefixLength: this.getHistoryShallow().length,
+            summaryPrefixLength:
+              compressionInfo.summaryPrefixLength ??
+              this.getHistoryShallow().length,
             completedToolCallIds: this.completedToolCallIds,
           });
         }
@@ -6215,7 +6293,7 @@ export class LlmChat {
     // is the caller's explicit opt-in for the primary model only.
     const persistentMode =
       (overrides?.allowPersistentRetry ?? !overrides) && isUnattendedMode();
-    const streamResponse = await retryWithBackoff(apiCall, {
+    const pendingStream = retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof ResponsesHttpError) {
           return error.shouldRetry(extraRetryErrorCodes);
@@ -6275,6 +6353,10 @@ export class LlmChat {
       },
     });
 
+    const streamResponse = await abortableProviderStream(
+      pendingStream,
+      params.config?.abortSignal,
+    );
     return this.processStreamResponse(
       model,
       rejectDegradedPlaceholderResponse(streamResponse),
