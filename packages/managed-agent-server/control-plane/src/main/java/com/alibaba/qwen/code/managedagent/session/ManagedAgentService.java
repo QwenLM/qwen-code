@@ -290,8 +290,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String title, Map<String, Object> metadata,
             List<InputBlock> blocks,
             com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig) {
-        return createSession(principal == null ? null : principal.tenantId(),
-                principal == null ? null : principal.userId(), principal,
+        if (principal == null) {
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required.");
+        }
+        return createSession(principal.tenantId(), principal.userId(), principal,
                 idempotencyKey, agentId, agentRevision, title, metadata, blocks,
                 modelConfig, null);
     }
@@ -302,8 +305,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             List<InputBlock> blocks,
             com.alibaba.qwen.code.managedagent.model.SessionModelConfig modelConfig,
             String memoryStoreId) {
-        return createSession(principal == null ? null : principal.tenantId(),
-                principal == null ? null : principal.userId(), principal,
+        if (principal == null) {
+            throw new ManagedAgentException(401, "actor_required",
+                    "A trusted actor is required.");
+        }
+        return createSession(principal.tenantId(), principal.userId(), principal,
                 idempotencyKey, agentId, agentRevision, title, metadata, blocks,
                 modelConfig, memoryStoreId);
     }
