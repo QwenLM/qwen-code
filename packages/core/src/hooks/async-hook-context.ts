@@ -17,6 +17,14 @@ import type { PendingAsyncOutput } from './types.js';
 export const ASYNC_HOOK_CONTEXT_OPEN = '<qwen:async-hook-context>';
 export const ASYNC_HOOK_CONTEXT_CLOSE = '</qwen:async-hook-context>';
 
+/**
+ * Upper bound on the joined async block, mirroring the user-prompt-expansion
+ * additional-context cap. The registry accumulates every completion with no
+ * total limit, so a verbose hook (or many completions) could otherwise append
+ * megabytes to the request and to the side query that reuses it.
+ */
+export const MAX_ASYNC_HOOK_CONTEXT_LENGTH = 10_000;
+
 export function wrapAsyncHookContext(context: string): string {
   return `${ASYNC_HOOK_CONTEXT_OPEN}\n${context}\n${ASYNC_HOOK_CONTEXT_CLOSE}`;
 }
@@ -46,8 +54,9 @@ export function isAsyncHookContextPartText(text: string): boolean {
 /**
  * Render pending async output as model-facing text: the additional contexts
  * verbatim, then the notification messages labeled by type and hook. `<`/`>`
- * are escaped so hook output cannot forge the closing tag. Returns null when
- * there is nothing to deliver.
+ * are escaped so hook output cannot forge the closing tag. The joined block is
+ * bounded by `MAX_ASYNC_HOOK_CONTEXT_LENGTH`. Returns null when there is
+ * nothing to deliver.
  */
 export function formatAsyncHookOutput(
   output: PendingAsyncOutput,
@@ -67,7 +76,18 @@ export function formatAsyncHookOutput(
       );
     }
   }
-  return blocks.length > 0 ? blocks.join('\n\n') : null;
+  if (blocks.length === 0) {
+    return null;
+  }
+  const joined = blocks.join('\n\n');
+  if (joined.length <= MAX_ASYNC_HOOK_CONTEXT_LENGTH) {
+    return joined;
+  }
+  // Strip a trailing partial escape entity left by the cut, mirroring
+  // sanitizeUserPromptExpansionAdditionalContext.
+  return joined
+    .slice(0, MAX_ASYNC_HOOK_CONTEXT_LENGTH)
+    .replace(/&(?:lt?|gt?)?$/, '');
 }
 
 /**

@@ -10,6 +10,7 @@ import { HookEventName } from './types.js';
 import {
   ASYNC_HOOK_CONTEXT_OPEN,
   ASYNC_HOOK_CONTEXT_CLOSE,
+  MAX_ASYNC_HOOK_CONTEXT_LENGTH,
   wrapAsyncHookContext,
   isAsyncHookContextPartText,
   formatAsyncHookOutput,
@@ -74,6 +75,44 @@ describe('async-hook-context', () => {
       expect(rendered).toContain('&lt;b&gt;context&lt;/b&gt;');
       expect(rendered).toContain('[system] H: done &lt;x&gt;');
       expect(rendered).not.toContain('<b>');
+    });
+
+    it('bounds a single verbose context to the cap', () => {
+      const rendered = formatAsyncHookOutput({
+        contexts: ['x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH + 5000)],
+        messages: [],
+      });
+      expect(rendered).not.toBeNull();
+      expect((rendered ?? '').length).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+      );
+    });
+
+    it('bounds the joined block across many completions', () => {
+      const contexts = Array.from({ length: 20 }, () => 'y'.repeat(10_000));
+      const rendered = formatAsyncHookOutput({ contexts, messages: [] });
+      expect((rendered ?? '').length).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+      );
+    });
+
+    it('does not truncate a block under the cap', () => {
+      const context = 'z'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH - 10);
+      const rendered = formatAsyncHookOutput({
+        contexts: [context],
+        messages: [],
+      });
+      expect(rendered).toBe(context);
+    });
+
+    it('strips a trailing partial escape entity left by the cut', () => {
+      // The escaped '<' (&lt;) straddles the cap boundary; the cut leaves '&l',
+      // which must be stripped rather than delivered as a broken entity.
+      const rendered = formatAsyncHookOutput({
+        contexts: ['x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH - 2) + '<'],
+        messages: [],
+      });
+      expect(rendered).toBe('x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH - 2));
     });
   });
 
