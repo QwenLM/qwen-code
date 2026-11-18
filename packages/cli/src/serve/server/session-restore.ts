@@ -12,6 +12,7 @@ import {
   readWorktreeSessionMarkerStrict,
 } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { readWorktreeSessionStrict } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import { readSessionBranchSidecar } from '@qwen-code/qwen-code-core/services/session-branch-sidecar.js';
 import {
   isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
@@ -265,6 +266,9 @@ async function reconcileRestoredSessionWorktree({
         slug: sidecar.slug,
         path: realTarget,
         branch: sidecar.worktreeBranch,
+        baseCommit:
+          sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+        baseBranch: sidecar.originalBranch || undefined,
       };
       try {
         if (!session.hasActivePrompt) {
@@ -423,6 +427,9 @@ async function reconcileRestoredSessionWorktree({
         slug: sidecar.slug,
         path: realTarget,
         branch: sidecar.worktreeBranch,
+        baseCommit:
+          sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+        baseBranch: sidecar.originalBranch || undefined,
       };
       // A parked deferred restore prompt reads inactive here by
       // design (the bridge's restore response excludes it), so the
@@ -927,6 +934,28 @@ export async function restoreSessionCore(options: {
         cleanupRestoredSession,
         daemonLog,
       });
+    }
+    // Re-apply the persisted branch point for a checkpoint-branch session
+    // (persist-only at branch time, so no live entry captured it there). The
+    // setter is fill-only: a session that already recorded a start commit
+    // (spawn capture, or branch/worktree meta) is left untouched (R8-2).
+    try {
+      const branchSidecar = readSessionBranchSidecar(
+        createWorkspaceRuntimeSessionService(
+          runtime,
+        ).getBranchSessionPathForArchiveState(
+          restoredStorageSessionId,
+          'active',
+        ),
+      );
+      if (branchSidecar) {
+        runtime.bridge.setSessionBaseCommit?.(
+          session.sessionId,
+          branchSidecar.baseCommit,
+        );
+      }
+    } catch {
+      // Best-effort hydration; the restore stays valid without it.
     }
     if (isCancelled()) {
       await cleanupRestoredSession();
