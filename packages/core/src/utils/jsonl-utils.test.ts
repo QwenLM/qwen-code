@@ -24,6 +24,7 @@ import {
   countLines,
   exists,
   parseLineTolerant,
+  parseLineTolerantWithIntegrity,
   read,
   readLines,
   readLinesWithIntegrity,
@@ -221,6 +222,51 @@ describe('_recoverObjectsFromLine', () => {
   it('returns empty array when nothing balanced can be parsed', () => {
     expect(_recoverObjectsFromLine('not json at all')).toEqual([]);
     expect(_recoverObjectsFromLine('{"unterminated":')).toEqual([]);
+  });
+
+  it('salvages complete suffix record after torn mid-string prefix (issue report shape)', () => {
+    const tornLine =
+      '{"backgroundTurn":{"taskId":"Explore_call","sess{"uuid":"c2fdde8f","type":"system","content":"ok"}';
+    expect(_recoverObjectsFromLine<{ uuid: string }>(tornLine)).toEqual([
+      { uuid: 'c2fdde8f', type: 'system', content: 'ok' },
+    ]);
+  });
+
+  it('preserves complete: false when recovering suffix after torn prefix in parseLineTolerantWithIntegrity', () => {
+    const tornLine =
+      '{"backgroundTurn":{"taskId":"Explore_call","sess{"uuid":"c2fdde8f"}';
+    expect(parseLineTolerantWithIntegrity(tornLine, '/tmp/test.jsonl')).toEqual(
+      {
+        records: [{ uuid: 'c2fdde8f' }],
+        complete: false,
+      },
+    );
+  });
+
+  it('leaves complete: true for balanced concatenated objects', () => {
+    expect(
+      parseLineTolerantWithIntegrity('{"a":1}{"b":2}', '/tmp/test.jsonl'),
+    ).toEqual({
+      records: [{ a: 1 }, { b: 2 }],
+      complete: true,
+    });
+  });
+
+  it('does not falsely extract nested objects inside complete records', () => {
+    const nested = '{"outer":{"inner":"value"}}';
+    expect(_recoverObjectsFromLine(nested)).toEqual([
+      { outer: { inner: 'value' } },
+    ]);
+  });
+
+  it('returns empty records when suffix is also unrecoverable', () => {
+    const bothTorn = '{"torn_prefix":"unclosed{"also_torn":';
+    expect(parseLineTolerantWithIntegrity(bothTorn, '/tmp/test.jsonl')).toEqual(
+      {
+        records: [],
+        complete: false,
+      },
+    );
   });
 });
 

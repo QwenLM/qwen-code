@@ -64,19 +64,39 @@ function getFileLock(filePath: string): Mutex {
   return fileLocks.get(filePath)!;
 }
 
+function canStartRecoveredSuffix(line: string, recordStart: number): boolean {
+  const previous = line.slice(0, recordStart).trimEnd().at(-1);
+  if (previous === '[' || previous === ',' || previous === ':') return false;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < recordStart; i++) {
+    const char = line[i];
+    if (escape) {
+      escape = false;
+    } else if (inString) {
+      if (char === '\\') escape = true;
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      inString = true;
+    } else if (char === '{' || char === '[') {
+      depth++;
+    } else if (char === '}' || char === ']') {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return inString || depth === 0;
+}
+
 /**
  * Recovers parsed objects from a single physical line that may contain one
  * or more concatenated top-level JSON objects (i.e. a missing newline
- * separator left two records glued together as `}{`). Walks the line with a
- * brace-depth counter that respects string boundaries and `\` escapes, then
- * tries `JSON.parse` on each balanced top-level fragment. Fragments that
- * still fail to parse are skipped silently — the caller decides whether to
- * warn.
- *
- * **Limitation**: only top-level `{...}` records are recovered. A glued line
- * whose records are top-level arrays (`[...][...]`) will not split. All
- * existing JSONL writers in this codebase produce object records, so this
- * matches the actual corruption shape — extend if that ever changes.
+ * separator left two records glued together as `}{`), or an unclosed/torn
+ * prefix followed by a complete suffix record (`inString || depth === 0`).
+ * Walks the line with a brace-depth counter that respects string boundaries
+ * and `\` escapes, then tries `JSON.parse` on each balanced top-level fragment.
+ * Fragments that still fail to parse are skipped silently.
  *
  * Exported for unit tests; not part of the module's stable surface.
  */
@@ -128,6 +148,37 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
       complete = false;
     }
   }
+
+  // If normal forward scanning found records and consumed the line cleanly, return them.
+  if (out.length > 0 && depth === 0 && !inString && start === -1) {
+    return {
+      records: out,
+      complete,
+    };
+  }
+
+  // If a torn prefix prevented depth from returning to 0 (e.g. truncated mid-string
+  // like `..."parentUuid":"...","sess` + `{"uuid":"..."}`), scan from the end of the line
+  // for a complete suffix record using the canStartRecoveredSuffix rule.
+  const lastOpenBrace = line.lastIndexOf('{');
+  if (lastOpenBrace > 0 && canStartRecoveredSuffix(line, lastOpenBrace)) {
+    try {
+      const parsed = JSON.parse(line.slice(lastOpenBrace));
+      if (
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        !Array.isArray(parsed)
+      ) {
+        return {
+          records: [parsed as T],
+          complete: false,
+        };
+      }
+    } catch {
+      // Suffix was not valid JSON either.
+    }
+  }
+
   return {
     records: out,
     complete:

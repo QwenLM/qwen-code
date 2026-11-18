@@ -862,6 +862,17 @@ describe('agent-transcript', () => {
       expect(records[1].parentUuid).toBe(records[0].uuid);
       expect(readLastTranscriptRecordUuidSync(jsonlPath)).toBe(records[1].uuid);
     });
+
+    it('recovers last UUID when the trailing line has a torn prefix and complete suffix record', () => {
+      write([], { initialUserPrompt: 'initial prompt' });
+      const tornLine =
+        '\n{"backgroundTurn":{"taskId":"task-1","sess{"uuid":"salvaged-uuid-123","type":"system","messageId":"m1"}';
+      fs.appendFileSync(jsonlPath, tornLine);
+
+      expect(readLastTranscriptRecordUuidSync(jsonlPath)).toBe(
+        'salvaged-uuid-123',
+      );
+    });
   });
 
   describe('normalizeResumedAgentDepth', () => {
