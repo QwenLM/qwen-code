@@ -8873,6 +8873,7 @@ describe('createAcpSessionBridge', () => {
     'approval_mode_changed',
     'model_switched',
     'prompt_cancelled',
+    'mod_log',
     'tool_toggled',
     'workspace_initialized',
     'mcp_server_restarted',
@@ -8957,6 +8958,7 @@ describe('createAcpSessionBridge', () => {
         return {};
       };
       let bridge: ReturnType<typeof makeBridge>;
+      let agentConnection: ChannelHandle['agentConnection'] | undefined;
       const isModelSwitchCase =
         bookkeepingType === 'model_switch_failed' ||
         bookkeepingType === 'model_switched' ||
@@ -8993,6 +8995,7 @@ describe('createAcpSessionBridge', () => {
         bridge = makeBridge({ channelFactory: factory });
       } else {
         const handle = makeChannel({ promptImpl, extMethodImpl });
+        agentConnection = handle.agentConnection;
         bridge = makeBridge({ channelFactory: async () => handle.channel });
       }
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -9056,6 +9059,12 @@ describe('createAcpSessionBridge', () => {
         await bridge.manageMcpServer('loop-mcp-server', 'enable', undefined);
       } else if (bookkeepingType === 'prompt_cancelled') {
         await bridge.cancelSession(session.sessionId);
+      } else if (bookkeepingType === 'mod_log') {
+        await agentConnection!.extNotification('qwen/notify/session/mod-log', {
+          sessionId: session.sessionId,
+          plugin: 'fixture-mod',
+          text: 'Mod logged after the turn failed',
+        });
       } else if (bookkeepingType === 'language_changed') {
         await bridge.setSessionLanguage(session.sessionId, {
           language: 'zh-CN',

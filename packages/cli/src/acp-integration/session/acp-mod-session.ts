@@ -83,10 +83,20 @@ export class AcpModSession {
       : undefined;
   }
 
-  /** Waits for the Mods to load; refuses the prompt if they failed. */
-  async admit(): Promise<void> {
-    await this.loading;
-    if (this.failure !== undefined)
+  /** Waits for the shared load until this prompt is cancelled. */
+  async admit(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    let onAbort!: () => void;
+    const cancelled = new Promise<void>((resolve) => {
+      onAbort = () => resolve();
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      await Promise.race([this.loading, cancelled]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+    if (!signal.aborted && this.failure !== undefined)
       throw RequestError.internalError(
         undefined,
         `${ACP_MODS_FAILED} ${this.failure}`,

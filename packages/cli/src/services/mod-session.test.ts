@@ -36,6 +36,8 @@ import {
   LlmEventType,
   type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core/core/turn.js';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import {
   getRuntimeContentGenerator,
@@ -376,7 +378,16 @@ describe('Mod session ownership', () => {
     expect(uiTelemetryService.getMaxListeners()).toBe(before);
   });
 
-  it("reads an ACP session's context from its own chat", async () => {
+  it("reads an ACP session's context without changing telemetry", async () => {
+    let catalog = '';
+    const chat = new LlmChat(
+      { getAutoMemoryContext: () => catalog } as Config,
+      {},
+      [{ role: 'user', parts: [getAutoMemorySnapshot([], 'catalog')!] }],
+      undefined,
+      uiTelemetryService,
+    );
+    chat.seedResumeTokenCounts(250, 0);
     const { session } = setup(
       {
         getExperimentalZedIntegration: () => true,
@@ -385,7 +396,7 @@ describe('Mod session ownership', () => {
         getModel: () => 'fixture',
         getLlmClient: () => ({
           isInitialized: () => true,
-          getChat: () => ({ getLastPromptTokenCount: () => 250 }),
+          getChat: () => chat,
         }),
       },
       { surface: null, log: vi.fn() },
@@ -399,6 +410,17 @@ describe('Mod session ownership', () => {
       window: 1000,
       percent: 25,
     });
+
+    // Reading the newly visible catalog from the telemetry listener used to
+    // invalidate the counts and synchronously enter the same listener again.
+    catalog = 'catalog';
+    uiTelemetryService.setLastPromptTokenCount(900);
+    expect(facts().usage.context).toEqual({
+      tokens: 0,
+      window: 1000,
+      percent: 0,
+    });
+    expect(uiTelemetryService.getLastPromptTokenCount()).toBe(900);
   });
 
   it('initializes once, buffers logs behind init, and uses the command signal', async () => {

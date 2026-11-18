@@ -71,7 +71,7 @@ describe('AcpModSession', () => {
   it("sends each log line under the session's ACP id", async () => {
     mocks.initialize.mockResolvedValue();
     const { client, mods } = create();
-    await mods.admit();
+    await mods.admit(new AbortController().signal);
     expect(mocks.flushLogs).toHaveBeenCalled();
     expect(mocks.host!.surface).toBeNull();
     // A Config id that /clear rotated still reaches the same ACP session.
@@ -87,11 +87,37 @@ describe('AcpModSession', () => {
     mocks.initialize.mockRejectedValue(new Error('Mod broken: bad hook'));
     const { mods } = create();
     for (let attempt = 0; attempt < 2; attempt++)
-      await expect(mods.admit()).rejects.toThrow(
+      await expect(mods.admit(new AbortController().signal)).rejects.toThrow(
         `${ACP_MODS_FAILED} Error: Mod broken: bad hook`,
       );
     expect(mocks.flushLogs).toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    'cancels a waiting prompt without interrupting the load (failure=%s)',
+    async (failure) => {
+      let finishLoad!: () => void;
+      mocks.initialize.mockReturnValue(
+        new Promise<void>((resolve, reject) => {
+          finishLoad = () => {
+            if (failure) reject(new Error('Mod broken: bad hook'));
+            else resolve();
+          };
+        }),
+      );
+      const { mods } = create();
+      const first = new AbortController();
+      const waiting = mods.admit(first.signal);
+      first.abort();
+      await expect(waiting).resolves.toBeUndefined();
+
+      const next = mods.admit(new AbortController().signal);
+      finishLoad();
+      if (failure) await expect(next).rejects.toThrow(ACP_MODS_FAILED);
+      else await expect(next).resolves.toBeUndefined();
+      expect(mocks.initialize).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('reads a legacy stream as the model events a turn hears', async () => {
     mocks.initialize.mockResolvedValue();

@@ -598,6 +598,7 @@ const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
 const MAX_EXTERNAL_RECORD_KEYS = 1_024;
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
+const MOD_TURN_ABORT_REASON = 'qwen:mod-turn-abort';
 // Cuts a streaming model response short so queued user input the user asked
 // to send now reaches the model; the turn itself goes on (see
 // `#openResponseInterrupt`).
@@ -749,6 +750,15 @@ type AutoCompressionSendResult =
       stopReason?: never;
     }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
+
+function isControlledPromptAbortReason(reason: unknown): boolean {
+  return (
+    reason === USER_CANCEL_ABORT_REASON ||
+    reason === MOD_TURN_ABORT_REASON ||
+    reason === SESSION_DISPOSE_ABORT_REASON ||
+    reason === INTERRUPTED_PROMPT_ABORT_REASON
+  );
+}
 
 function getAbortAwareEndTurnStopReason(
   signal: AbortSignal,
@@ -6142,11 +6152,8 @@ export class Session implements SessionContext {
         pendingSend?.signal.aborted === true
           ? pendingSend.signal.reason
           : undefined;
-      // Mirror the send-loop's controlled-cancellation contract: explicit
-      // user cancels, a forwarded infrastructure interruption (response
-      // close, prompt deadline, teardown) and session disposal settle as
-      // `cancelled`. A
-      // successor-prompt abort does so only when the thrown error is the
+      // Mirror the send-loop's controlled-cancellation contract. A
+      // successor-prompt abort settles as cancelled only when the error is the
       // abort itself; the send loop deliberately excludes NEW_PROMPT from
       // controlled cancellation so infrastructure failures are not hidden
       // as cancellations, and a non-abort error landing after a successor
@@ -6163,9 +6170,7 @@ export class Session implements SessionContext {
           admissionCancellation?.aborted === true &&
           (this.#isUserPromptCancellation(admissionCancellation) ||
             admissionCancellation.reason === SESSION_DISPOSE_ABORT_REASON)) ||
-          abortReason === USER_CANCEL_ABORT_REASON ||
-          abortReason === SESSION_DISPOSE_ABORT_REASON ||
-          abortReason === INTERRUPTED_PROMPT_ABORT_REASON ||
+          isControlledPromptAbortReason(abortReason) ||
           (abortReason === NEW_PROMPT_ABORT_REASON &&
             this.#isAbortError(error)));
       if (controlledAbort) {
@@ -7216,7 +7221,7 @@ export class Session implements SessionContext {
       this.config.getWorkingDir(),
       async (): Promise<PromptResponse> => {
         await this.assertCanStartTurn();
-        await this.mods?.admit();
+        await this.mods?.admit(pendingSend.signal);
         if (pendingSend.signal.aborted) {
           return { stopReason: 'cancelled' };
         }
@@ -8293,7 +8298,7 @@ export class Session implements SessionContext {
                     pendingSend.signal,
                     () => {
                       if (pendingSend.signal.aborted) return false;
-                      pendingSend.abort();
+                      pendingSend.abort(MOD_TURN_ABORT_REASON);
                       return true;
                     },
                     promptId,
@@ -8700,6 +8705,8 @@ export class Session implements SessionContext {
                       ) {
                         this.#clearPendingRestoreNotices();
                       }
+                      if (sendResult.stopReason === 'max_tokens')
+                        modTurn?.fail();
                       return { stopReason: sendResult.stopReason };
                     }
                     // LlmChat pushes the user entry before returning a stream.
@@ -9681,8 +9688,8 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Ends a turn whose model round threw. Explicit user cancellation and
-   * session disposal are controlled aborts, and so is the bridge's forwarded
+   * Ends a turn whose model round threw. User or Mod cancellation and session
+   * disposal are controlled aborts, and so is the bridge's forwarded
    * interruption token, as is any abort of a cron or notification turn's
    * signal, which only the session aborts; other AbortErrors still surface so
    * infrastructure failures are not hidden as cancellations. A failure fires
@@ -9697,9 +9704,7 @@ export class Session implements SessionContext {
     if (
       turnSignal.aborted &&
       (signalAbortedBySession ||
-        turnSignal.reason === USER_CANCEL_ABORT_REASON ||
-        turnSignal.reason === SESSION_DISPOSE_ABORT_REASON ||
-        turnSignal.reason === INTERRUPTED_PROMPT_ABORT_REASON)
+        isControlledPromptAbortReason(turnSignal.reason))
     ) {
       this.todoStopGuard.suspend();
       return { stopReason: 'cancelled' };
@@ -10560,6 +10565,8 @@ export class Session implements SessionContext {
             sendResult.stopReason === 'cancelled' ||
               preservePreparedMessageOnSkippedSend,
           );
+          if (sendResult.stopReason === 'max_tokens')
+            options.responseCapture?.modTurn?.fail();
           return {
             kind: 'terminal',
             stopReason: sendResult.stopReason,
@@ -10699,9 +10706,7 @@ export class Session implements SessionContext {
         }
         const isControlledCancellation =
           pendingSend.signal.aborted &&
-          (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON ||
-            pendingSend.signal.reason === SESSION_DISPOSE_ABORT_REASON ||
-            pendingSend.signal.reason === INTERRUPTED_PROMPT_ABORT_REASON);
+          isControlledPromptAbortReason(pendingSend.signal.reason);
         if (isControlledCancellation) {
           this.todoStopGuard.suspend();
           return {

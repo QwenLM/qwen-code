@@ -213,6 +213,7 @@ export class ModSession implements ICommandLoader {
       this.context = {
         // One ACP process serves many sessions, so the process-wide count is
         // whichever answered last; the session's own chat keeps its own.
+        // Use a passive read because route adoption can emit another update.
         tokens: this.acp
           ? this.chatTokens()
           : uiTelemetryService.getLastPromptTokenCount(),
@@ -313,7 +314,7 @@ export class ModSession implements ICommandLoader {
   private chatTokens(): number {
     const client = this.config.getLlmClient();
     return client?.isInitialized()
-      ? client.getChat().getLastPromptTokenCount()
+      ? client.getChat().peekLastPromptTokenCount()
       : 0;
   }
 
