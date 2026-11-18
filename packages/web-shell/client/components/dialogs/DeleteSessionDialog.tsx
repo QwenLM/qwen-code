@@ -159,6 +159,17 @@ export function DeleteSessionDialog({
     },
   });
 
+  // Re-evaluated at confirm time, not only on click: a row ticked while idle
+  // can start background work afterwards, and `toggleSelection` refuses to
+  // uncheck a blocked row, so the checked set alone cannot be trusted.
+  const deletableSelectedIds = useMemo(
+    () =>
+      filtered
+        .filter((s) => selectedIds.has(s.sessionId) && !blocksCurrentDelete(s))
+        .map((s) => s.sessionId),
+    [blocksCurrentDelete, filtered, selectedIds],
+  );
+
   const handleDelete = useCallback(() => {
     if (deleting) return;
     // Captured before the request: the daemon's terminal `session_closed`
@@ -167,10 +178,7 @@ export function DeleteSessionDialog({
     const attachedSessionId = currentSessionId;
 
     if (selectedIds.size > 0) {
-      const filteredSet = new Set(filtered.map((s) => s.sessionId));
-      const idsToDelete = Array.from(selectedIds).filter((id) =>
-        filteredSet.has(id),
-      );
+      const idsToDelete = deletableSelectedIds;
       if (idsToDelete.length === 0) return;
       setDeleting(true);
       deleteSessions(idsToDelete)
@@ -253,6 +261,7 @@ export function DeleteSessionDialog({
   }, [
     blocksCurrentDelete,
     currentSessionId,
+    deletableSelectedIds,
     deleteSession,
     deleteSessions,
     deleting,
@@ -267,7 +276,7 @@ export function DeleteSessionDialog({
   ]);
 
   const hasSelection = selectedIds.size > 0;
-  const canDelete = !deleting && !loading && hasSelection;
+  const canDelete = !deleting && !loading && deletableSelectedIds.length > 0;
 
   return (
     <div className={dp('picker', 'picker-in-shell')}>

@@ -306,6 +306,57 @@ describe('DeleteSessionDialog selection', () => {
     expect(dangerButton().disabled).toBe(true);
   });
 
+  it('refuses to confirm a row that turned busy after it was ticked', async () => {
+    // The guard has to sit on the request, not only on the click: a blocked
+    // row can no longer be unchecked, so a stale checked set would otherwise
+    // still reach the multi-select delete.
+    deleteSessionsMock.mockResolvedValue({
+      removed: [initialSessions[0].sessionId],
+      notFound: [],
+      errors: [],
+    });
+    const idle = [
+      initialSessions[0],
+      initialSessions[1],
+      { ...initialSessions[2], activeWorkState: 'idle' },
+    ];
+    const busy = [
+      initialSessions[0],
+      initialSessions[1],
+      {
+        ...initialSessions[2],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+    ];
+    sessions = idle;
+    mount();
+    clickRow(2);
+    expect(isChecked(rows()[2])).toBe(true);
+    expect(dangerButton().disabled).toBe(false);
+
+    // Alone, the stale selection must disarm the button.
+    sessions = busy;
+    rerender();
+    expect(dangerButton().disabled).toBe(true);
+    expect(deleteSessionsMock).not.toHaveBeenCalled();
+
+    // Alongside another row the button stays armed, so the request itself has
+    // to drop the row that turned busy — the button state cannot carry this.
+    sessions = idle;
+    rerender();
+    clickRow(0);
+    sessions = busy;
+    rerender();
+    expect(dangerButton().disabled).toBe(false);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(deleteSessionsMock).toHaveBeenCalledWith([
+      initialSessions[0].sessionId,
+    ]);
+  });
+
   it('clears checked rows and disarms delete when the filter changes', () => {
     mount();
 

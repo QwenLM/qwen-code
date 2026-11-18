@@ -262,15 +262,35 @@ function SelectableSessionRow({
     identity: string,
     state: Pick<
       DaemonSessionSummary,
-      'isPinned' | 'hasActivePrompt' | 'activeWorkState'
+      | 'isPinned'
+      | 'hasActivePrompt'
+      | 'activeWorkState'
+      | 'hasRunningBackgroundTasks'
     >,
   ) => void;
 }) {
   const { t } = useI18n();
-  const { isPinned, hasActivePrompt, activeWorkState } = session;
+  const {
+    isPinned,
+    hasActivePrompt,
+    activeWorkState,
+    hasRunningBackgroundTasks,
+  } = session;
   useEffect(() => {
-    onRefresh(identity, { isPinned, hasActivePrompt, activeWorkState });
-  }, [identity, isPinned, hasActivePrompt, activeWorkState, onRefresh]);
+    onRefresh(identity, {
+      isPinned,
+      hasActivePrompt,
+      activeWorkState,
+      hasRunningBackgroundTasks,
+    });
+  }, [
+    identity,
+    isPinned,
+    hasActivePrompt,
+    activeWorkState,
+    hasRunningBackgroundTasks,
+    onRefresh,
+  ]);
   const label = getSessionLabel(session);
   return (
     <button
@@ -1877,7 +1897,10 @@ export function WebShellSidebar({
       identity: string,
       state: Pick<
         DaemonSessionSummary,
-        'isPinned' | 'hasActivePrompt' | 'activeWorkState'
+        | 'isPinned'
+        | 'hasActivePrompt'
+        | 'activeWorkState'
+        | 'hasRunningBackgroundTasks'
       >,
     ) => {
       setSelectedSessions((previous) => {
@@ -1886,7 +1909,9 @@ export function WebShellSidebar({
           !selected ||
           (selected.isPinned === state.isPinned &&
             selected.hasActivePrompt === state.hasActivePrompt &&
-            selected.activeWorkState === state.activeWorkState)
+            selected.activeWorkState === state.activeWorkState &&
+            selected.hasRunningBackgroundTasks ===
+              state.hasRunningBackgroundTasks)
         )
           return previous;
         return new Map(previous).set(identity, { ...selected, ...state });

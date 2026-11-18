@@ -49,10 +49,14 @@ Out of scope (recorded as follow-ups, not silently dropped):
   is in-memory, so no `hasRunningBackgroundTasks` reaches the client at all.
   Evidence: a remote session whose shell pid had been alive ~26h was absent
   from live-state and carried no background field in the catalog.
-- Surfacing background work in surfaces other than the sidebar row and its
-  details tooltip. The Session Overview panel still grades a background-only
-  session `idle`; it is a display surface, not an action gate, so it is left
-  for a follow-up rather than widened here.
+- Re-grading the Session Overview panel's cards. A background-only session
+  still reads `idle` there, which keeps the panel's sort order and displayed
+  status unchanged; its two destructive card actions are gated separately (see
+  below), because that grade alone would offer them.
+- Deciding what the `unknown` and `unsupported` grades mean for archive and
+  delete. The shared predicate answers "is work known to be running"; the
+  side-task archive gate additionally fails closed on those grades, and that
+  difference is deliberate and documented on the predicate.
 
 ## Solution
 
@@ -65,9 +69,17 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   holds no active-work category and grades the row idle.
 - The same predicate replaces every other copy of that question on the action
   side: the sidebar's archive and delete eligibility checks, its standalone
-  archive handler, the recent rows' archive gate, and the delete dialog's
-  current-session block. A row that says it is busy must not offer the action
-  that ends the work, and the two delete entry points must not disagree.
+  archive handler, the recent rows' archive gate, the delete dialog's
+  current-session block, the Session Overview card actions, and the Activity
+  archive confirmation (which previously spelled the same disjunction out
+  twice). A row that says it is busy must not offer the action that ends the
+  work, and no two entry points may disagree.
+- Two staleness holes close with it. Selection mode keeps its own copy of each
+  ticked session, so its refresh contract now carries the background flag too —
+  otherwise bulk Archive would judge a session by the value it had when ticked.
+  And the delete dialog re-evaluates the guard when building the request, not
+  only on click: a row that turns busy after being ticked can no longer be
+  unchecked, so the checked set alone cannot be trusted.
 - Tint the marker with the same amber as the status dot (`--warning-color`)
   whenever background tasks are running, via `.sessionLoadingBackground`.
 - Name the marker only where it is the sole carrier. In the background-only
@@ -180,8 +192,10 @@ row. No page errors.
    behind an approval or a question, without reordering blocked-state
    precedence.
 4. Archive and delete are not offered for a session whose only activity is
-   background work — on the project rows, the recent rows, and in the delete
-   dialog for the session this client is attached to.
+   background work — on the project rows, the recent rows, the Session Overview
+   cards, and in the delete dialog for the session this client is attached to.
+   Bulk Archive follows the flag as it changes after a row is ticked, and a
+   multi-row delete request drops a row that turned busy after selection.
 5. Dot precedence, the touch layout, and the existing hover contracts are
    unchanged.
 6. Every assertion above dies under the corresponding mutation.
