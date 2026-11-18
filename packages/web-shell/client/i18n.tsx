@@ -10343,6 +10343,18 @@ function isTraditionalChineseTag(normalized: string): boolean {
   );
 }
 
+function isSimplifiedChineseTag(normalized: string): boolean {
+  return (
+    normalized === 'zh' ||
+    normalized === 'zh-cn' ||
+    normalized.startsWith('zh-cn-') ||
+    normalized === 'zh-hans' ||
+    normalized.startsWith('zh-hans-') ||
+    normalized === 'zh-sg' ||
+    normalized.startsWith('zh-sg-')
+  );
+}
+
 export function normalizeLanguage(
   value: string | undefined | null,
 ): WebShellLanguage {
@@ -10350,9 +10362,7 @@ export function normalizeLanguage(
   if (!normalized) return 'en';
   // zh-TW is a full catalog. Do not fold it into zh-CN or English.
   if (isTraditionalChineseTag(normalized)) return 'zh-TW';
-  if (normalized === 'zh' || normalized === 'zh-cn') {
-    return 'zh-CN';
-  }
+  if (isSimplifiedChineseTag(normalized)) return 'zh-CN';
   // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
   // underscore form all resolve to ru — region-qualified Russian speakers
   // must not fall through to en.
@@ -10381,8 +10391,7 @@ export function languageSettingToWebShellLanguage(
     return 'zh-TW';
   }
   if (
-    normalized === 'zh' ||
-    normalized === 'zh-cn' ||
+    isSimplifiedChineseTag(normalized) ||
     normalized === 'chinese' ||
     normalized === '中文'
   ) {

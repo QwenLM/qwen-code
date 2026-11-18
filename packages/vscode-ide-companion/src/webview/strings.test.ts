@@ -6,8 +6,29 @@
 
 /** @vitest-environment jsdom */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createChromeStrings, readLanguage } from './strings.js';
+
+// Same oracle as web-shell's client/test/zh-tw-glyphs.ts, which this package
+// cannot import: the CLI's hand-corrected packs translate one key set, so a Han
+// glyph the Simplified pack uses and the Traditional pack never uses is
+// Simplified-only. 餐 is valid Traditional (套餐) the CLI pack renders 方案.
+const HAN = /[㐀-鿿]/;
+
+async function packCharacters(locale: 'zh' | 'zh-TW'): Promise<Set<string>> {
+  const file = resolve(
+    import.meta.dirname,
+    `../../../cli/src/i18n/locales/${locale}.js`,
+  );
+  const { default: pack } = (await import(pathToFileURL(file).href)) as {
+    default: Record<string, string | string[]>;
+  };
+  const text = Object.values(pack).flat().join('');
+  return new Set([...text].filter((char) => HAN.test(char)));
+}
 
 describe('readLanguage', () => {
   afterEach(() => {
@@ -69,5 +90,27 @@ describe('composer.editIdentityUnavailable', () => {
     expect(
       createChromeStrings('zh-CN')('composer.editIdentityUnavailable'),
     ).toContain('身份');
+  });
+});
+
+describe('Traditional chrome table', () => {
+  it('carries no Simplified-only glyph', async () => {
+    const simplified = await packCharacters('zh');
+    const traditional = await packCharacters('zh-TW');
+    const glyphs = new RegExp(
+      `[${[...simplified]
+        .filter((char) => !traditional.has(char) && char !== '餐')
+        .join('')}]`,
+    );
+    const source = readFileSync(
+      resolve(import.meta.dirname, 'strings.ts'),
+      'utf8',
+    );
+    const start = source.indexOf(
+      'const ZH_TW: Record<ChromeStringKey, string>',
+    );
+    expect(start).toBeGreaterThan(-1);
+    const table = source.slice(start, source.indexOf('\n};', start));
+    expect(table).not.toMatch(glyphs);
   });
 });

@@ -21,6 +21,7 @@ describe('getLoadingPhrases', () => {
   it('keeps the Simplified and English tables reachable', () => {
     expect(getLoadingPhrases('zh-CN')[0]).toBe('正在努力搬砖，请稍候...');
     expect(getLoadingPhrases('zh')[0]).toBe('正在努力搬砖，请稍候...');
+    expect(getLoadingPhrases('zh-Hans-CN')[0]).toBe('正在努力搬砖，请稍候...');
     expect(getLoadingPhrases('en')[0]).toBe("I'm Feeling Lucky");
   });
 

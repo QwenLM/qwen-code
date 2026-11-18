@@ -10,6 +10,7 @@ import {
 } from './i18n';
 import type { WebShellLanguage } from './i18n';
 import { ZH_TW } from './i18n-zh-tw';
+import { SIMPLIFIED_ONLY_GLYPHS } from './test/zh-tw-glyphs';
 import { CHANNEL_METHOD_PLATFORMS } from './components/channels/channel-platform';
 import * as ruPart1Stub from './i18n-ru-part1.transcript-stub';
 import * as ruPart2Stub from './i18n-ru-part2.transcript-stub';
@@ -600,6 +601,10 @@ describe('web-shell ru locale', () => {
     expect(normalizeLanguage('zh_TW')).toBe('zh-TW');
     expect(normalizeLanguage('zh-Hant')).toBe('zh-TW');
     expect(normalizeLanguage('zh-HK')).toBe('zh-TW');
+    // Region- and script-qualified Traditional tags reach the same catalog.
+    for (const value of ['zh-MO', 'zh-Hant-TW', 'zh-hk-x', 'zh-mo-x']) {
+      expect(normalizeLanguage(value)).toBe('zh-TW');
+    }
     // Unrelated locales still collapse to en (fr, ja, … are not shipped).
     expect(normalizeLanguage('fr-FR')).toBe('en');
     expect(normalizeLanguage('ja-JP')).toBe('en');
@@ -755,11 +760,6 @@ describe('web-shell ru locale', () => {
   });
 });
 
-// Curated, not a whole Simplified block: 析/表/置/系/存 and friends are shared
-// with Traditional, so a naive range would red on correct zh-TW copy.
-const SIMPLIFIED_ONLY_GLYPHS =
-  /[这会说时门问为从图对总报无数认让过还进运选项页态码编辑删确认复载链试变]/;
-
 describe('web-shell zh-TW locale', () => {
   it('uses Taiwan Traditional Chinese instead of the Simplified catalog', () => {
     const tw = getTranslator('zh-TW');
@@ -778,12 +778,25 @@ describe('web-shell zh-TW locale', () => {
     expect(tw('language.invalid')).toContain('zh-TW');
   });
 
+  it('resolves the Simplified script and region tags the Traditional side honours', () => {
+    for (const tag of [
+      'zh-Hans',
+      'zh-Hans-CN',
+      'zh_SG',
+      'zh-sg-x',
+      'zh-cn-x',
+    ]) {
+      expect(normalizeLanguage(tag)).toBe('zh-CN');
+      expect(languageSettingToWebShellLanguage(tag)).toBe('zh-CN');
+    }
+    // Script wins over region: zh-Hant-CN stays Traditional.
+    expect(normalizeLanguage('zh-Hant-CN')).toBe('zh-TW');
+    expect(languageSettingToWebShellLanguage('zh-Hant-CN')).toBe('zh-TW');
+  });
+
   it('carries no Simplified-only vocabulary in any entry', () => {
     for (const [key, value] of Object.entries(ZH_TW)) {
       const text = typeof value === 'function' ? value({}) : value;
-      for (const forbidden of ['服务器', '软件', '设置', '为了']) {
-        expect(`${key}: ${text}`).not.toContain(forbidden);
-      }
       expect(`${key}: ${text}`).not.toMatch(SIMPLIFIED_ONLY_GLYPHS);
     }
   });
