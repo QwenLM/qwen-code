@@ -404,7 +404,7 @@ describe('RestartRecoveryPanel', () => {
 
     await waitFor(() =>
       expect(container.textContent).toContain(
-        'This task is no longer waiting for recovery. (not_continuable)',
+        'This task is no longer waiting for recovery. (degraded_history)',
       ),
     );
     act(() => buttonByText('Hide').click());
@@ -465,6 +465,89 @@ describe('RestartRecoveryPanel', () => {
     expect(
       client.continueRestartRecoveries.mock.calls[1]![0].sessions,
     ).toHaveLength(1);
+  });
+
+  it('keeps a not-continuable notice across later continue-all chunks', async () => {
+    const items = Array.from({ length: 11 }, (_, index) => ({
+      sessionId: `session-${index}`,
+      interruption: 'daemon_shutdown',
+    }));
+    client.getRestartRecoveries.mockResolvedValue(recoveryResult(items));
+    client.continueRestartRecoveries.mockImplementation(
+      async (request: {
+        sessions: Array<{ workspace: string; sessionId: string }>;
+      }) => ({
+        results: request.sessions.map((session) => ({
+          workspace: session.workspace,
+          sessionId: session.sessionId,
+          status:
+            session.sessionId === 'session-0'
+              ? ('not_continuable' as const)
+              : ('accepted' as const),
+          ...(session.sessionId === 'session-0'
+            ? { kind: 'degraded_history' as const }
+            : { kind: 'interrupted_prompt' as const }),
+        })),
+      }),
+    );
+    render();
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        '11 tasks interrupted by a restart',
+      ),
+    );
+    act(() => buttonByText('Review').click());
+    act(() => buttonByText('Continue all').click());
+
+    await waitFor(() =>
+      expect(client.continueRestartRecoveries).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        'This task is no longer waiting for recovery. (degraded_history)',
+      ),
+    );
+    expect(
+      container.querySelector('[data-testid="restart-recovery-panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('clears a notice when the capability disappears', async () => {
+    client.getRestartRecoveries.mockResolvedValue(
+      recoveryResult([{ sessionId: SESSION_A, interruption: 'in_flight' }]),
+    );
+    client.continueRestartRecoveries.mockResolvedValue({
+      results: [
+        {
+          workspace: '/ws',
+          sessionId: SESSION_A,
+          status: 'not_continuable',
+          kind: 'degraded_history',
+        },
+      ],
+    });
+    render();
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        '1 task interrupted by a restart',
+      ),
+    );
+    act(() => buttonByText('Review').click());
+    act(() => buttonByText('Continue').click());
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        'This task is no longer waiting for recovery. (degraded_history)',
+      ),
+    );
+
+    render({ supported: false });
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="restart-recovery-panel"]'),
+      ).toBeNull(),
+    );
   });
 
   it('lets the user dismiss a failed scan', async () => {

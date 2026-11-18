@@ -11419,131 +11419,74 @@ export function registerSessionRoutes(
     })
     .strict();
 
-  app.post('/sessions/recovery/continue', async (req, res) => {
-    const route = 'POST /sessions/recovery/continue';
-    const parsed = restartRecoveryContinueRequest.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        code: 'invalid_restart_recovery_continue_request',
-        error: 'Invalid restart recovery continue request.',
-      });
-      return;
-    }
-
-    const confirmToolTurn = parsed.data.confirmToolTurn === true;
-
-    const continueOne = async (requested: {
-      workspace: string;
-      sessionId: string;
-    }): Promise<Record<string, unknown>> => {
-      const base = {
-        workspace: requested.workspace,
-        sessionId: requested.sessionId,
-      };
-      const entry = resolveWorkspaceEntryBySelector(
-        workspaceRegistry,
-        requested.workspace,
-      );
-      if (!entry) {
-        return { ...base, status: 'error', code: 'workspace_not_found' };
-      }
-      const { generation, isCurrent } = captureWorkspaceEntryCurrency(
-        workspaceRegistry,
-        entry,
-      );
-      if (!generation || !isCurrent()) {
-        return {
-          ...base,
-          status: 'error',
-          code: 'workspace_runtime_unavailable',
-        };
-      }
-      const runtime = generation.runtime;
-      if (!runtime.trusted) {
-        logSessionRoutingFailure(route, 'untrusted_workspace', {
-          workspaceId: runtime.workspaceId,
-          workspaceCwd: runtime.workspaceCwd,
+  app.post(
+    '/sessions/recovery/continue',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const route = 'POST /sessions/recovery/continue';
+      const parsed = restartRecoveryContinueRequest.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          code: 'invalid_restart_recovery_continue_request',
+          error: 'Invalid restart recovery continue request.',
         });
-        return { ...base, status: 'error', code: 'untrusted_workspace' };
-      }
-      if (parseVirtualSubagentSessionId(requested.sessionId)) {
-        return {
-          ...base,
-          status: 'not_continuable',
-          code: 'virtual_subagent',
-        };
-      }
-      // The ledger path is derived from this value; reject anything that is
-      // not a persisted session id before touching the filesystem.
-      if (!SESSION_FILE_ID_PATTERN.test(requested.sessionId)) {
-        return {
-          ...base,
-          status: 'not_continuable',
-          code: 'invalid_session_id',
-        };
+        return;
       }
 
-      try {
-        const sessionService = createWorkspaceRuntimeSessionService(runtime);
-        const state = readRestartRecoveryState(
-          sessionService.getPromptLedgerPath(requested.sessionId),
+      const confirmToolTurn = parsed.data.confirmToolTurn === true;
+
+      const continueOne = async (requested: {
+        workspace: string;
+        sessionId: string;
+      }): Promise<Record<string, unknown>> => {
+        const base = {
+          workspace: requested.workspace,
+          sessionId: requested.sessionId,
+        };
+        const entry = resolveWorkspaceEntryBySelector(
+          workspaceRegistry,
+          requested.workspace,
         );
-        if (state.kind !== 'interrupted') {
+        if (!entry) {
+          return { ...base, status: 'error', code: 'workspace_not_found' };
+        }
+        const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+          workspaceRegistry,
+          entry,
+        );
+        if (!generation || !isCurrent()) {
+          return {
+            ...base,
+            status: 'error',
+            code: 'workspace_runtime_unavailable',
+          };
+        }
+        const runtime = generation.runtime;
+        if (!runtime.trusted) {
+          logSessionRoutingFailure(route, 'untrusted_workspace', {
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          });
+          return { ...base, status: 'error', code: 'untrusted_workspace' };
+        }
+        if (parseVirtualSubagentSessionId(requested.sessionId)) {
           return {
             ...base,
             status: 'not_continuable',
-            code: state.kind === 'settled' ? 'already_moved' : 'no_evidence',
+            code: 'virtual_subagent',
+          };
+        }
+        // The ledger path is derived from this value; reject anything that is
+        // not a persisted session id before touching the filesystem.
+        if (!SESSION_FILE_ID_PATTERN.test(requested.sessionId)) {
+          return {
+            ...base,
+            status: 'not_continuable',
+            code: 'invalid_session_id',
           };
         }
 
-        let loaded = false;
-        try {
-          runtime.bridge.getSessionSummary(requested.sessionId);
-          loaded = true;
-        } catch (error) {
-          if (!isSessionNotFoundError(error)) throw error;
-        }
-
-        let restoreAttachment:
-          | { sessionId: string; clientId: string }
-          | undefined;
-        if (!loaded) {
-          const outcome = await restoreSessionCore({
-            action: 'load',
-            runtime,
-            workspaceCwd: runtime.workspaceCwd,
-            sessionId: requested.sessionId,
-            archiveCoordinator,
-            requestedSessionIdAdmission,
-            assertRuntimeGenerationOpen:
-              captureRuntimeGenerationAssertion(runtime),
-            daemonLog,
-            materializeLiveConversationDirectory:
-              deps.materializeLiveConversationDirectory,
-            historyPageSize: undefined,
-            liveReplayMode: undefined,
-            compactedReplayMode: undefined,
-            clientId: undefined,
-            approvalMode: undefined,
-            restoreSource: {},
-            isCancelled: () => false,
-          });
-          if (outcome.kind === 'cancelled') {
-            return { ...base, status: 'error', code: 'cancelled' };
-          }
-          // The restore attaches a generated client id even when the caller
-          // supplied none. A batch owns no client, so the attachment is
-          // released after the continuation settles; detaching before it
-          // would let the idle-close path tear down the just-loaded session.
-          if (outcome.session.clientId !== undefined) {
-            restoreAttachment = {
-              sessionId: outcome.session.sessionId,
-              clientId: outcome.session.clientId,
-            };
-          }
-        }
-
-        try {
+        const continueLocked = async (): Promise<Record<string, unknown>> => {
           if (!isCurrent()) {
             return {
               ...base,
@@ -11551,124 +11494,200 @@ export function registerSessionRoutes(
               code: 'workspace_runtime_unavailable',
             };
           }
-
-          const context = await runtime.bridge.getSessionContextStatus(
-            requested.sessionId,
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          const state = readRestartRecoveryState(
+            sessionService.getPromptLedgerPath(requested.sessionId),
           );
-          const recovery = context.recovery;
-          if (!recovery || !recovery.canContinue) {
+          if (state.kind !== 'interrupted') {
             return {
               ...base,
               status: 'not_continuable',
-              ...(recovery ? { kind: recovery.kind } : {}),
-            };
-          }
-          if (recovery.cancellationConfirmationId) {
-            return {
-              ...base,
-              status: 'confirmation_required',
-              kind: recovery.kind,
-              code: 'cancellation_confirmation',
-            };
-          }
-          if (recovery.kind === 'interrupted_turn' && !confirmToolTurn) {
-            return {
-              ...base,
-              status: 'confirmation_required',
-              kind: recovery.kind,
-              code: 'tool_turn',
+              code: state.kind === 'settled' ? 'already_moved' : 'no_evidence',
             };
           }
 
-          const promptId = crypto.randomUUID();
-          const result = await runtime.bridge.continueSession(
-            requested.sessionId,
-            { promptId },
+          let loaded = false;
+          try {
+            runtime.bridge.getSessionSummary(requested.sessionId);
+            loaded = true;
+          } catch (error) {
+            if (!isSessionNotFoundError(error)) throw error;
+          }
+
+          let restoreAttachment:
+            | { sessionId: string; clientId: string }
+            | undefined;
+          if (!loaded) {
+            const outcome = await restoreSessionCore({
+              action: 'load',
+              runtime,
+              workspaceCwd: runtime.workspaceCwd,
+              sessionId: requested.sessionId,
+              archiveCoordinator,
+              requestedSessionIdAdmission,
+              assertRuntimeGenerationOpen:
+                captureRuntimeGenerationAssertion(runtime),
+              daemonLog,
+              materializeLiveConversationDirectory:
+                deps.materializeLiveConversationDirectory,
+              historyPageSize: undefined,
+              liveReplayMode: undefined,
+              compactedReplayMode: undefined,
+              clientId: undefined,
+              approvalMode: undefined,
+              restoreSource: {},
+              isCancelled: () => false,
+            });
+            if (outcome.kind === 'cancelled') {
+              return { ...base, status: 'error', code: 'cancelled' };
+            }
+            // The restore attaches a generated client id even when the caller
+            // supplied none. A batch owns no client, so the attachment is
+            // released when the continuation request returns (accepted or
+            // rejected). Dispatch admits the prompt first, so an accepted
+            // continuation keeps the session open; detaching before dispatch
+            // would let the idle-close path tear down the just-loaded session.
+            if (outcome.session.clientId !== undefined) {
+              restoreAttachment = {
+                sessionId: outcome.session.sessionId,
+                clientId: outcome.session.clientId,
+              };
+            }
+          }
+
+          try {
+            if (!isCurrent()) {
+              return {
+                ...base,
+                status: 'error',
+                code: 'workspace_runtime_unavailable',
+              };
+            }
+
+            const context = await runtime.bridge.getSessionContextStatus(
+              requested.sessionId,
+            );
+            const recovery = context.recovery;
+            if (!recovery || !recovery.canContinue) {
+              return {
+                ...base,
+                status: 'not_continuable',
+                ...(recovery ? { kind: recovery.kind } : {}),
+              };
+            }
+            if (recovery.cancellationConfirmationId) {
+              return {
+                ...base,
+                status: 'confirmation_required',
+                kind: recovery.kind,
+                code: 'cancellation_confirmation',
+              };
+            }
+            if (recovery.kind === 'interrupted_turn' && !confirmToolTurn) {
+              return {
+                ...base,
+                status: 'confirmation_required',
+                kind: recovery.kind,
+                code: 'tool_turn',
+              };
+            }
+
+            const promptId = crypto.randomUUID();
+            const result = await runtime.bridge.continueSession(
+              requested.sessionId,
+              { promptId },
+            );
+            if (!result.accepted) {
+              return {
+                ...base,
+                status: 'rejected',
+                kind: recovery.kind,
+                interruption: result.interruption,
+              };
+            }
+            return {
+              ...base,
+              status: 'accepted',
+              kind: recovery.kind,
+              promptId: result.promptId ?? promptId,
+              ...(result.lastEventId !== undefined
+                ? { lastEventId: result.lastEventId }
+                : {}),
+              ...(result.eventEpoch !== undefined
+                ? { eventEpoch: result.eventEpoch }
+                : {}),
+            };
+          } finally {
+            if (restoreAttachment !== undefined) {
+              await runtime.bridge
+                .detachClient(
+                  restoreAttachment.sessionId,
+                  restoreAttachment.clientId,
+                )
+                .catch(() => {});
+            }
+          }
+        };
+        try {
+          return await archiveCoordinator.runSharedMany(
+            [requested.sessionId],
+            continueLocked,
           );
-          if (!result.accepted) {
+        } catch (error) {
+          if (isSessionNotFoundError(error)) {
+            return { ...base, status: 'error', code: 'session_not_found' };
+          }
+          if (isGenerationClosedError(error) || !isCurrent()) {
             return {
               ...base,
-              status: 'rejected',
-              kind: recovery.kind,
-              interruption: result.interruption,
+              status: 'error',
+              code: 'workspace_runtime_unavailable',
             };
           }
-          return {
-            ...base,
-            status: 'accepted',
-            kind: recovery.kind,
-            promptId: result.promptId ?? promptId,
-            ...(result.lastEventId !== undefined
-              ? { lastEventId: result.lastEventId }
-              : {}),
-            ...(result.eventEpoch !== undefined
-              ? { eventEpoch: result.eventEpoch }
-              : {}),
-          };
-        } finally {
-          if (restoreAttachment !== undefined) {
-            await runtime.bridge
-              .detachClient(
-                restoreAttachment.sessionId,
-                restoreAttachment.clientId,
-              )
-              .catch(() => {});
-          }
+          daemonLog?.error(
+            error instanceof Error ? error.message : String(error),
+            error instanceof Error ? error : undefined,
+            {
+              route,
+              workspaceId: entry.workspaceId,
+              sessionId: requested.sessionId,
+            },
+          );
+          return { ...base, status: 'error', code: 'continue_failed' };
         }
-      } catch (error) {
-        if (isSessionNotFoundError(error)) {
-          return { ...base, status: 'error', code: 'session_not_found' };
-        }
-        if (isGenerationClosedError(error) || !isCurrent()) {
-          return {
-            ...base,
-            status: 'error',
-            code: 'workspace_runtime_unavailable',
-          };
-        }
-        daemonLog?.error(
-          error instanceof Error ? error.message : String(error),
-          error instanceof Error ? error : undefined,
-          {
-            route,
-            workspaceId: entry.workspaceId,
-            sessionId: requested.sessionId,
-          },
-        );
-        return { ...base, status: 'error', code: 'continue_failed' };
-      }
-    };
+      };
 
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    const onClose = () => {
-      if (!res.writableEnded) abort();
-    };
-    req.once('aborted', abort);
-    res.once('close', onClose);
-    if (req.aborted || res.destroyed) abort();
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      const onClose = () => {
+        if (!res.writableEnded) abort();
+      };
+      req.once('aborted', abort);
+      res.once('close', onClose);
+      if (req.aborted || res.destroyed) abort();
 
-    const results: Array<Record<string, unknown>> = [];
-    try {
-      for (const requested of parsed.data.sessions) {
+      const results: Array<Record<string, unknown>> = [];
+      try {
+        for (const requested of parsed.data.sessions) {
+          if (controller.signal.aborted) return;
+          results.push(await continueOne(requested));
+          // Loading and continuing are serial disk/bridge work; yield so a
+          // client disconnect is observed between sessions.
+          await new Promise((resolve) => setImmediate(resolve));
+        }
         if (controller.signal.aborted) return;
-        results.push(await continueOne(requested));
-        // Loading and continuing are serial disk/bridge work; yield so a
-        // client disconnect is observed between sessions.
-        await new Promise((resolve) => setImmediate(resolve));
+        addDaemonRequestAttribute(
+          'qwen-code.daemon.restart_recovery_continue_batch.members',
+          results.length,
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(200).json({ results });
+      } finally {
+        req.off('aborted', abort);
+        res.off('close', onClose);
       }
-      if (controller.signal.aborted) return;
-      addDaemonRequestAttribute(
-        'qwen-code.daemon.restart_recovery_continue_batch.members',
-        results.length,
-      );
-      res.setHeader('Cache-Control', 'no-store');
-      res.status(200).json({ results });
-    } finally {
-      req.off('aborted', abort);
-      res.off('close', onClose);
-    }
-  });
+    },
+  );
 
   const workspaceSessionInfoHandler =
     (paramName: 'id' | 'workspace'): RequestHandler =>

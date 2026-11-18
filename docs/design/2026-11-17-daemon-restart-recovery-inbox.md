@@ -211,13 +211,17 @@ each entry:
    terminals remain recoverable.
 2. Resolve the owner runtime from the requested workspace, applying the same
    ownership, trust, and generation guards as `POST /session/:id/continue`,
-   with no primary-runtime fallback. Standalone conversations are out of scope
-   and fail at the cold load.
+   with no primary-runtime fallback. Hold the same archive shared lock as that
+   route so archive or delete cannot race the ledger re-read, restore, or
+   dispatch. Standalone conversations are out of scope and fail at the cold
+   load.
 3. If the session is not live, run the same cold restore core that
    `POST /session/:id/load` uses. No second loading path is introduced. The
-   restore's temporary client attachment is released after the continuation
-   settles (or before returning when it is rejected); releasing it first would
-   let the idle-close path tear down the just-loaded session.
+   restore's temporary client attachment is released when the continuation
+   request returns, whether it is accepted or rejected. An accepted request
+   admits the prompt first, so the pending prompt keeps the session open;
+   releasing the attachment before dispatch would let the idle-close path tear
+   down the just-loaded session.
 4. Read the recovery summary through the same bridge status path the banner
    uses.
 5. If `canContinue` is false, return `not_continuable` with `kind`. This

@@ -86,6 +86,8 @@ export function RestartRecoveryPanel({
       setRows([]);
       setLoadFailed(false);
       setScanFailures([]);
+      setNotice(null);
+      setOpen(false);
       return;
     }
     let cancelled = false;
@@ -139,10 +141,11 @@ export function RestartRecoveryPanel({
     async (
       targets: readonly RestartRecoveryRow[],
       confirmToolTurn: boolean,
+      options: { clearNotice?: boolean } = {},
     ) => {
       if (targets.length === 0) return;
       setBusy(true);
-      setNotice(null);
+      if (options.clearNotice !== false) setNotice(null);
       try {
         const result = await client.continueRestartRecoveries({
           sessions: targets.map((row) => ({
@@ -195,7 +198,11 @@ export function RestartRecoveryPanel({
         });
         if (notContinuable) {
           setNotice(
-            `${t('restartRecovery.notContinuable')} (${notContinuable.code ?? notContinuable.status})`,
+            `${t('restartRecovery.notContinuable')} (${
+              notContinuable.code ??
+              notContinuable.kind ??
+              notContinuable.status
+            })`,
           );
         }
       } catch {
@@ -213,7 +220,9 @@ export function RestartRecoveryPanel({
         row.needsToolConfirmation !== true && row.needsConversation !== true,
     );
     for (let index = 0; index < pending.length; index += BATCH_SIZE) {
-      await runBatch(pending.slice(index, index + BATCH_SIZE), false);
+      await runBatch(pending.slice(index, index + BATCH_SIZE), false, {
+        clearNotice: index === 0,
+      });
     }
   }, [rows, runBatch]);
 

@@ -49,6 +49,7 @@ interface Fixture {
   bridge: AcpSessionBridge;
   app: express.Express;
   sessionId: string;
+  runSharedMany: ReturnType<typeof vi.fn>;
   seed(records: readonly PromptLedgerRecord[], sessionId?: string): void;
 }
 
@@ -88,6 +89,9 @@ function makeFixture(trusted = true): Fixture {
       assertCanWrite: vi.fn(),
     } as WorkspaceFileSystemFactory,
   } as WorkspaceRuntime;
+  const runSharedMany = vi.fn(
+    async (_sessionIds: string[], fn: () => Promise<unknown>) => await fn(),
+  );
   const app = express();
   app.use(express.json());
   registerSessionRoutes(app, {
@@ -95,8 +99,10 @@ function makeFixture(trusted = true): Fixture {
     bridge,
     workspaceRegistry: createWorkspaceRegistry([runtime]),
     archiveCoordinator: {
-      runSharedMany: async (_sessionIds, fn) => await fn(),
-    } as Parameters<typeof registerSessionRoutes>[1]['archiveCoordinator'],
+      runSharedMany,
+    } as unknown as Parameters<
+      typeof registerSessionRoutes
+    >[1]['archiveCoordinator'],
     mutate: () => (_req, _res, next) => next(),
     sendBridgeError: (res: Response, err: unknown) => {
       res.status(500).json({
@@ -113,6 +119,7 @@ function makeFixture(trusted = true): Fixture {
     bridge,
     app,
     sessionId,
+    runSharedMany,
     seed(records, seedSessionId = sessionId) {
       const ledgerPath = sessionService.getPromptLedgerPath(seedSessionId);
       for (const record of records) {
@@ -193,6 +200,21 @@ describe('POST /sessions/recovery/continue', () => {
     expect(fixture.bridge.continueSession).toHaveBeenCalledWith(
       fixture.sessionId,
       { promptId: expect.any(String) },
+    );
+  });
+
+  it('holds the archive shared lock while continuing', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.status).toBe(200);
+    expect(fixture.runSharedMany).toHaveBeenCalledWith(
+      [fixture.sessionId],
+      expect.any(Function),
     );
   });
 

@@ -169,11 +169,13 @@ prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终�
    `in_flight` 记录表示轮次正在执行；第 5 步的 `canContinue` 检查会拒绝它。
    `daemon_shutdown`、`daemon_lost`、`channel_closed` 终态仍可恢复。
 2. 从请求指定的 workspace 解析所属 runtime，应用与 `POST /session/:id/continue`
-   相同的归属、信任和 generation 守卫，且不回退到主运行环境。standalone 会话不在
-   范围内，会在冷加载时失败。
+   相同的归属、信任和 generation 守卫，且不回退到主运行环境。持有与该路由相同的
+   archive shared lock，使归档或删除不能与 ledger 重读、恢复或派发竞争。standalone
+   会话不在范围内，会在冷加载时失败。
 3. 会话不在内存时，运行与 `POST /session/:id/load` 相同的冷恢复核心。不引入第二套
-   加载路径。恢复过程产生的临时客户端 attachment 在续接结算后（或被拒绝返回前）释放；
-   过早释放会让空闲关闭路径拆掉刚加载的会话。
+   加载路径。恢复过程产生的临时客户端 attachment 在续接请求返回时释放，无论接受还是
+   拒绝。接受时 prompt 已先进入 pending，因此会保持会话打开；在派发前释放才会让空闲
+   关闭路径拆掉刚加载的会话。
 4. 通过与横幅相同的 bridge 状态路径读取恢复摘要。
 5. `canContinue` 为 false 时返回 `not_continuable` 和 `kind`。这包括
    `degraded_history` 以及仍在执行的会话。
