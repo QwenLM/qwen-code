@@ -1029,11 +1029,14 @@ export function hasUnmodeledShellCommandString(command: string): boolean {
   const head = takeLeadingToken(command);
   if (!head) return false;
   const name = getShellWrapperBase(resolveShellWord(head.token));
+  if (name === 'busybox') {
+    const applet = takeLeadingToken(head.rest);
+    return !applet || resolveShellWord(applet.token) !== 'echo';
+  }
   // These dispatchers can run another program with untracked argv, cwd,
   // namespace or startup code. Their payload is not a transparent prefix.
   if (
     [
-      'busybox',
       'taskset',
       'chroot',
       'flock',

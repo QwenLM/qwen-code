@@ -89,9 +89,11 @@ export class ShellCommentContext {
     if (!doubleQuoted && this.parameterQuotes.length === 0) {
       this.pendingProcessSubstitution = character === '<' || character === '>';
       if (character === '(') {
-        this.parenthesisWords.push(afterDollar || afterProcessSubstitution);
+        this.parenthesisWords.push(
+          afterDollar || afterProcessSubstitution || !this.wordStart,
+        );
       } else if (character === ')') {
-        // A shell group ends a word; a command/process expansion remains in it.
+        // A group ends a word; expansions and array assignments remain in it.
         this.wordStart = !this.parenthesisWords.pop();
         return undefined;
       }
