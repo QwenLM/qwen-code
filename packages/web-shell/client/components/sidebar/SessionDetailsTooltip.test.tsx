@@ -78,6 +78,17 @@ describe('SessionDetailsTooltip', () => {
       'User input needed',
     ],
     [{ hasActivePrompt: true, activeWorkState: 'active' as const }, 'Running'],
+    // A plain running turn must not claim background work: `toContain` alone
+    // cannot catch an unconditional composition, so this row also rejects it.
+    [{ hasActivePrompt: true, hasRunningBackgroundTasks: false }, 'Running'],
+    [
+      { isWaitingForPermission: true, hasRunningBackgroundTasks: true },
+      'Needs approval · Background tasks running',
+    ],
+    [
+      { isWaitingForUserQuestion: true, hasRunningBackgroundTasks: true },
+      'User input needed · Background tasks running',
+    ],
     [{ activeWorkState: 'active' as const }, 'Active work'],
     [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
   ])(
@@ -111,11 +122,49 @@ describe('SessionDetailsTooltip', () => {
         expect(details?.textContent).toContain(expected);
         if (expected !== 'Running')
           expect(details?.textContent).not.toContain('Running');
+        if (flags.hasRunningBackgroundTasks === false)
+          expect(details?.textContent).not.toContain('Background');
       } finally {
         act(() => root.unmount());
       }
     },
   );
+
+  it('names background work alongside a running turn', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'status',
+                workspaceCwd: '/workspace',
+                hasActivePrompt: true,
+                hasRunningBackgroundTasks: true,
+                activeWorkState: 'active',
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Running · Background tasks running',
+      );
+    } finally {
+      act(() => root.unmount());
+    }
+  });
 
   it('supports a ref-forwarding click trigger, keyboard dismissal and the host portal', async () => {
     const container = document.createElement('div');

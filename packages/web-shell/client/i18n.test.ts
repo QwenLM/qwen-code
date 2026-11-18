@@ -10,6 +10,7 @@ import {
 } from './i18n';
 import type { WebShellLanguage } from './i18n';
 import { CHANNEL_METHOD_PLATFORMS } from './components/channels/channel-platform';
+import { RU_PART6 } from './i18n-ru-part6';
 import * as ruPart1Stub from './i18n-ru-part1.transcript-stub';
 import * as ruPart2Stub from './i18n-ru-part2.transcript-stub';
 import * as ruPart3Stub from './i18n-ru-part3.transcript-stub';
@@ -120,6 +121,8 @@ const SCHEDULED_TASK_DELIVERY_KEYS = [
   'chat',
   'cardPrefix',
   'configuredGroupHint',
+  'configuredEndpointHint',
+  'endpoint',
   'configuredHint',
   'useConfiguredDestination',
   'differentConfiguredDestination',
@@ -140,6 +143,14 @@ const OUTBOUND_CHANNEL_KEYS = [
   'editor.field.webhook.webhookUrl.description',
   'editor.field.webhook.signingSecret',
   'editor.field.webhook.signingSecret.description',
+  'platform.name.generic-webhook',
+  'editor.field.genericWebhook.webhookUrl',
+  'editor.field.genericWebhook.webhookUrl.description',
+  'editor.field.genericWebhook.bearerToken',
+  'editor.field.genericWebhook.bearerToken.description',
+  'editor.field.genericWebhook.allowPrivateNetwork',
+  'editor.field.genericWebhook.allowPrivateNetwork.description',
+  'editor.field.genericWebhook.networkDescription',
 ].map((suffix) => `channels.${suffix}`);
 
 describe('web-shell i18n catalog', () => {
@@ -249,6 +260,21 @@ describe('web-shell i18n catalog', () => {
       expect(en(key)).not.toBe(key);
       expect(zh(key)).not.toBe(key);
       expect(zh(key)).not.toBe(en(key));
+    }
+  });
+
+  it('keeps the daemon-status SSE admission label translated in zh and ru', () => {
+    // The status dialog renders this label in every shipped locale. The
+    // translator falls back to EN per key, so a deleted zh/ru entry would
+    // silently show English mid-surface — compare against en(key), not the
+    // raw key (issue #17554 review R1-3).
+    const key = 'daemon.transport.sseAdmission';
+    const en = getTranslator('en')(key);
+    expect(en).not.toBe(key);
+    for (const language of ['zh-CN', 'ru'] as const) {
+      const value = getTranslator(language)(key);
+      expect(value).not.toBe(key);
+      expect(value).not.toBe(en);
     }
   });
 
@@ -632,6 +658,31 @@ describe('web-shell i18n catalog', () => {
 // ru is a full shipped catalog. These pins guard the normalizer branches,
 // Goal pluralisation, and that chrome keys resolve from RU rather than EN.
 describe('web-shell ru locale', () => {
+  it.each([
+    'scheduledTasks.delivery.configuredEndpointHint',
+    'scheduledTasks.delivery.endpoint',
+    'channels.editor.field.genericWebhook.webhookUrl',
+    'channels.editor.field.genericWebhook.webhookUrl.description',
+    'channels.editor.field.genericWebhook.bearerToken',
+    'channels.editor.field.genericWebhook.bearerToken.description',
+    'channels.editor.field.genericWebhook.allowPrivateNetwork',
+    'channels.editor.field.genericWebhook.allowPrivateNetwork.description',
+    'channels.editor.field.genericWebhook.networkDescription',
+  ])('localizes Generic Webhook copy in Russian: %s', (key) => {
+    const translated = getTranslator('ru')(key);
+    expect(translated).not.toBe(key);
+    expect(translated).not.toBe(getTranslator('en')(key));
+  });
+
+  it('keeps the Generic Webhook platform name unchanged in Russian', () => {
+    expect(RU_PART6['channels.platform.name.generic-webhook']).toBe(
+      'Generic Webhook',
+    );
+    expect(getTranslator('ru')('channels.platform.name.generic-webhook')).toBe(
+      'Generic Webhook',
+    );
+  });
+
   it('normalizes ru spellings to ru and leaves the en/zh mappings untouched', () => {
     for (const value of [
       'ru',

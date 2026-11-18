@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.contracts.catalog;
 
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.StandaloneSkill;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -46,9 +47,7 @@ public final class AgentDefinitionExtensions {
         for (Object entry : entries) {
             if (!(entry instanceof Map<?, ?> skill)
                     || !SKILL_FIELDS.containsAll(skill.keySet())
-                    || !text(skill.get("name"), 128)
-                    || !SKILL_NAME.matcher((String) skill.get("name")).matches()
-                    || !text(skill.get("description"), 4096)
+                    || !validSkillMetadata(skill.get("name"), skill.get("description"))
                     || !text(skill.get("body"), sessionCatalog ? 512 * 1024 : 32768)
                     || !names.add((String) skill.get("name"))) {
                 throw unsupported("skills");
@@ -78,6 +77,29 @@ public final class AgentDefinitionExtensions {
             throw unsupported("skills");
         }
         return List.copyOf(result);
+    }
+
+    public static List<Map<String, Object>> sessionSkills(Object value, List<StandaloneSkill> packages) {
+        var base = sessionSkills(value);
+        if (packages.isEmpty()) {
+            return base;
+        }
+        long bytes;
+        try {
+            // JSON.stringify emits supplementary characters as UTF-8, unlike Jackson's byte generator.
+            bytes = JSON.writeValueAsString(base).getBytes(StandardCharsets.UTF_8).length;
+        } catch (JsonProcessingException error) {
+            throw new IllegalStateException("Invalid admitted skills", error);
+        }
+        var names = new HashSet<String>();
+        base.forEach(skill -> names.add((String) skill.get("name")));
+        for (StandaloneSkill skill : packages) {
+            bytes += (names.isEmpty() ? 0L : 1L) + skill.catalogEntryBytes();
+            if (!names.add(skill.name()) || names.size() > 256 || bytes > ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES) {
+                throw new ManagedAgentException(409, "extension_skill_unavailable", "The combined Session Skill catalog has conflicting names or exceeds its limit.");
+            }
+        }
+        return base;
     }
 
     public static byte[] skillsBytes(List<Map<String, Object>> skills) {
@@ -143,6 +165,10 @@ public final class AgentDefinitionExtensions {
             throw unsupported(field);
         }
         return entries;
+    }
+
+    public static boolean validSkillMetadata(Object name, Object description) {
+        return text(name, 128) && SKILL_NAME.matcher((String) name).matches() && text(description, 4096);
     }
 
     private static boolean text(Object value, int maxBytes) {

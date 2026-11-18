@@ -73,6 +73,24 @@ describe('activity model', () => {
       'unread',
     );
     expect(activityState(entry('error', { hasTurnError: true }))).toBe('error');
+    // The monitor shape: background work the daemon grades idle is still
+    // active, and the Activity archive confirmation reads this same predicate.
+    expect(
+      activityState(
+        entry('monitor', {
+          hasRunningBackgroundTasks: true,
+          activeWorkState: 'idle',
+        }),
+      ),
+    ).toBe('active');
+    expect(
+      activityState(
+        entry('finished', {
+          hasRunningBackgroundTasks: false,
+          activeWorkState: 'idle',
+        }),
+      ),
+    ).toBe('idle');
   });
 
   it('uses only the shared in-memory completion flag, not historical timestamps', () => {

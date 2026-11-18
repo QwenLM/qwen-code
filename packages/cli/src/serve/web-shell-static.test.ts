@@ -439,6 +439,7 @@ describe('public PWA HTTP routes', () => {
     '/channels',
     '/live',
     '/scheduled-tasks',
+    '/pr-watches',
     '/goals',
     '/settings',
   ])(

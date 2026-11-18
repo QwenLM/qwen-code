@@ -10,10 +10,11 @@
 // control plane is provider-agnostic: the adapter name is a pattern on the
 // Java side, the reply context is adapter-opaque JSON echoed back on claim,
 // and the segment ledger / claim budget / receipt discipline are unchanged.
-// See docs/design/2026-11-13-managed-channel-dingtalk-adapter.md.
+// See docs/design/2026-11-13-managed-channel-dingtalk-adapter.md and
+// docs/design/2026-11-16-managed-channel-wecom-adapter.md.
 
 /** The adapters the managed path enables. */
-export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'github';
+export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'github' | 'wecom';
 
 /** The route policy pinned with the first binding of each route. */
 export interface ManagedChannelPolicy {
@@ -102,6 +103,21 @@ export function validManagedReceipt(value: unknown): boolean {
 
 /** The trusted control-plane surface the adapter talks to. */
 export interface ManagedChannelControlPlane {
+  /**
+   * A stable key of the registration this client talks to — the control-plane
+   * base URL, tenant, channel, and the owning actor, workspace and cwd-relative.
+   * A persisting adapter that needs cross-registration isolation keys its ledger
+   * by it (the WeCom adapter does), so a ledger staged for one registration is
+   * never replayed into another when the same configured entry is restarted
+   * against a different destination or owner. Binding only the tenant/channel is
+   * not enough: a new actor/workspace of the same tenant/channel must not inherit
+   * the prior owner's pending. This is a capability a persisting adapter opts
+   * into, not an invariant every sibling already satisfies — the DingTalk store
+   * still keys by name+account only and does not yet bind the registration
+   * identity (a follow-up). Optional so test doubles that do not persist may
+   * omit it.
+   */
+  readonly destinationKey?: string;
   register(request: {
     platform: ManagedChannelAdapter;
     accountId: string;

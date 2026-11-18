@@ -234,6 +234,7 @@ import {
   positiveFiniteOrNull,
   pushChannelRestoreIssues,
   resolveWriterIdleBudgetMs,
+  sseListenerCapsForStatus,
   sseMaxConnections,
   toDaemonStatusMemoryLimits,
   type DaemonStatusIssue,
@@ -241,6 +242,7 @@ import {
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
+import { getSseOccupancy } from './sse-occupancy.js';
 import { DaemonMetricsRing } from './daemon-metrics-ring.js';
 import { computeCpuPercent } from '../runtime/cpu-percent.js';
 import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
@@ -2939,6 +2941,10 @@ function createBootstrapServeApp(input: {
           opts.maxConnections,
           opts.maxSseConnections,
         ),
+        maxSseConnectionsPerListener: sseListenerCapsForStatus(
+          opts.maxConnections,
+          opts.maxSseConnections,
+        ),
         eventRingSize: opts.eventRingSize ?? DEFAULT_RING_SIZE,
         eventRingMaxBytes: opts.eventRingMaxBytes!,
         compactedReplayMaxBytes:
@@ -3005,6 +3011,7 @@ function createBootstrapServeApp(input: {
         ...(channelWorkers.length > 0 ? { channelWorkers } : {}),
         transport: {
           restSseActive: 0,
+          streamOccupancy: getSseOccupancy(),
           acp: {
             enabled: false,
             connections: 0,
@@ -9330,6 +9337,13 @@ async function runQwenServeImpl(
     (
       app.locals as { subSessionStoppers?: Array<() => void> }
     ).subSessionStoppers = subSessionStoppers;
+    // `POST /session/:id/sub-sessions` runs a person's send on the launcher of
+    // the caller's workspace.
+    (
+      app.locals as {
+        subSessionLauncherFor?: typeof subSessionWorkspaces.getLauncher;
+      }
+    ).subSessionLauncherFor = subSessionWorkspaces.getLauncher;
     subSessionStoppers.push(subSessionLauncher.stop);
     if (workspaceTrustHotReloadAvailable) {
       const [

@@ -137,6 +137,7 @@ import { SubagentDetail } from './SubagentDetail';
 import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
+import { SessionPanel } from './SessionPanel';
 import type { WebShellModelManagementOptions } from '../../modelManagement';
 import type {
   WebShellUnavailableModel,
@@ -353,6 +354,14 @@ export type ArtifactPanelTab =
       workspaceCwd?: string;
       nameFromFirstPrompt?: boolean;
       initialPrompt?: string;
+    }
+  | {
+      /** Another session, shown read-only: where a `/send` message runs. */
+      id: string;
+      kind: 'session';
+      title: string;
+      sessionId: string;
+      workspaceCwd: string;
     }
   | {
       id: string;
@@ -923,92 +932,95 @@ export function ArtifactPanel({
                     tab.kind === 'turn_calls' ? t('turnCalls.title') : tab.title
                   }
                 >
-                  <span
-                    className={`${styles.tabIcon} ${getArtifactPanelTabKind(tab) === 'artifact' ? styles.tabArtifactIcon : ''}`}
-                    aria-hidden="true"
-                  >
-                    {getArtifactPanelTabKind(tab) === 'review' ? (
-                      <TabReviewIcon />
-                    ) : tab.kind === 'files' ? (
-                      <FilesIcon className={styles.tabIconSvg} />
-                    ) : tab.kind === 'workflow' ? (
-                      <NetworkIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'file' ? (
-                      <FileTypeIcon
-                        name={tab.workspacePath}
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'artifact' ? (
-                      <ArtifactIcon
-                        artifact={artifacts.find(
-                          (artifact) =>
-                            'artifactId' in tab &&
-                            artifact.id === tab.artifactId,
-                        )}
-                        className={styles.tabIconSvg}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'subagent' ? (
-                      <TabSubagentIcon />
-                    ) : getArtifactPanelTabKind(tab) === 'monitor' ? (
-                      <SquareActivityIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'shell' ? (
-                      <SquareTerminalIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'side_task' ? (
-                      <MessageCirclePlusIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'web_preview' ? (
-                      <GlobeIcon className={styles.tabIconSvg} />
-                    ) : tab.kind === 'terminal' ? (
-                      <SquareTerminalIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : getArtifactPanelTabKind(tab) === 'image' ? (
-                      <ImageIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'context_usage' ? (
-                      <LayersIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'token_usage' ? (
-                      <GaugeIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'turn_calls' ? (
-                      <WrenchIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'trajectory' ? (
-                      <ListTreeIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : tab.kind === 'change_overview' ? (
-                      <FileDiffIcon
-                        className={styles.tabIconSvg}
-                        strokeWidth={1.6}
-                      />
-                    ) : (
-                      <TabScheduledTaskIcon />
-                    )}
-                  </span>
+                  {/* Another session's tab is named by its title alone. */}
+                  {tab.kind !== 'session' && (
+                    <span
+                      className={`${styles.tabIcon} ${getArtifactPanelTabKind(tab) === 'artifact' ? styles.tabArtifactIcon : ''}`}
+                      aria-hidden="true"
+                    >
+                      {getArtifactPanelTabKind(tab) === 'review' ? (
+                        <TabReviewIcon />
+                      ) : tab.kind === 'files' ? (
+                        <FilesIcon className={styles.tabIconSvg} />
+                      ) : tab.kind === 'workflow' ? (
+                        <NetworkIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'file' ? (
+                        <FileTypeIcon
+                          name={tab.workspacePath}
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'artifact' ? (
+                        <ArtifactIcon
+                          artifact={artifacts.find(
+                            (artifact) =>
+                              'artifactId' in tab &&
+                              artifact.id === tab.artifactId,
+                          )}
+                          className={styles.tabIconSvg}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'subagent' ? (
+                        <TabSubagentIcon />
+                      ) : getArtifactPanelTabKind(tab) === 'monitor' ? (
+                        <SquareActivityIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'shell' ? (
+                        <SquareTerminalIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'side_task' ? (
+                        <MessageCirclePlusIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'web_preview' ? (
+                        <GlobeIcon className={styles.tabIconSvg} />
+                      ) : tab.kind === 'terminal' ? (
+                        <SquareTerminalIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : getArtifactPanelTabKind(tab) === 'image' ? (
+                        <ImageIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'context_usage' ? (
+                        <LayersIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'token_usage' ? (
+                        <GaugeIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'turn_calls' ? (
+                        <WrenchIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'trajectory' ? (
+                        <ListTreeIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'change_overview' ? (
+                        <FileDiffIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : (
+                        <TabScheduledTaskIcon />
+                      )}
+                    </span>
+                  )}
                   <span
                     className={styles.tabTitle}
                     data-web-shell-session-title
@@ -1785,6 +1797,18 @@ export function ArtifactPanel({
             key={activeTab.id}
             task={activeTab.task}
             actions={activeTab.sessionActions}
+          />
+        ) : activeTab.kind === 'session' ? (
+          <SessionPanel
+            key={activeTab.id}
+            tabId={activeTab.id}
+            sessionId={activeTab.sessionId}
+            workspaceCwd={activeTab.workspaceCwd}
+            title={activeTab.title}
+            onRightPanelOpen={onNestedRightPanelOpen}
+            onArtifactsChange={onNestedArtifactsChange}
+            onError={onError}
+            onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : activeTab.kind === 'side_task' ? (
           <SideTaskPanel
