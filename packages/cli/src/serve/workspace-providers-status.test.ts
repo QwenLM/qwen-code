@@ -12,8 +12,33 @@ import {
   loadSettings,
   resetHomeEnvBootstrapForTesting,
 } from '../config/settings.js';
+import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
 import { listModelConfigurations } from './model-configuration.js';
+
+// The system settings overrides are only honored for a root-owned file,
+// which a non-root test host cannot arrange for its temp fixtures; the
+// fixtures stand in for administrator-created system files.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
 
 const coreMock = vi.hoisted(() => ({
   throwModelsConfigError: false,
@@ -57,6 +82,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'providers-status-'));
+    trustedSystemSettingsDirs.add(tmpDir);
     workspace = path.join(tmpDir, 'workspace');
     qwenHome = path.join(tmpDir, 'qwen-home');
     await fs.mkdir(workspace, { recursive: true });
@@ -71,6 +97,12 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       tmpDir,
       'system-defaults.json',
     );
+    // The override fixtures must exist and read as administrator-controlled:
+    // the trust gate rejects a missing file, and the operator sandbox reader
+    // fails loud for a rejected system layer while the platform default is
+    // absent. Empty files keep the system scopes inert.
+    await fs.writeFile(path.join(tmpDir, 'system-settings.json'), '{}');
+    await fs.writeFile(path.join(tmpDir, 'system-defaults.json'), '{}');
     coreMock.throwModelsConfigError = false;
     coreMock.modelsConfigErrorMessage =
       'Failed loading provider https://user:secret@broken.example/v1';
@@ -84,6 +116,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     restoreEnv('QWEN_CODE_SYSTEM_SETTINGS_PATH', originalSystemSettings);
     restoreEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', originalSystemDefaults);
     resetHomeEnvBootstrapForTesting();
+    trustedSystemSettingsDirs.delete(tmpDir);
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 

@@ -16,6 +16,7 @@ import {
 } from '../../config/settings.js';
 import { resolveHookSettingsForConfig } from '../../config/hook-settings.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { trustedSystemSettingsDirs } from '../../test-utils/trusted-system-settings.js';
 import { hooksCommand } from './hooksCommand.js';
 import {
   hashProjectHooks,
@@ -24,6 +25,30 @@ import {
 } from '../../config/hook-approvals.js';
 import { normalizeProjectRoot } from '../../config/approval-project-root.js';
 import { readProjectEnvFiles } from '../../config/environment.js';
+
+// The system settings overrides are only honored for a root-owned regular
+// file, which a non-root test host cannot arrange for its temp fixtures; the
+// fixtures stand in for administrator-created system files.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
 
 const hook = (command: string) => [
   { matcher: '*', hooks: [{ type: 'command' as const, command }] },
@@ -47,6 +72,7 @@ describe('/hooks reload with real settings files', () => {
 
   beforeEach(() => {
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-reload-'));
+    trustedSystemSettingsDirs.add(directory);
     // A .env the repo itself owns, so the approval hash covers it on every
     // machine; an ancestor .env reaches only the runtime env, not the hash.
     fs.mkdirSync(path.join(directory, 'repo'), { recursive: true });
@@ -73,6 +99,7 @@ describe('/hooks reload with real settings files', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
+    trustedSystemSettingsDirs.delete(directory);
     resetHookApprovalsForTesting();
     fs.rmSync(directory, { recursive: true, force: true });
   });

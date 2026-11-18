@@ -174,7 +174,6 @@ async function fixture(
       [secondary]: 'TRUST_FOLDER',
     }),
   );
-  await fs.writeFile(path.join(root, 'system.json'), '{}');
   const server = await startFakeOpenAIServer(respond);
   const env: Record<string, string> = Object.fromEntries(
     Object.keys(process.env).map((key) => [key, '']),
@@ -190,8 +189,6 @@ async function fixture(
     TEST_CLI_PATH: cliBin,
     QWEN_CLI_ENTRY: cliBin,
     QWEN_SANDBOX: 'false',
-    QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(root, 'system.json'),
-    QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(root, 'system.json'),
     QWEN_CODE_TRUSTED_FOLDERS_PATH: path.join(
       fixtureHome,
       'trustedFolders.json',

@@ -62,7 +62,6 @@ describe.each([
         model: { skipNextSpeakerCheck: true },
       }),
     );
-    await helper.createFile('system.json', '{}');
     server = await startFakeOpenAIServer(
       () => ({ content: 'DW04_DONE' }),
       fakeServerHostOptions(),
@@ -83,8 +82,6 @@ describe.each([
       USERPROFILE: home,
       QWEN_HOME: home,
       QWEN_RUNTIME_DIR: join(home, 'runtime'),
-      QWEN_CODE_SYSTEM_SETTINGS_PATH: join(cwd, 'system.json'),
-      QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(cwd, 'system.json'),
       QWEN_CODE_DISABLE_WORKFLOWS: '0',
       // Arm-dependent: an unconditional '0' would force the shared arm onto
       // the legacy loop now that the env override beats the setting.

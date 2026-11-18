@@ -17,11 +17,36 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...actualOs, homedir: vi.fn(() => mockHome.dir) };
 });
 
+// The system settings overrides are only honored for a root-owned regular
+// file, which a non-root test host cannot arrange for its temp fixtures; the
+// fixtures stand in for administrator-created system files.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
+
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { ideContextStore } from '@qwen-code/qwen-code-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
 import {
   clearSettingsCacheForTesting,
   loadSettingsCached,
@@ -95,6 +120,18 @@ describe('loadSettingsCached', () => {
       'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
       path.join(tmpRoot, 'system', 'system-defaults.json'),
     );
+    // The trust gate (#13513) only honors a root-owned regular file; the
+    // lstat mock above reports these empty fixtures as root-owned, so the
+    // overrides resolve to empty layers inside tmpRoot instead of the
+    // platform default a dev host may ship with real content.
+    trustedSystemSettingsDirs.add(tmpRoot);
+    fs.mkdirSync(path.join(tmpRoot, 'system'), { recursive: true });
+    for (const name of ['settings.json', 'system-defaults.json']) {
+      fs.writeFileSync(
+        path.join(tmpRoot, 'system', name),
+        JSON.stringify({ [SETTINGS_VERSION_KEY]: SETTINGS_VERSION }),
+      );
+    }
     resetModuleState();
   });
 
@@ -105,6 +142,7 @@ describe('loadSettingsCached', () => {
         delete process.env[key];
       }
     }
+    trustedSystemSettingsDirs.delete(tmpRoot);
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 

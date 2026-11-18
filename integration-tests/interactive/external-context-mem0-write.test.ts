@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
@@ -406,7 +405,6 @@ async function configureManagedWrite(
   const approvalsPath = join(qwenHome, 'mcpApprovals.json');
   const configPath = join(qwenHome, 'external-context.json');
   const mcpConfigPath = join(qwenHome, 'mcp.json');
-  const systemSettingsPath = join(qwenHome, 'system-settings.json');
   const integrationRoot = join(
     import.meta.dirname,
     '..',
@@ -452,15 +450,6 @@ async function configureManagedWrite(
       },
     }),
   );
-  const systemSettingsSource = join(
-    integrationRoot,
-    'examples',
-    'managed-mem0-write-system-settings.json',
-  );
-  rig.createFile(
-    '.qwen-home/system-settings.json',
-    await readFile(systemSettingsSource, 'utf8'),
-  );
   rig.createFile(
     '.qwen-home/trustedFolders.json',
     JSON.stringify({ [rig.testDir!]: 'TRUST_FOLDER' }),
@@ -496,7 +485,6 @@ async function configureManagedWrite(
   rig.createFile('fake-mem0-mcp.mjs', fakeMem0McpSource(integrationRoot));
 
   process.env['QWEN_HOME'] = qwenHome;
-  process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
   process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
   process.env['QWEN_CODE_MCP_APPROVALS_PATH'] = approvalsPath;
   process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
@@ -514,14 +502,6 @@ async function configureOssManagedWrite(
 ): Promise<ManagedWritePaths> {
   const qwenHome = join(rig.testDir!, '.qwen-home');
   const trustedFoldersPath = join(qwenHome, 'trustedFolders.json');
-  const systemSettingsPath = join(qwenHome, 'system-settings.json');
-  const integrationRoot = join(
-    import.meta.dirname,
-    '..',
-    '..',
-    'integrations',
-    'external-context',
-  );
 
   rig.mkdir('.qwen-home');
   rig.createFile(
@@ -539,22 +519,12 @@ async function configureOssManagedWrite(
       },
     }),
   );
-  const systemSettingsSource = join(
-    integrationRoot,
-    'examples',
-    'managed-mem0-write-system-settings.json',
-  );
-  rig.createFile(
-    '.qwen-home/system-settings.json',
-    await readFile(systemSettingsSource, 'utf8'),
-  );
   rig.createFile(
     '.qwen-home/trustedFolders.json',
     JSON.stringify({ [rig.testDir!]: 'TRUST_FOLDER' }),
   );
 
   process.env['QWEN_HOME'] = qwenHome;
-  process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
   process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = trustedFoldersPath;
   delete process.env['QWEN_CODE_MCP_APPROVALS_PATH'];
   process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';

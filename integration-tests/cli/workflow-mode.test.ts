@@ -46,17 +46,8 @@ describe.each([
         telemetry: { enabled: false },
       }),
     );
-    rig.createFile('system.json', '{}');
     vi.stubEnv('QWEN_HOME', join(rig.testDir!, 'home'));
     vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, 'runtime'));
-    vi.stubEnv(
-      'QWEN_CODE_SYSTEM_SETTINGS_PATH',
-      join(rig.testDir!, 'system.json'),
-    );
-    vi.stubEnv(
-      'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
-      join(rig.testDir!, 'system.json'),
-    );
     vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', '0');
     // Arm-dependent: an unconditional '0' would force the shared arm onto the
     // legacy loop now that the env override beats the setting.

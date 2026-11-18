@@ -83,7 +83,6 @@ describe.skipIf(process.platform === 'win32')(
         path.join(home, 'trustedFolders.json'),
         JSON.stringify({ [a]: 'TRUST_FOLDER', [b]: 'TRUST_FOLDER' }),
       );
-      await fs.writeFile(path.join(root, 'system.json'), '{}');
       server = await startFakeOpenAIServer(async ({ body }) => {
         if (currentTurnText(body, 'DW03_SETTINGS_BUSY')) {
           await busySettingsGate;
@@ -131,8 +130,6 @@ describe.skipIf(process.platform === 'win32')(
           // daemon's `qwen --acp` children, it puts them in a container with
           // no host-loopback route to the fake model server.
           QWEN_SANDBOX: 'false',
-          QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(root, 'system.json'),
-          QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(root, 'system.json'),
           QWEN_CODE_TRUSTED_FOLDERS_PATH: path.join(
             home,
             'trustedFolders.json',

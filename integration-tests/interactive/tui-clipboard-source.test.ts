@@ -75,8 +75,6 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
   for (const directory of [home, workspace, runtimeDir, output])
     mkdirSync(directory, { recursive: true });
   const evidence = mkdtempSync(join(output, `paste-${runtime}-${renderer}-`));
-  const system = join(scratch, 'system.json');
-  const defaults = join(scratch, 'defaults.json');
   const frames: Record<string, string> = {};
   const reached: Record<string, boolean> = {};
   let session: InteractiveSession | undefined;
@@ -88,8 +86,6 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
       error instanceof Error ? (error.stack ?? error.message) : String(error);
   };
   try {
-    json(system, { $version: 4 });
-    json(defaults, { $version: 4 });
     json(join(home, 'settings.json'), {
       security: {
         auth: { selectedType: 'openai' },
@@ -116,8 +112,6 @@ it(`frames a collapsed clipboard source exactly through ${runtime}+${renderer}`,
         USERPROFILE: home,
         QWEN_HOME: home,
         QWEN_RUNTIME_DIR: runtimeDir,
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
         TERM: 'xterm-256color',
         LANG: 'en_US.UTF-8',
         QWEN_CODE_LANG: 'en',

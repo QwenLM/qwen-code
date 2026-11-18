@@ -124,7 +124,6 @@ describe.skipIf(process.platform === 'win32' || sandboxed)(
         },
       });
       await writeJson(trustPath, rules());
-      await writeJson(path.join(root, 'system.json'), {});
       server = await startFakeOpenAIServer(({ body }) => ({
         content: body['stream'] === true ? 'DW02_AGENT_DONE' : '{}',
       }));
@@ -138,8 +137,6 @@ describe.skipIf(process.platform === 'win32' || sandboxed)(
           QWEN_HOME: home,
           QWEN_RUNTIME_DIR: runtime,
           QWEN_CLI_ENTRY: DEFAULT_CLI_BIN,
-          QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(root, 'system.json'),
-          QWEN_CODE_SYSTEM_DEFAULTS_PATH: path.join(root, 'system.json'),
           QWEN_CODE_TRUSTED_FOLDERS_PATH: trustPath,
           QWEN_CODE_DISABLE_CRON: '1',
           QWEN_CODE_DISABLE_WORKFLOWS: '0',

@@ -88,11 +88,9 @@ async function fixture(name, policy) {
       privacy: { usageStatisticsEnabled: false },
     }),
   );
-  const system = path.join(dirs.home, 'system.json');
-  const defaults = path.join(dirs.home, 'defaults.json');
-  await Promise.all(
-    [system, defaults].map((file) => fs.writeFile(file, '{"$version":4}')),
-  );
+  // The system scopes stay at the platform default: the trust gate
+  // (#13513) rejects a user-owned temp fixture, and the sandbox policy
+  // under test lives in the user scope above.
   return {
     name,
     ...dirs,
@@ -101,8 +99,6 @@ async function fixture(name, policy) {
       HOME: dirs.home,
       QWEN_HOME: globalDir,
       QWEN_RUNTIME_DIR: dirs.runtime,
-      QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-      QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
       TMPDIR: dirs.scratch,
       LANG: 'C.UTF-8',
       TERM: 'dumb',
