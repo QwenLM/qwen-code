@@ -68,7 +68,8 @@ as work, the conservative direction.
 
 Optional for back-compat: sidecars written before the field existed (and
 worktrees created without `carryDirtyState`) omit it, and readers treat absent as
-"no recorded overlay" — the has-work gate then behaves exactly as today. The
+"no recorded overlay" — the has-work gate applies no carried exemption (its
+base probes, including the shared hidden-index-bit refusal, still run). The
 runtime shape check (`isValidWorktreeSession`) accepts the field only when every
 entry has a string `path`, a `string | null` `hash`, and a boolean `executable`;
 a wrong-typed value corrupts the sidecar like any other field. The 64 KiB sidecar
@@ -196,7 +197,8 @@ unchanged in this deliverable.
   preserves the checkout whole even after deinit or a `git rm` that removes the
   gitlink from the index (the store persists in the per-worktree admin dir and
   the archive cannot cover it, R5-3).
-- Sidecars without the field behave exactly as today (back-compat).
+- Sidecars without the field get no carried exemption (back-compat); the base
+  probes, including the hidden-index-bit refusal, still apply.
 - A wrong-typed `carriedEntries` corrupts the sidecar (shape check).
 - Mutation witnesses: dropping the reaper's `carriedEntries` argument, widening
   the exemption to a prefix match, and dropping the content-identity comparison

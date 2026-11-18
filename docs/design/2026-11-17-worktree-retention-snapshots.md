@@ -5,7 +5,7 @@
 - Status: proposed (#17237, after the R9-6 carry-metadata deliverable)
 - Builds on: `2026-11-14-web-shell-codex-worktree-parity.md` D7 (snapshots are
   work archives), D3 (dirty carry), and `2026-11-17-worktree-carry-metadata.md`
-  (R9-6, the sidecar `carriedPaths` field).
+  (R9-6, the sidecar `carriedEntries` field).
 - Tracks: #17237 P6.
 
 ## Goal

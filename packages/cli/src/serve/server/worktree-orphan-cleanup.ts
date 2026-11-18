@@ -499,6 +499,7 @@ export async function executeWorktreeCleanup(
     !(await carriedOverlayStillHeldBySource(
       sidecar.carriedFrom ?? sidecar.originalCwd,
       sidecar.carriedEntries,
+      plan.lockKey,
     ))
   ) {
     needsSnapshot = true;

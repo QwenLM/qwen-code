@@ -1953,6 +1953,18 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     );
   });
 
+  it('a staged marker temp sibling is waived by the base gate too (round-7)', async () => {
+    // The carried ladder waives the atomic-write temp siblings; the base
+    // ladder must agree, or a no-carry checkout with a leftover temp reads
+    // as work while the carried one reads clean (divergent waiver policy).
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r96-tmppattern', 'main');
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    await fs.writeFile(path.join(wt, '.qwen-session.abc123.tmp'), 'partial\n');
+    await expect(worktreeHasWork(wt)).resolves.toBe(false);
+  });
+
   it('a hidden index bit on a CLEAN file still refuses (F6 bit arms)', async () => {
     // No edit: status alone reads clean, so only the bit refusal itself can
     // preserve. The edit-based F6 cells above can be satisfied by the status
@@ -2205,6 +2217,119 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     // Committed removal: same store, still no gitlink anywhere.
     git(wt, 'commit', '-qm', 'drop submodule', '--no-verify');
     await expect(worktreeHasWork(wt)).resolves.toBe(true);
+  });
+
+  it('a clean populated gitlink without a modules store reads as work (P1 arm)', async () => {
+    // An embedded-.git submodule (cloned, not absorbed) at the recorded SHA:
+    // status alone reads CLEAN and there is NO modules entry, so only the
+    // populated-directory arm of the gitlink probe can preserve. (An
+    // absorbed submodule would be rescued by the unconditional modules
+    // scan, leaving this arm unwitnessed.)
+    const subRoot = path.join(repoParent, 'subrepo');
+    await fs.mkdir(subRoot);
+    await initRepo(subRoot);
+    const subSha = git(subRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r96-populated', 'main');
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    execFileSync('git', ['clone', '-q', subRoot, 'lib'], {
+      cwd: wt,
+      encoding: 'utf8',
+    });
+    git(wt, 'update-index', '--add', '--cacheinfo', `160000,${subSha},lib`);
+    // Commit the gitlink so status reads CLEAN (a staged add would be work
+    // by itself and mask the arm under test).
+    git(wt, 'commit', '-qm', 'gitlink', '--no-verify');
+    expect(git(wt, 'status', '--porcelain')).toBe('');
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'an unreadable submodule object store still reads as work (R7-1)',
+    async () => {
+      // EACCES on <git-dir>/modules (a store created by another user) must
+      // fail closed, not answer "no store": the blanket catch let the reaper
+      // delete the only copy of the submodule's unpushed commits.
+      const subRoot = path.join(repoParent, 'subrepo');
+      await fs.mkdir(subRoot);
+      await initRepo(subRoot);
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'protocol.file.allow=always',
+          'submodule',
+          'add',
+          '-q',
+          subRoot,
+          'lib',
+        ],
+        { cwd: repoRoot, encoding: 'utf8' },
+      );
+      git(repoRoot, 'commit', '-qm', 'add submodule', '--no-verify');
+      const service = new GitWorktreeService(repoRoot);
+      const result = await service.createUserWorktree('r96-eacces', 'main');
+      expect(result.success).toBe(true);
+      const wt = result.worktree!.path;
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'protocol.file.allow=always',
+          'submodule',
+          'update',
+          '--init',
+          '-q',
+          'lib',
+        ],
+        { cwd: wt, encoding: 'utf8' },
+      );
+      git(wt, 'submodule', 'deinit', '-q', '-f', 'lib');
+      git(wt, 'update-index', '--force-remove', 'lib');
+      // Commit the removal so status reads CLEAN: a staged deletion would
+      // read as work by itself and mask the EACCES arm under test.
+      git(wt, 'commit', '-qm', 'drop lib', '--no-verify');
+      expect(git(wt, 'status', '--porcelain')).toBe('');
+      const modulesDir = path.resolve(
+        wt,
+        git(wt, 'rev-parse', '--git-dir'),
+        'modules',
+      );
+      await fs.chmod(modulesDir, 0o000);
+      try {
+        await expect(worktreeHasWork(wt)).resolves.toBe(true);
+      } finally {
+        await fs.chmod(modulesDir, 0o755);
+      }
+    },
+  );
+
+  it('the source check refuses an unrelated enclosing repository (round-7)', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-unrelated');
+    // A corrupted source checkout whose .git is gone discovers the ENCLOSING
+    // repo via upward discovery; if that repo happens to hold the overlay
+    // content (the R5-14 decoy), the waiver must still be refused — the
+    // carry comes from a checkout of the managed worktree's own repository.
+    const outer = path.join(repoParent, 'outer');
+    await fs.mkdir(outer);
+    await initRepo(outer);
+    // The enclosing repo's TOP holds the overlay content byte-for-byte, so
+    // without the same-repository check the identities would match and the
+    // waiver would be wrongly granted.
+    await fs.writeFile(path.join(outer, 'README.md'), 'dirty-unstaged\n');
+    await fs.writeFile(path.join(outer, 'tracked.txt'), 'dirty-staged\n');
+    await fs.writeFile(path.join(outer, 'untracked.txt'), 'dirty-untracked\n');
+    const decoy = path.join(outer, 'sub');
+    await fs.mkdir(decoy);
+    await expect(
+      carriedOverlayStillHeldBySource(decoy, carriedEntries, worktree.path),
+    ).resolves.toBe(false);
+    // The real source, resolved from a subdirectory, is still authorized.
+    await expect(
+      carriedOverlayStillHeldBySource(repoRoot, carriedEntries, worktree.path),
+    ).resolves.toBe(true);
   });
 
   it.skipIf(!arePermissionBitsEnforced())(

@@ -271,7 +271,16 @@ export async function buildWorktreeSnapshotMeta(
       continue;
     }
     tracked += 1;
-    if (xy[0] === 'D' || xy[1] === 'D') deleted.push(entry);
+    // Same protected-path policy the reader enforces (case-folded): a
+    // case-variant marker deletion on a case-sensitive volume must not
+    // enter the deleted list, or the capture writes a header its own
+    // reader refuses (round-7).
+    if (
+      (xy[0] === 'D' || xy[1] === 'D') &&
+      !isProtectedRel(normalizeRel(entry))
+    ) {
+      deleted.push(entry);
+    }
   }
   // git output is decoded as UTF-8; a non-UTF-8 filename arrives as U+FFFD
   // and could not be re-applied by name on restore. Refuse the capture (the

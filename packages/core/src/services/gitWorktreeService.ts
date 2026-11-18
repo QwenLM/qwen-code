@@ -252,6 +252,7 @@ export async function computeCarriedIdentities(
 export async function carriedOverlayStillHeldBySource(
   sourcePath: string,
   carriedEntries: readonly CarriedEntry[],
+  worktreePath?: string,
 ): Promise<boolean> {
   try {
     // carriedFrom may name a SUBDIRECTORY of the source checkout (a session
@@ -267,6 +268,27 @@ export async function carriedOverlayStillHeldBySource(
         '--show-toplevel',
       ])
     ).trim();
+    // Upward discovery can land in an UNRELATED repository when the source
+    // checkout's own .git is gone (a corrupted sibling worktree under the
+    // main repo's managed dir discovers the enclosing main repo — the
+    // R5-14 decoy again). When the managed worktree is known, require the
+    // source to resolve into the SAME repository (identical git common
+    // dir); the carry always comes from a checkout of that repository.
+    if (worktreePath !== undefined) {
+      const [sourceCommon, worktreeCommon] = await Promise.all([
+        runGit(sourceTop, [...NO_EXEC_CONFIG, 'rev-parse', '--git-common-dir']),
+        runGit(worktreePath, [
+          ...NO_EXEC_CONFIG,
+          'rev-parse',
+          '--git-common-dir',
+        ]),
+      ]);
+      const [sourceReal, worktreeReal] = await Promise.all([
+        fs.realpath(path.resolve(sourceTop, sourceCommon.trim())),
+        fs.realpath(path.resolve(worktreePath, worktreeCommon.trim())),
+      ]);
+      if (sourceReal !== worktreeReal) return false;
+    }
     const current = new Map(
       (
         await computeCarriedIdentities(
@@ -419,7 +441,18 @@ export async function worktreeHasPopulatedGitlink(
       await runGit(worktreePath, [...NO_EXEC_CONFIG, 'rev-parse', '--git-dir'])
     ).trim();
     const modulesDir = path.resolve(worktreePath, gitDir, 'modules');
-    const modules = await fs.readdir(modulesDir).catch(() => [] as string[]);
+    // ENOENT means "never initialized a submodule" — cheap and clean. Any
+    // OTHER read error (EACCES on a store created by another user, ENOTDIR,
+    // EMFILE) must rethrow into the outer fail-closed catch: a store that
+    // exists but cannot be listed may hold the only copy of unpushed
+    // commits, and a blanket catch would answer "no store" and let the
+    // reaper delete it (R7-1).
+    const modules = await fs
+      .readdir(modulesDir)
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return [] as string[];
+        throw error;
+      });
     if (modules.length > 0) return true;
     return false;
   } catch (error) {
@@ -519,7 +552,8 @@ export async function worktreeHasWork(
       let waived: string | null = null;
       if (
         (status === '!!' || status === '??') &&
-        entry === WORKTREE_SESSION_FILE
+        (entry === WORKTREE_SESSION_FILE ||
+          WORKTREE_SESSION_TMP_PATTERN.test(entry))
       ) {
         waived = 'session-marker';
       } else if (status === '!!' && isDisposableIgnoredEntry(entry)) {
@@ -707,7 +741,9 @@ async function hasNonCarriedWork(
  * A rule matching the directory's *contents* instead (a package-local
  * `node_modules/**`) makes git list them individually
  * (`!! packages/app/node_modules/x/`), whose last segment is not in the set,
- * so such a tree still counts as work and the checkout is preserved.
+ * so such a tree still counts as work (the reaper snapshots it before
+ * deleting). The snapshot's exclusion matcher reads the same listing, so it
+ * archives exactly this content rather than dropping it (R6-1).
  */
 export function isDisposableIgnoredEntry(entry: string): boolean {
   const segments = entry.replace(/\/$/, '').split('/');

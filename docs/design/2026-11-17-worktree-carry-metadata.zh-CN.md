@@ -54,7 +54,8 @@ symlink 落入通用 symlink 豁免（它在本检出中不持有数据），其
 方向保守。
 
 可选以向后兼容：该字段出现前写入的 sidecar（以及未用 `carryDirtyState` 创建的 worktree）
-省略它，读取方把缺席当作「无记录的覆盖层」——has-work 门则与今日行为完全一致。运行时
+省略它，读取方把缺席当作「无记录的覆盖层」——has-work 门不施加搬运豁免（其基础探针，
+含共享的隐藏索引位拒绝，仍运行）。运行时
 形状校验（`isValidWorktreeSession`）仅当每个条目都有字符串 `path`、`string | null` 的
 `hash`、布尔 `executable` 时接受；类型错误的值像其他字段一样使 sidecar 判为损坏。64 KiB
 sidecar 读取上限约束记录：由于身份增大了覆盖层，写入方（`fitSidecarToReadCap`）在序列化
@@ -143,7 +144,7 @@ sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sp
   隐藏索引位）拒绝捕获并改为保留 checkout；子模块对象库则即使 deinit 或 `git rm` 把
   gitlink 移出索引也整体保留 checkout（对象库留在 per-worktree 管理目录，归档覆盖不到，
   R5-3）。
-- 无该字段的 sidecar 行为与今日完全一致（向后兼容）。
+- 无该字段的 sidecar 不获搬运豁免（向后兼容）；基础探针（含隐藏索引位拒绝）仍适用。
 - 类型错误的 `carriedEntries` 使 sidecar 判为损坏（形状校验）。
 - 变异见证：去掉回收器的 `carriedEntries` 参数、把豁免放宽为前缀匹配、去掉内容身份比较，
   各击杀一条 committed 用例。

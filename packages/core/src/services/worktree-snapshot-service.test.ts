@@ -787,10 +787,62 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     ).rejects.toThrow(/protected/);
   });
 
+  it('never records a protected rename source in the header (round-6 witness)', async () => {
+    // A tracked marker renamed away: the source is a deletion, but recording
+    // it would make the reader refuse the whole header (protected path).
+    await fs.writeFile(path.join(worktree, WORKTREE_SESSION_FILE), 'marker\n');
+    git(worktree, 'add', WORKTREE_SESSION_FILE);
+    git(worktree, 'commit', '-qm', 'track marker', '--no-verify');
+    git(worktree, 'mv', WORKTREE_SESSION_FILE, 'renamed-marker');
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-rensrc',
+      slug: 'rensrc',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(m.dirty.deleted).not.toContain(WORKTREE_SESSION_FILE);
+    const { metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    await expect(readWorktreeSnapshotMeta(metaPath)).resolves.toBeTruthy();
+  });
+
+  it('never records a protected case-variant deletion in the header (round-7)', async () => {
+    // A tracked case-variant of the marker, deleted: the reader refuses
+    // protected deletions case-insensitively, so the writer must apply the
+    // same policy or it produces a header its own reader rejects.
+    await fs.writeFile(
+      path.join(worktree, '.QWEN-SESSION'),
+      'tracked-marker\n',
+    );
+    git(worktree, 'add', '.QWEN-SESSION');
+    git(worktree, 'commit', '-qm', 'track marker variant', '--no-verify');
+    await fs.rm(path.join(worktree, '.QWEN-SESSION'));
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-variant',
+      slug: 'variant',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(m.dirty.deleted).not.toContain('.QWEN-SESSION');
+    const { metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    await expect(readWorktreeSnapshotMeta(metaPath)).resolves.toBeTruthy();
+  });
+
   it('refuses capture when the worktree .git is gone (F4 direct)', async () => {
     // Without its own .git, git's upward discovery would answer about the
     // enclosing repository; the capture must refuse rather than archive a
     // tree it cannot describe (the reaper then preserves the checkout).
+    // Build the enclosing repository so the guard is witnessed against the
+    // actual discovery hazard, not a bare directory.
+    git(root, 'init', '-q', '-b', 'main');
+    git(root, 'config', 'user.email', 't@e.com');
+    git(root, 'config', 'user.name', 't');
+    git(root, 'commit', '-qm', 'enclosing', '--allow-empty', '--no-verify');
     await fs.rm(path.join(worktree, '.git'), { recursive: true, force: true });
     await expect(
       captureWorktreeSnapshot({

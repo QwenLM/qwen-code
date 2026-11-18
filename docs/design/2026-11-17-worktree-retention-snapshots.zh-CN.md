@@ -5,7 +5,7 @@
 - 状态：提议（#17237，继 R9-6 搬运元数据交付项之后）
 - 基于：`2026-11-14-web-shell-codex-worktree-parity.md` D7（快照是工作归档）、
   D3（dirty 携带），及 `2026-11-17-worktree-carry-metadata.md`（R9-6，sidecar
-  `carriedPaths` 字段）。
+  `carriedEntries` 字段）。
 - 跟踪：#17237 P6。
 
 ## 目标

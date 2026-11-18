@@ -93,18 +93,38 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
   }
 
   it('snapshots then deletes a checkout whose only content is git-ignored (P6 U3)', async () => {
-    const plan = await planFor('agent-aabbccd');
+    // A longer session id keeps the archive path ABOVE safeLogValue's 82-char
+    // budget, so the no-truncation assertion stays load-bearing (M37). The
+    // agent- prefix is reserved for the agent-<7hex> shape, so use a plain
+    // longer slug.
+    const slug = 'snapshot-pointer-long';
+    const plan = await planFor(slug);
     fs.writeFileSync(path.join(plan.lockKey, 'secret.env'), 'AWS_KEY=x\n');
 
-    await executeWorktreeCleanup(plan);
+    // The snapshot log line is the only durable pointer to the archive until
+    // U5 lands: pin that it names the FULL archive path (round-7).
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let logged = '';
+    try {
+      await executeWorktreeCleanup(plan);
+    } finally {
+      // Read the calls BEFORE mockRestore — restore resets the mock state.
+      logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      stderrSpy.mockRestore();
+    }
+    const snapBase = path.join(repoParent, `session-${slug}.worktree-snapshot`);
+    expect(logged).toContain(
+      `worktree cleanup snapshotted checkout action=delete`,
+    );
+    expect(logged).toContain(
+      `snapshot=${JSON.stringify(`${snapBase}.tar.gz`)}`,
+    );
 
     // P6: the ignored work is preserved in a snapshot, then the checkout is
     // deleted (snapshot-then-delete replaces the old permanent preserve).
     expect(fs.existsSync(plan.lockKey)).toBe(false);
-    const snapBase = path.join(
-      repoParent,
-      'session-agent-aabbccd.worktree-snapshot',
-    );
     expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
     expect(fs.existsSync(`${snapBase}.json`)).toBe(true);
   });
