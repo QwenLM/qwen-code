@@ -87,7 +87,8 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   it, so that rule has one home. The Session Overview card gates are a fourth
   delete path and deliberately stay stricter — they also require an `idle`
   grade and block live work on every card, not just the attached one — so they
-  keep their own expression; see the pre-existing-difference bullet below.
+  keep their own expression; the Out of scope list above records the same
+  asymmetry for a running turn as a pre-existing difference.
 - Delete refuses background work on any row, not just the attached one, in
   both the sidebar and the delete dialog: the delete route has no idle guard,
   so confirming would kill work the row advertises, and the Session Overview

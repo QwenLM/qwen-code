@@ -630,6 +630,66 @@ describe('DeleteSessionDialog selection', () => {
     expect(hint()).not.toContain('background work');
   });
 
+  it('keeps a refusal armed mid-delete from hiding that delete outcome', async () => {
+    let settle: (v: unknown) => void = () => {};
+    deleteSessionsMock.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toBe('Deleting...');
+
+    // A blocked row clicked while the request is in flight must not take the
+    // hint over: the failure below is about a different row entirely.
+    clickRow(0);
+    expect(hint()).toBe('Deleting...');
+
+    await act(async () => {
+      settle({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: 's1', error: 'locked' }],
+      });
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    expect(hint()).not.toContain('background work');
+  });
+
+  it('drops the refusal when the refused row filters away and back', () => {
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(hint()).toContain('background work');
+
+    typeFilter('S1');
+    expect(hint()).toBe('1 matches');
+    // Coming back must not re-assert a refusal nobody triggered in this state.
+    typeFilter('');
+    expect(hint()).toBe('');
+  });
+
   it('keeps the loading placeholder above a stale load error', () => {
     scopedSessionsLoading = true;
     scopedSessionsError = new Error('boom');

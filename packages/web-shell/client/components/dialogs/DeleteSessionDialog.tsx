@@ -114,8 +114,10 @@ export function DeleteSessionDialog({
     (session: DaemonSessionSummary) => {
       if (blocksDelete(session)) {
         // The danger button is disabled in this state, so this click is the
-        // only place the user can be told why the row will not tick.
-        setRefusalId(session.sessionId);
+        // only place the user can be told why the row will not tick. Nothing to
+        // explain while a delete is already running: the hint belongs to that
+        // request's progress and outcome.
+        if (!deleting) setRefusalId(session.sessionId);
         return;
       }
       // A refusal is not an error: clearing it leaves any load or delete error
@@ -132,7 +134,7 @@ export function DeleteSessionDialog({
         return next;
       });
     },
-    [blocksDelete],
+    [blocksDelete, deleting],
   );
 
   useEffect(() => {
