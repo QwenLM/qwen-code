@@ -70,12 +70,15 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -4578,6 +4581,35 @@ class QwenHostedHarnessConnectorTest {
 
         assertThat(ordinary).isEmpty();
         assertThat(markers).isEmpty();
+    }
+
+    // The createClient() ownership site carries the same notice handler
+    // as configurePool: a regression on its registration line would leave
+    // that client's retirements unnotified.
+    @Test
+    @SuppressWarnings("unchecked")
+    void createClientCarriesTheRetirementNoticeHandler() {
+        var client = harnessClient();
+        var builder = mock(HostedHarnessClient.Builder.class, RETURNS_SELF);
+        when(builder.build()).thenReturn(client);
+        try (var sdk = mockStatic(HostedHarnessClient.class, CALLS_REAL_METHODS)) {
+            sdk.when(HostedHarnessClient::builder).thenReturn(builder);
+            var connector = new QwenHostedHarnessConnector(properties(), sessions(),
+                    mock(JdbcWorkspaceExecutionStore.class));
+            assertThat(connector.createClient()).isSameAs(client);
+            ArgumentCaptor<Consumer<HarnessSessionRef>> captor =
+                    ArgumentCaptor.forClass(Consumer.class);
+            verify(client).onAttachmentRetirement(captor.capture());
+            var retired = mock(HarnessSessionRef.class);
+            Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+            Map<Object, HarnessSessionRef> refs =
+                    (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "attachments");
+            refs.put(key, retired);
+
+            captor.getValue().accept(retired);
+
+            assertThat(refs).isEmpty();
+        }
     }
 
     private static HostedHarnessClient harnessClient() {

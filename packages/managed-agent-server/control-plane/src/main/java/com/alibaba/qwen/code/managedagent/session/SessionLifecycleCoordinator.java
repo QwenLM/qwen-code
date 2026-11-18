@@ -1128,14 +1128,16 @@ public class SessionLifecycleCoordinator {
                                     harness.runMessageOperation(tenantId,
                                             childSessionId, stop);
                                 } catch (HarnessHttpFailure error) {
-                                    // A child waiting on its recovery or
-                                    // closing takes no stop yet: the retry
-                                    // asks again, as on the relay's arm.
+                                    // A child waiting on its recovery,
+                                    // closing, or out of cold-open slots
+                                    // takes no stop yet: the retry asks
+                                    // again, as on the relay's arm.
                                     if (!"hosted_turn_recovery_required"
                                             .equals(error.getErrorCode())
                                             && !"hosted_session_closing"
-                                                    .equals(error
-                                                            .getErrorCode())) {
+                                                    .equals(error.getErrorCode())
+                                            && !"hosted_session_open_busy"
+                                                    .equals(error.getErrorCode())) {
                                         stopFailure = error;
                                     }
                                 } catch (RuntimeException error) {
