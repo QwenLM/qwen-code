@@ -60,6 +60,8 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
+import type { ListenerKind } from './local-control/listener-identity.js';
+import type { StreamOccupancySnapshot } from './sse-occupancy.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
 // import the bucket shape from the status module alongside the rest of the
@@ -137,6 +139,7 @@ export interface BuildDaemonStatusOptions {
   acpHandle?: AcpHttpHandle;
   rateLimiter?: RateLimiterInstance;
   getRestSseActive: () => number;
+  getStreamOccupancy: () => StreamOccupancySnapshot;
   features: readonly string[];
   protocolVersions: ServeProtocolVersions;
   supportedDeviceFlowProviders: readonly string[];
@@ -204,11 +207,18 @@ interface DaemonStatusLimits {
   maxPendingPromptsPerSession: number | null;
   listenerMaxConnections: number | null;
   /**
-   * Effective admission cap for concurrent REST SSE streams
-   * (`runtime.transport.restSseActive` is the live occupancy).
+   * Effective admission cap for concurrent long-lived streams across every
+   * surface (`runtime.transport.streamOccupancy.total` is the live
+   * occupancy; `restSseActive` remains the REST event surface alone).
    * `null` = unlimited (listener cap disabled, or explicit opt-out).
    */
   maxSseConnections?: number | null;
+  /**
+   * Per-listener admission clamps paired with `maxSseConnections`
+   * (issue #17554). Each pairing listener keeps its own short-request
+   * headroom; `null` = unlimited. Additive — older daemons omit it.
+   */
+  maxSseConnectionsPerListener?: Record<ListenerKind, number | null>;
   eventRingSize: number;
   eventRingMaxBytes: number;
   compactedReplayMaxBytes: number;
@@ -367,6 +377,13 @@ interface DaemonStatusRuntime {
   channelWorkers?: ChannelWorkerGroupSnapshot[];
   transport: {
     restSseActive: number;
+    /**
+     * Listener-slot occupancy across every long-lived stream surface
+     * (issue #17554), broken down by surface and by listener. Includes
+     * ACP WebSocket connections: the gauge measures slots, not frames.
+     * Additive — older daemons omit it.
+     */
+    streamOccupancy?: StreamOccupancySnapshot;
     acp: {
       enabled: boolean;
       connections: number;
@@ -1018,6 +1035,10 @@ export async function buildDaemonStatusResponse(
         input.opts.maxConnections,
         input.opts.maxSseConnections,
       ),
+      maxSseConnectionsPerListener: sseListenerCapsForStatus(
+        input.opts.maxConnections,
+        input.opts.maxSseConnections,
+      ),
       eventRingSize: bridgeSnapshot.limits.eventRingSize,
       eventRingMaxBytes: bridgeSnapshot.limits.eventRingMaxBytes,
       compactedReplayMaxBytes: bridgeSnapshot.limits.compactedReplayMaxBytes,
@@ -1099,6 +1120,7 @@ export async function buildDaemonStatusResponse(
         : {}),
       transport: {
         restSseActive: input.getRestSseActive(),
+        streamOccupancy: input.getStreamOccupancy(),
         acp: {
           enabled: acpSnapshot !== undefined,
           connections: acpAggregate?.connectionCount ?? 0,
@@ -1765,6 +1787,76 @@ export function sseMaxConnections(
     return ceiling === null ? floor : Math.min(ceiling, floor);
   }
   return ceiling;
+}
+
+/**
+ * Socket budget of the pairing listeners (local-control and remote-access).
+ * Shared by `local-control/service.ts` and `remote-access.ts` so the budget
+ * and the per-listener SSE clamp derived from it cannot drift.
+ */
+export const PAIRING_LISTENER_MAX_CONNECTIONS = 64;
+
+/**
+ * Admission caps for long-lived stream surfaces (issue #17554). `undefined`
+ * means unlimited. `aggregate` bounds the daemon-wide total across every
+ * surface and listener; `byListener` additionally clamps each listener so
+ * the pairing surfaces keep the same short-request headroom guarantee as
+ * the primary listener.
+ */
+export interface SseAdmissionCaps {
+  aggregate: number | undefined;
+  byListener: Record<ListenerKind, number | undefined>;
+}
+
+/**
+ * Resolve the effective admission caps. The aggregate reuses
+ * {@link sseMaxConnections} unchanged (explicit override floors/clamps;
+ * `0`/`Infinity` and a disabled listener cap derive unlimited). The primary
+ * listener's clamp IS the aggregate — it is already clamped to the primary
+ * listener's headroom ceiling. Each pairing listener clamps at 80% of its
+ * own 64-socket budget while the aggregate is enabled; when the operator
+ * disables the cap, the per-listener clamps are disabled too (parity with
+ * the primary listener's opt-out semantics).
+ */
+export function resolveSseAdmissionCaps(opts: {
+  maxConnections?: number;
+  maxSseConnections?: number;
+}): SseAdmissionCaps {
+  const aggregate =
+    sseMaxConnections(opts.maxConnections, opts.maxSseConnections) ?? undefined;
+  const pairing =
+    aggregate === undefined
+      ? undefined
+      : Math.max(
+          1,
+          Math.floor(
+            PAIRING_LISTENER_MAX_CONNECTIONS * SSE_LISTENER_CAP_FRACTION,
+          ),
+        );
+  return {
+    aggregate,
+    byListener: {
+      primary: aggregate,
+      'local-control': pairing,
+      'remote-access': pairing,
+    },
+  };
+}
+
+/** Status-payload view of the per-listener clamps (`null` = unlimited). */
+export function sseListenerCapsForStatus(
+  listenerCap: number | undefined,
+  sseCap: number | undefined,
+): Record<ListenerKind, number | null> {
+  const { byListener } = resolveSseAdmissionCaps({
+    maxConnections: listenerCap,
+    maxSseConnections: sseCap,
+  });
+  return {
+    primary: byListener.primary ?? null,
+    'local-control': byListener['local-control'] ?? null,
+    'remote-access': byListener['remote-access'] ?? null,
+  };
 }
 
 export function positiveFiniteOrNull(value: number | undefined): number | null {

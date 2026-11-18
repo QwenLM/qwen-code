@@ -263,6 +263,21 @@ describe('web-shell i18n catalog', () => {
     }
   });
 
+  it('keeps the daemon-status SSE admission label translated in zh and ru', () => {
+    // The status dialog renders this label in every shipped locale. The
+    // translator falls back to EN per key, so a deleted zh/ru entry would
+    // silently show English mid-surface — compare against en(key), not the
+    // raw key (issue #17554 review R1-3).
+    const key = 'daemon.transport.sseAdmission';
+    const en = getTranslator('en')(key);
+    expect(en).not.toBe(key);
+    for (const language of ['zh-CN', 'ru'] as const) {
+      const value = getTranslator(language)(key);
+      expect(value).not.toBe(key);
+      expect(value).not.toBe(en);
+    }
+  });
+
   it('keeps every change-overview translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
