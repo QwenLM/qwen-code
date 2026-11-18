@@ -855,6 +855,52 @@ public class HarnessCoordinator {
                     current = store.findTurn(current.tenantId(),
                             current.sessionId(), current.turnId())
                             .orElseThrow();
+                    // The attach may have driven this prompt's parked
+                    // execution to a continuation-ready phase. Opening the
+                    // stream alone never settles such a park — the daemon's
+                    // only continuation entry is the continue route — so
+                    // drive it here under the same watermark guards as the
+                    // bound recovery arm (#17521). A park that is not
+                    // continuation-ready (a requested Action) keeps the
+                    // stream semantics: its durable resolution drives a
+                    // later redispatch.
+                    if (runtimeRecovery != null
+                            && runtimeRecovery.isContinuationReady()) {
+                        // #14387: continuing a workflow re-runs its
+                        // deterministic in-process script while the first
+                        // run's outcome stays unwitnessed.
+                        if (isWorkflowLaunchTurn(claimed)) {
+                            return blockWorkflowRecovery(claimed, leaseLost);
+                        }
+                        if (attachment.eventEpoch() == null
+                                || attachment.lastEventId() == null) {
+                            return fail(claimed,
+                                    "managed_runtime_recovery_watermark_missing",
+                                    "Hosted Harness recovery did not return an"
+                                            + " event watermark.");
+                        }
+                        Admission continuation = harness.continueManagedRuntime(
+                                session.tenantId(), session.sessionId(),
+                                current.promptId(),
+                                runtimeRecovery.getCheckpointId(),
+                                runtimeRecovery.getActivationId());
+                        requireLease(leaseLost);
+                        if (!attachment.eventEpoch()
+                                        .equals(continuation.eventEpoch())
+                                || continuation.lastEventId()
+                                        < attachment.lastEventId()) {
+                            throw new IllegalStateException(
+                                    "Hosted Harness recovery watermark changed");
+                        }
+                        store.recordRecoveryAdmission(current.tenantId(),
+                                current.sessionId(), current.turnId(), owner,
+                                attachment.eventEpoch(), attachment.eventEpoch(),
+                                continuation.eventEpoch(),
+                                continuation.lastEventId());
+                        current = store.findTurn(current.tenantId(),
+                                current.sessionId(), current.turnId())
+                                .orElseThrow();
+                    }
                 }
                 if (admission != null) {
                     store.recordAdmission(current.tenantId(),

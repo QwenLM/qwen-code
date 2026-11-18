@@ -1,11 +1,11 @@
-import { DAEMON_APPROVAL_MODES } from '@qwen-code/web-shell/daemon-react-sdk';
+import { APPROVAL_MODES } from '../constants/approvalModes.js';
 
 export type WebShellApprovalMode = Exclude<
-  (typeof DAEMON_APPROVAL_MODES)[number],
+  (typeof APPROVAL_MODES)[number],
   'plan'
 >;
 
-export const EXECUTION_APPROVAL_MODES = DAEMON_APPROVAL_MODES.filter(
+export const EXECUTION_APPROVAL_MODES = APPROVAL_MODES.filter(
   (mode) => mode !== 'plan',
 );
 
