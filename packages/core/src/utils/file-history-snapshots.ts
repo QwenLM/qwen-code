@@ -228,8 +228,8 @@ function sameRootProven<
 /**
  * Whether the snapshot's endpoint holds any confirmed capture — a record
  * that actually captured a baseline. A failed capture recorded nothing,
- * and an empty checkpoint even less: neither carries restoration data
- * whose loss could matter, so their folds protect nothing.
+ * and an empty checkpoint even less. Failed records can still reserve
+ * versions; deletionEvidence separately protects those non-execution effects.
  */
 function hasConfirmedCaptures<
   T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
@@ -239,28 +239,116 @@ function hasConfirmedCaptures<
   );
 }
 
-/**
- * Whether deleting `deleted` would drop a recovery endpoint the timeline
- * still needs. This is the REFUSAL predicate only — it answers whether a
- * deletion that persists history must be refused, never whether the
- * deleted records may fold into the survivor (a separate same-root
- * question, see `removeFileHistorySnapshots`).
- *
- * Refuse when `survivor` has no diff endpoint of its own, so its only
- * "after" state is the deleted snapshot's backups, the deleted endpoint
- * carries at least one confirmed capture, and the fold that would
- * preserve them cannot prove a shared capture root (a labeled survivor
- * with a different root, or an unlabeled legacy survivor). An endpoint
- * with no confirmed capture (nothing tracked, or only failed captures)
- * holds no restoration data, so deleting it across roots stays allowed
- * and must not block harmless empty-history edits.
- */
+/** Transfer authority is independent of an existing, possibly disjoint endpoint. */
 export function deletionDropsRequiredEndpoint<
   T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
 >(survivor: T, deleted: T): boolean {
-  if (survivor.diffAfterBackups) return false;
-  if (!hasConfirmedCaptures(deleted)) return false;
-  return !sameRootProven(survivor, deleted);
+  return (
+    hasConfirmedCaptures(deleted) &&
+    (!sameRootProven(survivor, deleted) ||
+      isRefusedWin32CaptureRoot(survivor.cwd) ||
+      isRefusedWin32CaptureRoot(deleted.cwd))
+  );
+}
+
+/**
+ * Deletion must not change reservations, retained references, first-version
+ * selection, or whether the next capture reuses a blob. Pointer-free records
+ * still reserve physical publish names; JSON cannot prove an alias harmless.
+ * Keep exact evidence rather than guessing which lost record is dispensable.
+ */
+function deletionEvidence<
+  T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
+>(snapshots: readonly T[]): string {
+  const records = new Map<string, number>();
+  const firstVersions = new Map<string, string>();
+  const execution = new Map<string, string>();
+  const reusable = new Map<string, string>();
+  for (const [index, snapshot] of snapshots.entries()) {
+    for (const [mapIndex, backups] of [
+      snapshot.trackedFileBackups,
+      snapshot.diffAfterBackups,
+    ].entries()) {
+      const aliases = new Map<
+        string,
+        Array<{
+          value: string;
+          failed: boolean;
+          file: string | null;
+        }>
+      >();
+      for (const [key, backup] of Object.entries(backups ?? {})) {
+        const identity =
+          snapshot.cwd === undefined
+            ? `legacy:${key}`
+            : isRefusedWin32CaptureRoot(snapshot.cwd)
+              ? JSON.stringify([snapshot.cwd, key])
+              : getCapturePath(snapshot.cwd, key);
+        const value = JSON.stringify([
+          backup.backupFileName,
+          backup.version,
+          new Date(backup.backupTime).toISOString(),
+          !!backup.failed,
+        ]);
+        // Equal newest distances preserve presence in EVERY future retained
+        // suffix, not just today's window. Moving a reservation nearer the end
+        // can be as unsafe as losing it: it changes later publish names.
+        records.set(
+          JSON.stringify([identity, key, value]),
+          snapshots.length - index - 1,
+        );
+        if (
+          snapshot.cwd !== undefined &&
+          isRefusedWin32CaptureCoordinate(snapshot.cwd, key)
+        )
+          continue;
+        if (backup.version === 1) {
+          const first = firstVersions.get(identity);
+          if (first !== undefined && first !== value)
+            throw new Error(
+              'Deleting ambiguous first-version history is not supported.',
+            );
+          firstVersions.set(identity, value);
+        }
+        const origin =
+          snapshot.cwd === undefined
+            ? 'legacy'
+            : getCapturePath(snapshot.cwd, '');
+        execution.set(JSON.stringify([origin, identity]), key);
+        const entries = aliases.get(identity) ?? [];
+        entries.push({
+          value,
+          failed: !!backup.failed,
+          file: backup.backupFileName,
+        });
+        aliases.set(identity, entries);
+      }
+      for (const [identity, entries] of aliases) {
+        const confirmed = entries.filter((entry) => !entry.failed);
+        const selected = confirmed[0] ?? entries[0]!;
+        const conflict = confirmed.some(
+          (entry) => entry.value !== selected.value,
+        );
+        if (conflict)
+          throw new Error(
+            'Deleting conflicting file-history aliases is not supported.',
+          );
+        const selection = selected.value;
+        if (
+          snapshot === snapshots.at(-1) &&
+          mapIndex === 0 &&
+          !selected.failed &&
+          selected.file !== null
+        )
+          reusable.set(identity, selection);
+      }
+    }
+  }
+  return JSON.stringify([
+    [...records].sort(),
+    [...execution],
+    [...reusable].sort(),
+  ]);
 }
 
 export function foldFileHistoryEndpoint<
@@ -277,6 +365,9 @@ export function foldFileHistoryEndpoint<
   // The closest pre-edit capture wins. Later endpoints supply baselines
   // for additional files, including records retained by earlier deletions.
   const endpoint = {
+    // Insert in original candidate order, then apply baseline precedence.
+    ...survivor.diffAfterBackups,
+    ...deleted.trackedFileBackups,
     ...deleted.diffAfterBackups,
     ...deleted.trackedFileBackups,
     ...survivor.diffAfterBackups,
@@ -289,6 +380,8 @@ export function foldFileHistoryEndpoint<
 export function removeFileHistorySnapshots<
   T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
 >(snapshots: readonly T[], removedPromptIds: ReadonlySet<string>): T[] {
+  if (!snapshots.some((snapshot) => removedPromptIds.has(snapshot.promptId)))
+    return [...snapshots];
   const folded = [...snapshots];
   // Work backwards so a consecutive deleted run carries all of its
   // endpoints through each provenance-checked link to the survivor.
@@ -296,6 +389,11 @@ export function removeFileHistorySnapshots<
     const survivor = folded[index]!;
     const deleted = folded[index + 1]!;
     if (removedPromptIds.has(deleted.promptId)) {
+      if (deletionDropsRequiredEndpoint(survivor, deleted)) {
+        throw new Error(
+          'Deleting file history would discard a checkpoint whose capture directory cannot be proven.',
+        );
+      }
       folded[index] = foldFileHistoryEndpoint(
         survivor,
         deleted,
@@ -303,5 +401,13 @@ export function removeFileHistorySnapshots<
       );
     }
   }
-  return folded.filter((snapshot) => !removedPromptIds.has(snapshot.promptId));
+  const retained = folded.filter(
+    (snapshot) => !removedPromptIds.has(snapshot.promptId),
+  );
+  if (deletionEvidence(snapshots) !== deletionEvidence(retained)) {
+    throw new Error(
+      'Deleting file history would discard recovery evidence or change backup version reservations; refusing to keep file restoration safe.',
+    );
+  }
+  return retained;
 }

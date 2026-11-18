@@ -1115,7 +1115,7 @@ describe('FileHistoryService', () => {
       expect(service.getSnapshots().map(serializeSnapshot)).toEqual(before);
     });
 
-    it('keeps an existing diff endpoint when deleting a same-root successor', () => {
+    it('refuses deletion when an existing diff endpoint is disjoint', () => {
       const survivor: FileHistorySnapshot = {
         promptId: 'p1',
         cwd: projectDir,
@@ -1133,9 +1133,11 @@ describe('FileHistoryService', () => {
         },
         diffAfterBackups: undefined,
       };
-      expect(
+      const before = JSON.stringify([survivor, deleted]);
+      expect(() =>
         removeFileHistorySnapshots([survivor, deleted], new Set(['p2'])),
-      ).toEqual([survivor]);
+      ).toThrow(/recovery evidence/);
+      expect(JSON.stringify([survivor, deleted])).toBe(before);
     });
 
     it('starts one capture per execution identity despite raw aliases', async () => {
@@ -1455,12 +1457,12 @@ describe('FileHistoryService', () => {
               capturedEmpty(local),
             ),
           ).toBe(true);
-          expect(
+          expect(() =>
             fold.removeFileHistorySnapshots(
               [empty(local), { ...capturedEmpty(foreign), promptId: 'p2' }],
               new Set(['p2']),
-            )[0].diffAfterBackups,
-          ).toBeUndefined();
+            ),
+          ).toThrow(/capture directory/);
           const createBackup = vi.fn(
             async (_path: string, version: number) => ({
               backupFileName: null,
@@ -1666,6 +1668,14 @@ describe('FileHistoryService', () => {
         expect(deletionDropsRequiredEndpoint(snapshots[0], snapshots[1])).toBe(
           confirmed && !sameRoot,
         );
+        if (!sameRoot && state !== 'empty') {
+          const before = JSON.stringify(snapshots);
+          expect(() =>
+            removeFileHistorySnapshots(snapshots, new Set(['p2'])),
+          ).toThrow();
+          expect(JSON.stringify(snapshots)).toBe(before);
+          return;
+        }
         const [kept] = removeFileHistorySnapshots(snapshots, new Set(['p2']));
         expect(kept.diffAfterBackups).toEqual(
           sameRoot && state !== 'empty'
@@ -1680,22 +1690,23 @@ describe('FileHistoryService', () => {
     it.skipIf(sep === '\\')(
       'A-DS1 never attributes a foreign failed-only endpoint to the survivor root',
       async () => {
-        const kept = removeFileHistorySnapshots(
-          [
-            serializedP('p1', '/A', {}),
-            serializedP('p2', '/B', failedOnly('f')),
-          ],
-          new Set(['p2']),
-        );
-        expect(kept).toHaveLength(1);
+        const original = [
+          serializedP('p1', '/A', {}),
+          serializedP('p2', '/B', failedOnly('f')),
+        ];
+        const before = JSON.stringify(original);
+        expect(() =>
+          removeFileHistorySnapshots(original, new Set(['p2'])),
+        ).toThrow(/recovery evidence/);
+        expect(JSON.stringify(original)).toBe(before);
+        // Reservation-only data is retained without assigning it to /A.
+        const kept = original;
         const service = new FileHistoryService('r15-ds1', true, '/A');
         service.restoreFromSnapshots(deserializeSnapshots(kept));
-        // Reloaded in /A: no failure is invented for a file never captured
-        // there — and nothing restorable was lost by deleting the endpoint.
-        expect(await service.rewind('p1', false)).toEqual({
-          filesChanged: [],
-          filesFailed: [],
-        });
+        // Keeping foreign provenance must not turn it into local failures.
+        await expect(service.rewind('p1', false)).rejects.toThrow(
+          /different working directory/,
+        );
         // Check the persisted shape only after exercising the consumer.
         expect(kept[0]).not.toHaveProperty('diffAfterBackups');
       },
@@ -3399,14 +3410,15 @@ describe('FileHistoryService', () => {
         const { Reader, files, unlinkCalls } = await setup();
         files.set('C:\\w\\victim', 'sentinel');
         files.set('C:\\w\\new.txt', 'made');
-        const surviving = removeFileHistorySnapshots(
-          timeline(refusedRoot),
-          new Set(['p2']),
-        );
-        // 删除授权：the endpoint itself stays deletable — its records
-        // are inert — but they go with the checkpoint, not the survivor.
+        const surviving = timeline(refusedRoot);
+        const before = JSON.stringify(surviving);
+        expect(() =>
+          removeFileHistorySnapshots(surviving, new Set(['p2'])),
+        ).toThrow(/capture directory/);
+        expect(JSON.stringify(surviving)).toBe(before);
         expect(surviving.map((snapshot) => snapshot.promptId)).toEqual([
           'p1',
+          'p2',
           'p3',
         ]);
         expect(surviving[0]).not.toHaveProperty('diffAfterBackups');
@@ -3449,10 +3461,10 @@ describe('FileHistoryService', () => {
       const { Reader, files, unlinkCalls } = await setup();
       files.set('C:\\w\\victim', 'sentinel');
       files.set('C:\\w\\new.txt', 'made');
-      const surviving = removeFileHistorySnapshots(
-        timeline('C:\\w'),
-        new Set(['p2']),
-      );
+      const ordinary = timeline('C:\\w');
+      // The last checkpoint redundantly retains p1's other baseline.
+      ordinary[2].trackedFileBackups['new.txt'] = nullBackup;
+      const surviving = removeFileHistorySnapshots(ordinary, new Set(['p2']));
       expect(surviving[0]).toHaveProperty('diffAfterBackups');
       const reloaded = new Reader('r21-ordinary', true, 'C:\\w');
       reloaded.restoreFromSnapshots(
@@ -4045,16 +4057,22 @@ describe('FileHistoryService', () => {
         expect
           .soft(await readFile(backupPath(first.backupFileName!)))
           .toEqual(firstBytes);
-        const returned = await reload(
-          origin,
+        const beforeDeletion = JSON.stringify(
+          resumed.getSnapshots().map(serializeSnapshot),
+        );
+        expect(() =>
           removeFileHistorySnapshots(
             resumed.getSnapshots(),
             new Set(['b1', 'b2']),
           ),
-        );
-        expect(returned.getForeignSnapshotCwds()).toEqual([]);
-        const result = await returned.rewind('a1');
-        expect(result.filesFailed).toEqual([]);
+        ).toThrow(/capture directory/);
+        expect(
+          JSON.stringify(resumed.getSnapshots().map(serializeSnapshot)),
+        ).toBe(beforeDeletion);
+        expect(await readFile(file, 'utf-8')).toBe('later');
+        // Refusal preserves the original capture for an explicit source-root reload.
+        const returned = await reload(origin, original.getSnapshots());
+        expect((await returned.rewind('a1')).filesFailed).toEqual([]);
         expect.soft(await readFile(file, 'utf-8')).toBe('old');
         expect(await readFile(backupPath(first.backupFileName!))).toEqual(
           firstBytes,
@@ -4075,7 +4093,7 @@ describe('FileHistoryService', () => {
       await svcB.trackEdit(file);
       const first = svcB.getSnapshots()[1].trackedFileBackups['f'];
       const kept = removeFileHistorySnapshots(
-        svcB.getSnapshots(),
+        [...svcB.getSnapshots(), { ...svcB.getSnapshots()[0], promptId: 'a2' }],
         new Set(['a1']),
       );
       expect(kept[0].trackedFileBackups).toEqual({});
@@ -4087,20 +4105,24 @@ describe('FileHistoryService', () => {
       await service.makeSnapshot('b1');
       await service.trackEdit(file);
       expect
-        .soft(service.getSnapshots()[1].trackedFileBackups[file].version)
+        .soft(service.getSnapshots()[2].trackedFileBackups[file].version)
         .toBe(2);
       expect
         .soft(await readFile(backupPath(first.backupFileName!), 'utf-8'))
         .toBe('old');
 
+      const beforeDeletion = JSON.stringify(
+        service.getSnapshots().map(serializeSnapshot),
+      );
+      expect(() =>
+        removeFileHistorySnapshots(service.getSnapshots(), new Set(['b1'])),
+      ).toThrow(/capture directory/);
+      expect(
+        JSON.stringify(service.getSnapshots().map(serializeSnapshot)),
+      ).toBe(beforeDeletion);
       const returned = new FileHistoryService('test-session', true, dirB);
       returned.restoreFromSnapshots(
-        deserializeSnapshots(
-          removeFileHistorySnapshots(
-            service.getSnapshots(),
-            new Set(['b1']),
-          ).map(serializeSnapshot),
-        ),
+        deserializeSnapshots(kept.map(serializeSnapshot)),
       );
       expect((await returned.rewind('a0')).filesFailed).toEqual([]);
       expect(await readFile(file, 'utf-8')).toBe('old');
@@ -4278,17 +4300,12 @@ describe('FileHistoryService', () => {
         cwd: otherDir,
       };
 
-      const [kept] = removeFileHistorySnapshots(
-        [survivor, foreign],
-        new Set(['p2']),
-      );
-
-      // The fold is dropped: the survivor must not gain entries captured
-      // under another directory, or rewind would resolve them through
-      // first-version fallback against the wrong root while
-      // getForeignSnapshotCwds reports nothing.
-      expect(kept.diffAfterBackups).toBeUndefined();
-      expect(kept.cwd).toBe(projectDir);
+      const before = JSON.stringify([survivor, foreign]);
+      expect(() =>
+        removeFileHistorySnapshots([survivor, foreign], new Set(['p2'])),
+      ).toThrow(/capture directory/);
+      expect(JSON.stringify([survivor, foreign])).toBe(before);
+      expect(survivor.diffAfterBackups).toBeUndefined();
     });
 
     it('reports required captures that a discarded foreign suffix holds', () => {
@@ -4716,7 +4733,18 @@ describe('FileHistoryService', () => {
       };
 
       const [keptSame] = removeFileHistorySnapshots(
-        [sameDirSurvivor, sameDirDeleted],
+        [
+          sameDirSurvivor,
+          sameDirDeleted,
+          {
+            ...sameDirDeleted,
+            promptId: 'p3',
+            trackedFileBackups: {
+              ...sameDirSurvivor.trackedFileBackups,
+              ...sameDirDeleted.trackedFileBackups,
+            },
+          },
+        ],
         new Set(['p2']),
       );
       expect(keptSame.diffAfterBackups).toEqual(
@@ -4724,7 +4752,18 @@ describe('FileHistoryService', () => {
       );
 
       const [keptLegacy] = removeFileHistorySnapshots(
-        [legacySurvivor, legacyDeleted],
+        [
+          legacySurvivor,
+          legacyDeleted,
+          {
+            ...legacyDeleted,
+            promptId: 'p3',
+            trackedFileBackups: {
+              ...legacySurvivor.trackedFileBackups,
+              ...legacyDeleted.trackedFileBackups,
+            },
+          },
+        ],
         new Set(['p2']),
       );
       // Legacy (unlabeled) deleted data keeps folding as before.
@@ -4732,14 +4771,12 @@ describe('FileHistoryService', () => {
         legacyDeleted.trackedFileBackups,
       );
 
-      const [keptLegacyForeign] = removeFileHistorySnapshots(
-        [legacySurvivor, foreignDeleted],
-        new Set(['p2']),
-      );
-      // A cwd-labeled foreign snapshot must not fold into an unlabeled
-      // legacy survivor either — its backups would then bypass the
-      // cross-directory guard while getForeignSnapshotCwds reports nothing.
-      expect(keptLegacyForeign.diffAfterBackups).toBeUndefined();
+      expect(() =>
+        removeFileHistorySnapshots(
+          [legacySurvivor, foreignDeleted],
+          new Set(['p2']),
+        ),
+      ).toThrow(/capture directory/);
     });
 
     // R1-4: pin the fold guard's directory comparison itself. The spellings
@@ -4761,7 +4798,18 @@ describe('FileHistoryService', () => {
 
       // Survivor canonical, deleted with a trailing separator.
       const [kept] = removeFileHistorySnapshots(
-        [survivor(projectDir), deleted(`${projectDir}${sep}`)],
+        [
+          survivor(projectDir),
+          deleted(`${projectDir}${sep}`),
+          {
+            ...deleted(projectDir),
+            promptId: 'p3',
+            trackedFileBackups: {
+              ...survivor(projectDir).trackedFileBackups,
+              ...deleted(projectDir).trackedFileBackups,
+            },
+          },
+        ],
         new Set(['p2']),
       );
       expect(kept.diffAfterBackups).toEqual(
@@ -4770,7 +4818,18 @@ describe('FileHistoryService', () => {
 
       // And the mirrored spelling: survivor carries the trailing separator.
       const [keptMirrored] = removeFileHistorySnapshots(
-        [survivor(`${projectDir}${sep}`), deleted(projectDir)],
+        [
+          survivor(`${projectDir}${sep}`),
+          deleted(projectDir),
+          {
+            ...deleted(projectDir),
+            promptId: 'p3',
+            trackedFileBackups: {
+              ...survivor(projectDir).trackedFileBackups,
+              ...deleted(projectDir).trackedFileBackups,
+            },
+          },
+        ],
         new Set(['p2']),
       );
       expect(keptMirrored.diffAfterBackups).toEqual(
@@ -5178,7 +5237,7 @@ describe('FileHistoryService', () => {
       }
     });
 
-    it('preserves original diff endpoints across deletion, restart, new turns and rewind', async () => {
+    it('keeps diff and restore data across refused deletion, restart and new turns', async () => {
       const file = await trackAndEdit('a.txt', 'zero\n', 'A\n');
       const created = at('created-in-b.txt');
       await service.trackEdit(created);
@@ -5191,20 +5250,33 @@ describe('FileHistoryService', () => {
       expect(original?.files[0]?.hunks.flatMap((hunk) => hunk.lines)).toContain(
         '+A',
       );
-      service.restoreFromSnapshots(
-        removeFileHistorySnapshots(service.getSnapshots(), new Set(['p2'])),
+      const beforeFirstDeletion = JSON.stringify(
+        service.getSnapshots().map(serializeSnapshot),
       );
+      expect(() =>
+        removeFileHistorySnapshots(service.getSnapshots(), new Set(['p2'])),
+      ).toThrow(/recovery evidence/);
+      expect(
+        JSON.stringify(service.getSnapshots().map(serializeSnapshot)),
+      ).toBe(beforeFirstDeletion);
       expect(service.getSnapshots().map((item) => item.promptId)).toEqual([
         'p1',
+        'p2',
         'p3',
       ]);
       expect(await service.getTurnDiff('p1')).toEqual(original);
       const persisted = service.getSnapshots().map(serializeSnapshot);
       service.restoreFromSnapshots(deserializeSnapshots(persisted));
       expect(await service.getTurnDiff('p1')).toEqual(original);
-      service.restoreFromSnapshots(
-        removeFileHistorySnapshots(service.getSnapshots(), new Set(['p3'])),
+      const beforeSecondDeletion = JSON.stringify(
+        service.getSnapshots().map(serializeSnapshot),
       );
+      expect(() =>
+        removeFileHistorySnapshots(service.getSnapshots(), new Set(['p3'])),
+      ).toThrow(/recovery evidence/);
+      expect(
+        JSON.stringify(service.getSnapshots().map(serializeSnapshot)),
+      ).toBe(beforeSecondDeletion);
       const restoredOnlyA = new FileHistoryService(
         'test-session',
         true,
@@ -5213,17 +5285,17 @@ describe('FileHistoryService', () => {
       restoredOnlyA.restoreFromSnapshots(
         deserializeSnapshots(service.getSnapshots().map(serializeSnapshot)),
       );
-      await restoredOnlyA.rewind('p1');
+      await restoredOnlyA.rewind('p1', false);
       expect(existsSync(created)).toBe(false);
       await writeFile(created, 'created again');
-      await restoredOnlyA.rewind('p1');
+      await restoredOnlyA.rewind('p1', false);
       expect(existsSync(created)).toBe(false);
       await writeFile(created, 'created again');
       await writeFile(file, 'new turn\n');
       await service.makeSnapshot('p4');
       await service.trackEdit(created);
       expect(await service.getTurnDiff('p1')).toEqual(original);
-      await service.rewind('p1');
+      await service.rewind('p1', false);
       expect(await readFile(file, 'utf8')).toBe('zero\n');
       expect(existsSync(created)).toBe(false);
       expect(await service.getTurnDiff('p1')).toEqual(original);

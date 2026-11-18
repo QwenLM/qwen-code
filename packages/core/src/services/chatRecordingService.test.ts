@@ -43,6 +43,7 @@ import {
   deserializeSnapshots,
   serializeSnapshot,
   type FileHistorySnapshot,
+  type SerializedFileHistorySnapshot,
 } from './fileHistoryService.js';
 import {
   SessionWriterLostError,
@@ -3879,118 +3880,155 @@ describe('ChatRecordingService', () => {
   // invalid_history BEFORE the lease replaces the transcript, so the file on
   // disk keeps every checkpoint.
   describe('deleteMessageGroups mixed-history refusal', () => {
-    it('leaves the transcript file unchanged when a deletion would drop an unproven endpoint', async () => {
-      const base = {
-        sessionId: 'test-session-id',
-        timestamp: '2026-10-15T00:00:00.000Z',
-        cwd: '/test/project/root',
-        version: '1.0.0',
-      };
-      const snapshot = (promptId: string, version: number, cwd?: string) => ({
-        promptId,
-        timestamp: '2026-10-15T00:00:00Z',
-        trackedFileBackups: {
-          'a.txt': {
-            backupFileName: `a@v${version}`,
-            version,
-            backupTime: '2026-10-15T00:00:00Z',
+    it.each([
+      'legacy',
+      'refused-survivor',
+      'version-reservation',
+      'disjoint-endpoint',
+    ])(
+      'leaves transcript bytes unchanged before replacement for %s refusal',
+      async (mode) => {
+        const base = {
+          sessionId: 'test-session-id',
+          timestamp: '2026-10-15T00:00:00.000Z',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        };
+        const snapshot = (
+          promptId: string,
+          version: number,
+          cwd?: string,
+        ): SerializedFileHistorySnapshot => ({
+          promptId,
+          timestamp: '2026-10-15T00:00:00Z',
+          trackedFileBackups: {
+            'a.txt': {
+              backupFileName: `a@v${version}`,
+              version,
+              backupTime: '2026-10-15T00:00:00Z',
+            },
           },
-        },
-        ...(cwd === undefined ? {} : { cwd }),
-      });
-      const userTurn = (uuid: string, parentUuid: string | null) =>
-        ({
-          ...base,
-          uuid,
-          parentUuid,
-          type: 'user',
-          provenance: 'real_user',
-          promptId: `api-${uuid}`,
-          daemonPromptId: `daemon-${uuid}`,
-          message: { role: 'user', parts: [{ text: uuid }] },
-        }) as ChatRecord;
-      const assistantTurn = (uuid: string, parentUuid: string) =>
-        ({
-          ...base,
-          uuid,
-          parentUuid,
-          type: 'assistant',
-          provenance: 'assistant_output',
-          model: 'gemini-pro',
-          message: { role: 'model', parts: [{ text: uuid }] },
-        }) as ChatRecord;
-      const fileHistoryRecord = (
-        uuid: string,
-        parentUuid: string,
-        snap: ReturnType<typeof snapshot>,
-      ) =>
-        ({
-          ...base,
-          uuid,
-          parentUuid,
-          type: 'system',
-          provenance: 'system',
-          subtype: 'file_history_snapshot',
-          systemPayload: { snapshots: [snap] },
-        }) as ChatRecord;
+          ...(cwd === undefined ? {} : { cwd }),
+        });
+        const userTurn = (uuid: string, parentUuid: string | null) =>
+          ({
+            ...base,
+            uuid,
+            parentUuid,
+            type: 'user',
+            provenance: 'real_user',
+            promptId: `api-${uuid}`,
+            daemonPromptId: `daemon-${uuid}`,
+            message: { role: 'user', parts: [{ text: uuid }] },
+          }) as ChatRecord;
+        const assistantTurn = (uuid: string, parentUuid: string) =>
+          ({
+            ...base,
+            uuid,
+            parentUuid,
+            type: 'assistant',
+            provenance: 'assistant_output',
+            model: 'gemini-pro',
+            message: { role: 'model', parts: [{ text: uuid }] },
+          }) as ChatRecord;
+        const fileHistoryRecord = (
+          uuid: string,
+          parentUuid: string,
+          snap: ReturnType<typeof snapshot>,
+        ) =>
+          ({
+            ...base,
+            uuid,
+            parentUuid,
+            type: 'system',
+            provenance: 'system',
+            subtype: 'file_history_snapshot',
+            systemPayload: { snapshots: [snap] },
+          }) as ChatRecord;
 
-      const transcript = [
-        userTurn('u1', null),
-        assistantTurn('a1', 'u1'),
-        // Legacy first checkpoint: written before upgrades, no cwd label.
-        fileHistoryRecord('fh1', 'a1', snapshot('api-u1', 1)),
-        userTurn('u2', 'fh1'),
-        assistantTurn('a2', 'u2'),
-        // Upgraded second checkpoint, labeled with the capture directory.
-        fileHistoryRecord('fh2', 'a2', snapshot('api-u2', 2, base.cwd)),
-      ];
-      const dir = `${os.tmpdir()}/fh-delete-refusal-${process.pid}-${Date.now()}`;
-      const transcriptPath = `${dir}/session.jsonl`;
-      const lease = {
-        sessionId: 'test-session-id',
-        ownerId: 'test-owner-id',
-        assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
-        readTranscript: vi.fn(
-          async () =>
-            (await fs.promises.readFile(transcriptPath, 'utf8')) as string,
-        ),
-        replaceTranscript: vi.fn(async (updated: string) => {
-          await fs.promises.writeFile(transcriptPath, updated);
-        }),
-        release: vi.fn().mockResolvedValue(undefined),
-      } as unknown as SessionWriterLease;
-      const deleter = new ChatRecordingService(mockConfig);
-      deleter.activate(lease);
-      try {
-        await fs.promises.mkdir(dir, { recursive: true });
-        await fs.promises.writeFile(
-          transcriptPath,
-          `${transcript.map((entry) => JSON.stringify(entry)).join('\n')}\n`,
+        const first = snapshot(
+          'api-u1',
+          1,
+          mode === 'legacy'
+            ? undefined
+            : mode === 'refused-survivor'
+              ? 'C:\\w\\C:f\\..'
+              : base.cwd,
         );
-
-        const before = await deleter.getMessageGroups();
-        expect(before.groups.map((group) => group.id)).toEqual(['u1', 'u2']);
-        const unchanged = await fs.promises.readFile(transcriptPath, 'utf8');
-
-        await expect(
-          deleter.deleteMessageGroups({
-            snapshot: before.snapshot,
-            groupIds: ['u2'],
+        const second = snapshot(
+          'api-u2',
+          mode === 'version-reservation' ? 7 : 2,
+          mode === 'refused-survivor' ? 'C:\\w' : base.cwd,
+        );
+        if (mode === 'version-reservation' || mode === 'disjoint-endpoint') {
+          first.trackedFileBackups = {};
+          first.diffAfterBackups = {
+            [mode === 'version-reservation' ? 'a.txt' : 'other.txt']: {
+              backupFileName: null,
+              version: 1,
+              backupTime: base.timestamp,
+            },
+          };
+          second.trackedFileBackups['a.txt'].backupFileName = null;
+        }
+        const transcript = [
+          userTurn('u1', null),
+          assistantTurn('a1', 'u1'),
+          // Legacy first checkpoint: written before upgrades, no cwd label.
+          fileHistoryRecord('fh1', 'a1', first),
+          userTurn('u2', 'fh1'),
+          assistantTurn('a2', 'u2'),
+          // Upgraded second checkpoint, labeled with the capture directory.
+          fileHistoryRecord('fh2', 'a2', second),
+        ];
+        const dir = `${os.tmpdir()}/fh-delete-refusal-${process.pid}-${Date.now()}`;
+        const transcriptPath = `${dir}/session.jsonl`;
+        const lease = {
+          sessionId: 'test-session-id',
+          ownerId: 'test-owner-id',
+          assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+          readTranscript: vi.fn(
+            async () =>
+              (await fs.promises.readFile(transcriptPath, 'utf8')) as string,
+          ),
+          replaceTranscript: vi.fn(async (updated: string) => {
+            await fs.promises.writeFile(transcriptPath, updated);
           }),
-        ).rejects.toMatchObject({ code: 'invalid_history' });
+          release: vi.fn().mockResolvedValue(undefined),
+        } as unknown as SessionWriterLease;
+        const deleter = new ChatRecordingService(mockConfig);
+        deleter.activate(lease);
+        try {
+          await fs.promises.mkdir(dir, { recursive: true });
+          await fs.promises.writeFile(
+            transcriptPath,
+            `${transcript.map((entry) => JSON.stringify(entry)).join('\n')}\n`,
+          );
 
-        // The refusal happens before the persistent rewrite: the lease never
-        // replaces the transcript and the file keeps both checkpoints.
-        expect(lease.replaceTranscript).not.toHaveBeenCalled();
-        expect(await fs.promises.readFile(transcriptPath, 'utf8')).toBe(
-          unchanged,
-        );
-        expect((await deleter.getMessageGroups()).groups).toHaveLength(2);
-      } finally {
-        await deleter.close().catch(() => undefined);
-        await fs.promises.rm(dir, { recursive: true, force: true });
-      }
-    });
+          const before = await deleter.getMessageGroups();
+          expect(before.groups.map((group) => group.id)).toEqual(['u1', 'u2']);
+          const unchanged = await fs.promises.readFile(transcriptPath, 'utf8');
+
+          await expect(
+            deleter.deleteMessageGroups({
+              snapshot: before.snapshot,
+              groupIds: ['u2'],
+            }),
+          ).rejects.toMatchObject({ code: 'invalid_history' });
+
+          // The refusal happens before the persistent rewrite: the lease never
+          // replaces the transcript and the file keeps both checkpoints.
+          expect(lease.replaceTranscript).not.toHaveBeenCalled();
+          expect(await fs.promises.readFile(transcriptPath, 'utf8')).toBe(
+            unchanged,
+          );
+          expect((await deleter.getMessageGroups()).groups).toHaveLength(2);
+        } finally {
+          await deleter.close().catch(() => undefined);
+          await fs.promises.rm(dir, { recursive: true, force: true });
+        }
+      },
+    );
   });
 });
 

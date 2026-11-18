@@ -20,11 +20,7 @@ import {
 } from './transcript-records.js';
 
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
-import {
-  deletionDropsRequiredEndpoint,
-  foldFileHistoryEndpoint,
-  removeFileHistorySnapshots,
-} from './file-history-snapshots.js';
+import { removeFileHistorySnapshots } from './file-history-snapshots.js';
 
 export interface MessageGroup {
   id: string;
@@ -520,38 +516,20 @@ export function deleteTranscriptMessageGroups(
     for (const snapshot of payload.snapshots)
       fileHistory.set(snapshot.promptId, snapshot);
   }
-  const timelineSnapshots = [...fileHistory.values()];
-  // Validate every link of a removed run before rewriting the transcript.
-  // Collapse backwards like the in-memory fold, including endpoints left
-  // by earlier deletions; an empty intermediate checkpoint must not hide
-  // a required foreign endpoint further along the run.
-  for (let index = 0; index + 1 < timelineSnapshots.length; index++) {
-    const survivor = timelineSnapshots[index]!;
-    if (removedPromptIds.has(survivor.promptId) || survivor.diffAfterBackups)
-      continue;
-    let end = index + 1;
-    while (
-      end < timelineSnapshots.length &&
-      removedPromptIds.has(timelineSnapshots[end]!.promptId)
-    )
-      end++;
-    if (end === index + 1) continue;
-    let endpoint = timelineSnapshots[end - 1]!;
-    for (let link = end - 2; link >= index; link--) {
-      const predecessor = timelineSnapshots[link]!;
-      if (deletionDropsRequiredEndpoint(predecessor, endpoint)) {
-        throw new MessageGroupDeletionError(
-          'invalid_history',
-          'Deleting these message groups would discard a file history checkpoint endpoint whose capture directory cannot be proven; refusing to keep file restoration safe',
-        );
-      }
-      endpoint = foldFileHistoryEndpoint(predecessor, endpoint, link === index);
-    }
+  let retainedSnapshots: SerializedFileHistorySnapshot[];
+  try {
+    retainedSnapshots = removeFileHistorySnapshots(
+      [...fileHistory.values()],
+      removedPromptIds,
+    );
+  } catch {
+    throw new MessageGroupDeletionError(
+      'invalid_history',
+      'Deleting these message groups would discard file history recovery evidence, change backup version reservations, or lose a checkpoint whose capture directory cannot be proven; refusing to keep file restoration safe',
+    );
   }
   const survivingSnapshots = new Map(
-    removeFileHistorySnapshots(timelineSnapshots, removedPromptIds).map(
-      (snapshot) => [snapshot.promptId, snapshot],
-    ),
+    retainedSnapshots.map((snapshot) => [snapshot.promptId, snapshot]),
   );
   const rewritten = records
     .filter((record) => !removed.has(record.uuid))

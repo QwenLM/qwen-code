@@ -2,11 +2,11 @@
 
 [English](2026-11-11-file-history-atomic-backup.md) | [简体中文](2026-11-11-file-history-atomic-backup.zh-CN.md)
 
-Status: Implemented and verified (pilot for issue #16896, porting the
-crash-safe capture from `v1.0.0-preview` @ `587e3429cabf` into main's existing
-file history). Reproduced via failure injection on the base commit, fixed,
-and verified with the regression suite plus an interactive E2E pass on
-2026-11-11.
+Status: The atomic-publication pilot for #16896 was implemented and validated
+on 2026-11-11. The relocation and conservative deletion extension for #16982
+is a local candidate with targeted evidence, not final acceptance; independent
+review and the repository-wide gates remain required. The historical pilot
+results below do not certify this larger candidate.
 
 ## Problem
 
@@ -30,9 +30,9 @@ size/content mismatch and `rewind` restores the truncated content as if it
 were the captured checkpoint: a silent wrong-restore in a feature whose whole
 purpose is reliable undo.
 
-## Current state
+## Pre-change state (atomic-publication pilot)
 
-Main's capture flow (`createBackup`):
+The pilot base used this capture flow (`createBackup`):
 
 1. `stat(filePath)`; ENOENT → record a `null` backup (the file did not exist).
 2. `safeCopyFile(filePath, backupPath)` — direct `copyFile` onto the final
@@ -51,18 +51,21 @@ UUIDs; main's deterministic names need an adaptation (see below).
 
 ## Goals
 
-- A crash or I/O error during capture never leaves incomplete content at the
-  final backup path.
+- Interrupted copy, permission and publication operations must not publish
+  their partial temporary content at the final backup path.
 - Failures keep surfacing through the existing `failed` / `filesFailed`
   semantics — no new flags, no caller changes.
 - Failure-injection regression tests for `copyFile` / `chmod` / `rename`.
-- Evaluate the per-snapshot `cwd` item and close it with evidence.
+- Evaluate worktree entry/exit separately from relocation, and preserve
+  labelled capture coordinates through readers, previews and restoration.
+- Refuse message-group deletion before persistence when recovery evidence or
+  deterministic publish reservations cannot be retained.
 
 ## Non-goals (from issue #16896)
 
 - Replacing `FileHistoryService` with preview's `FileHistoryManager`.
-- UUID-based backup names (main's `hash@version` + max-version scanning
-  already avoids collisions).
+- UUID-based backup names or allocator redesign. Deterministic `hash@version`
+  naming is unchanged; deletion must not change its reservation lifetimes.
 - Re-porting `captureFailed` / per-file rewind-failure reporting (main already
   has `failed` / `filesFailed`).
 - Session-fork backup migration (hardlink copy).
@@ -73,8 +76,9 @@ UUIDs; main's deterministic names need an adaptation (see below).
 
 ## Proposed solution
 
-Change only `createBackup` and `safeCopyFile` in
-`packages/core/src/services/fileHistoryService.ts`:
+The atomic-publication portion changes `createBackup` and `safeCopyFile` in
+`packages/core/src/services/fileHistoryService.ts`; the relocation/deletion
+extension and its consumers are described separately below:
 
 1. `safeCopyFile` gains an optional `mode` parameter (default `0`, the
    `copyFile` default) so the exclusive flag applies to both the first attempt
@@ -231,16 +235,26 @@ The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
   contain foreign checkpoints: ordinary truncation does not necessarily
   make subsequent file rewind available. Returning to an earlier directory
   only helps when every remaining labelled checkpoint matches that root.
-- **Deletion safety**: when a surviving checkpoint needs an endpoint from a
-  deleted successor but their capture roots cannot be shown to match,
-  message-group deletion is refused with the existing `invalid_history`
-  category before transcript replacement. This preserves the original
-  transcript and endpoint instead of silently dropping restoration data.
-  Some mixed legacy/labelled histories therefore cannot currently be
-  deleted. Checking only that the deleted checkpoint matches the current
-  root is insufficient: it can fold B's captured bytes into an unlabelled A
-  survivor and later restore B's content into A. Endpoint provenance or an
-  explicit legacy-root adoption policy remains a maintainer design decision.
+- **Deletion safety**: message-group deletion uses the same pure admission as
+  direct snapshot removal and reports `invalid_history` before transcript
+  replacement on refusal. An existing endpoint is not proof that a disjoint
+  deleted capture is dispensable. Neither a refused source nor a refused
+  destination root can authorize transfer through normalized origin equality.
+  The candidate must preserve each exact raw capture record, including null
+  and failed reservations, at its newest distance from the timeline end. This
+  preserves reservation/reference lifetime in future retained windows, not
+  merely the current maximum. Candidate identity order, raw alias choice and
+  the latest reusable file-backed captures must also remain unchanged;
+  conflicting aliases or different version-one baselines conservatively
+  refuse deletion rather than invent capture ordering. Empty histories,
+  redundant same-root captures and evidence-preserving folds remain useful.
+  Ordinary edited histories can also refuse deletion: for example, after an
+  earlier fold a second deletion may otherwise lose a newly tracked file or
+  change a version reservation. These restrictions apply to message-group
+  deletion, not every existing rewind/truncation/retention operation. No new
+  storage or provenance format, allocator, or filesystem-alias detector is
+  introduced. Mixed legacy/labelled records cannot be relabelled silently;
+  an explicit adoption policy remains a maintainer decision.
 - **Legacy fallback**: checkpoints created before this change carry no
   `cwd` and never count as foreign — refusing them wholesale would make
   every pre-upgrade session unrestorable. On unlabeled timelines the
@@ -411,11 +425,18 @@ The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
 
 ## Acceptance criteria
 
-- No code path publishes incomplete content at a final backup path.
+- The exercised copy/permission/flush/rename failure paths do not publish
+  partial temporary content at a final backup path.
 - `copyFile` / `chmod` / `rename` failures surface through the existing
   `failed` / `filesFailed` semantics, with temporary files cleaned up.
-- Concurrent captures of the same deterministic path remain harmless.
-- The `cwd` evaluation item is closed with the evidence above.
+- Concurrent captures keep complete-only, last-writer-wins publication; this
+  is not a general guarantee about arbitrary filesystem aliases.
+- Relocation refusal is verified separately from the historical worktree
+  evaluation; legacy and Config-selective-restore boundaries remain explicit.
+- DI-1 repeated deletion, DI-2 refused-root transfer and DI-3 reservation
+  changes either retain their evidence or refuse before effects. Native
+  controls check future capture bytes, including reservation lifetime after
+  retained-window eviction; focused tests are not full repository acceptance.
 - Bilingual design doc and regression tests land in the same change.
 
 ## Open questions
