@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -42,6 +42,7 @@ import { registerSessionRoutes } from './session.js';
 const roots: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -51,13 +52,19 @@ interface Fixture {
   runtime: WorkspaceRuntime;
   bridge: AcpSessionBridge;
   app: express.Express;
+  registry: ReturnType<typeof createWorkspaceRegistry>;
+  sessionService: SessionService;
   sessionId: string;
   lockDepth: () => number;
   runSharedMany: ReturnType<typeof vi.fn>;
-  seed(records: readonly PromptLedgerRecord[], sessionId?: string): void;
+  seed(
+    records: readonly PromptLedgerRecord[],
+    sessionId?: string,
+    sourceType?: string,
+  ): void;
 }
 
-function makeFixture(trusted = true): Fixture {
+function makeFixture(trusted = true, primary = true): Fixture {
   const root = mkdtempSync(path.join(tmpdir(), 'restart-recovery-continue-'));
   roots.push(root);
   const workspaceDir = path.join(root, 'workspace');
@@ -85,7 +92,7 @@ function makeFixture(trusted = true): Fixture {
     workspaceId: randomUUID(),
     workspaceCwd: workspaceDir,
     sessionRuntimeBaseDir: runtimeBaseDir,
-    primary: true,
+    primary,
     trusted,
     bridge,
     routeFileSystemFactory: {
@@ -105,11 +112,24 @@ function makeFixture(trusted = true): Fixture {
     },
   );
   const app = express();
+  const registry = createWorkspaceRegistry(
+    primary
+      ? [runtime]
+      : [
+          {
+            ...runtime,
+            workspaceId: randomUUID(),
+            workspaceCwd: path.join(root, 'primary'),
+            primary: true,
+          },
+          runtime,
+        ],
+  );
   app.use(express.json());
   registerSessionRoutes(app, {
     boundWorkspace: workspaceDir,
     bridge,
-    workspaceRegistry: createWorkspaceRegistry([runtime]),
+    workspaceRegistry: registry,
     archiveCoordinator: {
       runSharedMany,
     } as unknown as Parameters<
@@ -130,11 +150,46 @@ function makeFixture(trusted = true): Fixture {
     runtime,
     bridge,
     app,
+    registry,
+    sessionService,
     sessionId,
     lockDepth: () => lockDepth,
     runSharedMany,
-    seed(records, seedSessionId = sessionId) {
+    seed(records, seedSessionId = sessionId, sourceType) {
       const ledgerPath = sessionService.getPromptLedgerPath(seedSessionId);
+      mkdirSync(path.dirname(ledgerPath), { recursive: true });
+      if (sourceType !== undefined) {
+        writeFileSync(
+          path.join(path.dirname(ledgerPath), `${seedSessionId}.jsonl`),
+          `${JSON.stringify({
+            uuid: 'source-1',
+            parentUuid: null,
+            sessionId: seedSessionId,
+            timestamp: new Date().toISOString(),
+            type: 'system',
+            subtype: 'session_source',
+            systemPayload: { sourceType },
+            cwd: workspaceDir,
+            version: '1.0.0',
+          })}\n`,
+          'utf8',
+        );
+      }
+      writeFileSync(
+        path.join(path.dirname(ledgerPath), `${seedSessionId}.jsonl`),
+        `${JSON.stringify({
+          uuid: 'user-1',
+          parentUuid: null,
+          sessionId: seedSessionId,
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          provenance: 'real_user',
+          cwd: workspaceDir,
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'continue' }] },
+        })}\n`,
+        { encoding: 'utf8', flag: 'a' },
+      );
       for (const record of records) {
         appendPromptLedgerRecord(ledgerPath, record);
       }
@@ -212,7 +267,13 @@ describe('POST /sessions/recovery/continue', () => {
     );
     expect(fixture.bridge.continueSession).toHaveBeenCalledWith(
       fixture.sessionId,
-      { promptId: expect.any(String) },
+      {
+        promptId: expect.any(String),
+        expectedInterruption: 'interrupted_prompt',
+        assertCanContinue: expect.any(Function),
+        assertCanDispatch: expect.any(Function),
+        requireDispatchAck: true,
+      },
     );
   });
 
@@ -287,11 +348,15 @@ describe('POST /sessions/recovery/continue', () => {
     });
   });
 
-  it('does not load an already live session', async () => {
+  it('does not load an already live session with a persisted ordinary source', async () => {
     const fixture = makeFixture();
-    fixture.seed([inFlight('p1', Date.now())]);
+    fixture.seed([inFlight('p1', Date.now())], undefined, 'channel');
+    await expect(
+      fixture.sessionService.getSessionListItem(fixture.sessionId),
+    ).resolves.toMatchObject({ sourceType: 'channel' });
     vi.mocked(fixture.bridge.getSessionSummary).mockReturnValue({
       sessionId: fixture.sessionId,
+      sourceType: 'channel',
     } as ReturnType<AcpSessionBridge['getSessionSummary']>);
 
     const response = await request(fixture.app)
@@ -300,7 +365,20 @@ describe('POST /sessions/recovery/continue', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.results[0].status).toBe('accepted');
+    expect(fixture.bridge.getSessionSummary).toHaveBeenCalledOnce();
     expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+  });
+
+  it('still restores a cold session with a persisted ordinary source', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())], undefined, 'channel');
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0].status).toBe('accepted');
+    expect(restoreMocks.restoreSessionCore).toHaveBeenCalledOnce();
   });
 
   it('requires confirmation before continuing a tool turn', async () => {
@@ -328,11 +406,426 @@ describe('POST /sessions/recovery/continue', () => {
       'batch-client',
     );
 
+    vi.mocked(fixture.bridge.continueSession).mockResolvedValueOnce({
+      accepted: true,
+      interruption: 'interrupted_turn',
+      promptId: 'confirmed-tool-turn',
+    });
     const withConfirmation = await request(fixture.app)
       .post('/sessions/recovery/continue')
       .send(requestBody(fixture, true));
-    expect(withConfirmation.body.results[0].status).toBe('accepted');
-    expect(fixture.bridge.continueSession).toHaveBeenCalledOnce();
+    expect(withConfirmation.body.results[0]).toMatchObject({
+      status: 'accepted',
+      kind: 'interrupted_turn',
+      promptId: 'confirmed-tool-turn',
+    });
+    expect(fixture.bridge.continueSession).toHaveBeenCalledWith(
+      fixture.sessionId,
+      {
+        promptId: expect.any(String),
+        expectedInterruption: 'interrupted_turn',
+        assertCanContinue: expect.any(Function),
+        assertCanDispatch: expect.any(Function),
+        requireDispatchAck: true,
+      },
+    );
+  });
+
+  it('does not bypass confirmation when the interruption becomes a tool turn', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+    vi.mocked(fixture.bridge.continueSession).mockImplementationOnce(
+      async (_sessionId, context) => {
+        if (context?.expectedInterruption === 'interrupted_prompt') {
+          return {
+            accepted: false,
+            interruption: 'interrupted_turn',
+            reason: 'interruption_mismatch',
+          };
+        }
+        return { accepted: true, interruption: 'interrupted_turn' };
+      },
+    );
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'confirmation_required',
+      code: 'tool_turn',
+      kind: 'interrupted_turn',
+    });
+    expect(fixture.bridge.continueSession).toHaveBeenCalledWith(
+      fixture.sessionId,
+      {
+        promptId: expect.any(String),
+        expectedInterruption: 'interrupted_prompt',
+        assertCanContinue: expect.any(Function),
+        assertCanDispatch: expect.any(Function),
+        requireDispatchAck: true,
+      },
+    );
+  });
+
+  it('refuses a continuation when the generation closes during its status read', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+    let releaseStatus: () => void = () => {};
+    const statusEntered = new Promise<void>((resolve) => {
+      vi.mocked(fixture.bridge.getSessionContextStatus).mockImplementationOnce(
+        async () => {
+          resolve();
+          await new Promise<void>((release) => {
+            releaseStatus = release;
+          });
+          return {
+            sessionId: fixture.sessionId,
+            v: 1,
+            workspaceCwd: fixture.runtime.workspaceCwd,
+            recovery: { kind: 'interrupted_prompt', canContinue: true },
+            state: {},
+          };
+        },
+      );
+    });
+    vi.mocked(fixture.bridge.continueSession).mockImplementationOnce(
+      async (_sessionId, context) => {
+        context?.assertCanContinue?.();
+        return {
+          accepted: true,
+          interruption: 'interrupted_prompt',
+          promptId: 'should-not-admit',
+        };
+      },
+    );
+    const pending = request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture))
+      .then((response) => response);
+    await statusEntered;
+    const entry = fixture.registry.getEntryByWorkspaceId(
+      fixture.runtime.workspaceId,
+    );
+    expect(entry).toBeDefined();
+    fixture.registry.beginReplacement(entry!, 'test');
+    fixture.registry.activateReplacement(
+      entry!,
+      { ...fixture.runtime, generationGuard: undefined },
+      'test',
+    );
+    releaseStatus();
+
+    const response = await pending;
+    expect(response.body.results[0]).toMatchObject({
+      status: 'error',
+      code: 'workspace_runtime_unavailable',
+    });
+  });
+
+  it('does not reinterpret an ordinary bridge veto as tool-turn confirmation', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+    vi.mocked(fixture.bridge.continueSession).mockResolvedValueOnce({
+      accepted: false,
+      interruption: 'interrupted_turn',
+    });
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'rejected',
+      interruption: 'interrupted_turn',
+    });
+  });
+
+  it('rejects an indeterminate persisted source without restoring it', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())], undefined, 'agent');
+    const transcriptPath = path.join(
+      path.dirname(
+        fixture.sessionService.getPromptLedgerPath(fixture.sessionId),
+      ),
+      `${fixture.sessionId}.jsonl`,
+    );
+    writeFileSync(transcriptPath, '{torn-json\n', {
+      encoding: 'utf8',
+      flag: 'a',
+    });
+    await expect(
+      fixture.sessionService.readCreationMetadataIfReadable(
+        fixture.sessionId,
+        'active',
+      ),
+    ).resolves.toBeUndefined();
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'not_continuable',
+      code: 'metadata_unreadable',
+    });
+    expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+    expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a runtime that begins draining before continuation admission', async () => {
+    const fixture = makeFixture(true, false);
+    fixture.seed([inFlight('p1', Date.now())]);
+    let releaseStatus: () => void = () => {};
+    const statusEntered = new Promise<void>((resolve) => {
+      vi.mocked(fixture.bridge.getSessionContextStatus).mockImplementationOnce(
+        async () => {
+          resolve();
+          await new Promise<void>((release) => {
+            releaseStatus = release;
+          });
+          return {
+            sessionId: fixture.sessionId,
+            v: 1,
+            workspaceCwd: fixture.runtime.workspaceCwd,
+            recovery: { kind: 'interrupted_prompt', canContinue: true },
+            state: {},
+          };
+        },
+      );
+    });
+    vi.mocked(fixture.bridge.continueSession).mockImplementationOnce(
+      async (_sessionId, context) => {
+        context?.assertCanContinue?.();
+        context?.assertCanDispatch?.();
+        return { accepted: true, interruption: 'interrupted_prompt' };
+      },
+    );
+    const pending = request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture))
+      .then((response) => response);
+    await statusEntered;
+    expect(fixture.registry.beginDrain(fixture.runtime)).toBe(true);
+    releaseStatus();
+
+    const response = await pending;
+    expect(response.body.results[0]).toMatchObject({
+      status: 'error',
+      code: 'workspace_runtime_unavailable',
+    });
+  });
+
+  it('rechecks the runtime after asynchronous source inspection', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+    let releaseMetadata: () => void = () => {};
+    const metadataEntered = new Promise<void>((resolve) => {
+      vi.spyOn(
+        SessionService.prototype,
+        'readCreationMetadataIfReadable',
+      ).mockImplementationOnce(async () => {
+        resolve();
+        await new Promise<void>((release) => {
+          releaseMetadata = release;
+        });
+        return { sourceType: 'agent' };
+      });
+    });
+    const pending = request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture))
+      .then((response) => response);
+    await metadataEntered;
+    const entry = fixture.registry.getEntryByWorkspaceId(
+      fixture.runtime.workspaceId,
+    );
+    fixture.registry.beginReplacement(entry!, 'changed');
+    releaseMetadata();
+
+    const response = await pending;
+    expect(response.body.results[0]).toMatchObject({
+      status: 'error',
+      code: 'workspace_runtime_unavailable',
+    });
+    expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+  });
+
+  it('prefers a known hidden source over unreadable persisted metadata', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())], undefined, 'agent');
+    writeFileSync(
+      path.join(
+        path.dirname(
+          fixture.sessionService.getPromptLedgerPath(fixture.sessionId),
+        ),
+        `${fixture.sessionId}.jsonl`,
+      ),
+      '{torn-json\n',
+      { encoding: 'utf8', flag: 'a' },
+    );
+    vi.mocked(fixture.bridge.getSessionSummary).mockReturnValue({
+      sessionId: fixture.sessionId,
+      sourceType: 'agent',
+    } as ReturnType<AcpSessionBridge['getSessionSummary']>);
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'not_continuable',
+      code: 'hidden_session',
+    });
+    expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+  });
+
+  it('refuses a session taken over by a hidden agent before admission', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())], undefined, 'channel');
+    const summary = vi.mocked(fixture.bridge.getSessionSummary);
+    summary.mockReturnValue({
+      sessionId: fixture.sessionId,
+      sourceType: 'channel',
+    } as ReturnType<AcpSessionBridge['getSessionSummary']>);
+    let releaseStatus: () => void = () => {};
+    const statusEntered = new Promise<void>((resolve) => {
+      vi.mocked(fixture.bridge.getSessionContextStatus).mockImplementationOnce(
+        async () => {
+          resolve();
+          await new Promise<void>((release) => {
+            releaseStatus = release;
+          });
+          return {
+            sessionId: fixture.sessionId,
+            v: 1,
+            workspaceCwd: fixture.runtime.workspaceCwd,
+            recovery: { kind: 'interrupted_prompt', canContinue: true },
+            state: {},
+          };
+        },
+      );
+    });
+    vi.mocked(fixture.bridge.continueSession).mockImplementationOnce(
+      async (_sessionId, context) => {
+        context?.assertCanContinue?.();
+        return { accepted: true, interruption: 'interrupted_prompt' };
+      },
+    );
+    const pending = request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture))
+      .then((response) => response);
+    await statusEntered;
+    summary.mockReturnValue({
+      sessionId: fixture.sessionId,
+      sourceType: 'agent',
+    } as ReturnType<AcpSessionBridge['getSessionSummary']>);
+    releaseStatus();
+
+    const response = await pending;
+    expect(response.body.results[0]).toMatchObject({
+      status: 'not_continuable',
+      code: 'hidden_session',
+    });
+  });
+
+  it('rechecks source at the dispatch fence, not only its initial inspection', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())], undefined, 'channel');
+    const summary = vi.mocked(fixture.bridge.getSessionSummary);
+    summary.mockReturnValue({
+      sessionId: fixture.sessionId,
+      sourceType: 'channel',
+    } as ReturnType<AcpSessionBridge['getSessionSummary']>);
+    vi.mocked(fixture.bridge.continueSession).mockImplementationOnce(
+      async (_sessionId, context) => {
+        context?.assertCanContinue?.();
+        summary.mockReturnValue({
+          sessionId: fixture.sessionId,
+          sourceType: 'agent',
+        } as ReturnType<AcpSessionBridge['getSessionSummary']>);
+        context?.assertCanDispatch?.();
+        return { accepted: true, interruption: 'interrupted_prompt' };
+      },
+    );
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'not_continuable',
+      code: 'hidden_session',
+    });
+  });
+
+  it('refuses a torn source record beyond the metadata head', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+    const transcriptPath = path.join(
+      path.dirname(
+        fixture.sessionService.getPromptLedgerPath(fixture.sessionId),
+      ),
+      `${fixture.sessionId}.jsonl`,
+    );
+    const history = Array.from({ length: 9 }, (_, index) =>
+      JSON.stringify({
+        uuid: `history-${index}`,
+        parentUuid: null,
+        sessionId: fixture.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: fixture.runtime.workspaceCwd,
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'history' }] },
+      }),
+    ).join('\n');
+    writeFileSync(
+      transcriptPath,
+      `${history}\n{"type":"system","subtype":"session_source","systemPayload":{"sourceType":"agent"\n`,
+      { encoding: 'utf8', flag: 'a' },
+    );
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'not_continuable',
+      code: 'metadata_unreadable',
+    });
+    expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+    expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a generation that becomes stale at the dispatch fence', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+    vi.mocked(fixture.bridge.getSessionSummary).mockReturnValue({
+      sessionId: fixture.sessionId,
+      sourceType: 'channel',
+    } as ReturnType<AcpSessionBridge['getSessionSummary']>);
+    vi.mocked(fixture.bridge.continueSession).mockImplementationOnce(
+      async (_sessionId, context) => {
+        context?.assertCanContinue?.();
+        const entry = fixture.registry.getEntryByWorkspaceId(
+          fixture.runtime.workspaceId,
+        );
+        fixture.registry.beginReplacement(entry!, 'dispatch-closed');
+        context?.assertCanDispatch?.();
+        return { accepted: true, interruption: 'interrupted_prompt' };
+      },
+    );
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'error',
+      code: 'workspace_runtime_unavailable',
+    });
   });
 
   it('requires confirmation when the cancellation reason is unknown', async () => {
@@ -364,6 +857,95 @@ describe('POST /sessions/recovery/continue', () => {
       'batch-client',
     );
   });
+
+  it.each(['agent', 'agent-host'])(
+    'refuses to continue a hidden %s session',
+    async (sourceType) => {
+      const fixture = makeFixture();
+      fixture.seed([inFlight('p1', Date.now())], undefined, sourceType);
+
+      const response = await request(fixture.app)
+        .post('/sessions/recovery/continue')
+        .send(requestBody(fixture));
+
+      expect(response.body.results[0]).toMatchObject({
+        status: 'not_continuable',
+        code: 'hidden_session',
+      });
+      expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+      expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses a live hidden session without restoring it', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+    vi.mocked(fixture.bridge.getSessionSummary).mockReturnValue({
+      sessionId: fixture.sessionId,
+      sourceType: 'agent',
+    } as ReturnType<AcpSessionBridge['getSessionSummary']>);
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'not_continuable',
+      code: 'hidden_session',
+    });
+    expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+    expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses a live hidden source even when persisted metadata is ordinary', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())], undefined, 'default');
+    vi.mocked(fixture.bridge.getSessionSummary).mockReturnValue({
+      sessionId: fixture.sessionId,
+      sourceType: 'agent',
+    } as ReturnType<AcpSessionBridge['getSessionSummary']>);
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'not_continuable',
+      code: 'hidden_session',
+    });
+    expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+    expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+  });
+
+  it.each(['agent', 'agent-host'])(
+    'refuses a %s source visible only after cold restore',
+    async (sourceType) => {
+      const fixture = makeFixture();
+      fixture.seed([inFlight('p1', Date.now())]);
+      restoreMocks.restoreSessionCore.mockResolvedValueOnce({
+        kind: 'restored',
+        session: {
+          sessionId: 'restored',
+          clientId: 'batch-client',
+          sourceType,
+        },
+      });
+
+      const response = await request(fixture.app)
+        .post('/sessions/recovery/continue')
+        .send(requestBody(fixture));
+
+      expect(response.body.results[0]).toMatchObject({
+        status: 'not_continuable',
+        code: 'hidden_session',
+      });
+      expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+      expect(fixture.bridge.detachClient).toHaveBeenCalledWith(
+        'restored',
+        'batch-client',
+      );
+    },
+  );
 
   it('refuses degraded history and an active turn', async () => {
     const fixture = makeFixture();
@@ -409,6 +991,35 @@ describe('POST /sessions/recovery/continue', () => {
       interruption: 'none',
     });
   });
+
+  it.each([
+    { label: 'missing', records: [] as const, code: 'no_evidence' },
+    {
+      label: 'settled',
+      records: [
+        inFlight('p1', Date.now() - 1000),
+        terminal('p1', Date.now(), 'completed'),
+      ],
+      code: 'already_moved',
+    },
+  ])(
+    'keeps the ledger result for a $label hidden session',
+    async ({ records, code }) => {
+      const fixture = makeFixture();
+      fixture.seed(records, undefined, 'agent');
+
+      const response = await request(fixture.app)
+        .post('/sessions/recovery/continue')
+        .send(requestBody(fixture));
+
+      expect(response.body.results[0]).toMatchObject({
+        status: 'not_continuable',
+        code,
+      });
+      expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+      expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not load a session that already settled', async () => {
     const fixture = makeFixture();

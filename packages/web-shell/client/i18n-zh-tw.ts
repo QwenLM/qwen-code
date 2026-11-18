@@ -1230,8 +1230,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'restartRecovery.inFlight': '處理程序中斷',
   'restartRecovery.daemonShutdown': 'Daemon 重新啟動',
   'restartRecovery.interrupted': '已中斷',
-  'restartRecovery.cancellationNeedsConversation':
-    '請開啟會話確認這次取消。',
+  'restartRecovery.cancellationNeedsConversation': '請開啟會話確認這次取消。',
   'restartRecovery.notContinuable': '此任務已不再等待恢復。',
   'restartRecovery.failed': '無法繼續',
   'restartRecovery.batchStopped':

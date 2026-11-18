@@ -100,13 +100,16 @@ this slice and are tracked in Open questions.
 
 For each selected workspace runtime, enumerate the active chats directory and
 read the bounded 64 KiB tail of every `<sessionId>.ledger.jsonl`. Session
-enumeration uses the existing project-scoped listing, which reads the first
-transcript record to keep other projects' sessions out; the scan never reads
-transcript bodies. The ledger is small (roughly two records per prompt) and is
-already written at admission and at shutdown, so the scan costs one small read
-per session. The scan can only classify prompts whose latest record is inside
-that bounded tail; an `in_flight` record older than the tail is not recovered by
-this scan (fail closed).
+enumeration uses the existing project-scoped listing, whose bounded
+transcript reads establish project membership, followed by bounded creation
+metadata reads for source attribution. The scan never replays transcripts or
+loads sessions. Machine-owned `agent` and `agent-host` source types are omitted,
+matching the ordinary session catalog's hidden-session rule. The ledger is
+small (roughly two records per prompt) and is already written at admission and
+at shutdown, so each enumerated session costs a bounded ledger read in
+addition to the metadata scan. The scan can only classify prompts whose latest
+record is inside that bounded tail; an `in_flight` record older than the tail
+is not recovered by this scan (fail closed).
 
 Before emitting an item, the route checks the runtime's in-memory session
 summary and omits a session whose prompt is active or queued. That check does
@@ -219,7 +222,13 @@ each entry:
    sessions through `standaloneSessionService`. Hold the same archive shared
    lock as that route so archive or delete cannot race the ledger re-read,
    restore, or dispatch. Standalone conversations are out of scope and fail
-   at the cold load.
+   at the cold load. Match persisted, live, and restored source metadata
+   against the hidden `agent` / `agent-host` rule, so the continuation cannot
+   bypass the catalog exclusion. Indeterminate creation metadata returns
+   `metadata_unreadable` without restoring instead of being treated as an
+   ordinary source-less session. Metadata source reads run only after ledger
+   classification identifies recovery candidates, not for every settled or
+   ledger-less session.
 3. If the session is not live, run the same cold restore core that
    `POST /session/:id/load` uses. No second loading path is introduced. The
    restore's temporary client attachment is released when the continuation
@@ -231,14 +240,30 @@ each entry:
    uses.
 5. If `canContinue` is false, return `not_continuable` with `kind`. This
    includes `degraded_history` and a session with an active turn.
-6. If `cancellationConfirmationId` is present, return `confirmation_required`.
+6. The source checks in step 2 are applied to the persisted creation metadata and the live or restored session summary. When the ledger is still interrupted, a direct request for an `agent` or `agent-host` session returns `not_continuable` with `code: 'hidden_session'`, so it cannot bypass the scan's exclusion. Missing and settled ledgers retain their earlier results.
+7. If `cancellationConfirmationId` is present, return `confirmation_required`.
    A batch must never auto-confirm a turn that may have been cancelled on
    purpose; this batch cannot carry that confirmation, so the client directs
    the user to the conversation.
-7. If `kind` is `interrupted_turn` and `confirmToolTurn` is not `true`, return
+8. If `kind` is `interrupted_turn` and `confirmToolTurn` is not `true`, return
    `confirmation_required`. The caller can resubmit those sessions with
    `confirmToolTurn: true`.
-8. Otherwise call the existing `continueSession` path.
+9. Otherwise call the existing `continueSession` path with the authorized
+   interruption kind and selected-generation assertion. After its asynchronous
+   pre-check, the bridge admits only that actual classification, returning the
+   new classification when another confirmation is required. It forwards the
+   assertion through queued prompt admission to the ACP dispatch fence, so an
+   old runtime cannot be admitted after replacement begins or is draining.
+   The same fence re-reads the live source, refusing an agent takeover after
+   the route's earlier inspection instead of continuing on a stale ordinary
+   source snapshot. Scan-side source filtering happens before the visible
+   200-item cap, with at most four inspections in flight and result order
+   preserved. `truncated` is computed after that visible-source filtering.
+   The batch requests an acknowledgement of the first ACP write, so a dispatch
+   fence failure becomes a per-session error rather than a misleading acceptance.
+   That wait ends when the write begins; it does not wait for the model turn to
+   finish. Legacy continuations without that acknowledgement request keep their
+   existing asynchronous acceptance behavior.
 
 The result is per session:
 
@@ -275,8 +300,9 @@ The result is per session:
 
 `status` is one of `accepted`, `not_continuable`, `confirmation_required`,
 `rejected`, or `error`. `not_continuable` carries `already_moved`,
-`no_evidence`, `virtual_subagent`, or `invalid_session_id` (the id does not
-match the persisted session-file shape); `confirmation_required` carries
+`no_evidence`, `virtual_subagent`, or `hidden_session` (the source is
+`agent` or `agent-host`); `invalid_session_id` means the id does not match the
+persisted session-file shape; `metadata_unreadable` means creation metadata could not be read, so the source is indeterminate and the request is refused without loading; `confirmation_required` carries
 `cancellation_confirmation` or `tool_turn`; `error` carries
 `workspace_not_found`, `untrusted_workspace`, `workspace_runtime_unavailable`,
 `session_not_found`, `daemon_draining`, `session_archiving`,
@@ -380,6 +406,11 @@ instead of falling back to another endpoint.
 
 - `packages/cli/src/serve`: the ledger scanner and both recovery routes in this
   change. Focused tests cover the scan, the query, and the continuation route.
+- `packages/acp-bridge`: internal continuation admission checks for the
+  caller-authorized interruption classification and generation, plus forwarding
+  of the existing dispatch fence. Existing callers that provide neither
+  continue context flag retain their behavior; real bridge tests cover the
+  deferred classification and queued dispatch boundary.
 - `packages/sdk-typescript/src/daemon`: request/response types, client methods,
   exports, and tests.
 - `packages/web-shell/client`: the recovery panel, availability gating, i18n,
@@ -388,8 +419,7 @@ instead of falling back to another endpoint.
   `docs/developers/qwen-serve-protocol.md`, the SDK client guide, and the
   capability parity/contract tests. OpenAPI covers only the core guide
   operations, so the recovery routes are not added there.
-- No core changes. No ACP bridge changes beyond reusing the existing
-  `continueSession` and recovery status methods. No new persistent file.
+- No core changes and no new persistent file.
 
 ## Validation plan
 
@@ -404,11 +434,14 @@ instead of falling back to another endpoint.
 2. Route-test the scan batch: 1–20 selectors, an over-limit batch, unknown
    workspace, untrusted workspace, unavailable runtime, per-member failure,
    stable ordering, the clamp on `sinceMs`, archived exclusion, live-active
-   exclusion, and a transcript whose record id is not a persisted id.
+   exclusion, hidden `agent`/`agent-host` exclusion, and a transcript whose
+   record id is not a persisted id.
 3. Route-test the continuation batch: serial order, per-session results,
    `already_moved`, `degraded_history`, active turn, cancellation
-   confirmation, `interrupted_turn` without and with `confirmToolTurn`, load
-   failure, detach on non-accepted paths, and the 10-session cap.
+   confirmation, `interrupted_turn` without and with `confirmToolTurn`, a
+   changed tool-turn classification after pre-check, a generation closing
+   before ACP dispatch, hidden `agent`/`agent-host` sessions, load failure,
+   detach on non-accepted paths, and the 10-session cap.
 4. End-to-end: start a real daemon, start a turn, kill the daemon process,
    restart it, query the recovery batch, continue one session, and assert a new
    turn appears in its transcript. Both the SIGKILL (`in_flight`) and SIGTERM

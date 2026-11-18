@@ -1520,12 +1520,28 @@ export interface BridgeClientRequestContext {
   onPromptAdmitted?: () => void;
   /** Internal cancellation while a guarded prompt waits for its ACP write. */
   dispatchSignal?: AbortSignal;
+  /**
+   * For continuation requests, resolve accepted only after the first dispatch
+   * fence succeeds and the ACP write begins. Do not wait for the turn to finish.
+   */
+  requireDispatchAck?: boolean;
   /** Internal signal when the prompt write begins and may reach the ACP child. */
   onPromptWriteStarted?: () => void;
   /** Internal signal after the bridge writes the queued prompt to ACP. */
   onPromptDispatched?: () => void;
   /** Internal authorization check when dequeuing a prompt and before its ACP write. */
   assertCanDispatch?: () => void;
+  /**
+   * Internal authorization check after the agent classifies a continuation
+   * and before the bridge admits its turn. HTTP routes never receive it as
+   * request input; an old workspace generation may throw to refuse the turn.
+   */
+  assertCanContinue?: () => void;
+  /**
+   * If supplied, admit only this actual interruption classification, not a
+   * stale classification previously read by a recovery-listing caller.
+   */
+  expectedInterruption?: 'interrupted_prompt' | 'interrupted_turn';
   /** Approval mode required for the delegated turn. */
   expectedApprovalMode?: ApprovalMode;
   /** The live mode before the switch. Older children still enforce expectedApprovalMode. */
@@ -2912,6 +2928,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    /** Present only when admission refused the actual interruption type. */
+    reason?: 'interruption_mismatch';
     /**
      * Replay cursor + correlation id for an accepted continuation, mirroring
      * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —

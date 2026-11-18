@@ -206,6 +206,7 @@ import { createSessionOrganizationService } from '../session-organization-helper
 import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
   AGENT_SESSION_SOURCE_TYPE,
+  isHiddenCatalogSource,
 } from '../../runtime/agent-session-source.js';
 import {
   omitSkillDetailsForSdkSurface,
@@ -280,6 +281,7 @@ import {
 } from '../workspace-runtime-storage.js';
 import {
   DEFAULT_RESTART_RECOVERY_WINDOW_MS,
+  MAX_RESTART_RECOVERY_ITEMS,
   MAX_RESTART_RECOVERY_WINDOW_MS,
   readRestartRecoveryState,
   scanRestartRecoveries,
@@ -11430,6 +11432,82 @@ export function registerSessionRoutes(
     })
     .strict();
 
+  const hasIntactRecoverySourceTail = (filePath: string): boolean => {
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(filePath, 'r');
+      const size = fs.fstatSync(fd).size;
+      const readStart = Math.max(0, size - 64 * 1024);
+      const buffer = Buffer.alloc(Math.min(size, 64 * 1024));
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, readStart);
+      const lines = buffer.toString('utf8', 0, bytesRead).split('\n');
+      if (readStart > 0) {
+        const peek = Buffer.alloc(1);
+        fs.readSync(fd, peek, 0, 1, readStart - 1);
+        if (peek[0] !== 0x0a) lines.shift();
+      }
+      for (const line of lines) {
+        if (!line.includes('"subtype":"session_source"')) continue;
+        try {
+          JSON.parse(line);
+        } catch {
+          return false;
+        }
+      }
+      return true;
+    } catch {
+      return false;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          fs.closeSync(fd);
+        } catch {}
+      }
+    }
+  };
+
+  const inspectRestartRecoverySession = async (
+    runtime: WorkspaceRuntime,
+    sessionService: ReturnType<typeof createWorkspaceRuntimeSessionService>,
+    sessionId: string,
+  ): Promise<{
+    loaded: boolean;
+    sourceTypes: string[];
+    sourceUnknown: boolean;
+  }> => {
+    const metadata = await sessionService.readCreationMetadataIfReadable(
+      sessionId,
+      'active',
+    );
+    const sourceTypes =
+      metadata?.sourceType === undefined ? [] : [metadata.sourceType];
+    let sourceUnknown = metadata === undefined;
+    if (!sourceUnknown && metadata?.sourceType === undefined) {
+      const item = await sessionService.getSessionListItem(sessionId, 'active');
+      sourceUnknown ||= item === undefined;
+      if (item !== undefined) {
+        if (item.sourceType !== undefined) {
+          sourceTypes.push(item.sourceType);
+        }
+        sourceUnknown ||= !hasIntactRecoverySourceTail(item.filePath);
+      }
+    }
+    try {
+      const liveSource = runtime.bridge.getSessionSummary(sessionId).sourceType;
+      if (liveSource !== undefined) sourceTypes.push(liveSource);
+      return { loaded: true, sourceTypes, sourceUnknown };
+    } catch (error) {
+      if (!isSessionNotFoundError(error)) throw error;
+      return { loaded: false, sourceTypes, sourceUnknown };
+    }
+  };
+
+  class HiddenRestartRecoverySessionError extends Error {
+    constructor() {
+      super('Restart recovery session became hidden before dispatch.');
+    }
+  }
+
   app.post('/sessions/recovery', async (req, res) => {
     const route = 'POST /sessions/recovery';
     const parsed = restartRecoveryBatchRequest.safeParse(req.body);
@@ -11498,6 +11576,7 @@ export function registerSessionRoutes(
           sessionService,
           sessionIds,
           sinceMs,
+          limit: Number.POSITIVE_INFINITY,
           isSessionLiveActive: (sessionId) => {
             try {
               const summary = runtime.bridge.getSessionSummary(sessionId);
@@ -11509,14 +11588,43 @@ export function registerSessionRoutes(
             }
           },
         });
+        const visibleItems = [];
+        for (
+          let index = 0;
+          index < result.items.length &&
+          visibleItems.length <= MAX_RESTART_RECOVERY_ITEMS;
+          index += 4
+        ) {
+          if (controller.signal.aborted) return;
+          const candidates = await Promise.all(
+            result.items.slice(index, index + 4).map(async (item) => ({
+              item,
+              ...(await inspectRestartRecoverySession(
+                runtime,
+                sessionService,
+                item.sessionId,
+              )),
+            })),
+          );
+          if (controller.signal.aborted) return;
+          for (const candidate of candidates) {
+            if (
+              !candidate.sourceUnknown &&
+              !candidate.sourceTypes.some(isHiddenCatalogSource)
+            ) {
+              visibleItems.push(candidate.item);
+            }
+          }
+        }
         if (!isCurrent()) return unavailable();
+        const truncated = visibleItems.length > MAX_RESTART_RECOVERY_ITEMS;
         return {
           workspace,
           workspaceId: runtime.workspaceId,
           cwd: runtime.workspaceCwd,
           v: 1 as const,
-          items: result.items,
-          truncated: result.truncated,
+          items: visibleItems.slice(0, MAX_RESTART_RECOVERY_ITEMS),
+          truncated,
         };
       } catch (error) {
         if (isGenerationClosedError(error) || !isCurrent()) {
@@ -11675,12 +11783,32 @@ export function registerSessionRoutes(
             };
           }
 
-          let loaded = false;
-          try {
-            runtime.bridge.getSessionSummary(requested.sessionId);
-            loaded = true;
-          } catch (error) {
-            if (!isSessionNotFoundError(error)) throw error;
+          const { sourceTypes, loaded, sourceUnknown } =
+            await inspectRestartRecoverySession(
+              runtime,
+              sessionService,
+              requested.sessionId,
+            );
+          if (!isCurrent()) {
+            return {
+              ...base,
+              status: 'error',
+              code: 'workspace_runtime_unavailable',
+            };
+          }
+          if (sourceTypes.some(isHiddenCatalogSource)) {
+            return {
+              ...base,
+              status: 'not_continuable',
+              code: 'hidden_session',
+            };
+          }
+          if (sourceUnknown) {
+            return {
+              ...base,
+              status: 'not_continuable',
+              code: 'metadata_unreadable',
+            };
           }
 
           let restoreAttachment:
@@ -11710,6 +11838,9 @@ export function registerSessionRoutes(
             if (outcome.kind === 'cancelled') {
               return { ...base, status: 'error', code: 'cancelled' };
             }
+            if (outcome.session.sourceType !== undefined) {
+              sourceTypes.push(outcome.session.sourceType);
+            }
             // The restore attaches a generated client id even when the caller
             // supplied none. A batch owns no client, so the attachment is
             // released when the continuation request returns (accepted or
@@ -11730,6 +11861,13 @@ export function registerSessionRoutes(
                 ...base,
                 status: 'error',
                 code: 'workspace_runtime_unavailable',
+              };
+            }
+            if (sourceTypes.some(isHiddenCatalogSource)) {
+              return {
+                ...base,
+                status: 'not_continuable',
+                code: 'hidden_session',
               };
             }
 
@@ -11762,11 +11900,43 @@ export function registerSessionRoutes(
             }
 
             const promptId = crypto.randomUUID();
+            const assertCanContinue = () => {
+              if (!isCurrent()) {
+                throw new WorkspaceGenerationClosedError();
+              }
+              const summary = runtime.bridge.getSessionSummary(
+                requested.sessionId,
+              );
+              if (isHiddenCatalogSource(summary.sourceType)) {
+                throw new HiddenRestartRecoverySessionError();
+              }
+            };
             const result = await runtime.bridge.continueSession(
               requested.sessionId,
-              { promptId },
+              {
+                promptId,
+                ...(recovery.kind === 'interrupted_prompt' ||
+                recovery.kind === 'interrupted_turn'
+                  ? { expectedInterruption: recovery.kind }
+                  : {}),
+                assertCanContinue,
+                assertCanDispatch: assertCanContinue,
+                requireDispatchAck: true,
+              },
             );
             if (!result.accepted) {
+              if (
+                result.reason === 'interruption_mismatch' &&
+                result.interruption === 'interrupted_turn' &&
+                !confirmToolTurn
+              ) {
+                return {
+                  ...base,
+                  status: 'confirmation_required',
+                  kind: result.interruption,
+                  code: 'tool_turn',
+                };
+              }
               return {
                 ...base,
                 status: 'rejected',
@@ -11777,7 +11947,7 @@ export function registerSessionRoutes(
             return {
               ...base,
               status: 'accepted',
-              kind: recovery.kind,
+              kind: result.interruption,
               promptId: result.promptId ?? promptId,
               ...(result.lastEventId !== undefined
                 ? { lastEventId: result.lastEventId }
@@ -11805,6 +11975,13 @@ export function registerSessionRoutes(
         } catch (error) {
           if (isSessionNotFoundError(error)) {
             return { ...base, status: 'error', code: 'session_not_found' };
+          }
+          if (error instanceof HiddenRestartRecoverySessionError) {
+            return {
+              ...base,
+              status: 'not_continuable',
+              code: 'hidden_session',
+            };
           }
           if (error instanceof DaemonDrainingError) {
             return { ...base, status: 'error', code: 'daemon_draining' };

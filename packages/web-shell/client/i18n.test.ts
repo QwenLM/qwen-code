@@ -35,6 +35,28 @@ const FOLLOWUP_SETTING_KEYS = [
 // translator lookup the component performs, so a missing zh entry falls back
 // to EN on both sides and they stay green. Parity has to be asserted here,
 // key by key, including the strings no panel case renders.
+const RESTART_RECOVERY_MESSAGE_KEYS = [
+  'title',
+  'review',
+  'hide',
+  'continue',
+  'continueAll',
+  'confirmToolTurn',
+  'toolTurnHint',
+  'inFlight',
+  'daemonShutdown',
+  'interrupted',
+  'cancellationNeedsConversation',
+  'notContinuable',
+  'failed',
+  'batchStopped',
+  'loadFailed',
+  'retry',
+  'scanFailedWorkspaces',
+]
+  .map((suffix) => `restartRecovery.${suffix}`)
+  .sort();
+
 const WEIXIN_LOGIN_KEYS = [
   'title',
   'description',
@@ -941,6 +963,18 @@ describe('web-shell zh-TW locale', () => {
     // Script wins over region: zh-Hant-CN stays Traditional.
     expect(normalizeLanguage('zh-Hant-CN')).toBe('zh-TW');
     expect(languageSettingToWebShellLanguage('zh-Hant-CN')).toBe('zh-TW');
+  });
+
+  it('covers every restart-recovery message key without relying on fallbacks', () => {
+    expect(
+      Object.keys(ZH_TW)
+        .filter((key) => key.startsWith('restartRecovery.'))
+        .sort(),
+    ).toEqual(RESTART_RECOVERY_MESSAGE_KEYS);
+    for (const key of RESTART_RECOVERY_MESSAGE_KEYS) {
+      expect(getTranslator('en')(key)).not.toBe(key);
+      expect(getTranslator('zh-TW')(key)).not.toBe(key);
+    }
   });
 
   it('carries no Simplified-only vocabulary in any entry', () => {

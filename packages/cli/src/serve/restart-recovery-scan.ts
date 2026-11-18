@@ -56,6 +56,8 @@ export interface ScanRestartRecoveriesInput {
   sessionIds: readonly string[];
   /** Only entries at or after this timestamp are returned. */
   sinceMs: number;
+  /** Maximum returned items; callers may enumerate before their own filtering. */
+  limit?: number;
   /**
    * Optional memory-only live check. A session with an active or queued prompt
    * is running now, not interrupted by a restart, so it is omitted.
@@ -147,6 +149,7 @@ export function scanRestartRecoveries({
   sessionService,
   sessionIds,
   sinceMs,
+  limit = MAX_RESTART_RECOVERY_ITEMS,
   isSessionLiveActive,
 }: ScanRestartRecoveriesInput): RestartRecoveryScanResult {
   const items: RestartRecoveryItem[] = [];
@@ -176,9 +179,9 @@ export function scanRestartRecoveries({
     (left, right) =>
       Date.parse(right.lastActivityAt) - Date.parse(left.lastActivityAt),
   );
-  const truncated = items.length > MAX_RESTART_RECOVERY_ITEMS;
+  const truncated = items.length > limit;
   return {
-    items: truncated ? items.slice(0, MAX_RESTART_RECOVERY_ITEMS) : items,
+    items: truncated ? items.slice(0, limit) : items,
     truncated,
   };
 }

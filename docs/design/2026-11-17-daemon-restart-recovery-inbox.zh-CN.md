@@ -76,9 +76,11 @@ code?, stopReason?, at }`）。两种形状都不包含 prompt 内容，见
 
 对每个选中的 workspace runtime，枚举活跃 chats 目录，读取每个
 `<sessionId>.ledger.jsonl` 的 64 KiB 有界尾部。会话枚举复用已有的按项目列举逻辑，
-它会读取 transcript 的首条记录以排除其他项目的会话；扫描本身从不读取 transcript
-正文。ledger 很小（每个 prompt 约两条记录），且在准入和停机时已经写入，因此扫描成本
-是每会话一次小读取。扫描只能分类最新记录位于该有界尾部的 prompt；早于尾部的
+它通过受控的 transcript 记录读取确认项目归属，再读取有界创建 metadata 来识别来源；
+扫描从不回放 transcript 或加载会话。机器拥有的 `agent` 和 `agent-host` 来源类型会被省略，
+与普通会话列表的隐藏规则一致。ledger 很小（每个 prompt 约两条记录），且在准入和停机时
+已经写入，因此每个枚举会话在 metadata 扫描之外只需一次有界 ledger 读取。
+扫描只能分类最新记录位于该有界尾部的 prompt；早于尾部的
 `in_flight` 记录不会被本次扫描恢复（失败关闭）。
 
 在产出条目前，路由会检查 runtime 的内存会话摘要，跳过 prompt 正在执行或排队的
@@ -174,6 +176,10 @@ prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终�
    `POST /session/:id/continue` 不同，本批量路由不把 standalone 会话转交
    `standaloneSessionService`。持有与该路由相同的 archive shared lock，使归档或删除不能
    与 ledger 重读、恢复或派发竞争。standalone 会话不在范围内，会在冷加载时失败。
+   对持久化、已加载或刚恢复会话的来源 metadata 应用隐藏 `agent` / `agent-host` 规则，
+   使续接不能绕过列表的排除规则。metadata 不可读时返回 `metadata_unreadable`，不进入恢复，
+   不会把无法判定来源的会话当成普通的无来源会话。仅在 ledger 分类选出恢复候选后读取来源，
+   不为每个已结清或没有 ledger 的会话做来源检查。
 3. 会话不在内存时，运行与 `POST /session/:id/load` 相同的冷恢复核心。不引入第二套
    加载路径。恢复过程产生的临时客户端 attachment 在续接请求返回时释放，无论接受还是
    拒绝。接受时 prompt 已先进入 pending，因此会保持会话打开；在派发前释放才会让空闲
@@ -181,12 +187,23 @@ prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终�
 4. 通过与横幅相同的 bridge 状态路径读取恢复摘要。
 5. `canContinue` 为 false 时返回 `not_continuable` 和 `kind`。这包括
    `degraded_history` 以及仍在执行的会话。
-6. 存在 `cancellationConfirmationId` 时返回 `confirmation_required`。批量操作绝不能
+6. 第 2 步的来源检查同时用于持久化创建 metadata 和已加载或刚恢复的会话摘要。ledger 仍为 interrupted 时，直接请求
+   `agent` 或 `agent-host` 会话返回 `not_continuable` 与 `code: 'hidden_session'`，
+   不能绕过扫描的排除规则。ledger 缺失或已结清时仍返回此前的结果。
+7. 存在 `cancellationConfirmationId` 时返回 `confirmation_required`。批量操作绝不能
    自动确认一个可能被用户主动取消的轮次；该批量请求不携带此确认，因此客户端引导
    用户到会话内确认。
-7. `kind` 为 `interrupted_turn` 且 `confirmToolTurn` 不为 `true` 时返回
+8. `kind` 为 `interrupted_turn` 且 `confirmToolTurn` 不为 `true` 时返回
    `confirmation_required`。调用方可以带 `confirmToolTurn: true` 重新提交这些会话。
-8. 其余情况调用已有的 `continueSession` 路径。
+9. 其余情况调用已有的 `continueSession` 路径，传入被授权的中断类型和所选 generation 的
+   断言。bridge 在异步预检后只接受实际中断类型与授权相符的续接；如需另一种确认，
+   返回新的分类。该断言还经排队 prompt 准入传递到 ACP 派发边界，避免 runtime 开始替换或
+   draining 后仍继续向旧 runtime 派发。同一 fence 重读当前 live 来源，发现 agent 在等待期间
+   接管会话时拒绝续接，不复用此前的普通来源快照。扫描侧先过滤来源，再应用可见结果
+   200 条上限；最多 4 个来源检查并发执行，保持结果顺序。`truncated` 按过滤后的可见
+   候选计算。批量路径要求 bridge 确认第一次 ACP 写入，派发 fence 失败会映射为逐会话错误，
+   不会误报 accepted。确认止于写入开始，不等待模型回合结束。未请求该确认的既有续接保持
+   原有异步接受语义。
 
 结果按会话返回：
 
@@ -222,8 +239,10 @@ prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终�
 ```
 
 `status` 取 `accepted`、`not_continuable`、`confirmation_required`、`rejected` 或
-`error`。`not_continuable` 携带 `already_moved`、`no_evidence`、`virtual_subagent`
-或 `invalid_session_id`（id 不符合持久化会话文件形状）；`confirmation_required` 携带
+`error`。`not_continuable` 携带 `already_moved`、`no_evidence`、`virtual_subagent`、
+`invalid_session_id`（id 不符合持久化会话文件形状）、
+`hidden_session`（来源为 `agent` 或 `agent-host`）或 `metadata_unreadable`
+（创建 metadata 不可读，来源无法判定，直接拒绝而不加载）；`confirmation_required` 携带
 `cancellation_confirmation` 或 `tool_turn`；`error` 携带 `workspace_not_found`、
 `untrusted_workspace`、`workspace_runtime_unavailable`、`session_not_found`、
 `daemon_draining`、`session_archiving`、`session_id_conflict`、
@@ -300,13 +319,15 @@ prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终�
 
 - `packages/cli/src/serve`：本次实现 ledger 扫描器和两个恢复路由。聚焦测试覆盖
   扫描、查询与续接路由。
+- `packages/acp-bridge`：在续接准入时复核调用方已授权的中断类型与 generation，并传递
+  已有的派发 fence。未提供这些续接上下文字段的已有调用行为保持不变；真实 bridge 测试覆盖
+  延迟分类和排队派发边界。
 - `packages/sdk-typescript/src/daemon`：请求/响应类型、客户端方法、导出及测试。
 - `packages/web-shell/client`：恢复面板、可用性门控、国际化及测试。
 - `docs/developers/daemon-rest-api-reference.md`、
   `docs/developers/qwen-serve-protocol.md`、SDK 客户端指南，以及能力 parity/契约测试。
   OpenAPI 只覆盖核心指南操作，因此恢复路由不加入其中。
-- 不修改 core。除复用已有的 `continueSession` 和恢复状态方法外，不修改 ACP bridge。
-  不新增持久化文件。
+- 不修改 core，不新增持久化文件。
 
 ## 验证计划
 
@@ -318,9 +339,10 @@ prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终�
    过大；尾部之外的陈旧 `in_flight`；归档会话；窗口之外的条目；以及恰好 200 条的上限。
 2. 路由测试扫描批量：1–20 个选择器、超限批量、未知 workspace、不受信任 workspace、
    runtime 不可用、逐成员失败、稳定排序、`sinceMs` 的钳制、归档排除、活动 prompt
-   排除，以及 transcript 记录 id 不符合持久化 id 的情况。
+   排除、隐藏 `agent` / `agent-host` 排除，以及 transcript 记录 id 不符合持久化 id 的情况。
 3. 路由测试继续批量：串行顺序、逐会话结果、`already_moved`、`degraded_history`、
-   活跃轮次、取消确认、不带与带 `confirmToolTurn` 的 `interrupted_turn`、加载失败、
+   活跃轮次、取消确认、不带与带 `confirmToolTurn` 的 `interrupted_turn`、预检后工具轮次
+   分类变化、ACP 派发前 generation 关闭、隐藏 `agent` / `agent-host` 会话、加载失败、
    非 accepted 路径的 detach，以及 10 个会话上限。
 4. 端到端：启动真实 daemon，开始一轮，杀掉 daemon 进程，重启，查询恢复批量，继续
    一个会话，并断言其 transcript 出现新轮次。SIGKILL（`in_flight`）和 SIGTERM
