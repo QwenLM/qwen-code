@@ -767,6 +767,143 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-overview-details-${theme}`);
     });
 
+    test('session overview bulk delete batches at the route limit', async ({
+      page,
+    }, testInfo) => {
+      const workspaceCwd = '/workspace/session-overview-bulk-delete';
+      // The mock catalog deliberately exceeds the real daemon's 100-row page cap.
+      const sessions = Array.from({ length: 101 }, (_, index) => ({
+        sessionId: `bulk-delete-${index}`,
+        displayName: `Bulk delete fixture ${index}`,
+        workspaceCwd,
+        clientCount: 0,
+        hasActivePrompt: false,
+        updatedAt: '2026-07-01T12:00:00.000Z',
+      }));
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          ...sessions,
+          {
+            sessionId: 'web-shell-e2e-session',
+            displayName: 'Current session to keep',
+            workspaceCwd,
+            clientCount: 1,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      const batches: string[][] = [];
+      const browserErrors: string[] = [];
+      page.on('pageerror', (error) => browserErrors.push(error.message));
+      page.on('console', (message) => {
+        if (['error', 'warning'].includes(message.type())) {
+          browserErrors.push(message.text());
+        }
+      });
+      await page.route('**/workspace/models', (route) =>
+        route.fulfill({ json: { models: [] } }),
+      );
+      await page.route('**/daemon/status?*', (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            detail: 'full',
+            generatedAt: '2026-07-01T12:00:00.000Z',
+            status: 'ok',
+            issues: [],
+            daemon: { pid: 0, uptimeMs: 0, mode: 'http-bridge', workspaceCwd },
+            full: {
+              sessions: scenario.sessions.map((session) => ({
+                ...session,
+                subscriberCount: 0,
+                attachCount: 0,
+                pendingPromptCount: 0,
+                pendingPermissionCount: 0,
+                lastEventId: 0,
+              })),
+            },
+          },
+        }),
+      );
+      await page.route('**/sessions/delete', async (route) => {
+        const { sessionIds } = route.request().postDataJSON() as {
+          sessionIds: string[];
+        };
+        batches.push(sessionIds);
+        if (sessionIds.length > 100) {
+          await route.fulfill({
+            status: 400,
+            json: { error: 'max 100 session IDs', code: 'invalid_request' },
+          });
+          return;
+        }
+        const removed = scenario.sessions
+          .filter((session) => sessionIds.includes(session.sessionId))
+          .map((session) => session.sessionId);
+        scenario.sessions = scenario.sessions.filter(
+          (session) => !removed.includes(session.sessionId),
+        );
+        await route.fulfill({
+          json: {
+            removed,
+            notFound: sessionIds.filter((id) => !removed.includes(id)),
+            errors: [],
+          },
+        });
+      });
+      await gotoSession(page, scenario, daemon, theme);
+      await page.getByRole('button', { name: 'More', exact: true }).click();
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      const panel = page.locator('[data-web-shell-session-panel]');
+      await panel
+        .getByRole('textbox', { name: 'Search title, branch, PR or ID…' })
+        .fill('Bulk delete fixture');
+      await expect(panel).toContainText('101 session(s)');
+      await panel
+        .getByRole('checkbox', { name: 'Select all', exact: true })
+        .check();
+      await expect(panel).toContainText('101 of 101 row(s) selected');
+      await panel
+        .locator('[data-web-shell-session-footer]')
+        .getByRole('button', { name: 'Delete', exact: true })
+        .click();
+      await expect(page.getByRole('alertdialog')).toContainText(
+        'Delete 101 sessions?',
+      );
+      await captureScreenshot(
+        page,
+        `session-overview-bulk-delete-confirm-${theme}`,
+      );
+      await page.locator('[data-slot="alert-dialog-action"]').click();
+      await expect(
+        panel
+          .getByText('No data', { exact: true })
+          .or(panel.getByText(/Failed to delete session/)),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `session-overview-bulk-delete-result-${theme}`,
+      );
+      expect(batches.map((ids) => ids.length)).toEqual([100, 1]);
+      expect(batches.flat().sort()).toEqual(
+        sessions.map((session) => session.sessionId).sort(),
+      );
+      expect(scenario.sessions.map((session) => session.sessionId)).toEqual([
+        scenario.sessionId,
+      ]);
+      await expect(panel.getByText('No data', { exact: true })).toBeVisible();
+      await expect(panel).not.toContainText('Failed to delete session');
+      expect(browserErrors).toEqual([]);
+    });
+
     test('conversation search', async ({ page }, testInfo) => {
       const events = Array.from({ length: 12 }, (_, index) => [
         userTextEvent(`Explain synthetic example ${index + 1}.`, {
@@ -831,6 +968,104 @@ for (const theme of THEMES) {
         page.locator('[data-web-shell-message-list] pre.shiki').first(),
       ).toBeVisible();
       await captureScreenshot(page, `session-transcript-${theme}`);
+    });
+
+    test(`bidirectional Markdown`, async ({ page }, testInfo) => {
+      const response = [
+        'שלום, פתחו את `/workspace/docs/readme.md` ואת https://example.com/docs.',
+        '',
+        '```ts',
+        '// שלום path = "/workspace/logs/app.log";',
+        'const status = "ready";',
+        '```',
+      ].join('\n');
+      const scenario = createWebShellDaemonScenario();
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await fillComposer(page, 'Render mixed-direction Markdown.');
+      await page.locator('[data-web-shell-composer-submit]').click();
+      await expect.poll(() => daemon.promptRequests().length).toBe(1);
+      await daemon.sse.split(assistantTextEvent(response, { id: 10 }));
+
+      const markdown = page.locator(
+        '[data-web-shell-message-list] [data-markdown-source="assistant"]',
+      );
+      const inlineCode = markdown.locator('p code').first();
+      const streamingCode = markdown.locator('pre').first();
+      await expect(markdown).toHaveAttribute('dir', 'auto');
+      await expect(inlineCode).toHaveAttribute('dir', 'auto');
+      await expect(streamingCode).toHaveAttribute('dir', 'auto');
+      await expect(markdown.locator('pre.shiki')).toHaveCount(0);
+      await expect
+        .poll(async () => ({
+          message: await markdown.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+          messageDirection: await markdown.evaluate(
+            (element) => window.getComputedStyle(element).direction,
+          ),
+          inline: await inlineCode.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+          inlineDirection: await inlineCode.evaluate(
+            (element) => window.getComputedStyle(element).direction,
+          ),
+          code: await streamingCode.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+        }))
+        .toEqual({
+          message: 'plaintext',
+          messageDirection: 'rtl',
+          inline: 'isolate',
+          inlineDirection: 'ltr',
+          code: 'plaintext',
+        });
+      await captureScreenshot(
+        page,
+        `markdown-bidirectional-streaming-${theme}`,
+      );
+
+      await daemon.sendEvent(turnCompleteEvent('prompt-e2e', { id: 11 }));
+      const highlightedCode = markdown.locator('pre.shiki').first();
+      await expect(highlightedCode).toBeVisible();
+      const highlightedWrapper = highlightedCode.locator('..');
+      await expect(highlightedWrapper).toHaveAttribute('dir', 'auto');
+      await expect
+        .poll(async () => ({
+          wrapper: await highlightedWrapper.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+          code: await highlightedCode.evaluate(
+            (element) => window.getComputedStyle(element).unicodeBidi,
+          ),
+        }))
+        .toEqual({ wrapper: 'plaintext', code: 'plaintext' });
+      const lineInsets = await highlightedCode
+        .locator('code .line')
+        .evaluateAll((lines) => {
+          const container = lines[0]?.closest('pre');
+          if (!container) return [];
+          const containerRect = container.getBoundingClientRect();
+          return lines.slice(0, 2).map((line) => {
+            const range = document.createRange();
+            range.selectNodeContents(line);
+            const lineRect = range.getBoundingClientRect();
+            return {
+              left: lineRect.left - containerRect.left,
+              right: containerRect.right - lineRect.right,
+            };
+          });
+        });
+      expect(lineInsets).toHaveLength(2);
+      expect(lineInsets[0]!.right).toBeLessThanOrEqual(1);
+      expect(lineInsets[1]!.left).toBeLessThanOrEqual(1);
+      await captureScreenshot(page, `markdown-bidirectional-settled-${theme}`);
     });
 
     test(`usage-limited goal status`, async ({ page }, testInfo) => {
@@ -1458,6 +1693,69 @@ for (const theme of THEMES) {
       );
     });
 
+    test(`Channel repository filter editor`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'github',
+            displayName: 'GitHub',
+            manageable: true,
+            fields: githubManagement.fields,
+          },
+        ],
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await page.getByRole('button', { name: 'Configure GitHub' }).click();
+      const editor = page.getByRole('dialog');
+      await expect(
+        editor.getByRole('heading', { name: 'Configure GitHub' }),
+      ).toBeVisible();
+      await editor
+        .getByRole('switch', { name: 'Use Local GitHub CLI Authentication' })
+        .click();
+
+      // Anchors: the filter defaults to Off and the repository list stays
+      // hidden until a mode is chosen. A renderer that always shows the list
+      // (or lacks the field) fails here instead of shipping a stale capture.
+      const modeSelect = editor.getByLabel('Repository Filter');
+      await modeSelect.scrollIntoViewIfNeeded();
+      await expect(editor.getByLabel('Filtered Repositories')).toHaveCount(0);
+      await captureScreenshot(page, `channel-repo-filter-off-${theme}`);
+
+      await modeSelect.click();
+      await page
+        .getByRole('option', {
+          name: 'Blocklist — all except listed repositories',
+        })
+        .click();
+      const repositories = editor.getByLabel('Filtered Repositories');
+      await expect(repositories).toBeVisible();
+      await repositories.fill(
+        'https://github.com/QwenLM/qwen-code/pull/16117, octo/noisy-repo',
+      );
+      await captureScreenshot(page, `channel-repo-filter-blocklist-${theme}`);
+    });
+
     test(`Channel events`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         capabilities: {
@@ -2029,7 +2327,9 @@ for (const theme of THEMES) {
       // row is required to fit — at this viewport the two rows together are
       // taller than the dialog body, so demanding both would fail on geometry
       // rather than on a regression.
-      await inheriting.scrollIntoViewIfNeeded();
+      await inheriting.evaluate((element) =>
+        element.scrollIntoView({ block: 'center', inline: 'nearest' }),
+      );
       await expect(inheriting).toBeInViewport({ ratio: 1 });
       await captureScreenshot(page, `github-channel-repositories-${theme}`);
     });

@@ -60,6 +60,8 @@ describe('createAndAttachSessionForPrompt', () => {
       workspaceCwd: '/ws/secondary',
       approvalMode: 'yolo',
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
     // Model is still a post-create call, sequenced after attach.
     expect(order).toEqual(['create', 'attach', 'model']);
@@ -156,6 +158,8 @@ describe('createAndAttachSessionForPrompt', () => {
       sessionContext: { kind: 'standalone' },
       modelServiceId: 'qwen3.8-max(USE_OPENAI)',
       approvalMode: 'yolo',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
     expect(actions.setModel).not.toHaveBeenCalled();
     expect(actions.setReasoningEffort).toHaveBeenCalledWith('high', {
@@ -305,6 +309,8 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 
@@ -320,6 +326,8 @@ describe('createAndAttachSessionForPrompt', () => {
       workspaceCwd: undefined,
       approvalMode: 'plan',
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
     expect(actions.setModel).not.toHaveBeenCalled();
   });
@@ -395,6 +403,8 @@ describe('createAndAttachSessionForPrompt', () => {
       workspaceCwd: undefined,
       approvalMode: 'yolo',
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
     expect(actions.attachSession).not.toHaveBeenCalled();
     expect(actions.setModel).not.toHaveBeenCalled();
@@ -483,6 +493,8 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
       sourceType: 'default',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 
@@ -495,6 +507,8 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: undefined,
       sourceType: 'vscode',
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 
@@ -517,6 +531,8 @@ describe('createAndAttachSessionForPrompt', () => {
       workspaceCwd: undefined,
       sourceType: 'default',
       branch: { name: 'feat/x' },
+      keepOnNavigation: true,
+      navigationOutcome: { bound: true },
     });
   });
 
@@ -706,6 +722,108 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.attachSession).not.toHaveBeenCalled();
     expect(actions.releaseSession).toHaveBeenCalledWith('session-1');
     expect(actions.clearSession).toHaveBeenCalledOnce();
+  });
+
+  describe('detached creation (user navigated during create)', () => {
+    function createDetachedClient() {
+      return {
+        sessionId: 'session-1',
+        clientId: 'client-1',
+        setModel: vi.fn(async () => modelResult),
+        setConfigOption: vi.fn(async () => ({})),
+        updateMetadata: vi.fn(async () => ({})),
+        close: vi.fn(async () => {}),
+        detach: vi.fn(async () => {}),
+        client: {
+          setSessionApprovalMode: vi.fn(async () => ({ mode: 'plan' })),
+        },
+      };
+    }
+
+    function createUnboundActions(
+      client: ReturnType<typeof createDetachedClient>,
+    ) {
+      return createActions({
+        createSession: vi.fn(async (options) => {
+          if (options?.navigationOutcome) {
+            options.navigationOutcome.bound = false;
+          }
+          return client;
+        }),
+      });
+    }
+
+    it('returns the unbound client without attaching or touching the connection', async () => {
+      const client = createDetachedClient();
+      const actions = createUnboundActions(client);
+      const onSessionCreated = vi.fn();
+
+      const result = await prepareSession({
+        sessionActions: actions,
+        modelId: 'qwen3',
+        getCurrentSessionId: () => 'session-2',
+        onSessionCreated,
+      });
+
+      expect(result.detachedSession).toBe(client);
+      expect(actions.attachSession).not.toHaveBeenCalled();
+      expect(actions.setModel).not.toHaveBeenCalled();
+      expect(client.setModel).toHaveBeenCalledWith('qwen3');
+      expect(onSessionCreated).toHaveBeenCalledWith('session-1', client);
+      expect(actions.releaseSession).not.toHaveBeenCalled();
+      expect(actions.clearSession).not.toHaveBeenCalled();
+    });
+
+    it('applies Plan and reasoning through the created client', async () => {
+      const client = createDetachedClient();
+      const setApprovalMode = vi.fn(async () => ({ mode: 'plan' }));
+      const actions = {
+        ...createUnboundActions(client),
+        setApprovalMode,
+      };
+
+      await prepareSession({
+        sessionActions: actions,
+        modeId: 'yolo',
+        planMode: true,
+        reasoningEffort: 'medium',
+        getCurrentSessionId: () => 'session-2',
+      });
+
+      expect(client.client.setSessionApprovalMode).toHaveBeenCalledWith(
+        'session-1',
+        'yolo',
+        { clientId: 'client-1', planMode: true },
+      );
+      expect(client.setConfigOption).toHaveBeenCalledWith(
+        'reasoning_effort',
+        'medium',
+        { persist: true },
+      );
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(actions.setReasoningEffort).not.toHaveBeenCalled();
+    });
+
+    it('releases through the created client when detached preparation fails', async () => {
+      const client = createDetachedClient();
+      client.setModel.mockRejectedValue(new Error('model failed'));
+      const actions = createUnboundActions(client);
+
+      await expect(
+        prepareSession({
+          sessionActions: actions,
+          modelId: 'qwen3',
+          reasoningEffort: 'medium',
+          getCurrentSessionId: () => 'session-2',
+          warn: vi.fn(),
+        }),
+      ).rejects.toThrow('model failed');
+
+      expect(client.close).toHaveBeenCalledOnce();
+      expect(actions.releaseSession).not.toHaveBeenCalled();
+      expect(actions.clearSession).not.toHaveBeenCalled();
+      expect(client.setConfigOption).not.toHaveBeenCalled();
+    });
   });
 });
 

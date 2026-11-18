@@ -28,6 +28,133 @@ async function collect(
 }
 
 describe('EventBus', () => {
+  it('keeps a projection boundary without inventing IDs for filtered events', () => {
+    const bus = new EventBus(10, 10, new TurnBoundaryCompactionEngine());
+    expect(bus.snapshotReplay()?.replayProjectionWatermark).toBe(0);
+    bus.publish({ type: 'text', data: 'full prefix' });
+    bus.setEventDetailMode('summary');
+    const nested = {
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'nested detail' },
+          _meta: { parentToolCallId: 'parent' },
+        },
+      },
+    };
+    expect(bus.publish(nested)).toBeUndefined();
+    expect(bus.publish(nested)).toBeUndefined();
+    expect(bus.snapshotReplay()).toMatchObject({
+      lastEventId: 1,
+      replayProjectionWatermark: 1,
+    });
+    expect(bus.publish({ type: 'text', data: 'summary root' })?.id).toBe(2);
+    expect(bus.snapshotReplay()?.replayProjectionWatermark).toBe(2);
+    bus.setEventDetailMode('full');
+    expect(bus.publish({ type: 'text', data: 'new full boundary' })?.id).toBe(
+      3,
+    );
+    expect(bus.snapshotReplay()?.replayProjectionWatermark).toBe(2);
+    expect(
+      bus.snapshotReplay('summary')?.replayProjectionWatermark,
+    ).toBeUndefined();
+    expect(bus.snapshotReplay()?.replayProjectionWatermark).toBe(2);
+    bus.resetReplay();
+    expect(bus.snapshotReplay()?.replayProjectionWatermark).toBe(2);
+    bus.close();
+  });
+
+  it('treats reseeded events as unverified even in a new epoch', () => {
+    const source = new EventBus(10, 10, new TurnBoundaryCompactionEngine());
+    source.setEventDetailMode('summary');
+    const projected = source.publish({
+      type: 'text',
+      data: 'projected source',
+    })!;
+    const { id: _id, v: _version, ...input } = projected;
+    source.resetReplay();
+    expect(source.seedReplayEvents([input])[0]?.id).toBe(2);
+    expect(source.snapshotReplay()?.replayProjectionWatermark).toBe(2);
+    source.seedReplayEvents([]);
+    expect(source.snapshotReplay()?.replayProjectionWatermark).toBe(2);
+    const target = new EventBus(10, 10, new TurnBoundaryCompactionEngine());
+    expect(target.epoch).not.toBe(source.epoch);
+    target.seedReplayEvents([input]);
+    expect(target.snapshotReplay()?.replayProjectionWatermark).toBe(1);
+    expect(target.publish({ type: 'text', data: 'full suffix' })?.id).toBe(2);
+    expect(target.snapshotReplay()?.replayProjectionWatermark).toBe(1);
+    source.close();
+    target.close();
+  });
+
+  it('reports the boundary before the first event without allocating an ID', () => {
+    const bus = new EventBus(10, 10, new TurnBoundaryCompactionEngine());
+    bus.setEventDetailMode('summary');
+    expect(
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'filtered child' },
+            _meta: { parentToolCallId: 'parent' },
+          },
+        },
+      }),
+    ).toBeUndefined();
+    expect(bus.snapshotReplay()).toMatchObject({
+      lastEventId: 0,
+      replayProjectionWatermark: 0,
+    });
+    expect(bus.snapshotReplay('summary')).not.toHaveProperty(
+      'replayProjectionWatermark',
+    );
+    expect(bus.publish({ type: 'text', data: 'root' })?.id).toBe(1);
+    bus.close();
+  });
+
+  it('marks ordinary full seeds unverified across resets', () => {
+    const bus = new EventBus(10, 10, new TurnBoundaryCompactionEngine());
+    bus.seedReplayEvents([{ type: 'text', data: 'full history' }]);
+    expect(bus.snapshotReplay()?.replayProjectionWatermark).toBe(1);
+    bus.resetReplay();
+    expect(bus.snapshotReplay()?.replayProjectionWatermark).toBe(1);
+    bus.seedReplayEvents([{ type: 'text', data: 'next history' }]);
+    expect(bus.snapshotReplay()?.replayProjectionWatermark).toBe(2);
+    bus.close();
+  });
+
+  it('does not degrade an ordinary closed-bus publication', () => {
+    const onCompactionError = vi.fn();
+    const bus = new EventBus(10, 10, new TurnBoundaryCompactionEngine(), {
+      onCompactionError,
+    });
+    bus.close();
+    expect(bus.publish({ type: 'text', data: 'closed' })).toBeUndefined();
+    expect(bus.lastEventId).toBe(0);
+    expect(bus.snapshotReplay()?.degraded).toBeUndefined();
+    expect(onCompactionError).not.toHaveBeenCalled();
+  });
+
+  it('marks rejected publication degraded without consuming an ID', () => {
+    const onCompactionError = vi.fn();
+    const bus = new EventBus(10, 10, new TurnBoundaryCompactionEngine(), {
+      onCompactionError,
+    });
+    bus.publish({ type: 'text', data: 'retained' });
+    expect(bus.publish({ type: 'text', data: 1n })).toBeUndefined();
+    expect(bus.publish({ type: 'text', data: 2n })).toBeUndefined();
+    expect(bus.snapshotReplay()).toMatchObject({
+      lastEventId: 1,
+      degraded: true,
+      replayProjectionWatermark: 0,
+    });
+    expect(onCompactionError).toHaveBeenCalledTimes(1);
+    expect(bus.publish({ type: 'text', data: 'next' })?.id).toBe(2);
+    bus.close();
+  });
+
   it('clears stale replay and keeps the compaction engine usable', async () => {
     const bus = new EventBus(10, 10, new TurnBoundaryCompactionEngine());
     bus.seedReplayEvents([{ type: 'old', data: { text: 'deleted' } }]);
@@ -66,6 +193,290 @@ describe('EventBus', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('retains only the latest skill body while preserving live frames and replay IDs', async () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+    const live = bus.subscribe()[Symbol.asyncIterator]();
+    const makeUpdate = (body: string) => ({
+      type: 'session_update',
+      data: {
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [{ name: 'skill', description: 'A skill' }],
+          _meta: {
+            availableSkills: ['skill'],
+            availableSkillDetails: [{ name: 'skill', body }],
+          },
+        },
+      },
+    });
+    const first = bus.publish(makeUpdate('old body'))!;
+    expect((await live.next()).value).toBe(first);
+    const second = bus.publish(makeUpdate('new body'))!;
+    expect((await live.next()).value).toBe(second);
+    const retained = engine.snapshot().liveJournal;
+    expect(JSON.stringify(retained)).not.toContain('availableSkillDetails');
+    expect(retained.map((event) => event.id)).toEqual([1, 2]);
+    const replay = await collect(bus.subscribe({ lastEventId: 0 }), 3);
+    expect(replay.map((event) => event.id)).toEqual([1, 2, undefined]);
+    expect(JSON.stringify(replay[0])).not.toContain('old body');
+    expect(replay[1]).toBe(second);
+    expect(bus.snapshotReplay()?.liveJournal[1]).toBe(second);
+    expect(bus.liveJournalSnapshot()?.[1]).toBe(second);
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(
+      Buffer.byteLength(JSON.stringify(second)),
+    );
+    expect(first.data).toEqual(makeUpdate('old body').data);
+    await live.return?.();
+    bus.close();
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 0,
+      ringBytes: 0,
+      availableCommandsSnapshotBytes: 0,
+    });
+  });
+
+  it('projects seeded flat command snapshots and clears the latest full snapshot on reset', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+    const seeded = bus.seedReplayEvents(
+      ['old', 'new'].map((body) => ({
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails: [{ name: 'skill', body }] },
+        },
+      })),
+    );
+    expect(JSON.stringify(engine.snapshot())).not.toContain(
+      'availableSkillDetails',
+    );
+    expect(bus.snapshotReplay()?.compactedTurns[1]).toBe(seeded[1]);
+    expect(
+      JSON.stringify(bus.snapshotReplay()?.compactedTurns[0]),
+    ).not.toContain('old');
+    expect(bus.retentionSnapshot().ringCount).toBe(0);
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(
+      Buffer.byteLength(JSON.stringify(seeded[1])),
+    );
+    bus.resetReplay();
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
+    expect(bus.snapshotReplay()?.compactedTurns).toEqual([]);
+    bus.close();
+  });
+
+  it('does not serialize ordinary history for command snapshot accounting', () => {
+    const bus = new EventBus();
+    const history = Array.from({ length: 200 }, () => ({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'x'.repeat(4096) },
+        },
+      },
+    }));
+    const stringify = vi.spyOn(JSON, 'stringify');
+    const seeded = bus.seedReplayEvents(history);
+    expect(stringify).not.toHaveBeenCalled();
+    expect(seeded).toHaveLength(200);
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
+    bus.close();
+  });
+
+  it('replaces full skill details with an empty command update', () => {
+    const bus = new EventBus(10, undefined, new TurnBoundaryCompactionEngine());
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails: [{ body: 'private body' }] },
+        },
+      },
+    });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+        },
+      },
+    });
+    expect(bus.retentionSnapshot().availableCommandsSnapshotBytes).toBe(0);
+    expect(JSON.stringify(bus.snapshotReplay())).not.toContain('private body');
+    bus.close();
+  });
+
+  it('bounds retained bytes and preserves eviction and replay watermarks', async () => {
+    const bus = new EventBus(100, undefined, undefined, { maxRingBytes: 500 });
+    const events = Array.from(
+      { length: 20 },
+      () => bus.publish({ type: 'text', data: { text: '你好'.repeat(20) } })!,
+    );
+    const state = bus.retentionSnapshot();
+    expect(state.ringBytes).toBeLessThanOrEqual(500);
+    expect(state.ringCount).toBeLessThan(20);
+    expect(state.evictedEvents).toBe(20 - state.ringCount);
+    expect(state.evictedBytes + state.ringBytes).toBe(
+      events.reduce(
+        (sum, event) => sum + Buffer.byteLength(JSON.stringify(event)),
+        0,
+      ),
+    );
+    const stale = await collect(bus.subscribe({ lastEventId: 0 }), 1);
+    expect(stale[0].data).toEqual({
+      reason: 'ring_evicted',
+      lastDeliveredId: 0,
+      earliestAvailableId: state.earliestEventId,
+    });
+    const current = await collect(
+      bus.subscribe({ lastEventId: state.earliestEventId! - 1 }),
+      state.ringCount + 1,
+    );
+    expect(current.slice(0, -1).map((event) => event.id)).toEqual(
+      events.slice(-state.ringCount).map((event) => event.id),
+    );
+    expect(current.at(-1)?.type).toBe('replay_complete');
+    const lifetimeEvictions = {
+      evictedEvents: state.evictedEvents,
+      evictedBytes: state.evictedBytes,
+    };
+    bus.resetReplay();
+    expect(bus.retentionSnapshot().ringBytes).toBe(0);
+    expect(bus.retentionSnapshot()).toMatchObject(lifetimeEvictions);
+    bus.seedReplayEvents([{ type: 'text', data: 'seeded history' }]);
+    expect(bus.retentionSnapshot()).toMatchObject(lifetimeEvictions);
+    bus.close();
+  });
+
+  it('retains a single oversized event until a newer event replaces it', () => {
+    const bus = new EventBus(100, undefined, undefined, { maxRingBytes: 100 });
+    bus.publish({ type: 'large', data: 'x'.repeat(1000) });
+    expect(bus.retentionSnapshot().ringCount).toBe(1);
+    expect(bus.retentionSnapshot().ringBytes).toBeGreaterThan(100);
+    bus.publish({ type: 'small', data: 1 });
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 1,
+      earliestEventId: 2,
+    });
+    expect(bus.retentionSnapshot().ringBytes).toBeLessThanOrEqual(100);
+    bus.close();
+  });
+
+  it('counts the latest full command snapshot against the ring budget', () => {
+    const bus = new EventBus(
+      1000,
+      undefined,
+      new TurnBoundaryCompactionEngine(),
+      { maxRingBytes: 2000 },
+    );
+    for (let i = 0; i < 100; i++) {
+      bus.publish({
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [],
+            _meta: {
+              availableSkillDetails: [{ body: `body-${i}`.repeat(180) }],
+            },
+          },
+        },
+      });
+      expect(bus.retentionSnapshot().ringBytes).toBeLessThanOrEqual(2000);
+    }
+    for (let i = 0; i < 4; i++) {
+      bus.publish({ type: 'text', data: { text: 'x'.repeat(350) } });
+    }
+    expect(bus.retentionSnapshot().ringCount).toBe(1);
+    const replay = JSON.stringify(bus.snapshotReplay());
+    expect(replay.match(/availableSkillDetails/g)).toHaveLength(1);
+    expect(replay).toContain('body-99');
+    expect(replay).not.toContain('body-98');
+    bus.close();
+  });
+
+  it('retains at most one ring event when the full command snapshot exceeds the budget', () => {
+    const bus = new EventBus(100, undefined, undefined, { maxRingBytes: 2000 });
+    bus.publish({ type: 'text', data: 'before snapshot' });
+    bus.publish({
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: { availableSkillDetails: [{ body: 'x'.repeat(3000) }] },
+        },
+      },
+    });
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 1,
+      earliestEventId: 2,
+    });
+    expect(
+      bus.retentionSnapshot().availableCommandsSnapshotBytes,
+    ).toBeGreaterThan(2000);
+    bus.publish({ type: 'text', data: 'after snapshot' });
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 1,
+      earliestEventId: 3,
+    });
+    expect(bus.retentionSnapshot().ringBytes).toBeGreaterThan(2000);
+    bus.close();
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity, 256 * 1024 * 1024 + 1])(
+    'rejects invalid ring byte limit %s',
+    (maxRingBytes) => {
+      expect(
+        () => new EventBus(10, undefined, undefined, { maxRingBytes }),
+      ).toThrow('eventRingMaxBytes');
+    },
+  );
+
+  it('rejects projection failures without consuming IDs or changing retention', () => {
+    const bus = new EventBus(10, undefined, new TurnBoundaryCompactionEngine());
+    const first = bus.publish({ type: 'text', data: 'retained' });
+    const before = bus.retentionSnapshot();
+    const data = {};
+    Object.defineProperty(data, 'update', {
+      get: () => {
+        throw new Error('projection failed');
+      },
+    });
+    expect(JSON.stringify(data)).toBe('{}');
+    expect(bus.publish({ type: 'session_update', data })).toBeUndefined();
+    expect(bus.snapshotReplay()?.degraded).toBe(true);
+    expect(bus.retentionSnapshot()).toEqual(before);
+    expect(bus.lastEventId).toBe(first?.id);
+    expect(bus.publish({ type: 'text', data: 'next' })?.id).toBe(2);
+    bus.close();
+  });
+
+  it('handles seeded projection failures as degraded replay without retaining partial full snapshots', () => {
+    const bus = new EventBus(10, undefined, new TurnBoundaryCompactionEngine());
+    const data = {};
+    Object.defineProperty(data, 'update', {
+      get: () => {
+        throw new Error('seed projection failed');
+      },
+    });
+    expect(() =>
+      bus.seedReplayEvents([{ type: 'session_update', data }]),
+    ).not.toThrow();
+    expect(bus.snapshotReplay()?.degraded).toBe(true);
+    expect(bus.retentionSnapshot()).toMatchObject({
+      ringCount: 0,
+      ringBytes: 0,
+    });
+    bus.close();
   });
 
   it('assigns monotonic ids and the right schema version', () => {

@@ -755,14 +755,17 @@ export async function main() {
         undefined,
         undefined,
         undefined,
-        privateAcpParentCapability === undefined
-          ? {
-              workflowAncestorTrustProvider:
-                createLocalWorkflowAncestorTrustProvider(
-                  getOperatorTrustSettings(settings),
-                ),
-            }
-          : undefined,
+        {
+          lspDisabled: true,
+          ...(privateAcpParentCapability === undefined
+            ? {
+                workflowAncestorTrustProvider:
+                  createLocalWorkflowAncestorTrustProvider(
+                    getOperatorTrustSettings(settings),
+                  ),
+              }
+            : {}),
+        },
         buildEnabledSkillNamesProvider(settings),
       );
 
@@ -1439,6 +1442,9 @@ export async function main() {
 
     if (config.isInteractive()) {
       // Shown in the TUI only: a headless run's stderr is someone's pipeline.
+      if (initializationResult.authNotice) {
+        startupWarnings.push(initializationResult.authNotice);
+      }
       const interruptedWorkflowsNotice =
         await getInterruptedWorkflowRunsNotice(config);
       if (interruptedWorkflowsNotice) {

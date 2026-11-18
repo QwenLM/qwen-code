@@ -601,7 +601,7 @@
   font-size: 14px;
   font-weight: 400;
   line-height: 22px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .slashDetailText {
@@ -1988,16 +1988,6 @@
     forced-color-adjust: none;
     background: ButtonText;
   }
-}
-
-.addMenuPlanIcon {
-  display: inline-flex;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted-foreground);
 }
 
 .workspaceSelectTrigger {

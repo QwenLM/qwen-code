@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+
 import java.util.List;
 import java.util.Optional;
 
@@ -86,7 +88,7 @@ public interface ChannelInstanceStore {
     public long databaseNow();
 
     public static String reconciliationOperationId(ChannelClaim claim) {
-        return RECONCILE_OPERATION_PREFIX + com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+        return RECONCILE_OPERATION_PREFIX + ManagedSchemaKeys.key(
                 claim.tenantId(), claim.channelId(), claim.deliveryId(), Long.toString(claim.claimGeneration()));
     }
 }

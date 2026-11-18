@@ -454,3 +454,30 @@ describe('QwenAgentManager session-update transcript forwarding', () => {
     expect(onTranscriptUpdate).toHaveBeenCalledWith(notification);
   });
 });
+
+describe('QwenAgentManager.getSessionListPaged', () => {
+  it('keeps a composite nextCursor so page 2 stays reachable', async () => {
+    const manager = new QwenAgentManager();
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [{ sessionId: 'session-1' }],
+      nextCursor: '1700000000000|session-1.jsonl',
+    });
+    (
+      manager as unknown as {
+        connection: { listSessions: typeof listSessions };
+      }
+    ).connection = { listSessions };
+
+    const page = await manager.getSessionListPaged({ size: 1 });
+
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursor).toBe('1700000000000|session-1.jsonl');
+
+    await manager.getSessionListPaged({ size: 1, cursor: page.nextCursor });
+
+    expect(listSessions).toHaveBeenLastCalledWith({
+      size: 1,
+      cursor: '1700000000000|session-1.jsonl',
+    });
+  });
+});

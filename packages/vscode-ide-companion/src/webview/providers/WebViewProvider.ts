@@ -1951,32 +1951,32 @@ export class WebViewProvider {
           assertOwner();
           if (result.runtimeSync.status === 'failed')
             throw new Error('Subscription runtime activation failed.');
+          let modelId = result.modelId;
           if (owner.sessionId) {
             await owner.client.setSessionModel(
               owner.sessionId,
               `${result.modelId}(qwen-subscription)`,
             );
             assertOwner();
-          }
-          const providers = await owner.client
-            .workspaceByCwd(owner.workspaceCwd)
-            .workspaceProviders();
-          assertOwner();
-          if (
-            !providers.initialized ||
-            providers.current?.authType !== 'qwen-subscription' ||
-            ![result.modelId, `${result.modelId}(qwen-subscription)`].includes(
-              providers.current.modelId ?? '',
-            )
-          ) {
-            throw new Error('Subscription runtime activation failed.');
+          } else {
+            const providers = await owner.client
+              .workspaceByCwd(owner.workspaceCwd)
+              .workspaceProviders();
+            assertOwner();
+            if (!providers.initialized) {
+              throw new Error('Subscription runtime activation failed.');
+            }
+            const current = providers.providers
+              .find((provider) => provider.current)
+              ?.models.find((model) => model.isCurrent);
+            modelId = current?.baseModelId ?? modelId;
           }
           this.sendMessageToWebView({
             type: 'qwenSubscriptionActivationResult',
             data: {
               flowId: flow.id,
               requestId: data.requestId,
-              modelId: result.modelId,
+              modelId,
             },
           });
         } catch (error) {
@@ -2254,7 +2254,10 @@ export class WebViewProvider {
           return true;
         }
         this.subscriptionRuntime = {
-          client: new DaemonClient(runtime),
+          client: new DaemonClient({
+            ...runtime,
+            subscriptionPaywallScene: 'plugin',
+          }),
           workspaceCwd: canonicalWorkspaceCwd,
           sessionId: restoredSessionId,
         };

@@ -9,9 +9,23 @@ import os from 'node:os';
 import type { Terminal } from '@xterm/headless';
 import { loadPty, type PtyLoadResult } from '../utils/getPty.js';
 import { collectPtyProcessTree } from '../utils/pty-process-tree.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage } from '../utils/errors.js';
+import {
+  DEFAULT_WRITE_QUEUE_BYTES,
+  getPtyBudgetStats,
+  processPtyBudget,
+} from '../utils/bun-pty.js';
+import {
+  createDebugLogger,
+  isDebugLogFileEnabled,
+} from '../utils/debugLogger.js';
 import { loadXtermHeadless } from '../utils/load-xterm-headless.js';
+import {
+  getPtyInputQueueBytes,
+  PTY_INPUT_QUEUE_FIELDS,
+  type PtyInputQueueBytes,
+  type PtyInputQueueInternals,
+} from './pty-input-queue.js';
 import {
   disposeConoutWorker,
   noteConPtyHostReleased,
@@ -70,7 +84,8 @@ export type WebTerminalWriteResult = 'written' | 'backpressure' | 'unavailable';
 /** Upper bound on replayed scrollback per PTY session (roughly 4 MB). */
 const MAX_BUFFER_CHUNKS = 4000;
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
-const MAX_UNACKNOWLEDGED_INPUT_BYTES = 256 * 1024;
+const MAX_BUFFERED_INPUT_BYTES = 256 * 1024;
+const MAX_INPUT_FRAME_BYTES = 1024 * 1024;
 export const MAX_CONCURRENT_WEB_TERMINALS = 8;
 /** Reclaim a PTY session after this long with no connected listener. */
 const IDLE_RECLAIM_MS = 15 * 60 * 1000;
@@ -80,7 +95,8 @@ interface PtySession {
   workspaceCwd: string;
   buffer: string[];
   bufferBytes: number;
-  unacknowledgedInputBytes: number;
+  measureBufferedInputBytes(): PtyInputQueueBytes;
+  maxInputQueueBytes?: number;
   exited: boolean;
   exitCode?: number;
   /** Set once the PTY backend terminated this session on a resource limit. */
@@ -103,7 +119,9 @@ interface PtySession {
   ptyResourcesReleased: boolean;
 }
 
-interface SpawnedWebTerminalPty extends WebTerminalPty {
+interface SpawnedWebTerminalPty extends WebTerminalPty, PtyInputQueueInternals {
+  write(data: string | Buffer): void;
+  _isReady?: boolean;
   onData(callback: (data: string) => void): { dispose(): void } | undefined;
   onExit(
     callback: (e: { exitCode: number; signal?: number }) => void,
@@ -358,10 +376,6 @@ export class WebTerminalRegistry {
         earlyOutput.push(data);
         return;
       }
-      session.unacknowledgedInputBytes = Math.max(
-        0,
-        session.unacknowledgedInputBytes - Buffer.byteLength(data),
-      );
       if (queryTerminal) {
         try {
           queryTerminal.write(data);
@@ -428,6 +442,9 @@ export class WebTerminalRegistry {
     };
     let dataDisposable: { dispose(): void } | undefined;
     let exitDisposable: { dispose(): void } | undefined;
+    let deferredInputBytes = 0;
+    let warnedInputQueue = false;
+    let warnedInputQueueOnStderr = false;
     let errorDisposable: { dispose(): void } | undefined;
     const spawnPty = (useBundled: boolean) =>
       ptyImpl.module.spawn(file, args, {
@@ -486,7 +503,11 @@ export class WebTerminalRegistry {
       });
       proc = {
         pid: spawned.pid,
-        write: (data) => spawned.write(data),
+        write: (data) => {
+          const deferred = spawned._isReady === false;
+          spawned.write(Buffer.from(data));
+          if (deferred) deferredInputBytes += Buffer.byteLength(data);
+        },
         resize: (cols, rows) => spawned.resize(cols, rows),
         kill: () => {
           spawned.kill();
@@ -495,7 +516,7 @@ export class WebTerminalRegistry {
           // `_isReady` is false, so note the close only when kill() really ran.
           // release() then disposes the worker a deferred kill left behind,
           // without double-closing a pseudo-console kill() already closed.
-          if ((spawned as { _isReady?: boolean })._isReady !== false) {
+          if (spawned._isReady !== false) {
             noteConPtyHostReleased(spawned);
           }
         },
@@ -519,7 +540,7 @@ export class WebTerminalRegistry {
           // node-pty never releases on a natural exit, and this branch frees
           // it. Same outcome releaseConPtyHost would have had on that arm,
           // reached for a different reason.
-          if ((spawned as { _isReady?: boolean })._isReady === false) {
+          if (spawned._isReady === false) {
             disposeConoutWorker(spawned);
             return;
           }
@@ -554,7 +575,25 @@ export class WebTerminalRegistry {
       workspaceCwd: options.workspaceCwd,
       buffer: [],
       bufferBytes: 0,
-      unacknowledgedInputBytes: 0,
+      maxInputQueueBytes:
+        ptyImpl.name === 'qwen-bun-pty' ? DEFAULT_WRITE_QUEUE_BYTES : undefined,
+      measureBufferedInputBytes: () => {
+        if (spawned._isReady === false) return deferredInputBytes;
+        deferredInputBytes = 0;
+        const bytes = getPtyInputQueueBytes(spawned);
+        if (bytes === undefined && !warnedInputQueue) {
+          const message = `Web terminal ${JSON.stringify(terminalId)}: cannot inspect ${ptyImpl.name} input queue; expected ${PTY_INPUT_QUEUE_FIELDS.join(', ')}. Input admission is unavailable.`;
+          if (isDebugLogFileEnabled() && debugLogger.isEnabled()) {
+            warnedInputQueue = true;
+            debugLogger.warn(message);
+          } else if (!warnedInputQueueOnStderr) {
+            // The default serve daemon has no bound debug-log session.
+            warnedInputQueueOnStderr = true;
+            process.stderr.write(message + '\n');
+          }
+        }
+        return bytes;
+      },
       exited: false,
       outputListeners: new Set(),
       exitListeners: new Set(),
@@ -639,15 +678,42 @@ export class WebTerminalRegistry {
     const bytes = Buffer.byteLength(data);
     const isRecoveryControl =
       data.length === 1 && '\x03\x04\x1a\x1c'.includes(data);
+    if (!isRecoveryControl && bytes > MAX_INPUT_FRAME_BYTES) {
+      return 'backpressure';
+    }
+    // Ordinary input leaves one native queue for other PTYs; recovery controls
+    // may use that reserve without exceeding the backend process limit.
     if (
-      !isRecoveryControl &&
-      session.unacknowledgedInputBytes + bytes > MAX_UNACKNOWLEDGED_INPUT_BYTES
+      session.maxInputQueueBytes !== undefined &&
+      getPtyBudgetStats().writeQueueBytes + bytes >
+        processPtyBudget.totalWriteQueueBytes -
+          (isRecoveryControl ? 0 : DEFAULT_WRITE_QUEUE_BYTES)
     ) {
       return 'backpressure';
     }
+    if (!isRecoveryControl || session.maxInputQueueBytes !== undefined) {
+      const bufferedBytes = session.measureBufferedInputBytes();
+      if (
+        session.maxInputQueueBytes !== undefined &&
+        (bytes > session.maxInputQueueBytes ||
+          (typeof bufferedBytes === 'number' &&
+            bufferedBytes + bytes > session.maxInputQueueBytes))
+      ) {
+        return 'backpressure';
+      }
+      if (!isRecoveryControl) {
+        if (bufferedBytes === undefined) return 'unavailable';
+        if (
+          bufferedBytes === 'saturated' ||
+          (bufferedBytes !== 0 &&
+            bufferedBytes + bytes > MAX_BUFFERED_INPUT_BYTES)
+        ) {
+          return 'backpressure';
+        }
+      }
+    }
     try {
       session.pty.write(data);
-      if (!isRecoveryControl) session.unacknowledgedInputBytes += bytes;
       return 'written';
     } catch {
       return 'unavailable';

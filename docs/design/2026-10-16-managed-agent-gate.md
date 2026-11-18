@@ -186,9 +186,15 @@ A post-merge push failure whose head is no longer main's tip is recorded only
 on the analyze run's step summary, not on the workflow issue, when a newer push
 run of the same workflow exists at the new tip and has already settled: a
 `success` there means the tree is green, and a `failure` reports itself through
-its own completion event. A successor that ended `cancelled`, `timed_out`,
-`skipped`, or `startup_failure` is never analyzed, so the original failure is
-reported instead.
+its own completion event. A successor that ended `timed_out`, `skipped`, or
+`startup_failure` is never analyzed, so the original failure is reported
+instead. A `cancelled` successor owns the result only when the shared
+classifier's verdict for it is one that reports: `timeout`, or the fail-open
+`unknown`. A `concurrency` or `nothing-executed` successor stays silent on its
+own, so the original failure is still reported; an `unreadable` successor does
+not take ownership either, because a failed read certifies nothing about what
+that run concluded, and this run keeps its own fail-open report (#16272,
+#16280).
 
 A successor that has not completed settles nothing, and this job cannot wait
 for it — the pool the reporter runs on queued it for 20-100

@@ -1,7 +1,10 @@
 package com.alibaba.qwen.code.managedagent.contracts.workspace;
 
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 /** Control-plane lifecycle bridge to the configured Runtime backend. */
@@ -40,25 +43,25 @@ public interface RuntimeWarmer {
     }
 
     public default CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
-        return java.util.concurrent.CompletableFuture.failedFuture(
+        return CompletableFuture.failedFuture(
                 new UnsupportedOperationException("Workspace close is unavailable"));
     }
 
     public default CompletionStage<Void> drainWorkspaceResources(String tenantId, String sessionId,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        return java.util.concurrent.CompletableFuture.failedFuture(
+            RuntimeLifecycleAuthority authority) {
+        return CompletableFuture.failedFuture(
                 new UnsupportedOperationException("Workspace resource drain is unavailable"));
     }
 
     public default CompletionStage<Void> prepareWorkspaceResources(String tenantId, String sessionId,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        return java.util.concurrent.CompletableFuture.failedFuture(
+            RuntimeLifecycleAuthority authority) {
+        return CompletableFuture.failedFuture(
                 new UnsupportedOperationException("Workspace resource preparation is unavailable"));
     }
 
     public default CompletionStage<Void> recoverStoppedWorkspaceResources(String tenantId, String sessionId,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        return java.util.concurrent.CompletableFuture.failedFuture(
+            RuntimeLifecycleAuthority authority) {
+        return CompletableFuture.failedFuture(
                 new UnsupportedOperationException("Stopped Workspace recovery is unavailable"));
     }
 
@@ -72,7 +75,7 @@ public interface RuntimeWarmer {
      */
     public default void verifyWorkspaceCwdTarget(ContextBinding binding,
             String targetCwdRelative) {
-        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        throw WorkspaceExecutionStore.unavailable();
     }
 
     public default boolean supportsWorkspaceContextChange(ContextBinding binding) {

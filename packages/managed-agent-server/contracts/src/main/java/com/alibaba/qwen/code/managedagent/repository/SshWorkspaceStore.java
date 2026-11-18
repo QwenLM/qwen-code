@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 public interface SshWorkspaceStore {
     public static final TypeReference<LinkedHashMap<String, Object>> MAP = new TypeReference<>() { };
@@ -52,7 +53,7 @@ public interface SshWorkspaceStore {
 
     public List<StoreModels.ParkedOperation> findParked(int limit);
 
-    public java.util.Optional<Parked> parked(String tenant, String operationId);
+    public Optional<Parked> parked(String tenant, String operationId);
 
     public boolean completeParked(String tenant, String operationId);
 
@@ -72,7 +73,7 @@ public interface SshWorkspaceStore {
 
     public static String string(Map<String, Object> value, String key) {
         if (!(value.get(key) instanceof String text) || text.isBlank()) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return text;
     }

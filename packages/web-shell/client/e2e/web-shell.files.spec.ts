@@ -2211,6 +2211,9 @@ test('@smoke file-row drops preserve preview and use server-confirmed collision 
   const sidebar = browser.getByTestId('workspace-file-sidebar');
   await sidebar.getByRole('treeitem', { name: 'src', exact: true }).click();
   const row = sidebar.getByRole('treeitem', { name: 'guide.md', exact: true });
+  // Scrolling recycles virtual rows; resolve the target again before clicking.
+  await row.scrollIntoViewIfNeeded();
+  await expect(row).toBeInViewport({ ratio: 1 });
   await row.click();
   await expect(browser.getByTestId('workspace-file-content')).toContainText(
     'Nested guide',

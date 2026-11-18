@@ -688,6 +688,380 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it('labels a rendered HTML artifact Preview and opens the preview tab', () => {
+    const onOpenRequest = vi.fn();
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-html"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'html-artifact',
+                kind: 'html',
+                storage: 'workspace',
+                status: 'available',
+                title: 'ask-details.html',
+                workspacePath: '.qwen/tmp/ask-details.html',
+                mimeType: 'text/html',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={onOpenArtifact}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    const preview = buttons.find(
+      (button) => button.textContent?.trim() === 'Preview',
+    );
+    expect(preview).toBeDefined();
+    expect(preview?.disabled).toBe(false);
+    // The rendered action carries the eye icon, not the external-link icon.
+    expect(preview?.querySelector('svg.lucide-eye')).not.toBeNull();
+    expect(
+      preview?.querySelector('svg.lucide-square-arrow-out-up-right'),
+    ).toBeNull();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeUndefined();
+
+    act(() => preview?.click());
+    expect(onOpenRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'artifact',
+        artifactId: 'html-artifact',
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('keeps Open for a non-rendered artifact', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-csv"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'csv-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'report.csv',
+                workspacePath: 'reports/report.csv',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeDefined();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Preview'),
+    ).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
+  it.each(['notes.md', 'notes.markdown'])(
+    'labels a rendered Markdown artifact Preview (%s)',
+    (workspacePath) => {
+      // Markdown reaches `rendered` only through isRenderedFilePath, so pin the
+      // label itself: dropping .md/.markdown from that predicate must red this.
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <TurnOutputs
+              turnId="turn-markdown"
+              workspaceCwd="/primary"
+              changes={[]}
+              artifacts={[
+                {
+                  id: 'markdown-artifact',
+                  kind: 'file',
+                  storage: 'workspace',
+                  status: 'available',
+                  title: workspacePath,
+                  workspacePath,
+                } as DaemonSessionArtifact,
+              ]}
+              scheduledTasks={[]}
+              onReviewChanges={() => {}}
+              onOpenArtifact={() => {}}
+              onOpenScheduledTask={() => {}}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      const buttons = Array.from(container.querySelectorAll('button'));
+      const preview = buttons.find(
+        (button) => button.textContent?.trim() === 'Preview',
+      );
+      expect(preview).toBeDefined();
+      expect(preview?.querySelector('svg.lucide-eye')).not.toBeNull();
+      expect(
+        buttons.find((button) => button.textContent?.trim() === 'Open'),
+      ).toBeUndefined();
+
+      act(() => root.unmount());
+    },
+  );
+
+  it('disables Preview for a missing HTML artifact', () => {
+    const onOpenRequest = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-html-missing"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'html-missing',
+                kind: 'html',
+                storage: 'workspace',
+                status: 'missing',
+                title: 'ask-details.html',
+                workspacePath: '.qwen/tmp/ask-details.html',
+                mimeType: 'text/html',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const preview = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Preview',
+    );
+    expect(preview?.disabled).toBe(true);
+    act(() => preview?.click());
+    expect(onOpenRequest).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
+  it('labels a rendered HTML artifact Preview in zh-CN', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="zh-CN">
+          <TurnOutputs
+            turnId="turn-html-zh"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'html-artifact-zh',
+                kind: 'html',
+                storage: 'workspace',
+                status: 'available',
+                title: 'ask-details.html',
+                workspacePath: '.qwen/tmp/ask-details.html',
+                mimeType: 'text/html',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    const preview = buttons.find(
+      (button) => button.textContent?.trim() === '预览',
+    );
+    expect(preview).toBeDefined();
+    expect(preview?.querySelector('svg.lucide-eye')).not.toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it('labels an image artifact identified by mime alone Preview', () => {
+    // The panel renders an image/* mime even when the path has no extension;
+    // the card must agree rather than fall back to Open.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-image-mime"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'image-mime-artifact',
+                kind: 'image',
+                storage: 'workspace',
+                status: 'available',
+                title: 'diagram',
+                workspacePath: 'out/diagram',
+                mimeType: 'image/png',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Preview'),
+    ).toBeDefined();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
+  it('labels an HTML artifact with a charset mime parameter Preview', () => {
+    // text/html; charset=utf-8 normalises to text/html, which the panel
+    // renders; the card must not keep Open on the raw parameterised string.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-html-charset"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'html-charset-artifact',
+                kind: 'file',
+                storage: 'workspace',
+                status: 'available',
+                title: 'page-param',
+                workspacePath: 'out/page-param',
+                mimeType: 'text/html; charset=utf-8',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Preview'),
+    ).toBeDefined();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
+  it('keeps Open for an external-URL image that only shows metadata', () => {
+    // record_artifact accepts an image with a url and no workspace path, which
+    // lands as storage:'external_url'. The panel shows metadata and an Open
+    // link for it (no rendered preview), so the card must not promise Preview.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-external-image"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'external-image-artifact',
+                kind: 'image',
+                storage: 'external_url',
+                status: 'available',
+                title: 'External diagram',
+                url: 'https://example.com/diagram.png',
+                mimeType: 'image/png',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeDefined();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Preview'),
+    ).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
   it('marks only changed workspace artifacts as modified since recorded', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

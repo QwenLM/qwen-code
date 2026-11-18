@@ -3,17 +3,20 @@ package com.alibaba.qwen.code.managedagent.repository;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
+import java.nio.file.Path;
+
 public interface WorkspaceExecutionStore {
-    public java.nio.file.Path createdStorageRoot(String tenantId, String storageId);
+    public Path createdStorageRoot(String tenantId, String storageId);
 
     public boolean verifiedRecoveryEnabled();
 
     public void authorize(SessionRecord session);
 
-    public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+    public void authorizeLifecycle(SessionRecord session, RuntimeLifecycleAuthority authority);
 
     public void authorizeLegacyClose(SessionRecord session);
 

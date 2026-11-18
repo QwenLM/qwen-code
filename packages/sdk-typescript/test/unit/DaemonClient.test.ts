@@ -18,6 +18,7 @@ import {
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 import type { DaemonSessionAgentsStatus } from '../../src/daemon/index.js';
 import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
+import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
 import {
   DaemonCapabilityMissingError,
   DAEMON_REASONING_SELECTIONS,
@@ -2001,6 +2002,46 @@ describe('DaemonClient', () => {
         ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/git'],
       ]);
       expect(transportFetch).not.toHaveBeenCalled();
+    });
+
+    it('queries ignored paths against the selected workspace and session cwd', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, ignoredPaths: ['helper.log'] }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'wrong transport' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+      const response = await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitIgnoredPaths(
+          ['helper.log', 'source.ts'],
+          '/work/secondary/tree',
+          'session-1',
+        );
+      expect(response.ignoredPaths).toEqual(['helper.log']);
+      expect(response.v).toBe(1);
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Fwork%2Fsecondary/git/check-ignore?cwd=%2Fwork%2Fsecondary%2Ftree&sessionId=session-1',
+      );
+      expect(JSON.parse(calls[0]?.body as string)).toEqual({
+        paths: ['helper.log', 'source.ts'],
+      });
     });
 
     it('builds Git status query strings from cwd/wait options', async () => {
@@ -4346,6 +4387,136 @@ describe('DaemonClient', () => {
       },
     );
 
+    it.each([
+      [
+        'create',
+        (client: DaemonClient) =>
+          client.createOrAttachSession({ workspaceCwd: '/work/a' }),
+      ],
+      [
+        'worktree reset',
+        (client: DaemonClient) => client.resetWorktreeSession('s-1'),
+      ],
+    ])(
+      'bounds a %s whose advertised budget overflows the timer ceiling',
+      async (_name, start) => {
+        // `--session-restore-timeout-ms` accepts up to `MAX_TIMER_DELAY_MS`, and
+        // the derived deadline adds headroom on top, so a legal maximum
+        // overflows the ceiling. That overflow reported `0`, which
+        // `fetchWithTimeout` reads as "no deadline": the spawn armed no timer
+        // and attached no AbortSignal, so a stalled daemon held the create or
+        // worktree reset for the process lifetime (#14588 R1-4). It now clamps
+        // to the ceiling instead.
+        vi.useFakeTimers();
+        try {
+          let signal: AbortSignal | undefined;
+          const fetch = vi.fn(
+            (input: RequestInfo | URL, init?: RequestInit) => {
+              const url = String(input);
+              if (url.endsWith('/capabilities')) {
+                return Promise.resolve(
+                  jsonResponse(200, {
+                    v: 1,
+                    mode: 'http-bridge',
+                    features: [],
+                    modelServices: [],
+                    limits: { sessionRestoreTimeoutMs: 2_147_483_647 },
+                  }),
+                );
+              }
+              return new Promise<Response>((_resolve, reject) => {
+                signal = init?.signal ?? undefined;
+                signal?.addEventListener(
+                  'abort',
+                  () => reject(signal?.reason),
+                  { once: true },
+                );
+              });
+            },
+          ) as unknown as typeof globalThis.fetch;
+          const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+          await client.capabilities();
+
+          const outcome = start(client).catch((error: unknown) => error);
+          // Clamped to the ceiling, so a deadline is armed at all — the whole
+          // point of the fix: before it, `signal` stayed undefined forever.
+          expect(signal).toBeDefined();
+          // One millisecond short of the ceiling it must still be live. The
+          // advances sum to exactly `MAX_TIMER_DELAY_MS`, so the timer fires on
+          // the final tick: flooring the clamp at 30s (or an off-by-one
+          // `MAX_TIMER_DELAY_MS - 1`) aborts earlier and reds this line.
+          await vi.advanceTimersByTimeAsync(2_147_483_647 - 1);
+          expect(signal?.aborted).toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('keeps an explicit fetchTimeoutMs: 0 unbounded on the spawn routes', async () => {
+      // The doc on `resolveSessionSpawnTimeoutMs` promises an explicit deadline
+      // is returned verbatim, and `0` there asks for no deadline. The clamp
+      // above is only for a *derived* `0`, so this pins the override that a
+      // careless change would sweep away (#14588 R1-3).
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetchMock = vi.fn(
+          (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+            if (url.endsWith('/capabilities')) {
+              return Promise.resolve(
+                jsonResponse(200, {
+                  v: 1,
+                  mode: 'http-bridge',
+                  features: [],
+                  modelServices: [],
+                  limits: { sessionRestoreTimeoutMs: 2_147_483_647 },
+                }),
+              );
+            }
+            return new Promise<Response>(() => {
+              signal = init?.signal ?? undefined;
+            });
+          },
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch: fetchMock as unknown as typeof globalThis.fetch,
+          fetchTimeoutMs: 0,
+        });
+        await client.capabilities();
+
+        void client
+          .createOrAttachSession({ workspaceCwd: '/work/a' })
+          .catch(() => {});
+        // `signal` is assigned only once the spawn request reaches the wire, so
+        // asserting it is undefined proves the deadline is absent *and* nothing
+        // else: a later change that drops the request before the wire (a
+        // validation throw, an added capability preflight, a transport that
+        // stops forwarding `init`) leaves `signal` undefined too and keeps this
+        // case green, silently turning an explicit `0` into the 24.8-day
+        // deadline R3-2 warns about. Pin the request first, then the deadline.
+        // `advanceTimersByTimeAsync` also drains the microtask chain inside the
+        // fire-and-forget create, so this waits for the request to reach the
+        // wire rather than racing it.
+        await vi.advanceTimersByTimeAsync(100);
+        const spawnCalls = fetchMock.mock.calls.filter(
+          ([input]) => !String(input).endsWith('/capabilities'),
+        );
+        expect(spawnCalls.length).toBeGreaterThan(0);
+        expect(spawnCalls[0]?.[1]?.signal).toBeUndefined();
+        expect(signal).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(2_147_483_647);
+        expect(spawnCalls.length).toBeGreaterThan(0);
+        expect(signal).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('keeps a low restore pin unfloored on the restore route', async () => {
       // The floor above is deliberately spawn-only: restore keeps the
       // advertised budget as-is, so 5000 + 10s headroom still aborts at 15s.
@@ -6629,6 +6800,54 @@ describe('DaemonClient', () => {
       expect(calls[0]?.url).toBe(
         'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=20&parentSessionId=P',
       );
+    });
+
+    it('serializes liveOnly into both workspace session-list clients', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [{ sessionId: 's-live', workspaceCwd: '/work/a' }],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.listWorkspaceSessionsPage('/work/a', { liveOnly: true });
+      await client
+        .workspaceByCwd('/work/a')
+        .listWorkspaceSessionsPage({ liveOnly: true });
+
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20&liveOnly=1',
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=20&liveOnly=1',
+      ]);
+    });
+
+    it('routes liveOnly through native REST when an ACP transport is configured', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { sessions: [] }),
+      );
+      const transport = new AcpHttpTransport('http://daemon', undefined, fetch);
+      const transportFetch = vi
+        .spyOn(transport, 'fetch')
+        .mockRejectedValue(new Error('ACP transport must not serve liveOnly'));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await client.listWorkspaceSessionsPage('/work/a', {
+        pageSize: 100,
+        liveOnly: true,
+      });
+      await client
+        .workspaceByCwd('/work/a')
+        .listWorkspaceSessionsPage({ pageSize: 100, liveOnly: true });
+
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=100&liveOnly=1',
+        'http://daemon/workspaces/%2Fwork%2Fa/sessions?size=100&liveOnly=1',
+      ]);
     });
 
     it('serializes source filters into both workspace session-list clients', async () => {
@@ -12266,6 +12485,34 @@ describe('DaemonClient', () => {
   });
 
   describe('workspace registration persistence', () => {
+    it('reads and saves shared workspace order through REST and propagates failures', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { cwds: ['/b', '/a'] }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.getWorkspaceOrder()).resolves.toEqual({
+        cwds: ['/b', '/a'],
+      });
+      await expect(client.setWorkspaceOrder(['/b', '/a'])).resolves.toEqual({
+        cwds: ['/b', '/a'],
+      });
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        ['GET', 'http://daemon/workspace-order', null],
+        [
+          'POST',
+          'http://daemon/workspace-order',
+          JSON.stringify({ cwds: ['/b', '/a'] }),
+        ],
+      ]);
+      const failed = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: async () => jsonResponse(500, { error: 'disk full' }),
+      });
+      await expect(failed.setWorkspaceOrder(['/a'])).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+
     it('updates and clears workspace metadata through direct REST', async () => {
       const { fetch, calls } = recordingFetch((req) =>
         jsonResponse(200, {

@@ -767,6 +767,20 @@ describe('remember memory helper', () => {
     await expect(run('Remember me.')).rejects.toThrow('aborted');
   });
 
+  it('reports the mode tokens as wording rather than passing them through', async () => {
+    // The cases above feed free-form reasons, which pass through by
+    // design — none of them would fail if the conversion were reverted.
+    agentEnds('failed', 'MAX_TURNS');
+    await expect(run('Remember me.')).rejects.toThrow(
+      'Agent stopped: maximum turns reached.',
+    );
+
+    agentEnds('cancelled', 'CANCELLED');
+    await expect(run('Remember me.')).rejects.toThrow(
+      'Remember agent cancelled',
+    );
+  });
+
   it('remember agent always receives the full protocol even when all indexes are empty', async () => {
     agentWrites([projMem('user.md')], 'Saved.');
 

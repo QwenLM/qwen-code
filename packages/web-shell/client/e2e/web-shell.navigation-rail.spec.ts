@@ -228,7 +228,9 @@ test('narrow embedded container uses a contained drawer on a wide viewport @smok
     .locator(homeColumn)
     .getByText('Qwen Code', { exact: true });
   await expect(brand).toBeVisible();
-  await expect(brand.locator('..').locator('svg')).toBeVisible();
+  await expect(
+    brand.locator('..').locator('span[aria-hidden="true"] svg'),
+  ).toBeVisible();
   const host = await page.getByTestId('host-shell').boundingBox();
   const bounds = await drawer.boundingBox();
   expect(bounds!.x).toBeGreaterThanOrEqual(host!.x);

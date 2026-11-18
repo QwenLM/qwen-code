@@ -9,10 +9,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createServer, preview } from 'vite';
+import { preview } from 'vite';
 import type { ConfigEnv, ProxyOptions, UserConfig } from 'vite';
 import viteConfig, {
   BRAND_ROUTE_PROXY,
+  createDevelopmentMiddleware,
   MANAGED_AGENT_JAVA_ROUTE_PROXY,
   MANAGED_AGENT_PUBLIC_ROUTE_PROXY,
   QUALIFIED_ACP_WS_PROXY,
@@ -29,28 +30,49 @@ function loadConfig(): UserConfig {
   });
 }
 
-it('serves the settings page without claiming the settings source module', async ({
-  onTestFinished,
-}) => {
-  const server = await createServer({
-    ...loadConfig(),
-    configFile: false,
-    server: { host: '127.0.0.1', port: 0 },
-  });
-  onTestFinished(() => server.close());
-  await server.listen();
-  const baseUrl = server.resolvedUrls!.local[0];
-  for (const path of ['settings', 'settings?theme=dark', 'settings/']) {
-    const response = await fetch(`${baseUrl}${path}`, {
-      headers: { accept: 'text/html' },
-    });
-    expect(response.status).toBe(200);
-    expect(response.headers.get('content-type')).toContain('text/html');
-    expect(await response.text()).toContain('/main.tsx');
+describe('Web Shell settings development route', () => {
+  function runMiddleware(method: string, url: string, accept?: string) {
+    const req = {
+      method,
+      url,
+      headers: accept ? { accept } : {},
+    } as unknown as IncomingMessage;
+    const res = { setHeader: vi.fn() } as unknown as ServerResponse;
+    const next = vi.fn();
+
+    createDevelopmentMiddleware()(req, res, next);
+    return { req, res, next };
   }
-  const source = await fetch(`${baseUrl}settings.ts`);
-  expect(source.status).toBe(200);
-  expect(source.headers.get('content-type')).toContain('javascript');
+
+  it.each(['/settings', '/settings?theme=dark', '/settings/'])(
+    'rewrites %s to the SPA document',
+    (url) => {
+      const { req, res, next } = runMiddleware('GET', url, 'text/html');
+
+      expect(req.url).toBe('/index.html');
+      expect(res.setHeader).toHaveBeenCalledWith(
+        'Content-Security-Policy',
+        expect.stringContaining("default-src 'self'"),
+      );
+      expect(next).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not claim the settings source module', () => {
+    const { req, next } = runMiddleware('GET', '/settings.ts', 'text/html');
+
+    expect(req.url).toBe('/settings.ts');
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['POST', '/settings', 'text/html'],
+    ['GET', '/settings', '*/*'],
+  ])('leaves non-document requests untouched', (method, url, accept) => {
+    const { req } = runMiddleware(method, url, accept);
+
+    expect(req.url).toBe(url);
+  });
 });
 
 it.each([

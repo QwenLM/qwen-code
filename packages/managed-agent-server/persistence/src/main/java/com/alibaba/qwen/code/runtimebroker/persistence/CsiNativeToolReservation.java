@@ -32,6 +32,7 @@ import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.text;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.utf8;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.uuid;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeToolContent.qualifyContent;
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
 
 /** Original assistant allocation evidence; it does not authorize execution. */
 final class CsiNativeToolReservation {
@@ -648,12 +649,6 @@ final class CsiNativeToolReservation {
 
     private static String scope(JdbcCsiFilesRetirementGuard.Original original) {
         return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(original.request().getScope().getTenantId(), original.request().getIsolationKey());
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void require(boolean condition) {

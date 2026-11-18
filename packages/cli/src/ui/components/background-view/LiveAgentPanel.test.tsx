@@ -69,6 +69,7 @@ function renderPanel(
     selectedIndex: 0,
     dialogMode: options.dialogOpen ? ('list' as const) : ('closed' as const),
     dialogOpen: Boolean(options.dialogOpen),
+    autoOpened: false,
     pillFocused: false,
     livePanelFocused: Boolean(options.livePanelFocused),
     livePanelSelectedIndex: 0,

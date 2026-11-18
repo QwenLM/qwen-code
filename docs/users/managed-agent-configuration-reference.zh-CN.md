@@ -25,7 +25,7 @@ mvn -f packages/managed-agent-server/pom.xml -DskipTests clean process-classes &
 | `server.port` | `SERVER_PORT` | 整数 | `8080` | 公共监听端口，API 和 `/actuator/health` 都在该端口上提供。Spring Boot 从 `SERVER_PORT` 读取。 |
 | `spring.datasource.druid.max-active` | `QWEN_MANAGED_AGENT_DB_MAX_POOL_SIZE` | 整数 | `20` | 控制面 Druid 数据库连接池最多可持有的连接数。连接全部占用时，获取连接的请求最多等待 30 秒，随后失败。`managed-local` profile 下不生效，其连接池固定为 20。 |
 | `spring.datasource.password` | `SPRING_DATASOURCE_PASSWORD` | 字符串 | *（空）* | `spring.datasource.username` 的密码。属于机密：应放在 `server.env` 这类私有环境文件中，不要写在命令行上。 |
-| `spring.datasource.url` | `SPRING_DATASOURCE_URL` | 字符串 | `jdbc:mysql://127.0.0.1:3306/qwen_managed_agent` | 存放控制面状态的 MySQL 8 数据库的 JDBC URL；启动时 Flyway 会对其执行 schema 迁移。`managed-local` profile 改用私有 H2 文件数据库，其他 URL 启动时拒绝。 |
+| `spring.datasource.url` | `SPRING_DATASOURCE_URL` | 字符串 | `jdbc:mysql://127.0.0.1:3306/qwen_managed_agent` | 存放控制面状态的 MySQL 8 数据库的 JDBC URL；启动时 Flyway 会对其执行 schema 迁移。`managed-local` profile 改用私有 H2 文件数据库，其他 URL 启动时拒绝。对 `jdbc:mysql:` URL，服务端会开启 Connector/J 的语句解析缓存：以连接属性加上 `cachePrepStmts=true`、`prepStmtCacheSize=512` 和 `prepStmtCacheSqlLimit=8192`，每一项只在该 URL 和 Druid 连接属性（`spring.datasource.druid.connect-properties` 或 `connection-properties`）都没有设置它时才加；任一处提到 `useServerPrepStmts` 或 `useCursorFetch` 时，无论取值如何，一项都不加，因为二者都可能让 Connector/J 在服务端准备语句。在 URL 里写 `cachePrepStmts=false` 即可关闭缓存。 |
 | `spring.datasource.username` | `SPRING_DATASOURCE_USERNAME` | 字符串 | `qwen` | 控制面连接数据库所用的用户。除控制面数据库的权限外，还需要 `performance_schema.user_variables_by_thread` 的 `SELECT` 权限，预检 `--check` 会校验该权限。 |
 
 ## `qwen.managed-agent`
@@ -80,7 +80,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `concurrency` | — | 整数 | `4` | 重叠策略为 `allow` 的单个自动化定义可同时持有的未结束运行数；超出后，再到期的槽位记为 `skipped`，原因为 `count_limit`。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
-| `enabled` | `QWEN_MANAGED_AGENT_AUTOMATION_ENABLED` | 布尔 | `false` | 是否运行自动化扫描器，并受理自动化的创建、修改、退役与手动运行路由；关闭时这些路由返回 `409 automation_unavailable`，读取路由照常应答。这些路由还要求开启 `qwen.managed-agent.session-store.enabled`。开启后，自动化的计数或时长若不为正，启动时拒绝。 |
+| `enabled` | `QWEN_MANAGED_AGENT_AUTOMATION_ENABLED` | 布尔 | `true` | 是否运行自动化扫描器，并受理自动化的创建、修改、退役与手动运行路由；关闭时这些路由返回 `409 automation_unavailable`，读取路由照常应答。这些路由还要求开启 `qwen.managed-agent.session-store.enabled`。开启后，自动化的计数或时长若不为正，启动时拒绝。 |
 | `late-tolerance` | `QWEN_MANAGED_AGENT_AUTOMATION_LATE_TOLERANCE` | 时长 | `5m` | 扫描器发现到期槽位时，允许其迟到多久仍按计划触发。更迟的槽位按定义的补跑策略（`none`、`latest` 或 `bounded`）处理，未被补跑的记为错过。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `lease` | `QWEN_MANAGED_AGENT_AUTOMATION_LEASE` | 时长 | `60s` | 扫描器或手动运行持有自动化定义租约的时长，从认领该定义时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `lookback` | `QWEN_MANAGED_AGENT_AUTOMATION_LOOKBACK` | 时长 | `24h` | 扫描器为定义推导到期槽位时最多回看的时长；早于该窗口（或早于定义启用时刻）的槽位既不触发也不记录，从而限定所有补跑的范围。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |

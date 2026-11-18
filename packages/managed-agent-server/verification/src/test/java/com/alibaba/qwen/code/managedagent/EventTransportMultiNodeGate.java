@@ -1168,12 +1168,16 @@ public class EventTransportMultiNodeGate {
 
         public Node start(boolean transport) throws Exception {
             Files.createDirectories(root);
-            startHarness();
+            startHarness(System.nanoTime() + Duration.ofSeconds(90).toNanos());
             startSpring(transport);
             return this;
         }
 
         public void startHarness() throws Exception {
+            startHarness(System.nanoTime() + Duration.ofSeconds(90).toNanos());
+        }
+
+        public void startHarness(long deadline) throws Exception {
             Path home = Files.createDirectories(root.resolve("home"));
             Path config = Files.createDirectories(home.resolve(".qwen"));
             Path workspace = Files.createDirectories(root.resolve("workspace"));
@@ -1226,7 +1230,8 @@ public class EventTransportMultiNodeGate {
                     // The process is gone; the log holds what it said.
                 }
             });
-            await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofMillis(100))
+            await().atMost(remainingBootTime(deadline, Duration.ofSeconds(60)))
+                    .pollDelay(Duration.ZERO).pollInterval(Duration.ofMillis(100))
                     .until(() -> {
                         assertThat(harness.isAlive()).as("%s Harness exited:\n%s", name,
                                 harnessOutput()).isTrue();
@@ -1237,7 +1242,8 @@ public class EventTransportMultiNodeGate {
                         harnessPort = Integer.parseInt(match.group(1));
                         return true;
                     });
-            await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(100))
+            await().atMost(remainingBootTime(deadline, Duration.ofSeconds(30)))
+                    .pollDelay(Duration.ZERO).pollInterval(Duration.ofMillis(100))
                     .until(this::harnessReady);
             JsonNode capabilities = JSON.readTree(readCapabilities((HttpURLConnection)
                     URI.create("http://127.0.0.1:" + harnessPort + "/capabilities").toURL()
@@ -1279,12 +1285,37 @@ public class EventTransportMultiNodeGate {
         }
 
         public void startSpring(boolean transport) throws Exception {
-            launch(transport);
             // Only the first boot of the class migrates the schema.
             Duration boot = Duration.ofSeconds(schemaReady ? 90 : 180);
+            long deadline = System.nanoTime() + boot.toNanos();
+            boolean firstBoot = springPort == 0;
             Path ready = root.resolve("ready.json");
-            await().atMost(boot).pollInterval(Duration.ofMillis(100)).until(() ->
-                    Files.exists(ready) || !spring.isAlive());
+            Path log = root.resolve("spring.log");
+            for (int attempt = 0; ; attempt++) {
+                long offset = Files.exists(log) ? Files.size(log) : 0;
+                launch(transport);
+                await().atMost(remainingBootTime(deadline, boot))
+                        .pollDelay(Duration.ZERO).pollInterval(Duration.ofMillis(100)).until(() ->
+                                Files.exists(ready) || !spring.isAlive());
+                if (spring.isAlive() || Files.exists(ready) || !firstBoot
+                        || attempt >= 2 || spring.exitValue() == 0) {
+                    break;
+                }
+                byte[] bytes = Files.readAllBytes(log);
+                int from = (int) Math.min(offset, bytes.length);
+                String failure = new String(bytes, from, bytes.length - from, StandardCharsets.UTF_8);
+                if (!failure.contains("Port " + springPort + " was already in use.")
+                        || System.nanoTime() >= deadline) {
+                    break;
+                }
+                springPort = 0;
+                // An early consumer may already have attached the old store URL.
+                kill(harness);
+                synchronized (harnessOutput) {
+                    harnessOutput.setLength(0);
+                }
+                startHarness(deadline);
+            }
             long observed = System.currentTimeMillis();
             assertThat(spring.isAlive()).as("%s failed to start:\n%s", name,
                     tail(root.resolve("spring.log"))).isTrue();
@@ -1406,6 +1437,11 @@ public class EventTransportMultiNodeGate {
                 }
             }
         }
+    }
+
+    private static Duration remainingBootTime(long deadline, Duration limit) {
+        return Duration.ofNanos(Math.max(1,
+                Math.min(limit.toNanos(), deadline - System.nanoTime())));
     }
 
     private static int freePort() throws IOException {

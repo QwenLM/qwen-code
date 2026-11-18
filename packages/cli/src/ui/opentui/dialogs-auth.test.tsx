@@ -75,11 +75,19 @@ const mocks = vi.hoisted(() => {
           children,
         );
       }
-      return React.createElement(
+      const element = React.createElement(
         type as React.ElementType,
         config as Record<string, unknown>,
         children,
       );
+      if (typeof type === 'function' && type.name === 'FieldText') {
+        return React.createElement(
+          'span',
+          { key, 'data-field-text': '' },
+          element,
+        );
+      }
+      return element;
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
@@ -93,7 +101,7 @@ const subscription = vi.hoisted(() => ({
   email: 'real@example.com',
   deviceAuth: {
     verification_uri_complete:
-      'https://chat.qwen.ai/authorize?user_code=REAL-CODE&client=qwen-code',
+      'https://chat.qwen.ai/authorize?user_code=REAL-CODE&client=cli&entry=qwen_code&paywallScene=cli',
   },
   checking: false,
   connecting: false,
@@ -151,6 +159,7 @@ import * as coreRuntime from '@qwen-code/qwen-code-core';
 import { ICON, SPINNER_FRAMES, SPINNER_INTERVAL_MS } from '../constants.js';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
 import { setLanguageAsync } from '../../i18n/index.js';
+import * as providerSetupFlow from '../auth/useProviderSetupFlow.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -1106,25 +1115,48 @@ describe('caret editing in dialog text fields (#107)', () => {
     await press('down'); // modality → context window (index 2 while it's closed)
   }
 
-  /**
-   * The focused field's rendered text and the cell the cursor sits on, read off
-   * the cursor cell's neighbours so a row that labels its own field — the
-   * context-window row — contributes only the value. Valid while the field holds
-   * a value: an empty field puts the cell on its placeholder's first character,
-   * which is the row's first text element.
-   */
+  /** Read only the FieldText component, excluding adjacent prompts and labels. */
   function focusedField(): { text: string; cell: string } {
     const cell = cursorCell();
     if (!cell) throw new Error('no field renders a cursor cell');
-    const at = cell.textContent ?? '';
+    const field = cell.closest('[data-field-text]');
+    if (!field) throw new Error('cursor cell is outside FieldText');
     return {
-      text:
-        (cell.previousElementSibling?.textContent ?? '') +
-        at +
-        (cell.nextElementSibling?.textContent ?? ''),
-      cell: at,
+      text: field.textContent ?? '',
+      cell: cell.textContent ?? '',
     };
   }
+
+  it.each(['URL', 'API key'])(
+    'clears only the %s field and retains local undo without consuming global Ctrl+C',
+    async (fieldName) => {
+      await runToBaseUrlStep();
+      if (fieldName === 'API key') {
+        await typeText('https://api.example.com/v1');
+        await press('return');
+      }
+      const empty = focusedField();
+      await typeText('ab😀');
+      await press('left');
+      const previous = focusedField();
+      const preventDefault = vi.fn();
+      const stopPropagation = vi.fn();
+      await press('c', {
+        ctrl: true,
+        sequence: '\x03',
+        preventDefault,
+        stopPropagation,
+      });
+      expect(focusedField()).toEqual(empty);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(stopPropagation).not.toHaveBeenCalled();
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField()).toEqual(previous);
+      await press('c', { ctrl: true, shift: true, sequence: '\x03' });
+      await press('d', { ctrl: true, sequence: '\x04' });
+      expect(focusedField()).toEqual(previous);
+    },
+  );
 
   it('inserts at the position the arrows left the caret', async () => {
     await runToBaseUrlStep();
@@ -1217,6 +1249,185 @@ describe('caret editing in dialog text fields (#107)', () => {
       text: 'https://two.tests',
       cell: 'h',
     });
+  });
+
+  it('keeps numeric history and sends only accepted digits to the real owner', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('123');
+      await typeText('x');
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('12');
+      await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('123');
+      await pasteText('1,024');
+      expect(focusedField().text.trimEnd()).toBe('1231024');
+      expect(observed).toContain('123');
+      expect(observed).toContain('1231024');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('123');
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('12');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps older accepted edits across a normalized numeric paste', async () => {
+    await runToContextWindowRow();
+    await typeText('12');
+    await pasteText('1,024');
+    expect(focusedField().text.trimEnd()).toBe('121024');
+    await press('z', { ctrl: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('12');
+    await press('z', { ctrl: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('1');
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('121024');
+    await press('return');
+    expect(document.body.textContent).toContain('"contextWindowSize": 121024');
+  });
+
+  it('handles an invalid numeric key between edit and history in one read', async () => {
+    await runToContextWindowRow();
+    await typeText('12');
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      handler(baseKeyEvent({ name: '3', sequence: '3' }));
+      handler(baseKeyEvent({ name: 'x', sequence: 'x' }));
+      handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+      handler(
+        baseKeyEvent({ name: 'z', ctrl: true, shift: true, sequence: '\x1a' }),
+      );
+      handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+    });
+    expect(focusedField().text.trimEnd()).toBe('12');
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('123');
+    await press('return');
+    expect(document.body.textContent).toContain('"contextWindowSize": 123');
+  });
+
+  it('keeps redo when a numeric paste contains no valid characters', async () => {
+    await runToContextWindowRow();
+    await typeText('12');
+    await press('z', { ctrl: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('1');
+    const event = await pasteText('invalid,');
+    expect(event.preventDefault).toHaveBeenCalled();
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('12');
+  });
+
+  it('accepts a numeric clear through the real flow and Undo submits its prior number', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('12');
+      await press('c', { ctrl: true, sequence: '\x03' });
+      expect(observed.at(-1)).toBe('');
+      expect(contextRow()).toMatch(/Context window: auto$/);
+      const handler = lastKeyboardHandler();
+      await act(async () => {
+        handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+        handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(document.body.textContent).toContain('"contextWindowSize": 12');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps the context window when a same-read arrow left the row before Ctrl+C', async () => {
+    await runToContextWindowRow();
+    await typeText('128000');
+    // Focus wraps, so the ↓ of this read leaves the context-window row and the
+    // Ctrl+C behind it belongs to the toggle row it landed on. Read from the
+    // render that armed the handler, the clear still sees the old row and
+    // silently turns the stored number into auto.
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      handler(baseKeyEvent({ name: 'down', sequence: 'down' }));
+      handler(baseKeyEvent({ name: 'c', ctrl: true, sequence: '\x03' }));
+    });
+    await press('up'); // back onto the context-window row
+    expect(focusedField().text.trimEnd()).toBe('128000');
+    expect(contextRow()).toMatch(/Context window: 128000\s*$/);
+  });
+
+  it('does not spend Undo on a numeric Space in the same read before submit', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('12');
+      const handler = lastKeyboardHandler();
+      await act(async () => {
+        handler(baseKeyEvent({ name: '3', sequence: '3' }));
+        handler(baseKeyEvent({ name: 'space', sequence: ' ' }));
+        handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+        handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(document.body.textContent).toContain('"contextWindowSize": 12');
+      expect(document.body.textContent).not.toContain(
+        '"contextWindowSize": 123',
+      );
+      expect(observed).toContain('123');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('edits the context-window field in place', async () => {
@@ -1450,6 +1661,31 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await typeText('flash');
     expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
     expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
+  });
+
+  it('clears the search query on Ctrl+C and paints the whole list again', async () => {
+    await runToModelsStep();
+    await press('tab'); // custom-ID input → search field
+    await typeText('flash');
+    expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
+    await press('c', { ctrl: true, sequence: '\x03' });
+    // The empty active field paints its placeholder under the caret cell.
+    expect(
+      screen.getByText((_, element) => element?.textContent === '> search'),
+    ).toBeTruthy();
+    expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
+    expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
+  });
+
+  it('clears the custom-model-ID field on Ctrl+C before the step submits', async () => {
+    await runToModelsStep();
+    await typeText('my-model');
+    expect(document.body.textContent).toContain('my-model');
+    await press('c', { ctrl: true, sequence: '\x03' });
+    expect(document.body.textContent).not.toContain('my-model');
+    // The field stays editable: the clear is an edit, not a submit.
+    await typeText('next-model');
+    expect(document.body.textContent).toContain('next-model');
   });
 });
 
@@ -1689,7 +1925,7 @@ describe('real subscription entry', () => {
     await press('return');
     expect(screen.getByText('Waiting for sign-in…')).toBeTruthy();
     expect(document.body.textContent).toContain(
-      'user_code=REAL-CODE&client=qwen-code',
+      'user_code=REAL-CODE&client=cli',
     );
     expect(document.body.textContent).not.toContain('Local Mock');
     expect(config.refreshAuth).not.toHaveBeenCalled();
@@ -1806,12 +2042,12 @@ describe('real subscription entry', () => {
 
   it('offers activation Retry only after failure and preserves cancellation', async () => {
     subscription.state = { status: 'ready', plan: 'Pro' };
-    subscription.connectionError =
-      'Could not connect Qwen Subscription. Please try again.';
+    subscription.connectionError = '';
     renderDialog();
     await press('return');
     expect(screen.getByText('Retry')).toBeTruthy();
     expect(screen.queryByText('Connect')).toBeNull();
+    expect(screen.queryByText('Loading models from provider…')).toBeNull();
     await press('return');
     expect(subscription.connect).toHaveBeenCalledOnce();
     await pressEsc();

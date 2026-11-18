@@ -17,7 +17,7 @@ const ready: DaemonSubscriptionFlow = {
   userInfo: user,
 };
 const authorizationUrl =
-  'https://chat.qwen.ai/authorize?user_code=TEST-CODE&client=qwen-code';
+  'https://chat.qwen.ai/authorize?user_code=TEST-CODE&client=desktop&entry=qwen_code&paywallScene=desktop';
 const transport = {
   getSubscriptionConfig: vi.fn(),
   startSubscriptionLogin: vi.fn(),
@@ -36,7 +36,8 @@ beforeEach(() => {
   vi.resetAllMocks();
   transport.getSubscriptionConfig.mockResolvedValue({
     enabled: true,
-    plansUrl: 'https://chat.qwen.ai/?memberPlan=qwen_code',
+    plansUrl:
+      'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
   });
   transport.startSubscriptionLogin.mockResolvedValue(ready);
   transport.getSubscriptionUserInfo.mockResolvedValue(user);
@@ -160,7 +161,7 @@ it('starts authorization directly after the native picker selection and opens th
   await click('View Plans');
   expect(open.mock.calls.map(([url]) => url)).toEqual([
     authorizationUrl,
-    'https://chat.qwen.ai/?memberPlan=qwen_code',
+    'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
   ]);
 });
 
@@ -195,7 +196,7 @@ it.each(
     });
     expect(open.mock.calls.map(([url]) => url)).toEqual([
       authorizationUrl,
-      'https://chat.qwen.ai/?memberPlan=qwen_code',
+      'https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=desktop',
     ]);
   },
 );
@@ -903,7 +904,10 @@ it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'])(
     );
     const onActivated = vi.fn();
     await render({ onActivate, onActivated });
-    expect(onActivate).toHaveBeenCalledWith(expect.any(AbortSignal));
+    expect(onActivate).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+      expect.any(Function),
+    );
     expect(onActivate).toHaveBeenCalledOnce();
     expect(container.textContent).toContain('Loading models from provider…');
     expect(
@@ -924,14 +928,14 @@ it('keeps activation failure visible without looping and retries only on request
   });
   const onActivate = vi
     .fn()
-    .mockRejectedValueOnce(new Error('private upstream details'))
+    .mockRejectedValueOnce(new Error('model configuration failed'))
     .mockResolvedValue(undefined);
   const onActivated = vi.fn();
   await render({ onActivate, onActivated });
-  expect(container.textContent).toContain(
-    'Could not connect Qwen Subscription',
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+    'model configuration failed',
   );
-  expect(container.textContent).not.toContain('private upstream details');
+  expect(container.textContent).not.toContain('Loading models from provider');
   expect(container.textContent).toContain('Sign out');
   expect(container.textContent).toContain('Cancel');
   expect(onActivated).not.toHaveBeenCalled();

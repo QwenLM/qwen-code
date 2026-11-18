@@ -53,6 +53,7 @@ import type {
   ManagedHookResult,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import {
+  fencedMountHandback,
   HostedWorkspaceBroker,
   HostedWorkspaceBrokerRejection,
 } from './hosted-workspace-broker.js';
@@ -637,6 +638,17 @@ export class HostedHookSession {
    */
   get mountHeld(): boolean {
     return this.acquired || this.broker.acquired;
+  }
+
+  /**
+   * The config-scoped owner an active extension bundle names at construction
+   * (`extensions-components-<hash(sessionKey, configRevision)>`). Unlike a
+   * per-load `hooks-activation-*` owner, the same id is recomputed on every
+   * load of the same configRevision, so a terminal release would tombstone
+   * the id a later load must re-acquire (R13-1).
+   */
+  private get deterministicOwner(): boolean {
+    return this.broker.runtimeSessionId.startsWith('extensions-components-');
   }
 
   delegateBrokerToMcp(): void {
@@ -1982,7 +1994,14 @@ export class HostedHookSession {
     }
   }
 
-  async close(): Promise<void> {
+  async close(opts: { terminal?: boolean } = {}): Promise<void> {
+    // A detach keeps the Session reloadable; only a delete is terminal. The
+    // deterministic config-scoped owner must survive a detach re-acquirable
+    // (R13-1): a terminal release would persist a RELEASED tombstone under the
+    // very id the next load recomputes, wedging every later acquire. The rule
+    // lives on the owner, not the call site (R14-1): every non-delete close
+    // defaults to non-terminal, and only DELETE opts into the terminal release.
+    const terminal = opts.terminal ?? false;
     await this.drain();
     // The close is the drain arm. A Hook-configured Shell turn shares this
     // broker and its `finish()` skips the release, so a background run that
@@ -2011,10 +2030,76 @@ export class HostedHookSession {
     // before releasing the Session's own owner: the Session stays attached
     // with it, so a later turn can still run and retry the fenced release.
     if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
-    if (this.ownsBroker && this.mountHeld) {
+    // A DELETE must terminally release the deterministic owner even when this
+    // instance never acquired it (R15-4): a reload builds a fresh instance whose
+    // mountHeld stays false until a Hook turn acquires, so keying the terminal
+    // arm off the transient mount hold alone would orphan the owner on every
+    // load -> detach -> reload -> delete cycle. broker.release() resolves stored
+    // rows and needs no prior acquisition.
+    if (
+      this.ownsBroker &&
+      (this.mountHeld || (terminal && this.deterministicOwner))
+    ) {
+      if (!terminal && this.deterministicOwner) {
+        // R13-1: a detach hands the mount back but keeps the deterministic
+        // config-scoped owner re-acquirable. A terminal release here would
+        // persist a RELEASED tombstone under the id the next load recomputes
+        // from (sessionKey, configRevision), and acquireNewSession refuses any
+        // non-ACQUIRING row, so every Hook after the reload would fail. The
+        // mount is the scarce shared resource; releasing it lets other
+        // Sessions acquire while this owner's row stays re-acquirable.
+        const claim = this.broker.mountClaim();
+        if (claim !== undefined) {
+          try {
+            await this.broker.releaseMount(claim);
+          } catch (cause) {
+            // The handback sweeps nothing, so live or unproven work refuses
+            // it (R14-2). Name that condition the way the terminal arm names
+            // its hold fence: the Session stays attached and retryable rather
+            // than letting a bare Broker rejection escape as a close failure.
+            if (!fencedMountHandback(cause)) throw cause;
+            writeStderrLineSafe(
+              `qwen serve: Hook owner mount handback held by unfinished work: ${
+                this.broker.runtimeSessionId
+              } ${
+                cause instanceof HostedWorkspaceBrokerRejection
+                  ? `${cause.status} ${cause.code}`
+                  : String(cause)
+              }`,
+            );
+            throw new HostedHookRecoveryRequiredError();
+          }
+        }
+        this.acquired = false;
+        return;
+      }
       try {
         await this.broker.release({ drain: true });
       } catch (cause) {
+        // A DELETE of a never-acquired deterministic owner can answer 404 (no
+        // stored row exists) or, after a Broker restart, 503 reconciliation-
+        // required. Both are benign for an un-acquired owner: book it released
+        // exactly as releaseOwner does, instead of letting the refusal escape
+        // close() and wedge the session undeletable (R17-1). An acquired mount
+        // keeps the strict behavior — a missing row there is not routine. The
+        // release itself still runs, so a stored ACQUIRING row of a reloaded
+        // instance is terminally released as before (R15-4).
+        const rejection =
+          cause instanceof HostedWorkspaceBrokerRejection ? cause : undefined;
+        if (
+          !this.mountHeld &&
+          rejection !== undefined &&
+          ((rejection.status === 404 &&
+            rejection.code === 'runtime_session_not_found') ||
+            (rejection.status === 503 &&
+              rejection.code === 'runtime_reconciliation_required'))
+        ) {
+          debugLogger.debug(
+            `qwen serve: Hook owner terminal release ${rejection.status} ${rejection.code} (owner un-acquired, booked released): ${this.broker.runtimeSessionId}`,
+          );
+          this.acquired = false;
+          return;
+        }
         // A Runtime that settled an abandoned module evaluation as cancelled
         // lets drain() pass while the evaluation still runs, so this release
         // can be hold-fenced. Name that condition instead of letting a bare

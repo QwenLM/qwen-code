@@ -1781,6 +1781,26 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void bindsTheSessionHarnessOnlyWhileTheColumnIsEmpty() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-harness-session-bind-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "session-bind-create",
+                "sha256:" + "3".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        // An automation verb's create of a never-attached Session binds
+        // the boot id with no Turn to hang bindHarness on (#14548).
+        store.bindSessionHarness(tenant, session.sessionId(), "boot-a");
+        assertThat(store.requireSession(tenant, session.sessionId())
+                .harnessBootId()).isEqualTo("boot-a");
+        // A racing bind never overwrites a concurrent binding of another
+        // generation.
+        store.bindSessionHarness(tenant, session.sessionId(), "boot-b");
+        assertThat(store.requireSession(tenant, session.sessionId())
+                .harnessBootId()).isEqualTo("boot-a");
+    }
+
+    @Test
     void recoversAdmittedHarnessGenerationAndEventEpochUnderDispatchLease() {
         pauseRecoveryScanning();
         String tenant = "tenant-harness-recovery-" + UUID.randomUUID();

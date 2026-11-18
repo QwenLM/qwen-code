@@ -23,6 +23,8 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import { convertToFunctionErrorResponse } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
+import { PDF_MAX_PAGES_PER_READ } from '@qwen-code/qwen-code-core/utils/pdf.js';
 import {
   createHttpManagedSessionStores,
   ManagedSessionStoreHttpError,
@@ -86,6 +88,7 @@ import {
 } from './hosted-skill-catalog.js';
 import { answerResumedTurnCalls } from './hosted-runtime-recovery.js';
 import { writeHostedTodos } from './hosted-todo-session.js';
+import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
@@ -884,6 +887,30 @@ it('settles the turn over a held Runtime and owes it to the close (#13856)', asy
   await turn.consumeResults();
   await expect(turn.finish()).resolves.toBeUndefined();
   expect(turn.runtimeHeld).toBe(true);
+});
+
+it('never registers a held Runtime for a Hook-configured turn (R27-1 known gap)', async () => {
+  // Every producer of session.heldRuntimeTurns keys on runtimeHeld, and a
+  // Hook turn cannot set it: finish() skips broker.release() when hooks are
+  // configured, so the 409 runtime_session_held catch that assigns `held`
+  // never runs. The v2 close's drain therefore does not reach this shape and
+  // the detach still parks on recovery-required. Pinning the producer fact
+  // keeps that drain from being mistaken for a fix of the Hook shape; lifting
+  // it needs a keep-READY drain, which the terminal release here cannot be
+  // (a deterministic owner would get a RELEASED tombstone, R13-1/R14-1).
+  turn = createTurn(
+    false,
+    undefined,
+    hookSession(vi.fn() as unknown as HostedHookSession['fire']),
+  );
+  broker.release.mockRejectedValueOnce(
+    new HostedWorkspaceBrokerRejection(409, 'runtime_session_held'),
+  );
+  await turn.execute(calls, parts, 'model', new AbortController().signal);
+  await turn.consumeResults();
+  await turn.finish();
+  expect(broker.release).not.toHaveBeenCalled();
+  expect(turn.runtimeHeld).toBe(false);
 });
 
 it('keeps the honesty contract for a busy refusal (#13856)', async () => {
@@ -1852,10 +1879,14 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
   const file = ['read_file', 'write_file', 'edit', 'web_fetch'];
   const shellTools = [...file, 'run_shell_command'];
   await expect(advertised()).resolves.toEqual(file);
-  await expect(advertised('hosted-workspace-files/1')).resolves.toEqual(file);
+  await expect(advertised('hosted-workspace-files/1')).resolves.toEqual([
+    ...file,
+    'glob',
+  ]);
   await expect(advertised('hosted-workspace-shell/1', true)).resolves.toEqual([
     ...shellTools,
     'glob',
+    'todo_write',
   ]);
   await expect(advertised('hosted-workspace-files/2')).resolves.toEqual([
     ...file,
@@ -1875,6 +1906,221 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
     'glob',
   ]);
 });
+
+it.each([
+  undefined,
+  'hosted-workspace-files/1',
+  'hosted-workspace-files/2',
+  'hosted-workspace-files/3',
+  'hosted-workspace-shell/1',
+  'hosted-workspace-team-lead/1',
+  'hosted-workspace-read/1',
+])('advertises PDF pages on the normal Hosted profile %s', async (profile) => {
+  const shell =
+    profile?.startsWith('hosted-workspace-shell/') ||
+    profile === 'hosted-workspace-team-lead/1';
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    shell
+      ? { resources: session.resources, assertWritable: async () => {} }
+      : undefined,
+    undefined,
+    undefined,
+    { profile },
+  );
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(
+    declarations.find((tool) => tool.name === 'read_file')
+      ?.parametersJsonSchema,
+  ).toMatchObject({
+    properties: {
+      pages: {
+        type: ['string', 'null'],
+        description: expect.stringContaining(
+          `at most ${PDF_MAX_PAGES_PER_READ} pages`,
+        ),
+      },
+    },
+    required: ['file_path'],
+    additionalProperties: false,
+  });
+  expect(HOSTED_WORKSPACE_FILE_TOOLS[0]).not.toHaveProperty(
+    'parametersJsonSchema.properties.pages',
+  );
+});
+
+it('keeps PDF pages out of resident and private CSI declarations', async () => {
+  broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  turn = createTurn();
+  const resident = await turn.declarations(new AbortController().signal);
+  const csi = await new HostedCsiToolTurn(
+    session,
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    { bindingId: 'binding', generation: '1' },
+    'prompt',
+    commit,
+    harness,
+    messageFitsInline,
+  ).declarations(new AbortController().signal);
+  for (const declarations of [resident, csi]) {
+    expect(declarations.map((tool) => tool.name)).toEqual([
+      'read_file',
+      'write_file',
+      'edit',
+    ]);
+    expect(declarations[0]).toEqual(HOSTED_WORKSPACE_FILE_TOOLS[0]);
+    expect(declarations[0]).not.toHaveProperty(
+      'parametersJsonSchema.properties.pages',
+    );
+  }
+});
+
+it('dispatches PDF pages with the original input and declaration persisted', async () => {
+  const call = {
+    ...calls[0],
+    args: { file_path: 'document.pdf', pages: '2' },
+  };
+  await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(JSON.parse(broker.execute.mock.calls[0][1])).toEqual({
+    toolName: 'read_file',
+    input: call.args,
+  });
+  const intent = session.authority
+    .eventsInSequenceRange(1, session.authority.committedSequence)
+    .find((event) => event.kind === 'tool.intent');
+  const inputRef = assertManagedSessionDurableRef(
+    intent!.payload['argsRef'],
+    'PDF input',
+  );
+  expect(await toolInputOf(inputRef)).toEqual(call.args);
+  const definitionRef = assertManagedSessionDurableRef(
+    intent!.payload['toolDefinitionRef'],
+    'PDF declaration',
+  );
+  expect(
+    JSON.parse((await session.resources.read(definitionRef)).toString()),
+  ).toHaveProperty('parametersJsonSchema.properties.pages');
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+it.each([false, true])(
+  'requires the current read_file declaration for pending reads (legacy: %s)',
+  async (legacy) => {
+    const signal = new AbortController().signal;
+    const declarations = await turn.declarations(signal);
+    const definition = structuredClone(
+      legacy
+        ? HOSTED_WORKSPACE_FILE_TOOLS[0]
+        : declarations.find((tool) => tool.name === 'read_file')!,
+    );
+    const definitionRef = await session.resources.publish(
+      'managed-tool-definition',
+      Buffer.from(JSON.stringify(definition)),
+    );
+    const input = { file_path: 'document.pdf' };
+    const call = { ...calls[0], args: input };
+    const payloadJson = JSON.stringify({ toolName: call.name, input });
+    const bytes = Buffer.from(
+      JSON.stringify({
+        harnessSessionId: session.authority.sessionHeader.sessionKey.sessionId,
+        runtimeSessionId: 'prompt',
+        payloadJson,
+      }),
+    );
+    const argsDigest = `sha256:${managedToolDigest(input)}`;
+    const requestDigest = `sha256:${createHash('sha256').update(payloadJson).digest('hex')}`;
+    const inputRef = await session.resources.publish(
+      'managed-tool-input',
+      bytes,
+    );
+    const saved = {
+      plan: {
+        promptId: 'prompt',
+        calls: [
+          {
+            call,
+            definitionRef,
+            inputRef,
+            argsDigest,
+            runtimeCallId: call.callId,
+            requestDigest,
+          },
+        ],
+        runtime: {
+          runtimeSessionId: 'prompt',
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        },
+        round: 1,
+        model: 'model',
+      },
+      inputs: [{ input, bytes, payloadJson }],
+      parts: [
+        { functionCall: { id: call.callId, name: call.name, args: input } },
+      ],
+    };
+    const receiver = {
+      session,
+      broker: { ...broker, runtimeSessionId: 'prompt' },
+      warmed: Promise.resolve(),
+      promptId: 'prompt',
+      declarations: vi.fn().mockResolvedValue(declarations),
+      executeNative: vi.fn().mockResolvedValue([]),
+      context: { read: () => 'context already loaded' },
+      residentWorkspace: false,
+    };
+    const resumed = Reflect.apply(
+      HostedWorkspaceToolTurn.prototype.resumeSavedNativeBatch,
+      receiver,
+      [saved, 0, signal],
+    );
+    if (legacy) {
+      await expect(resumed).rejects.toMatchObject({
+        cause: expect.objectContaining({
+          message: 'Original native tool definition changed.',
+        }),
+      });
+      expect(receiver.executeNative).not.toHaveBeenCalled();
+    } else {
+      await expect(resumed).resolves.toEqual([]);
+      expect(receiver.executeNative).toHaveBeenCalledWith(
+        [call],
+        saved.parts,
+        'model',
+        signal,
+        {
+          saved,
+          requests: [
+            expect.objectContaining({
+              input,
+              inputBytes: bytes,
+              payloadJson,
+              argsDigest,
+              digest: requestDigest,
+            }),
+          ],
+          nextApprovalOrdinal: 0,
+        },
+      );
+    }
+    expect(
+      JSON.parse((await session.resources.read(definitionRef)).toString()),
+    ).toEqual(definition);
+    expect(await session.resources.read(inputRef)).toEqual(bytes);
+  },
+);
 
 // #13753 I3: the read profile's two tools dispatch like any profile's.
 it('dispatches read_file and glob on the read profile', async () => {
@@ -1952,10 +2198,10 @@ it.each([
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-// #13905 (item 41): the approval wiring keys on the Session's own profile,
-// not the call's name — a read-profile glob asks nothing under `default`,
-// while an MCP-declared glob on files/1 still asks.
+// Native glob follows the Session profile; namespaced MCP tools still ask.
 it.each([
+  ['hosted-workspace-files/1', 'default'],
+  ['hosted-workspace-files/1', 'auto-edit'],
   ['hosted-workspace-read/1', 'default'],
   ['hosted-workspace-shell/1', 'default'],
   ['hosted-workspace-shell/1', 'auto-edit'],
@@ -2006,56 +2252,61 @@ it.each([
     ).toEqual(['glob']);
     await native.consumeResults();
     await native.finish();
-
-    const mcp = {
-      broker,
-      ensureReady: async () => undefined,
-      refresh: async () => undefined,
-      tools: () => [{ name: 'glob', parametersJsonSchema: { type: 'object' } }],
-      toolInput: () => ({ toolName: 'managed_mcp_call', input: {} }),
-    };
-    turn = new HostedWorkspaceToolTurn(
-      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-      session,
-      harness,
-      'prompt',
-      commit,
-      messageFitsInline,
-      undefined,
-      undefined,
-      { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
-      {
-        mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
-      },
-    );
-    const mcpGlobCall = { ...globCall, callId: 'call-glob-mcp' };
-    const running = turn.execute(
-      [mcpGlobCall],
-      [
-        {
-          functionCall: {
-            id: mcpGlobCall.callId,
-            name: mcpGlobCall.name,
-            args: mcpGlobCall.args,
-          },
-        },
-      ],
-      'model',
-      new AbortController().signal,
-    );
-    // The files/1 Session must ask before dispatching even this name.
-    const requestId = await requested();
-    expect(actionIds()).toEqual([requestId]);
-    expect(broker.execute).toHaveBeenCalledOnce();
-    await resolveHostedAction(session, waiters, requestId, answer('allow'));
-    await running;
-    expect(broker.execute).toHaveBeenCalledTimes(2);
-    await turn.consumeResults();
-    await turn.finish();
   },
 );
 
-function createSearchTurn() {
+it('asks before an MCP glob on the ordinary file profile', async () => {
+  const name = `mcp_${'a'.repeat(32)}`;
+  const mcp = {
+    broker,
+    ensureReady: async () => undefined,
+    refresh: async () => undefined,
+    tools: () => [{ name, parametersJsonSchema: { type: 'object' } }],
+    toolInput: (tool: string) =>
+      tool === name ? { toolName: 'managed_mcp_call', input: {} } : undefined,
+  };
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'default', timeoutMs: 60_000 }, waiters },
+    {
+      profile: 'hosted-workspace-files/1',
+      mcp: mcp as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+    },
+  );
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual(
+    expect.arrayContaining(['glob', name]),
+  );
+  const call = {
+    ...calls[0],
+    callId: 'call-glob-mcp',
+    name,
+    args: { pattern: '**/*.ts' },
+  };
+  const running = turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name, args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const requestId = await requested();
+  expect(actionIds()).toEqual([requestId]);
+  expect(broker.execute).not.toHaveBeenCalled();
+  await resolveHostedAction(session, waiters, requestId, answer('allow'));
+  await running;
+  expect(broker.execute).toHaveBeenCalledOnce();
+  await turn.consumeResults();
+  await turn.finish();
+});
+
+function createSearchTurn(profile = 'hosted-workspace-files/1') {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -2066,11 +2317,11 @@ function createSearchTurn() {
     undefined,
     undefined,
     undefined,
-    { profile: 'hosted-workspace-files/2' },
+    { profile },
   );
 }
 
-it('refuses a glob call the files/1 profile never advertised', async () => {
+it('refuses a glob call without an admitted search profile', async () => {
   const call = {
     ...calls[0],
     name: 'glob',
@@ -2091,7 +2342,6 @@ it('refuses a glob call the files/1 profile never advertised', async () => {
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
-// #15076: `todo_write` ships only with the `/3` profiles.
 function createV3Turn(
   profile = 'hosted-workspace-files/3',
   hooks?: HostedHookSession,
@@ -2162,7 +2412,7 @@ it.each(['hosted-workspace-files/1', 'hosted-workspace-files/2'])(
 );
 
 it('refuses todo_write on a /2 profile before the Broker', async () => {
-  turn = createSearchTurn();
+  turn = createSearchTurn('hosted-workspace-files/2');
   const call = {
     ...calls[0],
     name: 'todo_write',
@@ -2234,50 +2484,97 @@ it.each([
   },
 );
 
-it('persists Todo without a Worker and restores the latest state after reopen', async () => {
-  turn = createV3Turn();
-  const first = { todos: [{ id: 'a', content: 'first', status: 'pending' }] };
-  const call = { ...calls[0], name: 'todo_write', args: first };
-  const responses = await turn.execute(
-    [call],
-    [{ functionCall: { id: call.callId, name: call.name, args: first } }],
-    'model',
-    new AbortController().signal,
-  );
-  expect(responses[0].functionResponse?.response?.['todos']).toEqual(
-    first.todos,
-  );
-  expect(broker.acquire).not.toHaveBeenCalled();
-  expect(broker.prepare).not.toHaveBeenCalled();
-  expect(broker.execute).not.toHaveBeenCalled();
-  const latest = {
-    todos: [{ id: 'a', content: 'first', status: 'completed' }],
-  };
-  await writeHostedTodos(session, 'prompt', 'next-call', latest);
-  expect(await writeHostedTodos(session, 'prompt', call.callId, first)).toEqual(
-    first.todos,
-  );
-  await expect(
-    writeHostedTodos(session, 'prompt', call.callId, latest),
-  ).rejects.toThrow();
-  const key = session.authority.sessionHeader.sessionKey;
-  await turn.close();
-  await session.close();
-  session = await openManagedSession({
-    runtimeBaseDir: root,
-    cwd: root,
-    transcriptPath: path.join(root, 'transcript.jsonl'),
-    sessionId: key.sessionId,
-    sessionKey: key,
-    version: 'test',
-    workerId: 'reopened-worker',
-    activationLeaseDurationMs: 60_000,
-  });
-  harness = createManagedHarnessHandle(session);
-  await harness.ensureRunnable();
-  turn = createV3Turn();
-  expect(await turn.todoInstructions()).toContain(JSON.stringify(latest.todos));
-});
+it.each(['hosted-workspace-files/3', 'hosted-workspace-shell/1'])(
+  'persists Todo without a Worker and restores it after reopen on %s',
+  async (profile) => {
+    turn = createV3Turn(profile);
+    const first = { todos: [{ id: 'a', content: 'first', status: 'pending' }] };
+    const call = { ...calls[0], name: 'todo_write', args: first };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: first } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['todos']).toEqual(
+      first.todos,
+    );
+    expect(broker.acquire).not.toHaveBeenCalled();
+    expect(broker.prepare).not.toHaveBeenCalled();
+    expect(broker.execute).not.toHaveBeenCalled();
+    const latest = {
+      todos: [{ id: 'a', content: 'first', status: 'completed' }],
+    };
+    await writeHostedTodos(session, 'prompt', 'next-call', latest);
+    expect(
+      await writeHostedTodos(session, 'prompt', call.callId, first),
+    ).toEqual(first.todos);
+    await expect(
+      writeHostedTodos(session, 'prompt', call.callId, latest),
+    ).rejects.toThrow();
+    const key = session.authority.sessionHeader.sessionKey;
+    await turn.close();
+    await session.close();
+    session = await openManagedSession({
+      runtimeBaseDir: root,
+      cwd: root,
+      transcriptPath: path.join(root, 'transcript.jsonl'),
+      sessionId: key.sessionId,
+      sessionKey: key,
+      version: 'test',
+      workerId: 'reopened-worker',
+      activationLeaseDurationMs: 60_000,
+    });
+    harness = createManagedHarnessHandle(session);
+    await harness.ensureRunnable();
+    turn = createV3Turn(profile);
+    expect(await turn.todoInstructions()).toContain(
+      JSON.stringify(latest.todos),
+    );
+  },
+);
+
+it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
+  'keeps public Plan read-only on %s',
+  async (profile) => {
+    vi.spyOn(hostedPlan, 'hostedPublicPlanActive').mockResolvedValue(true);
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile, publicPlanMode: true },
+    );
+    expect(
+      (await turn.declarations(new AbortController().signal)).map(
+        (tool) => tool.name,
+      ),
+    ).toEqual(['read_file', 'glob', 'exit_plan_mode']);
+    const call = {
+      ...calls[0],
+      name:
+        profile === 'hosted-workspace-shell/1' ? 'todo_write' : 'write_file',
+      args:
+        profile === 'hosted-workspace-shell/1'
+          ? { todos: [{ id: 'a', content: 'plan', status: 'pending' }] }
+          : { file_path: 'plan.txt', content: 'not yet approved' },
+    };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    expect(JSON.stringify(responses)).toContain('Plan mode is read-only');
+    expect(session.authority.domainRecord('todo_state')).toBeUndefined();
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
 
 it.each(['default', 'auto-edit', 'yolo'] as const)(
   'pre-approves todo_write under %s',
@@ -3177,14 +3474,35 @@ it.each([
       error: { message: '中'.repeat(25_000) },
     },
   },
+  {
+    label: 'resident text output',
+    resident: true,
+    result: {
+      executionStatus: 'success',
+      responseParts: [{ text: '中'.repeat(25_000) }],
+    },
+  },
+  {
+    label: 'PDF pages',
+    args: { file_path: 'document.pdf', pages: '1-3' },
+    result: {
+      executionStatus: 'success',
+      responseParts: [{ text: '中'.repeat(25_000) }],
+    },
+  },
 ])(
   'persists a small receipt for oversized settled $label',
-  async ({ result }) => {
+  async ({ result, args, resident }) => {
+    if (resident) {
+      broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+      turn = createTurn();
+    }
     broker.execute.mockResolvedValue(result);
     const publish = vi.spyOn(session.resources, 'publish');
+    const call = { ...calls[0], args: args ?? calls[0].args };
     const responses = await turn.execute(
-      [calls[0]],
-      [parts[0]],
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
       'model',
       new AbortController().signal,
     );
@@ -3192,6 +3510,13 @@ it.each([
     expect(response?.['outputOmitted']).toBe(true);
     expect(response?.['executionStatus']).toBe(result.executionStatus);
     expect(response?.['error']).toContain('durable Session limit');
+    if (resident) {
+      expect(response?.['error']).toContain('smaller offset/limit range.');
+      expect(response?.['error']).not.toContain('pages');
+    } else {
+      expect(response?.['error']).toContain('offset/limit range for text');
+      expect(response?.['error']).toContain('pages range for PDFs');
+    }
     expect(response).not.toHaveProperty('output');
     expect(response).not.toHaveProperty('runtimeError');
     const outcome = publish.mock.calls.find(
@@ -3399,6 +3724,9 @@ it.each(['files', 'shell', 'mcp'])(
       tools: () => [remote],
     };
     const original = structuredClone(HOSTED_WORKSPACE_FILE_TOOLS);
+    const originalReadSchema = original[0].parametersJsonSchema as {
+      properties: Record<string, unknown>;
+    };
     const described = new HostedWorkspaceToolTurn(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
@@ -3456,9 +3784,16 @@ it.each(['files', 'shell', 'mcp'])(
       ]);
       expect(declarations.at(-1)).toEqual(remote);
     }
-    expect(declarations.find((tool) => tool.name === 'read_file')).toEqual(
-      original[0],
-    );
+    expect(declarations.find((tool) => tool.name === 'read_file')).toEqual({
+      ...original[0],
+      parametersJsonSchema: {
+        ...originalReadSchema,
+        properties: {
+          ...originalReadSchema.properties,
+          pages: { type: ['string', 'null'], description: expect.any(String) },
+        },
+      },
+    });
     expect(HOSTED_WORKSPACE_FILE_TOOLS).toEqual(original);
     await described.close();
   },
@@ -5334,8 +5669,8 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
   // set is pinned here and each name must still be a declared native tool —
   // the child launch declares through HOSTED_AGENT_TOOL, a session message
   // through its two send_message declarations and the team board through
-  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is appended only for
-  // `files/3` (which is not a shell profile), so it joins the set on its own.
+  // HOSTED_TEAM_TOOLS, not the shell set. `todo_write` is appended for `files/3`
+  // and `shell/1`, but is absent from HOSTED_WORKSPACE_SHELL_TOOLS itself.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
     'web_fetch',
     'read_file',

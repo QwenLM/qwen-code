@@ -100,7 +100,7 @@ public final class ManagedSessionStoreModels {
             @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
             @NotNull @Min(MIN_LEASE_MILLIS) @Max(MAX_LEASE_MILLIS)
                     Long leaseMillis,
-            @jakarta.validation.Valid ActivationRenewal activation) {
+            @Valid ActivationRenewal activation) {
         public RenewWriterRequest(String workspaceId, String writerId, long writerGeneration, Long leaseMillis) {
             this(workspaceId, writerId, writerGeneration, leaseMillis, null);
         }
@@ -143,7 +143,7 @@ public final class ManagedSessionStoreModels {
             @NotBlank @Size(max = 144) String instanceId,
             @NotBlank @Size(max = 144) String bootId,
             @NotBlank @Size(max = 512) String operationId,
-            @NotNull @jakarta.validation.Valid OwnershipCommitProof commitProof) {
+            @NotNull @Valid OwnershipCommitProof commitProof) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

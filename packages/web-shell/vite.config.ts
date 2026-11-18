@@ -1,7 +1,7 @@
 import { pierreResources } from './pierre-build';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
+import type { Connect, PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
@@ -109,10 +109,8 @@ function developmentCsp(requestUrl: string): string {
   ].join('; ');
 }
 
-function configureDevelopmentMiddleware(
-  server: ViteDevServer | PreviewServer,
-): void {
-  server.middlewares.use((req, res, next) => {
+export function createDevelopmentMiddleware(): Connect.NextHandleFunction {
+  return (req, res, next) => {
     res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
     // Vite resolves the extensionless settings page to settings.ts before SPA fallback.
     if (
@@ -123,7 +121,13 @@ function configureDevelopmentMiddleware(
       req.url = '/index.html';
     }
     next();
-  });
+  };
+}
+
+function configureDevelopmentMiddleware(
+  server: ViteDevServer | PreviewServer,
+): void {
+  server.middlewares.use(createDevelopmentMiddleware());
 }
 
 export default defineConfig(({ command }) => ({

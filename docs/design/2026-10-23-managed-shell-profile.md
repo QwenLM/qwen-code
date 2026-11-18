@@ -45,14 +45,17 @@ arbitrary profile changes during load remain refused.
 ## Validation and acceptance
 
 The unified Shell profile must offer `read_file`, `write_file`, `edit`,
-`run_shell_command`, `monitor` and `glob` on the ordinary Workspace execution
-path. Native `glob` must retain argument validation, bounded results and
+`run_shell_command`, `monitor`, `glob` and durable Session `todo_write` on the
+ordinary Workspace execution path. Plan mode excludes todo writes. Native
+`glob` must retain argument validation, bounded results and
 containment, and be pre-approved as a read operation under default and
 auto-edit policies. Foreground-only transports retain their existing limits.
 
 Creation, load and Workspace recovery must reject the removed Shell profile.
-The files profiles and read-only child profile must retain their existing
-tool lists. Public Shell selection, live approval and Plan admission must use
+The [basic tool alignment design](2026-11-06-managed-basic-tools.md) supersedes
+the original tool-list criteria: `files/1` adds `glob`, `shell/1` adds
+`todo_write`, and ordinary Hosted reads, including read-only children, expose
+PDF `pages`. Public Shell selection, live approval and Plan admission must use
 the unified identifier.
 
 With lifecycle v2 enabled for `/1`, the unified profile must still use the

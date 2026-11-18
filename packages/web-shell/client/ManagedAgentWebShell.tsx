@@ -42,9 +42,15 @@ type ManagedSessionsNavigationProps = Pick<
 
 /** Change productScope with tenant/actor identity so saved selections and output caches are discarded. */
 export interface ManagedAgentWebShellProps
-  extends JavaManagedAgentProviderOptions,
+  extends Omit<JavaManagedAgentProviderOptions, 'baseUrl'>,
     ManagedSessionsNavigationProps {
   managedAgentProvider?: ManagedAgentProvider;
+  /**
+   * Backend base URL for the built-in Java provider. Required unless
+   * `managedAgentProvider` is supplied; a missing value fails loudly instead
+   * of resolving requests against `<origin>/undefined`.
+   */
+  baseUrl?: string;
   /** Only open the existing Session explicitly selected by the host. */
   hostSessionOnly?: boolean;
   sessionId?: string;
@@ -56,8 +62,35 @@ export interface ManagedAgentWebShellProps
   style?: CSSProperties;
 }
 
-/** Managed-only 产品入口，不创建 daemon workspace/session context。 */
+function shellErrorFallback(language: WebShellLanguage) {
+  return function ShellErrorFallback(error: Error, reset: () => void) {
+    return (
+      <RootErrorFallback error={error} onRetry={reset} language={language} />
+    );
+  };
+}
+
+/**
+ * Managed-only 产品入口，不创建 daemon workspace/session context。
+ *
+ * The provider (and its `baseUrl` guard) resolves one level below this
+ * boundary: an error boundary cannot catch a throw from the component that
+ * renders it, and a host mounting before its config resolves would otherwise
+ * get a blank container instead of the shell's own fallback.
+ */
 export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
+  return (
+    <ErrorBoundary
+      label="managed-agent-web-shell-config"
+      resetKeys={[props.baseUrl, props.managedAgentProvider]}
+      fallback={shellErrorFallback(normalizeLanguage(props.language))}
+    >
+      <ManagedAgentWebShellRoot {...props} />
+    </ErrorBoundary>
+  );
+}
+
+function ManagedAgentWebShellRoot(props: ManagedAgentWebShellProps) {
   const {
     sessionId,
     managedAgentProvider,
@@ -99,41 +132,47 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const hasFetch = fetchImpl !== undefined;
   const hasGetHeaders = getHeaders !== undefined;
   const hasSaveArtifact = saveArtifact !== undefined;
-  const provider = useMemo(
-    () =>
-      managedAgentProvider ??
-      createJavaManagedAgentProvider({
-        baseUrl,
-        credentials,
-        fetch: !hasFetch
-          ? undefined
-          : (...args) => (callbacksRef.current.fetchImpl ?? fetch)(...args),
-        getHeaders: !hasGetHeaders
-          ? undefined
-          : () => callbacksRef.current.getHeaders?.() ?? {},
-        agentId,
-        productScope,
-        enableWorkspaceBinding,
-        modelPresets,
-        saveArtifact: !hasSaveArtifact
-          ? undefined
-          : (artifact, options) =>
-              callbacksRef.current.saveArtifact?.(artifact, options) ??
-              Promise.resolve(),
-      }),
-    [
-      managedAgentProvider,
+  const provider = useMemo(() => {
+    if (managedAgentProvider) return managedAgentProvider;
+    // `''` is a supported same-origin base (`new URL('', origin)` resolves to
+    // the page origin), so only a missing prop is a configuration error. A
+    // plain-JS host can hand over `null` for an unresolved config value, which
+    // would otherwise resolve every request against `<origin>/null`.
+    if (baseUrl == null)
+      throw new Error(
+        'ManagedAgentWebShell requires `baseUrl` when no `managedAgentProvider` is supplied.',
+      );
+    return createJavaManagedAgentProvider({
       baseUrl,
       credentials,
+      fetch: !hasFetch
+        ? undefined
+        : (...args) => (callbacksRef.current.fetchImpl ?? fetch)(...args),
+      getHeaders: !hasGetHeaders
+        ? undefined
+        : () => callbacksRef.current.getHeaders?.() ?? {},
       agentId,
       productScope,
       enableWorkspaceBinding,
       modelPresets,
-      hasFetch,
-      hasGetHeaders,
-      hasSaveArtifact,
-    ],
-  );
+      saveArtifact: !hasSaveArtifact
+        ? undefined
+        : (artifact, options) =>
+            callbacksRef.current.saveArtifact?.(artifact, options) ??
+            Promise.resolve(),
+    });
+  }, [
+    managedAgentProvider,
+    baseUrl,
+    credentials,
+    agentId,
+    productScope,
+    enableWorkspaceBinding,
+    modelPresets,
+    hasFetch,
+    hasGetHeaders,
+    hasSaveArtifact,
+  ]);
   const [selection, setSelection] = useState(() => ({
     storageKey: provider.storageKey,
     hostSessionOnly,
@@ -178,13 +217,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     <ErrorBoundary
       label="managed-agent-web-shell-root"
       resetKeys={[provider.storageKey, selectedSessionId]}
-      fallback={(error, reset) => (
-        <RootErrorFallback
-          error={error}
-          onRetry={reset}
-          language={resolvedLanguage}
-        />
-      )}
+      fallback={shellErrorFallback(resolvedLanguage)}
     >
       <ThemeProvider value={theme}>
         <BrandProvider value={brand}>

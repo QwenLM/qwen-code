@@ -13,16 +13,16 @@ For DashScope, the built-in tool issues a self-contained search request to a sma
 
 If you configured nothing under `tools.webSearch`, the tool registers whenever the model you are running can back the search request with the same credentials:
 
-| How you signed in                                                                                                          | Built-in search                                 |
-| -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code) — **Plus or Pro**                             | on                                              |
-| Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                              |
-| Alibaba ModelStudio → **Token Plan**                                                                                       | on                                              |
-| Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint is not verified for this API |
-| QwenCloud → **Standard API Key**                                                                                           | on                                              |
-| QwenCloud → **Token Plan**                                                                                                 | on                                              |
-| An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key | on                                              |
-| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                 | off                                             |
+| How you signed in                                                                                                               | Built-in search                                 |
+| ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) — **Plus or Pro** | on                                              |
+| Alibaba ModelStudio → **Standard API Key**                                                                                      | on                                              |
+| Alibaba ModelStudio → **Token Plan**                                                                                            | on                                              |
+| Alibaba ModelStudio → **Coding Plan**                                                                                           | off — its endpoint is not verified for this API |
+| QwenCloud → **Standard API Key**                                                                                                | on                                              |
+| QwenCloud → **Token Plan**                                                                                                      | on                                              |
+| An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key      | on                                              |
+| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                      | off                                             |
 
 DashScope searches bill the same key as your main model; subscription searches reuse your Qwen login credentials. Permission handling follows the active approval mode and rules; in `default` approval mode the first search asks for confirmation. When your provider cannot back the tool, it simply does not appear at startup — no startup warning.
 
@@ -472,5 +472,60 @@ qwen mcp add looot \
 ```
 
 Replace `${LOOOT_API_KEY}` with your actual API key, or set it as an environment variable.
+
+---
+
+### You.com
+
+You.com's hosted MCP server. The free profile (`?profile=free`) works without an API key or account and exposes web search and agent/MCP discovery. Search queries are sent to You.com. With an API key, the URLs you ask it to read are also sent to You.com.
+
+- **Documentation:** https://you.com/docs/agents/mcp-server
+- **Cost:** Free profile: 100 searches a day per IP, no API key. An API key gives higher, per-account limits and adds the `you-contents` tool
+- **Get API Key:** Not needed for the free profile. For the keyed server: https://you.com/platform
+- **Best for:** Trying MCP web search with no setup on providers that cannot back the built-in tool (OpenRouter, DeepSeek, local models)
+
+#### Available Tools
+
+- `you-search`: Web search returning ranked results with URLs and snippets
+- `you-discover`: Finds AI agents, MCP servers, and skills (search only, it never installs anything)
+
+With an API key, the server (`https://api.you.com/mcp`, no profile) also offers `you-contents` for reading page content, and `you-balance` for checking your account balance.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP, no key)**
+
+```bash
+qwen mcp add you -t http "https://api.you.com/mcp?profile=free"
+```
+
+**Method 2: `settings.json` (Remote MCP, no key)**
+
+```json
+{
+  "mcpServers": {
+    "you": {
+      "httpUrl": "https://api.you.com/mcp?profile=free"
+    }
+  }
+}
+```
+
+**Method 3: `settings.json` (Remote MCP, with key)**
+
+```json
+{
+  "mcpServers": {
+    "you": {
+      "httpUrl": "https://api.you.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${YDC_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${YDC_API_KEY}` with your actual You.com API key, or set it as an environment variable.
 
 ---

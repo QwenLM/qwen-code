@@ -54,7 +54,7 @@ it('uses the actual selected model and account in the English summary', async ()
 
 it('keeps the actual browser link between the model and common commands', () => {
   const url =
-    'https://chat.qwen.ai/authorize?user_code=TEST-CODE&client=qwen-code';
+    'https://chat.qwen.ai/authorize?user_code=TEST-CODE&client=cli&entry=qwen_code&paywallScene=cli';
   const message = subscriptionSuccessMessage(
     {
       sub: 'user',

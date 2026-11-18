@@ -1046,11 +1046,11 @@ export function projectSpecialItemText(
       );
     case 'tools_list':
       return projectToolsList(
-        ((record['tools'] ?? []) as Array<{
+        (record['tools'] ?? []) as Array<{
           name: string;
           displayName?: string;
           description?: string;
-        }>) ?? [],
+        }>,
         Boolean(record['showDescriptions']),
       );
     case 'model_stats': {

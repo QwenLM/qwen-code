@@ -66,6 +66,7 @@ export enum HookEventName {
   TodoCompleted = 'TodoCompleted',
   // InstructionsLoaded - When an instruction or context file is loaded
   InstructionsLoaded = 'InstructionsLoaded',
+  FileChanged = 'FileChanged',
 }
 
 /**
@@ -290,6 +291,13 @@ export interface InstructionsLoadedInput extends HookInput {
   load_reason: InstructionLoadReason;
   trigger_file_path?: string;
   parent_file_path?: string;
+}
+
+export type FileChangeEvent = 'add' | 'change' | 'unlink';
+
+export interface FileChangedInput extends HookInput {
+  file_path: string;
+  event: FileChangeEvent;
 }
 
 /**
@@ -1107,6 +1115,7 @@ export interface SessionStartOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'SessionStart';
     additionalContext?: string;
+    watchPaths?: string[];
   };
 }
 

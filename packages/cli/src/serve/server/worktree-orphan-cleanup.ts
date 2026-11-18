@@ -37,6 +37,11 @@ export interface WorktreeCleanupPlan {
   lockKey: string;
 }
 
+/**
+ * Also derives the ownership lock key, so it must keep the rule stated in
+ * `worktree-ownership-op.ts`, which the restore and the reset route follow
+ * too.
+ */
 function canonicalPath(candidate: string): string {
   try {
     return fs.realpathSync(candidate);

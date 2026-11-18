@@ -3616,6 +3616,108 @@ describe('ArtifactPanel add menu', () => {
 });
 
 describe('ArtifactPanel review downloads', () => {
+  it.each([
+    { name: 'standalone', workspaceCwd: undefined, workspaceId: undefined },
+    {
+      name: 'unregistered conversation directory',
+      workspaceCwd: '/private-conversation',
+      workspaceId: undefined,
+    },
+    {
+      name: 'stale workspace identity',
+      workspaceCwd: '/primary',
+      workspaceId: 'removed-id',
+    },
+    {
+      name: 'untrusted workspace',
+      workspaceCwd: '/primary',
+      workspaceId: 'primary-id',
+    },
+  ])(
+    'shows recorded diffs without file access for $name',
+    async ({ name, workspaceCwd, workspaceId }) => {
+      if (name === 'untrusted workspace') {
+        mockWorkspace.capabilities.workspaces[0].trusted = false;
+      }
+      const changes = [
+        {
+          path: 'preview.html',
+          status: 'created' as const,
+          toolCallId: 'write-preview',
+          isArtifact: false,
+          diffs: [
+            {
+              oldText: '',
+              newText: '<h1>Standalone change</h1>',
+              fullContent: true,
+            },
+          ],
+        },
+      ];
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const onOpenFilePreview = vi.fn();
+      const renderPanel = () => (
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'review',
+                kind: 'review',
+                title: 'Review',
+                changes: name === 'standalone' ? undefined : changes,
+                workspaceCwd,
+                workspaceId,
+              },
+            ]}
+            activeTabId="review"
+            workspaceCwd="/primary"
+            reviewChanges={changes}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={onOpenFilePreview}
+            onClose={() => {}}
+          />
+        </I18nProvider>
+      );
+
+      act(() => root.render(renderPanel()));
+      const toggle = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="preview.html"]',
+      );
+      expect(toggle).not.toBeNull();
+      await act(async () => toggle!.click());
+
+      await vi.waitFor(() =>
+        expect(container.querySelector('.cm-content')?.textContent).toContain(
+          '<h1>Standalone change</h1>',
+        ),
+      );
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(
+        container.querySelector('button[title="Preview preview.html"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('button[title="Download preview.html"]'),
+      ).toBeNull();
+      expect(onOpenFilePreview).not.toHaveBeenCalled();
+      expect(mockWorkspace.client.workspaceByCwd).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.readFileBytes).not.toHaveBeenCalled();
+      expect(mockWorkspaceActions.stat).not.toHaveBeenCalled();
+
+      changes[0].diffs = [];
+      act(() => root.render(renderPanel()));
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        'This workspace may have been removed or the link is no longer valid.',
+      );
+    },
+  );
+
   it('renders a saved unified patch without full file bodies', () => {
     const fileDiff =
       '--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-old\n+new';

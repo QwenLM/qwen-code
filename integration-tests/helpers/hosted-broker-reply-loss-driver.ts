@@ -57,7 +57,7 @@ async function json(route: string, body?: unknown, expected = 200) {
   return text ? JSON.parse(text) : undefined;
 }
 
-async function upstream(route: string, body?: Buffer) {
+async function upstream(route: string, body?: Buffer<ArrayBuffer>) {
   const response = await fetch(new URL(route, config.brokerUrl), {
     method: body?.length ? 'POST' : 'GET',
     headers: {

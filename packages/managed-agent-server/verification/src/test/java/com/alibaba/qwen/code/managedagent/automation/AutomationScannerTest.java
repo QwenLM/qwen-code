@@ -70,6 +70,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
+        "qwen.managed-agent.automation.enabled=false",
         "qwen.managed-agent.harness.enabled=false"
 })
 class AutomationScannerTest {
@@ -155,7 +156,6 @@ class AutomationScannerTest {
                 AutomationHarnessFake.projectSchedule(jdbc, tenant, session, schedule, clock.get()));
         connector = new FakeConnector(fake);
         settings = new ManagedAgentProperties.Automation();
-        settings.setEnabled(true);
         settings.setLateTolerance(Duration.ofMinutes(5));
         settings.setLookback(Duration.ofHours(24));
         settings.setLease(Duration.ofSeconds(60));

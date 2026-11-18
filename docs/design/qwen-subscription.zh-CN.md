@@ -49,7 +49,7 @@ CLI 模型恢复提示 `/model`，启动时也允许 Esc 返回输入框。桌�
 
 激活在两个宿主间传递错误阶段、HTTP 状态、文案及 Retry-After。OAuth 保留既有 `error`/`error_description` 解析，以及轮询、刷新凭证所需的业务码判断；网关错误直接展示公开的 `error.message`，仅订阅额度耗尽使用下文定义的客户端文案。刷新凭证过期时退出就绪态，不隐式重新授权；激活重试遵守返回的冷却期限。推理取凭证失败和 MCP 搜索失败保留刷新、权限、限流分类，不再统一替换为重新登录提示。不展示未知本地异常和非 JSON 响应正文；GUI 兜底文案跟随宿主语言。
 
-账号 daemon 路由属于进程级；激活和模型刷新明确访问选定工作区 runtime，遵守信任、generation 和生命周期，不回退主 runtime。CLI 写入受信任的工作区配置，不回退用户设置。取消终止提交前检查；安装事务一旦获准开始，需完整完成，取消视图忽略结果。
+账号 daemon 路由属于进程级。Desktop 无工作区时，`POST /auth/subscription/model` 先检查全局认证策略，再确认会员身份并从账号目录选择模型，此接口没有工作区目标，也不写入设置。项目激活解析选定工作区并遵守其信任状态、认证策略和生命周期。即使事件流正在重连，Desktop 和 Web Shell 也会切换发起授权的活跃会话。bridge 先校验客户端，ACP 再检查目标会话生效的认证策略，通过后才能刷新模型目录或切换模型。独立草稿在首次创建会话时携带所选模型。保存设置前切换工作区或会话会取消原流程。保存一旦开始，设置事务会完整结束。
 
 VS Code 捕获 daemon、规范工作区和选定会话。侧栏激活通过带 flow/request 关联的桥接访问捕获工作区，验证运行时同步后只更新捕获会话。初始引导不能发送未注册的 Web Shell client ID。重新 bootstrap、会话/工作区变化、daemon 替换和视图销毁均终止归属。短生命周期账号 client 保留原 daemon 地址和 Token，晚到的登录请求仍向正确 daemon 取消。
 
@@ -66,7 +66,9 @@ VS Code 打开订阅授权时在 WebShellWithProviders 上设置 `viewHidden`，
 | 身份/会员       | `GET /api/oauth/userinfo`     |
 | 撤销            | `POST /api/oauth/revoke`      |
 
-订阅认证域名为 `https://auth.qwen.ai`，OAuth `client_id=qwen-code-cli`。浏览器授权链接为 `https://chat.qwen.ai/authorize?user_code=<code>&client=qwen-code`；网页 client 与 OAuth client_id 不同。购买统一使用 `https://chat.qwen.ai/?memberPlan=qwen_code`，不带设备码参数。这两个网页入口都需要登录网页账号。
+订阅认证域名为 `https://auth.qwen.ai`，OAuth `client_id=qwen-code-cli`。跳往 `chat.qwen.ai` 的网页链接携带 `entry=qwen_code` 和 `paywallScene`。授权地址 `/authorize` 还带 `user_code` 和 `client`，其中 `client` 与 `paywallScene` 取值一致。升级和购买共用 `/`，还带 `memberPlan=qwen_code`。两个网页入口都需要登录网页账号。
+
+终端和文档使用 `paywallScene=cli`，Desktop 和独立 Web Shell 使用 `paywallScene=desktop`，VS Code 插件使用 `paywallScene=plugin`。daemon 从订阅能力查询和授权流程创建请求接收 `paywallScene`，默认取 `desktop`，轮询同一流程时沿用创建时生成的授权链接。指向 `chat.qwen.ai` 的旧版网页授权链接也加相同的归因字段，并保留原有查询参数。
 
 Core 负责私有权限的原子存储、恢复、跨进程刷新锁和撤销。宿主只在有效 `QWEN_HOME` 相同时共享会话。会员与旧 OAuth 分开存储；刷新替换完整 Token 对；Token 和设备码不进入 GUI 响应。
 
@@ -84,9 +86,9 @@ CLI（Ink/OpenTUI）、桌面端和 VS Code 的订阅聊天及 MCP 搜索错误�
 
 ## 思考与搜索
 
-复用 ModelReasoningControls 和现有 session/ACP reasoning 设置。会员 `qwen3.8-max`、`qwen3.8-flash` 关闭时发送顶层 `enable_thinking: false` 且不带预算；低/中/高发送 true 和 4096/16384/32768，已有 xhigh/max 映射高档。移除冲突 reasoning/reasoning_effort 和嵌套 chat-template 思考开关，保留无关选项。显式原生预算继续有效，单次请求关闭移除预算，仍遵守强制思考元数据。未操作默认值、未知模型和其他供应商保持原样。
+复用 ModelReasoningControls 和现有 session/ACP reasoning 设置。Qwen 订阅来源的所有模型在控件和请求中都默认使用中等思考强度，用户显式选择优先。关闭时发送顶层 `enable_thinking: false` 且不带预算。低、中、高发送 true，预算分别为 4096、16384、32768，已有 xhigh/max 映射高档。移除冲突 reasoning/reasoning_effort 和嵌套 chat-template 思考开关，保留无关选项。显式原生预算继续有效。单次请求关闭会移除预算，仍遵守强制思考元数据。
 
-Max 已声明共用 UI 能力，Flash 只有请求映射，不增加能力声明。默认强度仍需产品确定。真实 Max 网关已接受关闭和三档预算，关闭无 reasoning_content、开启有；这证明参数接受和开关行为，不证明长推理预算严格执行或 Flash 支持。会员搜索复用现有 MCP 后端，动态注入 Bearer Token，HTTP 401 时刷新被拒 Token 并仅重试一次，取消归属工具请求。详见[会员 MCP 联网搜索](subscription-mcp-web-search.zh-CN.md)。
+真实 Max 网关已接受关闭和三档预算，关闭无 reasoning_content、开启有；这证明参数接受和开关行为，不证明长推理预算严格执行或 Flash 支持。会员搜索复用现有 MCP 后端，动态注入 Bearer Token，HTTP 401 时刷新被拒 Token 并仅重试一次，取消归属工具请求。详见[会员 MCP 联网搜索](subscription-mcp-web-search.zh-CN.md)。
 
 ## CLI 成功提示与账号命令
 
@@ -102,11 +104,13 @@ CLI 监听模型和凭据文件变化；其他进程移除凭据时也清理缓�
 
 ### 显式登录、工作区默认值与退出
 
-每次显式选择 Qwen 登录都重新发起设备授权，访问 `/authorize?user_code=…&client=qwen-code`，即使本地凭证仍有效。本地 OAuth 凭证不能证明浏览器仍处于登录状态。设备授权期间保留原账号的 token、revision 和模型目录。取消、拒绝、过期或兑换失败时保留原会话。退出登录或发起更新的登录会使较早的尝试失效。兑换成功后原子保存新的 token 对和 revision，清除旧目录，并拒绝旧账号迟到的目录响应。CLI 及 Desktop、VS Code 共用的进程级 daemon 流程都必须等待本次授权完成，才能确认会员状态或激活模型。普通启动仍自动恢复已保存凭证，不发起授权。成功摘要在模型与常用命令之间保留本次实际授权链接，不再生成 `/authorize/success` 链接。本次客户端修复不修改网页及已有路由；登录回跳、购买顺序及授权页的成功卡片仍由网页负责。
+每次显式选择 Qwen 登录都重新发起设备授权，访问 `/authorize`，即使本地凭证仍有效。本地 OAuth 凭证不能证明浏览器仍处于登录状态。设备授权期间保留原账号的 token、revision 和模型目录。取消、拒绝、过期或兑换失败时保留原会话。退出登录或发起更新的登录会使较早的尝试失效。兑换成功后原子保存新的 token 对和 revision，清除旧目录，并拒绝旧账号迟到的目录响应。CLI 及 Desktop、VS Code 共用的进程级 daemon 流程都必须等待本次授权完成，才能确认会员状态或激活模型。普通启动仍自动恢复已保存凭证，不发起授权。成功摘要在模型与常用命令之间保留本次实际授权链接，不再生成 `/authorize/success` 链接。本次客户端修复不修改网页及已有路由；登录回跳、购买顺序及授权页的成功卡片仍由网页负责。
 
-激活订阅只在当前项目保存供应商和模型。新项目继续使用用户已配置的默认值。用户可通过 `/model --global` 显式保存全局模型。激活需要项目设置。如果当前目录是用户主目录，提示用户打开项目文件夹。CLI 的 `/auth` 菜单默认高亮第 1 项 Qwen 会员账号。展示成功前回读目标工作区实际生效的供应商和模型。桌面端在第二步授权内展示账号、套餐、实际激活模型和备用链接，不再展示独立成功弹窗和常用命令。
+显式登录优先选 Max，目录没有 Max 时取第一项。在受信任的项目内登录时，模型、认证类型和端点写入该项目设置，供应商目录可以位于任意配置层级。从用户主目录启动交互式 CLI 时，选择保存到用户设置，重启后仍可恢复。daemon 的项目激活接口要求项目设置可用。Desktop 无工作区时，所选模型用于发起登录的会话或草稿。其他活跃会话继续使用各自的运行时模型，新建项目会话按生效设置取默认。CLI `/auth` 菜单初始高亮 Qwen 会员账号。Desktop 在授权第二步展示账号、套餐、已激活模型和手动链接。
 
 退出清除账号凭证及账号/套餐状态，保留模型和供应商选择，不切换其他供应商、不打开认证弹窗。凭证失效后，可选列表隐藏订阅模型，包括其他 session 退出的场景；通过 API Key 接入的同名模型仍可选择。底层目录与当前模型的路由身份保留，即使当前模型已不在可选列表中；重新登录后恢复订阅选项。无凭证的订阅请求与过期订阅选项统一提示“登录凭证已失效，请运行 /auth 重新登录。”，不附加连接错误包装，也不直接展示 `session_changed`。订阅入口中文保留 `Agent`。
+
+交互式 CLI 已配置订阅但凭据缺失或过期时，重启后直接进入输入界面。用户可运行 `/auth` 重新登录。启动时已保存的订阅模型不可用则提示用 `/model` 重选。完全未配置供应商的首次启动仍打开供应商向导。
 
 验证覆盖新旧凭证、两套 CLI 渲染器、原生 VS Code 和桌面端、登录后新工作区/新会话、退出后请求及切换其他供应商、浏览器打开失败和中英文文案。补充已有 E2E 报告，本轮不新增 Markdown 文件。
 

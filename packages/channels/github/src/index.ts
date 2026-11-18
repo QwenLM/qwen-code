@@ -6,8 +6,12 @@ import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   GithubChannel,
   validateBoundSessionConfig,
+  DEFAULT_PR_WATCH_LIMIT,
+  MAX_PR_WATCH_LIMIT,
+  validateRepoFilterConfig,
   PR_NOTIFICATION_REASONS,
   PR_WATCH_EVENTS,
+  REPO_FILTER_MODES,
 } from './GithubAdapter.js';
 
 /**
@@ -140,6 +144,24 @@ export const plugin: ChannelPlugin = {
         })),
       },
       {
+        key: 'repoFilterMode',
+        label: 'Repository Filter',
+        kind: 'enum',
+        default: 'off',
+        description:
+          'Filter incoming notifications by repository: allowlist processes only the listed repositories, blocklist processes all except the listed ones. Notifications about PRs bound to a session are filtered too; only their PR state watch events bypass the filter.',
+        // Built from the adapter's exported vocabulary so the UI options
+        // cannot drift from the validator (the PR_WATCH_EVENTS pattern).
+        options: REPO_FILTER_MODES.map((value) => ({ value, label: value })),
+      },
+      {
+        key: 'repoFilter',
+        label: 'Filtered Repositories',
+        kind: 'string-list',
+        description:
+          'Comma-separated owner/repo repository names used by the repository filter. Requires Repository Filter to be set to allowlist or blocklist.',
+      },
+      {
         key: 'deliverToBoundSessions',
         label: 'Deliver To PR-Bound Sessions',
         kind: 'boolean',
@@ -158,6 +180,16 @@ export const plugin: ChannelPlugin = {
         options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
       },
       {
+        key: 'prWatchLimit',
+        label: 'PR Watch Limit',
+        kind: 'number',
+        exclusiveMinimum: 0,
+        maximum: MAX_PR_WATCH_LIMIT,
+        default: String(DEFAULT_PR_WATCH_LIMIT),
+        description:
+          'Maximum open bound PRs watched per poll (requires Deliver To PR-Bound Sessions and PR Watch Events). Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one pulls.get per poll — at the 60s default that is ~60 requests/hour per PR, so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); an over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
+      },
+      {
         key: 'boundSessionActions',
         label: 'Bound Session Actions',
         kind: 'record',
@@ -172,7 +204,10 @@ export const plugin: ChannelPlugin = {
       if (!token && config['useLocalGh'] !== true) {
         return 'Channel requires a token or local GitHub CLI authentication (useLocalGh).';
       }
-      return validateBoundSessionConfig(config, 'github');
+      return (
+        validateBoundSessionConfig(config, 'github') ??
+        validateRepoFilterConfig(config, 'github')
+      );
     },
   },
   createChannel: (name, config, bridge, options) =>

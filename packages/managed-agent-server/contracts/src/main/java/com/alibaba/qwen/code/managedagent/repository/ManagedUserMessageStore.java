@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
+import com.alibaba.qwen.code.managedagent.model.ApiModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 
 import java.util.List;
@@ -25,9 +26,9 @@ public interface ManagedUserMessageStore {
 
     @FunctionalInterface
     public interface QueuedTurnSubmitter {
-        public com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission submit(String tenantId,
+        public ApiModels.CommandAdmission submit(String tenantId,
                 String actorId, String idempotencyKey, String sessionId,
-                List<com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock> input);
+                List<ApiModels.InputBlock> input);
     }
 
     public void startNext(String tenant, String session, QueuedTurnSubmitter submitter);

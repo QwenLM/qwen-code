@@ -80,6 +80,9 @@ interface UseQueuedPromptsArgs {
    * the legacy local fallback used by older daemons.
    */
   canQueryMidTurn: boolean;
+  /** Whether `session_prompt` advertises the native prompt queue routes.
+   * OpenAPI hosts can send prompts without exposing the daemon queue. */
+  canQueryPendingPrompts: boolean;
   /**
    * Whether the daemon advertises `session_attachments`. With it,
    * attachments travel with a mid-turn message and are injected into the
@@ -515,6 +518,7 @@ export function useQueuedPrompts({
   clientId,
   canMutateMidTurn,
   canQueryMidTurn,
+  canQueryPendingPrompts,
   canInjectMidTurnMedia,
   workspaceFileActions,
   streamingState,
@@ -526,6 +530,8 @@ export function useQueuedPrompts({
   reportError,
   t,
 }: UseQueuedPromptsArgs): UseQueuedPromptsResult {
+  const canQueryPendingPromptsRef = useRef(canQueryPendingPrompts);
+  canQueryPendingPromptsRef.current = canQueryPendingPrompts;
   const dispatchPolicyRef = useRef(getPromptDispatchError);
   dispatchPolicyRef.current = getPromptDispatchError;
   const sessionActions = useMemo<DaemonSessionActions>(
@@ -623,6 +629,8 @@ export function useQueuedPrompts({
     streamingState !== 'idle' || sessionHasActivePrompt,
   );
   const holdQueuedPromptsLocallyRef = useRef(holdQueuedPromptsLocally);
+  const hostHoldQueuedPromptsRef = useRef(holdQueuedPromptsLocally);
+  hostHoldQueuedPromptsRef.current = holdQueuedPromptsLocally;
   const refreshRequestSeqRef = useRef(0);
   /**
    * The tracked in-flight pending-prompts GET, if any. A caller that finds its
@@ -745,8 +753,10 @@ export function useQueuedPrompts({
   latestSessionIdRef.current = sessionId;
   latestWorkspaceCwdRef.current = workspaceCwd;
   latestConnectedRef.current = connected;
-  holdQueuedPromptsLocallyRef.current = holdQueuedPromptsLocally;
   const sessionActive = streamingState !== 'idle' || sessionHasActivePrompt;
+  const holdForLocalQueue =
+    holdQueuedPromptsLocally || (!canQueryPendingPrompts && sessionActive);
+  holdQueuedPromptsLocallyRef.current = holdForLocalQueue;
   useLayoutEffect(() => {
     midTurnReconcileSeqRef.current += 1;
   }, [sessionActive]);
@@ -1250,7 +1260,11 @@ export function useQueuedPrompts({
       // after this anchor.
       notBefore = refreshRequestSeqRef.current,
     ): Promise<RefreshPendingPromptsResult> => {
-      if (!latestConnectedRef.current || !targetSessionId)
+      if (
+        !canQueryPendingPromptsRef.current ||
+        !latestConnectedRef.current ||
+        !targetSessionId
+      )
         return Promise.resolve({ status: 'skipped' });
       if (latestSessionIdRef.current !== targetSessionId)
         return Promise.resolve({ status: 'skipped' });
@@ -1410,6 +1424,7 @@ export function useQueuedPrompts({
           // The wait can outlive the session or the connection: re-apply
           // the entry guards before dispatching against them.
           if (
+            !canQueryPendingPromptsRef.current ||
             !latestConnectedRef.current ||
             latestSessionIdRef.current !== targetSessionId
           ) {
@@ -2259,6 +2274,73 @@ export function useQueuedPrompts({
       let admissionStarted = false;
       let refreshedInBody = false;
 
+      if (!canQueryPendingPromptsRef.current) {
+        // Hosts without native queue routes use the same streaming send as
+        // the composer. The release chain waits for completion, not an
+        // invented daemon admission, before dispatching the next local row.
+        const removeLocalRow = () => {
+          const next = queuedPromptsRef.current.filter(
+            (row) => row.id !== localId,
+          );
+          queuedPromptsRef.current = next;
+          setQueuedPrompts(next);
+        };
+        return sessionActions
+          .sendPrompt(prompt.text, {
+            submittedPrompt: prompt.submittedPrompt,
+            images: prompt.images,
+            files: prompt.files,
+            inputAnnotations: prompt.inputAnnotations,
+            beforeDispatch: () => {
+              submitAbort.signal.throwIfAborted();
+              if (
+                !isCurrentOwnerTokenRef.current(ownerToken) ||
+                latestSessionIdRef.current !== targetSessionId ||
+                !queuedPromptsRef.current.some((row) => row.id === localId)
+              ) {
+                throw new PromptDispatchBlockedError(
+                  'Queued prompt owner changed',
+                );
+              }
+              const error = dispatchPolicyRef.current?.(prompt.text);
+              if (error !== undefined)
+                throw new PromptDispatchBlockedError(error);
+            },
+            onAdmissionStarted: () => {
+              admissionStarted = true;
+            },
+            onAdmitted: () => {
+              if (!isCurrentOwnerTokenRef.current(ownerToken)) return;
+              removeLocalRow();
+              prompt.onAdmitted?.();
+            },
+          })
+          .then(() => {
+            if (!isCurrentOwnerTokenRef.current(ownerToken)) return;
+            removeLocalRow();
+            prompt.onComplete?.();
+          })
+          .catch((error: unknown) => {
+            if (!isCurrentOwnerTokenRef.current(ownerToken)) return;
+            removeLocalRow();
+            if (submitAbort.signal.aborted) return;
+            if (
+              !admissionStarted &&
+              !(error instanceof PromptDispatchBlockedError)
+            ) {
+              restoreQueuedPromptsToEditor([prompt], targetSessionId);
+            }
+            reportError(error, t('queue.queueFailed'));
+          })
+          .finally(() => {
+            if (
+              submitAbortControllersRef.current.get(localId) === submitAbort
+            ) {
+              submitAbortControllersRef.current.delete(localId);
+            }
+          });
+      }
+
       return sessionActions
         .submitPrompt(prompt.text, {
           ...(prompt.submittedPrompt !== undefined
@@ -3076,7 +3158,7 @@ export function useQueuedPrompts({
         canInjectMidTurnMedia &&
         workspaceFileActions !== undefined;
       const shouldInsertMidTurn =
-        !holdQueuedPromptsLocallyRef.current &&
+        !hostHoldQueuedPromptsRef.current &&
         latestSessionActiveRef.current &&
         (imageList.length === 0 || canSendMidTurnMedia) &&
         (fileList.length === 0 || canSendMidTurnFiles) &&
@@ -3629,7 +3711,7 @@ export function useQueuedPrompts({
         setQueuedPrompts(next);
       }
     }
-    if (holdQueuedPromptsLocally) return;
+    if (holdForLocalQueue) return;
     for (const prompt of queuedPromptsRef.current) {
       if (!prompt.midTurnFailedAction) continue;
       const next = queuedPromptsRef.current.filter(
@@ -3714,7 +3796,7 @@ export function useQueuedPrompts({
   }, [
     sessionActive,
     writeBlocked,
-    holdQueuedPromptsLocally,
+    holdForLocalQueue,
     canQueryMidTurn,
     releaseChainedPrompt,
     submitPendingPrompt,

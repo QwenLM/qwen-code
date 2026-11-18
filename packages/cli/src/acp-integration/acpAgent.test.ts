@@ -37,6 +37,7 @@ import { ACP_EVENT_LOOP_STALL_RESTART_MS } from '@qwen-code/channel-base';
 import { getDefaultReasoningConfig } from './model-configuration.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { BTW_STREAM_TIMEOUT_MS } from './btw-generation.js';
 import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
 
@@ -4834,6 +4835,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect(hostPolicy?.executionEngine).toBe(engine);
         // Legacy sessions run their tools in this process.
         expect(hostPolicy?.managedRuntimeEnvironment).toBeUndefined();
+        // The session Config must keep LSP available; only helper Configs
+        // refuse it.
+        expect(hostPolicy?.lspDisabled).toBeUndefined();
         expect(response._meta).toEqual(
           engine ? { [SESSION_EXECUTION_ENGINE_META_KEY]: engine } : undefined,
         );
@@ -26459,6 +26463,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(mockConfig.initialize).toHaveBeenCalledWith({
       skipLlmInitialization: true,
+      skipFileWatching: true,
       // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): also
       // pins that the bootstrap path opts out of MCP discovery (so
       // bootstrap + per-session don't double-spawn N stdio servers).
@@ -26590,6 +26595,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(mockConfig.initialize).toHaveBeenCalledWith({
       skipLlmInitialization: true,
+      skipFileWatching: true,
       // F2 (#4175 commit 6 review fix — claude-opus-4-7 W119): also
       // pins that the bootstrap path opts out of MCP discovery (so
       // bootstrap + per-session don't double-spawn N stdio servers).
@@ -30183,9 +30189,7 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
       ]) {
         await expect(
           agent.unstable_listSessions({ cwd: '/tmp/project', cursor }),
-        ).rejects.toThrow(
-          `Invalid cursor: "${cursor}" is not a valid numeric cursor`,
-        );
+        ).rejects.toThrow(`Invalid cursor: "${cursor}" is not a valid cursor`);
       }
       expect(SessionService).not.toHaveBeenCalled();
     } finally {
@@ -30222,6 +30226,54 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
           excludeSourceTypes: ['agent-host', 'agent'],
         });
       }
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('passes a composite cursor through so page 2 stays reachable', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [],
+      nextCursor: undefined,
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          listSessions,
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      await agent.unstable_listSessions({
+        cwd: '/tmp/project',
+        cursor: '1700000000000|session-a.jsonl',
+      });
+      expect(listSessions).toHaveBeenCalledWith({
+        cursor: '1700000000000|session-a.jsonl',
+        size: undefined,
+        excludeSourceTypes: ['agent-host', 'agent'],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('rejects a composite cursor with an empty mtime prefix', async () => {
+    const { agent, agentPromise } = await bootAgent();
+
+    try {
+      await expect(
+        agent.unstable_listSessions({
+          cwd: '/tmp/project',
+          cursor: '|session-a.jsonl',
+        }),
+      ).rejects.toThrow(
+        'Invalid cursor: "|session-a.jsonl" is not a valid cursor',
+      );
+      expect(SessionService).not.toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -30977,6 +31029,99 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             }
           ).sessionApprovalModeConverged.get('persisted-1'),
         ).toBe(ApprovalMode.DEFAULT);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([
+    ['load', true, false],
+    ['resume', true, false],
+    ['load', false, false],
+    ['load', true, true],
+  ] as const)(
+    '%s handles signed-out subscription with a saved API model (route=%s, enforced=%s)',
+    async (action, hasRoute, enforced) => {
+      const innerConfig = bindRestoreMocks({ sessionExists: true });
+      const baseUrl = 'https://modelstudio.example/v1';
+      const modelId = 'qwen3.7-plus';
+      let authType = AuthType.QWEN_SUBSCRIPTION;
+      innerConfig.getAuthType.mockImplementation(() => authType);
+      innerConfig
+        .getModelsConfig()
+        .getCurrentAuthType.mockImplementation(() => authType);
+      innerConfig.getModel.mockReturnValue('qwen3.8-max');
+      innerConfig.refreshAuth.mockImplementation(async () => {
+        if (authType === AuthType.QWEN_SUBSCRIPTION) {
+          throw new SubscriptionOAuthError('session_changed');
+        }
+      });
+      innerConfig.switchModel.mockImplementation(async (nextAuth, nextId) => {
+        authType = nextAuth;
+        innerConfig.getModel.mockReturnValue(nextId);
+      });
+      const getResolvedModelConfig = vi
+        .fn()
+        .mockReturnValue(
+          hasRoute ? { id: modelId, baseUrl, generationConfig: {} } : undefined,
+        );
+      Object.assign(innerConfig, { getResolvedModelConfig });
+      const setValue = vi.fn();
+      vi.mocked(loadSettings).mockReturnValue({
+        ...makeRestoreSettings(),
+        merged: {
+          mcpServers: {},
+          security: {
+            auth: {
+              selectedType: AuthType.QWEN_SUBSCRIPTION,
+              ...(enforced ? { enforcedType: AuthType.QWEN_SUBSCRIPTION } : {}),
+            },
+          },
+        },
+        user: {
+          settings: {
+            security: { auth: { selectedType: AuthType.USE_OPENAI } },
+            model: { name: modelId, baseUrl },
+          },
+        },
+        setValue,
+      } as unknown as LoadedSettings);
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        const restore =
+          action === 'load'
+            ? agent.loadSession(params)
+            : agent.unstable_resumeSession(params);
+        if (hasRoute && !enforced) {
+          await restore;
+          expect(getResolvedModelConfig).toHaveBeenCalledWith(
+            AuthType.USE_OPENAI,
+            modelId,
+            baseUrl,
+          );
+          expect(innerConfig.switchModel).toHaveBeenCalledExactlyOnceWith(
+            AuthType.USE_OPENAI,
+            modelId,
+            { baseUrl },
+          );
+          expect(innerConfig.refreshAuth).toHaveBeenLastCalledWith(
+            AuthType.USE_OPENAI,
+            true,
+          );
+          expect(lastSessionMock?.getId()).toBe(params.sessionId);
+        } else {
+          await expect(restore).rejects.toThrow('session_changed');
+          expect(innerConfig.switchModel).not.toHaveBeenCalled();
+        }
+        expect(setValue).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
@@ -34658,6 +34803,9 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       ).toHaveBeenCalledWith(discoveryConfig),
     );
     expect(discoveryConfigSessionContext).toBe('workspace-mcp-discovery');
+    // A discovery-only Config must never start language servers, whatever the
+    // user's setting says: it runs no tools and is never shut down.
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.lspDisabled).toBe(true);
     const ancestorTrustProvider =
       vi.mocked(loadCliConfig).mock.calls[0]?.[9]
         ?.workflowAncestorTrustProvider;

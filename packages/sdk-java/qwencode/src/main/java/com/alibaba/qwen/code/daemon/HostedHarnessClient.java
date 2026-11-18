@@ -397,8 +397,29 @@ public final class HostedHarnessClient implements AutoCloseable {
             String optionId,
             long inputRevision,
             String policyRevision) {
+        resolveActionResponse(session, actionId, Map.of("optionId", optionId,
+                "inputRevision", inputRevision, "policyRevision", policyRevision));
+    }
+
+    public void resolveQuestion(
+            HarnessSessionRef session,
+            String actionId,
+            List<Map<String, Object>> answers,
+            long inputRevision,
+            String policyRevision) {
+        if (answers == null || answers.isEmpty() || answers.size() > 4
+                || inputRevision < 1 || inputRevision > 9007199254740991L
+                || !"hosted-user-question/1".equals(policyRevision)) {
+            throw new IllegalArgumentException("Invalid question response");
+        }
+        resolveActionResponse(session, actionId, Map.of("answers", answers,
+                "inputRevision", inputRevision, "policyRevision", policyRevision));
+    }
+
+    private void resolveActionResponse(HarnessSessionRef session, String actionId, Map<String, Object> body) {
         HarnessSessionRef ref = requireSessionRef(session);
-        if (actionId == null || !actionId.matches("tool_approval_[0-9a-f]{32}")) {
+        if (actionId == null
+                || !actionId.matches("(?:tool_approval_[0-9a-f]{32}|command_approval_[0-9a-f]{48})")) {
             throw new IllegalArgumentException("Invalid actionId");
         }
         HttpSupport.Response response =
@@ -407,13 +428,7 @@ public final class HostedHarnessClient implements AutoCloseable {
                                 + "/actions/"
                                 + actionId
                                 + "/resolve",
-                        Map.of(
-                                "optionId",
-                                optionId,
-                                "inputRevision",
-                                inputRevision,
-                                "policyRevision",
-                                policyRevision),
+                        body,
                         ref.getHarnessSessionId(),
                         ref.getHarnessClientId(),
                         "POST /session/:id/actions/:id/resolve");

@@ -5,8 +5,10 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
+import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.StreamReadConstraints;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,8 +35,8 @@ public final class ManagedCsiFilesProtocol {
     private static final Set<String> BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage");
     private static final Set<String> AUTHORITY_BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage", "authority");
     private static final Set<String> FINALIZATION_BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage", "authority", "finalization");
-    private static final ObjectMapper JSON = new ObjectMapper(com.fasterxml.jackson.core.JsonFactory.builder()
-            .streamReadConstraints(com.fasterxml.jackson.core.StreamReadConstraints.builder()
+    private static final ObjectMapper JSON = new ObjectMapper(JsonFactory.builder()
+            .streamReadConstraints(StreamReadConstraints.builder()
                     .maxNestingDepth(64).maxStringLength(32 * 1024 * 1024).build()).build())
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);

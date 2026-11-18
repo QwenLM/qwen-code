@@ -39,6 +39,7 @@ public class ManagedAgentPersistenceConfiguration {
             source.setConnectionInitSqls(List.of("SET SESSION sql_mode ="
                     + " CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'STRICT_TRANS_TABLES')"));
         }
+        MySqlStatementCache.fillDefaults(source);
         return source;
     }
 

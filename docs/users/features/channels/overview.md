@@ -251,6 +251,13 @@ Channel memory does not automatically learn facts from normal conversation or
 accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
 remember request and an exact entry ID when a natural reference is ambiguous.
 
+A turn a channel sends also runs no
+[auto-memory](../memory#auto-memory-what-qwen-learns-about-you) extraction or
+periodic cleanup (Dream) and gets no
+[follow-up suggestion](../followup-suggestions), including a message delivered
+to a session bound to a pull request. Auto-memory recall still runs, so a reply
+can draw on saved auto-memories.
+
 ### Token Security
 
 Bot tokens should not be stored directly in `settings.json`. Instead, use environment variable references:
@@ -597,8 +604,10 @@ Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, W
 
 The Web Shell's **Channel events** page shows a timeline of what every Channel
 in the current workspace did: the inbound messages it accepted, and the ones it
-skipped and why (`reason_filter`, `mention_required`, `duplicate`, a sender-gate
-rejection, `github_api_error` when reading or handling a GitHub thread failed;
+skipped and why (`reason_filter`, `mention_required`, `duplicate`,
+`edited_comment` for an older GitHub comment that mentions the bot and was
+edited, a sender-gate rejection, `github_api_error` when reading or handling a GitHub
+thread failed;
 a `failed` row with that reason means the thread will be read again), the
 replies it published or suppressed, its inbound task transitions, and how each
 poll went. Pick the workspace whose Channels you want

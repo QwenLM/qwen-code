@@ -1,13 +1,15 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.List;
 import java.util.Map;
 
 public interface ManagedSessionSkills {
     public List<Map<String, Object>> fromLaunchReference(String tenant, String session,
-            com.fasterxml.jackson.databind.JsonNode ref);
+            JsonNode ref);
 
     public List<Map<String, Object>> effective(SessionRecord session);
 
@@ -16,7 +18,7 @@ public interface ManagedSessionSkills {
     public Map<String, Object> initialSelection(String tenant, String session);
 
     public void saveInitialSelection(String tenant, String session,
-            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> pins);
+            List<ManagedExtensionPackages.Pin> pins);
 
     public void save(String tenant, String session, List<Map<String, Object>> skills);
 }

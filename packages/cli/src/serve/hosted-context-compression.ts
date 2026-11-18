@@ -372,6 +372,7 @@ export class HostedContextCompression {
       true,
       {
         toolInvocationGuard: () => ({ allowed: false }),
+        lspDisabled: true,
         ...(sessionModelConfig
           ? { modelConfiguration: sessionModelConfig }
           : {}),

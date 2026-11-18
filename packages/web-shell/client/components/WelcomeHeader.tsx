@@ -16,7 +16,7 @@ export function WelcomeHeader(props: WelcomeHeaderProps) {
   const brandName = useBrandName();
 
   return (
-    <div className={styles.header}>
+    <div className={styles.header} data-welcome-header="">
       <div className={styles.titleRow}>
         <span>{t('welcome.titlePrefix')}</span>
         <span className={styles.title}>{brandName}</span>

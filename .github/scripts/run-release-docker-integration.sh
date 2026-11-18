@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# shellcheck source=.github/scripts/apt-mirror-probe.sh
+source "$(dirname "${BASH_SOURCE[0]}")/apt-mirror-probe.sh"
+
 cleanup_release_containers() {
   container_ids="$(timeout 30 docker ps -aq --filter "label=org.qwen-code.ci.owner=${RELEASE_CONTAINER_OWNER}" 2>/dev/null)" || container_ids=''
   if [ -n "$container_ids" ]; then
@@ -139,6 +142,13 @@ if [ "$image_inspect_status" -ne 0 ]; then
   # bounding that side too is a cross-lane change tracked separately.
   timeout 20m docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
   check_docker_data_root_floor "${DISK_FLOOR_DOCKER_MIN_FREE_KB:-8388608}"
+  # This lane prunes the builder cache above, so its apt layers stay cold, and
+  # its routed host (`ecs-qwen-hk4-host`, or `ubuntu-latest` when the ECS pool
+  # is unavailable) already reaches `deb.debian.org` at MB/s — there the probe
+  # keeps the built-in source, as designed. It applies the probe the E2E leg
+  # uses (#16214) so a host whose default is throttled builds against a faster
+  # endpoint; the always-cold builder cache is unchanged here (#16271).
+  apply_apt_mirror
   # See e2e.yml: closing the lock descriptors in the child keeps a descendant
   # that outlives this job from holding the lock.
   npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-

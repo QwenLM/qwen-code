@@ -132,28 +132,36 @@ it.each(['qwen3.8-max', 'qwen3.8-flash'])(
   },
 );
 
-it('uses the real Chat pipeline with dynamic credentials and no DashScope extras', async () => {
-  fetchMock.mockResolvedValue(completion());
-  const result = await generator({
-    apiKey: 'stale-provider-key',
-  }).generateContent(request, 'prompt');
-  expect(result.candidates?.[0]?.content?.parts).toContainEqual({ text: 'OK' });
-  const [url, init] = fetchMock.mock.calls[0];
-  expect(String(url)).toBe(`${QWEN_SUBSCRIPTION_BASE_URL}/chat/completions`);
-  expect(new Headers(init?.headers).get('Authorization')).toBe(
-    'Bearer synthetic-access',
-  );
-  expect(init?.redirect).toBe('error');
-  expect(new Headers(init?.headers).has('X-DashScope-AuthType')).toBe(false);
-  expect(JSON.parse(init?.body as string)).toMatchObject({
-    model: QWEN_SUBSCRIPTION_MODEL,
-    stream: false,
-  });
-  expect(JSON.parse(init?.body as string)).not.toHaveProperty('metadata');
-  expect(JSON.parse(init?.body as string)).not.toHaveProperty(
-    'enable_thinking',
-  );
-});
+it.each(['qwen3.8-max', 'qwen3.8-flash', 'qwen3.7-plus'])(
+  'uses the Chat pipeline with dynamic credentials and a medium default for %s',
+  async (model) => {
+    fetchMock.mockResolvedValue(completion());
+    const result = await generator({
+      model,
+      apiKey: 'stale-provider-key',
+    }).generateContent({ ...request, model }, 'prompt');
+    expect(result.candidates?.[0]?.content?.parts).toContainEqual({
+      text: 'OK',
+    });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(`${QWEN_SUBSCRIPTION_BASE_URL}/chat/completions`);
+    expect(new Headers(init?.headers).get('Authorization')).toBe(
+      'Bearer synthetic-access',
+    );
+    expect(init?.redirect).toBe('error');
+    expect(new Headers(init?.headers).has('X-DashScope-AuthType')).toBe(false);
+    const body = JSON.parse(init?.body as string);
+    expect(body).toMatchObject({
+      model,
+      stream: false,
+      enable_thinking: true,
+      thinking_budget: 16384,
+    });
+    expect(body).not.toHaveProperty('metadata');
+    expect(body).not.toHaveProperty('reasoning');
+    expect(body).not.toHaveProperty('reasoning_effort');
+  },
+);
 
 it('consumes a multi-chunk SSE stream through the real Chat pipeline', async () => {
   const chunks: Array<Record<string, unknown>> = ['O', 'K'].map((content) => ({
@@ -310,15 +318,6 @@ it.each([
   },
 );
 
-it('enables thinking without inventing a budget when no strength is set', async () => {
-  fetchMock.mockResolvedValue(completion());
-  await generator({ reasoning: {} }).generateContent(request, 'prompt');
-  const body = JSON.parse(fetchMock.mock.lastCall![1]?.body as string);
-  expect(body.enable_thinking).toBe(true);
-  expect(body).not.toHaveProperty('thinking_budget');
-  expect(body).not.toHaveProperty('reasoning');
-});
-
 it('keeps mandatory thinking enabled without an unsupported off switch', async () => {
   fetchMock.mockResolvedValue(completion());
   await generator({
@@ -330,7 +329,7 @@ it('keeps mandatory thinking enabled without an unsupported off switch', async (
   expect(body).not.toHaveProperty('thinking_budget');
 });
 
-it('uses the request model to keep subscription fields off unknown models', async () => {
+it('honors an explicit effort when a request uses a different subscription model', async () => {
   fetchMock.mockResolvedValue(completion());
   await generator({ reasoning: { effort: 'low' } }).generateContent(
     { ...request, model: 'future-served-model' },
@@ -339,10 +338,11 @@ it('uses the request model to keep subscription fields off unknown models', asyn
   const body = JSON.parse(fetchMock.mock.lastCall![1]?.body as string);
   expect(body).toMatchObject({
     model: 'future-served-model',
-    reasoning: { effort: 'low' },
+    enable_thinking: true,
+    thinking_budget: 4096,
   });
-  expect(body).not.toHaveProperty('enable_thinking');
-  expect(body).not.toHaveProperty('thinking_budget');
+  expect(body).not.toHaveProperty('reasoning');
+  expect(body).not.toHaveProperty('reasoning_effort');
 });
 
 it('refreshes the rejected token once on 401, preserving the request body', async () => {

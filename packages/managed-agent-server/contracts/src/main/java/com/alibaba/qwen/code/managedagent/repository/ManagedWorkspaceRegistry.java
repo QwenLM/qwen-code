@@ -6,7 +6,9 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 public interface ManagedWorkspaceRegistry {
     public boolean createdSession(String tenantId, String actorId, String sessionId);
@@ -25,9 +27,9 @@ public interface ManagedWorkspaceRegistry {
     public WorkspaceSummary findReadable(String tenantId, String actorId,
             String workspaceId);
 
-    public java.util.Map<String, ReadableGrant> findReadable(
+    public Map<String, ReadableGrant> findReadable(
             String tenantId, String actorId,
-            java.util.Collection<String> workspaceIds);
+            Collection<String> workspaceIds);
 
     public WorkspaceSummary readableDefault(String tenantId,
             String actorId);

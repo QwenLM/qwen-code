@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.runtimebroker;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -411,9 +413,9 @@ public final class ToolExecutionRecord {
     }
 
     public static Map<String, Object> cancelledBeforeV3Start() {
-        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        Map<String, Object> result = new LinkedHashMap<>();
         result.put("executionStatus", "not_started");
-        result.put("responseParts", java.util.List.of());
+        result.put("responseParts", List.of());
         result.put("capture", null);
         return result;
     }

@@ -4,7 +4,7 @@ import type {
   DaemonSessionArtifact,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
-import { DownloadIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
+import { DownloadIcon, EyeIcon, SquareArrowOutUpRightIcon } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { useI18n } from '../../i18n';
@@ -15,9 +15,11 @@ import {
   artifactDisplayName,
   formatArtifactSize,
   downloadWorkspaceFile,
+  getArtifactImageMimeType,
   getArtifactTypeLabel,
   getImageMimeTypeFromPath,
   isSamePath,
+  normalizeArtifactMimeType,
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
@@ -86,6 +88,7 @@ export type TurnOutputOpenRequest = (
       title: string;
       turnId: string;
       changes: readonly TurnOutputFileChange[];
+      unfilteredChanges?: readonly TurnOutputFileChange[];
       selectedPath?: string;
       workspaceCwd?: string;
       workspaceId?: string;
@@ -486,6 +489,12 @@ function ArtifactCard({
   const openIcon = (
     <SquareArrowOutUpRightIcon size={16} strokeWidth={1.8} aria-hidden="true" />
   );
+  // Rendered artifacts (HTML, Markdown, images) open straight into a rendered
+  // preview tab, so label the action Preview rather than the generic Open.
+  // External-URL artifacts only show metadata and an Open link in the panel,
+  // so they keep Open even when their kind would otherwise render.
+  const rendered =
+    isRenderedArtifact(artifact) && artifact.storage !== 'external_url';
   return (
     <div className={styles.card}>
       <div className={`${styles.summary} ${styles.artifactSummary}`}>
@@ -543,8 +552,12 @@ function ArtifactCard({
                 onClick={onOpen}
                 disabled={!onOpen}
               >
-                {openIcon}
-                {t('common.open')}
+                {rendered ? (
+                  <EyeIcon size={16} strokeWidth={1.8} aria-hidden="true" />
+                ) : (
+                  openIcon
+                )}
+                {t(rendered ? 'turnOutputs.preview' : 'common.open')}
               </button>
             )}
           </span>
@@ -676,12 +689,17 @@ export function getFileChangePreviewContent(change: TurnOutputFileChange) {
 
 function isRenderedArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
-  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
+  // Match the panel's predicates for the relabelled kinds (HTML, Markdown,
+  // images): normalise mime parameters (text/html; charset=utf-8) and honour
+  // image/* mime even when the path has no extension. PDF/DOCX/XLSX are
+  // rendered by the panel through their own viewers but keep "Open" here.
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   return (
     artifact.kind === 'html' ||
     isRenderedFilePath(path) ||
     mimeType === 'text/html' ||
-    mimeType === 'text/markdown'
+    mimeType === 'text/markdown' ||
+    Boolean(getArtifactImageMimeType(artifact))
   );
 }
 

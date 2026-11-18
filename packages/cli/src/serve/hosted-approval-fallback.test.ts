@@ -336,6 +336,7 @@ function approvalSelectionFixture(
       'first',
       {
         requestId: 'first',
+        kind: 'permission',
         inputRevision: 1,
         optionsRef: optionsRef('first', 'call-first', 3),
       },
@@ -344,6 +345,7 @@ function approvalSelectionFixture(
       'legacy',
       {
         requestId: 'legacy',
+        kind: 'permission',
         inputRevision: 1,
         optionsRef: optionsRef('legacy', 'call-legacy', legacyVersion),
       },

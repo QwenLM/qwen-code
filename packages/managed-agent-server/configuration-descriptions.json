@@ -821,8 +821,8 @@
       "type": "string"
     },
     "spring.datasource.url": {
-      "en": "The JDBC URL of the MySQL 8 database that holds the control plane's state; Flyway applies the schema migrations to it at startup. The `managed-local` profile replaces it with a private H2 file database and refuses any other URL.",
-      "zh": "存放控制面状态的 MySQL 8 数据库的 JDBC URL；启动时 Flyway 会对其执行 schema 迁移。`managed-local` profile 改用私有 H2 文件数据库，其他 URL 启动时拒绝。",
+      "en": "The JDBC URL of the MySQL 8 database that holds the control plane's state; Flyway applies the schema migrations to it at startup. The `managed-local` profile replaces it with a private H2 file database and refuses any other URL. For a `jdbc:mysql:` URL the server turns on Connector/J's cache of parsed statements: it adds `cachePrepStmts=true`, `prepStmtCacheSize=512` and `prepStmtCacheSqlLimit=8192` as connection properties, each only when neither this URL nor the Druid connection properties (`spring.datasource.druid.connect-properties` or `connection-properties`) name it, and none of them when either names `useServerPrepStmts` or `useCursorFetch`, with any value, since both can make Connector/J prepare statements on the server. `cachePrepStmts=false` in the URL turns the cache off.",
+      "zh": "存放控制面状态的 MySQL 8 数据库的 JDBC URL；启动时 Flyway 会对其执行 schema 迁移。`managed-local` profile 改用私有 H2 文件数据库，其他 URL 启动时拒绝。对 `jdbc:mysql:` URL，服务端会开启 Connector/J 的语句解析缓存：以连接属性加上 `cachePrepStmts=true`、`prepStmtCacheSize=512` 和 `prepStmtCacheSqlLimit=8192`，每一项只在该 URL 和 Druid 连接属性（`spring.datasource.druid.connect-properties` 或 `connection-properties`）都没有设置它时才加；任一处提到 `useServerPrepStmts` 或 `useCursorFetch` 时，无论取值如何，一项都不加，因为二者都可能让 Connector/J 在服务端准备语句。在 URL 里写 `cachePrepStmts=false` 即可关闭缓存。",
       "type": "string"
     },
     "spring.datasource.username": {

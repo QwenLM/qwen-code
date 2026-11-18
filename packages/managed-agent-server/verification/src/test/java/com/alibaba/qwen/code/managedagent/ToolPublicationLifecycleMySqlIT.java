@@ -211,7 +211,12 @@ class ToolPublicationLifecycleMySqlIT {
                                     (prepared, call, values) -> {
                                         boolean execute = enabled && call.getName().startsWith("execute");
                                         String role = Thread.currentThread().getName();
-                                        if (execute && "receipt".equals(role) && sql.startsWith("INSERT INTO ma_tenant_guard") && sql.contains("'runtime_placement'")) {
+                                        // An ordinary publication lane enters on the
+                                        // Session root, not the placement guard
+                                        // (#16354), so the receipt parks on the root
+                                        // statement its lane actually runs.
+                                        if (execute && "receipt".equals(role)
+                                                && sql.startsWith("SELECT tenant_id, session_id, is_csi_guard FROM ma_session")) {
                                             receiptPlacement.countDown();
                                         }
                                         try {

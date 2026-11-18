@@ -16,6 +16,8 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 /** Original-connection parent fence for the private file-only CSI profile. */
 public final class JdbcCsiFilesRetirementGuard {
     private JdbcCsiFilesRetirementGuard() {
@@ -96,10 +98,13 @@ public final class JdbcCsiFilesRetirementGuard {
         if (!retained) {
             initializeRetentionRoot(connection, tenant);
         }
+        // The Session root precedes its slot and binding rows, the order
+        // lifecycle, hosted cleanup and guard-free execution control use.
+        Pin pin = readPin(connection, tenant, session);
         List<Slot> slots = new ArrayList<>();
         List<Binding> bindings = new ArrayList<>();
         readRuntimeRows(connection, tenant, session, true, slots, bindings);
-        requirePin(readPin(connection, tenant, session), request);
+        requirePin(pin, request);
         if (!retained && (!slots.isEmpty() || !bindings.isEmpty())) {
             throw unavailable();
         }
@@ -116,6 +121,27 @@ public final class JdbcCsiFilesRetirementGuard {
     }
 
     public static Original lockBindingControl(Connection connection, String bindingId) throws SQLException {
+        return lockBindingControl(connection, bindingId, false);
+    }
+
+    /**
+     * Control for tool execution admission and dispatch, and for operation
+     * lease changes (claim, renew, release), which move no binding out of its
+     * state. A binding outside the CSI files profile only needs proof that its
+     * Session is not CSI-pinned. The pin lives on the Session root, and profile
+     * slots and bindings require a committed pin, so the root alone decides it:
+     * no tenant guard and no slot or binding lock (designs
+     * 2026-11-05-managed-dispatch-tenant-guards and
+     * 2026-11-06-managed-binding-control-tenant-guards). A caller that takes
+     * placement afterwards, as compareAndSet does, must use
+     * {@link #lockBindingControl} instead: placement precedes the root.
+     */
+    public static Original lockExecutionControl(Connection connection, String bindingId) throws SQLException {
+        return lockBindingControl(connection, bindingId, true);
+    }
+
+    private static Original lockBindingControl(Connection connection, String bindingId, boolean execution)
+            throws SQLException {
         requireTransaction(connection);
         String tenant;
         String session;
@@ -153,13 +179,44 @@ public final class JdbcCsiFilesRetirementGuard {
             }
             return null;
         }
+        if (execution && !profile && sessionRootExists(connection, tenant, session, false)) {
+            // The root must exist to order this path: a locking read of a missing
+            // root takes only a gap lock, which does not exclude binding control.
+            if (!sessionRootExists(connection, tenant, session, true)) {
+                throw unavailable();
+            }
+            // Same refusals as lockManagedSession for an ordinary binding: a pinned
+            // Session, a pinned request key, or a leftover profile slot or binding.
+            Pin pin = readPin(connection, tenant, session);
+            if (pin != null && (CsiFilesRetirementProfile.PROFILE.equals(pin.profile()) || pin.requestKey() != null)
+                    || hasCsiRuntimeMarker(connection, tenant, session)) {
+                throw unavailable();
+            }
+            return null;
+        }
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant, 10);
-        boolean retained = lockRetentionRoot(connection, tenant);
+        // Only a profile binding can be the pinned original that needs the
+        // retention root; any other binding is refused or answered null below
+        // whatever it holds (design 2026-11-06-managed-binding-control-tenant-guards).
+        boolean retained = profile && lockRetentionRoot(connection, tenant);
         Original original = lockManagedSession(connection, tenant, session);
         if (original == null ? profile : !retained || !bindingId.equals(original.bindingId())) {
             throw unavailable();
         }
         return original;
+    }
+
+    static boolean sessionRootExists(Connection connection, String tenantId, String sessionId,
+            boolean locking) throws SQLException {
+        try (PreparedStatement statement = statement(connection,
+                "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id = ?"
+                        + (locking ? " FOR UPDATE" : ""))) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
+            try (ResultSet rows = statement.executeQuery()) {
+                return rows.next();
+            }
+        }
     }
 
     private static boolean hasTable(Connection connection, String name) throws SQLException {
@@ -225,10 +282,13 @@ public final class JdbcCsiFilesRetirementGuard {
             throws SQLException {
         requireTransaction(connection);
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenantId, 10);
+        // Root before slot and binding rows: guard-free execution control locks
+        // only this root and then its own binding, so a placement owner that
+        // locked the binding first would close a cycle with it.
+        Pin pin = readPin(connection, tenantId, sessionId);
         List<Slot> slots = new ArrayList<>();
         List<Binding> bindings = new ArrayList<>();
         readRuntimeRows(connection, tenantId, sessionId, true, slots, bindings);
-        Pin pin = readPin(connection, tenantId, sessionId);
         if (pin == null || !CsiFilesRetirementProfile.PROFILE.equals(pin.profile())) {
             if (pin != null && pin.requestKey() != null
                     || slots.stream().anyMatch(slot -> isProfile(slot.request().getScope()))
@@ -513,12 +573,6 @@ public final class JdbcCsiFilesRetirementGuard {
                         row, "workspace_generation"), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "canonical_cwd"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(
                         row, "capability_digest"), com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(row, "isolation_class"));
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void requireTransaction(Connection connection) throws SQLException {

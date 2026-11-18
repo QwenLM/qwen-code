@@ -24,8 +24,6 @@ export default {
   '{{count}} hours': '{{count}}小時',
   Retry: '重試',
   'Connecting…': '正在連線…',
-  'Could not connect Qwen Subscription. Please try again.':
-    '無法連線 Qwen 訂閱，請重試。',
   'Generated UI': 'Generated UI 生成式介面',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     '在支援的本機工作階段中啟用內建 Generated UI。重新建立所屬工作階段後生效。',

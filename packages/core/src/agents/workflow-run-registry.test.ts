@@ -125,7 +125,12 @@ function bridged(
   registry?: WorkflowRunRegistry,
 ) {
   const { r, entry } = registered(runId, overrides, registry);
-  if (channel) r.setApprovalChangeCallback(() => {});
+  if (channel) {
+    // A host that can answer: the badge callback alone is display-only and
+    // no longer qualifies as a parking channel.
+    r.setApprovalChangeCallback(() => {});
+    r.setApprovalRequestCallback(() => {});
+  }
   const emitter = new AgentEventEmitter();
   const cleanup = r.bridgeApprovalEvents(runId, emitter);
   /** Emits approvalEvent(event) on `on` and returns it. */
@@ -428,6 +433,21 @@ describe('WorkflowRunRegistry', () => {
     expect(pending()).toEqual([]);
   });
 
+  it('fails closed when only a badge (approval-change) callback is registered', async () => {
+    // The shape the interactive TUI had: an approval-change consumer that
+    // repaints "needs approval" but cannot answer the request.
+    const { r, entry } = registered('wf_badge_only_host');
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    r.bridgeApprovalEvents('wf_badge_only_host', emitter);
+
+    const request = approvalEvent();
+    emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, request);
+
+    await expectCancelled(request.respond);
+    expect(entry.pendingApprovals).toEqual([]);
+  });
+
   it('isolates approvals from two agents that share a provider callId', async () => {
     const { emit, resolve, pending } = bridged('wf_shared_call_id');
     const { respond: firstRespond } = emit({ subagentId: 'agent-a' });
@@ -469,6 +489,7 @@ describe('WorkflowRunRegistry', () => {
     await expectCancelled(rejectedRespond);
 
     r.setApprovalChangeCallback(() => {});
+    r.setApprovalRequestCallback(() => {});
     const { respond: retryRespond } = emit({ timestamp: 1_700_000_000_200 });
 
     expect(pending()).toMatchObject([parkedAt(1_700_000_000_200)]);

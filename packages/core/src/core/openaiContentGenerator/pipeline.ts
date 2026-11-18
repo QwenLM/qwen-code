@@ -1632,7 +1632,6 @@ export class ContentGenerationPipeline {
     // Qwen disable path above has selected a chat-template switch.
     if (
       this.contentGeneratorConfig.authType === 'qwen-subscription' &&
-      (model === 'qwen3.8-max' || model === 'qwen3.8-flash') &&
       (reasoningDisabled || effectiveReasoning !== undefined)
     ) {
       delete typed['reasoning'];

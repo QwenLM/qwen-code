@@ -1064,6 +1064,9 @@ export function registerManagedContextRoutes(
         },
         execute: (reference, toolName, input) =>
           executor.execute(reference, toolName, input),
+        acknowledge: (reference) => {
+          executor.acknowledge(reference);
+        },
         cancel: (reference) => executor.cancel(reference),
       }),
     );

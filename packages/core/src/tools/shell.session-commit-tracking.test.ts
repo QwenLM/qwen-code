@@ -17,7 +17,8 @@
  * `git commit` runs through `ShellToolInvocation.execute()` in a real temp
  * repo, then the guard is asked whether the follow-up amend is allowed. The
  * fake `ShellExecutionService` really runs commands via `spawnSync`, so
- * `getGitHeadSync` / `getGitHead` see genuine HEADs, not stubbed SHAs.
+ * `getGitHeadBeforeCommand` / `getGitHead` see genuine HEADs, not stubbed
+ * SHAs.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -137,6 +138,16 @@ describe.skipIf(process.platform === 'win32')(
       rawGit('config commit.gpgsign false', dir);
       rawCommit('seed.txt', seed, subject, dir);
       return dir;
+    }
+
+    /** An initialized repository with no commit yet (unborn HEAD). */
+    function initUnbornRepo(): void {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+      fs.mkdirSync(repoDir, { recursive: true });
+      rawGit('init -q --initial-branch=main', repoDir);
+      rawGit('config user.email agent@example.com');
+      rawGit('config user.name Agent');
+      rawGit('config commit.gpgsign false');
     }
 
     /** A temp dir that is not a repository; removed in `afterEach`. */
@@ -670,6 +681,56 @@ describe.skipIf(process.platform === 'win32')(
       // `onSettleWired` starts registration asynchronously, so wait for the
       // registry to reflect it instead of sleeping a fixed guess.
       await vi.waitFor(() => expect(amendVerdict()).toBeNull());
+    });
+
+    it('registers a promoted initial commit in a repository with an unborn HEAD (issue #12514-D)', async () => {
+      // An empty repository gives both a failed `rev-parse HEAD` and an
+      // unborn branch the same null SHA. The promoted path used to skip
+      // registration for both, so the next amend of the agent's root commit
+      // was falsely blocked. Capture must distinguish "verified repo with no
+      // HEAD" from "probe failed", and lineage must expect a null predecessor.
+      initUnbornRepo();
+      fs.writeFileSync(path.join(repoDir, 'initial.txt'), 'initial\n');
+
+      await runPromoted(
+        'git add initial.txt && git commit -m "initial feature"',
+      );
+
+      expect(lastLog('%s')).toBe('initial feature');
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('does not register an existing root commit when the pre-spawn HEAD probe is terminated', async () => {
+      initUnbornRepo();
+      rawCommit('human.txt', 'human\n', 'human root');
+      const humanSha = headSha();
+      const gitPath = execSync('command -v git', { encoding: 'utf-8' }).trim();
+      const probeBinDir = makeScratchDir('qwen-12514-probe-');
+      const probeGitPath = path.join(probeBinDir, 'git');
+      fs.writeFileSync(
+        probeGitPath,
+        '#!/bin/sh\n' +
+          'if [ "$1" = rev-parse ] && [ "$2" = --verify ] && [ "$3" = HEAD ]; then\n' +
+          '  kill -TERM "$$"\n' +
+          'fi\n' +
+          `exec ${JSON.stringify(gitPath)} "$@"\n`,
+      );
+      fs.chmodSync(probeGitPath, 0o755);
+      vi.stubEnv(
+        'PATH',
+        `${probeBinDir}${path.delimiter}${process.env['PATH']}`,
+      );
+      // Load-bearing: this row's closing assertions also hold when the shim is
+      // bypassed (the lineage check then rejects on a non-null predecessor), so
+      // pin that the interception is live before relying on it.
+      expect(() => rawGit('rev-parse --verify HEAD')).toThrow();
+
+      await runPromoted('git commit -m "nothing staged"', true);
+      firePromoteSettle!();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(headSha()).toBe(humanSha);
+      expect(amendVerdict()?.blocked).toBe(true);
     });
 
     it('does not adopt a commit somebody else landed while a promoted child ran (issue #12514)', async () => {

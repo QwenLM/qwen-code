@@ -338,29 +338,40 @@ class ManagedNativeJournalSnapshotsTest {
     }
 
     protected void commitMonitor() {
-        JsonNode revision;
-        try {
-            revision = ManagedExtensionProjectionContractTest.fixtures().required("monitorChainCases")
-                    .get(0).required("revisions").get(0);
-        } catch (java.io.IOException error) {
-            throw new java.io.UncheckedIOException(error);
+        commitMonitor("snapshot-monitor", monitorRevision(0));
+    }
+
+    /** Commits {@code count} monitor runs, each under its own command, one journal page each. */
+    protected void commitMonitors(int count) {
+        JsonNode revision = monitorRevision(0);
+        for (int index = 0; index < count; index++) {
+            commitMonitor("snapshot-monitor-" + index, revision);
         }
-        tx.executeWithoutResult(status -> journal.commitMonitor("snapshot-monitor", revision.required("monitorRun"),
+    }
+
+    protected void commitNextMonitor() {
+        commitMonitor("snapshot-concurrent-next", monitorRevision(1));
+    }
+
+    private void commitMonitor(String name, JsonNode revision) {
+        tx.executeWithoutResult(status -> journal.commitMonitor(name, revision.required("monitorRun"),
                 revision.required("occurredAt").longValue()));
     }
 
-    protected void commitNextMonitor() throws java.io.IOException {
-        var revision = ManagedExtensionProjectionContractTest.fixtures().required("monitorChainCases")
-                .get(0).required("revisions").get(1);
-        tx.executeWithoutResult(status -> journal.commitMonitor("snapshot-concurrent-next", revision.required("monitorRun"),
-                revision.required("occurredAt").longValue()));
+    private static JsonNode monitorRevision(int index) {
+        try {
+            return ManagedExtensionProjectionContractTest.fixtures().required("monitorChainCases")
+                    .get(0).required("revisions").get(index);
+        } catch (java.io.IOException error) {
+            throw new java.io.UncheckedIOException(error);
+        }
     }
 
     protected long snapshotPins() {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'NATIVE_SNAPSHOT'", Long.class);
     }
 
-    private static final class SimulatedCrash extends RuntimeException { }
+    protected static final class SimulatedCrash extends RuntimeException { }
 
     protected static class FaultJdbc extends ManagedSchemaJdbcTemplate {
         String boundary;
@@ -368,14 +379,55 @@ class ManagedNativeJournalSnapshotsTest {
         boolean injected;
         Runnable afterPage;
         int pagesBeforePause;
+        /** Runs once, after the first claim that upserts the manifest row. */
+        volatile Runnable afterClaim;
+        /** Runs after each claim's locking read while the count lasts. */
+        volatile Runnable afterClaimLock;
+        final java.util.concurrent.atomic.AtomicInteger claimLocksToHook = new java.util.concurrent.atomic.AtomicInteger();
+        /** The claim's locking reads that returned, which also shows that the hook above recognises them. */
+        final java.util.concurrent.atomic.AtomicInteger claimReads = new java.util.concurrent.atomic.AtomicInteger();
+        /** Manifest claim upserts attempted, including those that failed. */
+        final java.util.concurrent.atomic.AtomicInteger claimUpserts = new java.util.concurrent.atomic.AtomicInteger();
+        /** Manifest claim upserts that failed on a lock, the deadlock victims among them. */
+        final java.util.concurrent.atomic.AtomicInteger claimDeadlocks = new java.util.concurrent.atomic.AtomicInteger();
 
         FaultJdbc(DataSource source) {
             super(source);
         }
 
         @Override
+        public <T> java.util.List<T> queryForList(String sql, Class<T> type, Object... arguments) {
+            var rows = super.queryForList(sql, type, arguments);
+            if (sql.startsWith("SELECT 1 FROM ma_resource WHERE resource_key = ? FOR UPDATE")) {
+                claimReads.incrementAndGet();
+                if (afterClaimLock != null && claimLocksToHook.getAndDecrement() > 0) {
+                    afterClaimLock.run();
+                }
+            }
+            return rows;
+        }
+
+        @Override
         public int update(String sql, Object... arguments) {
-            int changed = super.update(sql, arguments);
+            boolean claim = sql.startsWith("INSERT INTO ma_resource (")
+                    && java.util.Arrays.asList(arguments).contains("managed-native-journal-snapshot");
+            if (claim) {
+                claimUpserts.incrementAndGet();
+            }
+            int changed;
+            try {
+                changed = super.update(sql, arguments);
+            } catch (org.springframework.dao.PessimisticLockingFailureException lost) {
+                if (claim) {
+                    claimDeadlocks.incrementAndGet();
+                }
+                throw lost;
+            }
+            Runnable claimed = afterClaim;
+            if (claim && claimed != null) {
+                afterClaim = null;
+                claimed.run();
+            }
             if (boundary != null && sql.startsWith(boundary)) {
                 injected = true;
                 throw new SimulatedCrash();

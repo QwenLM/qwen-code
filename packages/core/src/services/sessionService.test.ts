@@ -1040,7 +1040,12 @@ describe('SessionService', () => {
       expect(result.items[0].sessionId).toBe(sessionIdC); // newest
       expect(result.items[1].sessionId).toBe(sessionIdB);
       expect(result.hasMore).toBe(true);
-      expect(result.nextCursor).toBeDefined();
+      // The boundary mtime is unique here, so this pins the published format:
+      // a bare numeric mtime satisfies every shape-agnostic cursor assertion
+      // in this suite while breaking the documented cursor.
+      expect(result.nextCursor).toMatch(
+        /^\d+(\.\d+)?\|[0-9a-f-]{32,36}\.jsonl$/,
+      );
     });
 
     it('should paginate with cursor parameter', async () => {
@@ -1056,6 +1061,40 @@ describe('SessionService', () => {
       expect(result.items).toHaveLength(1);
       expect(result.items[0].sessionId).toBe(sessionIdA);
       expect(result.hasMore).toBe(false);
+    });
+
+    it('should return every session once when all files share an mtime', async () => {
+      // A tie group larger than one page must not be dropped at the page
+      // boundary: the cursor has to carry the ordering tie-break, not just
+      // the timestamp (bulk copies, restores and coarse-timestamp
+      // filesystems all produce equal mtimes).
+      const ids = Array.from({ length: 25 }, (_, index) =>
+        (index + 1).toString(16).padStart(32, '0'),
+      );
+      // readdir order is not name order (ext4 returns hash order), so hand the
+      // files over reversed: only the sort's tie-break can restore the order
+      // the cursor filter assumes.
+      listIds(...ids.slice().reverse());
+      byMtime({}, Date.now());
+      vi.mocked(jsonl.readLines).mockImplementation(async (filePath) => [
+        {
+          ...recordA1,
+          sessionId: filePath.toString().match(/([0-9a-f]{32})\.jsonl/)![1],
+        },
+      ]);
+
+      const seen: string[] = [];
+      let cursor: number | string | undefined;
+      for (let page = 0; page < 10; page++) {
+        const result = await sessionService.listSessions({ cursor, size: 5 });
+        seen.push(...result.items.map((item) => item.sessionId));
+        if (!result.hasMore) break;
+        cursor = result.nextCursor;
+        expect(cursor).toBeDefined();
+      }
+
+      expect(seen).toHaveLength(ids.length);
+      expect(new Set(seen).size).toBe(ids.length);
     });
 
     it('should skip files from different projects', async () => {

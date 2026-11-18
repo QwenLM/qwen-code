@@ -182,7 +182,7 @@ headless 的主循环以 `maxRounds: 1` 运行。因此它为每一轮做的准�
 | `interactionSpanByHost`  | ACP 的 span 挂在 daemon 的 trace 下                                                                                                                                                                                                                                                                                                                                                                                      | 改为输入：client 加入宿主为该 prompt 开启的 span；ACP 修改默认值之前完成                                                                                                                                               |
 | `userTurnRecordedByHost` | ACP 在 slash 命令执行前，按用户输入的原样记录 prompt，连同显示文本、附件、resource link 和 daemon prompt id 一起记录，并在首次发送前为这一轮建立文件历史快照，所以发出前就被取消的 prompt 也有快照；在 retry、continue 或 restore 上，宿主已经启动了 todo 工作链；在 Goal 模型轮上，宿主已经记录了 runtime 续写的消息；在 cron 模型轮上，宿主在请求进入历史后记录 prompt；在后台通知模型轮上，宿主记录通知及其报告的任务 | 改为输入：宿主传入这条记录，由 client 写入；ACP 修改默认值之前完成                                                                                                                                                     |
 
-`toolCallPreparations`、`memoryRecallQuery`、`stopPolicies` 和 `historyPromptId` 不在表中：第一个只是请求一个额外的事件，第二个把宿主在发送前展开的 prompt 原文交给召回，第三个加入宿主在 stop 点继续的理由（见 [stop 点续发](#stop-点续发)），第四个让 `Retry` 沿用它所替代那次尝试的历史标识；四者都不关闭任何行为。PR 2c-1 删除了 `stopHookRunByHost`，ACP 原来用它在自己的 Stop 循环里触发 Stop hook。
+`toolCallPreparations`、`memoryRecallQuery`、`stopPolicies` 和 `historyPromptId` 不在表中：第一个只是请求一个额外的事件，第二个把宿主在发送前展开的 prompt 原文交给召回，第三个加入宿主在 stop 点继续的理由（见 [stop 点续发](#stop-点续发)），第四个让 `Retry` 沿用它所替代那次尝试的历史标识；四者都不关闭任何行为。`skipMemoryExtraction` 也不在表中：它确实关闭了 client 的记忆提取与 Dream，但原因是这一轮转发的是 channel 的消息，而不是宿主自己做了这部分工作，因此它是长期输入，而不是过渡步骤。PR 2c-1 删除了 `stopHookRunByHost`，ACP 原来用它在自己的 Stop 循环里触发 Stop hook。
 
 新增任何为某个宿主关闭 client 部分工作的选项，都必须在这里登记一行。入口在表中还有未关闭的行时，不修改它的默认值。
 
@@ -308,7 +308,7 @@ PR 2c-1 把 PR 2a 所迁轮次的 stop 点迁到 client 的链上。只有尚未
 | 每次续发都走 ACP 的旧发送路径，并运行 ACP 的工具步骤                                  | 与这一轮其余部分一样，使用 client 的模型轮和共享工具批                                                                                                  |
 | ACP 在 Stop 循环之后执行托管记忆任务                                                  | 这一轮最后一个回复自行停下时由 client 执行；这一轮以其他方式结束时由 ACP 执行，例如达到 Stop hook 拦截上限、结束在 Steer 轮次上，或某个工具结束了这一轮 |
 
-client 在 Stop hook 续发中保留宿主的 span、工具守卫和 stop 策略选项，因此不会为续发另开 span，也不会为续发中的工具打开自己的守卫。每次 Stop hook 或 Todo Stop Guard 续发时，ACP 都重置自己的工具守卫状态，包括因 Live 工具而保留 ACP 工具执行器的情况。同一次续发中的工具结果请求沿用这一预算。
+client 在 Stop hook 续发中保留宿主的 span、工具守卫、stop 策略和跳过记忆提取的选项，因此不会为续发另开 span，也不会为续发中的工具打开自己的守卫。每次 Stop hook 或 Todo Stop Guard 续发时，ACP 都重置自己的工具守卫状态，包括因 Live 工具而保留 ACP 工具执行器的情况。同一次续发中的工具结果请求沿用这一预算。
 
 hook 诊断消息不会重新打开已结束回复的中断窗口。每个新的模型请求都会重新开始捕获最终答案；没有后续请求的诊断消息会保留前一个答案。
 
@@ -318,13 +318,13 @@ hook 诊断消息不会重新打开已结束回复的中断窗口。每个新的
 
 PR 2c-2 让另外五类 ACP 轮次使用共享模型轮、共享工具批和 client 的 stop 点。其中两类是 PR 2a 没有纳入的全新 prompt：channel prompt 和 Goal 提案审批轮次。另外三类重新进入会话中已有的轮次：retry、继续被打断的轮次（continue），以及恢复一个未回答的 `ask_user_question`（restore）。Goal 轮次、cron 和后台通知在 PR 2c-3 和 2c-4 中迁移。
 
-| 轮次                     | 设置开启后                                                                                                                                                                       |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| channel prompt           | 与其他全新 prompt 一样是 `UserQuery`，和现在一样不带 submitted prompt 和 workflow 输入；它的回复不会被排队的输入打断，它的工具结果从不结束这一轮，重复工具失败守卫保持关闭       |
-| Goal 提案审批            | `UserQuery`；会话和现在一样结算提案；Todo Stop Guard 让位或 Stop hook 达到上限时，提案不会启动 Goal                                                                              |
-| retry                    | 和现在一样由 ACP 剥离失败的那次尝试，retry 一直没有发出时再把它放回；第一轮是 `Retry`，带上那次尝试的标识 `historyPromptId`，以及 `admitUserPrompt` 给出的 UserPromptSubmit 结果 |
-| continue                 | 和现在一样由 ACP 剥离被打断的那段输入，或关闭被打断的调用；第一轮是 `Retry`，带 `historyPromptId`，不运行 UserPromptSubmit；第一条请求一直没有发出时，被打断的那段输入按原样放回 |
-| 恢复 `ask_user_question` | ACP 用自己的工具步骤重新提问；回答作为第一轮，即一个 `Retry`；之后的批次使用共享工具批                                                                                           |
+| 轮次                     | 设置开启后                                                                                                                                                                                                                                    |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| channel prompt           | 与其他全新 prompt 一样是 `UserQuery`，和现在一样不带 submitted prompt 和 workflow 输入；它的回复不会被排队的输入打断，它的工具结果从不结束这一轮，重复工具失败守卫保持关闭；每个模型轮都带 `skipMemoryExtraction`，因此不调度记忆提取或 Dream |
+| Goal 提案审批            | `UserQuery`；会话和现在一样结算提案；Todo Stop Guard 让位或 Stop hook 达到上限时，提案不会启动 Goal                                                                                                                                           |
+| retry                    | 和现在一样由 ACP 剥离失败的那次尝试，retry 一直没有发出时再把它放回；第一轮是 `Retry`，带上那次尝试的标识 `historyPromptId`，以及 `admitUserPrompt` 给出的 UserPromptSubmit 结果                                                              |
+| continue                 | 和现在一样由 ACP 剥离被打断的那段输入，或关闭被打断的调用；第一轮是 `Retry`，带 `historyPromptId`，不运行 UserPromptSubmit；第一条请求一直没有发出时，被打断的那段输入按原样放回                                                              |
+| 恢复 `ask_user_question` | ACP 用自己的工具步骤重新提问；回答作为第一轮，即一个 `Retry`；之后的批次使用共享工具批                                                                                                                                                        |
 
 重新进入的轮次即使带着工具结果，第一轮也是 `Retry` 而不是 `ToolResult`：`ToolResult` 不会开启 client 的一次交互，上一个 prompt 的循环检测计数会延续下来，UserPromptSubmit 也会在这些结果上运行。headless 用 `ToolResult` 继续被打断的轮次，是因为它每次运行都是一个新进程。client 不给 `Retry` 加系统提醒，所以 ACP 和现在一样为它加上 plan、arena 和 output-style 提醒；ACP 取走的 todo 提醒就是 client 会取的那一条。
 
@@ -420,6 +420,16 @@ PR 3b-2b 让轮次等待自己的工具批。工具批的完成步骤仍然结�
 | 已执行的调用全部被历史应答过的工具批不发送任何内容                     | 相同：这一批的重放应答不会单独发出                                           |
 
 如果轮次的流结束时还有另一个流在进行（它可能就是发出这一轮的流），轮次不等待：只由 provider 重放组成的响应会在自己的流关闭之前发出应答。这时工具批和以前一样等待各个流结束后自行完成，等待模型流的各个工具批仍在一次续发中发出。
+
+PR 3c-1 让轮次发出工具批接着发出的那一轮。工具批的完成步骤仍然修复历史、按交互 owner 拆分结果、启动工具使用摘要并检查各项停止条件，然后把下一轮交给轮次。轮次像 loop 的 `nextRound` 在工具批之后构建一轮那样构建它，并把它发出：
+
+| TUI 现在                                                                                   | 开启设置后                               |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------- |
+| 完成步骤取走排队到工具边界的输入（先是 mid-turn 消息，然后是 teammate 消息），并发出下一轮 | 轮次在工具批之后取走这些输入并发出这一轮 |
+
+在轮次发出这一轮之前，工具批一直占着 scheduler，并让 TUI 保持非 Idle，因此排队的工具批和空闲时的任务不会在中间开始。如果另一个流还在进行，轮次不等待自己的工具批，就把这一轮留给工具批，由工具批自己发出。等待模型流的各个工具批仍在一次续发中发出，由流最后结束的那个轮次发出。
+
+Ctrl+Y 的重试已经走共享轮次，并从 PR 3b-2b 起等待自己的工具批。PR 3c-1 在 Ink 对拍套件中加入重试场景，包括重试的工具结果轮的响应又调用工具；还加入工具运行期间排队的输入这一场景。
 
 ## 迁移计划
 
@@ -521,6 +531,9 @@ PR 4–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 - 断开后重试的流；
 - 同一会话中的两个 prompt；
 - 模型错误；
+- 模型错误后的重试，以及再次失败的重试；
+- 重试的工具结果轮，其响应又调用一个工具；
+- 工具运行期间排队的输入，它和工具结果一起发出；
 - 拦截的 UserPromptSubmit hook；
 - 拦截一次的 Stop hook。
 

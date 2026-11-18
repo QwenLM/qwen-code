@@ -63,6 +63,34 @@ test('reports failed jobs, steps and tests directly on a PR', () => {
   assert.doesNotMatch(comment, /Windows/);
 });
 
+test('names a timed-out (cancelled) job even when no job concluded failure', () => {
+  // The #16214 incident shape: 1 cancelled, rest success/skipped, 0 failure.
+  // The renderer must still name the timed-out leg, not drop every job.
+  const comment = renderFailureComment({
+    analysis: { workflow: 'E2E Tests', tests: [] },
+    occurrence: {
+      sha: '80953e053b40159d',
+      runId: '41743539611',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/41743539611',
+    },
+    jobs: [
+      {
+        name: 'E2E Test (Linux) - sandbox:docker - shard 1/1',
+        conclusion: 'cancelled',
+        html_url:
+          'https://github.com/QwenLM/qwen-code/actions/runs/41743539611/job/9001',
+        steps: [{ name: 'Run E2E tests', conclusion: 'cancelled' }],
+      },
+      { name: 'Build for E2E', conclusion: 'success', steps: [] },
+      { name: 'nightly', conclusion: 'skipped', steps: [] },
+    ],
+  });
+  assert.match(comment, /sandbox:docker.*\/job\/9001/);
+  assert.match(comment, /Run E2E tests/);
+  assert.doesNotMatch(comment, /Build for E2E/);
+  assert.doesNotMatch(comment, /nightly/);
+});
+
 test('keeps contributor text on one line and reports cancelled steps and test overflow', () => {
   const hostile = 'name`\r\n[link](https://example.com)';
   const comment = renderFailureComment({

@@ -15,38 +15,41 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.List;
+import java.util.Map;
 
 public interface ManagedSessionStore {
     public void authorizeLifecycle(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+            RuntimeLifecycleAuthority authority);
 
     public void authorizeOrdinary(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request);
 
-    public java.util.Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
+    public Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request);
 
     public WriterGrant acquireWriter(String tenantId, String sessionId,
             String writerToken, AcquireWriterRequest request);
 
     public WriterGrant acquireWriter(String tenantId, String sessionId, String writerToken,
-            AcquireWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+            AcquireWriterRequest request, RuntimeLifecycleAuthority authority);
 
     public WriterGrant renewWriter(String tenantId, String sessionId,
             String writerToken, RenewWriterRequest request);
 
     public WriterGrant renewWriter(String tenantId, String sessionId, String writerToken,
-            RenewWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+            RenewWriterRequest request, RuntimeLifecycleAuthority authority);
 
     public SealReceipt sealWriter(String tenantId, String sessionId,
             String writerToken, SealWriterRequest request);
 
     public SealReceipt sealWriter(String tenantId, String sessionId, String writerToken,
-            SealWriterRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+            SealWriterRequest request, RuntimeLifecycleAuthority authority);
 
     public void quiesceOwnership(String tenant, String session, String token,
             ManagedSessionStoreModels.QuiesceOwnershipRequest request);
@@ -62,7 +65,7 @@ public interface ManagedSessionStore {
             String writerToken, CommitTransactionRequest request);
 
     public CommitReceipt commit(String tenantId, String sessionId, String writerToken,
-            CommitTransactionRequest request, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+            CommitTransactionRequest request, RuntimeLifecycleAuthority authority);
 
     public RestoreHead restore(String tenantId, String workspaceId,
             String sessionId, String writerToken);
@@ -93,7 +96,7 @@ public interface ManagedSessionStore {
             String workspaceId, String sessionId, String instructions);
 
     public ToolResultResourceRef publishAgentSkills(String tenantId,
-            String workspaceId, String sessionId, List<java.util.Map<String, Object>> skills);
+            String workspaceId, String sessionId, List<Map<String, Object>> skills);
 
     public ToolResultResourceRef publishInheritedExtensionResource(String tenantId, String workspaceId, String sessionId, StoredResource source);
 
@@ -102,15 +105,15 @@ public interface ManagedSessionStore {
 
     public ToolResultResourceRef publishToolResult(String tenantId, String sessionId,
             String writerToken, PublishToolResultRequest request,
-            com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority);
+            RuntimeLifecycleAuthority authority);
 
     public boolean hasLiveWriter(String tenantId, String sessionId);
 
     public static String sessionScopeKey(String tenantId, String sessionId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenantId, sessionId);
+        return ManagedSchemaKeys.key(tenantId, sessionId);
     }
 
     public static String resourceKey(String scopeKey, String resourceId) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scopeKey, resourceId);
+        return ManagedSchemaKeys.key(scopeKey, resourceId);
     }
 }

@@ -2398,10 +2398,43 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       return { ...attached, flowId: event!.data.flowId, calls };
     }
 
-    it.each([null, 'session-a'])(
-      'activates subscription through its captured owner (session: %s)',
-      async (sessionId) => {
+    it.each([
+      [null, false, 'qwen3.8-max'],
+      ['session-a', false, 'qwen3.8-max'],
+      [null, true, 'fixture-openai'],
+      ['session-a', true, 'qwen3.8-max'],
+    ] as const)(
+      'activates through its captured owner (session: %s, project override: %s)',
+      async (sessionId, projectOverride, modelId) => {
         const attached = await openSidebar(sessionId);
+        if (projectOverride) {
+          attached.calls.providers.mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace-a',
+            initialized: true,
+            current: {
+              authType: 'openai',
+              modelId: 'fixture-openai(openai)',
+            },
+            providers: [
+              {
+                kind: 'model_provider',
+                status: 'ok',
+                authType: 'openai',
+                current: true,
+                models: [
+                  {
+                    modelId: 'fixture-openai(openai)',
+                    baseModelId: 'fixture-openai',
+                    name: 'Fixture OpenAI',
+                    isCurrent: true,
+                    isRuntime: false,
+                  },
+                ],
+              },
+            ],
+          });
+        }
         expect(subscriptionMocks.run).not.toHaveBeenCalled();
         await attached.messageHandler?.({
           type: 'qwenSubscriptionActivate',
@@ -2421,16 +2454,17 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
             sessionId,
             'qwen3.8-max(qwen-subscription)',
           );
+          expect(attached.calls.providers).not.toHaveBeenCalled();
         } else {
           expect(attached.calls.setModel).not.toHaveBeenCalled();
+          expect(attached.calls.providers).toHaveBeenCalledOnce();
         }
-        expect(attached.calls.providers).toHaveBeenCalledOnce();
         expect(attached.postMessage).toHaveBeenCalledWith({
           type: 'qwenSubscriptionActivationResult',
           data: {
             flowId: attached.flowId,
             requestId: 'request',
-            modelId: 'qwen3.8-max',
+            modelId,
           },
         });
         expect(attached.postMessage).not.toHaveBeenCalledWith(

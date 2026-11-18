@@ -12,6 +12,10 @@ export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
 // channel worker (or a private-parent channel bridge) set it.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 export const CHANNEL_OUTPUT_MODE_META_KEY = 'qwen.channel.outputMode';
+// Marks a slash-command notice that must ride the turn's reply: a response
+// boundary clears the chunk collection, so the notice needs its own slot and
+// the producer and both bridges have to agree on the key.
+export const CHANNEL_TURN_NOTICE_META_KEY = 'turnNotice';
 export const CHANNEL_TASK_RESULT_META_KEY = 'qwen.channel.taskResult';
 export const CHANNEL_TASK_RESULT_PARTIAL_META_KEY =
   'qwen.channel.taskResultPartial';
@@ -181,6 +185,8 @@ interface ChannelAgentBridgeEventMap {
    */
   disconnected: [code: number | null, signal: NodeJS.Signals | null];
   textChunk: [sessionId: string, chunk: string];
+  /** Also prefixes prompt()'s result, with a blank line before a non-empty body. */
+  turnNotice: [sessionId: string, notice: string];
   backgroundResponse: [
     sessionId: string,
     text: string,

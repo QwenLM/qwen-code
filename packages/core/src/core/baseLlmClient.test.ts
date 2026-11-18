@@ -827,6 +827,43 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('returns the main generator for a provider-qualified selector naming the main model', async () => {
+      const mainBaseUrl = 'https://main.invalid/v1';
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'main-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: mainBaseUrl,
+      });
+      registerOnly(AuthType.USE_OPENAI, 'main-model', { id: 'main-model' });
+
+      const resolved = await resolve('openai:main-model');
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(resolved.model).toBe('main-model');
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('returns the main generator for an endpoint-pinned selector matching the main base URL', async () => {
+      const mainBaseUrl = 'https://main.invalid/v1';
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'main-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: mainBaseUrl,
+      });
+      registerOnly(
+        AuthType.USE_OPENAI,
+        'main-model',
+        { id: 'main-model' },
+        mainBaseUrl,
+      );
+
+      const resolved = await resolve(`openai:main-model\0${mainBaseUrl}`);
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(resolved.model).toBe('main-model');
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
     it('returns the active runtime generator when model matches the runtime view', async () => {
       const runtimeContentGenerator = bareGenerator();
       crossProviderConfig.getContentGenerator = vi

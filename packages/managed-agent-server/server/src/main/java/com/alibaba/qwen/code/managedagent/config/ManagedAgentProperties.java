@@ -975,7 +975,7 @@ public class ManagedAgentProperties
     @Setter
     public static class Automation
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.Automation {
-        private boolean enabled;
+        private boolean enabled = true;
         @DurationUnit(ChronoUnit.MILLIS)
         private Duration scanDelay = Duration.ofSeconds(10);
         @DurationUnit(ChronoUnit.MILLIS)

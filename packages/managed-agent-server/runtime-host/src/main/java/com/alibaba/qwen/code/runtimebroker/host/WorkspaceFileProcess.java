@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.host;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFiles;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -11,11 +12,12 @@ import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 /** Bounded Workspace file exchanges using the configured local CLI. */
-public final class WorkspaceFileProcess implements com.alibaba.qwen.code.managedagent.contracts.workspace.LocalWorkspaceFiles {
+public final class WorkspaceFileProcess implements LocalWorkspaceFiles {
     public static final int MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
     public static final int MAX_UPLOAD_REQUEST_BYTES = 12 * 1024 * 1024;
     private static volatile Capability cachedCapability;
@@ -87,7 +89,7 @@ public final class WorkspaceFileProcess implements com.alibaba.qwen.code.managed
 
     private static List<FileIdentity> identity(String node, String entry) {
         try {
-            var identities = new java.util.ArrayList<FileIdentity>(2);
+            var identities = new ArrayList<FileIdentity>(2);
             for (String configured : List.of(node, entry)) {
                 Path path = Path.of(configured);
                 if (!path.isAbsolute()) {

@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.contracts.workspace;
 
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceCsiReservations;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker.ResidentWorkspace;
 import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -49,21 +51,21 @@ public class ResidentWorkspaceCatalog {
 
     public ResidentWorkspace require(RuntimeScope scope) {
         if (!ResidentWorkspaceProfile.selects(scope)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return configured.stream().filter(value -> value.registration().tenantId().equals(scope.getTenantId())
                 && value.workspaceId().equals(scope.getWorkspaceId())
                 && Long.toString(value.workspaceGeneration()).equals(scope.getWorkspaceGeneration())
                 && value.registration().mountRoot().equals(scope.getCanonicalCwd()))
-                .findFirst().orElseThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore::unavailable);
+                .findFirst().orElseThrow(WorkspaceExecutionStore::unavailable);
     }
 
     public RuntimeProvisionRequest request(ContextBinding binding) {
         var selected = find(binding);
         if (selected == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
-        return new RuntimeProvisionRequest(scope(selected), null, com.alibaba.qwen.code.managedagent.repository.WorkspaceCsiReservations.PROVISIONER_KIND,
+        return new RuntimeProvisionRequest(scope(selected), null, WorkspaceCsiReservations.PROVISIONER_KIND,
                 selected.registration().storageId());
     }
 

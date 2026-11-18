@@ -2516,6 +2516,23 @@ describe('release workflow', () => {
     );
   });
 
+  it('selects the apt mirror before the always-cold sandbox build', () => {
+    // #16271: this lane prunes the builder cache, so its apt layers are always
+    // cold — the same defect #16214 fixed for the E2E leg. It must source the
+    // shared probe and apply it before `build:sandbox`, so a mainland host
+    // builds against the VPC intranet mirror rather than the throttled default.
+    // Match the source statement, not a substring — the shellcheck directive
+    // above it also names the file.
+    expect(dockerIntegrationScript).toMatch(
+      /^source .*apt-mirror-probe\.sh"$/m,
+    );
+    const applyIndex = dockerIntegrationScript.indexOf('apply_apt_mirror');
+    expect(applyIndex).toBeGreaterThan(-1);
+    expect(
+      dockerIntegrationScript.indexOf('npm run build:sandbox'),
+    ).toBeGreaterThan(applyIndex);
+  });
+
   it('prunes BuildKit cache and gates the docker data root before the build and the vitest phase', () => {
     // #13479: run 37374675168 passed the job-start disk floor gate and the
     // runner still died on ENOSPC 24 minutes into the docker test step. The
@@ -2591,6 +2608,9 @@ describe('release workflow', () => {
     dockerPostFloorKb,
     postGateExit,
     inspectTimesOut = false,
+    aptDefaultRate,
+    aptAliyunRate,
+    aptTunaRate,
   } = {}) => {
     const directory = mkdtempSync(
       join(tmpdir(), 'release-docker-integration-'),
@@ -2647,8 +2667,25 @@ if [ "$1" = 'info' ]; then
 fi
 exit 0`,
     );
-    stub('npm', `printf 'npm %s\\n' "$*" >> "$CALLS_LOG"`);
+    stub(
+      'npm',
+      `printf 'npm %s flags=%s\\n' "$*" "\${BUILD_SANDBOX_FLAGS:-}" >> "$CALLS_LOG"`,
+    );
     stub('npx', `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"`);
+    // Deterministic stand-in for the probe's range reads so the suite stays
+    // hermetic (#16278 R1-1): answer the -w '%{http_code} %{speed_download}'
+    // projection per URL, default slow + one fast mirror.
+    stub(
+      'curl',
+      `for url; do :; done
+case "$url" in
+  *deb.debian.org*) printf '206 %s' "\${CURL_DEFAULT_RATE:-10000}" ;;
+  *mirrors.aliyun.com*) printf '206 %s' "\${CURL_ALIYUN_RATE:-5000000}" ;;
+  *mirrors.tuna.tsinghua.edu.cn*) printf '206 %s' "\${CURL_TUNA_RATE:-0}" ;;
+  *mirrors.cloud.aliyuncs.com*) printf '000 0' ;;
+  *) printf '000 0' ;;
+esac`,
+    );
     if (!helperAbsent) {
       // Both checkpoints share this stub: count invocations so a case can
       // fail the pre-vitest gate while the pre-build gate passes.
@@ -2683,6 +2720,10 @@ exit 0`,
         PRUNE_FAILS: pruneFails ? '1' : '0',
         IMAGE_PRUNE_FAILS: imagePruneFails ? '1' : '0',
         DOCKER_INFO_FAILS: dockerInfoFails ? '1' : '0',
+        BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true',
+        CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
+        CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
+        CURL_TUNA_RATE: String(aptTunaRate ?? 0),
       };
       // The floor knobs come from the test, never the ambient environment:
       // the suite's verdict must not depend on the env of whoever runs it.
@@ -2720,6 +2761,30 @@ exit 0`,
       rmSync(directory, { recursive: true, force: true });
     }
   };
+
+  it.skipIf(process.platform === 'win32')(
+    'selects the fast apt mirror and preserves the CI label in the build flags',
+    () => {
+      const { result, calls } = runDockerIntegrationScript();
+      expect(result.status).toBe(0);
+      expect(calls).toContain('--build-arg APT_MIRROR=mirrors.aliyun.com');
+      expect(calls).toContain('--label org.qwen-code.ci.sandbox=true');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'adds no apt mirror build arg when every endpoint is slow',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        aptDefaultRate: 10000,
+        aptAliyunRate: 20000,
+        aptTunaRate: 15000,
+      });
+      expect(result.status).toBe(0);
+      expect(calls).not.toContain('--build-arg APT_MIRROR=');
+      expect(calls).toContain('--label org.qwen-code.ci.sandbox=true');
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'reclaims without the disk gate or the lock protocol on hosted runners',

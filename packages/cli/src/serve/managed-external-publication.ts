@@ -306,7 +306,7 @@ export class ManagedExternalPublication
         READ_BYTES,
         Math.max(0, stream.byteLength - offset),
       );
-      let bytes = Buffer.alloc(0);
+      let bytes: Buffer = Buffer.alloc(0);
       if (length) {
         const result = await channel.store.readRange({
           manifestRef: manifest.ref,

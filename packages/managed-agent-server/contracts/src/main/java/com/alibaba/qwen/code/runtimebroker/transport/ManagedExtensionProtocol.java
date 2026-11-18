@@ -7,9 +7,11 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /** Narrow Hosted controls; executable settings are added only by the Java preparation gateway. */
@@ -66,8 +68,8 @@ public final class ManagedExtensionProtocol {
                     || !(command.get("actorKey") instanceof String actor) || !actor.matches("[a-f0-9]{64}")
                     || !counter(operation.get("expectedRevision"), 0)
                     || BrokerValues.exactLong(operation.get("expectedRevision")) == 9_007_199_254_740_991L
-                    || !java.util.Objects.equals(operation.get("expectedRevision"), command.get("expectedRevision"))
-                    || !java.util.Objects.equals(operation.get("extensions"), command.get("extensions"))
+                    || !Objects.equals(operation.get("expectedRevision"), command.get("expectedRevision"))
+                    || !Objects.equals(operation.get("extensions"), command.get("extensions"))
                     || !(operation.get("extensions") instanceof List<?> pins) || pins.size() > 32
                     || !(operation.get("baseMcpServers") instanceof List<?> servers) || servers.size() > 32
                     || operation.get("baseHookCatalog") != null && !(operation.get("baseHookCatalog") instanceof Map)) {
@@ -111,7 +113,7 @@ public final class ManagedExtensionProtocol {
                     || !(operation.get("extensionId") instanceof String id) || !id.matches("ext_[a-f0-9-]{36}")
                     || !(operation.get(field) instanceof String path) || path.isEmpty() || path.length() > 4096
                     || path.indexOf('\0') >= 0 || path.startsWith("/") || path.contains("\\")
-                    || java.util.Arrays.stream(path.split("/", -1)).anyMatch(segment -> segment.equals(".."))) {
+                    || Arrays.stream(path.split("/", -1)).anyMatch(segment -> segment.equals(".."))) {
                 throw invalid();
             }
         }
@@ -138,7 +140,7 @@ public final class ManagedExtensionProtocol {
                 throw invalidResponse();
             }
             if (("extension-activate".equals(request.get("kind")) || "extension-reconcile".equals(request.get("kind")))
-                    && !java.util.Objects.equals(BrokerValues.exactLong(request.get("revision")), BrokerValues.exactLong(result.get("revision")))) {
+                    && !Objects.equals(BrokerValues.exactLong(request.get("revision")), BrokerValues.exactLong(result.get("revision")))) {
                 throw invalidResponse();
             }
             if ("extension-reconcile".equals(request.get("kind")) && "stopped".equals(result.get("state"))) {
