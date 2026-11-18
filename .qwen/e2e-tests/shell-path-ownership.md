@@ -50,3 +50,10 @@ The R15 candidate has 1,375 passing tests across the four directly affected perm
 16. Preserve the existing case-arm and fd-close controls. A case pattern close must not close its surrounding subshell. A dynamic tee operand after an fd close remains visible alongside the conservative redirect operation.
 
 All 30 new R16 regressions were run against the parent production files and failed, then passed after the fixes. The final six files contain 2,167 passing tests, including the real scheduler. Changed-file ESLint and Prettier pass. Core typecheck still reports the same 17 unrelated diff, glob and zod errors; no full build, packaged CLI or ACP result is claimed.
+
+## 2026-11-18 R17 addendum
+
+17. Outer compound splitting and payload extraction share one `commandSubstitutionEnd` implementation. It distinguishes quotes, nested substitutions, case arms and command/process substitution boundaries. An unclosed substitution emits an uncertain operation instead of an empty safe-looking result. Wrapper and substitution depths are independent, so nested literal substitutions do not inherit wrapper uncertainty.
+18. Preserve wrapper redirects, adjacent descriptor and redirect operators, process-fd destinations, function-call cwd uncertainty, escaped-control uncertainty, and eval or wrapper-prefix HOME/CDPATH state. Bare negation is skipped before the version-dependent `time --` guard. Glob-only reads waive the unresolved floor only when no matching deny rule exists; ask rules alone do not trigger it.
+
+The R17 matrix has 22 regressions observed failing on the parent before the fixes: 16 structure/path cases, two additional depth/conditional cases, three negated time cases and one deny-protected brace read. An additional unclosed-substitution guard verifies the generic fail-closed path. The final six files contain 2,190 passing tests. A macOS Bash 3.2.57 isolated probe confirmed the sharpest quoted-substitution write produced `hi\n` in the protected fixture. Changed-file ESLint and Prettier pass; the same 17 unrelated type errors and lack of a packaged CLI or ACP run remain explicit.
