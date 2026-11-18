@@ -1201,6 +1201,30 @@ describe('message group deletion', () => {
       expect(Object.keys(kept[0]!.diffAfterBackups!)).toEqual(['f', 'g']);
     });
 
+    it('refuses a full-transcript fold that its retained Session caller cannot install', () => {
+      const state = Array.from({ length: MAX_SNAPSHOTS + 1 }, (_, index) =>
+        checkpoint(String(index), index === 1 ? { f: backup() } : {}),
+      );
+      // The full timeline can fold into checkpoint 0, but Session holds only
+      // the last MAX snapshots and has no such predecessor after persistence.
+      expect(
+        removeFileHistorySnapshots(state, new Set(['api-1']))[0]!
+          .diffAfterBackups,
+      ).toEqual({ f: backup() });
+      expect(() =>
+        removeFileHistorySnapshots(
+          state.slice(-MAX_SNAPSHOTS),
+          new Set(['api-1']),
+        ),
+      ).toThrow(/recovery evidence/);
+      const records = transcript(state);
+      const before = JSON.stringify(records);
+      expect(() =>
+        deleteTranscriptMessageGroups(records, ['1'], anchor),
+      ).toThrow(MessageGroupDeletionError);
+      expect(JSON.stringify(records)).toBe(before);
+    });
+
     it('accepts empty and redundant ordinary middle deletion', () => {
       const cases: Array<SerializedFileHistorySnapshot['trackedFileBackups']> =
         [{}, { f: backup() }];

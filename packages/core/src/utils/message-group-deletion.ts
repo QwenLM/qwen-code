@@ -20,7 +20,12 @@ import {
 } from './transcript-records.js';
 
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
+import type { MAX_SNAPSHOTS } from '../services/file-history-limits.js';
 import { removeFileHistorySnapshots } from './file-history-snapshots.js';
+
+// Session installs only this retained view after the transcript is replaced.
+// Keep utils a runtime leaf while making a changed limit a type error here.
+const SESSION_HISTORY_LIMIT: typeof MAX_SNAPSHOTS = 100;
 
 export interface MessageGroup {
   id: string;
@@ -518,10 +523,14 @@ export function deleteTranscriptMessageGroups(
   }
   let retainedSnapshots: SerializedFileHistorySnapshot[];
   try {
-    retainedSnapshots = removeFileHistorySnapshots(
-      [...fileHistory.values()],
-      removedPromptIds,
-    );
+    const snapshots = [...fileHistory.values()];
+    if (snapshots.length > SESSION_HISTORY_LIMIT) {
+      removeFileHistorySnapshots(
+        snapshots.slice(-SESSION_HISTORY_LIMIT),
+        removedPromptIds,
+      );
+    }
+    retainedSnapshots = removeFileHistorySnapshots(snapshots, removedPromptIds);
   } catch {
     throw new MessageGroupDeletionError(
       'invalid_history',

@@ -237,7 +237,9 @@ The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
   only helps when every remaining labelled checkpoint matches that root.
 - **Deletion safety**: message-group deletion uses the same pure admission as
   direct snapshot removal and reports `invalid_history` before transcript
-  replacement on refusal. An existing endpoint is not proof that a disjoint
+  replacement on refusal. It preflights both the full transcript and the
+  retained Session view that is installed after persistence. An existing
+  endpoint is not proof that a disjoint
   deleted capture is dispensable. Neither a refused source nor a refused
   destination root can authorize transfer through normalized origin equality.
   The candidate must preserve each exact raw capture record, including null

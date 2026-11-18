@@ -39,6 +39,7 @@ import {
   FileHistoryService,
   serializeSnapshot,
   deserializeSnapshots,
+  type SerializedFileHistorySnapshot,
 } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import {
   getApiHistoryPromptId,
@@ -13358,6 +13359,76 @@ describe('Session', () => {
   });
 
   describe('deleteMessageGroups', () => {
+    it('refuses before persistence when the retained file-history view cannot install a fold', async () => {
+      const { deleteTranscriptMessageGroups } = await import(
+        '@qwen-code/qwen-code-core/utils/message-group-deletion.js'
+      );
+      const { MAX_SNAPSHOTS } = await import(
+        '@qwen-code/qwen-code-core/services/fileHistoryService.js'
+      );
+      const state = Array.from(
+        { length: MAX_SNAPSHOTS + 1 },
+        (_, index): SerializedFileHistorySnapshot => ({
+          promptId: `api-${index}`,
+          cwd: '/work',
+          timestamp: '2026-11-18T00:00:00.000Z',
+          trackedFileBackups:
+            index === 1
+              ? {
+                  f: {
+                    backupFileName: null,
+                    version: 1,
+                    backupTime: '2026-11-18T00:00:00.000Z',
+                  },
+                }
+              : {},
+        }),
+      );
+      const records = state.flatMap((snapshot, index) => [
+        chatRecord({
+          uuid: `u${index}`,
+          parentUuid: index === 0 ? null : `s${index - 1}`,
+          type: 'user',
+          promptId: snapshot.promptId,
+          daemonPromptId: `daemon-${index}`,
+          message: { role: 'user', parts: [{ text: 'turn' }] },
+        }),
+        chatRecord({
+          uuid: `s${index}`,
+          parentUuid: `u${index}`,
+          type: 'system',
+          subtype: 'file_history_snapshot',
+          systemPayload: { snapshots: [snapshot] },
+        }),
+      ]);
+      const before = JSON.stringify(records);
+      const replace = vi.fn();
+      mockChatRecordingService.deleteMessageGroups.mockImplementation(
+        async () => {
+          const planned = deleteTranscriptMessageGroups(
+            records,
+            ['u1'],
+            chatRecord({ uuid: 'anchor', type: 'system' }),
+          );
+          replace(planned.records);
+          return planned.result;
+        },
+      );
+      mockFileHistoryService.getSnapshots.mockReturnValue(
+        deserializeSnapshots(state.slice(-MAX_SNAPSHOTS)),
+      );
+      await expect(
+        session.deleteMessageGroups({ snapshot: 'v1', groupIds: ['u1'] }),
+      ).rejects.toMatchObject({ code: 'invalid_history' });
+      expect(replace).not.toHaveBeenCalled();
+      expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+      expect(JSON.stringify(records)).toBe(before);
+      expect(session.isTurnIdle()).toBe(true);
+    });
+
     it('keeps the summary and surviving prompt identities while removing selected raw turns and snapshots', async () => {
       const summary: Content = {
         role: 'user',
