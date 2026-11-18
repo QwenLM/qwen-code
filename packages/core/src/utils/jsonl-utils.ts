@@ -361,15 +361,38 @@ export async function writeLine(
         await fs.promises.mkdir(dir, { recursive: true });
         ensuredDirs.add(dir);
       }
+      let prefix = '';
+      let existing: fs.promises.FileHandle | undefined;
+      try {
+        existing = await fs.promises.open(filePath, 'r');
+        const { size } = await existing.stat();
+        if (size > 0) {
+          const lastByte = Buffer.allocUnsafe(1);
+          const { bytesRead } = await existing.read(lastByte, 0, 1, size - 1);
+          prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
+        }
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        // Preserve append-only files when the tail cannot be read.
+        if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') {
+          throw error;
+        }
+      } finally {
+        await existing?.close();
+      }
       // flush:true fsyncs after each line so a process killed mid-write
       // doesn't leave a glued `}{` record on disk (closes #3681). On
       // Node v22/v24 strace shows string + utf8 + flush:true does fsync
       // correctly; passing a Buffer is forward-compat insurance against
       // any future C++ fast path that might bypass JS-side flush logic
       // for the string case, with no behavior delta on tested versions.
-      await fs.promises.appendFile(filePath, Buffer.from(line, 'utf8'), {
-        flush: true,
-      });
+      await fs.promises.appendFile(
+        filePath,
+        Buffer.from(prefix + line, 'utf8'),
+        {
+          flush: true,
+        },
+      );
     });
   } finally {
     if (fileLocks.get(filePath) === lock && !lock.isLocked()) {
@@ -403,7 +426,28 @@ export function writeLineSync(filePath: string, data: unknown): void {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.appendFileSync(filePath, Buffer.from(line, 'utf8'), { flush: true });
+  let prefix = '';
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(filePath, 'r');
+    const { size } = fs.fstatSync(descriptor);
+    if (size > 0) {
+      const lastByte = Buffer.allocUnsafe(1);
+      const bytesRead = fs.readSync(descriptor, lastByte, 0, 1, size - 1);
+      prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Preserve append-only files when the tail cannot be read.
+    if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') {
+      throw error;
+    }
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+  fs.appendFileSync(filePath, Buffer.from(prefix + line, 'utf8'), {
+    flush: true,
+  });
 }
 
 /**

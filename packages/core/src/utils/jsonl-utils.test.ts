@@ -537,6 +537,41 @@ describe('reader resource cleanup', () => {
 // (chatRecordingService, sessionService) mock these entirely, so flush:true or
 // atomicWriteFileSync wiring regressions would otherwise go undetected.
 describe('writeLine / writeLineSync / write', () => {
+  describe.each([
+    { name: 'writeLine', append: writeLine },
+    { name: 'writeLineSync', append: writeLineSync },
+  ])('$name', ({ name, append }) => {
+    it('preserves append support when the tail cannot be read', async () => {
+      const file = tmpFile('{"existing":true}\n');
+      const error = Object.assign(new Error('read denied'), {
+        code: 'EACCES',
+      });
+      const spy =
+        name === 'writeLine'
+          ? vi.spyOn(fs.promises, 'open').mockRejectedValueOnce(error)
+          : vi.spyOn(fs, 'openSync').mockImplementationOnce(() => {
+              throw error;
+            });
+
+      try {
+        await append(file, { next: true });
+        expect(fs.readFileSync(file, 'utf8')).toBe(
+          '{"existing":true}\n{"next":true}\n',
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('does not prepend a newline to an existing empty file', async () => {
+      const file = tmpFile('');
+
+      await append(file, { empty: true });
+
+      expect(fs.readFileSync(file, 'utf8')).toBe('{"empty":true}\n');
+    });
+  });
+
   it('writeLine round-trips through read() with flush:true appended records', async () => {
     const file = tmpPath('wl');
     await writeLine(file, { kind: 'a', n: 1 });
@@ -556,6 +591,28 @@ describe('writeLine / writeLineSync / write', () => {
     );
   });
 
+  it('writeLine preserves the next record after an interrupted append', async () => {
+    const parent = { uuid: 'parent' };
+    const file = tmpFile(
+      `${JSON.stringify(parent)}\n{"uuid":"partial","sessionId":"sess`,
+    );
+    const next = { uuid: 'next', parentUuid: 'parent' };
+
+    await writeLine(file, next);
+    await writeLine(file, { uuid: 'last', parentUuid: 'next' });
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(
+      `${JSON.stringify(parent)}\n{"uuid":"partial","sessionId":"sess\n` +
+        '{"uuid":"next","parentUuid":"parent"}\n' +
+        '{"uuid":"last","parentUuid":"next"}\n',
+    );
+    await expect(read(file)).resolves.toEqual([
+      parent,
+      next,
+      { uuid: 'last', parentUuid: 'next' },
+    ]);
+  });
+
   it('writeLineSync appends well-formed records with trailing newlines', () => {
     const file = tmpPath('wls');
     writeLineSync(file, { sync: true, i: 0 });
@@ -563,6 +620,20 @@ describe('writeLine / writeLineSync / write', () => {
 
     expect(fs.readFileSync(file, 'utf8')).toBe(
       '{"sync":true,"i":0}\n{"sync":true,"i":1}\n',
+    );
+  });
+
+  it('writeLineSync preserves the next record after an interrupted append', () => {
+    const file = tmpFile(
+      '{"uuid":"parent"}\n{"uuid":"partial","sessionId":"sess',
+    );
+    const next = { uuid: 'next', parentUuid: 'parent' };
+
+    writeLineSync(file, next);
+
+    expect(fs.readFileSync(file, 'utf8')).toBe(
+      '{"uuid":"parent"}\n{"uuid":"partial","sessionId":"sess\n' +
+        '{"uuid":"next","parentUuid":"parent"}\n',
     );
   });
 
