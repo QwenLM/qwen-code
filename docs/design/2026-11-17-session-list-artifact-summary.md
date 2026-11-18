@@ -123,36 +123,45 @@ clicked, using the list data the sidebar already holds.
   best-effort zero write must not leave a phantom count forever) but never
   creates one for an artifact-free session; an equal count skips the write so
   a warm load adds no disk write; a partial transcript read never seeds. The
-  seed runs before the empty-conversation early return, so side-records-only
-  sessions (artifacts registered before the first prompt — the same
-  transcript shape the library guard accepts) gain a count on their first
-  open even though they have no conversation to load. The shape gate states
-  the property the seed needs — no conversation turns at all, every record
-  is system metadata — instead of enumerating subtypes, so every
-  creation-time record the product writes before the first prompt
+  seed runs before the empty-conversation early return, so metadata-bearing
+  side-records sessions (artifacts registered before the first prompt — the
+  production shape, since every daemon session carries a `session_source`
+  record) gain a count on their first open even though they have no
+  conversation to load. The seed only fires for a transcript that
+  reconstructs at least one message: a pure artifact-only transcript
+  reconstructs nothing, no restore path can open it (`loadSession` returns
+  undefined, the projection is undefined), and a count there would advertise
+  a set no cold open can deliver — the honest state is no sidecar. The
+  shape gate states the property the helper needs — no conversation turns
+  at all, every record is system metadata — instead of enumerating subtypes,
+  so every creation-time record the product writes before the first prompt
   (`session_source`, `session_model`, titles, …) keeps it true; it is
   deliberately not `!records.some(isTranscriptConversationRecord)`, which
-  counts creation-time metadata as conversation records. The daemon/ACP
-  restore funnel reads selectively via `readRestoreProjection` and never
-  calls `loadSession`, so the projection read runs the same seed for
-  conversation-less transcripts (a missing projection is a candidate too —
-  the index builder rejects them). Both funnels call one shared helper that
-  owns the size probe, the auxiliary read, ownership, the shape gate and
-  the seed, so the preconditions cannot drift: the read is capped at the
-  same 64 MiB as the library mutation read with the same inclusive boundary
-  (exactly 64 MiB seeds, above skips, a failed size probe skips), and one
-  session yields one list row through either funnel. Only a transcript
-  with a loadable conversation keeps the uncapped seed — its read is the
-  load itself, and the restore payload's embedded snapshot must not depend
-  on the sidecar cap. Everything else goes through the helper, whose shape
-  gate is the sole admission test: the raw records are unvalidated, so a
-  conversation-less transcript carrying a record the validator drops
-  (unknown type, invalid identity) is not all-system on the raw array and
-  is refused rather than seeded from an empty active set — which would
-  heal a correct count to zero. Sessions with a conversation keep the
-  selective read's zero-extra-I/O contract (pinned by a read spy). Both
-  funnels and the library guard share one seed method and one
-  record-composition helper. The
+  counts creation-time metadata as conversation records. The load funnel
+  dispatches on a real conversation turn
+  (`messages.some((m) => m.type !== 'system')`): metadata reconstructs
+  messages too, and the raw records are unvalidated, so neither
+  `messages.length` nor the raw-array shape decides "has a conversation".
+  Only a transcript with a user/assistant/tool_result turn takes the
+  uncapped seed — its read is the load itself, and the restore payload's
+  embedded snapshot must not depend on the sidecar cap. Everything else
+  goes through the shared helper, whose shape gate refuses a mixed raw
+  array (a validator-dropped record alongside metadata) and whose
+  empty-message refusal covers the artifact-only shape — seeding either
+  from an empty active set would heal a correct count to zero. The
+  daemon/ACP restore funnel reads selectively via `readRestoreProjection`
+  and never calls `loadSession`, so the projection read runs the same
+  helper for a defined projection with an empty apiHistory; a missing
+  projection is not a restore candidate (nothing downstream carries an
+  artifactSnapshot for it) and pays no auxiliary read. Both funnels call
+  one shared helper that owns the size probe, the auxiliary read,
+  ownership, the shape gate and the seed, so the preconditions cannot
+  drift: the read is capped at the same 64 MiB as the library mutation read
+  with the same inclusive boundary (exactly 64 MiB seeds, above skips, a
+  failed size probe skips), and one session yields one list row through
+  either funnel. Sessions with a conversation keep the selective read's
+  zero-extra-I/O contract (pinned by a read spy). Both funnels and the
+  library guard share one seed method and one record-composition helper. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no
   record-level damage warnings — the same predicate the library mutation
@@ -338,9 +347,14 @@ clicked, using the list data the sidebar already holds.
   the conversation load seed staying uncapped, a conversation-less
   transcript carrying an unvalidatable record (unknown type, invalid
   identity) refused by both funnels instead of healing a correct count to
-  zero, the helper's empty-records and foreign-project guards, a partial
-  read through the projection funnel refused via the threaded
-  incomplete-read flag, conversation sessions
+  zero — including the variant where creation-time metadata reconstructs a
+  message beside the dropped record (dispatch keys on a real conversation
+  turn) — an artifact-only transcript that no restore path can open left
+  without a sidecar by both funnels, a missing projection paying no
+  auxiliary read, the helper's empty-records and foreign-project guards, a
+  partial read through the projection funnel refused via the threaded
+  incomplete-read flag, a generated_ui_state-only journal accepted as a
+  legal library removal target, conversation sessions
   untouched by the projection read), in both
   active and archived states, from
   event and snapshot (fork) records, counting the cold-restorable set
