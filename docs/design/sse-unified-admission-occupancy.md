@@ -67,7 +67,8 @@ Two gaps follow:
   EXCEPT for the deliberate changes this design documents: the additive
   `scope` (and listener-scoped `listener`) refusal fields, the new
   pairing-listener clamp (a REST stream arriving on a pairing listener is
-  refused at that listener's 51-stream clamp), and the `connectedClients`
+  refused at that listener's 51-stream clamp, or at the aggregate cap when
+  that is lower), and the `connectedClients`
   re-scope from REST-only to the aggregate.
 
 ## Non-goals
@@ -141,7 +142,9 @@ Both checks apply at admission: a stream is refused when the daemon-wide total
 reaches the aggregate cap **or** its listener's occupancy reaches that
 listener's clamp. With defaults (aggregate 204, pairing 51) the primary
 listener keeps ≥52 slots for short requests, each pairing listener keeps ≥13
-of its 64, and the combined fleet never exceeds 204.
+of its 64, and — absent concurrent in-flight handshakes, the reservation-free
+window documented above — the combined fleet stays within 204. A configured
+aggregate below 51 binds on every listener, pairing included.
 
 ### Refusal shape
 
@@ -198,9 +201,11 @@ fixtures that omit caps keep today's unlimited behavior.
   this design widens it deliberately and documents the change.
   `connectedClientsMax` stays the aggregate cap. Additive
   `listenerConnectedClients` / `listenerConnectedClientsMax` report the
-  arriving listener's own occupancy and clamp (resolved through the same
-  `caps.byListener` the gate uses), so a probe on a pairing listener reads
-  the pair that governs its requests instead of the aggregate (review R1-6).
+  arriving listener's own occupancy and the bound that governs its
+  admissions — the tighter of the aggregate cap and the listener's clamp
+  from the same `caps.byListener` the gate uses, since the gate tests the
+  aggregate first and a lower aggregate binds on every listener (review
+  R1-6).
 - Every HTTP saturation refusal calls `markAccessLogError` with
   `sse_connection_limit_exceeded` so the access log attributes the branch
   (the `{error, code}` convention); the ACP WS refusal writes the raw socket
@@ -300,11 +305,15 @@ documented as-is.
   and the `streamBtwSnapshots` call site),
   `packages/cli/src/serve/hosted-harness-session.ts`,
   `packages/cli/src/serve/acp-http/index.ts` — gates + counting.
+- `packages/cli/src/serve/btw-stream.ts` — `BtwStreamRequests.precheck` split
+  out of `open` so the route decides the terminal 409/410 before the
+  admission gate; `open` re-runs it (review R1-5).
 - `packages/cli/src/serve/server.ts` — resolve caps once, thread through deps,
   wire status/health getters.
 - `packages/cli/src/serve/routes/daemon-status.ts` — inject the occupancy
   getter into the status response builder.
-- `packages/cli/src/serve/routes/health.ts` — `connectedClients` scope.
+- `packages/cli/src/serve/routes/health.ts` — `connectedClients` scope and
+  the arriving listener's occupancy/governing-bound pair.
 - `packages/cli/src/serve/local-control/service.ts`,
   `packages/cli/src/serve/remote-access.ts` — share the pairing budget
   constant.

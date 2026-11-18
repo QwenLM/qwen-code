@@ -58,7 +58,8 @@ Risk & Scope 所述，cap、回收器与占用计数**仅覆盖
 - wire 变更全部 additive；既有字段保留原名。REST 流的拒绝正文、日志行、
   计数时机保留，**但排除本设计明确文档化的变更**：additive 的 `scope`
   （listener 范围另加 `listener`）拒绝字段、新的配对 listener 钳制
-  （到达配对 listener 的 REST 流在该 listener 的 51 流钳制处被拒），以及
+  （到达配对 listener 的 REST 流在该 listener 的 51 流钳制处被拒；聚合
+  cap 更低时则在聚合 cap 处被拒），以及
   `connectedClients` 从仅 REST 改义为聚合。
 
 ## 非目标
@@ -123,8 +124,9 @@ REST 路由保留早检查/晚计数顺序：门在订阅握手之前运行（�
 
 准入时两项检查都生效：daemon 全局总数达到聚合 cap，**或**到达 listener
 的占用达到该 listener 的钳制，流即被拒绝。默认值下（聚合 204、配对 51）
-主 listener 为短请求保留 ≥52 槽位，每个配对 listener 在 64 中保留 ≥13，
-合并连接群不超过 204。
+主 listener 为短请求保留 ≥52 槽位，每个配对 listener 在 64 中保留 ≥13；
+在无并发在飞握手（上文无预约窗口）时，合并连接群不超过 204。配置的聚合
+cap 低于 51 时对所有 listener（含配对）先生效。
 
 ### 拒绝形态
 
@@ -178,8 +180,9 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
   引入、当时口径仅 REST；本设计有意扩展并文档化该变化。
   `connectedClientsMax` 仍为聚合 cap。additive 的
   `listenerConnectedClients` / `listenerConnectedClientsMax` 上报到达
-  listener 自身的占用与钳制（经门禁所用的同一 `caps.byListener` 解析），
-  使配对 listener 上的探针读到管辖其请求的那一对，而非聚合（评审 R1-6）。
+  listener 自身的占用与管辖其准入的边界——聚合 cap 与该 listener 钳制
+  （经门禁所用的同一 `caps.byListener`）中更紧者：门禁先判聚合，更低的
+  聚合 cap 对所有 listener 先生效（评审 R1-6）。
 - 每个 HTTP 饱和拒绝调用 `markAccessLogError` 记录
   `sse_connection_limit_exceeded`，使访问日志归因该分支（`{error, code}`
   约定）；ACP WS 拒绝在 upgrade 前写裸 socket，本就没有访问日志行
@@ -264,11 +267,15 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
   `streamBtwSnapshots` 调用点）、
   `packages/cli/src/serve/hosted-harness-session.ts`、
   `packages/cli/src/serve/acp-http/index.ts` —— 门 + 计数。
+- `packages/cli/src/serve/btw-stream.ts` —— 把 `BtwStreamRequests.precheck`
+  从 `open` 拆出，使路由能在准入门之前判定终态 409/410；`open` 复跑
+  （评审 R1-5）。
 - `packages/cli/src/serve/server.ts` —— 一次性解析 caps、经 deps 下发、
   接 status/health getter。
 - `packages/cli/src/serve/routes/daemon-status.ts` —— 向 status 响应构建器
   注入占用 getter。
-- `packages/cli/src/serve/routes/health.ts` —— `connectedClients` 口径。
+- `packages/cli/src/serve/routes/health.ts` —— `connectedClients` 口径与
+  到达 listener 的占用/管辖边界对。
 - `packages/cli/src/serve/local-control/service.ts`、
   `packages/cli/src/serve/remote-access.ts` —— 共享配对预算常量。
 - `packages/cli/src/serve/run-qwen-serve.ts` —— bootstrap status 字段。

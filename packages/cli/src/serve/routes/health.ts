@@ -24,9 +24,10 @@ interface CreateHealthRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   /**
    * Long-lived stream occupancy (issue #17554). The aggregate total pairs
-   * with the daemon-wide cap; the arriving listener's share pairs with its
-   * own clamp, so a probe on a pairing listener reads the pair that governs
-   * the request that fetched it (review R1-6).
+   * with the daemon-wide cap; the arriving listener's share pairs with the
+   * bound that governs its admissions — the tighter of the aggregate cap
+   * and the listener's own clamp, since a lower aggregate binds first
+   * (review R1-6).
    */
   getStreamOccupancy: () => StreamOccupancySnapshot;
   sseAdmissionCaps?: SseAdmissionCaps;
@@ -141,6 +142,18 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
         opts.maxSseConnections,
       );
       const listener = listenerIdentityOf(req).kind;
+      // The bound that governs this listener's admissions: the tighter of
+      // the aggregate cap and its own clamp. The gate tests the aggregate
+      // first, so an aggregate below the pairing clamp binds on every
+      // listener and must be the reported max (review R1-6, round 2).
+      // null = unlimited on both sides.
+      const listenerClamp = sseAdmissionCaps?.byListener[listener] ?? null;
+      const listenerMax =
+        aggregateCap === null
+          ? listenerClamp
+          : listenerClamp === null
+            ? aggregateCap
+            : Math.min(aggregateCap, listenerClamp);
       res.status(200).json({
         status: 'ok',
         workspaceCount: runtimes.length,
@@ -162,13 +175,11 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
         // Effective SSE admission cap paired with the live occupancy above
         // so a probe can see saturation approaching (null = unlimited).
         connectedClientsMax: aggregateCap,
-        // The arriving listener's own pair (review R1-6): the pairing
-        // listeners refuse at their 51-stream clamp, not at the aggregate,
-        // so a probe there must read the pair that governs its requests.
+        // The arriving listener's own pair (review R1-6): its occupancy
+        // and the bound that governs its admissions — the pairing clamp
+        // (51) at the defaults, or the aggregate cap when that is lower.
         listenerConnectedClients: occupancy.byListener[listener],
-        listenerConnectedClientsMax: sseAdmissionCaps
-          ? (sseAdmissionCaps.byListener[listener] ?? null)
-          : aggregateCap,
+        listenerConnectedClientsMax: listenerMax,
         channelAlive,
         lastActivityAt:
           lastActivity !== null ? new Date(lastActivity).toISOString() : null,
