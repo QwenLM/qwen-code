@@ -164,16 +164,21 @@ dispatched attempt into a live request and revive a superseded decision.
 A thrown transport leaves admission `unknown`, which the truth table keeps
 `unsettled` under any witness; without an exit it would hold the phase open for
 the engine's lifetime. `abandon` terminalizes such an attempt as `failed` (never
-`established`). It refuses an attempt with a confirmed admission or with held
-`settled` evidence, so it cannot kill a live turn or discard authoritative
-settlement evidence; an in-flight attempt with no settled evidence may be
-abandoned, and a late accepted response is then discarded (a late `rejected`
-response still drops the row, since rejected requests are never tracked). An
-abandoned attempt is flagged so a late transport response cannot revive its
-terminal state. A superseded approval decision (positive witness forced to
-`none`) is given a terminal `failed` exit so it does not leak a permanent
+`established`). It refuses an attempt with a confirmed admission, so it cannot
+kill a live turn. While the POST is still in flight, held `settled` evidence also
+blocks abandon, because it may yet land on an accepted admission; but once
+admission resolves `unknown` (the transport threw) the held witness can never
+certify, so the attempt stays abandonable — otherwise a turn-end event that beat
+a failing POST would latch the phase forever. An in-flight attempt with no
+settled evidence may be abandoned, and a late accepted response is then discarded
+(a late `rejected` response still drops the row, since rejected requests are never
+tracked). An abandoned attempt is flagged so a late transport response cannot
+revive its terminal state. A superseded approval decision (positive witness forced
+to `none`) is given a terminal `failed` exit so it does not leak a permanent
 non-terminal row, while its returned outcome stays `unsettled` and it never
-certifies.
+certifies; the superseded flag is recomputed on every settle so a re-delivered
+decision that judges the request live again publishes a state consistent with its
+outcome and releases the identity.
 
 Retention is bounded **per kind and target** — at most the latest terminal entry
 — and terminal rows are released by `acknowledge`, not automatically across
@@ -220,10 +225,14 @@ older one.
 9. **In-flight evidence is not discarded.** A settlement delivered while the
    transport is in flight is applied once admission resolves, establishing the
    attempt and clearing the phase without re-delivery.
-10. **Abandon cannot kill a live turn or discard held evidence.** `abandon` on an
-    attempt with a confirmed admission, or with held `settled` evidence, is a
-    no-op; its real evidence still establishes it. An in-flight attempt with no
-    settled evidence may be abandoned and a late accepted response is discarded.
+10. **Abandon cannot kill a live turn; a thrown transport stays abandonable.**
+    `abandon` on an attempt with a confirmed admission is a no-op — its evidence
+    still lands and establishes. While the POST is in flight, held `settled`
+    evidence blocks abandon because it may yet land on an accepted admission; but
+    for an `unknown` admission (the transport threw) the held witness can never
+    establish, so the attempt must remain abandonable or the phase latches. An
+    in-flight attempt with no settled evidence may be abandoned and a late
+    accepted response is discarded.
 11. **Answer-then-settle ordering.** An approval settles `established` while its
     request is live even though answering means it is no longer awaiting a
     decision; the engine releases the identity on settle, so a re-delivered
@@ -242,9 +251,10 @@ older one.
 15. **In-flight establishment releases the identity.** An approval established
     via retained in-flight evidence releases its request identity, so a
     re-delivered decision for the same request no longer establishes.
-16. **A superseded decision gets a terminal exit.** A superseded approval settles
-    `unsettled` but the row terminalizes `failed`, so `acknowledge` releases it
-    instead of leaking a permanent non-terminal row.
+16. **A superseded decision gets a terminal exit.** A superseded approval — and an
+    approval dispatched with no request identity — settles `unsettled` but the row
+    terminalizes `failed`, so `acknowledge` releases it instead of leaking a
+    permanent non-terminal row.
 17. **An abandoned in-flight reject is not tracked.** Abandoning mid-flight then
     resolving `rejected` drops the row (rejected requests are never operations).
 18. **In-flight currency is frozen at settle.** A decision settled while
@@ -258,6 +268,14 @@ older one.
     hardcoded to `idle`.
 21. **The recorded target is frozen.** `Object.isFrozen(operations[i].target)` is
     true and a write through it throws, so an exposed row cannot be retargeted.
+22. **A thrown transport after an in-flight settle stays abandonable.** A submit
+    whose POST throws after a turn-end event settled in flight has admission
+    `unknown`; `abandon` terminalizes it and the phase returns to `idle` (the held
+    witness can never certify an `unknown` admission).
+23. **A re-delivered in-flight decision recomputes supersession.** Settling a
+    pending approval as superseded, re-marking the request live, and settling
+    again publishes a row state consistent with the returned outcome and releases
+    the identity, so a re-delivery cannot establish twice.
 
 Supporting cases pin rejected admission (no outcome, untracked, settling its id
 is a no-op), a failed witness, settling an unknown id (no-op), bounded retention
@@ -289,8 +307,14 @@ branch reds the abandoned-reject case; re-narrowing the witness at evidence
 application (instead of freezing it at settle) reds the settled-while-live
 in-flight case; applying in-flight evidence to a pending row reds the
 pending-submit case; removing the held-evidence guard from `abandon` reds the
-held-evidence case; hardcoding `phase` to `idle` reds the failed-phase case;
-removing `Object.freeze` reds the frozen-target case.
+held-evidence case; widening that guard back to any held `settled` witness (not
+just a pending row) reds the thrown-transport-abandonable case; setting the
+superseded flag only instead of recomputing it reds the re-delivered-decision
+case; narrowing the superseded flag to request-id-bearing targets reds the
+unbound-approval terminal-state assertion; changing the abandoned late-response
+witness from `failed` to `none` reds the returned-outcome assertion; hardcoding
+`phase` to `idle` reds the failed-phase case; removing `Object.freeze` reds the
+frozen-target case.
 
 ## Constraints respected
 

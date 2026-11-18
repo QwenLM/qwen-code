@@ -124,13 +124,16 @@ daemon 同时保留至多 64 个待处理授权请求。在 `r2` 也在等待时
 
 抛错的 transport 留下 admission `unknown`，真值表使其在任何 witness 下都保持
 `unsettled`；若无出路，它会在引擎整个生命周期内把 phase 钉死。`abandon` 把这种
-尝试终态化为 `failed`（绝不 `established`）。它拒绝 admission 已确认、或已持有
-`settled` 证据的尝试，故不会杀死存活 turn、也不会丢弃权威结算证据；没有 settled
-证据的在飞尝试可被 abandon，迟到的 accepted 响应随之被丢弃（迟到的 `rejected`
-响应仍删除该行，因为被拒请求绝不进入 operations）。被弃尝试打上标记，迟到的
-transport 响应无法复活其终态。被取代的 approval 决定（正向见证被强制为 `none`）
-获得终态 `failed` 出口，避免泄漏永久非终态行，而其返回 outcome 仍为 `unsettled`、
-绝不认证。
+尝试终态化为 `failed`（绝不 `established`）。它拒绝 admission 已确认的尝试，故不会
+杀死存活 turn。POST 仍在飞时，已持有的 `settled` 证据也会阻止 abandon，因为它可能
+落在 accepted admission 上；但一旦 admission 解析为 `unknown`（transport 抛错），
+持有的见证永远无法认证，该尝试必须保持可 abandon——否则先于失败 POST 到达的 turn-end
+事件会把 phase 永久钉死。没有 settled 证据的在飞尝试可被 abandon，迟到的 accepted
+响应随之被丢弃（迟到的 `rejected` 响应仍删除该行，因为被拒请求绝不进入 operations）。
+被弃尝试打上标记，迟到的 transport 响应无法复活其终态。被取代的 approval 决定（正向
+见证被强制为 `none`）获得终态 `failed` 出口，避免泄漏永久非终态行，而其返回 outcome
+仍为 `unsettled`、绝不认证；superseded 标志在每次 settle 时重算，故重新判定请求存活
+的重投递决定所发布的行状态与其 outcome 一致，并释放身份。
 
 保留**按 kind 与 target 有界**——至多最新一条终态——终态行由 `acknowledge` 释放，
 而非跨不同 target 自动释放：slice-2c 界面必须对每个已消费的终态行调用 acknowledge，
@@ -165,9 +168,12 @@ transport 响应无法复活其终态。被取代的 approval 决定（正向见
    到存活请求：被取代决定保持 `unsettled`，该行仍声称派发时的身份。
 9. **在飞证据不被丢弃。** transport 在飞期间送达的结算，在 admission 解析后被应用，
    建立该尝试并清除 phase，无需重投。
-10. **abandon 不能杀死存活 turn 或丢弃已持证据。** 对 admission 已确认、或已持有
-    `settled` 证据的尝试，`abandon` 是空操作；其真实证据仍能建立它。没有 settled
-    证据的在飞尝试可被 abandon，迟到的 accepted 响应被丢弃。
+10. **abandon 不能杀死存活 turn；抛错的 transport 保持可 abandon。** 对 admission
+    已确认的尝试，`abandon` 是空操作——其证据仍会落地并建立。POST 在飞时，已持有的
+    `settled` 证据会阻止 abandon，因为它可能落在 accepted admission 上；但对
+    `unknown` admission（transport 抛错），持有的见证永远无法建立，该尝试必须保持
+    可 abandon，否则 phase 被钉死。没有 settled 证据的在飞尝试可被 abandon，迟到的
+    accepted 响应被丢弃。
 11. **先应答后结算的顺序。** approval 在其请求存活时结算为 `established`，尽管应答
     意味着它已不再等待决定；引擎在结算时释放身份，故对同一已结算请求重投的决定不再
     建立。
@@ -180,8 +186,9 @@ transport 响应无法复活其终态。被取代的 approval 决定（正向见
     请求的重试可建立（仅在 `established` 时释放）。
 15. **在飞建立也释放身份。** 经保留的在飞证据建立的 approval 释放其请求身份，故对同一
     请求重投的决定不再建立。
-16. **被取代决定获得终态出口。** 被取代 approval 结算为 `unsettled`，但该行终态化为
-    `failed`，故 `acknowledge` 可释放它，而非泄漏永久非终态行。
+16. **被取代决定获得终态出口。** 被取代 approval——以及不带请求身份派发的 approval——
+    结算为 `unsettled`，但该行终态化为 `failed`，故 `acknowledge` 可释放它，而非泄漏
+    永久非终态行。
 17. **在飞被弃后 rejected 不跟踪。** 在飞时 abandon、随后 resolve `rejected` 会删除该行
     （被拒请求绝不进入 operations）。
 18. **在飞时效于 settle 时冻结。** 被取代时结算的决定，即使其请求在 admission 前重新
@@ -191,6 +198,11 @@ transport 响应无法复活其终态。被取代的 approval 决定（正向见
 20. **`phase('failed')` 透传。** settled-phase 参数不被硬编码为 `idle`。
 21. **记录 target 冻结。** `Object.isFrozen(operations[i].target)` 为 true，且经其写入
     抛错，故暴露的行无法被重定向。
+22. **在飞结算后抛错的 transport 保持可 abandon。** POST 在飞期间已有 turn-end 事件
+    结算、随后抛错的 submit，其 admission 为 `unknown`；`abandon` 使其终态化、phase
+    回到 `idle`（持有的见证永远无法认证 `unknown` admission）。
+23. **重投递的在飞决定重算取代。** 把 pending approval 结算为被取代、标回请求存活、
+    再结算一次，所发布的行状态与返回 outcome 一致并释放身份，故重投递不能再次建立。
 
 配套用例钉住：rejected 准入（无 outcome、不跟踪，结算其 id 为空操作）、failed
 witness、对未知 id settle（空操作）、按 kind 与 target 有界保留、状态变化之间
@@ -211,8 +223,12 @@ target 而非冻结快照会令记录 target 用例转红；忽略保留的在�
 在飞释放用例转红；去掉被取代终态出口会令被取代确认用例转红；去掉 abandoned 分支的
 rejected 清理会令在飞被弃 rejected 用例转红；在证据应用时重新收窄见证（而非 settle
 时冻结）会令存活时结算的在飞用例转红；对 pending 行应用在飞证据会令 pending submit
-用例转红；去掉 `abandon` 的已持证据守卫会令已持证据用例转红；把 `phase` 硬编码为
-`idle` 会令 failed-phase 用例转红；移除 `Object.freeze` 会令冻结 target 用例转红。
+用例转红；去掉 `abandon` 的已持证据守卫会令已持证据用例转红；把该守卫放宽回任意已持
+`settled` 见证（而非仅 pending 行）会令抛错可 abandon 用例转红；superseded 标志只置位
+不重算会令重投递决定用例转红；把 superseded 标志收窄到带 requestId 的 target 会令
+无身份 approval 终态断言转红；把 abandoned 迟到响应见证由 `failed` 改为 `none` 会令
+返回 outcome 断言转红；把 `phase` 硬编码为 `idle` 会令 failed-phase 用例转红；移除
+`Object.freeze` 会令冻结 target 用例转红。
 
 ## 遵守的约束
 

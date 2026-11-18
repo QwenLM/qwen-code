@@ -15,10 +15,12 @@ const accepted = async () => 'accepted' as const;
 
 function deferredAdmission() {
   let resolve!: (admission: Admission) => void;
-  const promise = new Promise<Admission>((r) => {
-    resolve = r;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<Admission>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe('daemon intents: admission is not establishment', () => {
@@ -86,6 +88,12 @@ describe('daemon intents: admission is not establishment', () => {
       accepted,
     );
     expect(intents.settle(operationId, 'settled')?.outcome).toBe('unsettled');
+    // The row must terminalize so acknowledge can release it (no permanent leak).
+    expect(intents.operations.find((op) => op.id === operationId)?.state).toBe(
+      'failed',
+    );
+    intents.acknowledge(operationId);
+    expect(intents.operations.some((op) => op.id === operationId)).toBe(false);
   });
 
   it('concurrently live approval requests each establish on their own decision', async () => {
@@ -464,9 +472,12 @@ describe('daemon intents: recorded-target and evidence boundaries', () => {
     // Abandon while the POST is still in flight.
     intents.abandon(cancelId);
     expect(intents.phase('idle')).toBe('idle');
-    // The transport then resolves accepted; it must not revive the attempt.
+    // The transport then resolves accepted; it must not revive the attempt, and
+    // the returned result must agree with the published failed row.
     gate.resolve('accepted');
-    await pending;
+    const { result } = await pending;
+    expect(result.admission).toBe('accepted');
+    expect(result.outcome).toBe('failed');
     expect(intents.operations.find((op) => op.id === cancelId)?.state).toBe(
       'failed',
     );
@@ -614,6 +625,56 @@ describe('daemon intents: recorded-target and evidence boundaries', () => {
     gate.resolve('accepted');
     const { result } = await pending;
     expect(result.outcome).toBe('established');
+  });
+
+  it('a transport that throws after an in-flight settle stays abandonable', async () => {
+    const intents = createDaemonChatIntents();
+    const gate = deferredAdmission();
+    const pending = intents.dispatch('submit', target, () => gate.promise);
+    const id = intents.operations.find((op) => op.kind === 'submit')!.id;
+    // The turn-end event arrives while the POST is in flight…
+    intents.settle(id, 'settled');
+    // …then the POST throws. Admission is unknown, so the held witness can
+    // never certify and the row must remain abandonable (no latched phase).
+    gate.reject(new Error('daemon restarting'));
+    await pending;
+    expect(intents.abandon(id)).toBeDefined();
+    expect(intents.operations.find((op) => op.id === id)?.state).toBe('failed');
+    expect(intents.phase('idle')).toBe('idle');
+    intents.acknowledge(id);
+    expect(intents.operations.some((op) => op.id === id)).toBe(false);
+  });
+
+  it('a re-delivered in-flight decision recomputes supersession', async () => {
+    const intents = createDaemonChatIntents();
+    intents.setApprovalRequestLive('r1', true);
+    const gate = deferredAdmission();
+    const pending = intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      () => gate.promise,
+    );
+    const id = intents.operations.find((op) => op.kind === 'approval')!.id;
+    intents.setApprovalRequestLive('r1', false);
+    intents.settle(id, 'settled'); // superseded -> flag set
+    intents.setApprovalRequestLive('r1', true);
+    intents.settle(id, 'settled'); // re-delivered while live -> flag recomputed
+    gate.resolve('accepted');
+    const { result } = await pending;
+    // The returned outcome and the published row state must agree, and the
+    // identity must be released so a re-delivery cannot establish twice.
+    expect(result.outcome).toBe('established');
+    expect(intents.operations.find((op) => op.id === id)?.state).toBe(
+      'established',
+    );
+    const again = await intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      accepted,
+    );
+    expect(intents.settle(again.operationId, 'settled')?.outcome).toBe(
+      'unsettled',
+    );
   });
 
   it('phase passes the failed settled state through', () => {

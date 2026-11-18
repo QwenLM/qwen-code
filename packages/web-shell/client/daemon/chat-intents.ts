@@ -273,13 +273,13 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       // without re-judging currency or being discarded.
       const narrowed = narrowWitness(intent, witness);
       intent.witness = narrowed;
-      if (
+      // Recompute on every settle: a re-delivered decision may judge the request
+      // live again, and a stale flag would publish a state that disagrees with
+      // the returned outcome and skip the identity release.
+      intent.superseded =
         intent.operation.kind === 'approval' &&
         witness === 'settled' &&
-        narrowed === 'none'
-      ) {
-        intent.superseded = true;
-      }
+        narrowed === 'none';
       // While the POST is in flight the row stays pending: the evidence is
       // retained and applied by dispatch once admission resolves, so a submit
       // does not leave 'submitting' before it was admitted.
@@ -298,10 +298,16 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       const intent = find(operationId);
       if (!intent) return undefined;
       if (isTerminal(intent.operation.state)) return undefined;
-      // Authoritative settlement evidence already held must still be able to
-      // land; abandoning would discard it and report a failed send for a turn
-      // the daemon is running.
-      if (intent.witness === 'settled') return undefined;
+      // While the POST is still in flight, held settled evidence may yet land
+      // on an accepted admission, so refuse to abandon. Once admission resolves
+      // unknown (the transport threw) the held witness can never certify, so the
+      // row must stay abandonable or the phase latches forever.
+      if (
+        intent.operation.state === 'pending' &&
+        intent.witness === 'settled'
+      ) {
+        return undefined;
+      }
       // Only an unconfirmable admission may be abandoned; an attempt with a
       // confirmed admission is a live turn whose evidence must still land. An
       // in-flight attempt without settled evidence may be abandoned, and a late
