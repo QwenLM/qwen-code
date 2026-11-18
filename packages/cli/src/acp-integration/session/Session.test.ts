@@ -13359,6 +13359,218 @@ describe('Session', () => {
   });
 
   describe('deleteMessageGroups', () => {
+    describe('hydrated file-history preflight', () => {
+      it.each(
+        ['current', 'foreign', 'legacy'].flatMap((origin) =>
+          [
+            'absolute',
+            'relative',
+            'short',
+            'stable-aliases',
+            'singletons',
+            'empty',
+            'conflicting-fragments',
+          ].flatMap((shape) =>
+            [false, true].map((retained) => ({ origin, shape, retained })),
+          ),
+        ),
+      )(
+        'checks actual $origin $shape aliases (retained=$retained) before recorder effects',
+        async ({ origin, shape, retained }) => {
+          const { ChatRecordingService } = await import(
+            '@qwen-code/qwen-code-core/services/chatRecordingService.js'
+          );
+          const { parseMessageGroupTranscript } = await import(
+            '@qwen-code/qwen-code-core/utils/message-group-deletion.js'
+          );
+          const { prepareTranscriptRecords } = await import(
+            '@qwen-code/qwen-code-core/utils/transcript-records.js'
+          );
+          const time = '2026-11-18T00:00:00.000Z';
+          const baseline = {
+            backupFileName: null,
+            version: 1,
+            backupTime: time,
+          };
+          const failed = { ...baseline, version: 2, failed: true };
+          const key =
+            shape === 'relative' ? './f' : shape === 'short' ? 'f' : '/work/f';
+          const aliases = {
+            [key]: baseline,
+            [shape === 'relative' ? '/work/f' : './f']: failed,
+          };
+          const state: SerializedFileHistorySnapshot[] = [
+            ...(retained
+              ? Array.from({ length: 1 }, (_, index) => ({
+                  promptId: `prefix-${index}`,
+                  ...(origin === 'legacy' ? {} : { cwd: '/work' }),
+                  timestamp: time,
+                  trackedFileBackups: {},
+                }))
+              : []),
+            ...[0, 1].map((index) => ({
+              promptId: `api-${index}`,
+              ...(origin === 'legacy' ? {} : { cwd: '/work' }),
+              timestamp: time,
+              trackedFileBackups:
+                shape === 'empty'
+                  ? {}
+                  : (index === 0 && shape !== 'stable-aliases') ||
+                      shape === 'singletons'
+                    ? { [key]: baseline }
+                    : aliases,
+            })),
+            ...(retained
+              ? Array.from({ length: 98 }, (_, index) => ({
+                  promptId: `suffix-${index}`,
+                  ...(origin === 'legacy' ? {} : { cwd: '/work' }),
+                  timestamp: time,
+                  trackedFileBackups: {},
+                }))
+              : []),
+          ];
+          const records = state.flatMap((snapshot, index) => [
+            chatRecord({
+              sessionId: 'alias-preflight',
+              uuid: `u${index}`,
+              parentUuid: index === 0 ? null : `s${index - 1}`,
+              type: 'user',
+              promptId: snapshot.promptId,
+              daemonPromptId: `daemon-${index}`,
+              message: { role: 'user', parts: [{ text: 'turn' }] },
+            }),
+            chatRecord({
+              sessionId: 'alias-preflight',
+              uuid: `s${index}`,
+              parentUuid: `u${index}`,
+              type: 'system',
+              subtype: 'file_history_snapshot',
+              systemPayload: { snapshots: [snapshot] },
+            }),
+          ]);
+          if (shape === 'conflicting-fragments') {
+            const index = records.findIndex(
+              (record) => record.type === 'user' && record.promptId === 'api-0',
+            );
+            records.splice(index + 1, 0, {
+              ...records[index]!,
+              promptId: 'conflicting-prompt',
+            });
+          }
+          const dir = await fs.mkdtemp(
+            path.join(os.tmpdir(), 'session-alias-preflight-'),
+          );
+          const transcriptPath = path.join(dir, 'session.jsonl');
+          const before =
+            records.map((record) => JSON.stringify(record)).join('\n') + '\n';
+          await fs.writeFile(transcriptPath, before);
+          const recorderConfig = {
+            getSessionId: () => 'alias-preflight',
+            getResumedSessionData: () => undefined,
+            getProjectRoot: () => dir,
+            getCliVersion: () => 'test',
+          } as unknown as Config;
+          const recorder = new ChatRecordingService(
+            recorderConfig,
+            undefined,
+            true,
+          );
+          const lease = {
+            sessionId: 'alias-preflight',
+            ownerId: 'test-owner',
+            assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+            readTranscript: async () => fs.readFile(transcriptPath, 'utf8'),
+            replaceTranscript: vi.fn(async (updated: string) =>
+              fs.writeFile(transcriptPath, updated),
+            ),
+            release: vi.fn().mockResolvedValue(undefined),
+          };
+          recorder.activate(
+            lease as unknown as Parameters<typeof recorder.activate>[0],
+          );
+          vi.spyOn(recorder, 'readActiveTranscriptChain').mockImplementation(
+            async () =>
+              prepareTranscriptRecords(
+                parseMessageGroupTranscript(
+                  await fs.readFile(transcriptPath, 'utf8'),
+                ),
+              ).records as readonly ChatRecord[],
+          );
+          const fileHistory = new FileHistoryService(
+            'alias-preflight',
+            true,
+            origin === 'foreign' ? '/reader' : '/work',
+          );
+          fileHistory.restoreFromSnapshots(
+            deserializeSnapshots(state.slice(-100)),
+          );
+          vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+            recorder,
+          );
+          vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(
+            fileHistory,
+          );
+          const localBefore = fileHistory.getSnapshots().map(serializeSnapshot);
+          const install = vi.spyOn(fileHistory, 'restoreFromSnapshots');
+          const list = await recorder.getMessageGroups();
+          const target = list.groups.find((group) =>
+            group.recordIds.some((id) =>
+              records.some(
+                (record) => record.uuid === id && record.promptId === 'api-0',
+              ),
+            ),
+          )!;
+          const refuses =
+            (origin !== 'foreign' && shape === 'absolute') ||
+            shape === 'conflicting-fragments';
+          try {
+            if (refuses) {
+              await expect(
+                session.deleteMessageGroups({
+                  snapshot: list.snapshot,
+                  groupIds: [target.id],
+                }),
+              ).rejects.toMatchObject({ code: 'invalid_history' });
+              expect(lease.replaceTranscript).not.toHaveBeenCalled();
+              expect(await fs.readFile(transcriptPath, 'utf8')).toBe(before);
+              expect(fileHistory.getSnapshots().map(serializeSnapshot)).toEqual(
+                localBefore,
+              );
+              expect(install).not.toHaveBeenCalled();
+              expect(mockLlmClient.setHistory).not.toHaveBeenCalled();
+              await expect(
+                session.recoverMessageDeletionContext(),
+              ).resolves.toBeUndefined();
+            } else {
+              await expect(
+                session.deleteMessageGroups({
+                  snapshot: list.snapshot,
+                  groupIds: [target.id],
+                }),
+              ).resolves.toMatchObject({ deletedGroupIds: [target.id] });
+              expect(lease.replaceTranscript).toHaveBeenCalledTimes(1);
+              expect(install).toHaveBeenCalledTimes(1);
+              expect(
+                fileHistory
+                  .getSnapshots()
+                  .some((snapshot) => snapshot.promptId === 'api-0'),
+              ).toBe(false);
+              expect(
+                (await recorder.getMessageGroups()).groups.some(
+                  (group) => group.id === target.id,
+                ),
+              ).toBe(false);
+            }
+            expect(session.isTurnIdle()).toBe(true);
+            await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+          } finally {
+            await recorder.close();
+            await fs.rm(dir, { recursive: true, force: true });
+          }
+        },
+      );
+    });
+
     it('refuses before persistence when the retained file-history view cannot install a fold', async () => {
       const { deleteTranscriptMessageGroups } = await import(
         '@qwen-code/qwen-code-core/utils/message-group-deletion.js'

@@ -12,6 +12,10 @@ import {
   createTranscriptExecutionLifecycleUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
+import {
+  getTranscriptMessageGroups,
+  MessageGroupDeletionError,
+} from '@qwen-code/qwen-code-core/utils/message-group-deletion.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
@@ -5858,6 +5862,34 @@ export class Session implements SessionContext {
         throw new RequestError(-32602, 'History recording is unavailable', {
           errorKind: 'session_message_deletion_unsupported',
         });
+      // The live service has hydrated aliases and may retain fewer checkpoints
+      // than the recorder. Check its actual input before replacing the transcript.
+      const records = [...(await recording.readActiveTranscriptChain())];
+      const selected = new Set(request.groupIds);
+      const removedRecords = new Set(
+        getTranscriptMessageGroups(records)
+          .filter((group) => selected.has(group.id))
+          .flatMap((group) => group.recordIds),
+      );
+      const removedPromptIds = new Set(
+        records
+          .filter((record) => removedRecords.has(record.uuid))
+          .map((record) => record.promptId)
+          .filter(
+            (id): id is string => typeof id === 'string' && id.length > 0,
+          ),
+      );
+      try {
+        removeFileHistorySnapshots(
+          this.config.getFileHistoryService().getSnapshots(),
+          removedPromptIds,
+        );
+      } catch {
+        throw new MessageGroupDeletionError(
+          'invalid_history',
+          'Deleting these message groups would discard local file history recovery evidence or change backup version reservations; refusing to keep file restoration safe',
+        );
+      }
       const result = await recording.deleteMessageGroups(request);
       persisted = true;
       deletedGroupIds = result.deletedGroupIds;
@@ -5899,15 +5931,17 @@ export class Session implements SessionContext {
       .getChatRecordingService()!
       .readActiveTranscriptChain();
     const restored = buildSessionHistoryFromConversation({ messages: records });
+    const fileHistory = this.config.getFileHistoryService();
+    const snapshots = removeFileHistorySnapshots(
+      fileHistory.getSnapshots(),
+      removed,
+    );
     const current = this.captureHistorySnapshot();
     const prelude = current.slice(0, getStartupContextLength(current));
     const llmClient = this.config.getLlmClient()!;
     llmClient.setHistory([...prelude, ...restored.apiHistory]);
     llmClient.getChat().setCompletedToolCallIds(restored.completedToolCallIds);
-    const fileHistory = this.config.getFileHistoryService();
-    fileHistory.restoreFromSnapshots(
-      removeFileHistorySnapshots(fileHistory.getSnapshots(), removed),
-    );
+    fileHistory.restoreFromSnapshots(snapshots);
     this.pendingDeletedApiPromptIds = undefined;
   }
 

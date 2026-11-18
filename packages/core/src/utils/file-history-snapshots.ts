@@ -252,10 +252,10 @@ export function deletionDropsRequiredEndpoint<
 }
 
 /**
- * Deletion must not change reservations, retained references, first-version
- * selection, or whether the next capture reuses a blob. Pointer-free records
- * still reserve physical publish names; JSON cannot prove an alias harmless.
- * Keep exact evidence rather than guessing which lost record is dispensable.
+ * Check exact-record lifetime and current-view baseline, execution and reuse
+ * selection. Pointer-free records still reserve physical publish names. These
+ * checks do not certify future candidate order after eviction/reload or physical
+ * alias independence; keep evidence rather than guessing a lost record harmless.
  */
 function deletionEvidence<
   T extends FileHistorySnapshot | SerializedFileHistorySnapshot,

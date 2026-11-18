@@ -237,16 +237,23 @@ The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
   only helps when every remaining labelled checkpoint matches that root.
 - **Deletion safety**: message-group deletion uses the same pure admission as
   direct snapshot removal and reports `invalid_history` before transcript
-  replacement on refusal. It preflights both the full transcript and the
-  retained Session view that is installed after persistence. An existing
+  replacement on refusal. The recorder preflights the raw full transcript and
+  its raw retained slice. Before calling the recorder, Session independently
+  checks its actual hydrated local snapshot array with the same deletion
+  utility and the selected groups' prompt identities. Ordinary singleton
+  hydration can shorten an absolute key while a multi-alias group keeps its
+  raw spellings; a raw slice is not a substitute for this consumer check. The
+  recorder also refuses selected raw fragments whose nonempty prompt identities
+  disagree with their aggregated record, so its removal set cannot silently
+  expand beyond the Session caller's view. An existing
   endpoint is not proof that a disjoint
   deleted capture is dispensable. Neither a refused source nor a refused
   destination root can authorize transfer through normalized origin equality.
   The candidate must preserve each exact raw capture record, including null
   and failed reservations, at its newest distance from the timeline end. This
-  preserves reservation/reference lifetime in future retained windows, not
-  merely the current maximum. Candidate identity order, raw alias choice and
-  the latest reusable file-backed captures must also remain unchanged;
+  preserves exact-record presence in future retained windows, not merely the
+  current maximum. Candidate identity order, raw alias choice and the latest
+  reusable file-backed captures are compared for the current input only;
   conflicting aliases or different version-one baselines conservatively
   refuse deletion rather than invent capture ordering. Empty histories,
   redundant same-root captures and evidence-preserving folds remain useful.
@@ -257,6 +264,18 @@ The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
   storage or provenance format, allocator, or filesystem-alias detector is
   introduced. Mixed legacy/labelled records cannot be relabelled silently;
   an explicit adoption policy remains a maintainer decision.
+- **Inherited future-order / physical-alias limit**: this admission is not a
+  guarantee of equal physical bytes for every later restore. An admitted sparse
+  loaded history with T maps `{g:G,f:F}`, `{f:F}` (deleted), `{g:G}`, `{f:F}`,
+  `{g:G}` preserves exact-record newest distances and current candidate order.
+  After 96 actual captures, serialization and reload, the unchanged and deleted
+  histories select `f,g` and `g,f` respectively. Separate regular files restore
+  equally; when g is a symlink to f, the final bytes differ (`G BASELINE` versus
+  `F BASELINE`) despite empty failure lists. The upstream planner produces the
+  same deletion plan: this is an inherited loaded-history/physical-alias limit,
+  not newly introduced corruption. It is not claimed to be a shape naturally
+  emitted by one fresh current-writer session. Future-order certification and
+  general alias detection are outside this bounded repair.
 - **Legacy fallback**: checkpoints created before this change carry no
   `cwd` and never count as foreign — refusing them wholesale would make
   every pre-upgrade session unrestorable. On unlabeled timelines the

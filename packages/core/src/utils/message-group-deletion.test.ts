@@ -90,6 +90,31 @@ function snapshot(id: string, parent: string | null, text: string): ChatRecord {
 }
 
 describe('message group deletion', () => {
+  it.each([
+    ['api-first', 'api-other', true],
+    [undefined, 'api-other', true],
+    ['api-first', undefined, false],
+    ['api-first', 'api-first', false],
+  ] as const)(
+    'cross-checks selected raw fragment prompt identities (%s, %s)',
+    (firstId, laterId, refuses) => {
+      const records = [
+        record('selected', null, 'user', { promptId: firstId }),
+        record('selected', null, 'user', { promptId: laterId }),
+        user('kept', 'selected'),
+      ];
+      const before = JSON.stringify(records);
+      const remove = () =>
+        deleteTranscriptMessageGroups(records, ['selected'], anchor);
+      if (refuses) {
+        expect(remove).toThrow(MessageGroupDeletionError);
+      } else {
+        expect(remove().result.removedApiPromptIds).toEqual(['api-first']);
+      }
+      expect(JSON.stringify(records)).toBe(before);
+    },
+  );
+
   it('deletes nonconsecutive complete turns and repairs only removed edges', () => {
     const records = [
       user('u1', null),

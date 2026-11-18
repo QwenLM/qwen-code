@@ -23,8 +23,8 @@ import type { SerializedFileHistorySnapshot } from '../services/fileHistoryServi
 import type { MAX_SNAPSHOTS } from '../services/file-history-limits.js';
 import { removeFileHistorySnapshots } from './file-history-snapshots.js';
 
-// Session installs only this retained view after the transcript is replaced.
-// Keep utils a runtime leaf while making a changed limit a type error here.
+// Also check the raw retained slice; Session separately preflights its actual
+// hydrated local input. Keep utils a runtime leaf and type-check the limit.
 const SESSION_HISTORY_LIMIT: typeof MAX_SNAPSHOTS = 100;
 
 export interface MessageGroup {
@@ -488,7 +488,27 @@ export function deleteTranscriptMessageGroups(
     }
     return parent;
   };
-  const active = prepareTranscriptRecords(records).records;
+  const active = prepareTranscriptRecords(records)
+    .records as readonly ChatRecord[];
+  const activePromptIds = new Map(
+    active.map((record) => [record.uuid, record.promptId]),
+  );
+  // Session reads aggregated records. Raw fragments must not silently expand
+  // the prompt removal set beyond the identities that caller can preflight.
+  if (
+    records.some(
+      (record) =>
+        removed.has(record.uuid) &&
+        typeof record.promptId === 'string' &&
+        record.promptId.length > 0 &&
+        record.promptId !== activePromptIds.get(record.uuid),
+    )
+  ) {
+    throw new MessageGroupDeletionError(
+      'invalid_history',
+      'Cannot safely resolve prompt ownership in conflicting transcript fragments',
+    );
+  }
   let compressionFollows = false;
   for (let index = active.length - 1; index >= 0; index--) {
     const record = active[index] as ChatRecord;
