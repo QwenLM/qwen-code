@@ -232,10 +232,9 @@ import {
   type ComposerTaskChipsHandle,
 } from './components/ComposerTaskChips';
 import { ComposerUsageStats } from './components/ComposerUsageStats';
-import { GoalStatusStrip } from './components/GoalStatusStrip';
+import { ComposerStatusStack } from './components/ComposerStatusStack';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import { SessionLimitBanner } from './components/SessionLimitBanner';
-import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
@@ -542,7 +541,6 @@ import {
   resolveFastModelForPicker,
 } from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
-import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
 import {
@@ -26902,45 +26900,41 @@ export function App({
                         )}
                         {(queuedPrompts.length > 0 ||
                           liveGoalSnapshot?.goal) && (
-                          <div
-                            className={composerStatusStyles.root}
-                            data-testid="composer-status-stack"
-                          >
-                            <QueuedPromptDisplay
-                              prompts={queuedPrompts}
-                              t={t}
-                              canMutateMidTurn={canMutateMidTurn}
-                              canInsertMidTurn={
+                          <ComposerStatusStack
+                            queued={{
+                              prompts: queuedPrompts,
+                              t,
+                              canMutateMidTurn,
+                              canInsertMidTurn:
                                 streamingState !== 'idle' ||
-                                sessionHasActivePrompt
-                              }
-                              onDelete={removeQueuedPrompt}
-                              canSendMidTurnNow={canSendMidTurnNow}
-                              onInsert={insertQueuedPrompt}
-                              onSendNow={sendQueuedPromptNow}
-                              onEdit={editQueuedPrompt}
-                              onImagePreview={openImagePanel}
-                              onAttachmentPreview={openAttachmentPanel}
-                            />
-                            {liveGoalSnapshot?.goal && (
-                              <GoalStatusStrip
-                                snapshot={liveGoalSnapshot}
-                                busy={goalControlBusy}
-                                onEdit={() => {
-                                  setGoalEditError(null);
-                                  setGoalEditOpen(true);
-                                }}
-                                onPause={() => runGoalControl('pause')}
-                                onResume={() => runGoalControl('resume')}
-                                onClear={() => runGoalControl('clear')}
-                                onOpenGoals={
-                                  projectFeaturesAvailable
-                                    ? openGoals
-                                    : undefined
-                                }
-                              />
-                            )}
-                          </div>
+                                sessionHasActivePrompt,
+                              onDelete: removeQueuedPrompt,
+                              canSendMidTurnNow,
+                              onInsert: insertQueuedPrompt,
+                              onSendNow: sendQueuedPromptNow,
+                              onEdit: editQueuedPrompt,
+                              onImagePreview: openImagePanel,
+                              onAttachmentPreview: openAttachmentPanel,
+                            }}
+                            goal={
+                              liveGoalSnapshot?.goal
+                                ? {
+                                    snapshot: liveGoalSnapshot,
+                                    busy: goalControlBusy,
+                                    onEdit: () => {
+                                      setGoalEditError(null);
+                                      setGoalEditOpen(true);
+                                    },
+                                    onPause: () => runGoalControl('pause'),
+                                    onResume: () => runGoalControl('resume'),
+                                    onClear: () => runGoalControl('clear'),
+                                    onOpenGoals: projectFeaturesAvailable
+                                      ? openGoals
+                                      : undefined,
+                                  }
+                                : undefined
+                            }
+                          />
                         )}
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
