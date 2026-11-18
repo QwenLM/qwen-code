@@ -7,7 +7,7 @@
 import { act, useState, type ComponentProps } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
 import { TrajectoryExecutions } from './TrajectoryExecutions';
 
@@ -150,7 +150,11 @@ function FollowHarness({
     </>
   );
 }
-async function mount(rows: TrajectoryExecutionRow[], shadow = false) {
+async function mount(
+  rows: TrajectoryExecutionRow[],
+  shadow = false,
+  language: WebShellLanguage = 'en',
+) {
   const container = document.createElement('div');
   const host = shadow ? document.createElement('div') : container;
   document.body.append(host);
@@ -177,7 +181,7 @@ async function mount(rows: TrajectoryExecutionRow[], shadow = false) {
     options = { ...options, ...extra };
     await act(async () =>
       root.render(
-        <I18nProvider language="en">
+        <I18nProvider language={language}>
           <FollowHarness
             rows={next}
             onSelect={onSelect}
@@ -265,6 +269,21 @@ it('keeps not-started execution as a marker without zero-duration bar', async ()
   expect(container.querySelector('[data-marker="true"]')).not.toBeNull();
   expect(vi.getTimerCount()).toBe(0);
 });
+it('offsets the waterfall bar from the axis start edge in Arabic', async () => {
+  const { container } = await mount(
+    [running('first', 8_000), running('second', 10_000)],
+    false,
+    'ar',
+  );
+  const bars = Array.from(
+    container.querySelectorAll<HTMLElement>(
+      '[data-testid="trajectory-execution-row"] span[style]',
+    ),
+  );
+  expect(bars.map((bar) => bar.style.insetInlineStart)).toEqual(['0%', '100%']);
+  expect(bars.map((bar) => bar.style.left)).toEqual(['', '']);
+});
+
 it('selects stable execution keys with keyboard and pointer', async () => {
   const { container, onSelect } = await mount([
     running('a'),

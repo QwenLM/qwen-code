@@ -10,7 +10,7 @@ import type {
   DaemonSessionWorkflowTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import {
   TranscriptRenderModeProvider,
   type TranscriptRenderMode,
@@ -166,6 +166,7 @@ function renderPanel(
     onOpenSubagent?: (tool: ACPToolCall) => void;
     onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
     renderMode?: TranscriptRenderMode;
+    language?: WebShellLanguage;
   } = {},
 ): HTMLElement {
   const snapshot: DaemonSessionWorkflowTasksStatus = {
@@ -180,7 +181,7 @@ function renderPanel(
   mounted.push({ root, container });
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={options.language ?? 'en'}>
         <TranscriptRenderModeProvider
           value={options.renderMode ?? 'interactive'}
         >
@@ -1359,7 +1360,48 @@ describe('TasksStatusMessage nested-agent tree', () => {
     const text = container.textContent ?? '';
     expect(text).toContain('↳');
     expect(text).toContain('from editor');
-    expect(container.querySelector('span[style*="padding-left"]')).toBeNull();
+    expect(
+      container.querySelector('span[style*="padding-inline-start"]'),
+    ).toBeNull();
+  });
+
+  it('closes the Arabic panel with the arrow its hint advertises', async () => {
+    const container = renderPanel([agentTask('solo')], { language: 'ar' });
+    expect(container.textContent).toContain('→/Esc إغلاق');
+    expect(container.textContent).not.toContain('←/Esc');
+
+    // The global keydown listener attaches after a 50 ms guard delay.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('label-solo'))!;
+    act(() => row.click());
+    expect(container.textContent).toContain('→ رجوع');
+    expect(container.textContent).not.toContain('← رجوع');
+
+    // Changing step re-arms the listener after the same guard delay.
+    const rearm = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      });
+    await rearm();
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' })),
+    );
+    expect(container.textContent).toContain('→ رجوع');
+
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' })),
+    );
+    expect(container.textContent).toContain('→/Esc إغلاق');
+
+    await rearm();
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' })),
+    );
+    expect(container.querySelector('[data-keyboard-scope]')).toBeNull();
   });
 
   it('cancels a foreground child of a background parent on the first press', async () => {

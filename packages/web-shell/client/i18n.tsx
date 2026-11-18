@@ -10587,12 +10587,10 @@ const LANGUAGE_LABELS: Record<WebShellLanguage, string> = {
 
 const Context = createContext<{
   language: WebShellLanguage;
-  dir: LanguageDirection;
   isRtl: boolean;
   t: (key: string, vars?: Record<string, string | number>) => string;
 }>({
   language: 'en',
-  dir: 'ltr',
   isRtl: false,
   t: (key) => key,
 });
@@ -10689,7 +10687,6 @@ export function I18nProvider({
   const value = useMemo(() => {
     return {
       language,
-      dir,
       isRtl: dir === 'rtl',
       t: getTranslator(language),
     };

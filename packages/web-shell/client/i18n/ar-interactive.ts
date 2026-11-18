@@ -1179,7 +1179,7 @@ export const AR_INTERACTIVE_MESSAGES: Record<string, ArMessageValue> = {
     `${v?.['current'] ?? 0}/${v?.['total'] ?? 0} أسئلة`,
   'askUser.selectAnswer': 'اختر إجابة',
   'askUser.typePlaceholder': 'اكتب شيئًا...',
-  'askUser.shortcuts.previous': '← السابق',
+  'askUser.shortcuts.previous': '→ السابق',
   'askUser.shortcuts.optionsSingle': '↑↓ للاختيار · Enter للإرسال',
   'askUser.shortcuts.optionsNext': '↑↓ للاختيار · Enter للتالي',
   'askUser.shortcuts.optionsFinal': '↑↓ للاختيار · Enter للإرسال',

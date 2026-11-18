@@ -205,6 +205,15 @@ describe('SessionSortMenu', () => {
     expect(radioItems()[1]!.getAttribute('aria-checked')).toBe('true');
   });
 
+  it('pushes every submenu value label to the inline end', async () => {
+    await renderMenu();
+    await openMenu();
+    for (const label of ['Group by', 'Sort by', 'Workspace']) {
+      const value = menuItem(label)?.querySelector('span.truncate');
+      expect(value?.className).toContain('ms-auto');
+    }
+  });
+
   it('lists workspace choices with the current selection and label', async () => {
     const onWorkspaceChange = vi.fn();
     await renderMenu({ onWorkspaceChange });

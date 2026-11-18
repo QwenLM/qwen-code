@@ -8,6 +8,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
 import type { WebShellUnavailableModelTooltipMount } from '../unavailableModels';
 import { UnavailableModelTooltip } from './UnavailableModelTooltip';
@@ -19,6 +20,7 @@ let container: HTMLDivElement | null = null;
 let portalRoot: HTMLDivElement | null = null;
 
 afterEach(() => {
+  vi.restoreAllMocks();
   act(() => root?.unmount());
   container?.remove();
   portalRoot?.remove();
@@ -27,12 +29,43 @@ afterEach(() => {
   portalRoot = null;
 });
 
+// jsdom reports zero-size rects, so Radix's collision flip places a requested
+// 'right' on the left and the side assertions below would pass either way.
+function stubLayout(): void {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(
+    function (this: HTMLElement) {
+      const anchor = this.hasAttribute('data-testid');
+      const left = anchor ? 400 : 0;
+      const top = anchor ? 300 : 0;
+      const width = anchor ? 120 : 200;
+      const height = anchor ? 24 : 80;
+      return {
+        left,
+        top,
+        width,
+        height,
+        x: left,
+        y: top,
+        right: left + width,
+        bottom: top + height,
+        toJSON: () => ({}),
+      } as DOMRect;
+    },
+  );
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1024);
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(768);
+}
+
 function renderTooltip({
   tooltip,
   mount,
+  language = 'en',
+  side,
 }: {
   tooltip?: string;
   mount?: WebShellUnavailableModelTooltipMount;
+  language?: 'en' | 'ar';
+  side?: 'top' | 'right' | 'bottom' | 'left';
 }) {
   container = document.createElement('div');
   portalRoot = document.createElement('div');
@@ -41,14 +74,17 @@ function renderTooltip({
   act(() => {
     root!.render(
       <WebShellPortalRootContext.Provider value={portalRoot}>
-        <UnavailableModelTooltip
-          model={{ id: 'qwen-max', label: 'Qwen Max', tooltip }}
-          mount={mount}
-        >
-          <button type="button" data-testid="trigger">
-            Qwen Max
-          </button>
-        </UnavailableModelTooltip>
+        <I18nProvider language={language}>
+          <UnavailableModelTooltip
+            model={{ id: 'qwen-max', label: 'Qwen Max', tooltip }}
+            mount={mount}
+            side={side}
+          >
+            <button type="button" data-testid="trigger">
+              Qwen Max
+            </button>
+          </UnavailableModelTooltip>
+        </I18nProvider>
       </WebShellPortalRootContext.Provider>,
     );
   });
@@ -81,14 +117,16 @@ describe('UnavailableModelTooltip', () => {
     act(() => {
       root!.render(
         <WebShellPortalRootContext.Provider value={portalRoot}>
-          <UnavailableModelTooltip
-            model={{ id: 'qwen-max', label: 'Renamed' }}
-            mount={mount}
-          >
-            <button type="button" data-testid="trigger">
-              Renamed
-            </button>
-          </UnavailableModelTooltip>
+          <I18nProvider language="en">
+            <UnavailableModelTooltip
+              model={{ id: 'qwen-max', label: 'Renamed' }}
+              mount={mount}
+            >
+              <button type="button" data-testid="trigger">
+                Renamed
+              </button>
+            </UnavailableModelTooltip>
+          </I18nProvider>
         </WebShellPortalRootContext.Provider>,
       );
     });
@@ -98,6 +136,51 @@ describe('UnavailableModelTooltip', () => {
 
     act(() => root!.unmount());
     expect(dispose).toHaveBeenCalled();
+  });
+
+  it('opens to the inline end in Arabic', async () => {
+    stubLayout();
+    renderTooltip({ tooltip: 'Need Pro', language: 'ar' });
+    await act(async () => {
+      container!
+        .querySelector<HTMLButtonElement>('[data-testid="trigger"]')
+        ?.focus();
+    });
+    expect(
+      document
+        .querySelector('[data-web-shell-unavailable-model-tooltip]')
+        ?.getAttribute('data-side'),
+    ).toBe('left');
+  });
+
+  it('keeps a caller-pinned vertical side in Arabic', async () => {
+    stubLayout();
+    renderTooltip({ tooltip: 'Need Pro', language: 'ar', side: 'top' });
+    await act(async () => {
+      container!
+        .querySelector<HTMLButtonElement>('[data-testid="trigger"]')
+        ?.focus();
+    });
+    expect(
+      document
+        .querySelector('[data-web-shell-unavailable-model-tooltip]')
+        ?.getAttribute('data-side'),
+    ).toBe('top');
+  });
+
+  it('mirrors a caller-pinned horizontal side in Arabic', async () => {
+    stubLayout();
+    renderTooltip({ tooltip: 'Need Pro', language: 'ar', side: 'left' });
+    await act(async () => {
+      container!
+        .querySelector<HTMLButtonElement>('[data-testid="trigger"]')
+        ?.focus();
+    });
+    expect(
+      document
+        .querySelector('[data-web-shell-unavailable-model-tooltip]')
+        ?.getAttribute('data-side'),
+    ).toBe('right');
   });
 
   it('falls back to the string tooltip when mount declines', async () => {

@@ -974,7 +974,7 @@ export const COLLAB_MESSAGES_AR: Record<string, CollabMessage> = {
   'collab.runtime.joinConnected': (v) =>
     `انضم هذا الحاسوب إلى ${v?.server} كبيئة تشغيل.`,
   'collab.runtime.notSavedHere': (v) =>
-    `انضم هذا الحاسوب، لكن تعذر حفظ الاتصال، ولن يعيد الاتصال تلقائياً بعد إعادة التشغيل أو إعادة تحميل مساحة العمل${v?.error ? `: ${v.error}` : '.'}`,
+    `انضم هذا الحاسوب، لكن تعذر حفظ الاتصال، ولن يعيد الاتصال تلقائياً بعد إعادة التشغيل أو إعادة تحميل مساحة العمل${v?.error ? `: ${v.error}` : ''}.${v?.recorded === 'true' ? ' أعد تشغيل أمر الانضمام نفسه لحفظه.' : ''}`,
   'collab.runtime.notSavedThere': (v) =>
     `اتصل ذلك الحاسوب، لكن تعذر حفظ الاتصال، ولن يعيد الاتصال تلقائياً بعد إعادة التشغيل أو إعادة تحميل مساحة العمل${v?.error ? `: ${v.error}` : '.'}`,
   'collab.runtime.joinTimedOut': (v) =>

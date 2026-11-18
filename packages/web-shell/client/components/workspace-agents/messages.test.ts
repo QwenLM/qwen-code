@@ -74,20 +74,22 @@ describe('collaboration messages', () => {
 describe('the join notices', () => {
   const en = COLLAB_MESSAGES_EN['collab.runtime.notSavedHere'];
   const zh = COLLAB_MESSAGES_ZH['collab.runtime.notSavedHere'];
+  const ar = COLLAB_MESSAGES_AR['collab.runtime.notSavedHere'];
 
   it('advises a rerun only when the credential recorded the join', () => {
     // An older daemon sends no `recorded`: absent means unknown, and the
     // rerun it would be advised to make can be refused.
     const cases = [
-      [undefined, '', ''],
-      ['false', '', ''],
+      [undefined, '', '', ''],
+      ['false', '', '', ''],
       [
         'true',
         ' Run the same join command again to save it.',
         '再运行一次同样的加入命令即可保存。',
+        ' أعد تشغيل أمر الانضمام نفسه لحفظه.',
       ],
     ] as const;
-    for (const [recorded, remedyEn, remedyZh] of cases) {
+    for (const [recorded, remedyEn, remedyZh, remedyAr] of cases) {
       expect(
         typeof en === 'function' ? en({ error: 'disk full', recorded }) : en,
       ).toBe(
@@ -97,6 +99,11 @@ describe('the join notices', () => {
         typeof zh === 'function' ? zh({ error: 'disk full', recorded }) : zh,
       ).toBe(
         `这台电脑已加入，但没能保存这次连接，重启或重新加载工作区后不会自动重连：disk full。${remedyZh}`,
+      );
+      expect(
+        typeof ar === 'function' ? ar({ error: 'disk full', recorded }) : ar,
+      ).toBe(
+        `انضم هذا الحاسوب، لكن تعذر حفظ الاتصال، ولن يعيد الاتصال تلقائياً بعد إعادة التشغيل أو إعادة تحميل مساحة العمل: disk full.${remedyAr}`,
       );
     }
   });

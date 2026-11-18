@@ -13,6 +13,8 @@ import { describe, expect, it } from 'vitest';
 const LTR_CODE_SURFACES: Array<[string, string]> = [
   ['./WaitingMinigame.module.css', '.cells'],
   ['./messages/UserShellMessage.module.css', '.output'],
+  ['./messages/UserShellMessage.module.css', '.command'],
+  ['./messages/PlanExecutionView.module.css', '.dagCanvas'],
   ['./messages/tools/DiffView.module.css', '.line'],
   ['./messages/tools/ToolChrome.module.css', '.lineOutput'],
   ['./messages/tools/ToolChrome.module.css', '.expandedOutput'],
