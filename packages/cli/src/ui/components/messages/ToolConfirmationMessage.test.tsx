@@ -427,16 +427,97 @@ describe('ToolConfirmationMessage', () => {
     expect(frame).not.toContain('\x08');
   });
 
+  // The CSI fixtures in the displayed-command and displayed-warnings tests
+  // pass with or without the sanitize calls, because Ink's own renderer drops
+  // CSI sequences and the C0 bytes behind them. What it lets through in these
+  // two places is SGR (colour and style sequences, `ESC [ ... m`) and Unicode
+  // bidi controls, so the three tests below are the ones that pin the sanitize
+  // calls on the command and on the warnings. SGR 8 is the conceal style.
+  it('does not let an SGR-only command reach the terminal as a raw escape', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'echo \x1b[8mhidden\x1b[0m done',
+      rootCommand: 'echo',
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    // The text between the sequences is still shown, the sequence is not raw.
+    expect(frame).toContain('hidden');
+    expect(frame).not.toContain('\x1b[8m');
+  });
+
+  it('does not let an SGR-only exec warning reach the terminal as a raw escape', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'echo hello',
+      rootCommand: 'echo',
+      warnings: ['outside workspace: \x1b[8mhidden\x1b[0m /tmp/data'],
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('outside workspace:');
+    expect(frame).toContain('hidden');
+    expect(frame).not.toContain('\x1b[8m');
+  });
+
+  it('strips bidi override and isolate characters from the displayed command', () => {
+    // RLO, LRI and PDI can reorder how the rest of the line is painted.
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'echo \u202eevil.sh\u2066 ok\u2069',
+      rootCommand: 'echo',
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('evil.sh');
+    expect(frame).not.toContain('\u202e');
+    expect(frame).not.toContain('\u2066');
+    expect(frame).not.toContain('\u2069');
+  });
+
   // rootCommand feeds the question line itself ("Allow execution of:
   // '{{command}}'?"). getCommandRoot() just takes the raw command's first
   // token, so this is untrusted the same way `command` is, right next to the
   // Yes/No choice the user is about to make, and needs the same sanitization.
   it('sanitizes terminal control sequences in the question line (rootCommand)', () => {
     // A bare C0 byte (no ESC prefix), not a CSI sequence: Ink's own renderer
-    // already strips ESC-prefixed sequences before they reach the frame, so
-    // a CSI-only payload would pass here even without sanitizeTerminalLine.
-    // A bare BEL/BS byte is the part Ink does not neutralize on its own, so
-    // it is the only payload that actually exercises this fix.
+    // already drops CSI sequences before they reach the frame, so a CSI-only
+    // payload would pass here even without sanitizeTerminalLine. A bare
+    // BEL/BS byte is the part Ink does not neutralize on its own in this
+    // unwrapped line, so it is the payload that actually exercises this fix.
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'exec',
       title: 'Confirm Shell Command',
@@ -536,6 +617,34 @@ describe('ToolConfirmationMessage', () => {
     // silently rewritten", the latter would collapse a dirty and a clean
     // rule into one persisted grant.
     expect(confirmationDetails.permissionRules).toEqual(['Bash(probe\x07 *)']);
+  });
+
+  // Each Always-allow label is one row. A rule specifier is built from the
+  // command text, so it can carry a newline or tab; sanitizeTerminalLine turns
+  // those into a space, where sanitizeTerminalText would keep them and the
+  // label would start a second row the layout never budgeted for.
+  it('keeps the Always-allow labels on one row when the rule specifier carries a newline or tab', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'probe arg',
+      rootCommand: 'probe',
+      permissionRules: ['Bash(probe\nsecond\tthird *)'],
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain("run 'probe second third *' commands");
+    expect(frame).not.toContain('\t');
   });
 
   it('renders classifier fallback guidance and the Default Mode option', async () => {
