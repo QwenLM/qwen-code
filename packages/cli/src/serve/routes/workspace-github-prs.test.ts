@@ -40,17 +40,6 @@ vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
-const mockIsGitAncestorOfHead = vi.hoisted(() => vi.fn());
-vi.mock(
-  '@qwen-code/qwen-code-core/utils/gitDiff.js',
-  async (importOriginal) => ({
-    ...(await importOriginal<
-      typeof import('@qwen-code/qwen-code-core/utils/gitDiff.js')
-    >()),
-    isGitAncestorOfHead: mockIsGitAncestorOfHead,
-  }),
-);
-
 const createGitHubPullRequestMock = vi.mocked(createGitHubPullRequest);
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 const fetchGitHubPullRequestFilesMock = vi.mocked(fetchGitHubPullRequestFiles);
@@ -109,7 +98,6 @@ const PR = {
 describe('workspace GitHub PR routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockIsGitAncestorOfHead.mockResolvedValue(false);
   });
 
   it('lists pull requests for the selected trusted workspace', async () => {
@@ -584,124 +572,12 @@ describe('workspace GitHub PR routes', () => {
       additions: 10,
       deletions: 2,
       headSha: 'abc1234',
-      headIsAncestor: false,
     });
     expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledWith(
       '/work/main',
       42,
       undefined,
       undefined,
-    );
-  });
-
-  it('reports headIsAncestor from the git ancestry probe', async () => {
-    // The client only trusts <head>..HEAD as a fallback boundary when the
-    // head is an ancestor of HEAD; the probe runs where git runs (here), and
-    // its verdict rides along with the file list.
-    fetchGitHubPullRequestFilesMock.mockResolvedValue({
-      kind: 'ok',
-      files: {
-        files: [],
-        hiddenCount: 0,
-        additions: 0,
-        deletions: 0,
-        headSha: 'abc1234',
-      },
-    });
-    mockIsGitAncestorOfHead.mockResolvedValue(true);
-    const app = mount();
-
-    const response = await request(app).get(
-      '/workspaces/primary/github/prs/42/files',
-    );
-
-    expect(response.status).toBe(200);
-    expect(response.body.headIsAncestor).toBe(true);
-    expect(mockIsGitAncestorOfHead).toHaveBeenCalledWith(
-      '/work/main',
-      'abc1234',
-      undefined,
-    );
-  });
-
-  it('refuses the boundary when the head is not an ancestor', async () => {
-    fetchGitHubPullRequestFilesMock.mockResolvedValue({
-      kind: 'ok',
-      files: {
-        files: [],
-        hiddenCount: 0,
-        additions: 0,
-        deletions: 0,
-        headSha: 'abc1234',
-      },
-    });
-    mockIsGitAncestorOfHead.mockResolvedValue(false);
-    const app = mount();
-
-    const response = await request(app).get(
-      '/workspaces/primary/github/prs/42/files',
-    );
-
-    expect(response.status).toBe(200);
-    expect(response.body.headIsAncestor).toBe(false);
-  });
-
-  it('skips the ancestry probe when the PR head is empty', async () => {
-    fetchGitHubPullRequestFilesMock.mockResolvedValue({
-      kind: 'ok',
-      files: {
-        files: [],
-        hiddenCount: 0,
-        additions: 0,
-        deletions: 0,
-        headSha: '',
-      },
-    });
-    const app = mount();
-
-    const response = await request(app).get(
-      '/workspaces/primary/github/prs/42/files',
-    );
-
-    expect(response.status).toBe(200);
-    expect(response.body.headIsAncestor).toBe(false);
-    expect(mockIsGitAncestorOfHead).not.toHaveBeenCalled();
-  });
-
-  it('runs the ancestry probe under the workspace effectiveEnv', async () => {
-    // The probe must see the same overlay identity as the gh fetch: a
-    // workspace whose git config/credentials come from its overlay must not
-    // be probed under the daemon host's environment.
-    fetchGitHubPullRequestFilesMock.mockResolvedValue({
-      kind: 'ok',
-      files: {
-        files: [],
-        hiddenCount: 0,
-        additions: 0,
-        deletions: 0,
-        headSha: 'abc1234',
-      },
-    });
-    mockIsGitAncestorOfHead.mockResolvedValue(true);
-    const overlay = { GH_TOKEN: 'workspace-token' };
-    const app = express();
-    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
-      workspaceRegistry: registry([
-        runtime('primary', '/work/main', true, overlay),
-      ]),
-      sendBridgeError,
-      mutate: passthroughMutate,
-    });
-
-    const response = await request(app).get(
-      '/workspaces/primary/github/prs/42/files',
-    );
-
-    expect(response.status).toBe(200);
-    expect(mockIsGitAncestorOfHead).toHaveBeenCalledWith(
-      '/work/main',
-      'abc1234',
-      overlay,
     );
   });
 
