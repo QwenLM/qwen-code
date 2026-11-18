@@ -5,6 +5,8 @@
  */
 
 import fs from 'node:fs';
+import { build as buildBundle } from 'esbuild';
+import nodeModule from 'node:module';
 import type { ResolveHook, ResolveHookContext } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -41,6 +43,7 @@ describe('installBundledChunkResolver', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     fs.rmSync(directory, { recursive: true, force: true });
   });
@@ -115,11 +118,96 @@ describe('installBundledChunkResolver', () => {
     '--im"port"=custom-loader.mjs',
     '--im"p\\ort"=custom-loader.mjs',
     '--experimental_loader=custom-loader.mjs',
+    '--experimental-loader=custom-loader.mjs',
+    '--require=./preload.cjs',
     '-r ./preload.cjs',
   ])('leaves a custom Node loader in %s alone', (options) => {
     vi.stubEnv('NODE_OPTIONS', options);
     installBundledChunkResolver(entryUrl);
     expect(registerHooks).not.toHaveBeenCalled();
+  });
+
+  it('leaves command-line Node loaders alone', () => {
+    const original = process.execArgv;
+    try {
+      process.execArgv = ['--import=custom-loader.mjs'];
+      installBundledChunkResolver(entryUrl);
+      expect(registerHooks).not.toHaveBeenCalled();
+    } finally {
+      process.execArgv = original;
+    }
+  });
+
+  it('supports runtimes without synchronous hooks', () => {
+    const original = nodeModule.registerHooks;
+    try {
+      Object.defineProperty(nodeModule, 'registerHooks', {
+        value: undefined,
+        configurable: true,
+      });
+      expect(() => installBundledChunkResolver(entryUrl)).not.toThrow();
+      expect(registerHooks).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(nodeModule, 'registerHooks', {
+        value: original,
+        configurable: true,
+      });
+    }
+  });
+
+  it('pins the generated chunk layout to the production build', async () => {
+    const build = fs.readFileSync(
+      new URL('../../../../esbuild.config.js', import.meta.url),
+      'utf8',
+    );
+    const chunkDirectory = build.match(
+      /const BUNDLE_CHUNK_DIR = '([^']+)'/u,
+    )?.[1];
+    const chunkTemplate = build.match(/chunkNames: `([^`]+)`/u)?.[1];
+    expect(chunkDirectory).toBe('chunks');
+    expect(chunkTemplate).toBe('${BUNDLE_CHUNK_DIR}/[name]-[hash]');
+    fs.writeFileSync(
+      path.join(directory, 'entry.js'),
+      'export const load = () => import("./lazy.js");',
+    );
+    fs.writeFileSync(
+      path.join(directory, 'lazy.js'),
+      'export const value = 1;',
+    );
+    const output = await buildBundle({
+      entryPoints: [path.join(directory, 'entry.js')],
+      bundle: true,
+      splitting: true,
+      format: 'esm',
+      platform: 'node',
+      outdir: path.join(directory, 'built'),
+      chunkNames: chunkTemplate!.replace(
+        '${BUNDLE_CHUNK_DIR}',
+        chunkDirectory!,
+      ),
+      metafile: true,
+    });
+    const builtEntryUrl = pathToFileURL(
+      path.join(directory, 'built', 'entry.js'),
+    ).href;
+    installBundledChunkResolver(builtEntryUrl);
+    expect(registerHooks).toHaveBeenCalledOnce();
+    const { resolve } = registerHooks.mock.calls[0]![0];
+    const chunks = Object.keys(output.metafile!.outputs).filter((file) =>
+      file.includes('/chunks/'),
+    );
+    expect(chunks.length).toBeGreaterThan(0);
+    const fallback = vi.fn();
+    for (const chunk of chunks) {
+      expect(
+        resolve(
+          './chunks/' + path.basename(chunk),
+          context(builtEntryUrl),
+          fallback,
+        ),
+      ).toMatchObject({ shortCircuit: true });
+    }
+    expect(fallback).not.toHaveBeenCalled();
   });
 
   it('leaves unpackaged CLI entries alone', () => {

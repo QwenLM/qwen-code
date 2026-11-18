@@ -7,7 +7,9 @@
 import { lstatSync, readdirSync, type Dirent } from 'node:fs';
 import nodeModule, { type ResolveFnOutput } from 'node:module';
 
+// Keep this layout in sync with esbuild.config.js and core/utils/bundlePaths.ts.
 const generatedChunkName = /^[\w.-]+-[A-Z0-9]{8}\.js$/u;
+// Keep loader spellings in sync with config/shared-env-keys.ts.
 const nodeLoaderOption =
   /(?:^|\s)(?:--(?:experimental[-_]loader|loader|import|require)(?=[\s=]|$)|-r(?=\s|$))/u;
 
