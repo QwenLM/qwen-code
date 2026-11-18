@@ -2,6 +2,15 @@
 
 语言：[English](./2026-11-16-web-shell-change-overview.md) | 中文
 
+> **已被取代的边界机制。** 本文描述 #17378 交付时的设计。其 commit 兜底边界——
+> files 路由的 `git merge-base --is-ancestor` 探针（`headIsAncestor`）与 hook 的
+> 「最新祖先 head」窗口——已由跟进设计
+> [变更总览边界修复](./2026-11-17-change-overview-boundary-fix.zh-CN.md)**退役**：
+> 跟进设计把窗口定界到会话不可变起点 commit，并用单次原生
+> `git log <range> --not <refs>` 排除从任一绑定 PR head（及基线分支）可达的所有
+> 提交。下文「Files 路由」「UI 组装」「降级」「涉及文件」各节以现在时描述原祖先
+> 探针机制，仅为保留历史准确；应读作已被跟进设计取代，而非当前行为。
+
 ## 问题
 
 会话进行中，agent 会编辑大量文件，用户逐渐不清楚改动规模到底有多大。目前 Web
@@ -219,17 +228,26 @@ PR 方法保持一致。
 
 ## 已知限制
 
-- **无绑定 PR 且无记录基线分支时的 commit 兜底。** 已交付的默认行为是遍历
-  HEAD 近期历史（上限 `COMMIT_FALLBACK_LIMIT`，按口径标注）。原始理由
-  「worktree 会话从零开始」不成立：worktree 分支在基线顶端创建，其 HEAD
-  携带基线分支历史；普通会话的 git cwd 就是用户自己的检出。后果：此类会话
-  可能把至多 `COMMIT_FALLBACK_LIMIT` 条会话前提交带着 subject 与 `+/-`
-  统计列为松散 `commit:` 单元。所有相邻状态都拒绝无范围遍历；此状态作为
-  维护者接受的残留保留（仅展示、只读面板、无写入路径）。边界修复——持久化
-  会话起点 commit 并组 `<startCommit>..HEAD`、未知起点则抑制兜底——延后。
-- **绑定时间序非提交图序。** 两个绑定 PR head 都是 HEAD 祖先但彼此不可比时，
-  最后绑定 head 的窗口会把兄弟 PR 的提交重复列为松散单元。同为维护者接受的
-  残留（仅展示重复）；修复需要客户端不具备的成对祖先/批量可达能力，延后。
+合入时接受的两条展示残留均已由跟进设计
+[变更总览边界修复](./2026-11-17-change-overview-boundary-fix.zh-CN.md)**解决**：
+该设计用单一的 `<start>..HEAD --not <绑定 heads>` 窗口取代「最新祖先 head」
+启发式。
+
+- **无绑定 PR 且无记录基线分支时的 commit 兜底**（原 R7-1）。已交付的默认
+  行为遍历 HEAD 近期历史，因为「worktree 会话从零开始」的前提不成立。跟进
+  设计记录会话起点 commit 并组 `<startCommit>..HEAD`；无起点 commit 时，若
+  记录了基线分支则回退到 `<baseBranch>..HEAD`，仅当两者皆无才抑制兜底——
+  绝不发起无范围遍历。（因此 `originalBranch` 有值但 `originalHeadCommit`
+  为空的 legacy worktree sidecar，仍得到一个由会移动的本地分支名界定的窗口。）
+  起点 commit 对 **worktree 会话 durable**（sidecar 的 `worktreeBase`，否则
+  `originalHeadCommit`），但对**分支与普通会话仅 live**：分支元数据不在
+  daemon 重启后恢复，而普通会话根本没有分支元数据——其起点 commit 是 spawn
+  时在工作区检出读取的 `getHeadCommit`，只存在于 live bridge entry、从不持久化
+  ——故恢复的分支/普通会话抑制兜底，而非遍历 HEAD。
+- **绑定时间序非提交图序**（原 R7-2）。两个不可比的祖先 head 使最后绑定
+  head 的窗口重复列兄弟 PR 的提交。跟进设计用一次原生
+  `git log <range> --not <heads>` 排除从*任一*绑定 PR head 可达的所有提交，
+  统一处理已合并、并行与不可比的 head。
 
 ## 待决问题
 
