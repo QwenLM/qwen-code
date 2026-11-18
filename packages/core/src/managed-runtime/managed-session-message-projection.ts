@@ -14,7 +14,6 @@ import {
 import {
   assertManagedSessionDurableRef,
   MANAGED_SESSION_FORMAT_VERSION,
-  MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
   managedSessionReaderFacingBody,
   safeErrorValue,
@@ -387,50 +386,63 @@ export class ManagedSessionMessageProjection {
     throughSequence: number | undefined,
     includeCompactions: boolean,
   ): Promise<ChatRecord[]> {
-    const records: ChatRecord[] = [];
-    const checkpoints = new Map<string, number>();
-    let after = 0;
-    for (;;) {
-      const page = this.authority.readEvents({
-        afterSequence: after,
-        limit: MANAGED_SESSION_LIMITS.maxReadEvents,
-      });
-      if (page.length === 0) break;
-      for (const event of page) {
-        if (throughSequence !== undefined && event.sequence > throughSequence)
-          return records;
-        after = event.sequence;
-        const branch = await readManagedBranchCheckpoint(
-          event,
-          this.resources,
-          (id) => checkpoints.get(id),
-          throughSequence ?? this.authority.committedSequence,
-        );
-        if (event.kind === 'checkpoint.committed') {
-          checkpoints.set(
-            event.payload['checkpointId'] as string,
-            event.sequence,
-          );
-        }
-        if (branch !== undefined) {
-          records.push(branch);
-        } else if (
-          event.kind === 'message.committed' ||
-          (includeCompactions && event.kind === 'context.compacted')
-        ) {
-          const ref = assertManagedSessionDurableRef(
-            event.payload[
-              event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
-            ],
-            `${event.kind} event ${event.eventId} body`,
-          );
-          const body = await this.bodies.read(this.resources, ref);
-          records.push(JSON.parse(body.toString('utf8')) as ChatRecord);
-        }
-      }
-    }
-    return records;
+    return projectManagedModelRecords(
+      this.authority.eventsInSequenceRange(
+        1,
+        throughSequence ?? this.authority.committedSequence,
+      ),
+      this.resources,
+      throughSequence ?? this.authority.committedSequence,
+      {
+        includeCompactions,
+        readBody: (ref) => this.bodies.read(this.resources, ref),
+      },
+    );
   }
+}
+
+/** Pure journal projection shared by live Sessions and frozen side queries. */
+export async function projectManagedModelRecords(
+  events: Iterable<ManagedSessionEvent>,
+  resources: ManagedSessionResourceStore,
+  throughSequence: number,
+  options: {
+    includeCompactions?: boolean;
+    readBody?: (ref: ManagedSessionDurableRef) => Promise<Buffer>;
+  } = {},
+): Promise<ChatRecord[]> {
+  const records: ChatRecord[] = [];
+  const checkpoints = new Map<string, number>();
+  const readBody =
+    options.readBody ??
+    ((ref) => readManagedMessageBody((part) => resources.read(part), ref));
+  for (const event of events) {
+    if (event.sequence > throughSequence) break;
+    const branch = await readManagedBranchCheckpoint(
+      event,
+      resources,
+      (id) => checkpoints.get(id),
+      throughSequence,
+    );
+    if (event.kind === 'checkpoint.committed')
+      checkpoints.set(event.payload['checkpointId'] as string, event.sequence);
+    if (branch !== undefined) records.push(branch);
+    else if (
+      event.kind === 'message.committed' ||
+      (options.includeCompactions && event.kind === 'context.compacted')
+    ) {
+      const ref = assertManagedSessionDurableRef(
+        event.payload[
+          event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
+        ],
+        `${event.kind} event ${event.eventId} body`,
+      );
+      records.push(
+        JSON.parse((await readBody(ref)).toString('utf8')) as ChatRecord,
+      );
+    }
+  }
+  return records;
 }
 
 async function readRecordBody(

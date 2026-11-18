@@ -177,6 +177,89 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
   });
 
+  describe('qwen4-max', () => {
+    const qwen4Capability = {
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+      },
+    };
+    const systemUser = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'hi' },
+    ] as OpenAI.Chat.ChatCompletionMessageParam[];
+    const firstBlockCacheControl = (result: Wire) =>
+      (
+        (
+          result['messages'] as Array<{
+            content: Array<{ cache_control?: unknown }>;
+          }>
+        )[0].content[0] as { cache_control?: unknown }
+      ).cache_control;
+
+    it('ships a legal native tier verbatim', () => {
+      mockCliConfig.getResolvedModelConfig = vi
+        .fn()
+        .mockReturnValue(qwen4Capability);
+      const p = gen({
+        model: 'qwen4-max',
+        authType: AuthType.USE_OPENAI,
+        reasoning: { effort: 'xhigh' },
+      });
+      const result = p.buildRequest(
+        {
+          model: 'qwen4-max',
+          messages: [{ role: 'user', content: 'hi' }],
+        } as OpenAI.Chat.ChatCompletionCreateParams,
+        'test-prompt-id',
+      ) as unknown as Wire;
+      expect(result['reasoning_effort']).toBe('xhigh');
+    });
+
+    it('stamps ttl 1h on cache breakpoints when cacheRetention is 1h', () => {
+      const p = gen({ model: 'qwen4-max', cacheRetention: '1h' });
+      const result = p.buildRequest(
+        {
+          model: 'qwen4-max',
+          messages: systemUser,
+        } as OpenAI.Chat.ChatCompletionCreateParams,
+        'test-prompt-id',
+      ) as unknown as Wire;
+      expect(firstBlockCacheControl(result)).toEqual({
+        type: 'ephemeral',
+        ttl: '1h',
+      });
+    });
+
+    it('omits ttl by default (5m spec default)', () => {
+      const p = gen({ model: 'qwen4-max' });
+      const result = p.buildRequest(
+        {
+          model: 'qwen4-max',
+          messages: systemUser,
+        } as OpenAI.Chat.ChatCompletionCreateParams,
+        'test-prompt-id',
+      ) as unknown as Wire;
+      expect(firstBlockCacheControl(result)).toEqual({ type: 'ephemeral' });
+    });
+
+    it('does not stamp ttl on qwen3.8-max even with cacheRetention 1h', () => {
+      const p = gen({ model: 'qwen3.8-max', cacheRetention: '1h' });
+      const result = p.buildRequest(
+        {
+          model: 'qwen3.8-max',
+          messages: systemUser,
+        } as OpenAI.Chat.ChatCompletionCreateParams,
+        'test-prompt-id',
+      ) as unknown as Wire;
+      expect(firstBlockCacheControl(result)).toEqual({ type: 'ephemeral' });
+    });
+  });
+
   it.each([
     [{ thinking_budget: 4096 }, { thinking_budget: 4096 }],
     [{ enable_thinking: false }, { reasoning_effort: 'none' }],
@@ -1614,6 +1697,22 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result.messages[0].content).toBe('You are a helpful assistant.');
       expect(result.messages[1].content).toBe('Hello!');
     });
+
+    it.each([true, false])(
+      'uses the isolated route cache control setting (%s)',
+      (enableCacheControl) => {
+        vi.mocked(mockCliConfig.getContentGeneratorConfig).mockReturnValue({
+          model: 'qwen-max',
+          enableCacheControl: !enableCacheControl,
+        });
+        const isolated = gen({ isolatedRoute: true, enableCacheControl });
+        const system = 'You are a helpful assistant.';
+        const result = isolated.buildRequest(baseRequest, 'test-prompt-id');
+        expect(result.messages[0].content).toEqual(
+          enableCacheControl ? [cachedText(system)] : system,
+        );
+      },
+    );
 
     it('should handle messages with array content for streaming requests', () => {
       // stream: true triggers cache control on the last message.

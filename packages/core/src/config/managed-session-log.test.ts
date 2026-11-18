@@ -407,6 +407,16 @@ describe('Managed Session log recording', () => {
   it(
     'keeps its title where the session list and a restore read it',
     async () => {
+      // This case reads the log by byte offset, so its own records must be the
+      // only writers. The activation renewal ticks at a third of the lease
+      // (100 s), which this case's raised ceiling admits: one tick both moves
+      // the rename off the offset sampled for it and charges its growth after
+      // the title reset, landing the next anchor a record early. Renewal-driven
+      // anchoring has its own cases below.
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'renewActivation',
+      ).mockResolvedValue(undefined);
       const config = await start(managedConfig());
       const recorder = config.getChatRecordingService()!;
       const titleRecords = async () =>
@@ -1859,7 +1869,10 @@ describe('Managed host tools', () => {
     const initializeInternal = vi
       .spyOn(
         config as unknown as {
-          initializeInternal(options?: unknown): Promise<void>;
+          initializeInternal(
+            options?: unknown,
+            ripgrepAvailability?: Promise<boolean>,
+          ): Promise<void>;
         },
         'initializeInternal',
       )
@@ -1867,6 +1880,7 @@ describe('Managed host tools', () => {
     await config.initialize();
     expect(initializeInternal).toHaveBeenCalledWith(
       expect.objectContaining({ skipMcpDiscovery: true }),
+      undefined,
     );
 
     // A settings reload or a working-directory change reconciles MCP servers

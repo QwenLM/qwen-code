@@ -6,7 +6,7 @@
  * AUTO approval mode LLM classifier.
  *
  * Two-stage flow:
- *   Stage 1 (fast):  shouldBlock-only output, max_tokens=32, thinking off.
+ *   Stage 1 (fast):  shouldBlock-only output, max_tokens=256, thinking off.
  *                    Allow path returns immediately (~300ms).
  *   Stage 2 (review): full output { thinking, shouldBlock, reason },
  *                     max_tokens=4096. API thinking is off by default but can
@@ -14,8 +14,8 @@
  *                     reduce false positives. (`thinking` is a plain output
  *                     field unless API thinking is explicitly enabled.)
  *
- * Fail-closed: any non-abort failure (API error, timeout, schema failure,
- * context overflow) returns shouldBlock=true with unavailable=true.
+ * A stage-1 deadline gets one complete review from a distinct session model.
+ * Unrecovered failures return shouldBlock=true with unavailable=true.
  */
 
 import type { Content } from '@google/genai';
@@ -27,6 +27,7 @@ import {
   buildClassifierSystemPrompt,
   STAGE1_SUFFIX,
   STAGE2_SUFFIX,
+  MAIN_MODEL_SUFFIX,
 } from './classifier-prompts/system-prompt.js';
 import { buildClassifierContents } from './classifier-transcript.js';
 import type { TrustedUserAnswerSnapshot } from './trusted-user-answers.js';
@@ -80,7 +81,7 @@ export interface ClassifierResult {
    * tool error returned to the main LLM). Empty when `shouldBlock=false`.
    */
   reason: string;
-  /** Stage-2 thinking content, when available. Not displayed to user. */
+  /** Full-review reasoning, when available. Not displayed to user. */
   thinking?: string;
   /** Model name actually used for the call (typically the fast model). */
   model: string;
@@ -96,7 +97,7 @@ export interface ClassifierResult {
    */
   unavailable?: boolean;
   /** Which stage produced the final verdict. */
-  stage: 'fast' | 'thinking';
+  stage: 'fast' | 'thinking' | 'main';
 }
 
 // ─── Schemas ────────────────────────────────────────────────────────────
@@ -142,6 +143,7 @@ export async function classifyAction(
   input: ClassifierInput,
 ): Promise<ClassifierResult> {
   const overallStart = Date.now();
+  input.signal.throwIfAborted();
 
   // buildClassifierContents and buildClassifierSystemPrompt are wrapped so
   // any pathological input (a tool returning a circular projected-args
@@ -164,17 +166,17 @@ export async function classifyAction(
       err,
       'fast',
       overallStart,
-      input.config,
+      getModelLabel(input.config),
     );
   }
   const stage1SystemPrompt = baseSystemPrompt + STAGE1_SUFFIX;
   const classifierSettings = resolveClassifierSettings(input.config);
 
   // Stage 1 ──────────────────────────────────────────────────────────────
-  const stage1Signal = AbortSignal.any([
-    input.signal,
-    AbortSignal.timeout(classifierSettings.stage1TimeoutMs),
-  ]);
+  const stage1Deadline = AbortSignal.timeout(
+    classifierSettings.stage1TimeoutMs,
+  );
+  const stage1Signal = AbortSignal.any([input.signal, stage1Deadline]);
 
   let stage1: Stage1Response;
   try {
@@ -196,14 +198,70 @@ export async function classifyAction(
         thinkingConfig: { includeThoughts: false },
       },
     })) as Stage1Response;
+    stage1Signal.throwIfAborted();
   } catch (err) {
     if (input.signal.aborted) throw err;
+    const mainModel = input.config.getModel();
+    if (stage1Deadline.aborted && mainModel !== getModelLabel(input.config)) {
+      const mainSignal = AbortSignal.any([
+        input.signal,
+        AbortSignal.timeout(classifierSettings.stage2TimeoutMs),
+      ]);
+      debugLogger.warn(
+        `Stage 1 deadline reached; reviewing stage=main model=${mainModel}`,
+      );
+      try {
+        mainSignal.throwIfAborted();
+        const result = await runSideQuery<Stage2Response>(input.config, {
+          contents,
+          schema: STAGE2_SCHEMA,
+          systemInstruction: baseSystemPrompt + MAIN_MODEL_SUFFIX,
+          abortSignal: mainSignal,
+          model: mainModel,
+          purpose: 'permission_classifier_main',
+          skipOutputLanguagePreference: true,
+          maxAttempts: 1,
+          boundedRetries: true,
+          config: {
+            temperature: 0,
+            maxOutputTokens: 4096,
+            thinkingConfig: {
+              includeThoughts: classifierSettings.stage2ThinkingEnabled,
+            },
+          },
+        });
+        mainSignal.throwIfAborted();
+        debugLogger.debug(
+          `${result.shouldBlock ? 'BLOCK' : 'ALLOW'} stage=main ` +
+            `model=${mainModel} durationMs=${Date.now() - overallStart}`,
+        );
+        return {
+          shouldBlock: result.shouldBlock,
+          reason: result.shouldBlock
+            ? sanitizeClassifierReason(result.reason)
+            : '',
+          thinking: result.thinking,
+          model: mainModel,
+          durationMs: Date.now() - overallStart,
+          stage: 'main',
+        };
+      } catch (mainError) {
+        if (input.signal.aborted) throw mainError;
+        return failUnavailable(
+          'Classifier main-model review unavailable',
+          mainError,
+          'main',
+          overallStart,
+          mainModel,
+        );
+      }
+    }
     return failUnavailable(
       'Classifier stage 1 unavailable',
       err,
       'fast',
       overallStart,
-      input.config,
+      getModelLabel(input.config),
     );
   }
 
@@ -363,9 +421,9 @@ export function sanitizeClassifierReason(raw: string): string {
 function failUnavailable(
   baseMessage: string,
   err: unknown,
-  stage: 'fast' | 'thinking',
+  stage: ClassifierResult['stage'],
   startedAt: number,
-  config: Config,
+  model: string,
 ): ClassifierResult {
   const reason = isContextLengthExceededError(err)
     ? 'Conversation transcript exceeds classifier context window'
@@ -375,14 +433,15 @@ function failUnavailable(
   // starts routing every call to manual approval. The public `ClassifierResult`
   // only carries the sanitized `reason` and `unavailable` flag.
   debugLogger.warn(
-    `failUnavailable stage=${stage} durationMs=${Date.now() - startedAt} ` +
+    `failUnavailable stage=${stage} model=${model} ` +
+      `durationMs=${Date.now() - startedAt} ` +
       `reason="${reason}" cause="${errMessage(err)}"`,
   );
   return {
     shouldBlock: true,
     reason,
     unavailable: true,
-    model: getModelLabel(config),
+    model,
     durationMs: Date.now() - startedAt,
     stage,
   };

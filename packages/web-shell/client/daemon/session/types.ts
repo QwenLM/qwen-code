@@ -8,6 +8,8 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonBranchSessionRequest,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -34,6 +36,7 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonSession,
   DaemonSessionClient,
+  DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskRuntimeStatus,
@@ -42,6 +45,7 @@ import type {
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionArtifact,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -176,6 +180,32 @@ export interface DaemonConnectionState {
   loadingTranscript?: boolean;
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
+  /**
+   * Restored artifact snapshot embedded in the load response. Available before
+   * the replay renders so a session-level artifact entry can appear early;
+   * live updates still come from the gated artifact fetch.
+   */
+  restoredArtifacts?: DaemonSessionArtifact[];
+  /**
+   * Session the restoredArtifacts snapshot belongs to. The optimistic session
+   * switch moves sessionId before the new restore lands, so consumers must
+   * only use the snapshot when this matches the current sessionId — otherwise
+   * the previous session's artifacts leak under the new one.
+   */
+  restoredArtifactsSessionId?: string;
+  /**
+   * Artifact count captured from the session-list summary at click time, so
+   * the header artifact entry can show it before the load response lands.
+   * A hint only: the load-embedded snapshot and the gated fetch supersede it,
+   * and the provider clears it once authoritative data commits.
+   */
+  artifactCountHint?: number;
+  /**
+   * Session the artifactCountHint belongs to. Same keying contract as
+   * restoredArtifactsSessionId: consumers must only use the hint when this
+   * matches the current sessionId.
+   */
+  artifactCountHintSessionId?: string;
   error?: string;
   /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
   errorStatus?: number;
@@ -351,6 +381,7 @@ export type DaemonNoticeOperation =
   | 'create_session'
   | 'close_session'
   | 'rename_session'
+  | 'bind_session_pr'
   | 'release_session'
   | 'list_sessions'
   | 'load_context'
@@ -374,6 +405,8 @@ export type DaemonNoticeOperation =
   | 'generate_session_content'
   | 'btw_session'
   | 'branch_session'
+  | 'create_worktree_branch'
+  | 'handoff_worktree'
   | 'fork_session'
   | 'record_session'
   | 'stream'
@@ -479,6 +512,8 @@ export interface PendingPromptActionOptions {
 
 export interface GetTasksActionOptions {
   silent?: boolean;
+  /** Also list the sends the daemon reports back to this session. */
+  includeSubSessions?: boolean;
 }
 
 export interface DaemonPromptImage {
@@ -624,6 +659,9 @@ export interface DaemonSessionActions {
     options?: {
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
+      /** Artifact count from the clicked session's list summary, shown in
+       * the header entry before the load response lands. Omit when unknown. */
+      artifactCountHint?: number;
     },
   ): Promise<void>;
   /** `memory` replay is reserved for the provider's live-journal repair. */
@@ -702,6 +740,10 @@ export interface DaemonSessionActions {
     silent?: boolean;
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
+  /** Manually bind a GitHub PR to the current session (supplementary registration). */
+  bindSessionPr(
+    pr: Omit<DaemonSessionPrInfo, 'issues'>,
+  ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
   generateSessionContent(
     prompt: string,
@@ -848,6 +890,12 @@ export interface DaemonSessionActions {
     switchStarted: boolean;
     sourceWarnings?: string[];
   }>;
+  /** "Create branch here" on the session's detached managed worktree. */
+  createWorktreeBranch(name: string): Promise<DaemonWorktreeBranchResult>;
+  /** "Hand off" between the managed worktree and the local checkout. */
+  handoffWorktree(
+    to: 'local' | 'worktree',
+  ): Promise<DaemonWorktreeHandoffResult>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 
@@ -870,6 +918,11 @@ export interface DaemonWorkspaceEventSignals {
   extensionsVersion: number;
   artifactsVersion: number;
   sourcesVersion?: number;
+  /**
+   * Per caller session: how many times a send it made that the daemon
+   * reports back started or settled. Re-read its sub-session tasks on change.
+   */
+  subSessionTaskVersions?: Record<string, number>;
   lastExtensionChange?: {
     status?:
       | 'installed'
@@ -913,4 +966,5 @@ export interface PendingSessionLoad {
   reject: (error: unknown) => void;
   signal?: AbortSignal;
   replaySource?: 'configured' | 'memory';
+  reconcilePromptActivity?: boolean;
 }

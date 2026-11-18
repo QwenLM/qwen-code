@@ -1088,7 +1088,7 @@ class ManagedExtensionRecordStoreTest {
         var ledger = new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository(jdbc);
         String deliveryId = delivery.path("deliveryId").asText();
         ledger.findOrCreate(new com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository.ChannelDelivery(
-                TENANT, "race-channel", deliveryId, "seg-1", 0, "planned", null, 0, 0));
+                TENANT, "race-channel", deliveryId, "seg-1", 0, "planned", null, 0, 0, 1));
         var oldClaim = instances.claim(TENANT, "race-channel", deliveryId, sessionId);
         ledger.transition(TENANT, "race-channel", deliveryId, "planned", "sending", null, oldClaim.claimGeneration());
         assertThat(instances.reserveReconciliation(oldClaim)).isTrue();

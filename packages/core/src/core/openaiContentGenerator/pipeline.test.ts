@@ -58,6 +58,7 @@ import {
 } from '../../providers/provider-config.js';
 import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
 import { fnCall } from '../../test-utils/model-fixtures.js';
+import { retryContext } from '../../utils/retryContext.js';
 
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
@@ -930,6 +931,129 @@ describe('ContentGenerationPipeline', () => {
       },
     );
 
+    it('clamps qwen4 non-thinking output to the 131072 range', async () => {
+      // The auto budget is sized for thinking mode (262144, ceiling-exempt).
+      // With thinking disabled the non-thinking cap is 131072, so a short
+      // prompt must not ship the thinking-sized max_tokens (400 range error).
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: undefined,
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_tokens: 131072,
+      });
+    });
+
+    it('keeps the qwen4 thinking-mode output budget above the non-thinking cap', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: undefined,
+          reasoning: { effort: 'high' },
+        },
+        userRequest('qwen4-max', { thinkingConfig: { includeThoughts: true } }),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'high',
+        max_tokens: 262144,
+      });
+    });
+
+    it('clamps an explicit user max_tokens to the non-thinking cap when thinking is off', async () => {
+      // samplingParams merge into the base request before the reasoning
+      // shaping, so the clamp bounds an explicit user ceiling too — it only
+      // shrinks the value, never raises it.
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_tokens: 200000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_tokens: 131072,
+      });
+    });
+
+    it('clamps a provider output-budget key to the non-thinking cap when thinking is off', async () => {
+      // The budget can travel under max_completion_tokens (samplingParams
+      // escape hatch) instead of max_tokens; the non-thinking clamp must
+      // bound that key too, not just max_tokens.
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 262144 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 131072,
+      });
+    });
+
+    it('keeps an explicit provider output-budget key below the non-thinking cap', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 50000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 50000,
+      });
+    });
+
+    it('does not apply the qwen4-max non-thinking cap to other qwen4 routes', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-plus',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 200000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-plus'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 200000,
+      });
+    });
+
     it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
       // The same persisted-tier failure through the real default provider.
       const apiCall = await executeWith(
@@ -1217,6 +1341,103 @@ describe('ContentGenerationPipeline', () => {
         });
       }
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('returns a required-thinking error on a single attempt', async () => {
+      const model = 'qwen3.8-max-preview';
+      pipelineWith({
+        baseUrl: TOKEN_PLAN_URL,
+        model,
+        extra_body: { enable_thinking: true },
+      });
+      providerAdds({ enable_thinking: true });
+      mockCompletion();
+      const error = requiredThinkingError();
+      createMock().mockRejectedValueOnce(error);
+      const context = {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      };
+
+      await expect(
+        retryContext.run(context, () =>
+          pipeline.execute(sideQuery(model), 'side-query:mod-model-complete'),
+        ),
+      ).rejects.toBe(error);
+      expect(createMock()).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ reasoning_effort: 'none' }),
+        expect.objectContaining({ maxRetries: 0 }),
+      );
+    });
+
+    it.each([
+      ['max_tokens', 111, 8],
+      ['max_completion_tokens', 111, 8],
+      ['max_new_tokens', 4, 4],
+    ])(
+      'keeps the isolated Mod request envelope and bounds %s',
+      async (outputField, configuredLimit, expectedLimit) => {
+        const body = await retryContext.run(
+          {
+            attempt: 1,
+            retryTotalDelayMs: 0,
+            requestSetupMs: 0,
+            singleAttempt: true,
+          },
+          () =>
+            executeWith(
+              {
+                samplingParams: {
+                  messages: [{ role: 'system', content: 'sampling override' }],
+                  enable_search: true,
+                  n: 2,
+                },
+                extra_body: {
+                  model: 'different-model',
+                  messages: [{ role: 'user', content: 'body override' }],
+                  tools: [{ type: 'function' }],
+                  functions: [{ name: 'legacy-function' }],
+                  web_search_options: { search_context_size: 'low' },
+                  search_options: { forced_search: true },
+                  stream: true,
+                  fixture_option: 'preserved',
+                  [outputField]: configuredLimit,
+                },
+              },
+              userRequest('requested-model', { maxOutputTokens: 8 }),
+              'side-query:mod-model-complete',
+              DefaultOpenAICompatibleProvider,
+            ),
+        );
+
+        expectFields(body, {
+          model: 'requested-model',
+          messages: [{ role: 'user', content: 'Hello' }],
+          tools: undefined,
+          functions: undefined,
+          enable_search: undefined,
+          web_search_options: undefined,
+          search_options: undefined,
+          n: undefined,
+          stream: false,
+          fixture_option: 'preserved',
+          max_tokens: undefined,
+          [outputField]: expectedLimit,
+        });
+      },
+    );
+
+    it('keeps configured hosted search options for ordinary requests', async () => {
+      const search = { search_context_size: 'low' };
+      const body = await executeWith(
+        { extra_body: { web_search_options: search } },
+        userRequest(),
+        'normal-prompt',
+        DefaultOpenAICompatibleProvider,
+      );
+      expect(body['web_search_options']).toEqual(search);
     });
 
     it.each([
@@ -2023,6 +2244,111 @@ describe('ContentGenerationPipeline', () => {
         thinking_budget: undefined,
         enable_thinking: undefined,
       });
+    });
+
+    it('maps qwen4 subscription effort to the qwen4 thinking_budget ladder', async () => {
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          reasoning: { effort: 'xhigh' },
+        },
+        'qwen4-max',
+      );
+      expectFields(wire, {
+        enable_thinking: true,
+        thinking_budget: 262144,
+        reasoning_effort: undefined,
+      });
+    });
+
+    it('keeps the qwen3.8 subscription budget table for qwen3.8-max', async () => {
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+          disableField: 'reasoning_effort',
+        },
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          reasoning: { effort: 'xhigh' },
+        },
+        'qwen3.8-max',
+      );
+      expectFields(wire, {
+        enable_thinking: true,
+        thinking_budget: 32768,
+      });
+    });
+
+    it('clamps qwen4 subscription non-thinking output to the 131072 range', async () => {
+      // The subscription gateway is not DashScope-detected, yet its disable
+      // shape (enable_thinking:false) ships through the same pipeline path.
+      // The real provider sizes the thinking-mode auto budget (262144); the
+      // clamp must still bound it to the non-thinking cap or the gateway
+      // rejects the max_tokens range (400).
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          samplingParams: undefined,
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DefaultOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        enable_thinking: false,
+        max_tokens: 131072,
+      });
+    });
+
+    it('clamps legacy tiers onto the declared qwen4 ladder instead of dropping them', async () => {
+      // The presets declare efforts:['low','high','xhigh'] without a profile.
+      // A persisted `max`/`medium` must ship as xhigh/high per the documented
+      // contract, not vanish into the server default (high).
+      const capability = {
+        thinking: true,
+        efforts: ['low', 'high', 'xhigh'],
+        defaultEffort: 'high',
+        disableField: 'reasoning_effort',
+      };
+      const maxWire = await executeWithCapability(
+        capability,
+        { reasoning: { effort: 'max' } },
+        'qwen4-max',
+      );
+      expectFields(maxWire, { reasoning_effort: 'xhigh' });
+      const mediumWire = await executeWithCapability(
+        capability,
+        { reasoning: { effort: 'medium' } },
+        'qwen4-max',
+      );
+      expectFields(mediumWire, { reasoning_effort: 'high' });
+    });
+
+    it('keeps the drop-to-server-default semantics for non-qwen4 declarations', async () => {
+      // Profile-less legacy declarations are not re-tiered; an unsupported
+      // tier stays dropped outside the qwen4 generation.
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+        { reasoning: { effort: 'max' } },
+        'capability-probe',
+      );
+      expectFields(wire, { reasoning_effort: undefined });
     });
 
     it.each(

@@ -7,11 +7,13 @@
 import { userPromptTimestamp } from './last-user-prompt-time.js';
 import { shellResultText } from '../utils/shell-result.js';
 import type { SessionSourcesSnapshot } from './session-sources.js';
+import type { GeneratedUiStateRecordPayload } from './generated-ui-state.js';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 
 import { type Config } from '../config/config.js';
 import type { ToolLifecycleRecord } from '../telemetry/tool-lifecycle.js';
 import type { RequestLifecycleRecord } from '../telemetry/request-lifecycle.js';
+import type { HookLifecycleRecord } from '../telemetry/hook-lifecycle-contract.js';
 import {
   backgroundTurnContext,
   type BackgroundNotificationTurn,
@@ -56,6 +58,10 @@ import {
   truncateTitleForList,
   writeSessionTitleSidecar,
 } from './session-title-sidecar.js';
+import {
+  sessionArtifactSummarySidecarPath,
+  writeSessionArtifactSummarySidecar,
+} from './session-artifact-summary-sidecar.js';
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
@@ -79,14 +85,20 @@ import {
   type SessionWriterCommitProof,
   SessionWriterLease,
 } from './session-writer-lease.js';
-import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import {
+  GENERATED_UI_STATE_SUBTYPE,
+  prepareTranscriptRecords,
+} from '../utils/transcript-records.js';
 import {
   getApiHistoryPromptId,
   isApiHistoryDirectoryContext,
 } from '../utils/api-history-metadata.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
 import { getRecordRewindId } from './session-api-history.js';
-import { computeInitialTurnFromHistory } from './session-turn-state.js';
+import {
+  collectSessionTurnState,
+  computeInitialTurnFromHistory,
+} from './session-turn-state.js';
 import {
   deleteTranscriptMessageGroups,
   getTranscriptMessageGroups,
@@ -313,7 +325,7 @@ export type ChatRecordProvenance =
   | 'mod_prompt';
 
 export type RecordToolResultOptions = {
-  subtype?: 'code_mode_tool_result';
+  subtype?: 'code_mode_tool_result' | 'tool_loop_end';
 } & (
   | {
       goalContext?: GoalTurnPermit;
@@ -457,11 +469,13 @@ export interface ChatRecord {
     | 'session_artifact_event'
     | 'session_artifact_snapshot'
     | 'session_sources_snapshot'
+    | 'generated_ui_state'
     | 'branch_checkpoint'
     | 'goal_state'
     | 'goal_runtime'
     | 'goal_turn_end'
     | 'code_mode_tool_result'
+    | 'tool_loop_end'
     | 'realtime_message'
     | 'turn_result'
     | 'turn_attempt'
@@ -577,6 +591,7 @@ export interface ChatRecord {
     | SessionArtifactEventRecordPayload
     | SessionArtifactSnapshotRecordPayload
     | SessionSourcesSnapshot
+    | GeneratedUiStateRecordPayload
     | BranchCheckpointRecordPayloadV1
     | GoalStateRecordPayloadV2
     | GoalTurnEndRecordPayload
@@ -639,6 +654,7 @@ export interface NotificationRecordPayload {
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    fromSession?: { sessionId: string; workspaceCwd: string };
   };
 }
 
@@ -726,7 +742,10 @@ export interface ChatCompressionRecordPayload {
   contextPrefixLength?: number;
   /** Generated summary and restore entries preceding any retained raw input. */
   summaryPrefixLength?: number;
-  /** Prompt identities parallel to compressedHistory. */
+  /**
+   * Prompt identities parallel to compressedHistory. The first retained model
+   * response may carry its owning prompt's identity when that prompt was summarized.
+   */
   promptIds?: Array<string | null>;
   /** Internal directory context, without changing the model-facing snapshot. */
   directoryContextIndices?: number[];
@@ -947,7 +966,11 @@ export function sessionModelPayloadsEqual(
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
-  uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord;
+  uiEvent:
+    | UiEvent
+    | RequestLifecycleRecord
+    | ToolLifecycleRecord
+    | HookLifecycleRecord;
 }
 
 /**
@@ -1175,9 +1198,14 @@ export type ChatRecordingFailureListener = (
   event: ChatRecordingFailureEvent,
 ) => void | Promise<void>;
 
+interface StrictRecordAppendOptions {
+  updateActiveTail?: boolean;
+  expectedBranchGeneration?: number;
+}
+
 interface BufferedRecordAppend {
   record: ChatRecord;
-  options: { updateActiveTail?: boolean } | undefined;
+  options: StrictRecordAppendOptions | undefined;
   resolve?: () => void;
   reject?: (error: unknown) => void;
 }
@@ -1234,6 +1262,8 @@ export interface ChatRecordingRestoreState {
 export class ChatRecordingService {
   /** UUID of the active logical tail, including records queued for writing. */
   private lastRecordUuid: string | null = null;
+  /** Bumped whenever the active branch is replaced (rewind, reset). */
+  private branchGeneration = 0;
   /** UUID of the last active-tail record confirmed written to disk. */
   private lastPersistedRecordUuid: string | null = null;
   /** Active chain mirrored in memory so end-of-turn validation is incremental. */
@@ -1282,6 +1312,8 @@ export class ChatRecordingService {
   private topologyFence: TranscriptTopologyFence | undefined;
   private readonly deletedTelemetryPromptIds = new Set<string>();
   private readonly deletedTelemetryCallIds = new Set<string>();
+  private readonly invalidatedHookExecutions = new Set<string>();
+  private readonly pendingHookTurnParents = new Map<string, string | null>();
   /** First async JSONL write failure; permanently degrades this recorder. */
   private writeFailure: Error | undefined;
   private integrityFailure: Error | undefined;
@@ -1504,6 +1536,13 @@ export class ChatRecordingService {
     return sessionTitleSidecarPath(this.ensureChatsDir(), this.getSessionId());
   }
 
+  private artifactSummarySidecarPath(): string {
+    return sessionArtifactSummarySidecarPath(
+      this.ensureChatsDir(),
+      this.getSessionId(),
+    );
+  }
+
   /**
    * Keeps the session list label independent of the transcript's head. A
    * transcript can be rebuilt without its first records (the writer recreates
@@ -1604,6 +1643,7 @@ export class ChatRecordingService {
     this.currentSessionWorkflowMode = undefined;
     this.activeBranchRecords = [];
     this.activeBranchBaseUuid = null;
+    this.branchGeneration += 1;
     this.pendingBranchToolCalls = [];
     this.userDisplayTextsForTitle.length = 0;
     this.modPromptKeysForTitle.clear();
@@ -1982,11 +2022,18 @@ export class ChatRecordingService {
 
   private async appendRecordStrict(
     record: ChatRecord,
-    options?: { updateActiveTail?: boolean },
+    options?: StrictRecordAppendOptions,
   ): Promise<void> {
     if (this.writeFailure) throw this.writeFailure;
     if (!this.acceptingWrites || this.state !== 'active')
       throw new SessionWriterUnavailableError();
+    if (
+      options?.expectedBranchGeneration !== undefined &&
+      this.branchGeneration !== options.expectedBranchGeneration
+    )
+      throw new Error(
+        'Cannot save view state during a transcript branch change',
+      );
     if (this.refusesManagedRecord(record)) {
       throw new ManagedSessionRecordRefusedError(record);
     }
@@ -2734,8 +2781,14 @@ export class ChatRecordingService {
       // Advance rewind associations only after the record is built, so a
       // rejected message cannot skew the projection.
       this.trackTitleText(record);
-      this.turnParentUuids.push(record.parentUuid ?? null);
-      this.turnPromptIds.push(getRecordRewindId(record));
+      const turnId = getRecordRewindId(record);
+      this.turnParentUuids.push(
+        turnId && this.pendingHookTurnParents.has(turnId)
+          ? this.pendingHookTurnParents.get(turnId)!
+          : (record.parentUuid ?? null),
+      );
+      if (turnId) this.pendingHookTurnParents.delete(turnId);
+      this.turnPromptIds.push(turnId);
       this.turnDaemonPromptIds.push(record.daemonPromptId);
       this.appendRecord(record);
       // The sidecar write is best-effort and runs after the transcript
@@ -3553,28 +3606,14 @@ export class ChatRecordingService {
       return pending;
     };
     const projectTurns = (records: readonly ChatRecord[]) => {
-      this.turnParentUuids = [];
-      this.turnPromptIds = [];
-      this.turnDaemonPromptIds = [];
+      const turns = collectSessionTurnState(records, this.getSessionId());
+      this.turnParentUuids = turns.turnParentUuids;
+      this.turnPromptIds = turns.turnPromptIds;
+      this.turnDaemonPromptIds = turns.turnDaemonPromptIds;
+      this.pendingHookTurnParents.clear();
       this.userDisplayTextsForTitle.length = 0;
       this.modPromptKeysForTitle.clear();
       for (const record of records) {
-        if (
-          record.type === 'user' &&
-          ![
-            'goal_runtime',
-            'notification',
-            'cron',
-            'mid_turn_user_message',
-            'realtime_message',
-            'agent_mention',
-            'agent_message',
-          ].includes(record.subtype ?? '')
-        ) {
-          this.turnParentUuids.push(record.parentUuid ?? null);
-          this.turnPromptIds.push(getRecordRewindId(record));
-          this.turnDaemonPromptIds.push(record.daemonPromptId);
-        }
         if (record.type === 'user' && record.subtype === undefined)
           this.trackTitleText(record);
       }
@@ -3644,6 +3683,7 @@ export class ChatRecordingService {
       if (!input.isCurrent()) return false;
       const rewindWrite = strict(rewind);
       committed = true;
+      this.branchGeneration += 1;
       projectTurns(retained);
       this.resetExternalRecordIndex();
       this.lastAttributionSnapshotJson = undefined;
@@ -3795,7 +3835,11 @@ export class ChatRecordingService {
    * Records a UI telemetry event for replaying metrics on resume.
    */
   recordUiTelemetryEvent(
-    uiEvent: UiEvent | RequestLifecycleRecord | ToolLifecycleRecord,
+    uiEvent:
+      | UiEvent
+      | RequestLifecycleRecord
+      | ToolLifecycleRecord
+      | HookLifecycleRecord,
   ): void {
     try {
       const record: ChatRecord = {
@@ -3804,7 +3848,24 @@ export class ChatRecordingService {
         subtype: 'ui_telemetry',
         systemPayload: { uiEvent },
       };
+      if (
+        uiEvent['event.name'] === 'hook_lifecycle' &&
+        uiEvent.sessionId !== record.sessionId
+      )
+        return;
       if (this.isDeletedTelemetry(record)) return;
+      if (uiEvent['event.name'] === 'hook_lifecycle') {
+        if (this.invalidatedHookExecutions.has(uiEvent.executionId)) return;
+        if (
+          !this.turnPromptIds.includes(uiEvent.promptId) &&
+          !this.pendingHookTurnParents.has(uiEvent.promptId)
+        ) {
+          this.pendingHookTurnParents.set(
+            uiEvent.promptId,
+            record.parentUuid ?? null,
+          );
+        }
+      }
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving ui telemetry record:', error);
@@ -3860,8 +3921,25 @@ export class ChatRecordingService {
         this.currentSessionApprovalMode =
           normalizeSessionApprovalModePayload(sessionApprovalMode);
       }
+      const removedPromptIds = new Set(
+        this.turnPromptIds.slice(targetTurnIndex),
+      );
+      for (const previous of this.activeBranchRecords) {
+        if (previous.subtype !== 'ui_telemetry') continue;
+        const event = (
+          previous.systemPayload as UiTelemetryRecordPayload | undefined
+        )?.uiEvent;
+        if (
+          event?.['event.name'] === 'hook_lifecycle' &&
+          removedPromptIds.has(event.promptId)
+        ) {
+          this.invalidatedHookExecutions.add(event.executionId);
+        }
+      }
+      this.pendingHookTurnParents.clear();
       // Re-root: point back to the record just before the target user turn.
       this.lastRecordUuid = this.turnParentUuids[targetTurnIndex] ?? null;
+      this.branchGeneration += 1;
       const projectionStart = Math.max(
         0,
         this.turnParentUuids.length - this.userDisplayTextsForTitle.length,
@@ -3939,32 +4017,16 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.resetExternalRecordIndex();
-    this.turnParentUuids = [];
-    this.turnPromptIds = [];
-    this.turnDaemonPromptIds = [];
+    const turns = collectSessionTurnState(messages, this.getSessionId());
+    this.turnParentUuids = turns.turnParentUuids;
+    this.turnPromptIds = turns.turnPromptIds;
+    this.turnDaemonPromptIds = turns.turnDaemonPromptIds;
+    this.pendingHookTurnParents.clear();
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
+    this.branchGeneration += 1;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
 
-    for (let i = 0; i < messages.length; i++) {
-      const record = messages[i];
-      if (
-        record.type === 'user' &&
-        record.subtype !== 'goal_runtime' &&
-        record.subtype !== 'notification' &&
-        record.subtype !== 'cron' &&
-        record.subtype !== 'mid_turn_user_message' &&
-        record.subtype !== 'realtime_message' &&
-        record.subtype !== 'agent_mention' &&
-        record.subtype !== 'agent_message'
-      ) {
-        // Reconstructed histories can start mid-chain; the persisted edge is
-        // the source of truth, not the previous item in this sliced list.
-        this.turnParentUuids.push(record.parentUuid ?? null);
-        this.turnPromptIds.push(getRecordRewindId(record));
-        this.turnDaemonPromptIds.push(record.daemonPromptId);
-      }
-    }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
     if (messages.length > 0) {
       this.lastRecordUuid = messages[messages.length - 1].uuid;
@@ -4561,6 +4623,14 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });
+    // Derived list cache, refreshed after the authoritative append. Older
+    // records carry no count; the load-time seed covers those sessions.
+    if (payload.artifactCount !== undefined) {
+      writeSessionArtifactSummarySidecar(
+        this.artifactSummarySidecarPath(),
+        payload.artifactCount,
+      );
+    }
   }
 
   async recordSessionArtifactSnapshot(
@@ -4573,7 +4643,38 @@ export class ChatRecordingService {
       systemPayload: payload,
     };
     await this.appendRecordStrict(record, { updateActiveTail: false });
+    writeSessionArtifactSummarySidecar(
+      this.artifactSummarySidecarPath(),
+      payload.artifacts.length,
+    );
   }
+  /** Identifies the current active branch; changes when it is replaced. */
+  getBranchGeneration(): number {
+    return this.branchGeneration;
+  }
+
+  /**
+   * One card's saved view state, beside the active tail. A save needs a
+   * conversation record to hang from; without one it could not be read back.
+   */
+  async recordGeneratedUiState(
+    payload: GeneratedUiStateRecordPayload,
+    generation: number,
+  ): Promise<void> {
+    if (this.lastRecordUuid === null)
+      throw new Error('There is no conversation to attach view state to');
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: GENERATED_UI_STATE_SUBTYPE,
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, {
+      updateActiveTail: false,
+      expectedBranchGeneration: generation,
+    });
+  }
+
   async recordSessionSourcesSnapshot(
     payload: SessionSourcesSnapshot,
   ): Promise<void> {

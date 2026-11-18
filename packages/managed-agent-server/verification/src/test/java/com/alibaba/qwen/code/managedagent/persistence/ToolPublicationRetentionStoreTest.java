@@ -528,6 +528,14 @@ public class ToolPublicationRetentionStoreTest {
         protected final Map<String, byte[]> bytes = new HashMap<>();
         @Override public void putIfAbsent(String key, byte[] value) { bytes.putIfAbsent(key, value.clone()); }
         @Override public InputStream open(String key) { return new ByteArrayInputStream(bytes.get(key)); }
+        @Override public InputStream openRange(String key, long offset, long length, Runnable guard) {
+            guard.run();
+            byte[] value = bytes.get(key);
+            if (value == null || offset < 0 || length < 0 || offset + length > value.length) {
+                throw new IllegalArgumentException("Invalid object range");
+            }
+            return new ByteArrayInputStream(value, (int) offset, (int) length);
+        }
         @Override public void validateConfiguration() {}
     }
 }

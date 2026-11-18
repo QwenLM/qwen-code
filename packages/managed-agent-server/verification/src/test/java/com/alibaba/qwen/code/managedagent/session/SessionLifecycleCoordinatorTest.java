@@ -107,6 +107,69 @@ class SessionLifecycleCoordinatorTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void detachTearsDownTheClientFilesBindingOnlyPastTheLiveWriterGate(boolean liveWriter) throws Exception {
+        var store = Mockito.mock(AgentStateStore.class);
+        var session = Mockito.mock(StoreModels.SessionRecord.class);
+        Mockito.when(session.workspace()).thenReturn(
+                Mockito.mock(com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding.class));
+        Mockito.when(session.toolProfile()).thenReturn("hosted-workspace-shell/1");
+        Mockito.when(store.requireSession("tenant", "session")).thenReturn(session);
+        Mockito.when(store.hasMcpServers(session)).thenReturn(false);
+        var operation = new StoreModels.OperationRecord("tenant", "session", "operation", OperationKind.DELETE,
+                "digest", "DELIVERING", "ACCEPTED", "DRAINING", "ACTIVE", "receipt", "server", 1, 1, null, 2);
+        var lifecycle = Mockito.mock(JdbcWorkspaceLifecycleStore.class);
+        Mockito.when(lifecycle.recoverEffects(operation)).thenReturn(
+                new ObjectMapper().createObjectNode().put("neverInitialized", false));
+        var harness = Mockito.mock(HarnessConnector.class);
+        var warmer = Mockito.mock(RuntimeWarmer.class);
+        Mockito.when(warmer.supportsWorkspaceClose(session.workspace())).thenReturn(true);
+        var authority = WorkspaceLifecycleStore.authority(operation);
+        Mockito.when(warmer.prepareWorkspaceResources("tenant", "session", authority))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        Mockito.when(warmer.drainWorkspaceResources("tenant", "session", authority))
+                .thenReturn(CompletableFuture.completedFuture(null));
+        Mockito.when(warmer.closeWorkspace("tenant", "session")).thenReturn(CompletableFuture.completedFuture(null));
+        var relay = Mockito.mock(JdbcChildResultRelayStore.class);
+        Mockito.when(relay.findLiveScopes("tenant", "session")).thenReturn(List.of());
+        var sessionStore = Mockito.mock(JdbcManagedSessionStore.class);
+        Mockito.when(sessionStore.hasLiveWriter("tenant", "session")).thenReturn(liveWriter);
+        var clientFiles = Mockito.mock(ClientFilesRelayService.class);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<ClientFilesRelayService> clientFilesProvider = Mockito.mock(ObjectProvider.class);
+        Mockito.doAnswer(invocation -> {
+            invocation.getArgument(0, java.util.function.Consumer.class).accept(clientFiles);
+            return null;
+        }).when(clientFilesProvider).ifAvailable(Mockito.any());
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(store, sessionStore, harness, warmer,
+                    relay, new ObjectMapper(), admissions(store, warmer), noTurnCancels(), brokerProvider(null),
+                    executor, Clock.systemUTC(), new ManagedAgentProperties());
+            coordinator.setWorkspaceLifecycleStore(lifecycle);
+            coordinator.setClientFilesRelay(clientFilesProvider);
+            var settle = SessionLifecycleCoordinator.class.getDeclaredMethod("settle",
+                    StoreModels.OperationRecord.class, AtomicBoolean.class);
+            settle.setAccessible(true);
+            try {
+                if (liveWriter) {
+                    // A live writer means the detach is refused: the binding must
+                    // not be torn down (it is still serving a live client).
+                    org.junit.jupiter.api.Assertions.assertThrows(
+                            java.lang.reflect.InvocationTargetException.class,
+                            () -> settle.invoke(coordinator, operation, new AtomicBoolean()));
+                    Mockito.verify(clientFiles, Mockito.never())
+                            .closeForSession(Mockito.anyString(), Mockito.anyString());
+                } else {
+                    assertThat(settle.invoke(coordinator, operation, new AtomicBoolean())).isEqualTo(true);
+                    Mockito.verify(clientFiles).closeForSession("tenant", "session");
+                }
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({
         "hosted-workspace-mcp/1,workspace_close_identity_unverified,true",
         "hosted-workspace-shell/1,workspace_close_identity_unverified,false",
@@ -1648,11 +1711,15 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
-    // The relay's stop arm tolerates a child that waits on its recovery or
-    // is already closing; the cascade mirrors exactly those two refusal
-    // codes — any other failure defers the Turn cancel, these two do not.
-    @Test
-    void aToleratedMessageStopRefusalStillCancelsTheTurn() {
+    // The relay's stop arm tolerates a child that waits on its recovery,
+    // is already closing, or is out of cold-open slots; the cascade mirrors
+    // exactly those refusal codes — any other failure defers the Turn
+    // cancel, these do not.
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "hosted_turn_recovery_required", "hosted_session_closing",
+            "hosted_session_open_busy"})
+    void aToleratedMessageStopRefusalStillCancelsTheTurn(String refusalCode) {
         World world = closingWorld("msg-tolerated-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
@@ -1666,8 +1733,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         var refusal = Mockito.mock(
                 com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure.class);
-        Mockito.when(refusal.getErrorCode())
-                .thenReturn("hosted_session_closing");
+        Mockito.when(refusal.getErrorCode()).thenReturn(refusalCode);
         harness.messageFailure = refusal;
         List<String> calls = new CopyOnWriteArrayList<>();
         harness.messageApplied = body -> calls.add("message-stop");

@@ -7,6 +7,10 @@ import type { ComponentProps } from 'react';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { I18nProvider } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import {
+  WebShellCustomizationProvider,
+  type WebShellCustomization,
+} from '../../customization';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import type {
   ManagedAgentProvider,
@@ -98,22 +102,25 @@ describe('WorkspaceBindingCreator', () => {
     strict = false,
     workspaceId?: string,
     extra: Partial<ComponentProps<typeof WorkspaceBindingCreator>> = {},
+    customization: WebShellCustomization = {},
   ) {
     await act(async () => {
       const content = (
         <I18nProvider language="en">
-          <WorkspaceBindingCreator
-            provider={provider}
-            clientId="client-a"
-            onCreated={onCreated}
-            onAbandoned={onAbandoned}
-            workspaceId={workspaceId}
-            onSelectWorkspace={onSelectWorkspace}
-            onWorkspaceCreated={onWorkspaceCreated}
-            interactive={interactive}
-            creationSkills={creationSkills}
-            {...extra}
-          />
+          <WebShellCustomizationProvider value={customization}>
+            <WorkspaceBindingCreator
+              provider={provider}
+              clientId="client-a"
+              onCreated={onCreated}
+              onAbandoned={onAbandoned}
+              workspaceId={workspaceId}
+              onSelectWorkspace={onSelectWorkspace}
+              onWorkspaceCreated={onWorkspaceCreated}
+              interactive={interactive}
+              creationSkills={creationSkills}
+              {...extra}
+            />
+          </WebShellCustomizationProvider>
         </I18nProvider>
       );
       root.render(strict ? <StrictMode>{content}</StrictMode> : content);
@@ -1946,6 +1953,213 @@ describe('WorkspaceBindingCreator', () => {
     expect(container.textContent).toContain('source unavailable');
   });
 
+  it('blocks the creation composer while the prepare phase is in flight', async () => {
+    // R8-1: `createOrRead` early-returns while `busy`, so the editor must not
+    // accept a prompt during the prepare window (here held at the skills
+    // load). Otherwise the keystrokes are dropped silently and cleared once
+    // the session is created.
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: true,
+    });
+    let finish!: (skills: never[]) => void;
+    creationSkills = {
+      workspaceCwd: '/hold',
+      list: vi.fn().mockResolvedValue([]),
+      load: vi.fn(
+        () =>
+          new Promise<never[]>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    };
+    await render();
+    await act(async () => {
+      editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    expect(editorMocks.props!.disabled).toBe(true);
+    await act(async () => {
+      finish([]);
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledOnce();
+  });
+
+  it('reports the creation request as processing and running', async () => {
+    // R9-1: the processing signal is the creation request itself, not
+    // `workspaceCreating` (which only the add-workspace flow sets).
+    const createSession = directCreation();
+    let release!: (value: { sessionId: string }) => void;
+    createSession.mockImplementation(
+      () =>
+        new Promise<{ sessionId: string }>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await render(
+      true,
+      false,
+      undefined,
+      {
+        alignManagedChatWithHost: true,
+        renderComposerFooter: (props) => (
+          <span data-testid="footer-running">{String(props.isRunning)}</span>
+        ),
+      },
+      {
+        composerPlaceholders: {
+          idle: 'Idle hint',
+          processing: 'Processing hint',
+        },
+      },
+    );
+
+    await act(async () => {
+      editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    expect(editorMocks.props!.placeholderText).toBe('Processing hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('true');
+
+    // The read-back after the create response is part of the same request:
+    // the latch must stay set while getSession resolves.
+    let releaseRead!: (value: {
+      sessionId: string;
+      agentId: string;
+      workspace: { workspaceId: string; cwdRelative: string };
+    }) => void;
+    getSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseRead = resolve;
+        }),
+    );
+    await act(async () => {
+      release({ sessionId: 'session-a' });
+      await flush();
+    });
+    expect(editorMocks.props!.placeholderText).toBe('Processing hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('true');
+
+    await act(async () => {
+      releaseRead({
+        sessionId: 'session-a',
+        agentId: 'agent-a',
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
+      await flush();
+    });
+  });
+
+  it('reports a read-back-only retry as processing and running', async () => {
+    // R9-1: a persisted pending that already carries a session id resumes with
+    // a read-back only, so the latch must cover that path too -- there is no
+    // createSession call to attach it to.
+    const createSession = directCreation();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-create:${provider.storageKey}`,
+      JSON.stringify({
+        agentId: 'agent-a',
+        workspaceId: 'ws-a',
+        cwdRelative: '.',
+        input: [{ type: 'input_text', text: 'Frozen prompt' }],
+        clientId: 'client-a',
+        idempotencyKey: 'frozen-key',
+        sessionId: 'session-a',
+      }),
+    );
+    let releaseRead!: (value: {
+      sessionId: string;
+      agentId: string;
+      workspace: { workspaceId: string; cwdRelative: string };
+    }) => void;
+    getSession.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseRead = resolve;
+        }),
+    );
+    await render(
+      true,
+      false,
+      undefined,
+      {
+        alignManagedChatWithHost: true,
+        renderComposerFooter: (props) => (
+          <span data-testid="footer-running">{String(props.isRunning)}</span>
+        ),
+      },
+      {
+        composerPlaceholders: {
+          idle: 'Idle hint',
+          processing: 'Processing hint',
+        },
+      },
+    );
+
+    await click('Retry reading session');
+    expect(createSession).not.toHaveBeenCalled();
+    expect(getSession).toHaveBeenCalledTimes(1);
+    expect(editorMocks.props!.placeholderText).toBe('Processing hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('true');
+
+    await act(async () => {
+      releaseRead({
+        sessionId: 'session-a',
+        agentId: 'agent-a',
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
+      await flush();
+    });
+    expect(editorMocks.props!.placeholderText).toBe('Idle hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('false');
+  });
+
+  it('does not report workspace creation as a running prompt', async () => {
+    // R9-1 the other direction: adding a workspace is not a creation request,
+    // and this screen has no queue, so it must not draw the processing state.
+    const createWorkspace = workspaceCreation();
+    createWorkspace.mockImplementation(() => new Promise(() => {}));
+    await render(
+      true,
+      false,
+      undefined,
+      {
+        alignManagedChatWithHost: true,
+        onOpenLocalWorkspace: vi.fn(),
+        renderComposerFooter: (props) => (
+          <span data-testid="footer-running">{String(props.isRunning)}</span>
+        ),
+      },
+      {
+        composerPlaceholders: {
+          idle: 'Idle hint',
+          processing: 'Processing hint',
+        },
+      },
+    );
+
+    await openWorkspaceCreation();
+    await nameWorkspace('Created');
+    await click('Create workspace');
+
+    expect(editorMocks.props!.placeholderText).toBe('Idle hint');
+    expect(
+      document.querySelector('[data-testid="footer-running"]')?.textContent,
+    ).toBe('false');
+  });
+
   it('freezes selected policy on lost response and restores the exact mode after refresh', async () => {
     const { createSession } = approvalSelection();
     createSession.mockRejectedValueOnce(new Error('lost response'));
@@ -2898,6 +3112,31 @@ describe('WorkspaceBindingCreator', () => {
     expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a', 'ws-a');
   });
 
+  it('hands the resolved model id to host welcome renderers on the creation screen', async () => {
+    directCreation();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      modelPresets: [{ agentId: 'agent-a', modelId: 'model-x', label: 'X' }],
+    };
+    const renderWelcomeHeader = vi.fn(() => null);
+    await render(true, false, undefined, { renderWelcomeHeader });
+    // The welcome renderer receives the same model id the composer footer
+    // shows — not the agent id the preset also carries.
+    expect(renderWelcomeHeader).toHaveBeenCalledWith(
+      expect.objectContaining({ currentModel: 'model-x' }),
+    );
+  });
+
+  it('renders the host composer footer on the creation screen', async () => {
+    directCreation();
+    const CustomFooter = vi.fn(() => <div>HOST-CREATION-FOOTER</div>);
+    await render(true, false, undefined, {
+      renderComposerFooter: CustomFooter,
+    });
+    expect(CustomFooter).toHaveBeenCalled();
+    expect(container.textContent).toContain('HOST-CREATION-FOOTER');
+  });
+
   it('uses the Workspace default without showing separate directory controls', async () => {
     const createSession = directCreation();
     const project = { ...workspace, defaultCwdRelative: 'qwen-code' };
@@ -3125,6 +3364,50 @@ describe('WorkspaceBindingCreator', () => {
     await click('Switch');
     expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-b');
     await expectWorkingDirectory('other-project');
+  });
+
+  it('keeps the composer editable and idle while another Workspace page loads', async () => {
+    directCreation();
+    let loadPage!: (value: {
+      data: (typeof workspace)[];
+      supported: boolean;
+    }) => void;
+    vi.mocked(provider.workspaceBinding!.list)
+      .mockReset()
+      .mockResolvedValueOnce({
+        data: [workspace],
+        defaultWorkspace: workspace,
+        nextCursor: 'next-page',
+        supported: true,
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            loadPage = resolve;
+          }),
+      );
+    await render(true, false, undefined, {
+      alignManagedChatWithHost: true,
+    });
+    // First paint after the initial list resolves: no turn, no queue, so the
+    // aligned placeholder must be the idle copy, not "processing".
+    expect(editorMocks.props?.placeholderText).toBe(
+      'Type a message or @ file path',
+    );
+    await workspaceAction('Load more');
+    // The background page fetch is soft preparation: hard-disabling the
+    // editor here would drop keystrokes typed while the page is in flight.
+    expect(editorMocks.props?.disabled).toBe(false);
+    expect(editorMocks.props?.isPreparing).toBe(true);
+    expect(editorMocks.props?.placeholderText).toBe(
+      'Type a message or @ file path',
+    );
+    await act(async () => {
+      loadPage({ data: [workspace], supported: true });
+      await flush();
+    });
+    expect(editorMocks.props?.disabled).toBe(false);
+    expect(editorMocks.props?.isPreparing).toBe(false);
   });
 
   it('freezes the initial prompt and choices, then retries only read-back after creation', async () => {

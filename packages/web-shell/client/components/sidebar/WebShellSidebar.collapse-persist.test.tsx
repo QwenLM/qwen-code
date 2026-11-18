@@ -285,6 +285,11 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     await flushSidebar();
     expect(
       topRow!.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+    expect(
+      document.querySelector(
+        '[role="dialog"] input[aria-label="Search sessions"]',
+      ),
     ).not.toBeNull();
   });
   it('hides the session search while the activity view is open', async () => {
@@ -311,7 +316,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       container.querySelector('button[aria-label="Search sessions"]'),
     ).not.toBeNull();
   });
-  it('drops the search field below the icon row in the mobile drawer', async () => {
+  it('opens search in a dialog without changing the mobile drawer header', async () => {
     renderSidebar(false, { mobileOpen: true });
     await flushSidebar();
 
@@ -328,15 +333,13 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(
       topRow!.querySelector('input[aria-label="Search sessions"]'),
     ).toBeNull();
-    const row = container.querySelector<HTMLElement>(
-      `.${sidebarStyles.topRowSearchRow}`,
-    );
-    expect(row).not.toBeNull();
     expect(
-      row!.querySelector('input[aria-label="Search sessions"]'),
+      document.querySelector(
+        '[role="dialog"] input[aria-label="Search sessions"]',
+      ),
     ).not.toBeNull();
   });
-  it('drops the search field below the icon row in a narrow column', async () => {
+  it('opens search outside a narrow column while preserving its brand', async () => {
     window.localStorage.setItem('qwen-code-web-shell-sidebar-width', '276');
     renderSidebar(false, { layout: 'rail' });
     await flushSidebar();
@@ -354,8 +357,11 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(
       topRow!.querySelector('input[aria-label="Search sessions"]'),
     ).toBeNull();
+    expect(topRow!.querySelector(`.${sidebarStyles.brandName}`)).not.toBeNull();
     expect(
-      container.querySelector(`.${sidebarStyles.topRowSearchRow}`),
+      document.querySelector(
+        '[role="dialog"] input[aria-label="Search sessions"]',
+      ),
     ).not.toBeNull();
   });
   it('keeps the session search in the Channels section header', async () => {
@@ -380,6 +386,11 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     await flushSidebar();
     expect(
       header!.querySelector('input[aria-label="Search sessions"]'),
+    ).toBeNull();
+    expect(
+      document.querySelector(
+        '[role="dialog"] input[aria-label="Search sessions"]',
+      ),
     ).not.toBeNull();
   });
   it('uses drawer constraints and closes mobile without persisting desktop collapse', async () => {
@@ -1077,6 +1088,30 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).toBe(true);
   });
 
+  it('forwards the session artifact count to onLoadSession when the summary carries one', async () => {
+    // The click-time hint path: a summary with artifactCount must reach
+    // onLoadSession as a third argument; without one the call keeps its
+    // two-argument shape (pinned by the collapsed-switcher tests below).
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((el) => el.textContent?.includes('API review'));
+    expect(row).toBeDefined();
+    await act(async () => click(row!));
+
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
+  });
+
   it('keeps project sessions available from the collapsed sidebar', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',
@@ -1746,7 +1781,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).toBe('open');
   });
 
-  it('keeps the switcher open while keyboard focus is inside it', async () => {
+  it('keeps the switcher open while search owns keyboard focus', async () => {
     renderSidebar(true);
     await flushSidebar();
 
@@ -1772,7 +1807,9 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     });
     await flushSidebar();
 
-    const input = switcher?.querySelector<HTMLInputElement>('input');
+    const input = document.querySelector<HTMLInputElement>(
+      '[role="dialog"] input',
+    );
     expect(input).not.toBeNull();
     act(() => {
       input!.focus();
@@ -1793,9 +1830,17 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     );
     expect(after).not.toBeNull();
     expect(after?.dataset.state).toBe('open');
+    act(() => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      );
+    });
+    await flushSidebar();
+    expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull();
+    expect(after?.dataset.state).toBe('open');
   });
 
-  it('keeps search open when selecting a session', async () => {
+  it('closes search when selecting a session from the collapsed switcher', async () => {
     renderSidebar(true);
     await flushSidebar();
 
@@ -1822,10 +1867,10 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    expect(switcher!.querySelector('input')).not.toBeNull();
+    expect(document.querySelector('[role="dialog"] input')).not.toBeNull();
 
     const row = Array.from(
-      switcher!.querySelectorAll<HTMLElement>('[role="button"]'),
+      document.querySelectorAll<HTMLElement>('[role="dialog"] [role="option"]'),
     ).find((element) => element.textContent?.includes('API review'));
     expect(row).not.toBeUndefined();
     act(() => {
@@ -1833,11 +1878,51 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     });
     await flushSidebar();
     expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project');
-    const openSwitcher = document.querySelector<HTMLElement>(
+    expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull();
+  });
+
+  it('forwards the artifact count when search selects a counted session', async () => {
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
       '[data-web-shell-collapsed-session-switcher]',
     );
-    expect(openSwitcher?.dataset.state).toBe('open');
-    expect(openSwitcher?.querySelector('input')).not.toBeNull();
+    const searchButton = switcher!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    act(() => {
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    const row = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="dialog"] [role="option"]'),
+    ).find((element) => element.textContent?.includes('API review'));
+    expect(row).not.toBeUndefined();
+    act(() => {
+      row!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
   });
 
   it('resets collapsed search state when the sidebar expands', async () => {
@@ -1862,7 +1947,9 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       search!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
     await flushSidebar();
-    const input = switcher!.querySelector<HTMLInputElement>('input');
+    const input = document.querySelector<HTMLInputElement>(
+      '[role="dialog"] input',
+    );
     act(() => {
       Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype,
@@ -1871,10 +1958,13 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       input!.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
+    expect(switcher!.textContent).toContain('API review');
+    expect(switcher!.textContent).toContain('Release notes');
     renderSidebar(false);
     await flushSidebar();
 
     expect(container.querySelector('[class*="projectSearch"]')).toBeNull();
+    expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull();
     expect(container.textContent).toContain('API review');
     expect(container.textContent).not.toContain('No matching sessions.');
   });
@@ -2292,7 +2382,7 @@ describe('WebShellSidebar rail navigation', () => {
     expect(onCollapsedChange).not.toHaveBeenCalled();
   });
 
-  it('resets the project search when the Live section unmounts the field', async () => {
+  it('closes session search when switching to Live without reopening it on Home', async () => {
     renderSidebar(false, {
       layout: 'rail',
       activePage: 'home',
@@ -2307,14 +2397,11 @@ describe('WebShellSidebar rail navigation', () => {
     expect(searchToggle).not.toBeNull();
     act(() => click(searchToggle!));
     await flushSidebar();
-    const input = container.querySelector<HTMLInputElement>(
+    const input = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(input).not.toBeNull();
 
-    // The Live section unmounts the search field. The search state must be
-    // reset with it, or the Home round-trip below remounts an autoFocus
-    // input holding the stale query.
     renderSidebar(false, {
       layout: 'rail',
       activePage: 'live',
@@ -2323,7 +2410,7 @@ describe('WebShellSidebar rail navigation', () => {
     });
     await flushSidebar();
     expect(
-      container.querySelector('input[aria-label="Search sessions"]'),
+      document.querySelector('input[aria-label="Search sessions"]'),
     ).toBeNull();
 
     renderSidebar(false, {
@@ -2334,7 +2421,7 @@ describe('WebShellSidebar rail navigation', () => {
     });
     await flushSidebar();
     expect(
-      container.querySelector('input[aria-label="Search sessions"]'),
+      document.querySelector('input[aria-label="Search sessions"]'),
     ).toBeNull();
     expect(document.activeElement).not.toBe(input);
   });
@@ -2755,6 +2842,28 @@ describe('Recent sessions shared rows', () => {
     );
     expect(loadSession).not.toHaveBeenCalled();
     expect(recent.textContent).not.toContain('API review');
+  });
+
+  it('forwards the artifact count when opening a counted recent session', async () => {
+    enableRecentSessions();
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: active.sessions,
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const row = recent.querySelector<HTMLElement>(
+      `div.${sidebarStyles.sessionRow}`,
+    )!;
+    await act(async () => click(row));
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
   });
 
   it('hides a stale recent row when the pinned catalog already contains it', async () => {

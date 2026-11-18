@@ -177,7 +177,10 @@ describe('built generated UI MCP artifact', () => {
     );
     expect(notices).toContain('@modelcontextprotocol/sdk@');
     expect(notices).toContain('quickjs-emscripten-core@');
-    expect(notices).toContain('dompurify@');
+    expect(notices).toContain('dompurify@3.4.17');
+    expect(await readFile(join(output, 'app.html'), 'utf8')).toContain(
+      'DOMPurify 3.4.17',
+    );
     expect(await readdir(output)).not.toContain('node_modules');
   });
 
@@ -220,7 +223,9 @@ describe('built generated UI MCP artifact', () => {
       parseToolResult(second).documentId,
     );
     expect(await client.readResource({ uri: APP_URI })).toEqual(before);
-    expect(await show(client, input)).toEqual(first);
+    const again = parseToolResult(await show(client, input));
+    expect(again.documentId).toBe(parseToolResult(first).documentId);
+    expect(again.cardId).not.toBe(parseToolResult(first).cardId);
     expect(JSON.stringify(before)).not.toContain('SECOND_DOCUMENT_MARKER');
     expect(await readdir(root)).toEqual([]);
     const resource = before.contents[0];
@@ -237,7 +242,9 @@ describe('built generated UI MCP artifact', () => {
     );
     await client.close();
     const restarted = await connect(root);
-    expect(await show(restarted, input)).toEqual(first);
+    expect(parseToolResult(await show(restarted, input)).documentId).toBe(
+      parseToolResult(first).documentId,
+    );
   });
 
   it('keeps generated source out of the public summary and round-trips Unicode', async () => {

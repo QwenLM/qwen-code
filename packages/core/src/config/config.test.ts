@@ -41,7 +41,20 @@ import {
   isValidGoalTokenBudget,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
+import {
+  AGENT_LOOP_SURFACES,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
+  type AgentLoopSurface,
+} from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
+
+/** The surfaces the shared loop is on for when nothing sets it. */
+const ON_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
+  'headless',
+  'ink',
+  'agent-core',
+]);
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
@@ -96,7 +109,10 @@ import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { applySkillSideEffects } from '../tools/skill-utils.js';
+import {
+  applySkillSideEffects,
+  collectAvailableSkillEntries,
+} from '../tools/skill-utils.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { AgentType, HookEventName } from '../hooks/types.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
@@ -127,6 +143,7 @@ import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-stat
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { resolveModelConfig } from '../models/modelConfigResolver.js';
 
 /**
  * A settled registration for the shared record, the shape
@@ -1092,6 +1109,26 @@ describe('Server Config (config.ts)', () => {
     await config.initialize(options);
     return config;
   };
+
+  it('publishes late registered commands without waiting for the skills cache TTL', async () => {
+    const config = await initConfig(
+      {},
+      { ...SKIP_ALL_INIT, skipSkillManager: false },
+    );
+    const manager = config.getSkillManager()!;
+    expect(
+      (await collectAvailableSkillEntries(manager, config)).entries,
+    ).toEqual([]);
+
+    for (const name of ['validation:echo', 'validation:replacement']) {
+      config.setModelInvocableCommandsProvider(() => [
+        { name, description: name },
+      ]);
+      expect(
+        (await collectAvailableSkillEntries(manager, config)).entries,
+      ).toEqual([{ name, description: name }]);
+    }
+  });
   /** A recording Config in an ACP session opted in to the writer lease. */
   const leasedConfig = (overrides: Partial<ConfigParameters> = {}) =>
     makeConfig({
@@ -1244,6 +1281,45 @@ describe('Server Config (config.ts)', () => {
         expect(
           QwenSubscriptionSession.prototype.getModels,
         ).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      { fallback: undefined, expected: 'qwen4' },
+      { fallback: 'removed-user-model', expected: 'qwen4' },
+      { fallback: 'qwen3.8-flash', expected: 'qwen3.8-flash' },
+    ])(
+      'initializes subscription model $expected with startup fallback $fallback',
+      async ({ fallback, expected }) => {
+        const { config: generationConfig, sources } = resolveModelConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          settings: { model: 'qwen4' },
+          env: {},
+        });
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: 'qwen4',
+          generationConfig,
+          generationConfigSources: sources,
+        });
+
+        await config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+          true,
+        );
+
+        expect(config.getContentGeneratorConfig()).toMatchObject({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: expected,
+        });
+        expect(
+          config
+            .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+            .map(({ id }) => id),
+        ).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
+        expect(config.getWarnings()).toEqual([]);
       },
     );
 
@@ -7312,6 +7388,245 @@ describe('Server Config (config.ts)', () => {
       expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
     });
 
+    describe('isEventBusAgentLoopEnabled', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to off for every surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+        }
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(true);
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '1');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(true);
+      });
+
+      it('is forced off by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=0 even when the parameter is on', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
+      });
+
+      it('forces only the surfaces named in an env list', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless,acp=0');
+        const config = makeConfig({ eventBusAgentLoopEnabled: true });
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('acp')).toBe(false);
+        expect(config.isEventBusAgentLoopEnabled('ink')).toBe(true);
+      });
+    });
+
+    describe('isUnifiedAgentLoopEnabled', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to on for headless, the Ink TUI and AgentCore and off for every other surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(
+            ON_BY_DEFAULT.has(surface),
+          );
+        }
+      });
+
+      it.each(['headless', 'ink', 'agent-core'] as const)(
+        'keeps %s on its own loop when the setting is false',
+        (surface) => {
+          expect(
+            makeConfig({
+              unifiedAgentLoopEnabled: false,
+            }).isUnifiedAgentLoopEnabled(surface),
+          ).toBe(false);
+        },
+      );
+
+      it.each(['headless', 'ink', 'agent-core'] as const)(
+        'keeps %s on its own loop when the environment turns it off',
+        (surface) => {
+          vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', `${surface}=0`);
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+          vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+        },
+      );
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(true);
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(false);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '1');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(true);
+      });
+
+      it('is forced off by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=0 even when the parameter is on', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(false);
+      });
+
+      it('forces only the surfaces named in an env list', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'acp=1,ink=0');
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('ink')).toBe(false);
+        // An unnamed surface falls back to its default, on for headless.
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(false);
+      });
+
+      it('resolves each surface independently', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'opentui');
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(false);
+      });
+    });
+
+    describe('loop-switch default tables are independent', () => {
+      // Snapshot the tables as found so cleanup restores them rather than a
+      // hardcoded false — the first rollout flip must not be erased here.
+      const savedUnified = { ...UNIFIED_SURFACE_DEFAULTS };
+      const savedEventBus = { ...EVENT_BUS_SURFACE_DEFAULTS };
+      afterEach(() => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          UNIFIED_SURFACE_DEFAULTS[surface] = savedUnified[surface];
+          EVENT_BUS_SURFACE_DEFAULTS[surface] = savedEventBus[surface];
+        }
+        vi.unstubAllEnvs();
+      });
+
+      it('flipping a unified surface default does not flip the event-bus default', () => {
+        // The next rollout step flips one surface's unified default. The kernel
+        // must stay at its own table's value for that surface unless its own
+        // table is flipped — re-merging the two tables reds this case.
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        UNIFIED_SURFACE_DEFAULTS.opentui = true;
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(
+          savedEventBus.opentui,
+        );
+      });
+
+      it('flipping an event-bus surface default does not flip the unified default', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        EVENT_BUS_SURFACE_DEFAULTS.opentui = true;
+        const config = makeConfig();
+        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(
+          savedUnified.opentui,
+        );
+      });
+    });
+
+    describe('getAgentLoopPath', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to shared for headless, the Ink TUI and AgentCore and legacy for every other surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().getAgentLoopPath(surface)).toBe(
+            ON_BY_DEFAULT.has(surface) ? 'shared' : 'legacy',
+          );
+        }
+      });
+
+      it('is shared when unified is on and the kernel is off', () => {
+        expect(
+          makeConfig({ unifiedAgentLoopEnabled: true }).getAgentLoopPath('acp'),
+        ).toBe('shared');
+      });
+
+      it('is kernel when both switches are on', () => {
+        const config = makeConfig({
+          unifiedAgentLoopEnabled: true,
+          eventBusAgentLoopEnabled: true,
+        });
+        // Every surface except speculation and hosted can enter the kernel;
+        // pin the arm for ink, opentui and agent-core too, not just acp.
+        for (const surface of AGENT_LOOP_SURFACES) {
+          if (surface === 'speculation' || surface === 'hosted') continue;
+          expect(config.getAgentLoopPath(surface)).toBe('kernel');
+        }
+      });
+
+      it('stays legacy when only the kernel switch is on', () => {
+        expect(
+          makeConfig({ eventBusAgentLoopEnabled: true }).getAgentLoopPath(
+            'acp',
+          ),
+        ).toBe('legacy');
+      });
+
+      it('follows the env overrides that drive the switches', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'headless');
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless');
+        const config = makeConfig();
+        expect(config.getAgentLoopPath('headless')).toBe('kernel');
+        expect(config.getAgentLoopPath('acp')).toBe('legacy');
+      });
+
+      it('caps speculation and hosted at shared even with both switches on', () => {
+        // runSpeculationModelRound and the Hosted Harness model round only call
+        // runModelRound and never read the event-bus switch, so neither can
+        // enter the kernel.
+        const config = makeConfig({
+          unifiedAgentLoopEnabled: true,
+          eventBusAgentLoopEnabled: true,
+        });
+        expect(config.getAgentLoopPath('speculation')).toBe('shared');
+        expect(config.getAgentLoopPath('hosted')).toBe('shared');
+      });
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
@@ -7347,6 +7662,26 @@ describe('Server Config (config.ts)', () => {
         expect(config.isWorkflowsEnabled()).toBe(false);
         await config.enableReviewWorkflow();
         expect(config.isWorkflowsEnabled()).toBe(true);
+      });
+
+      it('keeps a review activation through a settings reload that leaves the flag unset', async () => {
+        const config = await workflowConfig();
+        await config.enableReviewWorkflow();
+        await config.enableReviewWorkflow();
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(true);
+        // A value the settings do give replaces the activation.
+        config.applyWorkflowsEnabledSetting(false);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+      });
+
+      it('turns off settings-enabled workflows when the reloaded settings drop the flag', async () => {
+        const config = await workflowConfig({ workflowsEnabled: true });
+        await config.enableReviewWorkflow();
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
       });
 
       it.each(['registered', 'deferred', 'disabled'] as const)(
@@ -8424,6 +8759,31 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe(expected);
     });
 
+    it.each([true, false])(
+      'rejects a stale fast endpoint in strict mode (same-id alternative: %s)',
+      (alternative) => {
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          fastModel: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: alternative ? 'shared' : 'other',
+                baseUrl: 'https://moved.example/v1',
+              },
+            ],
+          },
+        });
+        expect(() =>
+          config.getFastModel({ requirePinnedEndpoint: true }),
+        ).toThrow('no longer configured at the selected endpoint');
+        expect(config.getFastModel()).toBe(
+          alternative ? 'openai:shared' : undefined,
+        );
+      },
+    );
+
     const readAuxModel = (
       config: Config,
       key: 'fastModel' | 'compactionModel',
@@ -8744,105 +9104,21 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  describe('the main-session policy and the auto-memory reference (#16291)', () => {
-    /** A session that can load skills: a skill manager and a Skill tool. */
-    const withSkillTool = (config: Config) => {
-      vi.spyOn(config, 'getSkillManager').mockReturnValue(
-        {} as unknown as ReturnType<Config['getSkillManager']>,
-      );
-      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
-        getAllToolNames: () => ['skill'],
-        isPermissionDeferred: () => false,
-      } as unknown as ReturnType<Config['getToolRegistry']>);
-    };
+  // Every reader gets the same policy: the main session and a subagent's
+  // derived Config, whether or not that subagent may use the Skill tool.
+  it('sends the resident policy to the session and to a derived Config', async () => {
+    const config = makeConfig();
+    loadProjectRules();
 
-    it('sends the resident policy with a pointer when the skill can be loaded', async () => {
-      const config = makeConfig();
-      withSkillTool(config);
-      loadProjectRules();
+    await config.refreshHierarchicalMemory();
 
-      await config.refreshHierarchicalMemory();
-
-      const policy = config.getAutoMemoryPrompt();
-      expect(policy).toContain('# auto memory');
-      expect(policy).toContain('load the `auto-memory` skill');
-      expect(policy).not.toContain('<types>');
-    });
-
-    it('keeps the full policy when no skill can be loaded', async () => {
-      const config = makeConfig();
-      vi.spyOn(config, 'getSkillManager').mockReturnValue(null);
-      loadProjectRules();
-
-      await config.refreshHierarchicalMemory();
-
-      const policy = config.getAutoMemoryPrompt();
-      expect(policy).toContain('<types>');
-      expect(policy).not.toContain('auto-memory');
-    });
-
-    // The session-start refresh runs before the tool registry exists, so the
-    // route must be decided when the policy is read, not when it is built.
-    it('sends the full policy once the registry turns out to have no Skill tool', async () => {
-      const config = makeConfig();
-      vi.spyOn(config, 'getSkillManager').mockReturnValue(
-        {} as unknown as ReturnType<Config['getSkillManager']>,
-      );
-      const toolNames: string[] = [];
-      vi.spyOn(config, 'getToolRegistry').mockReturnValue({
-        getAllToolNames: () => toolNames,
-        isPermissionDeferred: () => false,
-      } as unknown as ReturnType<Config['getToolRegistry']>);
-      loadProjectRules();
-
-      await config.refreshHierarchicalMemory();
-
-      expect(config.getAutoMemoryPrompt()).toContain('<types>');
-      toolNames.push('skill');
-      expect(config.getAutoMemoryPrompt()).toContain(
-        'load the `auto-memory` skill',
-      );
-    });
-
-    it('gives a derived Config with no skill manager the full policy', async () => {
-      const config = makeConfig();
-      withSkillTool(config);
-      loadProjectRules();
-      await config.refreshHierarchicalMemory();
-
-      // As buildSubagentContextOverride does for a skill-denied agent (#12424).
-      const subagent = deriveConfig(config);
-      subagent.getSkillManager = () => null;
-
-      expect(config.getAutoMemoryPrompt()).toContain(
-        'load the `auto-memory` skill',
-      );
-      expect(subagent.getAutoMemoryPrompt()).toContain('<types>');
-      expect(subagent.getAutoMemoryPrompt()).not.toContain('auto-memory');
-    });
-
-    it('does not list the bundled auto-memory skill under structured recall', () => {
-      const config = makeConfig({ enableManagedAutoMemory: true });
-      Object.assign(config, { memoryRecallMode: 'structured' });
-
-      expect(
-        config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
-      ).toBe(false);
-    });
-
-    it.each([
-      [true, true],
-      [false, false],
-    ])(
-      'lists the bundled auto-memory skill only with managed auto-memory (enabled: %s)',
-      (enableManagedAutoMemory, listed) => {
-        const config = makeConfig({ enableManagedAutoMemory });
-
-        expect(
-          config.isSkillEnabled({ name: 'auto-memory', level: 'bundled' }),
-        ).toBe(listed);
-      },
-    );
+    const policy = config.getAutoMemoryPrompt();
+    expect(policy).toContain('## Types and where they go');
+    expect(policy).not.toContain('<types>');
+    expect(policy).not.toContain('load the `auto-memory` skill');
+    const subagent = deriveConfig(config);
+    subagent.getSkillManager = () => null;
+    expect(subagent.getAutoMemoryPrompt()).toBe(policy);
   });
 
   it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
@@ -9781,6 +10057,7 @@ describe('Server Config (config.ts)', () => {
       '.worktree.json',
       '.pr.json',
       '.title.json',
+      '.artifacts.json',
     ]);
     mockProcessCwd(NEW_DIR);
     existingPaths(...from);
@@ -12380,6 +12657,103 @@ describe('setApprovalMode with folder trust', () => {
     const fallbackError = () =>
       (vi.mocked(logRipgrepFallback).mock.calls[0][1] as RipgrepFallbackEvent)
         .error;
+
+    it('loads ACP resources while the ripgrep probe is pending and joins it before publishing tools', async () => {
+      let finishResources!: () => void;
+      const resources = new Promise<void>((resolve) => {
+        finishResources = resolve;
+      });
+      let finishProbe!: (available: boolean) => void;
+      const probe = new Promise<boolean>((resolve) => {
+        finishProbe = resolve;
+      });
+      vi.mocked(canUseRipgrep).mockReturnValueOnce(probe);
+      const config = makeConfig({ experimentalZedIntegration: true });
+      const refresh = vi
+        .spyOn(config.getExtensionManager(), 'refreshCache')
+        .mockReturnValueOnce(resources);
+      const createRegistry = vi.spyOn(config, 'createToolRegistry');
+      let initialized = false;
+      const initializing = config.initialize().then(() => {
+        initialized = true;
+      });
+
+      try {
+        await vi.waitFor(() => expect(refresh).toHaveBeenCalled());
+        expect(canUseRipgrep).toHaveBeenCalledOnce();
+        expect(vi.mocked(canUseRipgrep).mock.calls[0]?.[1]).toBeInstanceOf(
+          AbortSignal,
+        );
+        expect(createRegistry).not.toHaveBeenCalled();
+        expect(initialized).toBe(false);
+
+        finishResources();
+        await vi.waitFor(() => expect(createRegistry).toHaveBeenCalled());
+        expect(initialized).toBe(false);
+      } finally {
+        finishResources();
+        finishProbe(true);
+        await initializing;
+      }
+
+      expect(grepRegistrations()).toHaveLength(1);
+    });
+
+    it('cancels and drains an ACP probe when resource initialization fails', async () => {
+      let signal: AbortSignal | undefined;
+      let closeProbe: (() => void) | undefined;
+      vi.mocked(canUseRipgrep).mockImplementationOnce(
+        (_builtin, abortSignal) =>
+          new Promise<boolean>((_resolve, reject) => {
+            signal = abortSignal;
+            closeProbe = () => reject(abortSignal?.reason);
+          }),
+      );
+      const config = makeConfig({ experimentalZedIntegration: true });
+      const failure = new Error('resource load failed');
+      vi.spyOn(
+        config.getExtensionManager(),
+        'refreshCache',
+      ).mockRejectedValueOnce(failure);
+
+      let settled = false;
+      const initializing = config.initialize();
+      void initializing.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+
+      try {
+        await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+      } finally {
+        closeProbe?.();
+        await expect(initializing).rejects.toBe(failure);
+      }
+
+      expect(signal?.aborted).toBe(true);
+      expect(logRipgrepFallback).not.toHaveBeenCalled();
+    });
+
+    it('keeps ACP fallback diagnostics and retries a failed probe when rebuilding tools', async () => {
+      vi.mocked(canUseRipgrep)
+        .mockRejectedValueOnce(new Error('probe failed'))
+        .mockResolvedValueOnce(true);
+      const config = await initConfig({ experimentalZedIntegration: true });
+
+      expect(canUseRipgrep).toHaveBeenCalledOnce();
+      expect(fallbackError()).toBe('probe failed');
+
+      await config.createToolRegistry();
+
+      expect(canUseRipgrep).toHaveBeenCalledTimes(2);
+      expect(logRipgrepFallback).toHaveBeenCalledOnce();
+    });
 
     it('registers the background-agent roster tool', async () => {
       await initConfig();

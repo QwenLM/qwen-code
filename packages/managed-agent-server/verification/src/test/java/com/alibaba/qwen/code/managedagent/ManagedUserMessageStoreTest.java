@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -68,6 +69,40 @@ class ManagedUserMessageStoreTest {
     }
 
     @Test
+    void refusesExternalAttachmentsBeforeSubmitOrEditCanPoisonTheQueue() {
+        jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, TENANT, session);
+        List<InputBlock> attachment = List.of(new InputBlock("input_file", "contents", "text/plain", null, "notes.txt"));
+
+        assertCode("workspace_unavailable", () -> command("first", new Command("submit", null, null, attachment)));
+        assertThat(query().messages()).isEmpty();
+        Message first = command("first", submit("first")).messages().getFirst();
+        Snapshot beforeEdit = query();
+        assertCode("workspace_unavailable", () -> command("edit",
+                new Command("edit", first.id(), first.revision(), attachment)));
+        assertThat(query()).isEqualTo(beforeEdit);
+        command("edit", new Command("edit", first.id(), first.revision(), text("edited")));
+        Message second = command("second", submit("second")).messages().getLast();
+
+        List<Message> delivered = messages.claim(TENANT, session, turn("RUNNING"), false);
+        assertThat(delivered).extracting(Message::id).containsExactly(first.id(), second.id());
+        assertThat(delivered).extracting(message -> message.input().getFirst().get("text"))
+                .containsExactly("edited", "second");
+    }
+
+    @Test
+    void preservesAttachmentSubmitAndEditForOtherProfiles() {
+        List<InputBlock> attachment = List.of(new InputBlock("input_file", "contents", "text/plain", null, "notes.txt"));
+        Message first = command("first", new Command("submit", null, null, attachment)).messages().getFirst();
+        assertThat(first.input().getFirst().get("type")).isEqualTo("resource");
+        Message second = command("second", submit("text")).messages().getLast();
+        Snapshot edited = command("edit", new Command("edit", second.id(), second.revision(), attachment));
+        assertThat(edited.messages().getLast().input()).isEqualTo(first.input());
+        assertThat(messages.claim(TENANT, session, turn("RUNNING"), false))
+                .extracting(Message::id).containsExactly(first.id(), second.id());
+    }
+
+    @Test
     void queueCommandsLockTheirSessionBeforeReconcilingTurns() {
         var source = new org.springframework.jdbc.datasource.DriverManagerDataSource(
                 "jdbc:h2:mem:queue-lock-" + UUID.randomUUID() + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
@@ -115,8 +150,12 @@ class ManagedUserMessageStoreTest {
     }
 
     @Test
-    void admitsClaimedSeedThroughTheRealSchemaAdapterAndKeepsTheQueueBarrier() {
+    void admitsClaimedSeedThroughTheRealSchemaAdapterAndKeepsTheQueueBarrier() throws Exception {
+        seedConversationBoundary();
         Message first = command("first", submit("first")).messages().getFirst();
+        assertThat(conversationBoundary()).isEqualTo(1);
+        command("first", submit("first"));
+        assertThat(conversationBoundary()).isEqualTo(1);
         assertCode("user_message_queue_pending", () -> store.insertTurnCommand(TENANT, "queue-test", "ordinary-key",
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR));
         jdbc.update("UPDATE ma_user_message SET state = 'claimed' WHERE tenant_id = ? AND session_id = ?", TENANT, session);
@@ -124,6 +163,16 @@ class ManagedUserMessageStoreTest {
         var admission = store.insertTurnCommand(TENANT, "queue-test", "user-queue:" + first.id(),
                 "digest", session, first.input(), "sha256:" + "0".repeat(64), ACTOR);
         assertThat(admission.turnId()).isNotBlank();
+        assertThat(conversationBoundary()).isEqualTo(1);
+    }
+
+    @Test
+    void ordinaryInputWithAQueueLikeIdempotencyKeyStillAdvancesTheBoundary() throws Exception {
+        seedConversationBoundary();
+        var admission = store.insertTurnCommand(TENANT, "queue-test", "user-queue:ordinary-input", "digest", session,
+                agents.userMessageInput(text("ordinary")), "sha256:" + "0".repeat(64), ACTOR);
+        assertThat(admission.turnId()).isNotBlank();
+        assertThat(conversationBoundary()).isEqualTo(1);
     }
 
     @Test
@@ -301,6 +350,20 @@ class ManagedUserMessageStoreTest {
 
     private Command submit(String text) {
         return new Command("submit", null, null, text(text));
+    }
+
+    private void seedConversationBoundary() {
+        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, session);
+        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,domain,record_id,"
+                        + "revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,1,'CONVERSATION',?,1)",
+                scope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "side_query_conversation"),
+                TENANT, session, "side_query_conversation", "side_query_conversation", "{\"mainInputBoundary\":0}");
+    }
+
+    private long conversationBoundary() throws Exception {
+        return json.readTree(jdbc.queryForObject("SELECT options_json FROM ma_session_record"
+                        + " WHERE tenant_id=? AND session_id=? AND record_kind='CONVERSATION'", String.class, TENANT, session))
+                .path("mainInputBoundary").asLong();
     }
 
     private List<InputBlock> text(String text) {

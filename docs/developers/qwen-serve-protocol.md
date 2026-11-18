@@ -32,7 +32,7 @@ When the flag is on, the global `bearerAuth` middleware gates **every normal API
 
 **`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser clients hitting the daemon cross-origin are blocked by default — a request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. One exception precedes the wall on a non-loopback bind with a token: a same-origin request (`Origin` equal to the direct socket scheme plus the normalized `Host` authority) is bearer-authenticated and its `Origin` stripped **on the primary listener** — with a valid bearer the route's own status follows, with a missing or invalid bearer a `401`, **except the pre-auth Web Shell document, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/mcp-app-sandbox` routes, which are served without a credential as in every other mode** — and only cross-origin or non-matching `Origin` values keep the `403` envelope. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
 
-- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/live`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/live`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) remain pre-auth unless `--no-web` removes them.
+- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/channel-events`, `/live`, `/scheduled-tasks`, `/pr-watches`, `/goals`, and `/settings` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/channel-events`, `/live`, `/scheduled-tasks`, `/pr-watches`, `/goals`, and `/settings` document navigations) remain pre-auth unless `--no-web` removes them.
 - A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input. Without a resolved token — which after generation means a loopback bind — HTTP(S) entries are limited to loopback hosts; a non-loopback browser origin requires a token because it can otherwise drive the full operator API, including code execution as the daemon user. Explicit browser-extension origins keep their existing tokenless local-automation path. Startup logs the authority granted to any tokenless allowed browser origin.
 
 Matched origins receive the standard CORS response headers on every request:
@@ -675,6 +675,7 @@ nothing.
 | `workspace_artifact_library`             | Persisted workspace-wide artifact queries, batch session queries and explicit-pair removal via `/workspaces/:workspace/artifact-library`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `workspace_artifact_library_stream`      | Session metadata on all artifact-library reads and opt-in finite SSE for full and selected-session queries; requires artifact persistence.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `session_sources`                        | session source persistence is wired for the runtime. Registers metadata-only workspace files, uploaded attachments, and HTTP(S) links through the live session owner.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `generated_ui_state`                     | Generated UI cards can save and read view state through `/session/:id/generated-ui/state/:cardId` on the live session owner.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `session_generation`                     | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `session_btw_stream`                     | Every registered runtime bridge supports resumable BTW streaming. Clients must check this flag before calling `/session/:id/btw/stream`; otherwise use the existing JSON BTW interface.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `scheduled_task_session_reuse`           | durable scheduled-task session management is active and every managed daemon runtime has installed the callback that lets a task explicitly bind to its current existing session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -937,11 +938,12 @@ Response shape:
     "maxTotalSessions": 800,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
+    "maxSseConnections": 204,
     "eventRingSize": 8000,
     "eventRingMaxBytes": 8388608,
     "compactedReplayMaxBytes": 4194304,
     "promptDeadlineMs": null,
-    "writerIdleTimeoutMs": null,
+    "writerIdleTimeoutMs": 60000,
     "channelIdleTimeoutMs": 0,
     "sessionIdleTimeoutMs": 1800000,
     "acpConnectionCap": 64
@@ -1309,7 +1311,11 @@ message it accepted or skipped (with the machine reason: `reason_filter`,
 before the poll window that mentions the bot, was edited after the window
 opened and is not in the channel's dedupe record; the channel does not answer
 it, and `actor` names the comment's author, who need not be the editor), a sender-gate rejection, `github_api_error`,
-`no_role_matched`),
+`no_role_matched`, `bound_watch_required` (the GitHub channel's
+`requireBoundWatch` gate excluded every bound `review`/`verify` follower of the
+PR — none holds an active watch on it — so the event retired privately instead
+of taking the public path; also used for a same-account comment watch skip and
+a plain comment whose mention waiver the gate removed)),
 a GitHub thread whose handling failed and that it will read again (`failed`
 with `github_api_error`: a GitHub error, or a local error while the channel
 cannot read or write its own state or one of the thread's tasks is unfinished),
@@ -1369,11 +1375,17 @@ presence metadata, startup state, and runtime state; literal secrets are never
 returned. Channel snapshots use `Cache-Control: no-store`.
 
 Field descriptors can expose nested object metadata through `properties`.
-Numeric descriptors can use `exclusiveMinimum` for an open lower bound and
-`maximum` for an inclusive upper bound. A stored number outside a newly declared
-bound is still accepted when the client re-sends it unchanged, so declaring a
-bound does not block unrelated edits to an existing channel; a value the client
-actually changed must satisfy both bounds. String
+Numeric descriptors can use `minimum` for an inclusive lower bound,
+`exclusiveMinimum` for an open lower bound, and `maximum` for an inclusive upper
+bound. When both lower bounds are declared the stricter one applies, with the
+exclusive bound winning a tie because it also rejects equality. A stored number
+outside a newly declared bound still passes the descriptor check when the client
+re-sends it unchanged, so declaring a bound does not by itself block unrelated
+edits to an existing channel; a value the client actually changed must satisfy
+the upper bound and whichever lower bound is in force. That tolerance is
+descriptor-level only: the channel's own configuration validation runs
+afterwards and may still refuse the write, so an unchanged value is not a
+guarantee that the save succeeds. String
 and secret descriptors can use `multiline` to ask clients for a multi-line text
 area; the descriptor types allow it only on top-level fields. Clients that do
 not render an advertised field kind must preserve its existing config value
@@ -1420,6 +1432,91 @@ group requests also retain the sender who initiated the request. Approval
 snapshots contain `senderIds` and `groupIds` because allowlists do not persist
 display names. Revoking an unknown user or group returns
 `404 channel_pairing_approval_not_found`.
+
+#### WeChat login
+
+The WeChat (`weixin`) channel authenticates by QR scan rather than by a config
+token, and its credential is a single process-global `account.json` in the
+daemon's home shared by every WeChat channel in every workspace. Its login
+routes therefore sit outside the workspace-scoped Channel management surface,
+alongside the subscription auth routes, and carry no `/workspaces/:workspace`
+variant:
+
+- `GET /auth/weixin`
+- `POST /auth/weixin/flows`
+- `GET /auth/weixin/flows/:id`
+- `DELETE /auth/weixin/flows/:id`
+- `POST /auth/weixin/revoke`
+
+`GET /auth/weixin` reads local state only and returns
+`{ "enabled": boolean, "configured": boolean, "userId"?: string, "savedAt"?: string }`.
+It never calls the upstream platform. A state directory that cannot be created
+answers `502 { "code": "credentials_error" }`, the same code the write paths use
+— not `404`, which clients read as "this daemon has no WeChat support". An
+`account.json` that exists but cannot be read or parsed is **not** that failure:
+it reads as `configured: false`, and re-login is the recovery for it.
+
+`POST /auth/weixin/flows` requires the strict mutation gate, mints a QR upstream,
+and returns `201` with `{ "id": string, "status": "waiting", "qrText"?: string,
+"qrcodeUrl": string }`. A mint that yields no scannable URL is reported as a
+failure rather than a live flow — the operator would have nothing to scan, and a
+live flow renders no retry action — so `502 { "code": "qr_unavailable" }` covers
+both an upstream error and a response carrying an id but no URL, and either way
+the slot is released. The scan loop then runs in the daemon; clients poll
+`GET /auth/weixin/flows/:id`, whose `status` is `waiting`, `scanned`, or one of
+the terminals `ready`, `expired`, `error`. **`ready` carries no `errorCode`** —
+only the failure terminals do: `qr_expired` (the refresh budget ran out) or
+`login_failed` (the upstream poll failed, or the login deadline elapsed). A
+credential that could not be written yields `error` with
+`errorCode: credentials_error`, because the operator has to fix the daemon's
+home directory and a generic `login_failed` would hide that.
+
+The status is not monotonic: after `scanned` the QR can still expire, and the
+view returns to `waiting` with a replacement QR. While that replacement is
+being minted the view carries neither `qrText` nor `qrcodeUrl`, so a dead code
+is never presented as scannable. **A live status is therefore not the same as a
+scannable one** — clients must derive the scan prompt from the QR fields, not
+from the status, and show a "preparing" state with a way out while both are
+absent. **Clients must re-render on every poll, not only when the status
+changes.** `qrText` is a best-effort block-glyph rendering and is absent when
+the encoder cannot render the URL; `qrcodeUrl` is present whenever a live QR is
+available, so the operator can open it directly. At most four _live_ flows run
+concurrently; a further start returns `429 too_many_flows`. A terminal view is
+retained for 60 seconds so a polling client can still read it — it does not
+count against that cap — and is then dropped, after which the poll returns
+`404 flow_not_found`.
+`DELETE /auth/weixin/flows/:id` aborts a flow and returns `204`; clients are
+expected to call it when they stop watching a live flow, because the daemon
+keeps polling the upstream whether or not anyone is. A live flow that goes
+**unpolled for 120 seconds** is cancelled as abandoned, so a client that reloads
+without sending `DELETE` cannot hold a slot for the whole login deadline; every
+poll re-arms that bound. It is sized against the worst gap between two
+_serviced_ polls, not against the poll cadence: a client that schedules its next
+poll only after the previous one settles can be silent for its whole request
+budget, and a backgrounded tab is throttled to roughly one timer per minute.
+Clients must keep their interval plus request budget well under it. Daemon
+shutdown aborts every in-flight flow, including a QR mint still in flight.
+
+On `ready` the daemon persists the credential itself. **No response on any of
+these routes carries the bot token**, and no request field can redirect the
+upstream API root.
+
+`POST /auth/weixin/revoke` requires the strict mutation gate, cancels every
+in-flight flow, removes the stored account, and returns `204`. If the credential
+file cannot be removed it answers `502 { "code": "credentials_error" }` instead.
+The flows are cancelled either way, but **the stored account may survive**: a
+502 leaves the removal outcome unknown, so do not assume either state. Re-read
+`GET /auth/weixin` for the daemon's view, but note that it reports
+`configured: false` for a credential it cannot read as well as for one it
+removed — when the removal itself matters, confirm it on the host. Channels
+already running keep the account they read at connect time until they are
+restarted.
+
+These routes are gated by the daemon's bearer authentication, not by workspace
+trust, because the credential they manage has no workspace scope. Clients that
+predate them receive `404`; the Web Shell treats that as "this daemon does not
+support WeChat login" rather than as an error. No separate capability tag is
+advertised — the panel lives behind the existing `channel_management` UI gate.
 
 ### Channel delivery and Notify
 
@@ -2775,6 +2872,22 @@ top-level session). Agents launched by the top-level session omit
 `parentAgentId` and `parentName`; clients should treat all three fields as
 optional and fall back to a flat list when they are absent.
 
+With `?includeSubSessions=true` (capability `session_sub_session_send`), the
+response also carries `subSessions`: the `sent` launches the daemon reports
+back to this session, from `POST /session/:id/sub-sessions` or from the
+model's `create_sub_session`. Each is `{ kind: "session", id, sessionId,
+workspaceCwd, label, status, startTime, endTime?, runtimeMs, byPerson,
+waitingForInput }`, where `id` is the completion's task id, `sessionId` and
+`workspaceCwd` name the target, and `status` changes from `running` to
+`completed`, `failed`, or `cancelled`. A 30-minute observation timeout
+produces `failed` and pauses while `waitingForInput` indicates a pending
+permission request or question in the target. The daemon keeps at most 20
+records per caller in memory and refuses another send while all 20 slots are
+active. A restart forgets them. When one starts, settles, or starts or stops
+waiting the daemon publishes `sub_session_task_changed` with `{ sessionId }` (the caller) on
+every session in the caller's workspace; clients filter by `sessionId` and
+re-read this route.
+
 ### `GET /session/:id/tasks/:taskId/runtime`
 
 On-demand detail for one shell task. `GET /session/:id/tasks` carries lifecycle
@@ -2986,6 +3099,40 @@ authentication, pool, workspace-budget, and workspace discovery-error
 enrichments are absent because their backing state is workspace-owned or keyed
 only by server name rather than by session. Status, discovery, and accounting
 from the selected session's own MCP manager remain available.
+
+### `GET /session/:id/generated-ui/state/:cardId` and `PUT /session/:id/generated-ui/state/:cardId`
+
+Saved view state for one Generated UI card, advertised by
+`generated_ui_state`. Both methods require a session-bound
+`X-Qwen-Client-Id` and a card id matching `^gc_[A-Za-z0-9_-]{16,64}$`
+(400 `invalid_card_id`). A missing client id returns 403; a malformed client
+id, or one bound to another session, returns 400 `invalid_client_id`.
+
+`GET` returns `{ "cardId", "revision", "value" }`; a card that was never saved
+has `revision: 0` and `value: null`. `PUT` takes
+`{ "baseRevision": <int>, "value": <JSON> }` and answers with an `outcome`:
+
+| Status | Body                                            | Meaning                                               |
+| ------ | ----------------------------------------------- | ----------------------------------------------------- |
+| 200    | `{ outcome: "saved", cardId, revision }`        | Saved; `revision` is the new revision                 |
+| 409    | `{ outcome: "stale", cardId, revision, value }` | `baseRevision` is not current; current state attached |
+| 413    | `{ outcome: "too_large", cardId, limitBytes }`  | The serialized value exceeds 16 KiB                   |
+
+Other failures carry a `code`: `invalid_state` (400), `state_card_limit` (409,
+128 cards per session) and `state_unavailable` (503, the transcript could not
+be read or written; never reported as empty state). Saving the current value
+again returns `saved` without writing.
+
+A rewind restores the retained value and its original revision. Each changed
+save receives a revision greater than any previously saved revision in the
+session transcript, including those from abandoned branches.
+
+Both are live-session-owner routes: the read follows `GET` owner routing, the
+write requires strict mutation and the session's bound workspace. They never
+fall back to the primary workspace. State is stored in the session transcript
+and follows its branch: a rewind past a save drops it and a fork copies the
+saves on the copied branch. See
+[the design](../design/generated-ui-view-state.md).
 
 ### Standalone session lifecycle (`standalone_sessions_v1`)
 
@@ -3795,7 +3942,7 @@ ACP-over-HTTP uses the same request and response bodies through vendor methods `
 
 ### Multi-workspace live-session routing
 
-When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/btw/stream`, `DELETE /session/:id/btw/stream/:requestId`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `POST /session/:id/mid-turn-messages/send-now`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, `DELETE /session/:id/artifacts/:artifactId`, `GET /session/:id/sources`, `POST /session/:id/sources`, and `DELETE /session/:id/sources/:sourceId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
+When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/btw/stream`, `DELETE /session/:id/btw/stream/:requestId`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `POST /session/:id/mid-turn-messages/send-now`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, `DELETE /session/:id/artifacts/:artifactId`, `GET /session/:id/sources`, `POST /session/:id/sources`, `DELETE /session/:id/sources/:sourceId`, `GET /session/:id/generated-ui/state/:cardId`, and `PUT /session/:id/generated-ui/state/:cardId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
 
 This rule is live-session-only and does not make every workspace-less session route multi-workspace-aware. Persisted or archived operations use their documented workspace-qualified routes. `POST /session/:id/branch`, `POST /session/:id/fork`, and `POST /session/:id/cd` intentionally remain primary-only and return `non_primary_session_route_not_supported` for non-primary owners.
 
@@ -4008,6 +4155,29 @@ If queued prompts are unexpected in a multi-client deployment, first confirm
 whether callers are sharing a default `sessionScope: "single"` session. For
 independent per-thread conversations, create sessions with
 `sessionScope: "thread"` so prompts serialize only within that thread.
+
+### `POST /session/:id/sub-sessions`
+
+A person sends a prompt from the page of session `:id` to a new session or any existing one, in its own workspace or another registered one (capability `session_sub_session_send`). The daemon runs it as a `sent` launch of `create_sub_session` with `:id` as the caller: the same trust and cap checks, and the same completion notification, which `:id` takes as a turn of its own. Unlike the tool, picking the workspace is the approval, so nothing is asked separately; the target keeps its own approval mode; any session but `:id` itself can be the target, keeping its own parent and source; and the delegation depth limit does not apply.
+
+```bash
+curl -X POST http://127.0.0.1:4170/session/$SID/sub-sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Summarize the open issues","workspace":"/work/other"}'
+# → 202 {"sessionId":"…","workspaceCwd":"/work/other"}
+```
+
+- `prompt` (required): non-empty, at most the `create_sub_session` prompt limit.
+- `workspace`: a registered, trusted workspace path or id. Absent means the caller's own workspace.
+- `targetSessionId`: an existing session to send to instead of starting a new one. Pass `workspace` too when it lives in another workspace.
+
+The response carries `sessionId`, `workspaceCwd` when the session runs in another workspace, and `taskId` when the completion's task id is not the session id (a follow-up). Errors: `400` (`invalid_sub_session_prompt`, `invalid_sub_session_workspace`, `invalid_sub_session_target`), `409 sub_session_send_refused` with the launcher's reason (an untrusted or unknown workspace, an unknown session, `:id` itself as the target, a cap, or a caller that does not record its chat), `501 sub_session_send_unavailable` for a session whose runtime cannot start sub-sessions, and the usual owner-route errors (standalone sessions are refused).
+
+While the target runs, the send is listed in `GET /session/:id/tasks?includeSubSessions=true`.
+
+A destination workspace using the `consensus` permission policy returns `409 sub_session_send_refused` before launching work. Send the message directly from the destination session to use its consensus approvals.
+
+The message is written to `:id`'s conversation as an `agent_mention` record whose `_meta.qwenAgentMessage.sentTo` is `{ sessionId, workspaceCwd, title? }` (the target), without starting a turn. When the target's turn settles, `:id` receives the completion notification and runs a turn in which its model tells the person what the target replied; the notification's label is `<workspace> · <title>`, and `backgroundTask.fromSession` identifies `{ sessionId, workspaceCwd }` for the target. The prompt the target receives carries `{ type: "source", sessionId, workspaceCwd, title? }` (the caller) among `_meta.inputAnnotations` on its `user_message_chunk`, live and on replay; the model's `create_sub_session` launches carry it too. The TypeScript SDK exposes the sender on normalized delta metadata as `sourceAnnotation` and keeps `inputAnnotations` for reference annotations.
 
 ### `DELETE /session/:id`
 

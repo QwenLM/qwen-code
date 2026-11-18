@@ -32,55 +32,49 @@ describe('github plugin validateConfig', () => {
     );
   });
 
-  it('rejects a non-array prWatchEvents', () => {
+  it('accepts the deprecated prWatchEvents surface without validating it', () => {
+    // The daemon owns state transitions now. The keys are read as an alias
+    // for one minor release, so a malformed value must not refuse the boot;
+    // connect() warns once instead.
     expect(
       validate({ deliverToBoundSessions: true, prWatchEvents: 'ci_failure' }),
-    ).toContain('prWatchEvents');
-  });
-
-  it('rejects unknown watch events', () => {
+    ).toBeUndefined();
     expect(
       validate({
         deliverToBoundSessions: true,
         prWatchEvents: ['ci_failure', 'pushed'],
       }),
-    ).toContain('pushed');
-  });
-
-  it('requires deliverToBoundSessions for watch events', () => {
-    expect(validate({ prWatchEvents: ['ci_failure'] })).toContain(
-      'requires deliverToBoundSessions',
-    );
-  });
-
-  it('requires deliverToBoundSessions for the watch budget reserve', () => {
-    expect(validate({ prWatchBudgetReserve: 300 })).toContain(
-      'prWatchBudgetReserve',
-    );
-    expect(
-      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 300 }),
     ).toBeUndefined();
+    expect(validate({ prWatchEvents: ['ci_failure'] })).toBeUndefined();
   });
 
-  it('rejects a reserve the descriptor admits but the getter would silently default', () => {
-    // exclusiveMinimum: -1 lets 0 disable the gate, but it also admits
-    // (-1, 0); those must be refused rather than becoming the default 200.
-    for (const reserve of [-0.5, -1, 'abc', Number.NaN]) {
-      expect(
-        validate({
-          deliverToBoundSessions: true,
-          prWatchBudgetReserve: reserve,
-        }),
-      ).toContain('must be a non-negative number');
+  it('no longer offers the removed watch-limit and reserve fields', () => {
+    for (const key of ['prWatchLimit', 'prWatchBudgetReserve']) {
+      expect(plugin.management?.fields.some((field) => field.key === key)).toBe(
+        false,
+      );
     }
-    // 0 disables, and a positive fraction is rounded up by the getter — both
-    // stay legal.
+  });
+
+  it('rejects a non-boolean requireBoundWatch and its missing dependency', () => {
     expect(
-      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 0 }),
-    ).toBeUndefined();
+      validate({ deliverToBoundSessions: true, requireBoundWatch: 'yes' }),
+    ).toContain('requireBoundWatch must be a boolean');
+    expect(validate({ requireBoundWatch: true })).toContain(
+      'requireBoundWatch for channel github requires deliverToBoundSessions',
+    );
     expect(
-      validate({ deliverToBoundSessions: true, prWatchBudgetReserve: 200.5 }),
+      validate({ deliverToBoundSessions: true, requireBoundWatch: true }),
     ).toBeUndefined();
+  });
+
+  it('describes requireBoundWatch as an opt-in boolean defaulting off', () => {
+    const field = plugin.management?.fields.find(
+      (candidate) => candidate.key === 'requireBoundWatch',
+    );
+    expect(field?.kind).toBe('boolean');
+    expect(field?.default).toBe('false');
+    expect(field?.description).toContain('watch');
   });
 
   it('accepts the full watch vocabulary, case-insensitively', () => {

@@ -415,6 +415,8 @@ export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
+export * from './services/session-artifact-summary-sidecar.js';
+export * from './services/generated-ui-state.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
 export * from './ipc/peer-admission.js';
@@ -807,6 +809,7 @@ export * from './utils/btwUtils.js';
 export * from './agents/btw-session.js';
 export * from './agents/forkedAgent.js';
 export * from './utils/sideQuery.js';
+export * from './utils/output-language-table.js';
 
 // ============================================================================
 // OAuth & Authentication

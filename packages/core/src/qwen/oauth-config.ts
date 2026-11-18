@@ -11,6 +11,7 @@ export const QWEN_SUBSCRIPTION_WEB_SEARCH_URL =
   'https://api.qwen.ai/api/v1/mcp/web_search';
 export const QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER =
   'QWEN_SUBSCRIPTION_DYNAMIC_TOKEN';
+export const QWEN_OAUTH_TOKEN_PLACEHOLDER = 'QWEN_OAUTH_DYNAMIC_TOKEN';
 
 export function getQwenOAuthConfig(): {
   baseUrl: string;

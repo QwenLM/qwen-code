@@ -1,8 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 
@@ -36,13 +34,13 @@ final class ExecutionAdmissionPlacement {
     static boolean free(DataSource dataSource, RuntimeBindingRecord original) {
         var request = original.getRequest();
         var scope = request.getScope();
-        if (CsiFilesRetirementProfile.isProfile(scope) || !"session".equals(scope.getIsolationClass())
-                || ResidentWorkspaceProfile.selects(scope) || HarnessOwnership.sharesRuntimeSessions(request)
+        if (!"session".equals(scope.getIsolationClass())
+                || HarnessOwnership.sharesRuntimeSessions(request)
                 || scope.getLifecycleAuthority() != null || request.getIsolationKey() == null) {
             return false;
         }
         return JdbcRepositorySupport.read(dataSource, connection ->
-                JdbcCsiFilesRetirementGuard.sessionRootExists(connection, scope.getTenantId(),
+                sessionRootExists(connection, scope.getTenantId(),
                         request.getIsolationKey(), false)
                 && (request.getStorageId() == null || localOrAbsent(connection, scope.getTenantId(),
                         request.getStorageId())));
@@ -57,7 +55,7 @@ final class ExecutionAdmissionPlacement {
         String tenant = original.getRequest().getScope().getTenantId();
         if (!free) {
             JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
-        } else if (!JdbcCsiFilesRetirementGuard.sessionRootExists(connection, tenant,
+        } else if (!sessionRootExists(connection, tenant,
                 original.getRequest().getIsolationKey(), true)) {
             throw new RuntimeBrokerException(409, "runtime_admission_closed", "Session admission is closed", false);
         }
@@ -70,13 +68,27 @@ final class ExecutionAdmissionPlacement {
      * placement.
      */
     static void lockDrainRoot(Connection connection, String tenantId, String harnessSessionId) throws SQLException {
-        JdbcCsiFilesRetirementGuard.sessionRootExists(connection, tenantId, harnessSessionId, true);
+        sessionRootExists(connection, tenantId, harnessSessionId, true);
+    }
+
+    private static boolean sessionRootExists(Connection connection, String tenantId,
+            String sessionId, boolean forUpdate) throws SQLException {
+        String sql = "SELECT 1 FROM ma_session WHERE tenant_id = ? AND session_id = ?"
+                + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setQueryTimeout(10);
+            statement.setBytes(1, tenantId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            statement.setBytes(2, sessionId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            try (ResultSet row = statement.executeQuery()) {
+                return row.next();
+            }
+        }
     }
 
     private static boolean localOrAbsent(Connection connection, String tenant, String storage) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT storage_kind FROM ma_storage WHERE alias_key = ?")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+            statement.setString(1, RuntimeAdmissionFences.storageAliasKey(tenant, storage));
             try (ResultSet row = statement.executeQuery()) {
                 return !row.next() || "LOCAL".equals(row.getString(1));
             }

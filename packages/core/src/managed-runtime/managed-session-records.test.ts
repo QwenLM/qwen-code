@@ -270,6 +270,27 @@ describe('managed session record envelope', () => {
     expect(event.subject).toBeUndefined();
   });
 
+  it('accepts input.accepted with a notBefore instant, null, or absent', () => {
+    const due = parseManagedSessionEvent(
+      withPayload(inputEvent(), { notBefore: 1_700_000_060_000 }),
+    );
+    expect(due.payload['notBefore']).toBe(1_700_000_060_000);
+    const immediate = parseManagedSessionEvent(
+      withPayload(inputEvent(), { notBefore: null }),
+    );
+    expect(immediate.payload['notBefore']).toBeNull();
+    // Absent stays valid: notBefore is optional, existing producers omit it.
+    const legacy = parseManagedSessionEvent(inputEvent());
+    expect(legacy.payload['notBefore']).toBeUndefined();
+  });
+
+  it('rejects a non-time notBefore on input.accepted', () => {
+    expectEventError(
+      withPayload(inputEvent(), { notBefore: 'soon' }),
+      /notBefore/,
+    );
+  });
+
   it('rejects an unknown kind rather than skipping it', () => {
     expectEventError(
       inputEvent({ kind: 'input.maybe' }),

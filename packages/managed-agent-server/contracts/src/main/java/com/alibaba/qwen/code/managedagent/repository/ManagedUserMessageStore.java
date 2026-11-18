@@ -10,7 +10,7 @@ public interface ManagedUserMessageStore {
     public record Message(String id, long sequence, long revision, String state,
             List<Map<String, Object>> input, String turnId) { }
 
-    public record Snapshot(boolean paused, List<Message> messages) { }
+    public record Snapshot(boolean paused, long queueRevision, List<Message> messages) { }
 
     public record Command(String action, String messageId, Long expectedRevision, List<InputBlock> input) { }
 

@@ -24,7 +24,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -388,7 +388,7 @@ class WorkspaceExecutionMembershipMySqlIT {
 
     private void checkMembers(Fixture fixture) {
         String key = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ?", String.class,
-                JdbcRuntimeBindingRepository.storageAliasKey(fixture.tenant, fixture.session.workspace().getStorageId()));
+                RuntimeAdmissionFences.storageAliasKey(fixture.tenant, fixture.session.workspace().getStorageId()));
         long members = jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE execution_storage_key = ?", Long.class, key);
         assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?", Long.class, key))
                 .isEqualTo(members);

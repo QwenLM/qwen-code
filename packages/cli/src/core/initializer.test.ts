@@ -204,12 +204,14 @@ describe('initializeApp', () => {
 
       await initializeApp(mockConfig as never, settings, {
         allowSubscriptionStartupFallback: allow,
+        allowUnlistedSubscriptionModel: true,
       });
 
       expect(mockPerformInitialAuth).toHaveBeenCalledExactlyOnceWith(
         mockConfig,
         AuthType.QWEN_SUBSCRIPTION,
         expected,
+        true,
       );
     },
   );

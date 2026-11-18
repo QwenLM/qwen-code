@@ -449,6 +449,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         <OpenTuiMemoryDialog
           config={config}
           settings={settings}
+          host={host}
           onClose={onClose}
           availableTerminalHeight={props.availableTerminalHeight}
         />
