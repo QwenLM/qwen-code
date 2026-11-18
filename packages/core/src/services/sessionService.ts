@@ -3671,48 +3671,79 @@ export class SessionService {
     // index builder rejects conversation-less transcripts outright, so a
     // missing projection is a candidate as well as an empty apiHistory.
     // Sessions with a conversation keep the selective read's zero-extra-I/O
-    // contract; the shape and ownership checks below confine the auxiliary
-    // full read's effect to local side-records-only transcripts.
+    // contract; the shared helper confines the auxiliary full read's
+    // effect to local side-records-only transcripts under the size cap.
     if (!projection || projection.runtime.apiHistory.length === 0) {
       const filePath = this.getSessionFilePath(sessionId, 'active');
-      // Same cap as the library mutation read: the auxiliary parse is
-      // best-effort and must not read an unbounded transcript on the
-      // restore path. A missing file simply skips the seed.
-      let size: number | undefined;
-      try {
-        size = (await fs.promises.stat(filePath)).size;
-      } catch {
-        size = undefined;
-      }
-      if (size !== undefined && size <= MAX_TRANSCRIPT_READ_BYTES) {
-        let sourceReadComplete = true;
-        const records = await this.readAllRecords(filePath, () => {
-          sourceReadComplete = false;
-        });
-        const firstRecord = records[0];
-        if (
-          firstRecord &&
-          (await this.sessionBelongsToCurrentProject(
-            firstRecord.sessionId,
-            firstRecord.cwd,
-          )) &&
-          isSideRecordsOnlyTranscript(records)
-        ) {
-          const { messages, gaps } = this.reconstructHistory(records, {
-            detectGaps: true,
+      await this.seedSideRecordsOnlyTranscript(
+        sessionId,
+        'active',
+        filePath,
+        async () => {
+          let sourceReadComplete = true;
+          const records = await this.readAllRecords(filePath, () => {
+            sourceReadComplete = false;
           });
-          this.seedArtifactSummaryFromRecords(
-            sessionId,
-            'active',
-            records,
-            messages,
-            gaps,
-            sourceReadComplete,
-          );
-        }
-      }
+          return { records, sourceReadComplete };
+        },
+      );
     }
     return projection;
+  }
+
+  /**
+   * First-open seed for conversation-less transcripts, shared by both
+   * restore funnels so the size cap, ownership, shape and authority gates
+   * cannot drift. The projection funnel has not read the transcript yet,
+   * so its read happens here behind the cap; the load funnel passes the
+   * records it already read for the conversation (the cap still governs
+   * the seed, so one session yields one list row through either funnel).
+   * The boundary is inclusive, matching the library mutation read's
+   * `size > maxBytes` refusal; a failed size probe skips the seed.
+   * Returns the rebuilt snapshot for the restore payload, or undefined
+   * when any gate declines.
+   */
+  private async seedSideRecordsOnlyTranscript(
+    sessionId: string,
+    state: SessionArchiveState,
+    filePath: string,
+    readRecords: () => Promise<{
+      records: ChatRecord[];
+      sourceReadComplete: boolean;
+    }>,
+  ): Promise<RebuiltSessionArtifactSnapshot | undefined> {
+    let size: number | undefined;
+    try {
+      size = (await fs.promises.stat(filePath)).size;
+    } catch {
+      size = undefined;
+    }
+    if (size === undefined || size > MAX_TRANSCRIPT_READ_BYTES) {
+      return undefined;
+    }
+    const { records, sourceReadComplete } = await readRecords();
+    const firstRecord = records[0];
+    if (
+      !firstRecord ||
+      !(await this.sessionBelongsToCurrentProject(
+        firstRecord.sessionId,
+        firstRecord.cwd,
+      )) ||
+      !isSideRecordsOnlyTranscript(records)
+    ) {
+      return undefined;
+    }
+    const { messages, gaps } = this.reconstructHistory(records, {
+      detectGaps: true,
+    });
+    return this.seedArtifactSummaryFromRecords(
+      sessionId,
+      state,
+      records,
+      messages,
+      gaps,
+      sourceReadComplete,
+    );
   }
 
   /**
@@ -3851,14 +3882,25 @@ export class SessionService {
     // Runs before the empty-conversation early return: artifacts can be
     // registered before the first prompt, and those side-records-only
     // sessions are listable even though they have no conversation to load.
-    const artifactSnapshot = this.seedArtifactSummaryFromRecords(
-      sessionId,
-      state,
-      records,
-      messages,
-      gaps,
-      sourceReadComplete,
-    );
+    // The conversation-less shape goes through the shared capped helper so
+    // both funnels seed identically; a conversation transcript keeps the
+    // uncapped seed — its read is the load itself, and the restore
+    // payload's embedded snapshot must not depend on the sidecar cap.
+    const artifactSnapshot = isSideRecordsOnlyTranscript(records)
+      ? await this.seedSideRecordsOnlyTranscript(
+          sessionId,
+          state,
+          filePath,
+          async () => ({ records, sourceReadComplete }),
+        )
+      : this.seedArtifactSummaryFromRecords(
+          sessionId,
+          state,
+          records,
+          messages,
+          gaps,
+          sourceReadComplete,
+        );
 
     if (messages.length === 0) {
       return;
@@ -5738,22 +5780,19 @@ const MAX_TRANSCRIPT_READ_BYTES = 64 * 1024 * 1024;
 
 /**
  * Artifacts can be registered before the first prompt; these valid
- * sessions have only side records and no user/assistant conversation.
- * Creation-time metadata counts as side records here: every daemon/Web
- * Shell session persists a `session_source` record at creation, and a
- * `custom_title` may arrive before the first prompt too. Shared by the
- * library mutation guard and the load-time sidecar seed so both accept
- * the same transcript shape.
+ * sessions have no conversation turns at all — every record is system
+ * metadata (creation-time records such as session_source/session_model,
+ * titles, artifact events, UI state). The gate states that property
+ * instead of enumerating subtypes, so every creation-time record the
+ * product writes before the first prompt keeps it true, today and later.
+ * Shared by the library mutation guard and the load-time sidecar seed so
+ * both accept the same transcript shape. Deliberately NOT
+ * `!records.some(isTranscriptConversationRecord)`: that predicate counts
+ * creation-time system metadata (e.g. session_source) as conversation
+ * records and would re-break the daemon creation shape.
  */
 function isSideRecordsOnlyTranscript(records: ChatRecord[]): boolean {
-  return records.every(
-    (record) =>
-      isSessionArtifactRecord(record) ||
-      (record.type === 'system' &&
-        (record.subtype === 'custom_title' ||
-          record.subtype === 'session_source' ||
-          record.subtype === 'session_sources_snapshot')),
-  );
+  return records.every((record) => record.type === 'system');
 }
 
 /**

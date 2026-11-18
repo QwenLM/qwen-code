@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
+import fs, {
   mkdirSync,
   mkdtempSync,
   renameSync,
@@ -452,13 +452,13 @@ describe('SessionService - artifact summary sidecar', () => {
   });
 
   it('does not clobber a correct sidecar from a journal with a history gap', async () => {
-    // The orphaned second user breaks the history chain and blocks
-    // active-branch attribution of the side events, so the rebuild sees
-    // no artifacts at all (0 of 3 — verified against
-    // selectActiveSideArtifactRecordUuids: the orphan conversation record
-    // blocks the preceding event, and the orphan event's parent is not
-    // active). A complete PARSE is not an authoritative read — the seed
-    // must leave the correct sidecar alone.
+    // The orphaned second user breaks the history chain: the active
+    // branch is just user-2, so the preceding event's parent user-1 is
+    // off it and only the orphan event (parented to the active leaf
+    // user-2) is selected — the rebuild sees 1 of 3, with no warning
+    // (verified against selectActiveSideArtifactRecordUuids). A complete
+    // PARSE is not an authoritative read — gaps.length alone refuses the
+    // seed, which must leave the correct sidecar alone.
     const a = persistedArtifact('https://example.com/gap-a');
     const b = persistedArtifact('https://example.com/gap-b');
     const c = persistedArtifact('https://example.com/gap-c');
@@ -736,6 +736,299 @@ describe('SessionService - artifact summary sidecar', () => {
     const loaded = await service.loadSession(SESSION_ID);
 
     expect(loaded).toBeDefined();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
+
+  it('seeds a side-records transcript carrying the creation-time session_model record', async () => {
+    // Web Shell create+attach awaits setModel before the first prompt,
+    // which persists a system/session_model record — the shape gate must
+    // admit every creation-time metadata record, not an enumerated few
+    // (review round-3 arm A: [session_source, session_model, events]).
+    const a = persistedArtifact('https://example.com/model-a');
+    const b = persistedArtifact('https://example.com/model-b');
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    const modelRecord: ChatRecord = {
+      uuid: 'model-1',
+      parentUuid: 'source-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.500Z',
+      type: 'system',
+      subtype: 'session_model',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        modelId: 'fake-model',
+        authType: 'openai',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      sourceRecord,
+      modelRecord,
+      { ...artifactEventRecord([a, b]), parentUuid: null },
+    ]);
+
+    const projection = await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(projection?.runtime.apiHistory.length).toBe(0);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  it('seeds a session_model-bearing side-records transcript through loadSession too', async () => {
+    const a = persistedArtifact('https://example.com/model-load-a');
+    const b = persistedArtifact('https://example.com/model-load-b');
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    const modelRecord: ChatRecord = {
+      uuid: 'model-1',
+      parentUuid: 'source-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.500Z',
+      type: 'system',
+      subtype: 'session_model',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        modelId: 'fake-model',
+        authType: 'openai',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      sourceRecord,
+      modelRecord,
+      { ...artifactEventRecord([a, b]), parentUuid: null },
+    ]);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  // Mirrors the service's MAX_TRANSCRIPT_READ_BYTES (not exported).
+  const MAX_TRANSCRIPT_READ_BYTES = 64 * 1024 * 1024;
+
+  const titleRecord = (title: string): ChatRecord => ({
+    uuid: 'title-1',
+    parentUuid: null,
+    sessionId: SESSION_ID,
+    timestamp: '2026-11-17T00:00:00.000Z',
+    type: 'system',
+    subtype: 'custom_title',
+    cwd: root,
+    version: '1.0.0',
+    systemPayload: { title } as unknown as ChatRecord['systemPayload'],
+  });
+
+  const writeTranscriptOfSize = (targetBytes: number, rest: ChatRecord[]) => {
+    const base = [titleRecord(''), ...rest]
+      .map((r) => JSON.stringify(r))
+      .join('\n');
+    const pad = targetBytes - Buffer.byteLength(base) - 1;
+    writeTranscript([titleRecord('x'.repeat(pad)), ...rest]);
+  };
+
+  it('skips the projection seed and its auxiliary read above the transcript size cap', async () => {
+    const readSpy = vi.spyOn(
+      service as unknown as {
+        readAllRecords: (
+          filePath: string,
+          onIncompleteRead?: () => void,
+        ) => Promise<ChatRecord[]>;
+      },
+      'readAllRecords',
+    );
+    const a = persistedArtifact('https://example.com/cap-over-a');
+    writeTranscriptOfSize(MAX_TRANSCRIPT_READ_BYTES + 1, [
+      { ...artifactEventRecord([a]), parentUuid: null },
+    ]);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+    readSpy.mockRestore();
+  });
+
+  it('seeds through the projection at exactly the transcript size cap', async () => {
+    // The library mutation read refuses only size > maxBytes, so the
+    // seed's boundary must stay inclusive on both funnels.
+    const a = persistedArtifact('https://example.com/cap-at-a');
+    const b = persistedArtifact('https://example.com/cap-at-b');
+    writeTranscriptOfSize(MAX_TRANSCRIPT_READ_BYTES, [
+      { ...artifactEventRecord([a, b]), parentUuid: null },
+    ]);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  it('skips the load seed above the transcript size cap for a conversation-less transcript', async () => {
+    const a = persistedArtifact('https://example.com/cap-load-over');
+    writeTranscriptOfSize(MAX_TRANSCRIPT_READ_BYTES + 1, [
+      { ...artifactEventRecord([a]), parentUuid: null },
+    ]);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+  });
+
+  it('seeds through loadSession at exactly the transcript size cap', async () => {
+    const a = persistedArtifact('https://example.com/cap-load-at');
+    writeTranscriptOfSize(MAX_TRANSCRIPT_READ_BYTES, [
+      { ...artifactEventRecord([a]), parentUuid: null },
+    ]);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
+
+  it('keeps the conversation load seed uncapped above the transcript size cap', async () => {
+    // The cap governs the conversation-less auxiliary seed only; a
+    // conversation transcript's read is the load itself, and the restore
+    // payload's embedded snapshot must not depend on the sidecar cap.
+    const a = persistedArtifact('https://example.com/cap-conversation');
+    const bigUser: ChatRecord = {
+      ...userRecord(),
+      message: {
+        role: 'user',
+        parts: [{ text: 'x'.repeat(MAX_TRANSCRIPT_READ_BYTES) }],
+      },
+    };
+    writeTranscript([bigUser, artifactEventRecord([a])]);
+
+    const loaded = await service.loadSession(SESSION_ID);
+
+    expect(loaded?.artifactSnapshot?.artifacts).toHaveLength(1);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
+
+  it('skips the seed when the size probe fails', async () => {
+    const originalStat = fs.promises.stat.bind(fs.promises);
+    const statSpy = vi
+      .spyOn(fs.promises, 'stat')
+      .mockImplementation(async (filePath, ...rest) => {
+        if (filePath === transcriptPath) {
+          throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+        }
+        return originalStat(filePath, ...rest);
+      });
+    const readSpy = vi.spyOn(
+      service as unknown as {
+        readAllRecords: (
+          filePath: string,
+          onIncompleteRead?: () => void,
+        ) => Promise<ChatRecord[]>;
+      },
+      'readAllRecords',
+    );
+    const a = persistedArtifact('https://example.com/stat-fail');
+    writeTranscript([{ ...artifactEventRecord([a]), parentUuid: null }]);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+
+    await service.loadSession(SESSION_ID);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+    readSpy.mockRestore();
+    statSpy.mockRestore();
+  });
+
+  it('recounts restorable survivors on a session_model-bearing transcript', async () => {
+    // The shared shape gate also governs the library mutation guard: a
+    // creation-metadata-bearing conversation-less transcript is a legal
+    // removal target, not session_transcript_corrupt.
+    const a = persistedArtifact('https://example.com/model-lib-a');
+    const b = persistedArtifact('https://example.com/model-lib-b');
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    const modelRecord: ChatRecord = {
+      uuid: 'model-1',
+      parentUuid: 'source-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.500Z',
+      type: 'system',
+      subtype: 'session_model',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        modelId: 'fake-model',
+        authType: 'openai',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      sourceRecord,
+      modelRecord,
+      { ...artifactEventRecord([a, b]), parentUuid: null },
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 2);
+
+    const removed = await service.removeSessionArtifactsForLibrary(
+      SESSION_ID,
+      [a.id],
+      {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      },
+    );
+
+    expect(removed).toEqual([a.id]);
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
       1,
     );
