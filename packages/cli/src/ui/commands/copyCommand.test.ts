@@ -10,6 +10,7 @@ import { copyCommand } from './copyCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
+import { countMarkdownSourceBlocks } from '../utils/MarkdownDisplay.js';
 
 vi.mock('../utils/commandUtils.js', () => ({
   copyToClipboard: vi.fn(),
@@ -51,6 +52,61 @@ describe('copyCommand', () => {
       getHistoryShallow: mockGetHistoryShallow,
     });
   });
+
+  it.each([
+    {
+      kind: 'latex',
+      markdown: [
+        '```text',
+        '```not-a-close',
+        '$$',
+        'hidden',
+        '$$',
+        '$hidden_inline$',
+        '```',
+        '$$',
+        'visible',
+        '$$',
+        '$visible_inline$',
+      ].join('\n'),
+      expected: 'visible',
+    },
+    {
+      kind: 'mermaid',
+      markdown: [
+        '````text',
+        '````not-a-close',
+        '```mermaid',
+        'flowchart LR',
+        '  H[Hidden] --> X[Target]',
+        '```',
+        '````',
+        '```mermaid',
+        'flowchart LR',
+        '  V[Visible] --> Y[Target]',
+        '```',
+      ].join('\n'),
+      expected: 'flowchart LR\n  V[Visible] --> Y[Target]',
+    },
+  ])(
+    'copies the $kind source identified by the renderer after a false fence',
+    async ({ kind, markdown, expected }) => {
+      const sources: Array<{ kind: string; source: string; index: number }> =
+        [];
+      countMarkdownSourceBlocks(markdown, (kind, source, index) => {
+        sources.push({ kind, source, index });
+      });
+      expect(sources).toEqual([{ kind, source: expected, index: 1 }]);
+      mockGetHistoryShallow.mockReturnValue([
+        { role: 'model', parts: [{ text: markdown }] },
+      ]);
+      mockCopyToClipboard.mockResolvedValue(undefined);
+
+      await copyCommand.action!(mockContext, `${kind} 1`);
+
+      expect(mockCopyToClipboard).toHaveBeenCalledExactlyOnceWith(expected);
+    },
+  );
 
   it('should return info message when no history is available', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');

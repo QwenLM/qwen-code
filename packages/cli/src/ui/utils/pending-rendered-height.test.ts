@@ -227,6 +227,26 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(6);
   });
 
+  it.each([
+    ['```', '```not-a-close'],
+    ['~~~', '~~~~ still-code'],
+    ['```', '```\u00a0'],
+  ])('keeps table-like content as code after %s / %s', (fence, falseClose) => {
+    const lines = [
+      `${fence}md`,
+      falseClose,
+      '| A | B |',
+      '| - | - |',
+      '| 1 | 2 |',
+      fence,
+      'after',
+    ];
+    expect(fitPendingSlice(lines, 80, 7, CLAMP)).toEqual({
+      keptLines: 7,
+      clipped: false,
+    });
+  });
+
   it('tracks tilde (~~~) fences too', () => {
     const lines = [
       '~~~',

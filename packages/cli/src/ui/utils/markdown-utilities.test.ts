@@ -31,14 +31,14 @@ describe('markdown-utilities', () => {
     });
 
     it('should return content.length if the only \n\n is inside a code block and the end of content is not', () => {
-      const content = '```\nignore this\n\nnewline\n```KeepThis';
+      const content = '```\nignore this\n\nnewline\n```\nKeepThis';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
     it('should not split at a \n\n inside a tilde (~~~) fenced code block', () => {
       // Same as the backtick case but with ~~~ fences: the internal blank line
       // must not be chosen as a split point.
-      const content = '~~~\nignore this\n\nnewline\n~~~KeepThis';
+      const content = '~~~\nignore this\n\nnewline\n~~~\nKeepThis';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
@@ -46,7 +46,7 @@ describe('markdown-utilities', () => {
       // A 6-backtick fence must count as ONE delimiter. Matching only the first
       // three characters would produce a phantom close-then-reopen, mark the
       // internal blank line as outside the block, and split there.
-      const content = '``````\nignore this\n\nnewline\n``````KeepThis';
+      const content = '``````\nignore this\n\nnewline\n``````\nKeepThis';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
@@ -94,7 +94,7 @@ describe('markdown-utilities', () => {
     });
 
     it('re-arms the closed-block walk for the single-newline fallback', () => {
-      const content = '```a\nx\n\ny\n```\n```b\nz\n```TAIL';
+      const content = '```a\nx\n\ny\n```\n```b\nz\n```\nTAIL';
       expect(findLastSafeSplitPoint(content, 22)).toBe(14);
     });
 
@@ -337,6 +337,19 @@ describe('markdown-utilities', () => {
   });
 
   describe('fence recognition', () => {
+    it.each(['\n', '\r\n'])(
+      'closes a longer fence with spaces and tabs under %j line endings',
+      (eol) => {
+        const before = ['```ts', 'code', '```` \t', ''].join(eol);
+        const content = `${before}After`;
+        expect(getEnclosingFenceInfo(content, before.length)).toBeNull();
+        expect(splitFencedMarkdown(content, before.length)).toEqual({
+          before,
+          after: 'After',
+        });
+      },
+    );
+
     it.each([
       ['~~~', '```'],
       ['```', '~~~'],

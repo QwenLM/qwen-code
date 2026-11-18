@@ -9,6 +9,10 @@ import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { findInlineMathExpressions } from '../utils/inline-math.js';
+import {
+  CODE_FENCE_RE,
+  isClosingCodeFence,
+} from '../utils/pending-rendered-height.js';
 
 interface FencedCodeBlock {
   lang: string | null;
@@ -45,7 +49,7 @@ interface SelectedInlineLatexExpression {
 function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   const blocks: FencedCodeBlock[] = [];
   const lines = markdown.split(/\r?\n/);
-  const fenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const fenceRegex = CODE_FENCE_RE;
   const languageCounts = new Map<string, number>();
   let activeFence: string | null = null;
   let activeLang: string | null = null;
@@ -70,12 +74,7 @@ function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
       continue;
     }
 
-    if (
-      match &&
-      match[1].startsWith(activeFence[0]) &&
-      match[1].length >= activeFence.length &&
-      /^[ \t]*$/.test(match[2] ?? '')
-    ) {
+    if (isClosingCodeFence(match, activeFence)) {
       blocks.push({
         lang: activeLang,
         content: activeLines.join('\n'),
@@ -100,7 +99,7 @@ function parseInlineLatexExpressions(
 ): InlineLatexExpression[] {
   const expressions: InlineLatexExpression[] = [];
   const lines = markdown.split(/\r?\n/);
-  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const codeFenceRegex = CODE_FENCE_RE;
   const mathFenceRegex = /^ *\$\$ *$/;
   let activeCodeFence: string | null = null;
   let inLatexBlock = false;
@@ -108,12 +107,7 @@ function parseInlineLatexExpressions(
   for (const line of lines) {
     const codeFenceMatch = line.match(codeFenceRegex);
     if (activeCodeFence) {
-      if (
-        codeFenceMatch &&
-        codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
-        codeFenceMatch[1].length >= activeCodeFence.length &&
-        /^[ \t]*$/.test(codeFenceMatch[2] ?? '')
-      ) {
+      if (isClosingCodeFence(codeFenceMatch, activeCodeFence)) {
         activeCodeFence = null;
       }
       continue;
@@ -177,7 +171,7 @@ function selectInlineLatexExpression(
 function parseLatexBlocks(markdown: string): LatexBlock[] {
   const blocks: LatexBlock[] = [];
   const lines = markdown.split(/\r?\n/);
-  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const codeFenceRegex = CODE_FENCE_RE;
   const mathFenceRegex = /^ *\$\$ *$/;
   let activeCodeFence: string | null = null;
   let inLatexBlock = false;
@@ -186,12 +180,7 @@ function parseLatexBlocks(markdown: string): LatexBlock[] {
   for (const line of lines) {
     const codeFenceMatch = line.match(codeFenceRegex);
     if (activeCodeFence) {
-      if (
-        codeFenceMatch &&
-        codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
-        codeFenceMatch[1].length >= activeCodeFence.length &&
-        /^[ \t]*$/.test(codeFenceMatch[2] ?? '')
-      ) {
+      if (isClosingCodeFence(codeFenceMatch, activeCodeFence)) {
         activeCodeFence = null;
       }
       continue;
