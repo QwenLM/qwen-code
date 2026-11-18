@@ -341,6 +341,43 @@ describe('markdown-utilities', () => {
   });
 
   describe('fence recognition', () => {
+    it.each(
+      [
+        ['```', 'not-a-close'],
+        ['~~~', 'still code'],
+        ['```', '\u00a0'],
+      ].flatMap(([fence, trailing]) =>
+        ['\n', '\r\n'].map((eol) => ({ fence, trailing, eol })),
+      ),
+    )(
+      'keeps $fence$trailing inside the block under $eol line endings',
+      ({ fence, trailing, eol }) => {
+        const content = [
+          `${fence}ts`,
+          'code',
+          `${fence}${trailing}`,
+          '',
+          'still inside',
+          fence,
+          '',
+          'prose',
+        ].join(eol);
+        const inside = content.indexOf('still inside');
+        const afterBlock = content.indexOf('prose');
+
+        expect(getEnclosingFenceInfo(content, inside)).toEqual({
+          lang: 'ts',
+          startLine: 1,
+        });
+        expect(getEnclosingFenceInfo(content, afterBlock)).toBeNull();
+        expect(findLastSafeSplitPoint(content, afterBlock)).toBe(afterBlock);
+        expect(splitFencedMarkdown(content, inside)).toEqual({
+          before: `${content.slice(0, inside)}${fence}\n`,
+          after: `${fence}ts qwen-code:start-line=4\n${content.slice(inside)}`,
+        });
+      },
+    );
+
     it.each([16385, 16386, 16387])(
       'does not reopen a closed fence when a %s-character buffer ends at CR',
       (length) => {

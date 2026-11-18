@@ -275,7 +275,7 @@ describe('fitPendingSlice', () => {
   });
 
   it.each(['```', '~~~'])(
-    'charges a table after a closed %s block equally for LF and raw CRLF lines',
+    'charges a table after a closed %s block equally across CRLF normalization',
     (fence) => {
       const lines = [
         `${fence}ts`,
@@ -289,8 +289,15 @@ describe('fitPendingSlice', () => {
       ];
       const lf = fitPendingSlice(lines.join('\n').split('\n'), 80, 8, 10);
       const crlf = fitPendingSlice(lines.join('\r\n').split('\n'), 80, 8, 10);
+      const crcrlf = fitPendingSlice(
+        lines.join('\r\r\n').split(/\r?\n/),
+        80,
+        8,
+        10,
+      );
       expect(lf).toEqual({ keptLines: 4, clipped: true });
       expect(crlf).toEqual(lf);
+      expect(crcrlf).toEqual(lf);
     },
   );
 
