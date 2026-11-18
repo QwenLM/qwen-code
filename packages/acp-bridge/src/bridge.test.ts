@@ -7814,9 +7814,11 @@ describe('createAcpSessionBridge', () => {
         snapshot,
         options,
       ) {
-        stores.set(this.sessionId, this);
         if (!snapshot) return originalRestore.call(this, snapshot, options);
-        if (this.sessionId !== restoringId) {
+        // Key by the snapshot's session id — the store's own sessionId is
+        // private, and tsc --build typechecks the test files.
+        stores.set(snapshot.sessionId, this);
+        if (snapshot.sessionId !== restoringId) {
           return originalRestore.call(this, snapshot, options);
         }
         const first = await originalRestore.call(
