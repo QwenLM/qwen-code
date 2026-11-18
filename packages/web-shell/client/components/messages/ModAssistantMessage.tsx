@@ -21,9 +21,9 @@ import {
   useOnScreen,
 } from './mod-rows';
 
-const FirstOfReplyContext = createContext<ReadonlyMap<string, boolean>>(
-  new Map(),
-);
+const FirstOfReplyContext = createContext<
+  ReadonlyMap<string, boolean> | undefined
+>(undefined);
 
 export function ModReplyRowsProvider({
   messages,
@@ -37,10 +37,11 @@ export function ModReplyRowsProvider({
     () => (asker ? modReplyRows(messages) : undefined),
     [asker, messages],
   );
-  if (!rows) return children;
   return (
     <FirstOfReplyContext.Provider value={rows}>
-      <AssistantMessageComponentContext.Provider value={ModAssistantMessage}>
+      <AssistantMessageComponentContext.Provider
+        value={asker ? ModAssistantMessage : undefined}
+      >
         {children}
       </AssistantMessageComponentContext.Provider>
     </FirstOfReplyContext.Provider>
@@ -52,7 +53,7 @@ export function ModAssistantMessage({
   ...props
 }: AssistantMessageProps & { messageId: string }) {
   const asker = useContext(ModRowAskerContext);
-  const isFirstOfReply = useContext(FirstOfReplyContext).get(messageId);
+  const isFirstOfReply = useContext(FirstOfReplyContext)?.get(messageId);
   const rowRef = useRef<HTMLDivElement>(null);
   const copySource = useRef<HTMLDivElement>(null);
   const row =

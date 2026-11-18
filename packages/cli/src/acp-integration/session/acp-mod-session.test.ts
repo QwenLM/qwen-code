@@ -135,7 +135,10 @@ describe('AcpModSession', () => {
       ['AssistantMessage', { text: 1, isFirstOfReply: true }],
       ['AssistantMessage', { ...props, extra: true }],
     ])
-      await expect(mods.askRow(component, bad)).rejects.toThrow(/Invalid/);
+      await expect(mods.askRow(component, bad)).rejects.toMatchObject({
+        code: -32602,
+        data: { errorKind: 'invalid_mod_row' },
+      });
     expect(mocks.askRow).toHaveBeenCalledOnce();
   });
 

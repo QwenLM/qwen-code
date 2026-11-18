@@ -55,6 +55,40 @@ export function acpModRowSites(
     : [];
 }
 
+export function parseAcpModRow(
+  component: unknown,
+  props: unknown,
+): { component: ModRenderSite; props: ModRenderInput['props'] } | undefined {
+  if (typeof component !== 'string')
+    throw RequestError.invalidParams(
+      { errorKind: 'invalid_mod_row' },
+      'Invalid Mod row component',
+    );
+  const kinds = Object.hasOwn(ROW_PROPS, component)
+    ? ROW_PROPS[component as ModRenderSite]
+    : undefined;
+  if (!kinds) return undefined;
+  if (
+    typeof props !== 'object' ||
+    props === null ||
+    Array.isArray(props) ||
+    Object.keys(props).length !== Object.keys(kinds).length ||
+    Object.entries(kinds).some(
+      ([key, kind]) =>
+        !Object.hasOwn(props, key) ||
+        typeof (props as Record<string, unknown>)[key] !== kind,
+    )
+  )
+    throw RequestError.invalidParams(
+      { errorKind: 'invalid_mod_row' },
+      `Invalid ${component} row props`,
+    );
+  return {
+    component: component as ModRenderSite,
+    props: props as ModRenderInput['props'],
+  };
+}
+
 // Resolves once `promise` settles, or false once `signal` aborts first.
 async function settled(
   promise: Promise<unknown>,
@@ -159,36 +193,12 @@ export class AcpModSession {
     component: unknown,
     props: unknown,
   ): Promise<BridgeModRowAnswer> {
-    if (typeof component !== 'string')
-      throw RequestError.invalidParams(undefined, 'Invalid Mod row component');
-    const kinds = Object.hasOwn(ROW_PROPS, component)
-      ? ROW_PROPS[component as ModRenderSite]
-      : undefined;
-    // A site this host does not draw rows for.
-    if (!kinds) return { status: 'unhooked' };
-    if (
-      typeof props !== 'object' ||
-      props === null ||
-      Array.isArray(props) ||
-      Object.keys(props).length !== Object.keys(kinds).length ||
-      Object.entries(kinds).some(
-        ([key, kind]) =>
-          !Object.hasOwn(props, key) ||
-          typeof (props as Record<string, unknown>)[key] !== kind,
-      )
-    )
-      throw RequestError.invalidParams(
-        undefined,
-        `Invalid ${component} row props`,
-      );
+    const row = parseAcpModRow(component, props);
+    if (!row) return { status: 'unhooked' };
     const signal = AbortSignal.timeout(ROW_ASK_TIMEOUT_MS);
     if (!(await settled(this.loading, signal))) return { status: 'unanswered' };
     if (this.failure !== undefined) return { status: 'unhooked' };
-    return this.session.askRow(
-      component as ModRenderSite,
-      props as ModRenderInput['props'],
-      signal,
-    );
+    return this.session.askRow(row.component, row.props, signal);
   }
 
   /**

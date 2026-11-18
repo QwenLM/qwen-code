@@ -115,6 +115,14 @@ describe('Mod rows through the daemon', () => {
         component: 'AssistantMessage',
         props: { text: 'Answer 1', isFirstOfReply },
       });
+      const invalidRow = {
+        component: 'AssistantMessage',
+        props: { text: 'Answer 1' },
+      };
+      const invalidRowError = {
+        status: 400,
+        body: { code: 'invalid_mod_row' },
+      };
       const before = await client.createOrAttachSession({
         workspaceCwd: workspace,
         sessionScope: 'thread',
@@ -124,6 +132,11 @@ describe('Mod rows through the daemon', () => {
           clientId: before.clientId,
         }),
       ).toEqual({ status: 'unhooked' });
+      await expect(
+        client.askSessionModRow(before.sessionId, invalidRow, {
+          clientId: before.clientId,
+        }),
+      ).rejects.toMatchObject(invalidRowError);
       const changed = await client.setWorkspaceSetting(
         'user',
         'experimental.mods',
@@ -174,12 +187,8 @@ describe('Mod rows through the daemon', () => {
         ),
       ).toEqual({ status: 'unhooked' });
       await expect(
-        client.askSessionModRow(
-          session.sessionId,
-          { component: 'AssistantMessage', props: { text: 'Answer 1' } },
-          asked,
-        ),
-      ).rejects.toThrow();
+        client.askSessionModRow(session.sessionId, invalidRow, asked),
+      ).rejects.toMatchObject(invalidRowError);
 
       const logs: unknown[] = [];
       const done = new AbortController();

@@ -4440,10 +4440,9 @@ Response (200), one of:
 
 Errors:
 
-- `400 {code: 'invalid_mod_row'}` — the body has no `component` string or no `props` object.
+- `400 {code: 'invalid_mod_row'}` — the body has no valid `component` string or `props` object, or the props do not match a recognized site. The ACP extension method reports invalid params for a recognized site's invalid props.
 - `400 {code: 'invalid_client_id'}` — malformed `X-Qwen-Client-Id` header.
 - `404` — session unknown or not live.
-- A `props` that does not match the site fails as an invalid ACP request.
 
 Cancellation: none. The client sends one ask at a time per session, so an abandoned ask costs at most the one row it named; the bridge's backstop is 75 seconds. ACP-over-HTTP clients have no mapping for this route.
 

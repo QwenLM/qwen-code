@@ -430,7 +430,11 @@ import {
 } from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
-import { AcpModSession, type AcpModTurn } from './acp-mod-session.js';
+import {
+  AcpModSession,
+  type AcpModTurn,
+  parseAcpModRow,
+} from './acp-mod-session.js';
 import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
@@ -5636,14 +5640,18 @@ export class Session implements SessionContext {
   }
 
   /** Answers a Mod row the client draws. */
-  askModRow(component: unknown, props: unknown): Promise<BridgeModRowAnswer> {
+  async askModRow(
+    component: unknown,
+    props: unknown,
+  ): Promise<BridgeModRowAnswer> {
     if (this.mods) return this.mods.askRow(component, props);
+    if (!parseAcpModRow(component, props)) return { status: 'unhooked' };
     // The Mods start once the history is replayed.
-    return Promise.resolve({
+    return {
       status: this.settings.merged.experimental?.mods
         ? 'unanswered'
         : 'unhooked',
-    });
+    };
   }
 
   /**

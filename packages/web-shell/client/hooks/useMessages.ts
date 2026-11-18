@@ -160,6 +160,21 @@ export function projectStreamingTailMessages(
     return undefined;
   }
 
+  let blockIndex = blocks.length - 1;
+  let messageIndex = previous.messages.length - 1;
+  for (; blockIndex > 0 && messageIndex > 0; blockIndex--, messageIndex--) {
+    const block = blocks[blockIndex];
+    if (block.kind !== 'status' || block.source !== 'mod_log') break;
+    const message = previous.messages[messageIndex];
+    if (
+      previous.blocks[blockIndex] !== block ||
+      message.id !== block.id ||
+      message.role !== 'system' ||
+      message.source !== 'mod_log'
+    )
+      return undefined;
+  }
+
   const previousSummary = previous.blockChangeSummary;
   let summaryProvesTailAppend = false;
   if (previousSummary && blockChangeSummary) {
@@ -173,14 +188,14 @@ export function projectStreamingTailMessages(
     }
     summaryProvesTailAppend = true;
   } else {
-    for (let i = 0; i < blocks.length - 1; i += 1) {
+    for (let i = 0; i < blockIndex; i += 1) {
       if (previous.blocks[i] !== blocks[i]) return undefined;
     }
   }
 
-  const before = previous.blocks[blocks.length - 1];
-  const after = blocks[blocks.length - 1];
-  const previousTail = previous.messages[previous.messages.length - 1];
+  const before = previous.blocks[blockIndex];
+  const after = blocks[blockIndex];
+  const previousTail = previous.messages[messageIndex];
   if (
     (before.kind !== 'assistant' && before.kind !== 'thought') ||
     after.kind !== before.kind ||
@@ -235,7 +250,7 @@ export function projectStreamingTailMessages(
 
   const messages = previous.messages.slice();
   const appendedText = after.text.slice(before.text.length);
-  messages[messages.length - 1] = {
+  messages[messageIndex] = {
     ...previousTail,
     content: previousTail.content + appendedText,
     isStreaming: true,

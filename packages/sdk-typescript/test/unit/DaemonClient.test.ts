@@ -8136,29 +8136,48 @@ describe('DaemonClient', () => {
   });
 
   describe('askSessionModRow', () => {
-    it("POSTs the row and returns the session's answer", async () => {
-      const { fetch, calls } = recordingFetch(() =>
-        jsonResponse(200, {
+    it.each(['rest', 'acp-http', 'acp-ws'] as const)(
+      'POSTs the row over REST with a %s client',
+      async (type) => {
+        const answer = {
           status: 'answered',
           props: { text: '你好', isFirstOfReply: true },
-        }),
-      );
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      const row = {
-        component: 'AssistantMessage',
-        props: { text: 'Hello', isFirstOfReply: true },
-      };
-      await expect(
-        client.askSessionModRow('s/1', row, { clientId: 'client-1' }),
-      ).resolves.toEqual({
-        status: 'answered',
-        props: { text: '你好', isFirstOfReply: true },
-      });
-      expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/mod-row');
-      expect(calls[0]?.method).toBe('POST');
-      expect(JSON.parse(calls[0]!.body as string)).toEqual(row);
-      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
-    });
+        };
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, answer),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          ...(type === 'rest'
+            ? { fetch }
+            : {
+                transport: {
+                  type,
+                  supportsReplay: true,
+                  connected: true,
+                  restFetch: fetch,
+                  fetch: async () =>
+                    jsonResponse(404, { error: 'No ACP mapping' }),
+                  async *subscribeEvents() {},
+                  dispose() {},
+                },
+              }),
+        });
+        const row = {
+          component: 'AssistantMessage',
+          props: { text: 'Hello', isFirstOfReply: true },
+        };
+        const signal = new AbortController().signal;
+        await expect(
+          client.askSessionModRow('s/1', row, { clientId: 'client-1', signal }),
+        ).resolves.toEqual(answer);
+        expect(calls[0]?.url).toBe('http://daemon/session/s%2F1/mod-row');
+        expect(calls[0]?.method).toBe('POST');
+        expect(JSON.parse(calls[0]!.body as string)).toEqual(row);
+        expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+        expect(calls[0]?.signal).toBe(signal);
+      },
+    );
   });
 
   describe('recapSession (#4175 follow-up)', () => {

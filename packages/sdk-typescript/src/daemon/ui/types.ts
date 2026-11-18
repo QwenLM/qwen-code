@@ -1409,7 +1409,8 @@ export interface DaemonTranscriptBlockChangeSummary {
   /**
    * The latest revision that was not a pure append to one streaming tail
    * block. For summaries from the same source, equal values therefore prove
-   * that every intervening revision was such an append.
+   * that every intervening revision was such an append. Passive Mod log lines
+   * can follow the streaming block without ending it.
    */
   tailAppendBarrierRevision: number;
   /** The streaming tail block changed at this revision, when eligible. */

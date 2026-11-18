@@ -4919,17 +4919,17 @@ export class DaemonClient {
   }
 
   /**
-   * Ask a live session's Mods for a transcript row this client draws. The
-   * daemon answers once the row's `ui.render` hooks did, which can take as
-   * long as a model call; `signal` aborts only the local fetch. Older
-   * daemons return 404: pre-flight `caps.features.session_mod_rows`.
+   * Ask a live session's Mods for a transcript row over REST. Check for
+   * `session_mod_rows` in `capabilities.features` before calling. The daemon
+   * waits for the row's `ui.render` hooks, which can take as long as a model
+   * call. `signal` aborts only the local fetch.
    */
   async askSessionModRow(
     sessionId: string,
     row: DaemonModRow,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): Promise<DaemonModRowAnswer> {
-    const res = await this.transport.fetch(
+    const res = await this._fetch(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/mod-row`,
       {
         method: 'POST',
