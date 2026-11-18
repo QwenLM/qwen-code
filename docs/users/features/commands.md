@@ -173,7 +173,7 @@ The `/btw` command allows you to ask quick side questions without interrupting o
 
 | Command                | Description                                                                                    |
 | ---------------------- | ---------------------------------------------------------------------------------------------- |
-| `/btw <your question>` | Ask a side question in Ink or OpenTUI.                                                         |
+| `/btw <your question>` | Ask a side question.                                                                           |
 | `?btw <your question>` | Ask a side question in OpenTUI. In Ink, this sends a regular message to the main conversation. |
 
 **How It Works:**
