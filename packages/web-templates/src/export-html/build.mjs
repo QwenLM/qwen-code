@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_143_100;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_145_100;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -121,10 +121,15 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_143_100;
 // turn another session's reply starts (its card label, keeping the card in a
 // folded turn, and opening that session from it) brings it to 2,142,326. The
 // warning sits 774 above that measurement and the ceiling 1,774 above it.
+// Generic Webhook copy (#17405: ten keys across two locales) adds 2,154:
+// the same tree with main 7a9b270d's dictionary measures 2,142,233 bytes,
+// against 2,144,387 with the new copy. CSS and third-party inputs are unchanged,
+// and the forbidden-input guard passes. Leave 713 bytes to the warning and
+// 1,713 to the ceiling.
 // The tool-summary parsing for permission-omitted search results (#15144)
-// adds 298 more: the merged tree measures 2,142,624 locally on main
-// b9da38c7bd, under both limits.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_144_100;
+// adds 463: 2,145,498 against 2,145,961 locally on main 9de5d9a311 without
+// and with the change, under the ceiling.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_146_100;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

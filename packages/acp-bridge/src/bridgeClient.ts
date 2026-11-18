@@ -2723,7 +2723,8 @@ export class BridgeClient implements Client {
    * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-changed`,
-   * `qwen/notify/session/mcp-budget-event` — each translated into a
+   * `qwen/notify/session/mcp-budget-event`,
+   * `qwen/notify/session/mod-log` (a Mod's log line) — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
    */
@@ -3108,6 +3109,22 @@ export class BridgeClient implements Client {
       this.publishExtNotification(sessionId, 'session_recording_degraded', {
         sessionId,
         reason: 'write_failed',
+      });
+      return;
+    }
+    if (method === 'qwen/notify/session/mod-log') {
+      const { sessionId, plugin, text } = params;
+      if (
+        typeof sessionId !== 'string' ||
+        typeof plugin !== 'string' ||
+        typeof text !== 'string' ||
+        !this.ownsSession(sessionId)
+      )
+        return;
+      this.publishExtNotification(sessionId, 'mod_log', {
+        sessionId,
+        plugin,
+        text,
       });
       return;
     }

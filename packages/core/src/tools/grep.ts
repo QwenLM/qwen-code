@@ -73,6 +73,170 @@ interface GrepMatch {
   line: string;
 }
 
+/**
+ * Ignore-aware tracked + untracked candidates for the fallback strategies.
+ * A plain recursive walk also scans ignored build output (dist/). If the
+ * listing is unavailable, null preserves the legacy unscoped fallback.
+ */
+async function gitAwareFileList(
+  cwd: string,
+  signal: AbortSignal,
+): Promise<string[] | null> {
+  // An abort must not be mistaken for "no git here": null sends the search to
+  // the recursive branch below, which has no abort handling at all.
+  signal.throwIfAborted();
+  if (!isGitRepository(cwd) || !isCommandAvailable('git').available) {
+    return null;
+  }
+  try {
+    const output = await new Promise<string>((resolve, reject) => {
+      const child = spawn(
+        'git',
+        [
+          ...NO_EXEC_CONFIG,
+          'ls-files',
+          '-z',
+          '--cached',
+          '--others',
+          '--exclude-standard',
+        ],
+        { cwd, windowsHide: true },
+      );
+      const onAbort = () => child.kill('SIGKILL');
+      signal.addEventListener('abort', onAbort, { once: true });
+      const chunks: Buffer[] = [];
+      child.stdout.on('data', (c) => chunks.push(c));
+      // drained and discarded: the failure below is swallowed by the catch, and
+      // an unread pipe would block the child the same way grep's does
+      child.stderr.on('data', () => {});
+      child.on('error', reject);
+      child.on('close', (code) => {
+        signal.removeEventListener('abort', onAbort);
+        if (code === 0) resolve(Buffer.concat(chunks).toString('utf8'));
+        else reject(new Error(`git ls-files exited with code ${code}`));
+      });
+    });
+    const entries = output.split('\0').filter(Boolean);
+    // git also lists symlinks, submodule gitlinks and index entries whose file
+    // is gone. grep dereferences a symlink passed as an explicit operand, which
+    // would read targets outside the search root — something neither `git grep`
+    // nor a recursive walk does — so keep only operands grep can search.
+    // Chunked: one lstat promise per entry over a large corpus costs more memory
+    // and time than the same work in bounded batches.
+    const LSTAT_BATCH = 1024;
+    const searchable: string[] = [];
+    for (let i = 0; i < entries.length; i += LSTAT_BATCH) {
+      const stats = await Promise.all(
+        entries.slice(i, i + LSTAT_BATCH).map(async (entry) => {
+          try {
+            return (await fsPromises.lstat(path.resolve(cwd, entry))).isFile()
+              ? entry
+              : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      for (const entry of stats) {
+        if (entry !== null) searchable.push(entry);
+      }
+    }
+    return searchable;
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return null;
+  }
+}
+
+/**
+ * System grep over an explicit file list, batched to stay under ARG_MAX.
+ * --include still applies to explicit operands, so the glob filter holds.
+ */
+async function grepOverFileList(
+  files: string[],
+  cwd: string,
+  pattern: string,
+  glob: string | undefined,
+  signal: AbortSignal,
+  parse: (output: string, basePath: string) => GrepMatch[],
+): Promise<GrepMatch[]> {
+  const ARGV_BUDGET_BYTES = 128 * 1024;
+  const STDERR_SUMMARY_BYTES = 4096;
+  const matches: GrepMatch[] = [];
+  let batch: string[] = [];
+  let bytes = 0;
+  const flush = async () => {
+    if (batch.length === 0) return;
+    // A listener added after the abort already fired never runs, so without
+    // this every batch past a cancellation would spawn unkillable.
+    signal.throwIfAborted();
+    const args = ['-n', '-H', '-E', '--null', '--ignore-case'];
+    if (glob) args.push(`--include=${glob}`);
+    args.push('-e', pattern, '--', ...batch);
+    batch = [];
+    bytes = 0;
+    const output = await new Promise<string>((resolve, reject) => {
+      const child = spawn('grep', args, { cwd, windowsHide: true });
+      const onAbort = () => child.kill('SIGKILL');
+      signal.addEventListener('abort', onAbort, { once: true });
+      const chunks: Buffer[] = [];
+      // Drained in full: grep writes one diagnostic per operand it cannot open,
+      // and an unread pipe fills and blocks the child forever. Only what the
+      // recursive branch would not tolerate is retained, bounded.
+      const unexpected: Buffer[] = [];
+      let unexpectedBytes = 0;
+      child.stdout.on('data', (c) => chunks.push(c));
+      child.stderr.on('data', (c: Buffer) => {
+        const text = c.toString('utf8');
+        if (
+          text.includes('Permission denied') ||
+          /grep:.*: Is a directory/i.test(text)
+        ) {
+          return;
+        }
+        const room = STDERR_SUMMARY_BYTES - unexpectedBytes;
+        if (room <= 0) return;
+        const kept = c.length > room ? c.subarray(0, room) : c;
+        unexpected.push(kept);
+        unexpectedBytes += kept.length;
+      });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        signal.removeEventListener('abort', onAbort);
+        if (signal.aborted) {
+          reject(new Error('system grep was aborted'));
+          return;
+        }
+        // GNU grep can warn about an unsupported pattern and still exit 0/1.
+        // Only trust output without unexpected diagnostics, regardless of code.
+        if (unexpectedBytes === 0) {
+          resolve(Buffer.concat(chunks).toString('utf8'));
+        } else {
+          const summary = Buffer.concat(unexpected).toString('utf8').trim();
+          reject(
+            new Error(
+              `system grep exited with code ${code}${
+                summary ? `: ${summary}` : ''
+              }`,
+            ),
+          );
+        }
+      });
+    });
+    // loop instead of spread: a single batch can exceed the argument limit
+    for (const match of parse(output, cwd)) matches.push(match);
+  };
+  for (const file of files) {
+    const operand = file === '-' ? './-' : file;
+    const size = Buffer.byteLength(operand) + 1;
+    if (bytes + size > ARGV_BUDGET_BYTES && batch.length > 0) await flush();
+    batch.push(operand);
+    bytes += size;
+  }
+  await flush();
+  return matches;
+}
+
 class GrepToolInvocation extends BaseToolInvocation<
   GrepToolParams,
   ToolResult
@@ -545,30 +709,69 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // --- Strategy 2: System grep ---
       const { available: grepAvailable } = isCommandAvailable('grep');
-      if (grepAvailable) {
+      // Extract directory names from exclusion patterns. Both system-grep
+      // branches need them: the recursive one as --exclude-dir, the corpus one
+      // as a filter, because --exclude-dir is inert against explicit operands.
+      const globExcludes = this.fileExclusions.getGlobExcludes();
+      const commonExcludes = globExcludes
+        .map((pattern) => {
+          let dir = pattern;
+          if (dir.startsWith('**/')) {
+            dir = dir.substring(3);
+          }
+          if (dir.endsWith('/**')) {
+            dir = dir.slice(0, -3);
+          } else if (dir.endsWith('/')) {
+            dir = dir.slice(0, -1);
+          }
+
+          // Only consider patterns that are likely directories. This filters out file patterns.
+          if (dir && !dir.includes('/') && !dir.includes('*')) {
+            return dir;
+          }
+          return null;
+        })
+        .filter((dir): dir is string => !!dir);
+      const corpus = grepAvailable
+        ? await gitAwareFileList(absolutePath, options.signal)
+        : null;
+      if (corpus) {
+        strategyUsed = 'system grep';
+        const excludedDirs = new Set(commonExcludes);
+        // Strategy 3 hands the same list to globStream as `ignore:`, so drop the
+        // same directories here and keep the two fallbacks on one file set. Only
+        // path segments count: the last one is the file name.
+        const scopedCorpus = corpus.filter(
+          (entry) =>
+            !entry
+              .split('/')
+              .slice(0, -1)
+              .some((segment) => excludedDirs.has(segment)),
+        );
+        try {
+          return await grepOverFileList(
+            scopedCorpus,
+            absolutePath,
+            pattern,
+            glob,
+            options.signal,
+            (output, basePath) => this.parseGrepOutput(output, basePath),
+          );
+        } catch (scopedGrepError: unknown) {
+          // Recover into the JavaScript strategy, not into the recursive grep
+          // below: that one searches the whole tree, which is the scope this
+          // corpus exists to keep the fallbacks out of. A cancellation is not a
+          // grep failure, so it must not start another search.
+          if (options.signal.aborted) throw scopedGrepError;
+          debugLogger.debug(
+            `GrepLogic: scoped system grep failed: ${getErrorMessage(
+              scopedGrepError,
+            )}. Falling back...`,
+          );
+        }
+      } else if (grepAvailable) {
         strategyUsed = 'system grep';
         const grepArgs = ['-r', '-n', '-H', '-E', '--null'];
-        // Extract directory names from exclusion patterns for grep --exclude-dir
-        const globExcludes = this.fileExclusions.getGlobExcludes();
-        const commonExcludes = globExcludes
-          .map((pattern) => {
-            let dir = pattern;
-            if (dir.startsWith('**/')) {
-              dir = dir.substring(3);
-            }
-            if (dir.endsWith('/**')) {
-              dir = dir.slice(0, -3);
-            } else if (dir.endsWith('/')) {
-              dir = dir.slice(0, -1);
-            }
-
-            // Only consider patterns that are likely directories. This filters out file patterns.
-            if (dir && !dir.includes('/') && !dir.includes('*')) {
-              return dir;
-            }
-            return null;
-          })
-          .filter((dir): dir is string => !!dir);
         commonExcludes.forEach((dir) => grepArgs.push(`--exclude-dir=${dir}`));
         if (glob) {
           grepArgs.push(`--include=${glob}`);
@@ -658,6 +861,22 @@ class GrepToolInvocation extends BaseToolInvocation<
       const globPattern = glob ? glob : '**/*';
       const ignorePatterns = this.fileExclusions.getGlobExcludes();
 
+      const jsCorpus = await gitAwareFileList(absolutePath, options.signal);
+      // Where the filesystem folds case, git reports the index spelling while
+      // the walk below reports the on-disk one, and `--others` lists only the
+      // first because git treats them as one file — so a case-only rename git
+      // missed would drop every match. Where it does not fold, the two are
+      // distinct paths and `--others` lists both, so exact comparison is right.
+      const foldsCase =
+        process.platform === 'darwin' || process.platform === 'win32';
+      const corpusIdentity = (file: string) => {
+        const resolved = path.resolve(absolutePath, file);
+        return foldsCase ? resolved.toLowerCase() : resolved;
+      };
+      const allowedFiles = jsCorpus
+        ? new Set(jsCorpus.map(corpusIdentity))
+        : null;
+
       const filesIterator = globStream(globPattern, {
         cwd: absolutePath,
         dot: true,
@@ -671,6 +890,9 @@ class GrepToolInvocation extends BaseToolInvocation<
       const allMatches: GrepMatch[] = [];
 
       for await (const filePath of filesIterator) {
+        if (allowedFiles && !allowedFiles.has(corpusIdentity(filePath))) {
+          continue;
+        }
         const fileAbsolutePath = filePath as string;
         try {
           const content = await fsPromises.readFile(fileAbsolutePath, 'utf8');
