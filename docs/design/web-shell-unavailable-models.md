@@ -6,7 +6,7 @@
 
 Embedded hosts often have a product catalog of models the current account
 cannot use (plan, permission, or missing authorization). Those models should
-still appear in the composer model picker as disabled rows. Hover or focus
+still appear in the composer model picker as disabled rows. Hover, focus, or tap
 opens a hint that can be plain text or host-owned UI, including action
 buttons such as “Authorize”. The host may be SolidJS, so the public slot
 cannot require React elements.
@@ -27,7 +27,7 @@ cannot hold buttons. Interactive hover already exists in
 - Hosts inject extra models that the daemon list does not offer.
 - Those rows render disabled in the composer picker, including the
   reasoning submenu’s copy of the same list.
-- Hover and keyboard focus open a hint. The hint may be a string or a
+- Hover, keyboard focus, and tap open a hint. The hint may be a string or a
   host-mounted DOM tree with buttons.
 - Solid and vanilla DOM hosts mount into an `HTMLElement`. They do not
   construct React elements.
@@ -91,7 +91,7 @@ hint are the host’s responsibility.
 
 Reuse a hover-intent Popover, not Tooltip or a new HoverCard. Open after
 about 300ms, close after a short leave delay, stay open when the pointer
-enters the content, and open on keyboard focus. The hint is a fixed-width
+enters the content, and open on keyboard focus or tap. The hint is a fixed-width
 card: Web Shell renders the model name as the title and the string tooltip
 as the description. Disabled rows keep a hover/focus highlight. Web Shell
 owns placement, open/close, the portal, and the scroll bounds. The host
@@ -127,7 +127,7 @@ and the settings harness picker.
 
 - An omitted or empty list leaves the picker unchanged.
 - Injected models appear after available ones and cannot be selected.
-- A host string tooltip appears on hover and focus.
+- A host string tooltip appears on hover, focus, and tap.
 - A host mount can render a button; clicking it does not switch models or
   dismiss the picker.
 - Solid or DOM hosts do not need a React element factory.

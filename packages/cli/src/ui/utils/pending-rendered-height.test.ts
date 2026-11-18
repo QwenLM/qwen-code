@@ -13,7 +13,20 @@ import {
   isTableStart,
   fitPendingSlice,
   splitMarkdownTableRow,
+  CODE_FENCE_RE,
+  isClosingCodeFence,
 } from './pending-rendered-height.js';
+
+describe('isClosingCodeFence', () => {
+  it.each(['not-a-close', ' still-code', '\u00a0', '\r\r', '\r text'])(
+    'rejects non-closing trailing content %j',
+    (trailing) => {
+      expect(
+        isClosingCodeFence(CODE_FENCE_RE.exec(`\`\`\`${trailing}`), '```'),
+      ).toBe(false);
+    },
+  );
+});
 
 describe('splitMarkdownTableRow', () => {
   it('splits a simple row into trimmed cells', () => {
@@ -360,6 +373,27 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(6);
   });
 
+  it.each([
+    ['```', '```not-a-close'],
+    ['~~~', '~~~~ still-code'],
+    ['```', '```\u00a0'],
+  ])('keeps table-like content as code after %s / %s', (fence, falseClose) => {
+    const lines = [
+      `${fence}md`,
+      falseClose,
+      '| A | B |',
+      '| - | - |',
+      '| 1 | 2 |',
+      fence,
+      'after',
+    ];
+    expect(fitPendingSlice(lines, 80, 7, CLAMP)).toEqual({
+      keptLines: 7,
+      clipped: false,
+      renderedRows: 7,
+    });
+  });
+
   it('tracks tilde (~~~) fences too', () => {
     const lines = [
       '~~~',
@@ -373,6 +407,33 @@ describe('fitPendingSlice', () => {
     expect(clipped).toBe(false);
     expect(keptLines).toBe(6);
   });
+
+  it.each(['```', '~~~'])(
+    'charges a table after a closed %s block equally across CRLF normalization',
+    (fence) => {
+      const lines = [
+        `${fence}ts`,
+        'code',
+        `${fence} \t`,
+        '',
+        '| A | B |',
+        '| - | - |',
+        '| 1 | 2 |',
+        '| 3 | 4 |',
+      ];
+      const lf = fitPendingSlice(lines.join('\n').split('\n'), 80, 8, 10);
+      const crlf = fitPendingSlice(lines.join('\r\n').split('\n'), 80, 8, 10);
+      const crcrlf = fitPendingSlice(
+        lines.join('\r\r\n').split(/\r?\n/),
+        80,
+        8,
+        10,
+      );
+      expect(lf).toEqual({ keptLines: 4, clipped: true, renderedRows: 4 });
+      expect(crlf).toEqual(lf);
+      expect(crcrlf).toEqual(lf);
+    },
+  );
 
   it('charges the taller vertical-format height on a NARROW terminal', () => {
     // 4 cols → minHorizontalWidth = max(24, 6*4+5) = 29. contentWidth 20 < 29 →

@@ -11,13 +11,14 @@ import {
 } from './environmentContext.js';
 import { REATTACH_BOUNDARY_METADATA } from '../services/image-payload-references.js';
 import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
+import { isAsyncHookContextPartText } from '../hooks/async-hook-context.js';
 
 /**
  * Whether `part` is context this code injected into a user turn rather than
  * the caller's own content: a per-turn reminder, a UserPromptSubmit/Mod block,
- * or a marked memory catalog snapshot.
+ * an async hook context block, or a marked memory catalog snapshot.
  *
- * Shape-based for the two text envelopes, the same trust model
+ * Shape-based for the text envelopes, the same trust model
  * `isSystemReminderContent` uses. Classification spans the whole entry, which
  * is what lets a mid-entry reminder bound the moving run; only the contiguous
  * injected run after the caller's last own part is relocated, so a
@@ -28,6 +29,7 @@ function isInjectedPromptContext(part: Part): boolean {
   return (
     isWrappedSystemReminderPart(part) ||
     isUserPromptSubmitContextPartText(part.text ?? '') ||
+    isAsyncHookContextPartText(part.text ?? '') ||
     part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true
   );
 }
