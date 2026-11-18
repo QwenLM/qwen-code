@@ -58,8 +58,10 @@ Then enter:
   or use `qwen mcp reject <name>` to deny it.
 - With `--bare` or `--safe-mode`, Qwen Code ignores servers from `settings.json`
   and the project's `.mcp.json`. Pass servers at startup with `--mcp-config`.
-  The [Linux tool execution sandbox](./sandbox.md#linux-tool-execution-sandbox)
-  disables MCP entirely.
+- The [Linux tool execution sandbox](./sandbox.md#linux-tool-execution-sandbox)
+  rejects startup if the session configuration includes an MCP server. To start
+  in this sandbox, remove the server entries from the settings and project
+  configuration used by the session and omit `--mcp-config`.
 
 If the session supports settings-based servers and an eligible server still
 does not appear in `/mcp` after a settings change, restart Qwen Code in the
