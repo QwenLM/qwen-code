@@ -345,22 +345,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return warm(harnessSessionId, null);
     }
 
-    /** 只读查询可信会话对应的当前 Workspace 绑定，不分配也不预热运行时。 */
-    public CompletionStage<RuntimeBindingRecord> findBindingForHarnessSession(
-            String tenantId, String harnessSessionId) {
-        requireOpen(closed);
-        String harnessId = BrokerValues.requireId(
-                harnessSessionId, "harnessSessionId");
-        return resolveScope(harnessId, false, null).thenApply(scope -> {
-            if (!scope.getTenantId().equals(tenantId)) {
-                throw conflict("runtime_session_conflict",
-                        "Harness Session belongs to another tenant");
-            }
-            return bindingRepository.findLatestForRequest(
-                    provisionRequest(scope, harnessId));
-        });
-    }
-
     public CompletionStage<RuntimeScope> capabilities(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
         return capabilitiesContext(harnessSessionId, authority).thenApply(HarnessSessionResolver.Capabilities::scope);

@@ -218,11 +218,22 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                             // failure: keep it on the permanent-conflict path.
                             throw failure;
                         }
-                        // Any other failing reattach proves nothing about
+                        // Any other non-retryable refusal is an evidence
+                        // verdict (for example a continuity denial), not a
+                        // transport failure: keep it on the permanent arm
+                        // instead of retrying until the reconcile timeout.
+                        if (!failure.isRetryable()
+                                && !"runtime_external_provider_failed".equals(failure.getCode())) {
+                            throw failure;
+                        }
+                        // A retryable failing reattach proves nothing about
                         // identity: the observed worker may still be running,
                         // so this must stay retryable and never reach the
                         // conflict arm that permanently fences the binding.
-                        return RuntimeObservation.unknown(handle);
+                        // Assign instead of returning so the endpoint
+                        // bookkeeping below still runs, keeping the lease
+                        // usable for a later confirm.
+                        observation = RuntimeObservation.unknown(handle);
                     }
                 }
                 if (observation.getOutcome() == RuntimeObservation.Outcome.READY

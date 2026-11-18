@@ -1023,56 +1023,6 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
-    public RuntimeBindingRecord findLatestForRequest(RuntimeProvisionRequest request) {
-        requireRequest(request);
-        // One transaction snapshot: under autoCommit the slot and binding
-        // reads straddle a concurrent release and the locked-read consistency
-        // check would throw on a legally retired generation.
-        return JdbcRepositorySupport.transaction(dataSource, connection -> {
-            Slot slot = selectSlot(connection, JdbcRepositorySupport.requestKey(request), false);
-            if (slot != null) {
-                requireSlotIdentity(slot, request);
-                if (slot.activeBindingId != null) {
-                    RuntimeBindingRecord active =
-                            selectById(connection, slot.activeBindingId, false);
-                    if (active == null || !active.getRequest().equals(request)) {
-                        throw new IllegalStateException(
-                                "Runtime binding slot is inconsistent");
-                    }
-                    if (active.isActive()) {
-                        return active;
-                    }
-                    // A release committed between the two statements: fall
-                    // through to the durable latest generation, which this
-                    // contract must return even when retired.
-                }
-            }
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "SELECT " + BINDING_COLUMNS
-                            + " FROM ma_runtime_binding WHERE request_key = ?"
-                            + " ORDER BY runtime_generation DESC LIMIT 2")) {
-                statement.setString(1, JdbcRepositorySupport.requestKey(request));
-                try (ResultSet result = statement.executeQuery()) {
-                    if (!result.next()) {
-                        return null;
-                    }
-                    RuntimeBindingRecord record = mapBinding(result);
-                    if (result.next() && result.getLong("runtime_generation")
-                            == record.getGeneration()) {
-                        throw new IllegalStateException(
-                                "Runtime binding generation is ambiguous");
-                    }
-                    if (!record.getRequest().equals(request)) {
-                        throw new IllegalStateException(
-                                "Runtime binding request identity is inconsistent");
-                    }
-                    return record;
-                }
-            }
-        });
-    }
-
-    @Override
     public List<RuntimeBindingRecord> findActiveByIsolationKey(
             RuntimeScope scope, String isolationKey) {
         if (scope == null) {

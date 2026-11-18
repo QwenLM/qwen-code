@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -106,9 +107,14 @@ public final class ExternalWorkspaceRetirementService {
                 return receipt(request, saved);
             }
             requireWorkspace(request, "ACTIVE");
-            RuntimeBindingRecord current = jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection ->
-                    bindings.lockActiveForRetirement(connection, original));
-            if (current == null) {
+            RuntimeBindingRecord current;
+            try {
+                current = jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection ->
+                        bindings.lockActiveForRetirement(connection, original));
+            } catch (IllegalStateException unavailable) {
+                // A concurrent re-provision between the pre-transaction read
+                // and the lock refuses retirement like any other missing
+                // evidence, not as an unmapped 500.
                 throw blocked();
             }
             require(current.getVersion() == request.expectedVersion());
@@ -251,7 +257,14 @@ public final class ExternalWorkspaceRetirementService {
                         && (head.get("recovery_status") == null || "READY".equals(head.get("recovery_status")))
                         && (head.get("state") == null || List.of("ACTIVE", "SEALED", "DELETED").contains(head.get("state"))));
             }
-            JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, json, request.tenantId(), session);
+            try {
+                JdbcWorkspaceLifecycleStore.requireIdleJournal(jdbc, json, request.tenantId(), session);
+            } catch (ManagedAgentException busy) {
+                // An unsettled journal or an active Turn is idle evidence the
+                // documented retirement refusal must answer, not a pass-through
+                // of the journal store's own code.
+                throw blocked();
+            }
             empty("SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                     + " AND status NOT IN ('COMPLETED','FAILED','CANCELLED') LIMIT 1 FOR UPDATE", request.tenantId(), session);
             // A decided approval is a recorded decision: any continuation it
