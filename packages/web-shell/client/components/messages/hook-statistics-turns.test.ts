@@ -187,9 +187,9 @@ it.each([false, true])(
       }),
       ...normalizeDaemonEvent({
         v: 1,
-        type: 'turn_complete',
+        type: 'prompt_cancelled',
         promptId: backgroundTurn.turnId,
-        data: { sessionId: 'session', stopReason: 'cancelled', backgroundTurn },
+        data: { sessionId: 'session' },
       }),
       ...(answered
         ? [
@@ -206,6 +206,11 @@ it.each([false, true])(
       events,
     );
     const messages = transcriptBlocksToDaemonMessages(blocks);
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: 'prompt_cancelled' }),
+      ]),
+    );
     const target = answered
       ? messages.find((message) => message.role === 'assistant')?.id
       : localPrompt.id;

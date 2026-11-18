@@ -13,6 +13,7 @@ import {
   QWEN_AGENT_MESSAGE_META_KEY,
 } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonBackgroundTurn,
   DaemonLoopStop,
   QwenAgentMessageMeta,
   DaemonTranscriptBlock,
@@ -575,7 +576,7 @@ export function transcriptBlocksToDaemonMessages(
   // message instead of being appended to text that appeared before the tool.
   let needsNewContentMessage = false;
   let previousPromptId: string | undefined;
-  const backgroundResultMarkers = new Set<string>();
+  const backgroundTurns = new Map<string, DaemonBackgroundTurn>();
   const loadedToolIds = new Set(
     blocks.flatMap((block) =>
       block.kind === 'tool' ? [block.toolCallId] : [],
@@ -592,9 +593,10 @@ export function transcriptBlocksToDaemonMessages(
     const blockMeta = getRecord(
       (block as ExtendedDaemonTextTranscriptBlock).meta,
     );
-    const backgroundTurn = parseDaemonBackgroundTurn(
-      block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
-    );
+    const backgroundTurn =
+      parseDaemonBackgroundTurn(
+        block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
+      ) ?? (block.promptId ? backgroundTurns.get(block.promptId) : undefined);
     const promptId = backgroundTurn?.turnId ?? block.promptId;
     if (
       promptId !== undefined &&
@@ -613,9 +615,9 @@ export function transcriptBlocksToDaemonMessages(
         block.kind === 'status' && block.source === 'background_task_completed'
       ) &&
       !('parentToolCallId' in block && block.parentToolCallId) &&
-      !backgroundResultMarkers.has(backgroundTurn.turnId)
+      !backgroundTurns.has(backgroundTurn.turnId)
     ) {
-      backgroundResultMarkers.add(backgroundTurn.turnId);
+      backgroundTurns.set(backgroundTurn.turnId, backgroundTurn);
       messages.push({
         id: `background-turn:${backgroundTurn.turnId}`,
         role: 'system',
