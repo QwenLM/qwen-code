@@ -181,11 +181,12 @@ async function startDaemon(
   workspace: string,
   qwenHome: string,
   fakeBaseUrl: string,
+  cliPath = CLI_BIN,
 ): Promise<RunningDaemon> {
   const child = spawn(
     process.execPath,
     [
-      CLI_BIN,
+      cliPath,
       'serve',
       '--port',
       '0',
@@ -602,4 +603,11 @@ describeDaemon('qwen serve — restart recovery', () => {
     const result = Array.isArray(records) ? asRecord(records[0]) : undefined;
     expect(result).toMatchObject({ status: 'accepted' });
   }, 120_000);
+
+  it('cleans up a daemon that exits before listening', async () => {
+    if (!fake) return;
+    await expect(
+      startDaemon(workspace, qwenHome, fake.baseUrl, '/nonexistent/qwen-cli'),
+    ).rejects.toThrow(/daemon exited before listening.*stdout=.*stderr=/s);
+  });
 });
