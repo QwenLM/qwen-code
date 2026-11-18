@@ -619,11 +619,14 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
-  it('seeds a side-records-only session on load', async () => {
-    // Artifacts registered before the first prompt: the transcript holds
-    // only side records, so loadSession returns no conversation — but the
-    // session is listable and the seed must still run (the same shape the
-    // library mutation guard accepts).
+  it('does not seed an artifact-only transcript that no restore path can open', async () => {
+    // A transcript with only artifact events reconstructs no message at
+    // all: loadSession returns undefined and the projection is undefined,
+    // so no cold open delivers these artifacts. A count here would
+    // advertise a set the opened session can never show (review round-5
+    // R5-1); the honest state is no sidecar. Metadata-bearing side-records
+    // transcripts (the production shape) reconstruct their creation
+    // records and are seeded — see the session_source cases.
     const a = persistedArtifact('https://example.com/side-only-a');
     const b = persistedArtifact('https://example.com/side-only-b');
     writeTranscript([{ ...artifactEventRecord([a, b]), parentUuid: null }]);
@@ -631,9 +634,7 @@ describe('SessionService - artifact summary sidecar', () => {
     const loaded = await service.loadSession(SESSION_ID);
 
     expect(loaded).toBeUndefined();
-    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
-      2,
-    );
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
   });
 
   it('seeds a side-records-only session that also carries a custom title', async () => {
@@ -660,9 +661,21 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
-  it('seeds a side-records-only session through the daemon restore projection', async () => {
+  it('does not seed through the projection when no projection can be built', async () => {
     // The daemon/ACP funnel reads via readRestoreProjection and never
-    // calls loadSession; the first-open seed must run on that path too.
+    // calls loadSession. A missing projection means the index builder
+    // found no conversation record at all — nothing downstream carries an
+    // artifactSnapshot for it, so the seed must not write a count, and the
+    // auxiliary read must not even run (review round-5 R5-1).
+    const readSpy = vi.spyOn(
+      service as unknown as {
+        readAllRecords: (
+          filePath: string,
+          onIncompleteRead?: () => void,
+        ) => Promise<ChatRecord[]>;
+      },
+      'readAllRecords',
+    );
     const a = persistedArtifact('https://example.com/projection-a');
     const b = persistedArtifact('https://example.com/projection-b');
     writeTranscript([{ ...artifactEventRecord([a, b]), parentUuid: null }]);
@@ -671,12 +684,10 @@ describe('SessionService - artifact summary sidecar', () => {
       replay: { kind: 'none' },
     });
 
-    // The index builder rejects conversation-less transcripts, so the
-    // projection is undefined — the seed must still run on that branch.
     expect(projection).toBeUndefined();
-    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
-      2,
-    );
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+    readSpy.mockRestore();
   });
 
   it('seeds a side-records-only session carrying the creation-time session_source record', async () => {
@@ -946,12 +957,23 @@ describe('SessionService - artifact summary sidecar', () => {
   });
 
   it('skips the seed when the size probe fails', async () => {
+    // Metadata-bearing shape so both funnels actually enter the helper
+    // (a pure artifact-only transcript is refused earlier — by the
+    // defined-projection gate and the empty-message refusal — and would
+    // mask the size-probe skip).
     const originalStat = fs.promises.stat.bind(fs.promises);
+    // Fail only each funnel's first transcript stat (the helper's size
+    // probe); the load's later mtime stat must still succeed, so the
+    // stub delegates after the first call per arm.
+    let transcriptStatCalls = 0;
     const statSpy = vi
       .spyOn(fs.promises, 'stat')
       .mockImplementation(async (filePath, ...rest) => {
         if (filePath === transcriptPath) {
-          throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+          transcriptStatCalls += 1;
+          if (transcriptStatCalls === 1) {
+            throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+          }
         }
         return originalStat(filePath, ...rest);
       });
@@ -965,7 +987,20 @@ describe('SessionService - artifact summary sidecar', () => {
       'readAllRecords',
     );
     const a = persistedArtifact('https://example.com/stat-fail');
-    writeTranscript([{ ...artifactEventRecord([a]), parentUuid: null }]);
+    const title: ChatRecord = {
+      uuid: 'title-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'custom_title',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        title: 'Stat fail',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([title, { ...artifactEventRecord([a]), parentUuid: null }]);
 
     await service.readRestoreProjection(SESSION_ID, {
       replay: { kind: 'none' },
@@ -973,6 +1008,7 @@ describe('SessionService - artifact summary sidecar', () => {
     expect(readSpy).not.toHaveBeenCalled();
     expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
 
+    transcriptStatCalls = 0;
     await service.loadSession(SESSION_ID);
     expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
     readSpy.mockRestore();
@@ -1015,6 +1051,45 @@ describe('SessionService - artifact summary sidecar', () => {
     writeTranscript([
       sourceRecord,
       modelRecord,
+      { ...artifactEventRecord([a, b]), parentUuid: null },
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 2);
+
+    const removed = await service.removeSessionArtifactsForLibrary(
+      SESSION_ID,
+      [a.id],
+      {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      },
+    );
+
+    expect(removed).toEqual([a.id]);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
+
+  it('accepts a generated_ui_state-only journal as a legal removal target', async () => {
+    // The property gate widened the library guard's accepted shape: a
+    // transcript whose only non-artifact records are non-conversation
+    // system subtypes reconstructs no message, and the guard must treat
+    // it as side-records-only, not corrupt (review round-5 deferred pin).
+    const a = persistedArtifact('https://example.com/uistate-lib-a');
+    const b = persistedArtifact('https://example.com/uistate-lib-b');
+    const uiState: ChatRecord = {
+      uuid: 'ui-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'generated_ui_state',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {} as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      uiState,
       { ...artifactEventRecord([a, b]), parentUuid: null },
     ]);
     writeSessionArtifactSummarySidecar(sidecarPath, 2);
@@ -1099,6 +1174,57 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
+  it('does not heal a correct sidecar when metadata reconstructs a message beside an unvalidatable record', async () => {
+    // custom_title/session_source/session_model reconstruct messages, so
+    // messages.length is not "has a conversation": with a validator-dropped
+    // record alongside, the raw array is not all-system either. Dispatch
+    // must key on a real conversation turn; otherwise the uncapped branch
+    // rebuilds from an active set that selects nothing and heals 2 to 0,
+    // while the projection funnel keeps 2 (review round-5 R4-1 reopened).
+    const a = persistedArtifact('https://example.com/title-unvalid-a');
+    const b = persistedArtifact('https://example.com/title-unvalid-b');
+    const title: ChatRecord = {
+      uuid: 'title-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'custom_title',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        title: 'Pre-prompt',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    const unknownType = {
+      uuid: 'bad-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:02.000Z',
+      type: 'brand_new_record_type',
+      cwd: root,
+      version: '1.0.0',
+    } as unknown as ChatRecord;
+    writeTranscript([
+      title,
+      { ...artifactEventRecord([a, b]), parentUuid: null },
+      unknownType,
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 2);
+
+    await service.loadSession(SESSION_ID);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
   it('refuses the projection seed for an empty transcript with an existing sidecar', async () => {
     // The helper's empty-records guard: nothing to rebuild from must not
     // heal an existing count (review round-4 R4-4).
@@ -1135,12 +1261,28 @@ describe('SessionService - artifact summary sidecar', () => {
     // The projection funnel threads onIncompleteRead into
     // sourceReadComplete; a truncated last line makes the read
     // non-authoritative, so the seed must refuse even though the parsed
-    // prefix rebuilds a smaller count (review round-4 R4-5).
+    // prefix rebuilds a smaller count (review round-4 R4-5). The title
+    // record makes the projection defined (empty apiHistory) so the
+    // funnel actually enters the helper and the threading is load-bearing.
     const a = persistedArtifact('https://example.com/partial-a');
     const b = persistedArtifact('https://example.com/partial-b');
+    const title: ChatRecord = {
+      uuid: 'title-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'custom_title',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        title: 'Partial',
+      } as unknown as ChatRecord['systemPayload'],
+    };
     writeFileSync(
       transcriptPath,
-      `${JSON.stringify({ ...artifactEventRecord([a, b]), parentUuid: null })}\n` +
+      `${JSON.stringify(title)}\n` +
+        `${JSON.stringify({ ...artifactEventRecord([a, b]), parentUuid: null })}\n` +
         '{"uuid":"trunc","type":"sys',
       'utf8',
     );
@@ -1219,9 +1361,30 @@ describe('SessionService - artifact summary sidecar', () => {
     expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
   });
 
-  it('seeds the archived sidecar for a side-records-only archived session', async () => {
+  it('seeds the archived sidecar for a metadata-bearing side-records archived session', async () => {
+    // The archived funnel shares the dispatch: a creation-time record
+    // reconstructs a message, so the capped helper seeds the archived
+    // sidecar even though there is no conversation to load. (A pure
+    // artifact-only transcript reconstructs nothing and is not seeded —
+    // see the R5-1 case.)
     const a = persistedArtifact('https://example.com/archived-side-only');
-    writeTranscript([{ ...artifactEventRecord([a]), parentUuid: null }]);
+    const source: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      source,
+      { ...artifactEventRecord([a]), parentUuid: null },
+    ]);
     const archiveDir = path.join(path.dirname(transcriptPath), 'archive');
     mkdirSync(archiveDir, { recursive: true });
     renameSync(transcriptPath, path.join(archiveDir, `${SESSION_ID}.jsonl`));
@@ -1230,7 +1393,7 @@ describe('SessionService - artifact summary sidecar', () => {
       maxBytes: 10_000_000,
     });
 
-    expect(loaded).toBeUndefined();
+    expect(loaded).toBeDefined();
     expect(
       readSessionArtifactSummarySidecar(archivedSidecarPath)?.artifactCount,
     ).toBe(1);

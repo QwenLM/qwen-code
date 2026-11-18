@@ -3819,13 +3819,17 @@ export class SessionService {
     );
     // The daemon/ACP restore funnel reads selectively and never calls
     // loadSession (the writer-lease path consumes the projection even when
-    // it is undefined), so the first-open seed must run here too. The
-    // index builder rejects conversation-less transcripts outright, so a
-    // missing projection is a candidate as well as an empty apiHistory.
-    // Sessions with a conversation keep the selective read's zero-extra-I/O
-    // contract; the shared helper confines the auxiliary full read's
-    // effect to local side-records-only transcripts under the size cap.
-    if (!projection || projection.runtime.apiHistory.length === 0) {
+    // it is undefined), so the first-open seed must run here too. A missing
+    // projection is NOT a restore candidate: the index builder found no
+    // conversation record at all, so no downstream path carries an
+    // artifactSnapshot for it and a count written here would advertise a
+    // set no cold open can deliver. A defined projection with an empty
+    // apiHistory is the metadata-bearing side-records shape (creation-time
+    // records reconstruct messages but no model turns); the shared helper
+    // confines the auxiliary full read to that local shape under the size
+    // cap. Sessions with a conversation keep the selective read's
+    // zero-extra-I/O contract.
+    if (projection && projection.runtime.apiHistory.length === 0) {
       const filePath = this.getSessionFilePath(sessionId, 'active');
       await this.seedSideRecordsOnlyTranscript(
         sessionId,
@@ -3888,6 +3892,14 @@ export class SessionService {
     const { messages, gaps } = this.reconstructHistory(records, {
       detectGaps: true,
     });
+    // No reconstructable message means no restore path can open this
+    // transcript (loadSession returns undefined, the projection is
+    // undefined): seeding a count here would advertise artifacts the
+    // opened session can never show. Metadata-bearing side-records
+    // transcripts reconstruct their creation records as messages and pass.
+    if (messages.length === 0) {
+      return undefined;
+    }
     return this.seedArtifactSummaryFromRecords(
       sessionId,
       state,
@@ -4034,31 +4046,36 @@ export class SessionService {
     // Runs before the empty-conversation early return: artifacts can be
     // registered before the first prompt, and those side-records-only
     // sessions are listable even though they have no conversation to load.
-    // Only a transcript with a loadable conversation takes the uncapped
-    // seed — its read is the load itself, and the restore payload's
-    // embedded snapshot must not depend on the sidecar cap. Everything
-    // else goes through the shared capped helper, whose shape gate is the
-    // sole admission test: the raw records are unvalidated, so a
-    // conversation-less transcript carrying a record the validator drops
-    // (unknown type, invalid identity) is not all-system on the raw array
-    // and must still be refused rather than seeded from an empty active
-    // set — which would heal a correct sidecar to zero.
-    const artifactSnapshot =
-      messages.length > 0 && !isSideRecordsOnlyTranscript(records)
-        ? this.seedArtifactSummaryFromRecords(
-            sessionId,
-            state,
-            records,
-            messages,
-            gaps,
-            sourceReadComplete,
-          )
-        : await this.seedSideRecordsOnlyTranscript(
-            sessionId,
-            state,
-            filePath,
-            async () => ({ records, sourceReadComplete }),
-          );
+    // Dispatch on a real conversation turn, not on a non-empty messages:
+    // creation-time metadata (custom_title, session_source, session_model)
+    // reconstructs messages too, and the raw records are unvalidated, so
+    // neither messages.length nor the raw-array shape decides "has a
+    // conversation". Only a transcript with a user/assistant/tool_result
+    // turn takes the uncapped seed — its read is the load itself, and the
+    // restore payload's embedded snapshot must not depend on the sidecar
+    // cap. Everything else goes through the shared capped helper, whose
+    // shape gate refuses a mixed raw array (a validator-dropped record
+    // alongside metadata) and whose empty-message refusal covers the
+    // artifact-only shape no restore path can open — seeding either from
+    // an empty active set would heal a correct sidecar to zero.
+    const hasConversationTurn = messages.some(
+      (message) => message.type !== 'system',
+    );
+    const artifactSnapshot = hasConversationTurn
+      ? this.seedArtifactSummaryFromRecords(
+          sessionId,
+          state,
+          records,
+          messages,
+          gaps,
+          sourceReadComplete,
+        )
+      : await this.seedSideRecordsOnlyTranscript(
+          sessionId,
+          state,
+          filePath,
+          async () => ({ records, sourceReadComplete }),
+        );
 
     if (messages.length === 0) {
       return;
