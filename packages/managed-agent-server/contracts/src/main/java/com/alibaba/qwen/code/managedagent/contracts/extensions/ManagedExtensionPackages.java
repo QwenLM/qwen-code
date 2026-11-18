@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.contracts.extensions;
 
+import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -29,6 +30,14 @@ public final class ManagedExtensionPackages {
         @JsonAnySetter
         public void rejectUnknown(String name, JsonNode value) {
             throw new IllegalArgumentException("Unknown extension target field");
+        }
+    }
+
+    public record StandaloneSkill(String name, String description, boolean userInvocable, int catalogEntryBytes) {
+        public StandaloneSkill {
+            if (!AgentDefinitionExtensions.validSkillMetadata(name, description) || catalogEntryBytes <= 0) {
+                throw new IllegalArgumentException("Invalid compiled Skill metadata");
+            }
         }
     }
 
