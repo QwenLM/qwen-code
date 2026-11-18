@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.cli.session;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -9,6 +10,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -32,6 +34,7 @@ import com.alibaba.qwen.code.cli.protocol.data.behavior.Behavior.Operation;
 import com.alibaba.qwen.code.cli.protocol.message.SDKResultMessage;
 import com.alibaba.qwen.code.cli.protocol.message.SDKSystemMessage;
 import com.alibaba.qwen.code.cli.protocol.message.assistant.SDKAssistantMessage;
+import com.alibaba.qwen.code.cli.protocol.message.assistant.SDKPartialAssistantMessage;
 import com.alibaba.qwen.code.cli.protocol.message.control.CLIControlResponse;
 import com.alibaba.qwen.code.cli.session.event.consumers.AssistantContentSimpleConsumers;
 import com.alibaba.qwen.code.cli.session.event.consumers.SessionEventConsumers;
@@ -552,6 +555,70 @@ class SessionTest {
                         + "\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"alpha\"}}}",
                 "{\"type\":\"stream_event\",\"uuid\":\"frame-b\",\"event\":{\"type\":\"content_block_delta\","
                         + "\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"beta\"}}}");
+    }
+
+    @Test
+    void streamingCallbacksHonorLegacyMessageIds() throws Exception {
+        FakeTransport transport = new FakeTransport(
+                streamingTextFrame("\"uuid\":\"wire-uuid\",", "uuid only"),
+                streamingTextFrame("\"message_id\":\"old-id\",", "legacy only"),
+                streamingTextFrame("", "no id"),
+                streamingTextFrame("\"uuid\":\"other-uuid\",\"message_id\":\"explicit-id\",", "both ids"),
+                "{\"type\":\"result\",\"subtype\":\"success\"}") {
+            @Override
+            public TransportOptions getTransportOptions() {
+                return new TransportOptions().setIncludePartialMessages(true);
+            }
+        };
+        List<String> frameIds = new ArrayList<>();
+        List<String> callbackIds = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        var consumers = new SessionEventSimpleConsumers() {
+            @Override
+            public void onPartialAssistantMessage(Session session, SDKPartialAssistantMessage frame) {
+                frameIds.add(frame.getMessageId());
+                super.onPartialAssistantMessage(session, frame);
+            }
+        }.setAssistantContentConsumer(new AssistantContentSimpleConsumers() {
+            @Override
+            public void onText(Session session, TextAssistantContent content) {
+                texts.add(content.getText());
+                callbackIds.add(content.getMessageId());
+            }
+        });
+        Session session = new Session(transport);
+        try {
+            session.sendPrompt("fixture", consumers);
+            List<String> expectedIds = Arrays.asList("wire-uuid", "old-id", null, "explicit-id");
+            assertAll(
+                    () -> assertEquals(List.of("uuid only", "legacy only", "no id", "both ids"), texts),
+                    () -> assertEquals(expectedIds, frameIds, "raw frame getter IDs"),
+                    () -> assertEquals(expectedIds, callbackIds, "content callback IDs"));
+        } finally {
+            session.close();
+        }
+    }
+
+    @Test
+    void partialAssistantMessagePreservesExplicitSetterAndWireFields() {
+        var frame = new SDKPartialAssistantMessage();
+        frame.setMessageId("setter-id");
+        String idBeforeUuid = frame.getMessageId();
+        frame.setUuid("wire-uuid");
+        var serialized = JSON.parseObject(frame.toString());
+        var decoded = serialized.to(SDKPartialAssistantMessage.class);
+        assertAll(
+                () -> assertEquals("setter-id", idBeforeUuid, "setter readback without UUID"),
+                () -> assertEquals("setter-id", frame.getMessageId(), "setter readback with UUID"),
+                () -> assertEquals("setter-id", serialized.getString("message_id")),
+                () -> assertEquals("wire-uuid", serialized.getString("uuid")),
+                () -> assertEquals("setter-id", decoded.getMessageId(), "decoded explicit ID"));
+    }
+
+    private static String streamingTextFrame(String identifiers, String text) {
+        return "{\"type\":\"stream_event\",\"session_id\":\"session-test\",\"parent_tool_use_id\":null,"
+                + identifiers + "\"event\":{\"type\":\"content_block_delta\",\"index\":0,"
+                + "\"delta\":{\"type\":\"text_delta\",\"text\":\"" + text + "\"}}}";
     }
 
     private void assertAssistantContentCallbackUuids(boolean streaming, String firstFrame, String secondFrame)

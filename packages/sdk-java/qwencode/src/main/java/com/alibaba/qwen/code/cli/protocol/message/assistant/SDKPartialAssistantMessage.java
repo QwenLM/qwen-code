@@ -45,7 +45,8 @@ public class SDKPartialAssistantMessage extends MessageBase {
     /** {@inheritDoc} */
     @Override
     public String getMessageId() {
-        return this.getUuid();
+        String explicitMessageId = super.getMessageId();
+        return explicitMessageId != null ? explicitMessageId : this.getUuid();
     }
 
     /**
