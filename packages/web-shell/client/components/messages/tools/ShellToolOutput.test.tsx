@@ -77,6 +77,16 @@ function result(overrides: Record<string, unknown> = {}) {
 }
 
 describe('shell result presentation', () => {
+  it.each([
+    { text: 'health OK', dir: 'ltr' },
+    { text: '', dir: null },
+  ])('document-mode output carries dir=$dir', ({ text, dir }) => {
+    const container = render(tool(text), true);
+    expect(
+      container.querySelector('[class*="expandedOutput"]')?.getAttribute('dir'),
+    ).toBe(dir);
+  });
+
   it('does not open an empty execution details list for elapsed-only metadata', () => {
     render(
       tool('', {

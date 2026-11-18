@@ -656,6 +656,7 @@
 }
 
 .payloadText {
+  direction: ltr;
   margin: 0;
   padding: 8px 10px;
   max-height: 240px;
@@ -735,7 +736,6 @@
 }
 
 .expandedOutput {
-  direction: ltr;
   margin: 0;
   padding: 0;
   font-size: 12px;
@@ -806,6 +806,7 @@
 }
 
 .shellOutput {
+  direction: ltr;
   color: var(--foreground);
   max-height: 200px;
 }

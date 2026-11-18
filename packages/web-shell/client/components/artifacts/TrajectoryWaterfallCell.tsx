@@ -12,7 +12,7 @@ import styles from './TrajectoryWaterfallCell.module.css';
 
 function position(start: number, end: number, from: number, length: number) {
   return {
-    left: `${((start - from) / length) * 100}%`,
+    insetInlineStart: `${((start - from) / length) * 100}%`,
     width: `${((end - start) / length) * 100}%`,
   } satisfies CSSProperties;
 }
@@ -74,7 +74,7 @@ export function TrajectoryWaterfallCell({
           style={
             zero
               ? {
-                  left:
+                  insetInlineStart:
                     length > 0 ? `${((start - from) / length) * 100}%` : '0%',
                 }
               : position(start, end, from, length)

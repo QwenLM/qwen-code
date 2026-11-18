@@ -140,13 +140,50 @@ describe('ReadFile output availability', () => {
     expect(container.textContent).toContain('No output');
     expect(container.textContent).not.toContain('unavailable');
   });
+
+  it('leaves the Arabic placeholder to the shell and pins file content LTR', () => {
+    const outputDir = (container: HTMLElement) =>
+      container.querySelector('[class*="expandedOutput"]')?.getAttribute('dir');
+    const waiting = renderToolLine(
+      makeTool({ toolName: 'ReadFile', status: 'in_progress' }),
+      { forceExpanded: true },
+      {},
+      'ar',
+    );
+    expect(outputDir(waiting)).toBeNull();
+    const read = renderToolLine(
+      makeTool({
+        toolName: 'ReadFile',
+        args: { file_path: '/workspace/README' },
+        content: [
+          { type: 'content', content: { type: 'text', text: 'alpha\nbeta' } },
+        ],
+      }),
+      { forceExpanded: true },
+      {},
+      'ar',
+    );
+    expect(outputDir(read)).toBe('ltr');
+    const edit = renderToolLine(
+      makeTool({
+        toolName: 'Edit',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'replaced line' } },
+        ],
+      }),
+      { forceExpanded: true },
+      {},
+      'ar',
+    );
+    expect(outputDir(edit)).toBe('ltr');
+  });
 });
 
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
   customization = {},
-  language: 'en' | 'zh-CN' = 'en',
+  language: 'en' | 'zh-CN' | 'ar' = 'en',
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);

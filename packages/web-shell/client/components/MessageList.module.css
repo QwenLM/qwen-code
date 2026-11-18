@@ -461,6 +461,12 @@
   }
 }
 
+/* The hovered tick grows from its inline start, so the RTL card anchor's
+   28px inward offset only holds while the origin mirrors with it. */
+:global([dir='rtl']) .sessionTimelineTick {
+  transform-origin: right center;
+}
+
 /* The card is portaled to the dir-carrying portal root, so the slide-in and
    its scale origin mirror to open from the right edge in RTL. */
 :global([dir='rtl']) .sessionTimelineDetails {

@@ -227,4 +227,15 @@ describe('Composer tag trailing inset', () => {
       'padding-inline: 0.5ch 0',
     ]);
   });
+
+  it('keeps the vertical half of the chip padding on both text boxes', () => {
+    const blockPaddings = entries((selector) =>
+      /^\.tag(Label|Value)$/.test(selector),
+    )
+      .map((entry) =>
+        entry.decls.find((decl) => decl.startsWith('padding-block:')),
+      )
+      .filter((decl): decl is string => decl !== undefined);
+    expect(blockPaddings).toEqual(['padding-block: 3px', 'padding-block: 3px']);
+  });
 });

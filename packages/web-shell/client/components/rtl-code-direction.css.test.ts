@@ -17,24 +17,39 @@ const LTR_CODE_SURFACES: Array<[string, string]> = [
   ['./messages/PlanExecutionView.module.css', '.dagCanvas'],
   ['./messages/tools/DiffView.module.css', '.line'],
   ['./messages/tools/ToolChrome.module.css', '.lineOutput'],
-  ['./messages/tools/ToolChrome.module.css', '.expandedOutput'],
+  ['./messages/tools/ToolChrome.module.css', '.shellOutput'],
+  ['./messages/tools/ToolChrome.module.css', '.payloadText'],
+  ['./messages/TasksStatusMessage.module.css', '.shellOutput'],
   ['./dialogs/GitDiffDialog.module.css', '.diffLine'],
 ];
+
+function directions(file: string, selector: string): string[] {
+  const css = readFileSync(
+    fileURLToPath(new URL(file, import.meta.url)),
+    'utf8',
+  );
+  const found: string[] = [];
+  postcss.parse(css).walkRules((rule) => {
+    if (!rule.selectors.some((s) => s.trim() === selector)) return;
+    rule.walkDecls('direction', (decl) => found.push(decl.value));
+  });
+  return found;
+}
 
 describe('RTL shell keeps code surfaces LTR', () => {
   it.each(LTR_CODE_SURFACES)(
     '%s pins %s to direction: ltr',
     (file, selector) => {
-      const css = readFileSync(
-        fileURLToPath(new URL(file, import.meta.url)),
-        'utf8',
-      );
-      const directions: string[] = [];
-      postcss.parse(css).walkRules((rule) => {
-        if (!rule.selectors.some((s) => s.trim() === selector)) return;
-        rule.walkDecls('direction', (decl) => directions.push(decl.value));
-      });
-      expect(directions).toContain('ltr');
+      expect(directions(file, selector)).toContain('ltr');
     },
   );
+
+  // The shared class also renders localized placeholders and the user's own
+  // answer, so its machine-output paths carry the pin instead: `.shellOutput`
+  // above, and `dir="ltr"` on the read/edit content.
+  it('leaves the shared output class to the shell direction', () => {
+    expect(
+      directions('./messages/tools/ToolChrome.module.css', '.expandedOutput'),
+    ).toEqual([]);
+  });
 });

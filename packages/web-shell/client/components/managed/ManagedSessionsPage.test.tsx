@@ -375,7 +375,7 @@ describe('ManagedSessionsPage', () => {
 
   async function render(
     sessionId?: string,
-    language: 'en' | 'zh-CN' = 'en',
+    language: 'en' | 'zh-CN' | 'ar' = 'en',
     managedAgentProvider: ManagedAgentProvider | null = provider,
     navigationTarget?: HTMLElement | null,
     interactive = true,
@@ -1518,6 +1518,7 @@ describe('ManagedSessionsPage', () => {
   it.each([
     ['en', 'billing'],
     ['zh-CN', '余额'],
+    ['ar', 'رصيد'],
   ] as const)(
     'explains a payment failure in %s without submitting another prompt',
     async (language, guidance) => {

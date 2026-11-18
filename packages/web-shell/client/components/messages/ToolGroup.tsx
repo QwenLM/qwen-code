@@ -283,7 +283,9 @@ function ExpandedReadContent({ tool }: { tool: ACPToolCall }) {
   return (
     <div className={styles.expandedRead}>
       {plainText ? (
-        <pre className={styles.expandedOutput}>{content}</pre>
+        <pre className={styles.expandedOutput} dir="ltr">
+          {content}
+        </pre>
       ) : (
         <Markdown content={fencedCodeBlock(language, content)} />
       )}
@@ -333,7 +335,9 @@ function ExpandedEditContent({ tool }: { tool: ACPToolCall }) {
       {diff ? (
         <DiffView diff={diff} />
       ) : (
-        <pre className={styles.expandedOutput}>{text}</pre>
+        <pre className={styles.expandedOutput} dir="ltr">
+          {text}
+        </pre>
       )}
     </div>
   );

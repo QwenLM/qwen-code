@@ -157,7 +157,10 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
           </span>
         </div>
         <div className={styles.expandedCardBody}>
-          <pre className={styles.expandedOutput}>
+          <pre
+            className={styles.expandedOutput}
+            dir={output ? 'ltr' : undefined}
+          >
             {output ? sanitizeControlChars(output) : emptyOutput}
           </pre>
         </div>

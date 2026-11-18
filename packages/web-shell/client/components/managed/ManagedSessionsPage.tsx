@@ -291,7 +291,7 @@ export function ManagedSessionsPage({
   return <p role="status">{t('managed.unavailable')}</p>;
 }
 
-const FAILURE_MESSAGES: Record<string, readonly [string, string, string]> = {
+const FAILURE_MESSAGES = {
   model_payment_required: [
     'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
     '模型接口要求支付（HTTP 402），可能是余额不足或计费受限。请检查供应商账户余额与计费状态后重试。',
@@ -337,9 +337,9 @@ const FAILURE_MESSAGES: Record<string, readonly [string, string, string]> = {
     '本轮执行失败，请根据当前会话检查服务日志以定位具体原因。',
     'Ход не удался. Проверьте журналы сервера для этой сессии, чтобы найти причину.',
   ],
-};
+} as const satisfies Record<string, readonly [string, string, string]>;
 
-const FAILURE_AR_MESSAGES: Record<string, string> = {
+const FAILURE_AR_MESSAGES: Record<keyof typeof FAILURE_MESSAGES, string> = {
   model_payment_required:
     'يتطلب واجهة برمجة النموذج الدفع (HTTP 402). تحقق من رصيد حساب المزوّد والفوترة قبل إعادة المحاولة.',
   model_authentication_failed:
@@ -871,10 +871,13 @@ function ManagedSessionsContent({
   );
   const failureMessage = summary?.failure
     ? ((language === 'ar'
-        ? FAILURE_AR_MESSAGES[summary.failure.code]
-        : FAILURE_MESSAGES[summary.failure.code]?.[
-            language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0
-          ]) ?? summary.failure.message)
+        ? FAILURE_AR_MESSAGES[
+            summary.failure.code as keyof typeof FAILURE_MESSAGES
+          ]
+        : FAILURE_MESSAGES[
+            summary.failure.code as keyof typeof FAILURE_MESSAGES
+          ]?.[language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0]) ??
+      summary.failure.message)
     : undefined;
   const recoveryError =
     recovery.value &&
