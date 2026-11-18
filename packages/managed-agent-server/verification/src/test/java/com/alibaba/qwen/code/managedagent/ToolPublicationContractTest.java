@@ -4,8 +4,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationC
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.networknt.schema.JsonSchemaFactory;
-import com.networknt.schema.SpecVersion.VersionFlag;
+import com.networknt.schema.SchemaRegistry;
+import com.networknt.schema.SpecificationVersion;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -37,7 +37,7 @@ class ToolPublicationContractTest {
                 "managed-tool-publication-v1.fixtures.json").toFile());
         JsonNode schema = JSON.readTree(contracts().resolve(
                 "managed-tool-publication-v1.schema.json").toFile());
-        var factory = JsonSchemaFactory.getInstance(VersionFlag.V202012);
+        var factory = SchemaRegistry.withDefaultDialect(SpecificationVersion.DRAFT_2020_12);
         var cases = (com.fasterxml.jackson.databind.node.ArrayNode) suite.required("cases").deepCopy();
         for (JsonNode size : suite.required("referenceSizeCases")) {
             ObjectNode value = (ObjectNode) cases.get(0).required("value").deepCopy();

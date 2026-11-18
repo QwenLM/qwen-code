@@ -6,9 +6,9 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.networknt.schema.JsonSchema;
-import com.networknt.schema.JsonSchemaFactory;
-import com.networknt.schema.SpecVersion.VersionFlag;
+import com.networknt.schema.Schema;
+import com.networknt.schema.SchemaRegistry;
+import com.networknt.schema.SpecificationVersion;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -34,8 +34,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ManagedExtensionRecordContractTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Path CONTRACT_DIR = findContractDirectory();
-    private static final JsonSchemaFactory SCHEMAS =
-            JsonSchemaFactory.getInstance(VersionFlag.V202012);
+    private static final SchemaRegistry SCHEMAS = SchemaRegistry
+            .withDefaultDialect(SpecificationVersion.DRAFT_2020_12);
 
     @Test
     void validatesTheFixturesAgainstTheSchema() throws IOException {
@@ -50,7 +50,7 @@ class ManagedExtensionRecordContractTest {
                 "runCases", new String[] {"run", "extensionRun"},
                 "monitorRunCases", new String[] {"monitorRun", "monitorRun"})
                 .entrySet()) {
-            JsonSchema definition = definition(schema, list.getValue()[1]);
+            Schema definition = definition(schema, list.getValue()[1]);
             for (JsonNode fixture : fixtures().required(list.getKey())) {
                 if (fixture.required("valid").booleanValue()
                         && !definition.validate(fixture.required(
@@ -252,7 +252,7 @@ class ManagedExtensionRecordContractTest {
         return wrong;
     }
 
-    private static JsonSchema definition(JsonNode schema, String name) {
+    private static Schema definition(JsonNode schema, String name) {
         ObjectNode wrapper = JSON.createObjectNode()
                 .put("$schema", schema.required("$schema").textValue())
                 .put("$ref", "#/$defs/" + name);

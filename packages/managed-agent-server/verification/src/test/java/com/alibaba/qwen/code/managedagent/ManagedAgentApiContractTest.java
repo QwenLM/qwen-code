@@ -73,7 +73,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.networknt.schema.ValidationMessage;
+import com.networknt.schema.Error;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -3979,8 +3979,8 @@ class ManagedAgentApiContractTest {
     }
 
     private static void collect(Map<String, String> drift, String label,
-            Set<ValidationMessage> messages) {
-        for (ValidationMessage message : messages) {
+            List<Error> messages) {
+        for (Error message : messages) {
             String location = message.getInstanceLocation().toString()
                     .replaceAll("/\\d+(?=/|$)", "/*");
             if (location.isEmpty()) {
@@ -3988,7 +3988,7 @@ class ManagedAgentApiContractTest {
             }
             String property = message.getProperty() == null ? ""
                     : " " + message.getProperty();
-            drift.put(label + ": " + location + " " + message.getType()
+            drift.put(label + ": " + location + " " + message.getKeyword()
                     + property, message.getMessage());
         }
     }
