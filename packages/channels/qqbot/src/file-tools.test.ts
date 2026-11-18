@@ -248,11 +248,13 @@ describe('readOutboundFile', () => {
     },
   );
 
-  itLinux('keeps the pre-open guard alone where procfs is absent', () => {
+  itLinux('keeps a legitimate read where procfs is absent', () => {
     const path = join(workspace, 'report.txt');
     writeFileSync(path, 'hello');
     // macOS and Windows expose no `/proc/self/fd`; the same code runs there in
-    // the nightly lanes, where an upload must not start failing.
+    // the nightly lanes. The descriptor path is unavailable there, so the
+    // post-open re-resolution runs instead and must not refuse a file that
+    // still resolves inside the roots.
     fsHooks.existsSync.mockImplementation(
       ((p: string) => p !== '/proc/self/fd') as never,
     );
@@ -263,6 +265,40 @@ describe('readOutboundFile', () => {
     });
 
     expect(readOutboundFile(path, workspace).bytes.toString()).toBe('hello');
+  });
+
+  it('re-resolves the requested path after a procfs-less open', () => {
+    const inner = join(workspace, 'report.txt');
+    const outside = join(root, 'outside.txt');
+    writeFileSync(inner, 'hello');
+    writeFileSync(outside, 'outside');
+    const link = join(workspace, 'link.txt');
+    symlinkSync(inner, link);
+    // The temporary directory is pointed elsewhere so the outside file is
+    // outside both allowed roots, as it is for a workspace outside the system
+    // temp dir.
+    osHooks.tmpdir.mockReturnValue(join(root, 'elsewhere'));
+    fsHooks.existsSync.mockImplementation(
+      ((p: string) => p !== '/proc/self/fd') as never,
+    );
+    fsHooks.readlinkSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT: no such file or directory'), {
+        code: 'ENOENT',
+      });
+    });
+    const realOpen = fsHooks.realOpenSync!;
+    fsHooks.openSync.mockImplementation(((p: string, flags: number) => {
+      const fd = realOpen(p, flags);
+      // The requested name resolved inside before the open and points outside
+      // now; without procfs only the post-open re-resolution can see it.
+      rmSync(link);
+      symlinkSync(outside, link);
+      return fd;
+    }) as never);
+
+    expect(() => readOutboundFile(link, workspace)).toThrow(
+      /outside the session workspace/,
+    );
   });
 
   // Windows has neither constant (`fs.constants.O_NOFOLLOW`/`O_NONBLOCK` are
@@ -344,6 +380,41 @@ describe('readOutboundFile', () => {
     expect(flags & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
     expect(flags & constants.O_NONBLOCK).toBe(constants.O_NONBLOCK);
   });
+
+  itPosixOpenFlags(
+    'proves the opened identity where the flag exists but procfs does not',
+    () => {
+      const path = join(workspace, 'report.txt');
+      writeFileSync(path, 'hello');
+      // macOS presents the flag set of the test above but exposes no
+      // `/proc/self/fd`, so the fast path is unsound there: the identity proof
+      // must run, and the open must still carry `O_NOFOLLOW`.
+      fsHooks.existsSync.mockImplementation(
+        ((p: string) => p !== '/proc/self/fd') as never,
+      );
+      // The identity probe asks with `bigint`; the plain `fstat` calls that
+      // follow stay real, so only the probe sees the mismatch.
+      fsHooks.fstatSync.mockImplementationOnce(((
+        fd: number,
+        options?: unknown,
+      ) => {
+        if (!options) return fsHooks.realFstatSync!(fd);
+        const stat = fsHooks.realFstatSync!(fd, { bigint: true });
+        return {
+          ...stat,
+          isFile: () => stat.isFile(),
+          dev: stat.dev + 1n,
+          ino: stat.ino + 1n,
+        };
+      }) as never);
+
+      expect(() => readOutboundFile(path, workspace)).toThrow(
+        /changed between the check and the open/,
+      );
+      const flags = fsHooks.openSync.mock.calls[0]![1] as number;
+      expect(flags & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
+    },
+  );
 
   it('reports a file rewritten between the two stat calls', () => {
     const path = join(workspace, 'report.txt');

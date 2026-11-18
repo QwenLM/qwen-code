@@ -217,18 +217,23 @@ function makeHandler(deps: QQFileToolDeps, spec: OutboundMediaSpec) {
  * workspace or the temporary directory.
  *
  * `realpathSync` resolves symlinks before the root check, so a link inside the
- * workspace cannot smuggle an outside file, and the read-only open refuses a
- * final component swapped to a symlink after that check — with `O_NOFOLLOW`
- * where the platform exposes it, and with an `lstat` → `open` → `fstat`
- * identity check where it does not (Windows), the same compensation
+ * workspace cannot smuggle an outside file. The read-only open refuses a final
+ * component swapped to a symlink: `O_NOFOLLOW` where the platform exposes it,
+ * plus the `lstat` → `open` → `fstat` identity proof wherever no post-open
+ * descriptor path is available (macOS, Windows) — the same compensation
  * `packages/core/src/utils/no-follow-open.ts` applies. Two further guards close
  * the ways a path check alone is blind: a file with more than one hard link is
  * refused (a hard link has no target to resolve, so the check would otherwise
- * read the linked contents), and where the platform exposes `/proc/self/fd` the
- * path the kernel records for the descriptor is compared after opening, which
- * catches a directory component swapped between the check and the open; a
- * descriptor whose path cannot be read there is refused rather than trusted.
- * The read is re-checked against `fstat` so a file rewritten mid-read is
+ * read the linked contents), and where the platform exposes `/proc/self/fd`
+ * (Linux) the path the kernel records for the descriptor is compared after
+ * opening, which catches a directory component swapped between the check and
+ * the open; a descriptor whose path cannot be read there is refused rather than
+ * trusted. Without procfs the requested path is resolved again after the open
+ * and re-checked against the roots, which narrows the same window. The identity
+ * proof and that re-resolution are best-effort against a same-user racer: a
+ * swap landing before the identity probe cannot be fully excluded with the
+ * primitives Node exposes (there is no `openat`-style descriptor-relative
+ * walk). The read is re-checked against `fstat` so a file rewritten mid-read is
  * reported instead of sent truncated.
  *
  * `kind` picks the byte cap and the format the bytes must match. The sniff runs
@@ -276,7 +281,24 @@ export function readOutboundFile(
       );
     }
     const openedPath = descriptorPath(fd);
-    if (openedPath !== 'unavailable' && !insideRoots(openedPath, roots)) {
+    if (openedPath === 'unavailable') {
+      // No descriptor path to compare on this platform: resolve the requested
+      // name again after the open, so a component swapped in between lands
+      // outside the roots and is refused.
+      let reopened: string;
+      try {
+        reopened = realpathSync(filePath);
+      } catch {
+        throw new QQOutboundFileError(
+          'the file could not be identified after opening.',
+        );
+      }
+      if (!insideRoots(reopened, roots)) {
+        throw new QQOutboundFileError(
+          'the file is outside the session workspace and the temporary directory.',
+        );
+      }
+    } else if (!insideRoots(openedPath, roots)) {
       throw new QQOutboundFileError(
         'the file is outside the session workspace and the temporary directory.',
       );
@@ -401,7 +423,8 @@ function insideRoots(path: string, roots: string[]): boolean {
 /**
  * The path a descriptor actually points at, when the platform exposes one.
  * `/proc/self/fd` is the Linux answer; elsewhere there is nothing to ask, so
- * `'unavailable'` tells the caller to keep the pre-open check as its only guard.
+ * `'unavailable'` tells the caller to fall back to resolving the requested path
+ * again after the open.
  *
  * `readlinkSync` rather than `realpathSync` on purpose: `realpathSync` throws
  * `ENOENT` once the opened name is unlinked (the kernel appends ` (deleted)` to
@@ -429,24 +452,40 @@ function descriptorPath(fd: number): string | 'unavailable' {
 /**
  * Open a file read-only without following a symlink in the final component.
  *
- * `O_NOFOLLOW` carries that guarantee on POSIX. Windows exposes neither
- * `O_NOFOLLOW` nor `O_NONBLOCK`, so OR-ing those flags in degrades to a plain
- * open that follows a symlink swapped in after the pre-open check. There the
- * compensation is the one `packages/core/src/utils/no-follow-open.ts` applies:
- * refuse a symlink up front, then prove the opened handle still refers to the
- * file that was checked (inode 0 means it never can be proven, so it is
- * refused). The core helper is not a dependency of the channel packages, so
- * this keeps the same posture locally.
+ * `O_NOFOLLOW` carries that guarantee for the final component on POSIX, but it
+ * cannot see a directory component swapped for a symlink, so the flag is only
+ * trusted where the descriptor path is checked after the open (`/proc/self/fd`
+ * on Linux). Elsewhere — macOS, which has the flag but no procfs, and Windows,
+ * which has neither flag — the open is compensated by the identity proof
+ * `packages/core/src/utils/no-follow-open.ts` applies: refuse a symlink up
+ * front, then prove the opened handle still refers to the file that was checked
+ * (inode 0 means it never can be proven, so it is refused). The flag is still
+ * set where it exists, so a final-component swap is refused at the open itself
+ * too. The core helper is not a dependency of the channel packages, so this
+ * keeps the same posture locally.
+ *
+ * The proof is best-effort against a same-user racer: a swap that lands before
+ * the `lstat` makes both sides agree, and Node exposes no `openat`-style
+ * descriptor-relative walk to close that window completely.
  */
 function openReadOnlyNoFollow(filePath: string): number {
   const noFollow = constants.O_NOFOLLOW;
-  if (typeof noFollow === 'number') {
+  // The fast path is only sound when the descriptor path is checked after the
+  // open: `O_NOFOLLOW` guards the final component alone, so without that check
+  // a swapped directory component would go unseen.
+  const procfsAvailable = existsSync('/proc/self/fd');
+  if (typeof noFollow === 'number' && procfsAvailable) {
     return openSync(
       filePath,
       constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | noFollow,
     );
   }
 
+  const flags = [
+    constants.O_RDONLY,
+    typeof noFollow === 'number' ? noFollow : undefined,
+    typeof constants.O_NONBLOCK === 'number' ? constants.O_NONBLOCK : undefined,
+  ].reduce<number>((all, flag) => (flag === undefined ? all : all | flag), 0);
   const before = lstatSync(filePath, { bigint: true });
   if (before.isSymbolicLink()) {
     throw new QQOutboundFileError(
@@ -458,7 +497,7 @@ function openReadOnlyNoFollow(filePath: string): number {
       'the file identity cannot be verified on this filesystem.',
     );
   }
-  const fd = openSync(filePath, constants.O_RDONLY);
+  const fd = openSync(filePath, flags);
   try {
     const after = fstatSync(fd, { bigint: true });
     if (before.dev !== after.dev || before.ino !== after.ino) {
