@@ -106,13 +106,20 @@
   暖 load 不新增写盘；部分读取的 transcript 绝不播种。播种在空对话早退
   之前执行，因此 side-records-only 会话（首个 prompt 之前注册的产物——与
   库守卫接受的 transcript 形状相同）即使没有可加载的对话，也在首次打开时
-  获得数量。daemon/ACP 恢复漏斗经 `readRestoreProjection` 选择性读取、
-  从不调用 `loadSession`，因此投影读取对无对话的 transcript 执行同一播种
-  （投影缺失也是候选——索引构建器会拒绝这类 transcript）；创建期元数据
-  算作侧记录——每个 daemon 会话在首个 prompt 前都带一条 `session_source`
-  记录。辅助读取与库变更读取同样以 64 MiB 为上限；有对话的会话保持选择性
-  读取的零额外 I/O 契约（由读取 spy 钉住）。两个漏斗与库守卫共用同一个
-  播种方法和同一个记录组合助手。播种还要求 journal
+  获得数量。形状门陈述播种所需的属性——完全没有对话轮次、每条记录都是
+  system 元数据——而不是枚举子类型，因此产品在首个 prompt 之前写下的每条
+  创建期记录（`session_source`、`session_model`、标题……）都让它保持为真；
+  它刻意不写成 `!records.some(isTranscriptConversationRecord)`——那个判定
+  把创建期元数据算作对话记录。daemon/ACP 恢复漏斗经
+  `readRestoreProjection` 选择性读取、从不调用 `loadSession`，因此投影读取
+  对无对话的 transcript 执行同一播种（投影缺失也是候选——索引构建器会拒绝
+  这类 transcript）。两个漏斗调用同一个私有助手，由它持有尺寸探测、辅助
+  读取、归属校验、形状门与播种，前置条件不会漂移：读取与库变更读取同样以
+  64 MiB 为上限、同样的包含边界（正好 64 MiB 播种、超过跳过、尺寸探测失败
+  跳过），同一会话经任一漏斗得到同一列表行。有对话的 transcript 保持无上限
+  播种——它的读取就是 load 本身，恢复载荷的内嵌快照不能依赖 sidecar 上限——
+  且有对话的会话保持选择性读取的零额外 I/O 契约（由读取 spy 钉住）。两个
+  漏斗与库守卫共用同一个播种方法和同一个记录组合助手。播种还要求 journal
   具备权威性：无历史链缺口（断链会把 artifact 事件孤儿化出活跃分支而少计），
   且无记录级损坏警告——与库变更守卫同一判定
   （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。两处
@@ -256,12 +263,14 @@
   sidecar）；load 播种及其权威性门（历史链缺口、含变更级丢弃的记录级损坏
   警告、被容忍的单产物级跳过、全拒绝日志被播种与库守卫同样拒绝、
   side-records-only 会话在空对话早退之前及经 daemon 恢复投影漏斗播种、
-  有对话会话不被投影读取触碰），active
+  创建期 `session_model` 元数据在两个漏斗都被形状门接纳、共享上限在两个
+  漏斗都有钉子——超过上限跳过辅助读取、正好上限播种、尺寸探测失败跳过——
+  且有对话的 load 播种保持无上限、有对话会话不被投影读取触碰），active
   与 archived 两态、event 与 snapshot（fork）记录、按冷启动可恢复集合计数
   （无快照 published file 定位符经 bridge/core 共享谓词排除、真正预览快照
   保留）；库删除更新（可恢复
   幸存者算术，单个与批量、请求批次含陈旧 id、无快照 published file 定位符
-  排除）；
+  排除、带 `session_model` 的无对话 transcript 是合法删除目标）；
   archive/delete/冲突处理（含 kept 侧无 sidecar 的形状）；工作目录搬迁；
   store `count()` 含删除后递减；
   `toSessionSummary` 携带/省略与恢复中标记（`artifactCountPending` 保持行

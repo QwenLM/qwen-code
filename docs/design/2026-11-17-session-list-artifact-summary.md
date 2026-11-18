@@ -126,17 +126,27 @@ clicked, using the list data the sidebar already holds.
   seed runs before the empty-conversation early return, so side-records-only
   sessions (artifacts registered before the first prompt — the same
   transcript shape the library guard accepts) gain a count on their first
-  open even though they have no conversation to load. The daemon/ACP
+  open even though they have no conversation to load. The shape gate states
+  the property the seed needs — no conversation turns at all, every record
+  is system metadata — instead of enumerating subtypes, so every
+  creation-time record the product writes before the first prompt
+  (`session_source`, `session_model`, titles, …) keeps it true; it is
+  deliberately not `!records.some(isTranscriptConversationRecord)`, which
+  counts creation-time metadata as conversation records. The daemon/ACP
   restore funnel reads selectively via `readRestoreProjection` and never
   calls `loadSession`, so the projection read runs the same seed for
   conversation-less transcripts (a missing projection is a candidate too —
-  the index builder rejects them); creation-time metadata counts as side
-  records for the gate — every daemon session carries a `session_source`
-  record before its first prompt. The auxiliary read is capped at the same
-  64 MiB as the library mutation read, and sessions with a conversation
-  keep the selective read's zero-extra-I/O contract (pinned by a read
-  spy). Both funnels share one seed
-  method and one record-composition helper with the library guard. The
+  the index builder rejects them). Both funnels call one shared helper that
+  owns the size probe, the auxiliary read, ownership, the shape gate and
+  the seed, so the preconditions cannot drift: the read is capped at the
+  same 64 MiB as the library mutation read with the same inclusive boundary
+  (exactly 64 MiB seeds, above skips, a failed size probe skips), and one
+  session yields one list row through either funnel. A conversation
+  transcript keeps the uncapped seed — its read is the load itself, and the
+  restore payload's embedded snapshot must not depend on the sidecar cap —
+  and sessions with a conversation keep the selective read's zero-extra-I/O
+  contract (pinned by a read spy). Both funnels and the library guard share
+  one seed method and one record-composition helper. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no
   record-level damage warnings — the same predicate the library mutation
@@ -316,14 +326,19 @@ clicked, using the list data the sidebar already holds.
   per-artifact skips, all-refused journals refused by the seed and the
   library guard alike, side-records-only sessions seeded before the
   empty-conversation early return and through the daemon restore projection
-  funnel, conversation sessions untouched by the projection read), in both
+  funnel, creation-time `session_model` metadata admitted by the shape gate
+  on both funnels, the shared cap pinned on both funnels — above-cap skips
+  the auxiliary read, exactly-at-cap seeds, a failed size probe skips — and
+  the conversation load seed staying uncapped, conversation sessions
+  untouched by the projection read), in both
   active and archived states, from
   event and snapshot (fork) records, counting the cold-restorable set
   (non-snapshot published file locators excluded via the shared bridge/core
   predicate, real preview snapshots kept); library
   removal update (restorable-survivor arithmetic, single and batch, stale
   ids in the requested batch, non-snapshot published file locators
-  excluded);
+  excluded, a `session_model`-bearing conversation-less transcript as a
+  legal removal target);
   archive/delete/conflict handling (including the kept-side-absent shape);
   working-directory relocation; store
   `count()` including the decrement after a removal; `toSessionSummary`
