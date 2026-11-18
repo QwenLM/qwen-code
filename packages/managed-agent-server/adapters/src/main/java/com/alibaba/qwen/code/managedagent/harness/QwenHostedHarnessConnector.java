@@ -662,6 +662,24 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return error;
     }
 
+    /**
+     * Whether a create's 409 says the Session is already there, which a
+     * passive re-take answers. Keyed on the code, never on the bare status:
+     * the same 409 also carries a closing suspension gate, a full cold-open
+     * slot, a quiescing instance and a wedged teardown. Loading again behind
+     * one of those spends a second admission on a wait the caller must see,
+     * and behind {@code hosted_session_open_busy} it loads a Session whose
+     * journal the refused create never wrote.
+     */
+    private static boolean alreadyHeld(DaemonHttpException error) {
+        if (error.getStatusCode() != 409) {
+            return false;
+        }
+        String code = error.getErrorCode();
+        return "hosted_session_already_attached".equals(code)
+                || "managed_session_already_exists".equals(code);
+    }
+
     private Attachment doCreateOrLoad(String tenantId, String sessionId,
             boolean loadExisting, boolean passiveManagedRuntimeRecovery,
             boolean actionResponse) {
@@ -1813,7 +1831,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 // The Harness still holds the Session this control plane
                 // attached before it restarted: re-take it passively, the
                 // way the other cold attachments re-acquire a live one.
-                if (error.getStatusCode() != 409) {
+                if (!alreadyHeld(error)) {
                     throw error;
                 }
                 createOrLoad(tenantId, sessionId, true, true);
@@ -1847,7 +1865,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 // bound (a peer's create, or this one's lost answer):
                 // re-take it passively, the way the channel attachment
                 // does.
-                if (error.getStatusCode() != 409) {
+                if (!alreadyHeld(error)) {
                     throw error;
                 }
                 createOrLoad(tenantId, sessionId, true, true);
@@ -1996,7 +2014,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             return client().createSession(builder.build());
         } catch (DaemonHttpException error) {
-            if (error.getStatusCode() != 409) {
+            if (!alreadyHeld(error)) {
                 throw error;
             }
             return load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly);

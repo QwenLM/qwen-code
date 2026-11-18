@@ -286,6 +286,7 @@ const state = vi.hoisted(() => ({
   publicationRequest: vi.fn(),
   storeOptions: [] as Array<Record<string, unknown>>,
   ownershipReleases: [] as Array<Record<string, unknown>>,
+  writerRenewalStops: 0,
   setLifecycleAuthority: vi.fn(),
   modelConfig: vi.fn(),
   memory: vi.fn(),
@@ -487,6 +488,9 @@ vi.mock(
         },
         close: async () => undefined,
         stopLocal: async () => undefined,
+        stopWriterRenewal: () => {
+          state.writerRenewalStops += 1;
+        },
         quiesceOwnership: async () => undefined,
         releaseOwnership: async (
           request: Record<string, unknown> & {
@@ -659,6 +663,7 @@ beforeEach(({ task }) => {
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
   state.appendFault = undefined;
+  state.writerRenewalStops = 0;
   state.automationCreates.length = 0;
   state.automationRetires.length = 0;
   state.modelConfig.mockReset();
@@ -46041,6 +46046,122 @@ describe('idle suspension', () => {
       },
       { timeout: 5000 },
     );
+  });
+
+  it('an open event stream keeps the session resident', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 150 });
+    const clientId = await createIdleSession(server);
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No port');
+    const stream = new AbortController();
+    try {
+      const opened = await fetch(
+        `http://127.0.0.1:${address.port}/session/${SESSION_ID}/events`,
+        {
+          headers: {
+            'X-Qwen-Harness-Protocol-Version': '1',
+            'X-Qwen-Harness-Boot-Id': BOOT_ID,
+            'X-Qwen-Client-Id': clientId,
+          },
+          signal: stream.signal,
+        },
+      );
+      expect(opened.status).toBe(200);
+      // An open stream is a reader the teardown would cut, so the predicate
+      // refuses it across several idle periods.
+      await sleep(500);
+      expect((await statusOf(server, clientId)).status).toBe(200);
+      expect(statsOf(server).cleanSuspensions).toBe(0);
+      expect(statsOf(server).eligibilityFailures).toBeGreaterThanOrEqual(1);
+      stream.abort();
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      stream.abort();
+      server.closeAllConnections();
+    }
+  });
+
+  it('a disconnected mutation keeps its own async tail counted', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 200 });
+    const clientId = await createIdleSession(server);
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = false;
+    // Stall the admitted request inside its own authorization await: the
+    // work holds no busy flag and has not entered the authority's serial
+    // queue yet, so only the admitted-work count keeps teardown off it.
+    state.authorizeOrdinary.mockImplementation(async () => {
+      if (!stalled) {
+        stalled = true;
+        await stall;
+      }
+    });
+    const request = headers(
+      supertest(server).post(`/session/${SESSION_ID}/title`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ title: 'disconnected caller' });
+    const settled = request.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.waitFor(
+      async () => {
+        expect(stalled).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+    // The socket closes while the commit is still in flight. Releasing the
+    // admitted unit here would let teardown start under live work.
+    request.abort();
+    await settled;
+    await sleep(700);
+    // The attempt raised its gate and is still waiting for the admitted unit,
+    // so routes answer the reversible closing refusal — never a completed
+    // suspension, which is what releasing on the socket's 'close' produced.
+    const gated = await statusOf(server, clientId);
+    expect(gated.status).toBe(409);
+    expect(gated.body.code).toBe('hosted_session_closing');
+    expect(statsOf(server).cleanSuspensions).toBe(0);
+    release();
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it('a capped teardown ends the writer lease renewal', async () => {
+    const server = await app(false, undefined, true, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 5,
+      suspendRetryCap: 2,
+      suspendReconcileMs: 400,
+    });
+    await createIdleSession(server);
+    state.appendFault = async (_journal, records, _append) => {
+      if (isActivationRelease(records)) throw new Error('store gone');
+      return false;
+    };
+    await vi.waitFor(
+      async () => {
+        expect(statsOf(server).blockedTeardowns).toBe(1);
+      },
+      { timeout: 5000 },
+    );
+    // The bounded reconciliation only fences the old writer once the lease
+    // lapses. The removed resident's Store client must not keep renewing it:
+    // stopLocal() is never reached on this path, so the timer needs its own
+    // stop (the activation renewal alone does not carry the writer lease).
+    expect(state.writerRenewalStops).toBeGreaterThanOrEqual(1);
   });
 
   it('a parked input keeps the session resident', async () => {

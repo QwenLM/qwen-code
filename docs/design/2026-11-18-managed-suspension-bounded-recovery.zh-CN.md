@@ -12,9 +12,11 @@
 
 `JournalWriterLifecycle.acquireWriter` 仅在 head 为 ACTIVE **且写者租约未过期**（`writerLeaseUntil.after(now)`）且 writer id 与 token 匹配时续租同 generation。租约一旦过期，任何 acquire——包括相同 boot id 与 token——都落入 generation 递增分支。`sealWriter` 按 generation fencing，故携带旧 generation 的 seal 在任何后继 acquire 后被拒。
 
-重试上限处挂起驱动器不再发起 seal 尝试，blocked 分支停止续约。闸门拒绝本 Harness 自身的 load，故租约存活期间无同进程 client 能 acquire。经过超过写者租约加 Store 请求超时的有界等待后：
+重试上限处挂起驱动器不再发起 seal 尝试，blocked 分支停止续约。**存在两条续约，都必须停。** activation 续约在 Session assembly 里；写者租约自己的 `/writers:renew` 定时器在 Store client 里，过去只有 `sealGrant()` 或 `stopLocal()` 会停它。在 writer 步骤之前就失败的 teardown 两者都到不了，于是被移除的 resident 会永远续租，下面的上界也就什么都证明不了。因此 teardown 在其 writer 步骤开头调用 Store client 的 `stopWriterRenewal()`，blocked 分支再为所有更早的失败调用一次。该调用只停定时器、不 fence client——`stopLocal()` 会连同一 client 仍欠的 seal 对账请求一起拒绝——而提交所需的按需续约仍可运行，故重试照常工作。
 
-1. 写者租约已过期（续约已停），且
+闸门拒绝本 Harness 自身的 load，故租约存活期间无同进程 client 能 acquire。经过超过写者租约加 Store 请求超时的有界等待后：
+
+1. 写者租约已过期（两条续约都已停；到达上限时已在飞的续约可能从其自身完成时刻起再续一个完整租约，这由超时项覆盖），且
 2. 上限处尝试的在飞 seal 请求已超时，无旧 seal 仍在飞。
 
 此后任何 acquire 都 bump generation 并 fence 旧 seal。head 处于三种状态之一，均安全：
@@ -29,7 +31,7 @@
 
 ## 3. 行为
 
-- capped uncertain teardown 时 Harness 停流停续约，保持闸门 **blocked**（以 `hosted_session_teardown_blocked` 拒绝 load），并在 `HOSTED_SUSPEND_RECONCILE_MS`（候选 65s = 60s 写者租约 + 超过 30s Store 请求超时的余量；启用前对照真实 Store 超时验证）后调度闸门清除。
+- capped uncertain teardown 时 Harness 停流、停 activation 续约与写者租约续约，保持闸门 **blocked**（以 `hosted_session_teardown_blocked` 拒绝 load），并在 `HOSTED_SUSPEND_RECONCILE_MS`（候选 100s = 60s 写者租约 + 30s Store 请求超时 + 10s 余量；启用前对照真实 Store 超时验证）后调度闸门清除。
 - 边界后移除闸门 entry（若仍 blocked 且未被复用）；下一次 load 冷打开。`reconciledGates` 计数记录自动恢复。
 - 控制面对 `hosted_session_teardown_blocked` 的分类不变（拒绝，非免预算等待）：teardown 楔住的 Turn 以该码失败；Session 本身为后续请求恢复。Session 级恢复自动；在飞 Turn 是楔住 teardown 的代价。
 - 闸门清除时 Store 仍不可达，则冷打开以暂时性 Store 错误失败并重试至 Store 恢复；闸门本身无需运维。
@@ -39,9 +41,11 @@
 - reconciliation 等待期间，load 与读遇到 `hosted_session_teardown_blocked`；闸门不被静默移除。
 - 边界后闸门自动清除（`reconciledGates` 递增），后续 load 不再被闸门拒绝。
 - 持续 Store 不可达在闸门清除后仍表现为 load 失败（非闸门拒绝）。
+- capped teardown 会停掉写者租约续约，被移除的 resident 无法把租约维持到上界之后。
 - 干净挂起→冷打开路径不变。
 
 ## 5. 边界
 
-- reconcile 等待是候选常量；与空闲周期、冷打开上限一样启用前由测量验证。它必须超过写者租约加 Store 请求超时。
+- reconcile 等待是候选常量；与空闲周期、冷打开上限一样启用前由测量验证。它必须超过写者租约加 Store 请求超时，因为在飞续约与上限处尝试的在飞 seal 都以该超时为上界。
+- 该上界从两条续约停止的时刻起算。写者租约或 Store 请求超时不同于 60s/30s 默认值的部署必须重新推导该常量；它不是普适安全值。
 - 本补篇解决 Session 级恢复问题；不改变控制面 Turn 分类，不新增回执。

@@ -4975,6 +4975,9 @@ export function registerHostedHarnessSessionRoutes(
     (session.replyPlanRetries?.size ?? 0) > 0 ||
     session.ownershipRelease !== undefined ||
     session.clientFiles !== undefined ||
+    // An open Harness event stream is a reader this teardown would cut. The
+    // design's predicate names it beside the Turn's own stream.
+    session.streams.size > 0 ||
     [...(session.shell?.monitorLoops?.values() ?? [])].some(
       (loop) => loop.live,
     ) ||
@@ -5070,6 +5073,11 @@ export function registerHostedHarnessSessionRoutes(
             done.publishers = true;
           }
           if (!done.writer) {
+            // The writer lease's own renewal timer lives in the Store client,
+            // not in the activation renewal below. End it before the release
+            // and seal so a failure here leaves a lease that lapses instead of
+            // one a removed resident keeps extending forever.
+            session.stores!.stopWriterRenewal();
             // Outside the authority serial queue: the renewal runs inside
             // it, so waiting from within would deadlock.
             await session.managed.stopRenewal();
@@ -5119,6 +5127,16 @@ export function registerHostedHarnessSessionRoutes(
       // seal reconciliation.
       for (const stop of session.streams) stop();
       void session.managed.stopRenewal().catch(() => undefined);
+      // A teardown that failed before the writer step never reached its
+      // stopWriterRenewal, and the removed resident's Store client would keep
+      // renewing the lease forever — the bound below proves nothing while it
+      // does. End that timer here too; the client stays usable for the seal
+      // reconciliation, which stopLocal() would refuse.
+      try {
+        session.stores?.stopWriterRenewal();
+      } catch {
+        // A client already closed or fenced has no timer left to end.
+      }
       // Bounded automatic recovery (design open question 8): renewal is
       // stopped and no further seal attempt is made, so once the writer
       // lease expires and the capped attempt's in-flight request times out,
@@ -8864,13 +8882,25 @@ export function registerHostedHarnessSessionRoutes(
     if (suspension) {
       const refusal = suspensionRefusalCode(suspension);
       if (refusal) return error(res, 409, refusal);
-      // Request-scoped work is counted until the response closes,
-      // including client disconnects; async tails that outlive the
-      // response (turns, message operations, loops) are caught by the
-      // live-work recheck after the bounded wait.
+      // Request-scoped work is counted until the handler ends its own
+      // response, which every route reaches through res.json/send/error even
+      // after its caller disconnected. The socket's 'close' is not that
+      // moment: it fires while a disconnected caller's async tail is still
+      // committing, and releasing there lets teardown start under live work.
+      // A route that never ends its response keeps the Session resident —
+      // the safe direction. Async tails that outlive the response (turns,
+      // message operations, loops) are caught by the live-work recheck.
       if (req.method !== 'GET' && req.path !== '/heartbeat') {
         admitSuspensionWork(suspension);
-        res.on('close', () => releaseSuspensionWork(suspension));
+        const end = res.end.bind(res) as (...args: unknown[]) => Response;
+        let released = false;
+        res.end = ((...args: unknown[]) => {
+          if (!released) {
+            released = true;
+            releaseSuspensionWork(suspension);
+          }
+          return end(...args);
+        }) as typeof res.end;
       }
     }
     if (instance && session && req.method !== 'GET') {

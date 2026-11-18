@@ -1104,6 +1104,7 @@ class QwenHostedHarnessConnectorTest {
         when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
         DaemonHttpException conflict = mock(DaemonHttpException.class);
         when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(client.createSession(any())).thenThrow(conflict);
         when(client.loadSession(any())).thenReturn(attached);
         AgentStateStore sessions = mock(AgentStateStore.class);
@@ -1721,6 +1722,7 @@ class QwenHostedHarnessConnectorTest {
         HarnessSessionRef session = mock(HarnessSessionRef.class);
         DaemonHttpException conflict = mock(DaemonHttpException.class);
         when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         when(client.capabilities()).thenReturn(capabilities);
         when(client.loadSession(any(LoadHarnessSession.class)))
@@ -1735,6 +1737,45 @@ class QwenHostedHarnessConnectorTest {
 
         assertThat(attachment.bootId()).isEqualTo(BOOT_ID);
         verify(client).loadSession(any(LoadHarnessSession.class));
+        verify(client).createSession(any(CreateHarnessSession.class));
+    }
+
+    // A create's 409 is only a load fallback when it says the Session is
+    // already there. The suspension gate, a full cold-open slot and a wedged
+    // teardown share the status, and each must reach the caller with its own
+    // code: loading again spends a second admission on a wait, and behind
+    // open_busy it loads a journal the refused create never wrote.
+    @ParameterizedTest
+    @CsvSource({"hosted_session_already_attached,true",
+            "managed_session_already_exists,true",
+            "hosted_session_open_busy,false",
+            "hosted_session_closing,false",
+            "hosted_session_teardown_blocked,false",
+            "hosted_harness_quiescing,false"})
+    void onlyAnAlreadyHeldCreateConflictFallsBackToALoad(String code, boolean loads) {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode()).thenReturn(code);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(session);
+        when(client.createSession(any(CreateHarnessSession.class))).thenThrow(conflict);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        if (loads) {
+            assertThat(connector.createOrLoad("tenant-a", SESSION_ID, false).bootId())
+                    .isEqualTo(BOOT_ID);
+            verify(client).loadSession(any(LoadHarnessSession.class));
+        } else {
+            assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, false))
+                    .isSameAs(conflict);
+            verify(client, never()).loadSession(any(LoadHarnessSession.class));
+        }
         verify(client).createSession(any(CreateHarnessSession.class));
     }
 
@@ -2020,9 +2061,11 @@ class QwenHostedHarnessConnectorTest {
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         DaemonHttpException conflict = mock(DaemonHttpException.class);
         when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(client.createSession(any(CreateHarnessSession.class))).thenThrow(conflict);
         DaemonHttpException alreadyAttached = mock(DaemonHttpException.class);
         when(alreadyAttached.getStatusCode()).thenReturn(409);
+        when(alreadyAttached.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(client.loadSession(any(LoadHarnessSession.class)))
                 .thenThrow(alreadyAttached)
                 .thenReturn(attached);
@@ -2715,6 +2758,7 @@ class QwenHostedHarnessConnectorTest {
         ReflectionTestUtils.setField(restarted, "client", client);
         DaemonHttpException attachedElsewhere = mock(DaemonHttpException.class);
         when(attachedElsewhere.getStatusCode()).thenReturn(409);
+        when(attachedElsewhere.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(client.createSession(any())).thenThrow(attachedElsewhere);
         when(client.loadSession(any())).thenAnswer(invocation -> {
             LoadHarnessSession load = invocation.getArgument(0);

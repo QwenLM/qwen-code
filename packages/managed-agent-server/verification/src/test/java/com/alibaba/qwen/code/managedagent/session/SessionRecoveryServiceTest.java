@@ -53,9 +53,17 @@ class SessionRecoveryServiceTest {
         jdbc.execute("CREATE TABLE ma_session_head (tenant_id VARCHAR, session_id VARCHAR,"
                 + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR,"
                 + " state VARCHAR, activation_phase VARCHAR, activation_head_revision BIGINT,"
-                + " journal_revision BIGINT)");
-        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L);
+                + " journal_revision BIGINT, is_wake_pending INT, wake_head_revision BIGINT)");
+        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L);
+        // The obligation projections the sealed-head proof reads. Empty by
+        // default: a cleanly suspended Session owes nothing.
+        jdbc.execute("CREATE TABLE ma_turn (tenant_id VARCHAR, session_id VARCHAR, status VARCHAR)");
+        jdbc.execute("CREATE TABLE ma_session_record (tenant_id VARCHAR, session_id VARCHAR,"
+                + " record_kind VARCHAR, runtime_state VARCHAR)");
+        jdbc.execute("CREATE TABLE ma_resource_ref (resource_key VARCHAR, tenant_id VARCHAR,"
+                + " session_id VARCHAR, owner_kind VARCHAR)");
+        jdbc.execute("CREATE TABLE ma_resource (resource_key VARCHAR, state VARCHAR)");
         when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
         when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of());
         service = new SessionRecoveryService(sessions, store, coordinator, harness, new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(jdbc), mock(JdbcManagedSessionStore.class));
@@ -93,16 +101,73 @@ class SessionRecoveryServiceTest {
     }
 
     // The persistent suspension proof (docs/design/2026-11-18-managed-
-    // suspension-recovery-view.md): the view follows the sealed head, never
-    // the presence or absence of a Harness cache entry.
+    // suspension-recovery-view.md): the view follows durable state, never the
+    // presence or absence of a Harness cache entry. A sealed head alone is not
+    // that proof — a refused load closes its writer the same way — so the
+    // ready arm also needs the wake projection and the obligation checks.
+    private void sealCleanly() {
+        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'released',"
+                + " activation_head_revision = 5, journal_revision = 5,"
+                + " is_wake_pending = 0, wake_head_revision = 5");
+    }
+
     @Test
     void aCleanlySuspendedSessionIsReadyWithoutHarnessEvidence() {
-        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'released',"
-                + " activation_head_revision = 5, journal_revision = 5");
+        sealCleanly();
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("ready");
         assertThat(recovery.nextTurnAllowed()).isTrue();
         verifyNoInteractions(harness, coordinator);
+    }
+
+    @Test
+    void aSealedHeadWhoseWakeProjectionStillOwesProofIsNotReady() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = 1");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+    }
+
+    @Test
+    void aSealedHeadWhoseWakeProofCoversAnOlderRevisionIsNotReady() {
+        sealCleanly();
+        jdbc.update("UPDATE ma_session_head SET wake_head_revision = 4");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"turn", "runtime", "cleanup"})
+    void aSealedHeadThatStillOwesDurableWorkIsNotReady(String obligation) {
+        sealCleanly();
+        switch (obligation) {
+            case "turn" -> jdbc.update("INSERT INTO ma_turn VALUES ('tenant', 'session', 'RUNNING')");
+            case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES"
+                    + " ('tenant', 'session', 'DOMAIN', 'ready')");
+            default -> {
+                jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+                jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', 'tenant', 'session', 'HOSTED_CLEANUP')");
+            }
+        }
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+    }
+
+    @Test
+    void aSettledRecordAndAConfirmedDebtDoNotBlockTheSealedHeadProof() {
+        sealCleanly();
+        // A terminal run projects a null runtime_state, and a confirmed debt
+        // drops its REFERENCED ref: neither is owed work any more.
+        jdbc.update("INSERT INTO ma_session_record VALUES ('tenant', 'session', 'DOMAIN', NULL)");
+        jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'RELEASED')");
+        jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', 'tenant', 'session', 'HOSTED_CLEANUP')");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
     }
 
     @Test
@@ -117,19 +182,21 @@ class SessionRecoveryServiceTest {
     }
 
     @Test
-    void aSealedHeadWithoutAReleasedActivationNamesTheSequenceViolation() {
+    void aSealedHeadWithoutAReleasedActivationKeepsTheEvidenceDrivenArms() {
+        // A bare writers:seal reaches this shape too, so it is not a sequence
+        // violation the view can name: it stays on the conservative arms.
         jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'active',"
-                + " activation_head_revision = 5, journal_revision = 5");
+                + " activation_head_revision = 5, journal_revision = 5,"
+                + " is_wake_pending = 0, wake_head_revision = 5");
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("operator_required");
-        assertThat(recovery.reasonCode()).isEqualTo("teardown_sequence_violation");
-        verifyNoInteractions(harness, coordinator);
+        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
     }
 
     @Test
     void aStaleCacheCannotOverrideTheSealedHeadProof() {
-        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'released',"
-                + " activation_head_revision = 5, journal_revision = 5");
+        sealCleanly();
         when(harness.inspectRecovery("tenant", "session", null))
                 .thenReturn(new RecoveryStatus("recovering", "turn_active", null, false, false, false));
         var recovery = service.query("tenant", "actor", "session");
@@ -140,8 +207,7 @@ class SessionRecoveryServiceTest {
 
     @Test
     void anActiveTurnOnASealedHeadKeepsTheEvidenceDrivenArms() {
-        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'released',"
-                + " activation_head_revision = 5, journal_revision = 5");
+        sealCleanly();
         turn("RUNNING", null);
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("recovering");

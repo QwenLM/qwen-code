@@ -12,9 +12,11 @@ When a suspension teardown fails or returns an uncertain result at the retry cap
 
 `JournalWriterLifecycle.acquireWriter` extends the same generation only when the head is ACTIVE **and the writer lease is unexpired** (`writerLeaseUntil.after(now)`) and the writer id and token match. Once the lease expires, every acquire — including one with the same boot id and token — falls through to the generation-increment branch. `sealWriter` fences on generation, so a seal carrying the old generation is rejected once any successor acquires.
 
-At the retry cap the suspension driver makes no further seal attempt, and the blocked branch stops renewal. The gate refuses this Harness's own loads, so no same-process client can acquire while the lease is live. After a bounded wait exceeding the writer lease plus the Store request timeout:
+At the retry cap the suspension driver makes no further seal attempt, and the blocked branch stops renewal. **Two renewals exist and both must end.** The activation renewal lives in the Session assembly; the writer lease's own `/writers:renew` timer lives in the Store client, and only `sealGrant()` or `stopLocal()` used to stop it. A teardown that fails before its writer step reaches neither, so the removed resident would keep extending the lease forever and the bound below would prove nothing. The teardown therefore calls the Store client's `stopWriterRenewal()` at the start of its writer step, and the blocked branch calls it again for every earlier failure. That call ends the timer without fencing the client — `stopLocal()` would also refuse the seal reconciliation the same client still owes — and an on-demand renewal for a commit still runs, so retries keep working.
 
-1. the writer lease has expired (renewal stopped), and
+The gate refuses this Harness's own loads, so no same-process client can acquire while the lease is live. After a bounded wait exceeding the writer lease plus the Store request timeout:
+
+1. the writer lease has expired (both renewals stopped; a renewal already in flight when the cap was reached can extend the lease by one full lease from its own completion, which the timeout term covers), and
 2. the capped attempt's in-flight seal request has timed out, so no old seal remains in flight.
 
 From then on, any acquire bumps the generation and fences the old seal. The head is then in one of three states, all safe:
@@ -29,7 +31,7 @@ The design's obstacle applies only while the lease is live; the bounded wait exp
 
 ## 3. Behavior
 
-- On a capped uncertain teardown the Harness stops streams and renewal, keeps the gate **blocked** (refusing loads with `hosted_session_teardown_blocked`), and schedules a gate clear after `HOSTED_SUSPEND_RECONCILE_MS` (candidate 65s = 60s writer lease + margin over the 30s Store request timeout; validated against the real Store timeout before enablement).
+- On a capped uncertain teardown the Harness stops streams, the activation renewal and the writer lease renewal, keeps the gate **blocked** (refusing loads with `hosted_session_teardown_blocked`), and schedules a gate clear after `HOSTED_SUSPEND_RECONCILE_MS` (candidate 100s = 60s writer lease + the 30s Store request timeout + a 10s margin; validated against the real Store timeout before enablement).
 - After the bound the gate entry is removed (if still blocked and not reused); the next load cold-opens. A `reconciledGates` counter records the automatic recovery.
 - The control-plane classification of `hosted_session_teardown_blocked` is unchanged (a refusal, not a budget-exempt wait): the Turn whose teardown wedged fails under that code; the Session itself recovers for subsequent requests. Session-level recovery is automatic; the in-flight Turn is the cost of the wedged teardown.
 - If the Store is still unreachable when the gate clears, the cold open fails with a transient Store error and retries until the Store returns; no operator is required for the gate itself.
@@ -39,9 +41,11 @@ The design's obstacle applies only while the lease is live; the bounded wait exp
 - During the reconciliation wait, loads and reads meet `hosted_session_teardown_blocked`; the gate is not silently removed.
 - After the bound the gate auto-clears (`reconciledGates` increments) and a subsequent load is no longer gate-refused.
 - A persistent Store outage still surfaces as a load failure (not the gate refusal) after the gate clears.
+- A capped teardown ends the writer lease renewal, so the removed resident cannot keep the lease alive past the bound.
 - The clean suspend→cold-open path is unchanged.
 
 ## 5. Boundaries
 
-- The reconcile wait is a candidate constant; like the idle period and cold-open cap it is validated by measurement before enablement. It must exceed the writer lease plus the Store request timeout.
+- The reconcile wait is a candidate constant; like the idle period and cold-open cap it is validated by measurement before enablement. It must exceed the writer lease plus the Store request timeout, because both an in-flight renewal and the capped attempt's in-flight seal are bounded by that timeout.
+- The bound is measured from the moment the renewals stop. A deployment whose writer lease or Store request timeout differs from the 60s/30s defaults must re-derive the constant; it is not a universal safe value.
 - This resolves the Session-level recovery question; it does not change the control-plane Turn classification or add a receipt.
