@@ -36,9 +36,28 @@ Starting makes the Channel locally ready. It does not contact the receiver or
 verify credentials. Stopping cancels in-flight requests. Restart or reload the
 Channel to apply configuration changes.
 
-The backend provides configuration and delivery APIs. Builds without the
-corresponding Web integration do not show Generic Webhook in Channels; use
-`settings.json` and `qwen serve --channel` until that integration is available.
+## Use Web Shell
+
+In Channels, select the intended workspace and choose **Generic Webhook**. Give
+the instance a name, enter the webhook URL, and optionally enter a Bearer token.
+For an intentional local or private receiver, expand **Advanced settings** and
+enable **Allow local and private endpoints**. Save and start the Channel.
+
+The URL and token use the existing secret controls, including environment
+references and explicit replacement or clearing of the optional token. Receiving,
+pairing and agent-session settings do not apply to this integration.
+
+When creating a scheduled task, use a persistent task session and select the
+named Channel as its delivery destination. Web Shell fills the configured
+endpoint automatically; no observed contacts or manually entered chat ID are
+needed. Existing manual-trigger and per-run-session restrictions still apply.
+Task cards display the Channel name and destination ID; the editor describes
+Generic targets as endpoints and keeps IM group wording for platform adapters.
+
+These controls are shared with hosts using `WebShellWithProviders` when the host
+enables Channels and Scheduled Tasks and supplies a daemon workspace. Builds
+containing only the backend support do not show Generic Webhook in Channels;
+use the `settings.json` and `qwen serve --channel` steps above until upgrading.
 
 ## Receiving contract
 

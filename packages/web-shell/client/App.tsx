@@ -5305,6 +5305,7 @@ export function App({
     error: artifactsError,
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
+    artifactCountHint,
   } = useSessionArtifacts();
   const sourcesState = useSessionSources();
   const refreshSources = sourcesState.refresh;
@@ -18289,6 +18290,7 @@ export function App({
       sessionId: string,
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
+      artifactCountHint?: number,
     ) => {
       setManagedHome(false);
       pendingManualTitleRef.current = undefined;
@@ -18335,6 +18337,7 @@ export function App({
                 ? undefined
                 : workspaceCwd,
           sessionContext: targetContext,
+          artifactCountHint,
         });
         if (
           sessionOpenInvocationRef.current === invocation &&
@@ -23464,7 +23467,11 @@ export function App({
     environmentPanelItems.includes('artifacts') &&
     connection.sessionId
       ? {
-          artifactCount: artifacts.length,
+          // The live list wins once present; before it lands, the click-time
+          // hint from the session-list summary shows the count early. The
+          // hook retires the hint when authoritative data arrives.
+          artifactCount:
+            artifacts.length > 0 ? artifacts.length : (artifactCountHint ?? 0),
           onOpenArtifacts: () => {
             handleEnvironmentPanelOpenChange(true);
             setArtifactsExpandSignal((value) => value + 1);
@@ -24717,9 +24724,14 @@ export function App({
                     createNewSession({ kind: 'global' })
                   }
                   standaloneSessionsReloadToken={standaloneSessionsReloadToken}
-                  onLoadSession={(sessionId, workspaceCwd) => {
+                  onLoadSession={(sessionId, workspaceCwd, artifactCount) => {
                     showChat();
-                    return loadSidebarSession(sessionId, workspaceCwd);
+                    return loadSidebarSession(
+                      sessionId,
+                      workspaceCwd,
+                      undefined,
+                      artifactCount,
+                    );
                   }}
                   onOpenHostSession={handleOpenHostSession}
                   onLoadStandaloneSession={(sessionId, displayName) => {
