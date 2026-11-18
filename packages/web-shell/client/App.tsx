@@ -12397,7 +12397,6 @@ export function App({
   useEffect(() => {
     if (!modelManagementPolicy.allowAdd) setShowAuthDialog(false);
   }, [modelManagementPolicy.allowAdd, showAuthDialog]);
-  const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
     useState(0);
@@ -20652,9 +20651,7 @@ export function App({
           }
           if (cmd === 'memory') {
             const memoryArg = text.slice(match[0].length).trim().toLowerCase();
-            if (memoryArg === 'refresh') {
-              setMemoryRefreshSignal((signal) => signal + 1);
-            } else if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
+            if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
               const addTarget = memoryArg.slice('add'.length).trim();
               setMemoryAddScope(
                 addTarget === 'user' || addTarget === 'global'
@@ -24210,7 +24207,6 @@ export function App({
               onClose={() => setShowMemoryDialog(false)}
             >
               <MemoryMessage
-                refreshSignal={memoryRefreshSignal}
                 addSignal={memoryAddSignal}
                 addScope={memoryAddScope}
                 onMessage={(text, type = 'status') => {

@@ -182,6 +182,7 @@ import {
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_UPDATES,
@@ -9316,6 +9317,11 @@ export function createSessionControlPlane(
                         [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                       }
                     : {}),
+                  ...(req.deferAutomaticWorkUntilCwdRestore
+                    ? {
+                        [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
+                      }
+                    : {}),
                 },
               });
               return await restoreChannel.connection.loadSession(request);
@@ -9343,6 +9349,11 @@ export function createSessionControlPlane(
                 ...(req.suppressWorktreeContextRestore
                   ? {
                       [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+                    }
+                  : {}),
+                ...(req.deferAutomaticWorkUntilCwdRestore
+                  ? {
+                      [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
                     }
                   : {}),
               },
