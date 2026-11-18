@@ -172,6 +172,95 @@ describe('async-hook-context', () => {
         'x'.repeat(cut - 1) + ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
       );
     });
+
+    it('strips a partial entity before backing off the surrogate it re-exposes', () => {
+      // A lone high surrogate immediately before a '<' that lands on the cut:
+      // stripping the partial '&l' re-exposes the surrogate, so the back-off
+      // must run after the strip or the block ends on an orphaned surrogate.
+      const cut =
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH -
+        ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length;
+      const filler = 'x'.repeat(20_000);
+      const rendered = formatAsyncHookOutput({
+        contexts: ['x'.repeat(cut - 3) + '\uD800' + '<' + filler],
+        messages: [],
+      });
+      expect(rendered).toBe(
+        'x'.repeat(cut - 3) + ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
+      );
+    });
+
+    it('marks a cut context even when the message half squeezes its budget below the notice', () => {
+      // A large warning message reserves most of the cap, leaving the context
+      // a budget too small for the notice; the cut must still be marked (the
+      // notice's room comes out of the message side).
+      const rendered = formatAsyncHookOutput({
+        contexts: ['LINT: 3 errors in src/foo.ts'],
+        messages: [
+          {
+            type: 'warning',
+            message: 'x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH - 30),
+            hookName: 'H',
+            hookId: 'h1',
+            timestamp: 0,
+          },
+        ],
+      });
+      expect(rendered).toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
+      expect(rendered).toContain('[warning]');
+      expect((rendered ?? '').length).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+      );
+    });
+
+    it('bounds a message-dominated block with no context', () => {
+      // Non-JSON stdout / stderr become single info/warning messages with no
+      // per-message cap; a hook printing past the cap hits the message-only
+      // bound, which must not ship an unbounded message half.
+      const rendered = formatAsyncHookOutput({
+        contexts: [],
+        messages: [
+          {
+            type: 'info',
+            message: 'x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH + 5000),
+            hookName: 'H',
+            hookId: 'h1',
+            timestamp: 0,
+          },
+        ],
+      });
+      expect(rendered).not.toBeNull();
+      expect((rendered ?? '').length).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+      );
+      expect(rendered).toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
+    });
+
+    it('marks a displaced context when a message fills the cap', () => {
+      // A message at/over the cap displaces the context entirely; the drop must
+      // stay marked in the context position rather than silently read as "no
+      // context", matching the squeeze branch just below the cap.
+      const rendered = formatAsyncHookOutput({
+        contexts: ['LINT: 3 errors in src/foo.ts'],
+        messages: [
+          {
+            type: 'warning',
+            message: 'x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH),
+            hookName: 'H',
+            hookId: 'h1',
+            timestamp: 0,
+          },
+        ],
+      });
+      expect(rendered).not.toBeNull();
+      expect(rendered?.startsWith(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE)).toBe(
+        true,
+      );
+      expect(rendered).toContain('[warning]');
+      expect((rendered ?? '').length).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+      );
+    });
   });
 
   describe('wrapAsyncHookContext', () => {
