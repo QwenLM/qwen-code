@@ -239,8 +239,8 @@ describe('cross-language parity fixture (TS side)', () => {
 
   it('derives every fixture inputId/bindingId byte-for-byte', () => {
     for (const c of fixture.cases) {
-      expect(prWatchInputId(c.identity), c.id).toBe(c.inputId);
-      expect(prWatchBindingId(c.identity), c.id).toBe(c.bindingId);
+      expect([c.id, prWatchInputId(c.identity)]).toEqual([c.id, c.inputId]);
+      expect([c.id, prWatchBindingId(c.identity)]).toEqual([c.id, c.bindingId]);
     }
   });
 
@@ -248,9 +248,9 @@ describe('cross-language parity fixture (TS side)', () => {
     for (const r of fixture.refusals) {
       const identity = r.identity as unknown as PrWatchEventIdentity;
       if ('transition' in r.identity) {
-        expect(() => prWatchInputId(identity), r.id).toThrow(r.message);
+        expect(() => prWatchInputId(identity)).toThrow(r.message);
       } else {
-        expect(() => prWatchBindingId(identity), r.id).toThrow(r.message);
+        expect(() => prWatchBindingId(identity)).toThrow(r.message);
       }
     }
   });

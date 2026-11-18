@@ -170,15 +170,32 @@ public class ManagedPrWatchService {
             throw new ManagedAgentException(400, "invalid_request",
                     error.getMessage());
         }
-        PrWatchInjection row = injections.findOrCreate(new PrWatchInjection(
+        PrWatchInjection candidate = new PrWatchInjection(
                 tenantId, inputId, channelId, binding.bindingId(),
                 binding.sessionId(), request.owner(), request.repo(),
                 request.prNumber(), request.transition(), request.headSha(),
                 request.episode(), request.evidence(), request.text(),
-                "staged", 0, 0));
+                "staged", 0, 0);
+        PrWatchInjection row = injections.findOrCreate(candidate);
         if (!row.sessionId().equals(binding.sessionId())) {
-            throw new ManagedAgentException(409, "pr_watch_injection_conflict",
-                    "The PR event was already admitted to another Session.");
+            // A merely staged row owned by another Session is not an admission:
+            // that binding's Harness call never committed and the PR has since
+            // been rebound. Release the stale receipt and re-stage under the
+            // current binding so the occurrence can still be delivered; only an
+            // admitted row reserves the identity for its Session (a dead
+            // binding must not block the PR forever — the lazy-retire rule).
+            if ("admitted".equals(row.state())
+                    || !injections.releaseStaged(tenantId, inputId)) {
+                throw new ManagedAgentException(409,
+                        "pr_watch_injection_conflict",
+                        "The PR event was already admitted to another Session.");
+            }
+            row = injections.findOrCreate(candidate);
+            if (!row.sessionId().equals(binding.sessionId())) {
+                throw new ManagedAgentException(409,
+                        "pr_watch_injection_conflict",
+                        "The PR event was already admitted to another Session.");
+            }
         }
         if ("admitted".equals(row.state())) {
             // Redelivery of an admitted transition: the original admission,

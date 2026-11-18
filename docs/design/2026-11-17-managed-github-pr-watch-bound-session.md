@@ -295,6 +295,14 @@ list carries an incompleteness marker; the parity fixture is two-directional (a 
 reads it) and pins the envelope limits; and the `channels.enabled` description names the
 four `pr-watch:*` routes.
 
+Round 3 additionally closed: a merely staged injection row owned by a previous binding
+is released and re-staged on rebind (only an admitted row reserves the identity), so a
+transient Harness failure cannot block the PR forever; the strict integer wire binding
+is scoped to the three `pr-watch:*` request records instead of the whole MVC surface;
+the E2E rig runs beside the failover arms under their prerequisites bound and its path
+is visible to the Managed Agent gate; and the private-only delivery check counts claims
+so it witnesses the lane ran and served nothing.
+
 ## Open questions
 
 1. ~~D1–D5~~ confirmed (see status); D5 resolved to the internal channel-adapter

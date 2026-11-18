@@ -47,4 +47,13 @@ public interface PrWatchInjectionRepository {
      * row is absent; a replay of an admitted row returns the current row.
      */
     public PrWatchInjection admit(String tenantId, String inputId);
+
+    /**
+     * Releases a merely staged injection (receipt and operation) so the
+     * identity can be re-staged under a new binding. A staged row is not an
+     * admission: its Harness call never committed, and a rebind must not be
+     * blocked by it forever. Returns false when the row is absent or already
+     * admitted (an admitted row permanently reserves the identity).
+     */
+    public boolean releaseStaged(String tenantId, String inputId);
 }

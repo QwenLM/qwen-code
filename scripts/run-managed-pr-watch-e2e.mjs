@@ -181,6 +181,7 @@ async function fakeControlPlane(opts = {}) {
     admitted: new Set(opts.preadmitted ?? []),
     queue: [],
     deliveriesServed: 0,
+    claims: 0,
     journal: [],
     injectDelayMs: opts.injectDelayMs ?? 0,
     bindings: opts.bindings ?? [
@@ -258,6 +259,10 @@ async function fakeControlPlane(opts = {}) {
         req.method === 'POST' &&
         url.pathname === `${root}/deliveries:claim`
       ) {
+        // The queue is never written, so deliveriesServed alone is identically
+        // 0; counting claims witnesses that the adapter actually polled the
+        // delivery lane (the half of private-only that can otherwise not fail).
+        state.claims += 1;
         const claimed = state.queue.splice(0);
         state.deliveriesServed += claimed.length;
         return send(200, { deliveries: claimed });
@@ -461,9 +466,9 @@ async function scenarioP1() {
     gh.state.posted,
   );
   check(
-    'PRIVATE-ONLY: no channel_delivery served',
-    cp.state.deliveriesServed === 0,
-    cp.state.deliveriesServed,
+    'PRIVATE-ONLY: delivery lane ran and served nothing',
+    cp.state.claims > 0 && cp.state.deliveriesServed === 0,
+    { claims: cp.state.claims, deliveriesServed: cp.state.deliveriesServed },
   );
   // The CI read must target the head the adapter reports, not an arbitrary
   // ref: every recorded check-runs ref equals the injected head.

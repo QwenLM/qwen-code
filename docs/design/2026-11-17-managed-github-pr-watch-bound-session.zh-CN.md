@@ -135,6 +135,8 @@ transition, headSha, evidence } }`；wake pump 读 `text` 作 prompt。private-o
 
 第 2 轮另闭环：CLOSED 绑定 Session 现也被惰性退订（不只 DELETED/跨 Workspace）；冷加载文件历史豁免覆盖 `pr_event` 停泊的工具回合；关闭路径结算挂起的 `pr_event` input；watch pass 移到回复通道之后且仅在变化时持久化；终态退订带 ownership 守卫；pump-less 绑定在首次 `pr_event_wake_unavailable` 时退订；失败检查列表带不完整标记；parity fixture 双向化（TS 测试读取它）并钉死信封上限；`channels.enabled` 说明列出四个 `pr-watch:*` 路由。
 
+第 3 轮另闭环：仅暂存（staged）且属于旧绑定的注入行在改绑时被释放并在当前绑定下重新暂存（只有已准入的行才保留该身份），瞬时 Harness 失败不再永久阻塞 PR；严格整数线上绑定收窄到三个 `pr-watch:*` 请求记录而非整个 MVC 面；E2E rig 移到 failover 各 arm 旁、受其前置条件约束，且其路径对 Managed Agent gate 可见；private-only 投递检查统计 claim 次数，从而见证投递通道跑过且零投递。
+
 ## 开放问题
 
 1. ~~D1–D5~~ 已确认（见状态）；D5 定为 internal channel-adapter 面（无进一步角色决策待定）。

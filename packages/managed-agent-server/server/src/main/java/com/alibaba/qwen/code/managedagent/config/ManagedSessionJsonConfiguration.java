@@ -1,11 +1,12 @@
 package com.alibaba.qwen.code.managedagent.config;
 
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchCreateRequest;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchInjectRequest;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchRetireRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer;
-import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
@@ -22,19 +23,6 @@ public class ManagedSessionJsonConfiguration implements WebMvcConfigurer {
         this.protocol = protocol;
     }
 
-    /**
-     * The MVC converter binds the wire contract's integers exactly (TS
-     * parity): a fractional prNumber/episode must fail the body binding with
-     * a 400, never truncate into the route's long fields. This customizes the
-     * auto-configured MVC mapper; the internal protocol mapper above is a
-     * separate surface and keeps its own rules.
-     */
-    @Bean
-    Jackson2ObjectMapperBuilderCustomizer managedApiIntegerTokens() {
-        return builder -> builder.featuresToDisable(
-                DeserializationFeature.ACCEPT_FLOAT_AS_INT);
-    }
-
     @Override
     public void extendMessageConverters(List<HttpMessageConverter<?>> converters) {
         ObjectMapper internal = protocol.copy();
@@ -48,6 +36,18 @@ public class ManagedSessionJsonConfiguration implements WebMvcConfigurer {
                         .rebuild().maxStringLength(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BASE64_CHARS).build());
                 jackson.registerObjectMappersForType(CommitTransactionRequest.class,
                         mappings -> jackson.getSupportedMediaTypes().forEach(type -> mappings.put(type, commits)));
+                // The three pr-watch wire records bind integers exactly (TS
+                // parity): a fractional prNumber/episode must fail body binding
+                // with a 400, never truncate into the route's long fields. The
+                // strictness is scoped to these records so the rest of the MVC
+                // surface (public /v1/** included) keeps its default binding.
+                ObjectMapper strictInts = jackson.getObjectMapper().copy()
+                        .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
+                for (Class<?> record : new Class<?>[] {PrWatchCreateRequest.class,
+                        PrWatchInjectRequest.class, PrWatchRetireRequest.class}) {
+                    jackson.registerObjectMappersForType(record,
+                            mappings -> jackson.getSupportedMediaTypes().forEach(type -> mappings.put(type, strictInts)));
+                }
             }
         }
     }

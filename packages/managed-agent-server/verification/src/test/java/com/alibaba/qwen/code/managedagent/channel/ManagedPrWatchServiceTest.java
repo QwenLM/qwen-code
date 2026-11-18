@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcPrWatchBindingStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcPrWatchInjectionRepository;
@@ -385,6 +386,34 @@ class ManagedPrWatchServiceTest {
     }
 
     @Test
+    void injectReleasesAStagedRowAndDeliversToTheReboundSession() {
+        // A transient Harness failure stages the row for Session A without
+        // admitting it. After retire + rebind to Session B the adapter
+        // re-drives the identical occurrence: a staged row is not an
+        // admission, so it must be released and re-staged for B — not refused
+        // as a conflict that would reserve the identity for A forever.
+        String first = createSession(WORKSPACE);
+        bind(first);
+        harness.failTransientOnce = true;
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text")))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getStatus()).isEqualTo(503));
+        assertThat(ledgerRows(first)).singleElement()
+                .extracting(row -> row.get("state")).isEqualTo("staged");
+        service.retire(TENANT, channel, new PrWatchRetireRequest(OWNER, REPO, PR));
+        String second = createSession(WORKSPACE);
+        bind(second);
+        PrWatchAdmission admission = service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text"));
+        assertThat(admission.sessionId()).isEqualTo(second);
+        assertThat(admission.replayed()).isFalse();
+        assertThat(ledgerRows(first)).isEmpty();
+        assertThat(ledgerRows(second)).singleElement()
+                .extracting(row -> row.get("state")).isEqualTo("admitted");
+    }
+
+    @Test
     void distinctTransitionsAndHeadsDeriveDistinctInputs() {
         String sessionId = createSession(WORKSPACE);
         bind(sessionId);
@@ -639,6 +668,7 @@ class ManagedPrWatchServiceTest {
         final List<Call> calls = new ArrayList<>();
         final Map<String, Map<String, Object>> inputs = new LinkedHashMap<>();
         boolean loseAnswerOnce;
+        boolean failTransientOnce;
 
         @Override
         public boolean isAvailable() {
@@ -682,6 +712,10 @@ class ManagedPrWatchServiceTest {
                 String sessionId, Map<String, Object> body) {
             calls.add(new Call(sessionId, new LinkedHashMap<>(body)));
             assertThat(body.get("kind")).isEqualTo("submit_pr_event_input");
+            if (failTransientOnce) {
+                failTransientOnce = false;
+                throw new HarnessFailure("transient harness failure");
+            }
             String inputId = String.valueOf(body.get("inputId"));
             boolean replayed = inputs.containsKey(inputId);
             inputs.putIfAbsent(inputId, body);

@@ -1574,11 +1574,6 @@ jobs:
             fi
             sleep $((attempt * 15))
           done
-      - name: 'Run managed PR-watch bound-session E2E'
-        if: "${{ !cancelled() }}"
-        timeout-minutes: 10
-        run: >-
-          npm run test:e2e:managed-pr-watch
       - name: 'Install Managed Agent dependencies'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
@@ -1597,6 +1592,11 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
           fi
+      - name: 'Run managed PR-watch bound-session E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-pr-watch
       - name: 'Run session owner failover E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10

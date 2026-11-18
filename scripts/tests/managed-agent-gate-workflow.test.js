@@ -71,6 +71,7 @@ describe('Managed Agent gate scope', () => {
     'integration-tests/helpers/hosted-harness-process.ts',
     'integration-tests/vitest.hosted.config.ts',
     'scripts/run-managed-agent-server-e2e.ts',
+    'scripts/run-managed-pr-watch-e2e.mjs',
     '.github/workflows/sdk-java.yml',
     '.github/workflows/managed-agent-gate.yml',
     '.github/scripts/managed-agent-gate-scope.mjs',

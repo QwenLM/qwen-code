@@ -777,8 +777,8 @@ describe('Hosted real-process gates', () => {
     expect(job['runs-on']).toBe('ubuntu-latest');
     expect(job.env.QWEN_E2E_REGISTER_STORAGE).toBe('1');
     // Every arm the job runs has a row above, so none runs unpinned. The
-    // PR-watch bound-session rig is a separate channel gate (its own runner,
-    // not the failover runner) and is pinned by its own case below.
+    // PR-watch bound-session rig is not one of the failover arm rows; it is
+    // pinned by its own case below.
     expect(
       job.steps
         .filter(
@@ -841,12 +841,17 @@ describe('Hosted real-process gates', () => {
     expect(step.run).toContain(`npm run ${script}`);
     expect(step['timeout-minutes']).toBe(10);
     expect(step['continue-on-error']).toBeUndefined();
-    // It needs only the bundled CLI + core dist, so it runs right after the
-    // install/build/bundle step, before the Maven packaging.
-    const bundle = job.steps.findIndex((s) =>
-      /corepack pnpm install --frozen-lockfile/.test(s.run ?? ''),
+    // It runs beside the other arms, after the failover prerequisites and
+    // under the same bound, so a rig flake cannot skip the remaining setup
+    // and arms, and a failed install does not run it against a missing dist.
+    const install = job.steps.findIndex(
+      (s) => s.name === 'Install MySQL binaries for the failover E2E',
     );
-    expect(job.steps.indexOf(step)).toBeGreaterThan(bundle);
+    expect(install).toBeGreaterThan(-1);
+    expect(job.steps.indexOf(step)).toBeGreaterThan(install);
+    expect(step.if).toBe(
+      "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}",
+    );
   });
 
   it.each(failoverArms)(

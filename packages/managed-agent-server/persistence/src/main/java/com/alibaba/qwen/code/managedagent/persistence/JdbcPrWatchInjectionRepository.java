@@ -109,6 +109,34 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
         return find(tenantId, inputId).orElse(null);
     }
 
+    @Override
+    public boolean releaseStaged(String tenantId, String inputId) {
+        ChannelStoreSupport.requireId(tenantId, "tenantId");
+        ChannelStoreSupport.requireId(inputId, "inputId");
+        PrWatchInjection old = find(tenantId, inputId).orElse(null);
+        if (old == null || !"staged".equals(old.state())) {
+            return false;
+        }
+        String scope = ManagedSchemaKeys.key("CHANNEL", tenantId, old.channelInstanceId());
+        String operation = ManagedSchemaKeys.operationKey(OperationKind.PR_WATCH_INJECT, scope,
+                ManagedSchemaKeys.key(old.sessionId()), inputId);
+        String receipt = ManagedSchemaKeys.receiptKey(ReceiptNamespace.PR_WATCH_INJECT, tenantId,
+                ReceiptScope.CHANNEL, old.channelInstanceId(), inputId);
+        Boolean released = transactions.execute(status -> {
+            // The state guard keeps a concurrent admission from being released:
+            // if the row slipped to admitted, leave both rows untouched.
+            int ops = jdbc.update("DELETE FROM ma_operation WHERE operation_key = ?"
+                    + " AND operation_kind = 'PR_WATCH_INJECT' AND state = 'staged'", operation);
+            if (ops != 1) {
+                return false;
+            }
+            jdbc.update("DELETE FROM ma_request_receipt WHERE receipt_key = ?"
+                    + " AND namespace = 'PR_WATCH_INJECT'", receipt);
+            return true;
+        });
+        return Boolean.TRUE.equals(released);
+    }
+
     private PrWatchInjection row(java.sql.ResultSet row, int index) throws java.sql.SQLException {
         JsonNode body = JdbcManagedToolResultStore.parse(row.getString("request_json"));
         return new PrWatchInjection(row.getString("tenant_id"), row.getString("operation_id"),
