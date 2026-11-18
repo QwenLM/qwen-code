@@ -6923,8 +6923,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     },
   );
 
-  it('keeps every reply another session sent in view when the turn collapses', () => {
-    const replyCard = (id: string): SystemMessage => {
+  it.each(['none', 'before', 'between'])('keeps relays (%s)', (ordinary) => {
+    const replyCard = (id: string, crossSession = true): SystemMessage => {
       const backgroundTurn = {
         turnId: `turn-${id}`,
         taskId: id,
@@ -6942,7 +6942,7 @@ describe('MessageList — turn collapse (DOM)', () => {
           ...backgroundTurn,
           backgroundTask: {
             status: 'completed',
-            fromSession: { sessionId: id },
+            ...(crossSession ? { fromSession: { sessionId: id } } : {}),
           },
         },
         backgroundTurn,
@@ -6957,17 +6957,30 @@ describe('MessageList — turn collapse (DOM)', () => {
     };
     const c = mount([
       userMsg('u1'),
+      asstMsg('initial-answer'),
+      ...(ordinary === 'before'
+        ? [replyCard('ordinary', false), toolMsg('ordinary-tool')]
+        : []),
       replyCard('a'),
       toolMsg('g1'),
       asstMsg('a1'),
       completed,
       asstMsg('a1-rest'),
+      ...(ordinary === 'between'
+        ? [
+            replyCard('ordinary', false),
+            toolMsg('ordinary-tool'),
+            asstMsg('ordinary-summary'),
+          ]
+        : []),
       replyCard('b'),
       toolMsg('g2'),
       asstMsg('a2'),
     ]);
     expect(isCollapsed(c, 'g1')).toBe(true);
     expect(has(c, 'g2')).toBe(false);
+    expect(has(c, 'ordinary-summary')).toBe(false);
+    expect(has(c, 'initial-answer')).toBe(true);
     for (const id of ['card-a', 'a1', 'a1-rest', 'card-b', 'a2']) {
       expect(has(c, id)).toBe(true);
     }

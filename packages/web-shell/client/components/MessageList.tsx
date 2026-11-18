@@ -2144,27 +2144,34 @@ export function applyTurnCollapse(
 
     const answerIdx = findFinalAnswerIndex(items, start, end);
     const answerStartIdx = findAnswerStartIndex(items, start, answerIdx);
-    // Each reply another session sent starts its own exchange, so the answer
-    // before its card stays in view too.
     const exchangeAnswers: Array<[number, number]> = [];
+    const keepExchangeAnswer = (from: number, to: number) => {
+      const idx = findFinalAnswerIndex(items, from, to);
+      if (idx >= 0) {
+        exchangeAnswers.push([findAnswerStartIndex(items, from, idx), idx]);
+      }
+    };
+    let promptAnswerEnd: number | undefined;
     let exchangeStart = start;
+    let exchangeFromSession = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
       if (
-        item.type === 'message' &&
-        item.message.role === 'system' &&
-        item.message.source === 'background_notification_turn_started' &&
-        isTurnFromSession(item.message.data)
+        item.type !== 'message' ||
+        item.message.role !== 'system' ||
+        item.message.source !== 'background_notification_turn_started'
       ) {
-        const idx = findFinalAnswerIndex(items, exchangeStart, i - 1);
-        if (idx >= 0) {
-          exchangeAnswers.push([
-            findAnswerStartIndex(items, exchangeStart, idx),
-            idx,
-          ]);
-        }
-        exchangeStart = i;
+        continue;
       }
+      const nextFromSession = isTurnFromSession(item.message.data);
+      if (exchangeStart === start) promptAnswerEnd = i - 1;
+      if (nextFromSession && promptAnswerEnd !== undefined) {
+        keepExchangeAnswer(start, promptAnswerEnd);
+        promptAnswerEnd = undefined;
+      }
+      if (exchangeFromSession) keepExchangeAnswer(exchangeStart, i - 1);
+      exchangeStart = i;
+      exchangeFromSession = nextFromSession;
     }
     const isAnswerAt = (i: number) =>
       (i >= answerStartIdx && i <= answerIdx) ||
