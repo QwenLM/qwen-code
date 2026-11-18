@@ -196,12 +196,6 @@ final class AgentSessionPolicies {
                 AgentDefinitionExtensions.skills(content.get("skills"), true));
     }
 
-    String creationToolProfile(String tenantId, String actorId,
-            String agentId, String requestedRevision, String workspaceId) {
-        AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision, true);
-        return ExternalWorkspaceSessionPolicies.profileForSkillDiscovery(workspaces, tenantId, actorId, workspaceId, pin.toolProfile());
-    }
-
     boolean hasMcpServers(SessionRecord session) {
         if (WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
             return false;

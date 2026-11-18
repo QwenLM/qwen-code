@@ -5,6 +5,7 @@
  */
 
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { getHeadCommit } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import {
   applySessionStartupConfig,
   parseSessionStartupConfig,
@@ -750,9 +751,17 @@ interface SessionEntry {
     released: boolean;
   };
   /** Worktree isolation metadata, when created with worktree param. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+    baseBranch?: string;
+  };
   /** Branch metadata, when created with branch param. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
+  /** Start commit captured at creation for a plain session (no branch/worktree). */
+  baseCommit?: string;
   /** GitHub PRs bound via updateSessionMetadata, in binding order. */
   prs?: SessionPrInfo[];
   channel: AcpChannel;
@@ -4604,6 +4613,7 @@ export function createSessionControlPlane(
       pendingInteractions: [...entry.pendingInteractions.values()],
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
       ...(entry.branch ? { branch: entry.branch } : {}),
+      ...(entry.baseCommit ? { baseCommit: entry.baseCommit } : {}),
       ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
       // session/load registers the entry before it awaits
       // artifacts.restore(), and rewind restores into a live entry; both
@@ -5636,8 +5646,15 @@ export function createSessionControlPlane(
     parentSessionId?: string,
     sourceType?: string,
     sourceId?: string,
-    worktree?: { slug: string; path: string; branch: string },
-    branch?: { name: string; baseBranch: string },
+    worktree?: {
+      slug: string;
+      path: string;
+      branch: string;
+      baseCommit?: string;
+      baseBranch?: string;
+    },
+    branch?: { name: string; baseBranch: string; baseCommit?: string },
+    baseCommit?: string,
     requestedSessionId?: string,
     daemonOwnedStandaloneCreation = false,
     onNewSessionDispatch?: () => void,
@@ -5935,12 +5952,29 @@ export function createSessionControlPlane(
         }
       }
 
+      // A plain session (no branch/worktree meta) records its start commit so
+      // the change overview's commit fallback can scope <baseCommit>..HEAD.
+      // Captured here centrally for every plain producer (scheduled tasks,
+      // sub-sessions, live tasks, a2a, …) that does not pass one (R5-1). Read
+      // once at creation; a failed read stays undefined (no boundary). The
+      // attach/coalesce paths return before this point, so an existing
+      // session's recorded start commit is never recomputed from a moved HEAD.
+      const startCommit =
+        baseCommit ??
+        (branch || worktree ? undefined : getHeadCommit(boundWorkspace));
       const entry = createSessionEntry(
         ci,
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId, sourceType, sourceId, worktree, branch },
+        {
+          parentSessionId,
+          sourceType,
+          sourceId,
+          worktree,
+          branch,
+          baseCommit: startCommit,
+        },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -6139,6 +6173,7 @@ export function createSessionControlPlane(
         ...(startupConfigApplied ? { startupConfigApplied } : {}),
         ...(entry.worktree ? { worktree: entry.worktree } : {}),
         ...(entry.branch ? { branch: entry.branch } : {}),
+        ...(entry.baseCommit ? { baseCommit: entry.baseCommit } : {}),
       };
     } finally {
       if (requestedSessionId !== undefined) {
@@ -7605,8 +7640,15 @@ export function createSessionControlPlane(
       parentSessionId?: string;
       sourceType?: string;
       sourceId?: string;
-      worktree?: { slug: string; path: string; branch: string };
-      branch?: { name: string; baseBranch: string };
+      worktree?: {
+        slug: string;
+        path: string;
+        branch: string;
+        baseCommit?: string;
+        baseBranch?: string;
+      };
+      branch?: { name: string; baseBranch: string; baseCommit?: string };
+      baseCommit?: string;
     } = {},
   ): SessionEntry => {
     const childSnapshot = ci.harness.activeWork?.snapshot;
@@ -7623,6 +7665,7 @@ export function createSessionControlPlane(
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
       ...(options.branch ? { branch: options.branch } : {}),
+      ...(options.baseCommit ? { baseCommit: options.baseCommit } : {}),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -11562,6 +11605,7 @@ export function createSessionControlPlane(
         source.sourceId,
         req.worktree,
         req.branch,
+        req.baseCommit,
         req.sessionId,
         daemonOwnedStandaloneCreation,
         trustedStandaloneSpawn
@@ -13556,6 +13600,31 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (entry?.worktree !== undefined) {
         delete entry.worktree;
+        markSessionCatalogChanged();
+      }
+    },
+
+    setSessionBaseCommit(sessionId, baseCommit) {
+      const entry = byId.get(sessionId);
+      // Fill-only: the start commit is immutable once recorded at creation.
+      // A plain session that visits a worktree already carries its creation
+      // start S; promoting the worktree's later creation tip T on hand-back
+      // must not overwrite S (that would permanently hide the S..T commits).
+      // A branch session records its start on branch.baseCommit and has no
+      // top-level value, so the guard must treat that as already recorded too
+      // — otherwise hand-back installs T top-level, the summary-first hook
+      // composes T..HEAD, and the branch session's window empties (R7-1).
+      // Sessions created as a worktree have neither a top-level nor a branch
+      // start (only worktree.baseCommit, which is NOT gated here because this
+      // runs before clearSessionWorktree), so this still fills their boundary
+      // on hand-back (R6-1).
+      if (
+        entry &&
+        baseCommit &&
+        entry.baseCommit === undefined &&
+        entry.branch?.baseCommit === undefined
+      ) {
+        entry.baseCommit = baseCommit;
         markSessionCatalogChanged();
       }
     },
