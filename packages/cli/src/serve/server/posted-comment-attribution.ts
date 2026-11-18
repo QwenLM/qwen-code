@@ -836,30 +836,19 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     // The shell tool echoes "Command: <cmd>\nDirectory: ...\nOutput (stdout
     // and stderr combined): <result>\nExecution Error: ...". Recorded
     // transcripts keep the earlier "Output:" / "Error:" labels.
-    const directoryPrefix = '\nDirectory: ';
-    const directoryStart = output.indexOf(directoryPrefix);
+    const headerPattern =
+      /\nDirectory: [^\n]*(?:\n(?!Directory: |Output(?: \(stdout and stderr combined\))?: )[^\n]*)*\n(Output(?: \(stdout and stderr combined\))?): /g;
+    const header = headerPattern.exec(output);
+    if (header && headerPattern.exec(output)) continue;
     const outputPattern = /\n(Output(?: \(stdout and stderr combined\))?): /g;
-    outputPattern.lastIndex = Math.max(0, directoryStart);
-    const boundary = outputPattern.exec(output);
+    const boundary = header ?? outputPattern.exec(output);
     if (!boundary) continue;
-    const resultStart = outputPattern.lastIndex;
-    if (outputPattern.exec(output)) continue;
+    if (!header && outputPattern.exec(output)) continue;
 
-    const nextDirectory =
-      directoryStart === -1
-        ? -1
-        : output.indexOf(
-            directoryPrefix,
-            directoryStart + directoryPrefix.length,
-          );
-    if (nextDirectory !== -1 && nextDirectory < boundary.index) continue;
-
-    const command = output.slice(
-      commandPrefix.length,
-      directoryStart === -1 ? boundary.index : directoryStart,
-    );
+    const command = output.slice(commandPrefix.length, boundary.index);
     const segment = creationSegment(command);
     if (!segment) continue;
+    const resultStart = boundary.index + boundary[0].length;
     const errorPrefix =
       boundary[1] === 'Output' ? '\nError:' : '\nExecution Error:';
     const successFooter = `${errorPrefix} (none)`;
@@ -868,9 +857,7 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     const resultEnd =
       successFooterStart >= resultStart &&
       output.startsWith(successFooter, successFooterStart) &&
-      /^\nExit Code: (?:-?\d+|\(none\))(?=\n|$)/.test(
-        output.slice(exitCodeStart),
-      )
+      /^\nExit Code: 0(?=\n|$)/.test(output.slice(exitCodeStart))
         ? successFooterStart
         : output.indexOf(errorPrefix, resultStart);
     const result = output.slice(

@@ -160,15 +160,26 @@ describe('extractPostedCommentIds', () => {
     },
   );
 
-  it('does not attribute a URL found only in the execution error', () => {
-    const command = 'gh pr comment 1 --body a';
-    const url = 'https://github.com/o/r/pull/1#issuecomment-99';
+  it.each(['', '\nExecution Error: (none)'])(
+    'does not attribute a URL found only in the execution error (suffix %j)',
+    (suffix) => {
+      const command = 'gh pr comment 1 --body a';
+      const url = 'https://github.com/o/r/pull/1#issuecomment-99';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: (root)\nOutput (stdout and stderr combined): (empty)\nExecution Error: could not post ${url}${suffix}\nExit Code: (none)\nSignal: (none)\nProcess Group PGID: (none)`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual([]);
+    },
+  );
+
+  it('does not treat standalone labels as a second complete header', () => {
     const entry = shellResult(
-      command,
-      '',
-      `Command: ${command}\nDirectory: (root)\nOutput (stdout and stderr combined): (empty)\nExecution Error: could not post ${url}\nExit Code: (none)\nSignal: (none)\nProcess Group PGID: (none)`,
+      "gh pr comment 1 --body 'Example:\nDirectory: sample'",
+      'notice\nOutput: retrying\nhttps://github.com/o/r/pull/1#issuecomment-42',
     );
-    expect(extractPostedCommentIds(entry)).toEqual([]);
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
   });
 
   it('still attributes a legacy transcript without a Directory line', () => {
