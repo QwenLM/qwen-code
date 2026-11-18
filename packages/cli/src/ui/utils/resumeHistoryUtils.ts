@@ -791,7 +791,16 @@ export function stripSuppressOnRestore<T extends Pick<HistoryItem, 'display'>>(
   };
 }
 
-/** Counts the resumed user turns that the visible Prompts statistic tracks. */
+/**
+ * Counts the resumed user turns that the visible Prompts statistic tracks.
+ * Mirrors the live counter, which advances only for UserQuery / Cron /
+ * Teammate sends: background and agent records are `type: 'user'` but never a
+ * real user prompt, so counting them would inflate the statistic on resume
+ * (the exact inflation the promptCount/userPromptCount split prevents). The
+ * exclusion set matches the transcript navigation predicate
+ * (session-transcript-reader recordToNavigationTurnKind) plus realtime
+ * messages; cron and teammate records stay counted (R15-1).
+ */
 export function computeResumedUserTurnCount(
   records: readonly ChatRecord[],
 ): number {
@@ -799,7 +808,11 @@ export function computeResumedUserTurnCount(
     (m) =>
       m.type === 'user' &&
       m.subtype !== 'mid_turn_user_message' &&
-      m.subtype !== 'realtime_message',
+      m.subtype !== 'realtime_message' &&
+      m.subtype !== 'notification' &&
+      m.subtype !== 'goal_runtime' &&
+      m.subtype !== 'agent_mention' &&
+      m.subtype !== 'agent_message',
   ).length;
 }
 

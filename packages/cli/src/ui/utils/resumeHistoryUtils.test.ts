@@ -2564,6 +2564,27 @@ describe('computeResumedUserTurnCount', () => {
     ).toBe(3);
   });
 
+  it('excludes background and agent records that are type:user but not user prompts (R15-1)', () => {
+    // One plain user prompt plus one background notification record: the
+    // visible statistic counts 1, not 2 — the live counter never advances for
+    // a notification. goal_runtime and the session multi-agent records are
+    // likewise type:user but never a real user prompt.
+    expect(
+      computeResumedUserTurnCount([userRecord(), userRecord('notification')]),
+    ).toBe(1);
+    // cron stays counted: the live counter advances for Cron sends.
+    expect(
+      computeResumedUserTurnCount([
+        userRecord(),
+        userRecord('notification'),
+        userRecord('goal_runtime'),
+        userRecord('agent_mention'),
+        userRecord('agent_message'),
+        userRecord('cron'),
+      ]),
+    ).toBe(2);
+  });
+
   it('stays below the mint seed when background mints claimed higher ids (S1)', () => {
     // Three user turns but a background mint claimed id 9: the mint seed is
     // 10 while the visible-statistic seed must stay at the user-turn count.
