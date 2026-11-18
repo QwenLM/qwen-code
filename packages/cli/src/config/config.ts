@@ -2127,8 +2127,8 @@ export async function loadCliConfig(
       ? []
       : normalizeDisabledToolList(settings.tools?.visible);
   // `tools.eager` restricts which schemas ride in the initial model request
-  // (#9827). Unlisted tools stay registered and reachable via tool_search —
-  // it is a schema-size knob, not an availability knob (#10075).
+  // (#9827). Unlisted tools stay registered even when the session's
+  // discovery or invocation tools are unavailable (#10075).
   //
   // An explicitly empty array must survive as an empty array, not collapse
   // into "unset": `[]` is an active allowlist naming nothing (defer

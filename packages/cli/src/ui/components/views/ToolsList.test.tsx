@@ -65,9 +65,12 @@ describe('<ToolsList />', () => {
       />,
     );
     const frame = lastFrame() ?? '';
-    expect(frame).toContain('tool_search');
-    expect(frame).toContain('tool_call');
-    expect(frame).toContain('permissions.deny');
+    const text = frame.replace(/\s+/g, ' ');
+    expect(text).toContain('direct mode uses tool_search then tool_call');
+    expect(text).toContain('Code mode uses tool_search then exec');
+    expect(text).toContain('permissions.deny');
+    expect(text).toContain('--exclude-tools');
+    expect(text).toContain('Restart Qwen Code');
   });
 
   it('marks fixed-only media-policy tools and leaves others unmarked', () => {

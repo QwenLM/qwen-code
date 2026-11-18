@@ -901,9 +901,8 @@ export class PermissionManager {
    *
    * While the `settings.tools.eager` allowlist is active (see
    * `isEagerToolAllowListActive`), a built-in tool not named in it is
-   * `deferred`, NOT `disabled`: it stays registered — listed in `/tools`,
-   * discoverable and callable through the ToolSearch + ToolCall bridge — but its schema is kept out
-   * of the eager model request, which is the #9827 guarantee. Call-time
+   * `deferred`: it stays registered and listed in `/tools`, but its schema
+   * is omitted from the eager model request (#9827). Call-time
    * approval for such a tool falls back to the normal permission
    * evaluation (ask / approval-mode), so nothing loses capability
    * silently (#10075).
