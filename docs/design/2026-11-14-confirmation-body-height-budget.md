@@ -48,9 +48,10 @@ destinations are invisible.
   claim: `ask_user_question` returns its own dialog before any budget is
   taken, and the body grant floors at one row, so a height shorter than the
   chrome plus that row yields a frame taller than the grant.
-- A body is sized from one budget, computed once, and that same number is the
-  ceiling of the outer cap.
-- Any truncation shows a contiguous prefix and says how much is hidden.
+- A body is sized from one budget, computed once, and the ceiling of the outer
+  cap is that number plus the measured auto-mode banner.
+- Any truncation shows a contiguous block — a prefix, or for a list whose last
+  entry is the one that matters a suffix — and says how much is hidden.
 - The destination list in a fetch-style confirmation outranks the prose that
   accompanies it, and a clipped destination list can never look complete.
 - There is a discoverable way to read the whole body without answering.
@@ -97,9 +98,11 @@ Content that is cut must be pinned first. Ink rows with `flexShrink: 0` keep
 their natural height, so the cap cuts the tail instead of compressing a
 scatter of rows. `MaxSizedBox` already does exactly this for its own rows and
 renders the `... last N lines hidden ...` footer, and anything routed through
-it inherits both — but only for a box told to cut at the bottom, which every
-box here sets explicitly; the default hides the head and prints
-`... first N line(s) hidden ...`.
+it inherits both — but only for a box told to cut at the bottom, because the
+default hides the head and prints `... first N line(s) hidden ...`. Which end
+a box keeps is a decision about the content rather than a house default; the
+ordering section below says which boxes keep their tail and which keep their
+head.
 
 Rows that `MaxSizedBox` cannot host stay pinned Ink rows and render their own
 counted footer:
@@ -138,8 +141,12 @@ prompt is sized:
   floor: it renders no footer, so the floor does not apply to it. A block
   dropped whole hands its rows to a `... prompt hidden ...` notice while at
   least one row is free; when not even that row is left, the destinations keep
-  it and the prose goes unannounced: a prose footer would push the destination
-  footer past the cap, and Ink would cut off the one that matters instead.
+  it and the prose has no row to announce itself with — a prose footer would
+  push the destination footer past the cap, and Ink would cut off the one that
+  matters instead. The dropped prose registers the reveal in that case anyway:
+  a frame in which the prompt simply vanished, with neither a prose footer nor
+  a count of hidden destinations, is exactly the frame where nothing else would
+  light the shortcut.
 
 The trade-off is deliberate: at a body budget of roughly five rows or fewer,
 the destinations outrank the explanation, and the prose may be gone. The
@@ -150,17 +157,29 @@ user still sees which hosts are being authorized and can reveal the rest.
 The orderings below were chosen deliberately and are what the code does:
 
 - Inside the fetch-style body, destinations outrank the prose that only
-  describes the request; inside the warning list, the last warning outranks
-  the earlier ones, because a mode warning describes the request while the
-  warning naming the exact action is the one that changes it.
-- Where a warnings box and the branch's own body element (the diff, the
-  command) share one capped grant, the box needs one row per warning to show
-  them all; once it has to cut, the ceiling it is given _is_ its charge,
-  because it renders exactly that many rows. The other side never loses its
-  last row to the split: with two rows it lays out through a box, with one
-  row it renders the notice that counts what it dropped. At a grant so small
-  that only one side can have a row, the warning keeps it and the command
-  goes.
+  describes the request. Inside the warning list, the last warning outranks the
+  earlier ones, because a mode warning describes the request while the warning
+  naming the exact action is the one that changes it; a warnings box that has
+  to cut therefore asks for the head cut and keeps its tail.
+- Where a warnings box and the branch's own subject (the diff, the command)
+  share one capped grant, the subject keeps the row: it is the thing being
+  authorised. The box is charged at what it actually draws — its wrapped rows
+  while all of them fit, otherwise one row each — and whatever the split takes
+  from it is counted on the row that survived, as `+N warning(s) hidden` once
+  the subject is down to its single row. A warnings box dropped with no row of
+  its own registers the reveal, so the rows it lost can still be had back. The
+  subject never loses its last row to the split either: with two rows it lays
+  out through a box, with one row it renders the notice that counts what it
+  dropped.
+- An MCP identity row carries two labels and neither half is dispensable — the
+  server says where the call goes, the tool says what it does — so at a
+  one-row grant each label is cut inside itself and the row registers that a
+  cut happened, rather than letting the joined line decide by overflowing.
+- In a plan body the editor hint is the way out of a clipped plan, so it is
+  charged a row only when the plan is clipped. At a grant that fits one of the
+  two, the plan keeps the row, and the view's two-row floor does not by itself
+  drop a plan that needs no more rows than the grant holds: dropping it would
+  hide the thing being approved behind a cue the cap cuts away anyway.
 - The destination block's chrome is what gets handed back under pressure —
   blank separator, then label — and the counted footer is the last thing
   standing, because the count is the only signal that the list continues.
@@ -196,9 +215,12 @@ generic; the hint itself is left as the shared one.
 The exception is a plan body that survives the budget and is cut inside
 `MarkdownDisplay`: that component draws its own in-place cue and registers no
 overflow id, so the shortcut hint is not lit by it. The plan branch keeps its
-own always-rendered `o open full plan in editor` row for that case, and
-registers an overflow when the budget is so small that the plan body is dropped
-outright.
+own `o open full plan in editor` row for that case and charges it a row only
+when the plan is actually clipped — a plan that fits the rows on offer has
+nothing to escape from, and at a grant that fits one of the two the plan is the
+one that keeps the row. The branch registers an overflow when the budget is so
+small that the plan body is dropped outright, which happens only when the plan
+needs more rows than the grant holds.
 
 ## Constraints
 
@@ -211,8 +233,9 @@ outright.
   the marker is a row, so the capped content and the marker have to be costed
   together.
 - A `MaxSizedBox` cuts its tail only when told to: `overflowDirection` must be
-  `"bottom"`, because the default hides the head and prints
-  `... first N line(s) hidden ...`.
+  `"bottom"` for content whose head is the part that matters, while the warning
+  boxes ask for the default head cut on purpose, because there the tail is what
+  matters and the head cut prints `... first N line(s) hidden ...`.
 - The outer cap is a layout guard, not a formatter. It cannot announce what it
   clipped, because it never measures layout — every body that can overflow must
   announce its own truncation, and the guard only bounds the damage.
@@ -245,11 +268,15 @@ outright.
   - exec confirmation with an unavailable classifier at a 12-row terminal: the
     command text and the `No` option are both on screen, and no blank block
     replaces the command;
-  - exec warnings at a budget that cannot hold them all: the list is capped to a
-    contiguous, counted prefix and the command keeps the leftover row as a
-    pinned truncated cue that registers the overflow, instead of seven body
-    rows being compressed under a five-row cap; a command shrunk to a single
-    row announces itself the same way;
+  - exec warnings at a budget that cannot hold them all: the command reserves
+    its row first and the warnings share out the rest — charged at their wrapped
+    rows while those fit, one row each once they do not — so the box cuts at the
+    head and the warning naming the exact action survives, instead of seven body
+    rows being compressed under a five-row cap; a one-row warning ask pins the
+    last warning on a row that counts the earlier ones as `+N warning(s) hidden`;
+    a warnings box with no row of its own registers the reveal and hands its
+    count to the row that survived; and a command shrunk to a single row
+    announces itself the same way;
   - 30 destinations at small budgets down to two body rows: the
     `URLs to fetch:` header, a contiguous prefix of destinations and a counted
     hidden-URLs row are on screen, and a scattered sample is not; the header is
@@ -267,21 +294,33 @@ outright.
     while counting what is drawn drops the block whole and spends that row on
     the announcement;
   - a plan body with room: the plan rows and the `o open full plan in editor`
-    row occupy separate rows, and at a two-row budget the dropped plan is
-    announced, which is also what lights the reveal shortcut;
+    row occupy separate rows; a plan that needs more rows than the grant holds
+    is dropped at a two-row budget and announced, which is also what lights the
+    reveal shortcut, and the hint keeps the row at a one-row grant; a plan that
+    fits the single row the budget leaves is rendered as text, with neither the
+    hint row nor an announcement, because nothing was cut;
   - a long MCP identity at a one-row budget: the two identity rows give way to
-    one pinned truncated row, because the sizing box cannot answer a one-row
-    ask and would otherwise render past the cap;
+    one pinned row that holds both halves, each label cut inside itself, so the
+    row still says where the call goes and what it does instead of the longer
+    half pushing the other off screen, and it registers that a cut happened;
   - an edit body at an extreme budget: with two body rows and one warning the
     diff gives way to a `... diff hidden ...` announcement, and with one body
-    row and two warnings the warning naming the exact action survives on a
-    pinned row that counts the rest as `+N warning(s) hidden`; both register an
-    overflow, so a dropped diff lights the reveal hint the way a dropped plan
-    does;
+    row the warnings are dropped whole — the change itself keeps the row and the
+    announcement's tail counts them as `+N warning(s) hidden`; a one-row warning
+    ask keeps the last warning and counts the ones behind it the same way; all
+    of these register an overflow, so a dropped diff lights the reveal hint the
+    way a dropped plan does;
   - a plain-text prompt squeezed out by its own footer: the dropped prose is
     announced; and at a budget where the last row is contested, the destination
     footer keeps it and the prose footer is omitted rather than clipping the
     destination footer;
+  - prose left with no row at all, not even one for a footer: the reveal is
+    registered anyway, and the frame still shows a destination, the question and
+    the answers;
+  - the two-option blocked retry layout on a tight compact terminal: the four
+    command rows are asserted as four distinct rendered rows in order, because a
+    row compressed onto its neighbour still prints its text and a substring
+    check would pass a squeezed frame;
   - a plain-text prompt that fits a one-row budget: it renders, because the
     `MINIMUM_MAX_HEIGHT` floor exists only to pay for a footer that a fitting
     body never needs;
@@ -310,10 +349,12 @@ outright.
   or options below the fold, at any terminal height that can hold them.
 - For each confirmation type, the body ceiling equals the single budget that
   type branch computed, plus the measured auto-mode banner height.
-- Every clipped body shows a contiguous prefix and states how much is hidden;
-  a clipped destination list can never read as complete. A plan cut inside
-  `MarkdownDisplay` is the one exception to the announcement: it carries that
-  component's own cue instead of a counted footer from this component.
+- Every clipped body shows a contiguous block — a prefix, or a suffix where the
+  last entry is the one that matters — and states how much is hidden; a clipped
+  destination list can never read as complete. A cut announced inside the
+  renderer that makes it is the exception to a counted footer from this
+  component: a plan cut inside `MarkdownDisplay` carries that component's own
+  cue, and an identity label cut inside itself carries the ellipsis in the label.
 - A body clipped by this component makes the `ctrl-s` hint available for as long
   as it is on screen, and the id is released when the confirmation leaves.
 - A reviewer can reproduce each of the four defects on the parent commit and
