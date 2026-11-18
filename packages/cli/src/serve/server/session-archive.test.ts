@@ -32,6 +32,7 @@ import {
   readPromptLedgerRecords,
 } from '@qwen-code/acp-bridge/promptLedger';
 import {
+  BridgeTimeoutError,
   SessionArchivedError,
   SessionArchivingError,
   SessionConflictError,
@@ -2244,6 +2245,27 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     ).not.toContain(worktreePath);
   });
 
+  it('preserves a checkout referenced by another archived session', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400bd';
+    const siblingId = '550e8400-e29b-41d4-a716-4466554400be';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    writeSessionFile(workspaceDir, siblingId, 'archived');
+    fs.copyFileSync(
+      service.getWorktreeSessionPath(sessionId),
+      service.getWorktreeSessionPathForArchiveState(siblingId, 'archived'),
+    );
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('checkout shared with');
+  });
+
   it('keeps the checkout when the session record was never there', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440091';
     const { service, worktreePath } = setupWorktreeSession(sessionId, {
@@ -3133,6 +3155,35 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     expect(result.errors).toEqual([
       { sessionId, error: expect.stringContaining('already closing') },
     ]);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+    expect(fs.existsSync(worktreePath)).toBe(true);
+  });
+
+  it('preserves the transcript and attachments if the deletion close times out', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400bf';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    const closeSession = vi
+      .fn()
+      .mockRejectedValue(new BridgeTimeoutError('closeSession', 10));
+    const deleteSessionAttachments = vi.fn();
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession, deleteSessionAttachments },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([]);
+    expect(result.errors).toEqual([
+      { sessionId, error: expect.stringContaining('timed out') },
+    ]);
+    expect(closeSession).toHaveBeenCalledWith(sessionId, undefined, {
+      forDeletion: true,
+    });
+    expect(deleteSessionAttachments).not.toHaveBeenCalled();
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       true,
     );

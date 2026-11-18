@@ -212,15 +212,17 @@ async function worktreeAllowedRoots(
 const SIDECAR_SUFFIX = '.worktree.json';
 
 /**
- * Scans another sidecar dir for a sidecar that names the checkout and
- * belongs to a session still on the bridge. Returns the refusal reason, or
+ * Scans the other archive state for references to the checkout. Superseded
+ * sessions count only when checking older transfers and they are still live.
+ * Returns the refusal reason, or
  * `undefined` when there is none; a dir that cannot be listed, or a
  * sidecar in it that cannot be read, also refuses.
  */
-async function findLiveSessionNamingCheckout(
+async function findOtherSessionNamingCheckout(
   dir: string,
+  sessionId: string,
   lockKey: string,
-  isSessionLive: (sessionId: string) => boolean,
+  isSessionLive?: (sessionId: string) => boolean,
 ): Promise<string | undefined> {
   let entries: string[];
   try {
@@ -233,12 +235,16 @@ async function findLiveSessionNamingCheckout(
   }
   for (const entry of entries) {
     if (!entry.endsWith(SIDECAR_SUFFIX)) continue;
+    const otherId = entry.slice(0, -SIDECAR_SUFFIX.length);
+    if (otherId === sessionId) continue;
     const other = await readWorktreeSessionStrict(path.join(dir, entry));
     if (other.state === 'missing') continue;
     if (other.state === 'invalid') return `unreadable sibling sidecar ${entry}`;
     if (canonicalPath(other.session.worktreePath) !== lockKey) continue;
-    const otherId = entry.slice(0, -SIDECAR_SUFFIX.length);
-    if (isSessionLive(otherId)) {
+    if (other.session.supersededBy === undefined) {
+      return `checkout shared with ${entry}`;
+    }
+    if (isSessionLive?.(otherId)) {
       return `session ${otherId} naming the checkout is still live`;
     }
   }
@@ -367,14 +373,15 @@ export async function verifyWorktreeCleanupOwnership(
         };
       }
     }
-    if (plan.otherStateSidecarDir !== undefined) {
-      const otherState = await findLiveSessionNamingCheckout(
-        plan.otherStateSidecarDir,
-        plan.lockKey,
-        isSessionLive,
-      );
-      if (otherState !== undefined) return { ok: false, reason: otherState };
-    }
+  }
+  if (plan.otherStateSidecarDir !== undefined) {
+    const otherState = await findOtherSessionNamingCheckout(
+      plan.otherStateSidecarDir,
+      sessionId,
+      plan.lockKey,
+      olderTombstone ? isSessionLive : undefined,
+    );
+    if (otherState !== undefined) return { ok: false, reason: otherState };
   }
   // Every guard above verified plan.lockKey, but the removal call
   // re-derives its own target from originalCwd + slug. Assert the two
