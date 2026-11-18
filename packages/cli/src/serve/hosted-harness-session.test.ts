@@ -46428,6 +46428,48 @@ describe('idle suspension', () => {
     );
   });
 
+  it('a pending MCP operation keeps the session resident, not blocked', async () => {
+    const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      toolProfile: 'hosted-workspace-mcp/1',
+      mcpServers: [
+        {
+          serverId: 'demo',
+          serverRevision: 1,
+          definitionDigest: 'a'.repeat(64),
+        },
+      ],
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    // The durable record an abandoned dispatch leaves behind: the route's
+    // finally already cleared mcpBusy, so only the record holds the Session.
+    // The owner close in teardown step 3 refuses while it is pending.
+    const pending = vi
+      .spyOn(HostedMcpSession.prototype, 'hasPendingOperations')
+      .mockReturnValue(true);
+    try {
+      await sleep(600);
+      expect((await statusOf(server, clientId)).status).toBe(200);
+      expect(statsOf(server).cleanSuspensions).toBe(0);
+      // The defect this pins: without the durable term the attempt spends its
+      // retries and hands the Session a blocked gate every idle period.
+      expect(statsOf(server).blockedTeardowns).toBe(0);
+      expect(statsOf(server).eligibilityFailures).toBeGreaterThanOrEqual(1);
+    } finally {
+      pending.mockRestore();
+    }
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  });
+
   it('a capped teardown ends the writer lease renewal', async () => {
     const server = await app(false, undefined, true, {
       idleSuspendMs: 150,

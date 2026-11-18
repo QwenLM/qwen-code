@@ -4951,7 +4951,7 @@ export function registerHostedHarnessSessionRoutes(
       if (suspensions.get(sessionId) !== suspension) return;
       void attemptSuspend(sessionId).catch((cause) => {
         writeStderrLineSafe(
-          `qwen serve: Hosted Session ${sessionId} suspension attempt failed: ${String(cause)}`,
+          `qwen serve: Hosted Session ${sessionId} suspension attempt failed: ${sanitizeDaemonLogLine(String(cause))}`,
         );
       });
     };
@@ -4979,6 +4979,14 @@ export function registerHostedHarnessSessionRoutes(
     session.mcpBusy === true ||
     session.hooksBusy === true ||
     session.mcpRecovering > 0 ||
+    // The durable records, not just the in-flight flags: an operation the
+    // dispatch poll gave up on stays pending after the route cleared mcpBusy,
+    // and the owner close in teardown step 3 refuses while it does. Without
+    // these terms every idle period would spend its retries and hand the
+    // Session a blocked gate for a known-pending operation.
+    (session.mcp?.hasPendingOperations() ?? false) ||
+    (session.mcp?.hasUnsettledConfigurations ?? false) ||
+    (session.hooks?.hasPendingOperations ?? false) ||
     compressionBusy(session) ||
     session.fileHistoryOwed !== undefined ||
     hasHostedCleanupDebt(session.managed) ||
@@ -4990,7 +4998,10 @@ export function registerHostedHarnessSessionRoutes(
     session.extensionBootstrapPending === true ||
     (session.replyPlanRetries?.size ?? 0) > 0 ||
     session.ownershipRelease !== undefined ||
-    session.clientFiles !== undefined ||
+    // Liveness, not object presence: unregister() drops the client and
+    // registration but leaves the object on the Session, so testing the field
+    // would make the Session permanently un-suspendable after one panel use.
+    session.clientFiles?.active === true ||
     // An open Harness event stream is a reader this teardown would cut. The
     // design's predicate names it beside the Turn's own stream.
     session.streams.size > 0 ||
@@ -5172,7 +5183,7 @@ export function registerHostedHarnessSessionRoutes(
       writeStderrLineSafe(
         `qwen serve: Hosted Session ${sessionId} teardown uncertain` +
           ` afterMs=${Date.now() - attemptStart} attempts=${suspension.teardownAttempts}` +
-          ` reason=${String(lastTeardownError)}; gate auto-clears in ${reconcileMs}ms`,
+          ` reason=${sanitizeDaemonLogLine(String(lastTeardownError))}; gate auto-clears in ${reconcileMs}ms`,
       );
       const reconcileTimer = setTimeout(() => {
         const entry = suspensions.get(sessionId);
