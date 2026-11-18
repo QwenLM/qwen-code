@@ -32,11 +32,16 @@ worktree to a self-contained archive and restores it:
   `tar.gz` of the worktree tree plus a JSON header beside it. The exclusion
   matches the has-work gate's _ignored-only_ geometry: a path under a
   regenerable directory name (`DISPOSABLE_IGNORED_ROOTS` — `node_modules`,
-  `dist`, `coverage`) is excluded only when git reports it ignored
-  (`ls-files --others --ignored --exclude-standard -z`), so a tracked or
-  non-ignored file under those names is work and is archived (verify finding
-  F3). The `.git` file/dir and the session marker are always excluded. Uses the
-  `tar` dependency already in core; paths are relative to the worktree root.
+  `dist`, `coverage`) is excluded only when git reports it ignored, so a
+  tracked or non-ignored file under those names is work and is archived
+  (verify finding F3). The ignored entries are taken from the `!!` records of
+  the gate's own `status --porcelain --ignored=matching -z` listing — the same
+  command, so the two geometries cannot drift: a contents-matching rule
+  (`packages/app/node_modules/**`) collapses one level deeper than
+  `ls-files --directory` would, and a mismatch let the gate count work the
+  archive then dropped (R6-1). The `.git` file/dir and the session marker are
+  always excluded. Uses the `tar` dependency already in core; paths are
+  relative to the worktree root.
   The header (`buildWorktreeSnapshotMeta`) records base commit (`worktreeBase`),
   HEAD commit, branch, dirty-state summary (tracked/untracked counts **and the
   list of deleted tracked paths**, including rename sources), session id,
@@ -109,8 +114,10 @@ commits. A capture failure also falls back to preserve (fail-closed: never
 delete without a durable snapshot); a state the snapshot cannot represent
 faithfully — staged content differing from the worktree, a non-UTF-8 deleted
 path — likewise refuses capture and preserves. The archive is keyed by
-`sessionId` in the chats dir and named in a cleanup log line; the reopen-restore
-affordance (U5) reads it back by that key.
+`sessionId` beside the sidecar (the chats dir, or its `archive/` subdir for
+archived sessions — the reaper writes to the sidecar's own directory) and named
+in a cleanup log line; the reopen-restore affordance (U5) reads it back by that
+key.
 
 ### U4 — Retention sweep
 

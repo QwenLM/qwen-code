@@ -575,6 +575,22 @@ describe('createWorktreeSession', () => {
       ),
     ).toEqual([]);
   });
+
+  it('drops an oversized carriedEntries overlay so the created sidecar stays readable (round-6)', async () => {
+    const entries = Array.from({ length: 800 }, (_, i) => ({
+      path: `some/long/path/file-${i}.txt`,
+      hash: 'a'.repeat(40),
+      executable: false,
+    }));
+    await createWorktreeSession(filePath, {
+      ...sample,
+      carriedEntries: entries,
+    });
+    const read = await readWorktreeSession(filePath);
+    expect(read).not.toBeNull();
+    expect(read!.carriedEntries).toBeUndefined();
+    expect(read!.slug).toBe(sample.slug);
+  });
 });
 
 describe('clearWorktreeSession', () => {

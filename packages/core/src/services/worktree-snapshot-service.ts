@@ -94,19 +94,26 @@ function normalizeRel(p: string): string {
  * restore must never remove: the worktree's `.git` or the session marker.
  */
 function isProtectedRel(norm: string): boolean {
+  // Case-fold: on APFS/NTFS a '.GIT/config' entry aliases '.git/config', so
+  // a case-sensitive comparison would let a restore remove the git link
+  // (round-6 containment). The capture filter keeps its case-sensitive
+  // checks — it walks the local filesystem's real names, where on a
+  // case-sensitive volume '.GIT' is distinct content that must be archived.
+  const lower = norm.toLowerCase();
   return (
-    norm === '.git' ||
-    norm.startsWith('.git/') ||
-    norm === WORKTREE_SESSION_FILE
+    lower === '.git' ||
+    lower.startsWith('.git/') ||
+    lower === WORKTREE_SESSION_FILE.toLowerCase()
   );
 }
 
 /**
  * The ignored disposable output the has-work gate waives, split into collapsed
  * directory entries (trailing slash) and individual ignored files. Built from
- * a directory-collapsed `git ls-files --others --ignored --exclude-standard
- * --directory` listing so a large `node_modules` does not enumerate file-level
- * and overflow the capture buffer.
+ * the `!!` records of the gate's own `status --porcelain --ignored=matching
+ * -z` listing, so capture excludes exactly what the gate waives (R6-1) and a
+ * large `node_modules` does not enumerate file-level and overflow the capture
+ * buffer.
  */
 interface DisposableIgnoredMatcher {
   dirs: string[];
@@ -245,7 +252,17 @@ export async function buildWorktreeSnapshotMeta(
       i += 1;
       if (entry === WORKTREE_SESSION_FILE) continue;
       tracked += 1;
-      if (xy[0] === 'R' && source.length > 0) deleted.push(source);
+      // A rename source is a deletion too, but a protected path (the git
+      // link or the marker, if tracked) must never enter the deleted list:
+      // the reader refuses protected deletions, so recording one would make
+      // the whole archive unreadable (round-6).
+      if (
+        xy[0] === 'R' &&
+        source.length > 0 &&
+        !isProtectedRel(normalizeRel(source))
+      ) {
+        deleted.push(source);
+      }
       continue;
     }
     if (entry === WORKTREE_SESSION_FILE) continue;
@@ -285,27 +302,40 @@ export async function captureWorktreeSnapshot(
 ): Promise<WorktreeSnapshotPaths> {
   const { worktreePath, snapshotDir, meta } = options;
   await fs.access(path.join(worktreePath, '.git'));
-  // The ignored disposable output the exclusion geometry consults, listed
-  // directory-collapsed so a large node_modules does not enumerate file-level
-  // and overflow the capture buffer. Only ignored entries are disposable
-  // candidates: a tracked or non-ignored file under a regenerable directory
-  // name is absent from this listing and is archived.
-  const ignoredOut = await runGit(
+  // The ignored disposable output the exclusion geometry consults, taken
+  // from the SAME listing the has-work gate waives (`status --porcelain
+  // --ignored=matching -z`, the `!!` records) so the two geometries cannot
+  // drift: a contents-matching rule (`packages/app/node_modules/**`)
+  // collapses one level deeper here than `ls-files --directory` would, and
+  // the mismatch let the gate count work the archive then dropped (R6-1).
+  // Ignored entries stay directory-collapsed, so a large node_modules does
+  // not enumerate file-level and overflow the capture buffer; tracked and
+  // non-ignored files are not `!!` records and are archived.
+  const statusOut = await runGit(
     worktreePath,
     [
       ...NO_EXEC_CONFIG,
       '--no-optional-locks',
-      'ls-files',
-      '--others',
-      '--ignored',
-      '--exclude-standard',
-      '--directory',
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '--ignored=matching',
       '-z',
     ],
     undefined,
     64 * 1024 * 1024,
   );
-  const ignoredEntries = ignoredOut.split('\0').filter((p) => p.length > 0);
+  const ignoredEntries: string[] = [];
+  const records = statusOut.split('\0');
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
+    if (record.length === 0) continue;
+    const xy = record.slice(0, 2);
+    // A rename/copy record is followed by a bare source-path record; skip
+    // it so a source literally named '!! …' is not read as an ignored entry.
+    if (xy[0] === 'R' || xy[0] === 'C') i += 1;
+    if (xy === '!!') ignoredEntries.push(record.slice(3));
+  }
   const matcher: DisposableIgnoredMatcher = {
     dirs: ignoredEntries.filter(
       (e) => e.endsWith('/') && isDisposableIgnoredEntry(e),

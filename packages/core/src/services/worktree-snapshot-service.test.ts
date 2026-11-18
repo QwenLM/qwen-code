@@ -16,7 +16,10 @@ import {
   buildWorktreeSnapshotMeta,
   WORKTREE_SNAPSHOT_SCHEMA_VERSION,
 } from './worktree-snapshot-service.js';
-import { WORKTREE_SESSION_FILE } from './gitWorktreeService.js';
+import {
+  WORKTREE_SESSION_FILE,
+  worktreeHasWork,
+} from './gitWorktreeService.js';
 
 // R5-1: record the output file's mode at the moment node-tar is invoked. A
 // post-write chmod ends at the same 0600 mode (the P2 cell below) but leaves
@@ -709,6 +712,101 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       expect(tarCreateEntryModes.every((mode) => mode === 0o600)).toBe(true);
     },
   );
+
+  it('archives ignored content the gate counts as work under a contents-matching rule (R6-1)', async () => {
+    // `packages/app/node_modules/**` ignores the CONTENTS: the gate's
+    // status --ignored=matching collapses at .../node_modules/x/ (last
+    // segment 'x' is not disposable → work), while ls-files --directory
+    // would collapse at .../node_modules/ (disposable → excluded). The
+    // capture must use the gate's own geometry or it drops the very content
+    // that made the gate say "work", and the checkout is then deleted.
+    await fs.writeFile(
+      path.join(worktree, '.gitignore'),
+      'packages/app/node_modules/**\n',
+    );
+    git(worktree, 'add', '.gitignore');
+    git(worktree, 'commit', '-qm', 'ignore contents', '--no-verify');
+    await fs.mkdir(
+      path.join(worktree, 'packages', 'app', 'node_modules', 'x'),
+      { recursive: true },
+    );
+    await fs.writeFile(
+      path.join(worktree, 'packages', 'app', 'node_modules', 'x', 'y.js'),
+      '// work\n',
+    );
+    await expect(worktreeHasWork(worktree)).resolves.toBe(true);
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-r61',
+      slug: 'r61',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-r61',
+    );
+    await expect(
+      fs.readFile(
+        path.join(restored, 'packages', 'app', 'node_modules', 'x', 'y.js'),
+        'utf8',
+      ),
+    ).resolves.toBe('// work\n');
+  });
+
+  it('refuses case-variant protected deletion paths (round-6 containment)', async () => {
+    // On APFS/NTFS '.GIT/config' aliases '.git/config'; the reader and the
+    // restore confine must refuse it case-insensitively so a restore cannot
+    // remove the git link through a case variant.
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-case',
+      slug: 'case',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const full = {
+      ...m,
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+      createdAt: Date.now(),
+      dirty: { tracked: 0, untracked: 0, deleted: ['.GIT/config'] },
+    };
+    await fs.writeFile(metaPath, `${JSON.stringify(full, null, 2)}\n`);
+    await expect(readWorktreeSnapshotMeta(metaPath)).rejects.toThrow();
+    const restored = path.join(root, 'restored-case');
+    git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+    await expect(
+      restoreWorktreeSnapshot(snapshotPath, restored, full),
+    ).rejects.toThrow(/protected/);
+  });
+
+  it('refuses capture when the worktree .git is gone (F4 direct)', async () => {
+    // Without its own .git, git's upward discovery would answer about the
+    // enclosing repository; the capture must refuse rather than archive a
+    // tree it cannot describe (the reaper then preserves the checkout).
+    await fs.rm(path.join(worktree, '.git'), { recursive: true, force: true });
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: {
+          sessionId: 'session-nogit',
+          slug: 'nogit',
+          baseCommit: 'a'.repeat(40),
+          headCommit: 'a'.repeat(40),
+          branch: '',
+          dirty: { tracked: 0, untracked: 0, deleted: [] },
+        },
+      }),
+    ).rejects.toThrow();
+  });
 
   it('records the branch actually checked out at capture (P2)', async () => {
     // A session created detached may `git switch -c` later; the header must

@@ -1953,6 +1953,22 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     );
   });
 
+  it('a hidden index bit on a CLEAN file still refuses (F6 bit arms)', async () => {
+    // No edit: status alone reads clean, so only the bit refusal itself can
+    // preserve. The edit-based F6 cells above can be satisfied by the status
+    // probe if a refresh clears the hand-set bit; this one witnesses the arms
+    // directly (round-6).
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r96-bits', 'main');
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    git(wt, 'update-index', '--assume-unchanged', 'README.md');
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
+    git(wt, 'update-index', '--no-assume-unchanged', 'README.md');
+    git(wt, 'update-index', '--skip-worktree', 'README.md');
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
+  });
+
   it('a pristine carried deletion reads clean; restoring or staging it is work', async () => {
     // Source deletes a tracked file (unstaged); the carry reproduces the
     // deletion and records a null-hash identity.
@@ -2129,6 +2145,133 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     // The working directory is emptied, but the object store persists.
     expect(await fs.readdir(path.join(wt, 'lib'))).toHaveLength(0);
     await expect(worktreeHasWork(wt)).resolves.toBe(true);
+  });
+
+  it('a submodule whose gitlink left the index still reads as work via its object store (R5-3 round-6)', async () => {
+    // A stray commit in the submodule makes its object store the only copy
+    // of that work. deinit empties the working directory; removing the
+    // gitlink from the index (staged, then committed) must NOT bypass the
+    // modules scan — `git worktree remove` deletes the store with the admin
+    // dir and the archive cannot cover it.
+    const subRoot = path.join(repoParent, 'subrepo');
+    await fs.mkdir(subRoot);
+    await initRepo(subRoot);
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        subRoot,
+        'lib',
+      ],
+      { cwd: repoRoot, encoding: 'utf8' },
+    );
+    git(repoRoot, 'commit', '-qm', 'add submodule', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r96-rm', 'main');
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'update',
+        '--init',
+        '-q',
+        'lib',
+      ],
+      { cwd: wt, encoding: 'utf8' },
+    );
+    git(path.join(wt, 'lib'), 'config', 'user.email', 't@e.com');
+    git(path.join(wt, 'lib'), 'config', 'user.name', 't');
+    git(
+      path.join(wt, 'lib'),
+      'commit',
+      '-qm',
+      'stray',
+      '--allow-empty',
+      '--no-verify',
+    );
+    git(wt, 'submodule', 'deinit', '-q', '-f', 'lib');
+    // Staged removal: the gitlink leaves the index, the store persists.
+    git(wt, 'update-index', '--force-remove', 'lib');
+    expect(git(wt, 'ls-files', '--stage')).not.toContain('160000');
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
+    // Committed removal: same store, still no gitlink anywhere.
+    git(wt, 'commit', '-qm', 'drop submodule', '--no-verify');
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
+  });
+
+  it.skipIf(!arePermissionBitsEnforced())(
+    'a mode change git tracks reads as work; a git-invisible one stays clean (R6-2)',
+    async () => {
+      await fs.writeFile(
+        path.join(repoRoot, 'run.sh'),
+        '#!/bin/sh\necho base\n',
+      );
+      git(repoRoot, 'add', 'run.sh');
+      git(repoRoot, 'commit', '-qm', 'run', '--no-verify');
+      await fs.chmod(path.join(repoRoot, 'run.sh'), 0o755);
+      await fs.writeFile(
+        path.join(repoRoot, 'run.sh'),
+        '#!/bin/sh\necho dirty\n',
+      );
+      await makeDirty(repoRoot);
+      const { worktree, carriedEntries } = await createCarried('r96-exec');
+      expect(carriedEntries.find((e) => e.path === 'run.sh')?.executable).toBe(
+        true,
+      );
+      // 0755→0710 keeps the owner exec bit: git sees no mode change, so the
+      // pristine overlay still reads clean (no false positive).
+      await fs.chmod(path.join(worktree.path, 'run.sh'), 0o710);
+      await expect(
+        worktreeHasWork(worktree.path, carriedEntries),
+      ).resolves.toBe(false);
+      // 0755→0655 removes the owner exec bit (git: 100755→100644) while
+      // group/other exec remain: a wider mask would waive this tracked mode
+      // change and lose it with the checkout.
+      await fs.chmod(path.join(worktree.path, 'run.sh'), 0o655);
+      await expect(
+        worktreeHasWork(worktree.path, carriedEntries),
+      ).resolves.toBe(true);
+    },
+  );
+
+  it('the source check resolves a subdirectory carry source to the checkout top (round-6)', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-subdir');
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      false,
+    );
+    // A session /cd'd below the top: carriedFrom names the subdirectory,
+    // but the overlay paths are repo-relative.
+    await fs.mkdir(path.join(repoRoot, 'sub'));
+    await expect(
+      carriedOverlayStillHeldBySource(
+        path.join(repoRoot, 'sub'),
+        carriedEntries,
+      ),
+    ).resolves.toBe(true);
+  });
+
+  it('an all-deletions overlay with a gone source is refused (round-6)', async () => {
+    await fs.rm(path.join(repoRoot, 'tracked.txt'));
+    const { carriedEntries } = await createCarried('r96-alldel');
+    expect(carriedEntries.length).toBeGreaterThan(0);
+    expect(carriedEntries.every((e) => e.hash === null)).toBe(true);
+    // Absent paths lstat as ENOENT; without a source-readability check they
+    // would masquerade as "still absent" in a source that no longer exists.
+    await expect(
+      carriedOverlayStillHeldBySource(
+        path.join(repoParent, 'gone'),
+        carriedEntries,
+      ),
+    ).resolves.toBe(false);
   });
 
   it('the source-side check authorizes the no-archive delete only while the source holds the overlay (R5-2)', async () => {

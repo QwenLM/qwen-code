@@ -27,9 +27,12 @@ P6 在 #17237 分支上分五个单元落地；每个可独立测试。
 - **捕获** `captureWorktreeSnapshot({worktreePath, snapshotDir, meta})`：worktree 树的
   `tar.gz` 加随旁 JSON 头。排除与 has-work 门的*仅 ignored* 几何对齐：可再生目录名
   （`DISPOSABLE_IGNORED_ROOTS`——`node_modules`、`dist`、`coverage`）下的路径仅当 git
-  报告 ignored（`ls-files --others --ignored --exclude-standard -z`）时才排除，因此
-  这些名字下的 tracked 或非 ignored 文件是工作并被归档（验证发现 F3）。`.git` 文件/目录
-  与会话 marker 始终排除。用 core 已有的 `tar` 依赖；路径相对 worktree 根。头
+  报告 ignored 时才排除，因此这些名字下的 tracked 或非 ignored 文件是工作并被归档
+  （验证发现 F3）。ignored 条目取自门自身的 `status --porcelain --ignored=matching -z`
+  列举的 `!!` 记录——同一命令，使两个几何不可能漂移：内容匹配规则
+  （`packages/app/node_modules/**`）比 `ls-files --directory` 多折叠一层，几何不一致
+  曾让门判为工作的内容被归档丢弃（R6-1）。`.git` 文件/目录与会话 marker 始终排除。
+  用 core 已有的 `tar` 依赖；路径相对 worktree 根。头
   （`buildWorktreeSnapshotMeta`）记录 base commit（`worktreeBase`）、HEAD commit、分支、
   dirty 摘要（tracked/untracked 计数**及删除的 tracked 路径列表**，含 rename 源）、
   会话 id、时间戳、schema 版本。
@@ -75,7 +78,8 @@ untracked 往返；未暂存/暂存删除与 rename 源在重建 HEAD 上重新�
 detached）：此时快照已写但检出被保留（`unmerged commits`），故「无论 dirty 状态都移除」
 对 dirty 内容成立，对未合并 commit 不成立。捕获失败同样回退保留（fail-closed：未获持久
 快照绝不删除）；快照无法忠实表示的状态——暂存内容与工作树不同、非 UTF-8 删除路径——
-同样拒绝捕获并保留。归档按 `sessionId` 键存于 chats 目录并在清理日志中点名；
+同样拒绝捕获并保留。归档按 `sessionId` 键存于 sidecar 旁（chats 目录，归档会话为其
+`archive/` 子目录——回收器写入 sidecar 自身所在目录）并在清理日志中点名；
 重开恢复入口（U5）按该键读回。
 
 ### U4 — 保留清扫

@@ -47,8 +47,9 @@ sidecar 契约，排期于 #17237。
 给 `WorktreeSession` 增可选 `carriedEntries?: CarriedEntry[]`，其中
 `CarriedEntry = { path: string; hash: string | null; executable: boolean }`。
 `hash` 是搬运内容的磁盘原始字节 blob 哈希（`git hash-object --no-filters`）；
-`hash === null` 记录搬运删除（携带移除了该路径）；`executable` 是搬运文件的可执行位，
-使仅模式变更也可检测。非常规搬运条目（symlink、目录）没有内容身份：搬运的 untracked
+`hash === null` 记录搬运删除（携带移除了该路径）；`executable` 是搬运文件的属主可执行
+位——git 仅由 `S_IXUSR` 推导索引模式，更宽的掩码会豁免 0755→0655 这类 git 可见的模式
+变更（R6-2）。非常规搬运条目（symlink、目录）没有内容身份：搬运的 untracked
 symlink 落入通用 symlink 豁免（它在本检出中不持有数据），其余非常规搬运条目读作工作，
 方向保守。
 
@@ -68,7 +69,9 @@ branch-worktree 路由与 handoff 从会话自己的检出捕获 dirty 状态（
 `originalCwd`，可能授权删除覆盖层的最后副本（R5-14）。这两个路由无条件记录它（可能
 等于 `originalCwd`）；`POST /session` 与 legacy sidecar 缺席该字段，回退在那里命名的
 正是正确检出。非字符串值像其他字段一样使 sidecar 判为损坏。搬迁写入随 sidecar 其余
-字段一并保留它。
+字段一并保留它。校验先把记录路径解析到其检出顶（会话 `/cd` 到顶之下时记录的是子目录，
+而覆盖层路径相对仓库根）；源已消失或不可读时解析失败即拒绝——包括全删除覆盖层，否则其
+缺席路径会在已不存在的源里伪装成「仍缺席」（round-6）。
 
 ### D2 — 写入方持久化覆盖层
 
@@ -112,8 +115,8 @@ sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sp
 精确路径而非前缀。内容比较在搬运与清理两侧都用 `git hash-object --no-filters`（带 `--`
 分隔符使以 `-` 开头的路径不被当作选项），故身份是磁盘原始字节的 blob 哈希。`--no-filters`
 是刻意的：路径的 clean 过滤器（`eol`/`text` 归一化）否则可能把一次编辑归一化掉，使被改动
-的搬运文件哈希不变而被读作原始——这正是要避免的数据丢失路径（R4-1/R5-5）。仅模式变更由
-可执行位字段捕获。每个搬运条目还会对照其当前身份校验，即使 `git status` 未列出它（会话
+的搬运文件哈希不变而被读作原始——这正是要避免的数据丢失路径（R4-1/R5-5）。git 可见的
+仅模式变更由属主可执行位字段捕获（R6-2）。每个搬运条目还会对照其当前身份校验，即使 `git status` 未列出它（会话
 删除的搬运 untracked 文件不留 status 记录，R5-8）。仅含原始搬运内容的 checkout 只有在源
 检出仍逐内容持有该覆盖层时才免快照回收；否则改为快照（R5-2）。
 
@@ -137,7 +140,9 @@ sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sp
 - 隐藏在 assume-unchanged 或 skip-worktree 下的会话编辑读作工作。
 - 含任何非搬运工作（迟到的 ignored 文件、搬运文件之外填充的目录）的 checkout 读作工作，
   被先快照再删除（P6 U3）——绝不裸删。快照无法忠实表示的状态（暂存内容与工作树不同、
-  隐藏索引位、已初始化子模块）拒绝捕获并改为保留 checkout。
+  隐藏索引位）拒绝捕获并改为保留 checkout；子模块对象库则即使 deinit 或 `git rm` 把
+  gitlink 移出索引也整体保留 checkout（对象库留在 per-worktree 管理目录，归档覆盖不到，
+  R5-3）。
 - 无该字段的 sidecar 行为与今日完全一致（向后兼容）。
 - 类型错误的 `carriedEntries` 使 sidecar 判为损坏（形状校验）。
 - 变异见证：去掉回收器的 `carriedEntries` 参数、把豁免放宽为前缀匹配、去掉内容身份比较，

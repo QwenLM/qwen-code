@@ -201,7 +201,10 @@ export async function computeCarriedIdentities(
       throw error;
     }
     if (stat.isFile()) {
-      present.push({ path: rel, executable: (stat.mode & 0o111) !== 0 });
+      // Git derives the index mode from the OWNER exec bit alone (100755 vs
+      // 100644). A wider mask (0o111) would read a git-visible mode change
+      // like 0755→0655 as unchanged and waive it (R6-2).
+      present.push({ path: rel, executable: (stat.mode & 0o100) !== 0 });
     }
   }
   const BATCH = 200;
@@ -251,10 +254,23 @@ export async function carriedOverlayStillHeldBySource(
   carriedEntries: readonly CarriedEntry[],
 ): Promise<boolean> {
   try {
+    // carriedFrom may name a SUBDIRECTORY of the source checkout (a session
+    // /cd'd below the top): the overlay paths are repo-relative, so resolve
+    // the checkout top before joining them. A gone or unreadable source
+    // fails rev-parse and falls to the catch — including an all-deletions
+    // overlay, whose absent paths would otherwise lstat as ENOENT and
+    // masquerade as "still absent" in a source that no longer exists.
+    const sourceTop = (
+      await runGit(sourcePath, [
+        ...NO_EXEC_CONFIG,
+        'rev-parse',
+        '--show-toplevel',
+      ])
+    ).trim();
     const current = new Map(
       (
         await computeCarriedIdentities(
-          sourcePath,
+          sourceTop,
           carriedEntries.map((e) => e.path),
         )
       ).map((e) => [e.path, e]),
@@ -343,12 +359,13 @@ export async function hasHiddenIndexBit(
 }
 
 /**
- * Whether the worktree's index holds a populated gitlink (an initialized
- * submodule). A submodule has its own object database, which can hold unpushed
- * commits that live nowhere else; removing the checkout (or archiving only its
- * working files) would discard them, and `submodule.<name>.ignore=dirty` can
- * hide the dirt from `git status`. A destructive sink must therefore preserve
- * such a checkout. Fail-closed: a read error counts as populated.
+ * Whether the worktree holds an initialized submodule's state: a populated
+ * gitlink in the index, or a persisting submodule object store. A submodule
+ * has its own object database, which can hold unpushed commits that live
+ * nowhere else; removing the checkout (or archiving only its working files)
+ * would discard them, and `submodule.<name>.ignore=dirty` can hide the dirt
+ * from `git status`. A destructive sink must therefore preserve such a
+ * checkout. Fail-closed: a read error counts as populated.
  */
 export async function worktreeHasPopulatedGitlink(
   worktreePath: string,
@@ -362,10 +379,8 @@ export async function worktreeHasPopulatedGitlink(
       64 * 1024 * 1024,
     );
     if (stderr.trim().length > 0) return true;
-    let hasGitlink = false;
     for (const entry of stdout.split('\0')) {
       if (!entry.startsWith('160000 ')) continue;
-      hasGitlink = true;
       const separator = entry.indexOf('\t');
       if (separator < 0) return true;
       const gitlinkPath = path.resolve(
@@ -390,24 +405,22 @@ export async function worktreeHasPopulatedGitlink(
         });
       if (populated) return true;
     }
-    // A deinited submodule's working directory is gone, but its object
-    // database (possibly holding unpushed commits) persists in the
-    // per-worktree admin dir `<git-dir>/modules/<name>` (R5-3). The
-    // working-directory probe above reads it as unpopulated; detect the
-    // persisting object store so the only copy of those commits is not
-    // deleted. Any initialized submodule leaves a modules entry.
-    if (hasGitlink) {
-      const gitDir = (
-        await runGit(worktreePath, [
-          ...NO_EXEC_CONFIG,
-          'rev-parse',
-          '--git-dir',
-        ])
-      ).trim();
-      const modulesDir = path.resolve(worktreePath, gitDir, 'modules');
-      const modules = await fs.readdir(modulesDir).catch(() => [] as string[]);
-      if (modules.length > 0) return true;
-    }
+    // A submodule's object database (possibly holding unpushed commits)
+    // persists in the per-worktree admin dir `<git-dir>/modules/<name>` even
+    // when the working directory is emptied (deinit) OR the gitlink leaves
+    // the index entirely (`git rm lib`, staged or committed) — `git worktree
+    // remove` then deletes the store with the admin dir, and the archive
+    // cannot cover it (it sits outside the worktree root). Scan it
+    // UNCONDITIONALLY: gating on the index gitlink let a staged removal
+    // bypass the preserve (R5-3 round-6). A worktree that never initialized
+    // a submodule has no modules dir; the ENOENT-tolerant readdir keeps that
+    // case cheap.
+    const gitDir = (
+      await runGit(worktreePath, [...NO_EXEC_CONFIG, 'rev-parse', '--git-dir'])
+    ).trim();
+    const modulesDir = path.resolve(worktreePath, gitDir, 'modules');
+    const modules = await fs.readdir(modulesDir).catch(() => [] as string[]);
+    if (modules.length > 0) return true;
     return false;
   } catch (error) {
     debugLogger.debug(

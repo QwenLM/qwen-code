@@ -445,11 +445,13 @@ async function checkoutStillPopulated(worktreePath: string): Promise<boolean> {
 /**
  * Execute a verified cleanup after the record deletion was confirmed
  * (`kind === 'removed'`), still under the cleanup lock. The marker is
- * re-verified (nothing may have flipped it since classification) and the
- * checkout must hold no uncommitted work; the branch is deleted safely
- * (never forced) and a preserved branch is logged so "checkout removed,
- * branch kept" stays distinguishable from "checkout kept, ownership
- * doubtful".
+ * re-verified (nothing may have flipped it since classification). A checkout
+ * with work is snapshotted then deleted (P6 U3); a pristine one is deleted
+ * bare only while the carry source still holds the overlay; a state the
+ * snapshot cannot represent faithfully is preserved. The branch is deleted
+ * safely (never forced) and a preserved branch is logged so "checkout
+ * removed, branch kept" stays distinguishable from "checkout kept,
+ * ownership doubtful".
  */
 export async function executeWorktreeCleanup(
   plan: WorktreeCleanupPlan,

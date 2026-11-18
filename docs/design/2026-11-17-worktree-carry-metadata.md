@@ -59,8 +59,9 @@ Add an optional `carriedEntries?: CarriedEntry[]` to `WorktreeSession`, where
 `CarriedEntry = { path: string; hash: string | null; executable: boolean }`.
 `hash` is the raw on-disk blob hash of the carried content (`git hash-object
 --no-filters`); `hash === null` records a carried deletion (the carry removed the
-path); `executable` is the carried file's exec bit so a mode-only change is
-detectable. Non-regular carried entries (symlinks, directories) get no content
+path); `executable` is the carried file's OWNER exec bit — git derives the
+index mode from `S_IXUSR` alone, so a wider mask would waive a git-visible
+mode change like 0755→0655 (R6-2). Non-regular carried entries (symlinks, directories) get no content
 identity: a carried untracked symlink falls to the general symlink waiver (it
 holds no data in this checkout), while any other non-regular carried entry reads
 as work, the conservative direction.
@@ -88,7 +89,12 @@ two differ could authorize deleting the overlay's last copy (R5-14). The two
 routes record it unconditionally (it may equal `originalCwd`); `POST /session`
 and legacy sidecars omit it, and the fallback names the right checkout there.
 A non-string value corrupts the sidecar like any other field. Relocation writes
-preserve it with the rest of the sidecar.
+preserve it with the rest of the sidecar. The check resolves the recorded path
+to its checkout top before comparing (a session `/cd`'d below the top records
+a subdirectory, while the overlay paths are repo-relative); a gone or
+unreadable source fails the resolution and is refused — including an
+all-deletions overlay, whose absent paths would otherwise masquerade as
+"still absent" (round-6).
 
 ### D2 — Writers persist the overlay
 
@@ -149,8 +155,8 @@ not prefix. The content comparison uses `git hash-object --no-filters` (with a
 and cleanup, so the identity is the RAW on-disk blob hash. `--no-filters` is
 deliberate: the path's clean filter (`eol`/`text` normalization) could otherwise
 normalize an edit away, making a changed carried file hash identically and read
-pristine — the data-loss path this avoids (R4-1/R5-5). A mode-only change is
-caught by the exec-bit field. Every carried entry is also verified against its
+pristine — the data-loss path this avoids (R4-1/R5-5). A git-visible mode-only
+change is caught by the owner-exec-bit field (R6-2). Every carried entry is also verified against its
 current identity even when `git status` does not list it (a carried untracked
 file the session deleted leaves no status record, R5-8). A pristine carried-only
 checkout is collected without an archive only while the source checkout still
@@ -185,8 +191,11 @@ unchanged in this deliverable.
 - A checkout with any non-carried work (a late-arriving ignored file, a populated
   directory beyond the carried files) reads as work and is snapshotted then
   deleted (P6 U3) — never deleted bare. States the snapshot cannot represent
-  faithfully (staged content differing from the worktree, a hidden index bit, an
-  initialized submodule) refuse capture and preserve the checkout instead.
+  faithfully (staged content differing from the worktree, a hidden index bit)
+  refuse capture and preserve the checkout instead; a submodule object store
+  preserves the checkout whole even after deinit or a `git rm` that removes the
+  gitlink from the index (the store persists in the per-worktree admin dir and
+  the archive cannot cover it, R5-3).
 - Sidecars without the field behave exactly as today (back-compat).
 - A wrong-typed `carriedEntries` corrupts the sidecar (shape check).
 - Mutation witnesses: dropping the reaper's `carriedEntries` argument, widening
