@@ -241,20 +241,33 @@ export class ManagedDingtalkAdapter {
       // managed-state.json: make the drop explicit, never silent. Detect it
       // even when a keyed ledger already exists — a rollback to the
       // pre-upgrade build can stage fresh legacy claims after the upgrade
-      // (R2-6). Archive it once reported so a static legacy is not re-announced
-      // on every later start. The legacy ledger is not adopted — that would
-      // replay one registration's pending into another.
+      // (R2-6). The legacy ledger is not adopted — that would replay one
+      // registration's pending into another. It is archived only once the
+      // start succeeds (below), so a failed first start leaves the file for a
+      // rollback to recover (R3-2).
       const legacy = this.store.strandedLegacyLedger();
       if (legacy) {
-        const reportedPath = this.store.archiveStrandedLegacy() ?? legacy.path;
-        // Only claim a loss when there was something to lose: a quiescent
-        // legacy ledger (0 pending, 0 outbound) strands nothing (R2-1).
-        const loss =
-          legacy.pending > 0 || legacy.outbound > 0
-            ? ' Its staged-but-unadmitted claims were acked to the provider and are lost.'
-            : '';
+        // An unreadable legacy is not an empty one: its counts are unknown and
+        // any claims it held are stranded (R3-1). Name the inbound and outbound
+        // consequences separately so an outbound-only strand does not report
+        // lost inbound messages, and a quiescent 0/0 legacy reports no loss
+        // (R2-1).
+        const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
+        const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
+        let consequence = '';
+        if (!legacy.readable) {
+          consequence =
+            ' Its contents could not be read, so any staged-but-unadmitted claims it held are stranded.';
+        } else {
+          if (legacy.pending > 0)
+            consequence +=
+              ' Its staged-but-unadmitted claims were acked to the provider and are lost.';
+          if (legacy.outbound > 0)
+            consequence +=
+              ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';
+        }
         this.log(
-          `Managed DingTalk upgraded to per-registration ledgers; the legacy ledger ${reportedPath} (${legacy.pending} pending, ${legacy.outbound} outbound) is stranded and not replayed.${loss}`,
+          `Managed DingTalk upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
         );
       }
       this.state = loaded ?? {
@@ -295,6 +308,12 @@ export class ManagedDingtalkAdapter {
       // adapter the CLI would then park on.
       if (!this.running || this.ownershipLost)
         throw new Error('Managed DingTalk adapter stopped during connection.');
+      // The start succeeded, so archive the reported legacy: a static legacy is
+      // not re-announced on every later start, and a second registration of the
+      // entry is not told the first registration's claims were its own (R2-6).
+      // A failed start above leaves it untouched for a rollback to recover
+      // (R3-2); the notice then simply repeats on the retry.
+      if (legacy) this.store.archiveStrandedLegacy();
       if (this.pollLoop) this.loop = this.runLoop();
     } catch (error) {
       this.stop();

@@ -5,9 +5,11 @@
  */
 
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -2660,18 +2662,40 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
     await adapter.connect();
     const stranded = lines.filter((l) => l.includes('stranded'));
     expect(stranded).toHaveLength(1);
-    // The notice names the archived path (the legacy file is renamed once
-    // reported), which still sits under the entry's managed-state.json stem.
+    // The notice names the legacy path and both consequences separately:
+    // inbound claims lost AND outbound segments dropped (R2-1 split clauses).
     expect(stranded[0]).toContain(join(dir, 'managed-state.json'));
     expect(stranded[0]).toContain('2 pending');
     expect(stranded[0]).toContain('3 outbound');
     expect(stranded[0]).toContain('are lost');
+    expect(stranded[0]).toContain(
+      'un-receipted outbound segments were dropped',
+    );
     // Not adopted: the legacy pending never enters this registration's state.
     // Assert the state itself, not plane.submit — connect() never drives
     // resubmitPending(), so an empty submit list could not discriminate an
     // adoption mutant (R2-3).
     expect(pendingOf(adapter)).toEqual([]);
+    // Archive contract (R3-3): after a successful start the legacy file is
+    // renamed — not deleted — to a .stranded- sibling that still holds the
+    // seeded claims, and a second start does not re-announce it. Assert the
+    // effects, not a shared path prefix that both names satisfy.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    const archived = readdirSync(dir).filter((f) =>
+      f.startsWith('managed-state.json.stranded-'),
+    );
+    expect(archived).toHaveLength(1);
+    const archivedState = JSON.parse(
+      readFileSync(join(dir, archived[0]), 'utf8'),
+    );
+    expect(archivedState.pending).toHaveLength(2);
+    expect(archivedState.outbound).toHaveLength(3);
     await adapter.disconnect();
+    lines.length = 0;
+    const adapter2 = adapterFor(cwd, plane, fake);
+    await adapter2.connect();
+    expect(lines.filter((l) => l.includes('stranded'))).toHaveLength(0);
+    await adapter2.disconnect();
   });
 
   it('a quiescent legacy ledger (0/0) is reported without a loss alarm', async () => {
@@ -2743,6 +2767,109 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
     expect(stranded[0]).toContain('are lost');
     expect(pendingOf(adapter2)).toEqual([]);
     await adapter2.disconnect();
+  });
+
+  it('an unreadable legacy ledger reports unknown counts and a possible loss, not an empty one', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // A crash-truncated legacy: the parse fails, so the counts are unknown.
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await adapter.connect();
+    const stranded = lines.filter((l) => l.includes('stranded'));
+    expect(stranded).toHaveLength(1);
+    // Not rendered as a quiescent "0 pending / 0 outbound, nothing lost"
+    // (R3-1): the counts are unknown and a possible loss is named.
+    expect(stranded[0]).toContain('unknown pending');
+    expect(stranded[0]).toContain('unknown outbound');
+    expect(stranded[0]).toContain('could not be read');
+    expect(stranded[0]).not.toContain('0 pending');
+    await adapter.disconnect();
+  });
+
+  it('an outbound-only legacy strand names the outbound consequence, not lost inbound claims', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [],
+        outbound: [
+          { deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' },
+          { deliveryId: 'd-2', ordinal: 1, messageId: 'm-2' },
+          { deliveryId: 'd-3', ordinal: 2, messageId: 'm-3' },
+        ],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) => l.includes('stranded'));
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    // The outbound consequence is named; no inbound "claims … are lost" is
+    // claimed for a ledger that staged no inbound claims (R2-1 fix-induced).
+    expect(stranded[0]).toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    expect(stranded[0]).not.toContain('are lost');
+    await adapter.disconnect();
+  });
+
+  it('a failed first start leaves the legacy ledger unarchived for a rollback to recover', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    // The stream cannot connect: the ordinary failed-first-start shape.
+    fake.deps.createStreamClient = () => ({
+      connect: async () => {
+        throw new Error('stream unreachable');
+      },
+      disconnect: () => {},
+    });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:legacy',
+            event: { platformEventId: 'dingtalk:legacy' },
+          },
+        ],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await expect(adapter.connect()).rejects.toThrow('stream unreachable');
+    // The strand was reported, but the archive is deferred until the start
+    // succeeds (R3-2): the legacy file is still present so a rollback to the
+    // pre-upgrade build can recover it.
+    expect(lines.filter((l) => l.includes('stranded'))).toHaveLength(1);
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
   });
 
   it('a webhook-less frame after an identity change is dropped (cache is identity-scoped)', async () => {

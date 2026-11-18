@@ -202,30 +202,40 @@ export class ManagedDingtalkStateStore {
    * explicit, never silent. Detection is NOT gated on the identity-keyed ledger
    * being absent: a rollback to the pre-upgrade build can stage fresh claims
    * into `managed-state.json` after a keyed ledger already exists, and those
-   * must still be reported (R2-6). The caller archives the file once reported
-   * (`archiveStrandedLegacy`) so a static legacy is not re-announced on every
-   * later start. The legacy ledger is NOT adopted — adopting it would replay
-   * one registration's pending into another, the cross-ownership hazard the
-   * identity keying prevents.
+   * must still be reported (R2-6). The caller archives the file once the start
+   * succeeds (`archiveStrandedLegacy`) so a static legacy is not re-announced on
+   * every later start. The legacy ledger is NOT adopted — adopting it would
+   * replay one registration's pending into another, the cross-ownership hazard
+   * the identity keying prevents.
+   *
+   * `readable` distinguishes a legacy whose contents could not be read or
+   * parsed (counts unknown, reported as 0 but flagged) from one that parsed to
+   * an empty ledger: an unreadable legacy certainly strands whatever it held,
+   * so the caller must not render it as a quiescent "nothing was lost" (R3-1).
    */
   strandedLegacyLedger():
-    | { path: string; pending: number; outbound: number }
+    | { path: string; pending: number; outbound: number; readable: boolean }
     | undefined {
     const legacyPath = join(this.directory, 'managed-state.json');
     if (!existsSync(legacyPath)) return undefined;
     let pending = 0;
     let outbound = 0;
+    let readable = true;
     try {
       const value = JSON.parse(readFileSync(legacyPath, 'utf8')) as {
         pending?: unknown[];
         outbound?: unknown[];
-      };
-      pending = Array.isArray(value.pending) ? value.pending.length : 0;
-      outbound = Array.isArray(value.outbound) ? value.outbound.length : 0;
+      } | null;
+      const pendingList = value?.pending;
+      const outboundList = value?.outbound;
+      pending = Array.isArray(pendingList) ? pendingList.length : 0;
+      outbound = Array.isArray(outboundList) ? outboundList.length : 0;
     } catch {
-      // A corrupt legacy ledger still strands; report it with zero counts.
+      // A corrupt or unreadable legacy still strands; flag it so the caller
+      // reports unknown counts and a possible loss, never a silent "empty".
+      readable = false;
     }
-    return { path: legacyPath, pending, outbound };
+    return { path: legacyPath, pending, outbound, readable };
   }
 
   /**

@@ -366,6 +366,7 @@ describe('ManagedDingtalkStateStore', () => {
     expect(stranded!.path).toBe(join(s.directory, 'managed-state.json'));
     expect(stranded!.pending).toBe(2);
     expect(stranded!.outbound).toBe(3);
+    expect(stranded!.readable).toBe(true);
     // The legacy ledger is reported, not adopted: load() still returns undefined
     // (the identity-keyed file is absent), so no pending replays across identities.
     expect(s.load()).toBeUndefined();
@@ -405,20 +406,39 @@ describe('ManagedDingtalkStateStore', () => {
     expect(s.load()).toEqual(baseState());
   });
 
-  it.each(['{not json', 'null', '[]'])(
+  it.each([
+    ['{not json', false],
+    ['null', true],
+    ['[]', true],
+  ])(
     'a corrupt legacy ledger (%s) reports zero counts instead of throwing',
-    (raw) => {
+    (raw, readable) => {
       const s = store();
       mkdirSync(s.directory, { recursive: true });
       writeFileSync(join(s.directory, 'managed-state.json'), raw);
       // The catch keeps a damaged legacy from turning the upgrade into a hard
-      // startup failure (R2-4): report zero counts, never throw.
+      // startup failure (R2-4): report zero counts, never throw. A read/parse
+      // failure is flagged unreadable so the caller cannot render it as a
+      // quiescent "nothing was lost" (R3-1); a value that parses but carries no
+      // claims stays readable.
       const stranded = s.strandedLegacyLedger();
       expect(stranded).toBeDefined();
       expect(stranded!.pending).toBe(0);
       expect(stranded!.outbound).toBe(0);
+      expect(stranded!.readable).toBe(readable);
     },
   );
+
+  it('an unreadable legacy ledger (directory at the path) is flagged, not empty', () => {
+    const s = store();
+    mkdirSync(s.directory, { recursive: true });
+    // EISDIR: the legacy path is a directory, so the read fails. The record
+    // must be flagged unreadable, not reported as a quiescent empty ledger.
+    mkdirSync(join(s.directory, 'managed-state.json'));
+    const stranded = s.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.readable).toBe(false);
+  });
 
   it('keeps the state file 0600 inside a 0700 directory (R4)', () => {
     const s = store();
@@ -472,6 +492,11 @@ describe('ManagedDingtalkStateStore', () => {
     expect(
       new ManagedDingtalkStateStore('robot', tempHome(), 'client-1').directory,
     ).not.toBe(a.directory);
+    // Pin the directory leaf literally (R3-4): a basename-fed expectation is
+    // self-referential and would survive dropping the `dingtalk-` prefix or
+    // narrowing the hash, which would silently orphan an upgrading install's
+    // legacy ledger in the old directory.
+    expect(basename(a.directory)).toMatch(/^dingtalk-[0-9a-f]{16}$/);
     expect(a.directory).toBe(
       join(
         getGlobalQwenDir(),
