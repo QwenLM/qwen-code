@@ -107,7 +107,7 @@
 - **记录纠正。** 设计记录与 PR Risk 段原称「无生产运行时改动 / 无运行时 import」。对代码核实：没有运行时模块 import 生成器，但 bundled `SKILL.md` 随构建发布并由 `readBundledReference` 在运行时读取，故模型面向内容确有改动。两版文档与 PR 正文改为「无运行时*代码*改动；发布的 skill 内容有改动」。修复 #1 的描述仍指 round-2 之前的内联正则与过滤，现改为描述 `mintedScheduleId`。
 - **转 #17673：把 caveat 的 oracle 绑定到 `CronSlots.java`。** 共享 `managed-automation-slots-v1` fixtures（30 案例）无月内日期步进案例，故 Java 求值器在 `*/N` 上未与 TS 镜像绑定。关闭它需新增同时被 `managed-automation-slots.test.ts` 与 `CronSlotsTest.java` 消费的 fixture 案例并跑 Java verification 套件——属跨语言契约改动，留在本 PR 之外。上文双求值器一致性只覆盖 JavaScript 侧。
 
-见证（各字节级还原）：成员写入、`Object.assign`、计算工具名、模板字面量 sibling、gap 对调、路由 key 对调、删 cron 的 `No interval` 规则、令 `parseCron` 分歧，各使对应断言红；拼写 `key = "wakeup";` 的 Java 注释保持绿；此前形态（第二绑定、换 call id、手搭 tool call、`let` + 内联 allow、`??=`、伪造来源、usage 行 `??`）全部仍红，提到绑定名的注释保持绿。被执行的扫描器正向控制携带以上全部形态——含 `delete` 与计算工具名，故两项库存均不空转——外加一个无关回调，其 `respond_in_schema` 回答被证明在域外。core 33/33、scripts 元 183/183、eslint/prettier/core typecheck 净。
+见证（各字节级还原）：成员写入、`Object.assign`、计算工具名、模板字面量 sibling、gap 对调、路由 key 对调、删 cron 的 `No interval` 规则、令 `parseCron` 分歧，各使对应断言红；拼写 `key = "wakeup";` 的 Java 注释保持绿；此前形态（第二绑定、换 call id、手搭 tool call、`let` + 内联 allow、`??=`、伪造来源、usage 行 `??`、门改宽为 `blockProperties !== undefined`）全部仍红，提到绑定名的注释保持绿。扫描器返回的每份库存都至少有一条自己的见证。被执行的扫描器正向控制携带全部**扫描器侧**形态——伪造来源、成员写入、`Object.assign`、`delete`、`??=` 改写、内联 allow、计算工具名与模板字面量 sibling，故无库存空转——外加一个无关回调，其 `respond_in_schema` 回答被证明在域外。core 侧形态（gap 对调、路由 key 对调、shell 规则删除、解析器分歧）则如上所列，通过变异真实源并重生来见证。core 33/33、scripts 元 183/183、eslint/prettier/core typecheck 净。
 
 ## 开放问题
 
