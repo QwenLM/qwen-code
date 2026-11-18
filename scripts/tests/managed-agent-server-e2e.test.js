@@ -3850,11 +3850,11 @@ describe('managed-agent-server e2e runner', () => {
 
   // The wiring scanner and its loop scoping are executed against hostile fakes
   // so neither can be vacuous: a fabricated provenance, an in-place member
-  // write and an Object.assign on the input, a `??=` rewrite of the decision,
-  // an inline allow, and a template-literal sibling answering from a
-  // fabricated schema must each move an inventory — while prose naming the
-  // bindings moves none, and an unrelated arm's respond_in_schema answer stays
-  // out of the loop scope.
+  // write, an Object.assign and a delete on the input, a `??=` rewrite of the
+  // decision, an inline allow, a computed tool name, and a template-literal
+  // sibling answering from a fabricated schema must each move an inventory —
+  // while prose naming the bindings moves none, and an unrelated arm's
+  // respond_in_schema answer stays out of the loop scope.
   it('executes the classifier wiring scanner against hostile rewiring', () => {
     const fakeCallback = (lines) =>
       [
@@ -3868,11 +3868,13 @@ describe('managed-agent-server e2e runner', () => {
       "const blockProperties = schemaTool ? { shouldBlock: { type: 'boolean' } } : undefined;",
       "if (blockProperties !== undefined) blockProperties['shouldBlock'] = { type: 'boolean' };",
       "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } });",
+      'delete blockProperties.shouldBlock;',
       'let blockAnswer = classifierBlockAnswer(blockProperties);',
       'blockAnswer ??= { shouldBlock: false };',
       'if (blockAnswer !== undefined) {',
       "  return { toolCalls: [fakeToolCall('respond_in_schema', blockAnswer, 'loop-classifier')] };",
       '}',
+      "return { toolCalls: [fakeToolCall(['respond', 'in', 'schema'].join('_'), blockAnswer, 'loop-fire-computed')] };",
       "return { toolCalls: [fakeToolCall(`respond_in_schema`, classifierBlockAnswer({ shouldBlock: { type: 'boolean' } }), 'loop-fire-sibling')] };",
     ]);
     const unrelatedFake = fakeCallback([
@@ -3888,11 +3890,12 @@ describe('managed-agent-server e2e runner', () => {
     expect(wiring.declarations).toEqual(['blockProperties']);
     expect(wiring.gates).toHaveLength(1);
     expect(wiring.allowSites).toEqual(['(anonymous)']);
-    // Every write form is recorded: the member write, the in-place call and
-    // the nullish assignment — none of them rebinds an identifier.
+    // Every write form is recorded: the member write, the in-place call, the
+    // delete and the nullish assignment — none rebinds an identifier.
     expect(wiring.reassignments).toEqual([
       "blockProperties['shouldBlock'] = { type: 'boolean' }",
       "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } })",
+      'delete blockProperties.shouldBlock',
       'blockAnswer ??= { shouldBlock: false }',
     ]);
     // The sibling's fabricated schema is a second helper call, visible even
@@ -3913,7 +3916,9 @@ describe('managed-agent-server e2e runner', () => {
     expect(scope.answers[1].isGatedBinding).toBe(false);
     expect(scope.schemaNameSites).toHaveLength(3);
     expect(wiring.schemaNameSites).toHaveLength(4);
-    expect(scope.dynamicToolNames).toEqual([]);
+    // A computed tool name hides the answer from every name-based inventory,
+    // so it is recorded on its own and the loop pin requires none.
+    expect(scope.dynamicToolNames).toHaveLength(1);
   });
 
   // The fake-side minted-id extraction is executed, not counted as source
