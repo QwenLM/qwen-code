@@ -4,7 +4,7 @@
 
 ## 状态与问题
 
-实现进行中。Root global 基线63028通过（42.131s、两次自然退出、零 model HTTP）；strictNative49702在 initial-options 失败（32.933s），实际只有只读占位。该次 cleanup grace 错误/signal9 保留为失败，不是自然退出。本增量之前 `/trust` 确实进入 `OpenTuiTrustDialog`，但只有 yes/no 和 Escape。Ink `TrustDialog` 支持三种持久化决定及重启。已有启动 `OpenTuiFolderTrustGate` 只处理未决定的工作区，不能关闭此命令缺口。
+实现完成；完整公共场景已在三个 profile 全部通过（见验证与验收）。Root global 基线63028通过（42.131s、两次自然退出、零 model HTTP）；strictNative49702在 initial-options 失败（32.933s），实际只有只读占位。该次 cleanup grace 错误/signal9 保留为失败，不是自然退出。本增量之前 `/trust` 确实进入 `OpenTuiTrustDialog`，但只有 yes/no 和 Escape。Ink `TrustDialog` 支持三种持久化决定及重启。已有启动 `OpenTuiFolderTrustGate` 只处理未决定的工作区，不能关闭此命令缺口。
 
 ## 范围与行为
 
@@ -28,7 +28,7 @@ mount 显式传入选中的 Config/settings/host。捕获 Config 身份、settin
 
 先对已安装 global Ink 身份和当前 strict-native 占位运行配对公共基线；旧 global 是对照，不是最终候选证据。随后在当前 NodeInk/BunInk/strictNative 运行同一完整公共场景。复用 `tui-extension-acquisition.test.ts` 和 `tui-skills-manager.test.ts` 的 owned HOME/runtime/temp、fake server、InteractiveSession 与证据模式，保持自然退出和零 model 合同。必须包括有界的真实 `r` relaunch，不能 mock 重启或只验 parent/cancel。详见 [public E2E plan](../../.qwen/e2e-tests/opentui-trust-manager-20261114.md)。
 
-单测覆盖三种选择、立即/延期保存、parent/IDE 警告、trust-disabled 政策、读写失败、替换待提交后失败、Escape、owner 替换/ABA、过时重启及同 owner 成功。Root 原生几何60236和首次修正49670均记录三种尺寸通过、两种失败；后一次实际揭示跟随早于最终坐标、scrollbar 遮盖 hint 字符，不是 stale source。后续 Root12927 原生几何与固定用户 PageDown 已通过，仅属布局证据。此前源码 normal97728 通过，但实际当前 profile 重启仍暴露失败：NodeInk30907 完成两次 r/四次自然退出；Native9236 首次 untrust 已写入却没有 fresh record，BunInk83110 首次 same-PID/fresh-session 重启成功、第二次没有 fresh record。两次失败最终 cleanup signal9。尚无实际栈证明具体 FSEvents 根因。新增共享准备后的全部 normal 与三个 profile 验证仍 pending。扩展 global1069 协议真实执行两次 r 重启、四次自然退出，仅属对照证据。现有通用几何脚本仍不包含 Trust；有限 Trust 矩阵证据是另一次 Root12927，不能借通用脚本通过。更广平台几何仍独立保留。后续需验证完整标签与重启/错误文字，不削弱 oracle。完成前需要 build/type、相关 whole tests、零 warning lint、format、bundle、公共各 profile 及两轮完整 diff clean 自审。
+单测覆盖三种选择、立即/延期保存、parent/IDE 警告、trust-disabled 政策、读写失败、替换待提交后失败、Escape、owner 替换/ABA、过时重启及同 owner 成功。Root 原生几何60236和首次修正49670均记录三种尺寸通过、两种失败；后一次实际揭示跟随早于最终坐标、scrollbar 遮盖 hint 字符，不是 stale source。后续 Root12927 原生几何与固定用户 PageDown 已通过，仅属布局证据。此前源码 normal97728 通过，但实际当前 profile 重启仍暴露失败：NodeInk30907 完成两次 r/四次自然退出；Native9236 首次 untrust 已写入却没有 fresh record，BunInk83110 首次 same-PID/fresh-session 重启成功、第二次没有 fresh record。两次失败最终 cleanup signal9。尚无实际栈证明具体 FSEvents 根因。新增共享准备后，全部 normal 检查与三个 profile 的完整公共场景已在 `674e1945d1` 通过（Node+Ink 76.57s、Bun+Ink 101.38s、Bun+OpenTUI 84.63s；每条两次真实 `r` 重启、四次自然退出、零模型请求）。延迟状态行滚入与共享等待策略改动后，build/typecheck/lint/bundle 与 node:ink leg 在 `5f133d0691` 再次通过，CI `tui-parity` 完整三 leg 验收（pinned Bun 1.4.4）也在同一 head 通过。扩展 global1069 协议真实执行两次 r 重启、四次自然退出，仅属对照证据。现有通用几何脚本仍不包含 Trust；有限 Trust 矩阵证据是另一次 Root12927，不能借通用脚本通过。更广平台几何仍独立保留。后续需验证完整标签与重启/错误文字，不削弱 oracle。完成前需要 build/type、相关 whole tests、零 warning lint、format、bundle、公共各 profile 及两轮完整 diff clean 自审。
 
 ## 限制
 
