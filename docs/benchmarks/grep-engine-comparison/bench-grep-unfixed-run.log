@@ -1,0 +1,24 @@
+# Review annotation: the system-grep rows below were case-sensitive; their
+# original '-i default' labels were incorrect. Raw recorded rows are preserved.
+# The original 'js patched' label below has no retained patch or harness that
+# establishes what was patched; it is not evidence of a controlled JS baseline.
+js patched
+common word        | main:git-grep (content, -i default)                        | median     737 ms | matches   50567 | out    5546 KB
+common word        | main:system-grep (content, -i default)                     | median   60130 ms | matches 1022948 | out 1219378 KB
+common word        | preview:rg files_with_matches (default, case-sensitive)    | median     244 ms | matches    7147 | out     403 KB
+common word        | preview:rg content --json (case-sensitive)                 | median     148 ms | matches   47678 | out   15854 KB
+common word        | preview:rg content --json -i (normalized to main default)  | median     141 ms | matches   50567 | out   16725 KB
+common word        | preview:rg files -i (normalized)                           | median     237 ms | matches    7228 | out     409 KB
+identifier regex   | main:git-grep (content, -i default)                        | median    2055 ms | matches     114 | out      16 KB
+identifier regex   | main:system-grep (content, -i default)                     | median  125848 ms | matches    1019 | out    4032 KB
+identifier regex   | preview:rg files_with_matches (default, case-sensitive)    | median     155 ms | matches      32 | out       2 KB
+identifier regex   | preview:rg content --json (case-sensitive)                 | median     137 ms | matches     114 | out      48 KB
+identifier regex   | preview:rg content --json -i (normalized to main default)  | median     140 ms | matches     114 | out      48 KB
+identifier regex   | preview:rg files -i (normalized)                           | median     139 ms | matches      32 | out       2 KB
+absent string      | main:git-grep (content, -i default)                        | median     379 ms | matches       0 | out       0 KB
+absent string      | main:system-grep (content, -i default)                     | median   54172 ms | matches       3 | out       0 KB
+absent string      | preview:rg files_with_matches (default, case-sensitive)    | median     141 ms | matches       0 | out       0 KB
+absent string      | preview:rg content --json (case-sensitive)                 | median     138 ms | matches       0 | out       0 KB
+absent string      | preview:rg content --json -i (normalized to main default)  | median     140 ms | matches       0 | out       0 KB
+absent string      | preview:rg files -i (normalized)                           | median     141 ms | matches       0 | out       0 KB
+saved bench-grep-results.json

@@ -3705,7 +3705,12 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
       try {
-        return await withActionTimeout(session.tasks(), 'Get tasks timed out');
+        return await withActionTimeout(
+          session.tasks(
+            opts?.includeSubSessions ? { includeSubSessions: true } : {},
+          ),
+          'Get tasks timed out',
+        );
       } catch (error) {
         if (
           error instanceof Error &&
