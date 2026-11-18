@@ -10,10 +10,10 @@ import type {
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { stableJson } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 
-/** Runs a row's `ui.render` chain: the props to draw, or none to keep its own. */
+/** Props to draw, undefined to keep the original, or null when skipped. */
 export type ModRowRender = (
   input: ModRenderInput,
-) => Promise<ModRenderInput['props'] | undefined>;
+) => Promise<ModRenderInput['props'] | undefined | null>;
 
 interface Row {
   input: ModRenderInput;
@@ -25,7 +25,7 @@ interface Row {
   queued: boolean;
   readonly listeners: Set<() => void>;
   // Hear each render of the row end, whatever it answered.
-  readonly settles: Set<() => void>;
+  readonly settles: Set<(answered: boolean) => void>;
 }
 
 // Rows answered and no longer shown are kept for a remount up to this many.
@@ -72,7 +72,7 @@ export class ModRows {
         key,
         queued: false,
         listeners: new Set<() => void>(),
-        settles: new Set<() => void>(),
+        settles: new Set(),
       };
     this.rows.set(id, row);
     row.listeners.add(listener);
@@ -87,7 +87,7 @@ export class ModRows {
   /**
    * Shows a row until its hooks answered its input, for a client that asks
    * once: resolves to the answer, `props` absent where the row keeps its own,
-   * or to none when the rows are cleared or `signal` aborts first.
+   * or to none if the render failed or did not finish.
    */
   ask(
     input: ModRenderInput,
@@ -105,8 +105,8 @@ export class ModRows {
         resolve(answer);
       };
       const answered = () => finish(row.answer ? { props: row.answer } : {});
-      const settled = () => {
-        if (this.rows.get(id) !== row) finish(undefined);
+      const settled = (completed: boolean) => {
+        if (!completed) finish(undefined);
         else if (!this.due(row)) answered();
       };
       const aborted = () => finish(undefined);
@@ -142,7 +142,7 @@ export class ModRows {
     this.rows.clear();
     this.queue.length = 0;
     for (const row of rows) {
-      for (const settled of [...row.settles]) settled();
+      for (const settled of [...row.settles]) settled(false);
       if (row.answer) for (const listener of row.listeners) listener();
     }
   }
@@ -179,20 +179,27 @@ export class ModRows {
         const { input, key } = ready;
         // An invalidate while it renders asks for this row once more.
         ready.stale = false;
-        let answer: ModRenderInput['props'] | undefined;
+        let result: Awaited<ReturnType<ModRowRender>>;
         try {
-          answer = await this.render(input);
+          result = await this.render(input);
         } catch {
-          answer = undefined;
+          result = null;
         }
         // A row cleared away while it rendered keeps no answer.
         if (this.rows.get(readyId) === ready) {
+          if (result === null && input.surface === 'desktop') {
+            // The next client request can retry, including after invalidation.
+            ready.stale = true;
+            for (const settled of [...ready.settles]) settled(false);
+            return;
+          }
+          const answer = result ?? undefined;
           const changed = ready.answer !== answer;
           ready.answer = answer;
           ready.answerKey = key;
           if (this.due(ready) && ready.listeners.size)
             this.enqueue(readyId, ready);
-          for (const settled of [...ready.settles]) settled();
+          for (const settled of [...ready.settles]) settled(true);
           if (changed) for (const listener of ready.listeners) listener();
         }
       } finally {

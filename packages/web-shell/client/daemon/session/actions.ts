@@ -22,8 +22,6 @@ import type {
   DaemonPendingPromptSummary,
   DaemonRewindResult,
   DaemonSessionRecapResult,
-  DaemonModRow,
-  DaemonModRowAnswer,
   DaemonRewindSnapshotInfo,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionArtifactsEnvelope,
@@ -3328,16 +3326,6 @@ export function createDaemonSessionActions({
           'recap_session',
         );
       }
-    },
-
-    async askModRow(
-      sessionId: string,
-      row: DaemonModRow,
-    ): Promise<DaemonModRowAnswer> {
-      const session = sessionRef.current;
-      if (session?.sessionId !== sessionId)
-        throw new Error('The Mod row belongs to another session');
-      return await session.askModRow(row);
     },
 
     async *generateSessionContent(

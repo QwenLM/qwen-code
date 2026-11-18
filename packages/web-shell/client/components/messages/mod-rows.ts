@@ -4,17 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useReducer, useState, type RefObject } from 'react';
+import {
+  createContext,
+  useEffect,
+  useReducer,
+  useState,
+  type RefObject,
+} from 'react';
 import type { DaemonModRow, DaemonModRowAnswer } from '@qwen-code/sdk/daemon';
+import type { Message } from '../../adapters/types.js';
 
 /** Asks a session's Mods for one row this client draws. */
 export type ModRowAsk = (row: DaemonModRow) => Promise<DaemonModRowAnswer>;
 
 // Answers kept for rows scrolled away and back, per session.
 const KEPT_ANSWERS = 500;
-// Sessions whose answers are kept, for switching back to one.
-const KEPT_SESSIONS = 20;
-
 const rowKey = (row: DaemonModRow) =>
   `${row.component}\0${JSON.stringify(row.props)}`;
 
@@ -34,7 +38,7 @@ export class ModRowAsker {
   >();
   private asking = false;
 
-  constructor(public ask: ModRowAsk) {}
+  constructor(private readonly ask: ModRowAsk) {}
 
   /**
    * The props a row draws with: those its hooks rewrote, null to draw its
@@ -108,18 +112,33 @@ export class ModRowAsker {
   }
 }
 
-const askers = new Map<string, ModRowAsker>();
+export const ModRowAskerContext = createContext<ModRowAsker | undefined>(
+  undefined,
+);
 
-/** The asker of a session's rows, kept across remounts of its transcript. */
-export function modRowAsker(sessionId: string, ask: ModRowAsk): ModRowAsker {
-  let asker = askers.get(sessionId);
-  if (asker) {
-    askers.delete(sessionId);
-    asker.ask = ask;
-  } else asker = new ModRowAsker(ask);
-  askers.set(sessionId, asker);
-  if (askers.size > KEPT_SESSIONS) askers.delete(askers.keys().next().value!);
-  return asker;
+/** Reply blocks and whether they open the reply. Ephemeral logs and thinking
+ * are skipped so a row keeps its identity when the transcript is replayed. */
+export function modReplyRows(
+  messages: readonly Message[],
+): Map<string, boolean> {
+  const rows = new Map<string, boolean>();
+  let previousIsReply = false;
+  for (const message of messages) {
+    if (
+      message.role === 'thinking' ||
+      (message.role === 'system' && message.source === 'mod_log')
+    )
+      continue;
+    const isReply =
+      message.role === 'assistant' &&
+      message.source === undefined &&
+      message.agentMessage === undefined &&
+      message.author === undefined &&
+      message.localCommandId === undefined;
+    if (isReply) rows.set(message.id, !previousIsReply);
+    previousIsReply = isReply;
+  }
+  return rows;
 }
 
 /**

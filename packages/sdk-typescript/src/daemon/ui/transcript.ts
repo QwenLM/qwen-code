@@ -1007,6 +1007,13 @@ function canMergeTextDelta(
   if (!sameRecordedUser && existing.segmentId !== event.segmentId) {
     return false;
   }
+  if (
+    event.type === 'assistant.text.delta' &&
+    (existing.meta?.source === 'slash_command') !==
+      (event.meta?.source === 'slash_command')
+  ) {
+    return false;
+  }
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }

@@ -109,6 +109,10 @@ import {
   HookStatisticsContext,
   type HookStatisticsSource,
 } from '../../components/messages/hook-statistics-context.js';
+import {
+  ModRowAsker,
+  ModRowAskerContext,
+} from '../../components/messages/mod-rows.js';
 import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
@@ -6103,6 +6107,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
 
   const appSession = sessionRef.current;
+  const modRowEpoch = appSession?.eventEpoch;
+  const modRowsSupported =
+    connection.capabilities?.features.includes('session_mod_rows') ?? false;
+  const modRows = useMemo(() => {
+    if (
+      !modRowsSupported ||
+      !appSession ||
+      appSession.sessionId !== connection.sessionId
+    )
+      return undefined;
+    return new ModRowAsker(async (row) => {
+      if (
+        sessionRef.current !== appSession ||
+        appSession.eventEpoch !== modRowEpoch
+      )
+        return { status: 'unanswered' };
+      return await appSession.askModRow(row);
+    });
+  }, [appSession, connection.sessionId, modRowEpoch, modRowsSupported]);
   const hookStatistics = useMemo<HookStatisticsSource | undefined>(() => {
     const session = appSession;
     if (
@@ -6331,7 +6354,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                                   <HookStatisticsContext.Provider
                                     value={hookStatistics}
                                   >
-                                    {children}
+                                    <ModRowAskerContext.Provider
+                                      value={modRows}
+                                    >
+                                      {children}
+                                    </ModRowAskerContext.Provider>
                                   </HookStatisticsContext.Provider>
                                 </DaemonPromptSettlementContext.Provider>
                               </DaemonTranscriptHistoryContext.Provider>

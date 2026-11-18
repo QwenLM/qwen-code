@@ -29,7 +29,10 @@ const {
   formatThinkingDuration,
   getThinkingSummaryKey,
 } = await import('./AssistantMessage');
-const { ModRowAsker } = await import('./mod-rows');
+const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+const { ModAssistantMessage, ModReplyRowsProvider } = await import(
+  './ModAssistantMessage'
+);
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
@@ -687,13 +690,22 @@ describe('AssistantMessage Mod rows', () => {
     vi.stubGlobal('navigator', { clipboard: { writeText } });
     try {
       const ask = answered('**你好**', false);
+      const content = '**Hello**';
       const container = render(
-        <AssistantMessage
-          content="**Hello**"
-          showFooterActions
-          modRows={new ModRowAsker(ask)}
-          modRowFirstOfReply={false}
-        />,
+        <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+          <ModReplyRowsProvider
+            messages={[
+              { id: 'earlier', role: 'assistant', content: 'Earlier' },
+              { id: 'reply', role: 'assistant', content },
+            ]}
+          >
+            <ModAssistantMessage
+              messageId="reply"
+              content={content}
+              showFooterActions
+            />
+          </ModReplyRowsProvider>
+        </ModRowAskerContext.Provider>,
       );
       await act(async () => {});
       expect(ask).toHaveBeenCalledWith({
@@ -702,13 +714,17 @@ describe('AssistantMessage Mod rows', () => {
       });
       const body = container.querySelector(`.${styles.content}`)!;
       expect(body.textContent).toBe('你好');
-      for (const label of ['Copy content', 'Copy Markdown source']) {
+      expect(container.querySelector('[hidden]')?.textContent).toBe('Hello');
+      for (const [label, expected] of [
+        ['Copy content', 'Hello'],
+        ['Copy Markdown source', '**Hello**'],
+      ]) {
         await act(async () =>
           container
             .querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!
             .click(),
         );
-        expect(writeText).toHaveBeenLastCalledWith('**Hello**');
+        expect(writeText).toHaveBeenLastCalledWith(expected);
       }
     } finally {
       vi.unstubAllGlobals();
@@ -734,18 +750,22 @@ describe('AssistantMessage Mod rows', () => {
     try {
       const ask = answered('你好');
       const asker = new ModRowAsker(ask);
-      render(
-        <AssistantMessage
-          content="Hello"
-          isStreaming
-          modRows={asker}
-          modRowFirstOfReply
-        />,
+      const reply = (isStreaming: boolean) => (
+        <ModRowAskerContext.Provider value={asker}>
+          <ModReplyRowsProvider
+            messages={[{ id: 'reply', role: 'assistant', content: 'Hello' }]}
+          >
+            <ModAssistantMessage
+              messageId="reply"
+              content="Hello"
+              isStreaming={isStreaming}
+            />
+          </ModReplyRowsProvider>
+        </ModRowAskerContext.Provider>
       );
+      render(reply(true));
       expect(observers).toHaveLength(0);
-      const container = render(
-        <AssistantMessage content="Hello" modRows={asker} modRowFirstOfReply />,
-      );
+      const container = render(reply(false));
       const body = () =>
         container.querySelector(`.${styles.content}`)!.textContent;
       act(() => observers[0]!([{ isIntersecting: false }]));

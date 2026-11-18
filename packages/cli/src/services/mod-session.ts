@@ -796,12 +796,12 @@ export class ModSession implements ICommandLoader {
   ): Promise<ModRowAnswer> {
     const surface = this.host?.surface;
     if (
-      this.closing ||
       surface !== 'desktop' ||
       !this.sites.includes(component) ||
       !this.runtime?.renderHooksFor(component).length
     )
       return { status: 'unhooked' };
+    if (this.closing) return { status: 'unanswered' };
     const input = {
       surface,
       component,
@@ -846,10 +846,9 @@ export class ModSession implements ICommandLoader {
     }
   }
 
-  // A row's answer: the props its hooks rewrote, or none to draw its own.
   private async renderRow(
     input: ModRenderInput,
-  ): Promise<ModRenderInput['props'] | undefined> {
+  ): Promise<ModRenderInput['props'] | undefined | null> {
     const runtime = this.runtime;
     const generation = this.toolGeneration.signal;
     if (
@@ -860,7 +859,7 @@ export class ModSession implements ICommandLoader {
       !this.allowed() ||
       !this.active()
     )
-      return undefined;
+      return null;
     const signal = AbortSignal.any([
       this.lifetime.signal,
       generation,

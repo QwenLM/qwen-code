@@ -577,6 +577,75 @@ describe('Mod session renders', () => {
         terminal.session.askRow('AssistantMessage', props, signal),
       ).resolves.toEqual({ status: 'unhooked' });
     });
+
+    it('leaves a timed-out render unanswered and can rewrite it on the next ask', async () => {
+      const { runtime, session } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      const signal = new AbortController().signal;
+      await session.initialize(signal);
+      const deadline = new AbortController();
+      const timeout = vi
+        .spyOn(AbortSignal, 'timeout')
+        .mockReturnValueOnce(deadline.signal);
+      runtime.render
+        .mockImplementationOnce(async (_request, renderSignal) => {
+          await new Promise<void>((resolve) =>
+            renderSignal.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          );
+          renderSignal.throwIfAborted();
+          return { tree: ENGINE_NODE, notes: [] };
+        })
+        .mockResolvedValue({
+          tree: ENGINE_NODE,
+          notes: [],
+          props: { ...props, text: 'Rewritten' },
+        });
+      try {
+        const asked = session.askRow('AssistantMessage', props, signal);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(timeout).toHaveBeenCalledWith(30_000);
+        deadline.abort();
+        await expect(asked).resolves.toEqual({ status: 'unanswered' });
+        expect(runtime.render).toHaveBeenCalledOnce();
+
+        await expect(
+          session.askRow('AssistantMessage', props, signal),
+        ).resolves.toEqual({
+          status: 'answered',
+          props: { ...props, text: 'Rewritten' },
+        });
+        expect(runtime.render).toHaveBeenCalledTimes(2);
+      } finally {
+        timeout.mockRestore();
+      }
+    });
+
+    it('leaves a skipped render unanswered until the session can render it', async () => {
+      const { runtime, session, extension } = setup({
+        sites: ['AssistantMessage'],
+        desktop: true,
+      });
+      const signal = new AbortController().signal;
+      await session.initialize(signal);
+      extension.isActive = false;
+      await expect(
+        session.askRow('AssistantMessage', props, signal),
+      ).resolves.toEqual({ status: 'unanswered' });
+      expect(runtime.render).not.toHaveBeenCalled();
+
+      extension.isActive = true;
+      runtime.render.mockResolvedValue({ tree: ENGINE_NODE, notes: [], props });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await expect(
+          session.askRow('AssistantMessage', props, signal),
+        ).resolves.toEqual({ status: 'answered' });
+      }
+      expect(runtime.render).toHaveBeenCalledOnce();
+    });
   });
 
   it('aborts a stalled row on its wall-clock deadline and releases the next tool', async () => {

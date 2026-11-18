@@ -32,8 +32,6 @@ import type {
   DaemonSessionSavedWorkflowDetail,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
-  DaemonModRow,
-  DaemonModRowAnswer,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSession,
@@ -747,11 +745,6 @@ export interface DaemonSessionActions {
     pr: Omit<DaemonSessionPrInfo, 'issues'>,
   ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
-  /**
-   * Ask the session's Mods for a transcript row. Rejects without a notice
-   * once the connection holds another session than `sessionId`.
-   */
-  askModRow(sessionId: string, row: DaemonModRow): Promise<DaemonModRowAnswer>;
   generateSessionContent(
     prompt: string,
     opts?: { signal?: AbortSignal },

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { DaemonModRow, DaemonModRowAnswer } from '@qwen-code/sdk/daemon';
-import { ModRowAsker, modRowAsker } from './mod-rows';
+import type { Message } from '../../adapters/types';
+import { ModRowAsker, modReplyRows } from './mod-rows';
 
 const row = (text: string): DaemonModRow => ({
   component: 'AssistantMessage',
@@ -85,15 +86,37 @@ describe('ModRowAsker', () => {
     asker.watch(row('three'), () => {});
     expect(ask).toHaveBeenCalledOnce();
   });
+});
 
-  it("keeps a session's answers across remounts, asking with the latest ask", async () => {
-    const first = asked();
-    const asker = modRowAsker('session-a', first.ask);
-    const second = asked();
-    expect(modRowAsker('session-a', second.ask)).toBe(asker);
-    expect(modRowAsker('session-b', second.ask)).not.toBe(asker);
-    asker.watch(row('one'), () => {});
-    expect(first.ask).not.toHaveBeenCalled();
-    expect(second.ask).toHaveBeenCalledOnce();
+it('classifies main replies and preserves continuation across thoughts and Mod logs', () => {
+  const reply = (id: string) => ({
+    id,
+    role: 'assistant' as const,
+    content: id,
   });
+  const messages: Message[] = [
+    { id: 'user', role: 'user', content: 'prompt' },
+    reply('first'),
+    {
+      id: 'log',
+      role: 'system',
+      variant: 'info',
+      source: 'mod_log',
+      content: 'log',
+    },
+    { id: 'thought', role: 'thinking', content: 'thought' },
+    reply('continuation'),
+    { id: 'tool', role: 'tool_group', tools: [] },
+    reply('afterTool'),
+    { ...reply('command'), source: 'slash_command' },
+    { ...reply('agent'), agentMessage: { kind: 'agent_message' } },
+    { ...reply('local'), localCommandId: 'local-command' },
+    reply('afterNonReplies'),
+  ];
+  expect([...modReplyRows(messages)]).toEqual([
+    ['first', true],
+    ['continuation', false],
+    ['afterTool', true],
+    ['afterNonReplies', true],
+  ]);
 });

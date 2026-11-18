@@ -27,6 +27,7 @@ import {
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
 import { SessionRecoveryBanner } from '../../components/SessionRecoveryBanner.js';
+import { ModRowAskerContext } from '../../components/messages/mod-rows.js';
 import type { McpAppDisplay } from '../../components/messages/McpApp.js';
 import {
   GeneratedUiInstanceStore,
@@ -38,6 +39,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonEvent,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionContextStatus,
   NonBlockingPromptAccepted,
   DaemonSseConnectReason,
@@ -113,6 +116,7 @@ interface MockSession {
   replayPartial?: boolean;
   replayError?: string;
   eventEpoch?: string;
+  askModRow?: (row: DaemonModRow) => Promise<DaemonModRowAnswer>;
   session?: Record<string, unknown>;
   client?: MockClient;
   lastEventId?: number;
@@ -677,6 +681,56 @@ describe('DaemonSessionProvider', () => {
       if (signal?.aborted) resolve();
       else signal?.addEventListener('abort', () => resolve(), { once: true });
     });
+
+  it('discards Mod row answers and unhooked state when a saved session reopens', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_mod_rows'],
+    });
+    const beforeClose = vi.fn(async () => ({ status: 'unhooked' as const }));
+    const afterReopen = vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text: 'Rewritten' },
+    }));
+    sdkMocks.sessions.push(createMockSession({ askModRow: beforeClose }));
+    let current: ContextType<typeof ModRowAskerContext>;
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      current = useContext(ModRowAskerContext);
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const row: DaemonModRow = {
+      component: 'AssistantMessage',
+      props: { text: 'Original', isFirstOfReply: true },
+    };
+    const before = requireActions(current);
+    before.watch(row, () => {});
+    await flushPromises();
+    expect(beforeClose).toHaveBeenCalledWith(row);
+
+    await act(async () => requireActions(actions).clearSession());
+    expect(current).toBeUndefined();
+    sdkMocks.sessions.push(
+      createMockSession({ eventEpoch: 'epoch-2', askModRow: afterReopen }),
+    );
+    let reload!: Promise<void>;
+    act(() => {
+      reload = requireActions(actions).loadSession('session-1');
+    });
+    await act(async () => {
+      await reload;
+      await flushPromises();
+    });
+
+    const reopened = requireActions(current);
+    expect(reopened).not.toBe(before);
+    reopened.watch(row, () => {});
+    await flushPromises();
+    expect(afterReopen).toHaveBeenCalledWith(row);
+    expect(reopened.answer(row)).toEqual({ text: 'Rewritten' });
+  });
 
   it.each(['request', 'tool'] as const)(
     'bridges trajectory replay and metadata-only events on the existing subscription (%s)',
@@ -28200,6 +28254,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     replayPartial: opts.replayPartial ?? false,
     replayError: opts.replayError,
     eventEpoch: opts.eventEpoch ?? 'epoch-1',
+    askModRow: opts.askModRow,
     session:
       opts.session ??
       ({

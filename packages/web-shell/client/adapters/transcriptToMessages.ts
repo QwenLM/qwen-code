@@ -801,6 +801,7 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
         const meta = getRecord(textBlock.meta);
+        const source = getString(meta, 'source');
         const reportedArtifacts = readReportedArtifacts(meta ?? undefined);
         if (notice?.source === 'vision_bridge_notice') {
           messages.push({
@@ -940,6 +941,8 @@ export function transcriptBlocksToDaemonMessages(
                   : `${block.id}-t-${messages.length}`,
                 role: 'assistant',
                 content: seg.text,
+                ...(source ? { source } : {}),
+                isStreaming: textBlock.streaming,
                 ...(backgroundTurn ? { backgroundTurn } : {}),
                 timestamp: blockTime,
                 sourceBlockIds: [block.id],
@@ -980,6 +983,8 @@ export function transcriptBlocksToDaemonMessages(
         if (
           target &&
           target.role === 'assistant' &&
+          (target.source === 'slash_command') ===
+            (source === 'slash_command') &&
           !needsNewContentMessage &&
           textBlock.segmentId === undefined &&
           !isTextBlockEmpty(textBlock)
@@ -1006,7 +1011,6 @@ export function transcriptBlocksToDaemonMessages(
           needsNewContentMessage = false;
           currentThinkingIdx = null;
         } else if (textBlock.text.trim().length > 0) {
-          const source = getString(meta, 'source');
           messages.push({
             id: block.id,
             role: 'assistant',

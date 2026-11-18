@@ -266,6 +266,46 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('keeps slash-command output separate from model text in the same prompt', () => {
+    const chunks = [
+      { text: 'Earlier model text.' },
+      { text: 'Skill notice. ', source: 'slash_command' },
+      { text: 'Some skills omitted.', source: 'slash_command' },
+      { text: 'Model ' },
+      { text: 'reply.' },
+    ];
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      chunks.flatMap(({ text, source }) =>
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'session_update',
+          promptId: 'prompt-1',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+              ...(source ? { _meta: { source } } : {}),
+            },
+          },
+        }),
+      ),
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'assistant', text: 'Earlier model text.', streaming: false },
+      {
+        kind: 'assistant',
+        text: 'Skill notice. Some skills omitted.',
+        meta: { source: 'slash_command' },
+        streaming: false,
+      },
+      { kind: 'assistant', text: 'Model reply.', streaming: true },
+    ]);
+    expect(state.blocks[0]).not.toHaveProperty('meta.source');
+    expect(state.blocks[2]).not.toHaveProperty('meta.source');
+  });
+
   it('attaches branchRecordId when the decorated chunk merges into an existing block', () => {
     // A checkpointed record replayed as 2+ chunks creates its block from
     // the first (undecorated) chunk; the decorated final chunk must merge

@@ -1743,6 +1743,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('preserves source and streaming when splitting /insight output', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'insight-1',
+        'assistant',
+        'Generating insights... {"insight_progress":{"stage":"scan","progress":0.5,"detail":"reading"}}',
+        1,
+        true,
+        { meta: { source: 'slash_command' } },
+      ),
+    ]);
+
+    expect(messages).toMatchObject([
+      {
+        role: 'assistant',
+        content: 'Generating insights...',
+        source: 'slash_command',
+        isStreaming: true,
+      },
+      { role: 'insight_progress', stage: 'scan' },
+    ]);
+  });
+
   it('renders terminal insight messages with surrounding text', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock(
@@ -1758,6 +1781,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         id: 'insight-1-t-0',
         role: 'assistant',
         content: 'before',
+        isStreaming: false,
         timestamp: 1,
       },
       {
@@ -1770,6 +1794,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         id: 'insight-1-t-2',
         role: 'assistant',
         content: 'middle',
+        isStreaming: false,
         timestamp: 1,
       },
       {
@@ -1782,6 +1807,7 @@ describe('transcriptBlocksToDaemonMessages', () => {
         id: 'insight-1-t-4',
         role: 'assistant',
         content: 'after',
+        isStreaming: false,
         timestamp: 1,
       },
     ]);
@@ -2395,6 +2421,24 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
       },
     ]);
+  });
+
+  it('keeps adjacent slash-command output and model replies separate', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'Earlier model text.', 1),
+      textBlock('command', 'assistant', 'Skill notice.', 2, false, {
+        meta: { source: 'slash_command' },
+      }),
+      textBlock('a2', 'assistant', 'Model reply.', 3, true),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'assistant', content: 'Earlier model text.' },
+      { role: 'assistant', content: 'Skill notice.', source: 'slash_command' },
+      { role: 'assistant', content: 'Model reply.', isStreaming: true },
+    ]);
+    expect(messages[0]).not.toHaveProperty('source');
+    expect(messages[2]).not.toHaveProperty('source');
   });
 
   it('keeps identity-tagged assistant segments as separate messages', () => {
