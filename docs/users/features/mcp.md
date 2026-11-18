@@ -51,9 +51,9 @@ Then enter:
 
 - In an [untrusted folder](../configuration/trusted-folders.md), the session
   skips MCP connections, including servers configured at user scope.
-- Servers from a project's `.mcp.json` or `.qwen/settings.json` require
-  approval, except in YOLO mode. In the interactive terminal, approve a pending
-  server in `/mcp` to connect it in the current session. From a shell, run
+- If a server from the project's `.mcp.json` or `.qwen/settings.json` is
+  pending approval in the interactive session, use the approval prompt to
+  connect it. To approve it from a shell, run
   `qwen mcp approve <name>` in that project and start a new interactive session,
   or use `qwen mcp reject <name>` to deny it.
 - With `--bare` or `--safe-mode`, Qwen Code ignores servers from `settings.json`
