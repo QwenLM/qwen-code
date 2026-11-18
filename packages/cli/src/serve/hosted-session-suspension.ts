@@ -20,19 +20,30 @@ export const HOSTED_COLD_OPEN_LIMIT = 8;
 export const HOSTED_SUSPEND_WORK_WAIT_MS = 30_000;
 /** Teardown retries (backoff + jitter) before operator recovery. */
 export const HOSTED_SUSPEND_TEARDOWN_RETRY_CAP = 5;
+/** The Store client's default request timeout, which bounds an in-flight call. */
+const STORE_REQUEST_TIMEOUT_MS = 30_000;
+const RECONCILE_MARGIN_MS = 10_000;
 /**
- * Bounded post-cap reconciliation wait before the gate auto-clears: the
- * writer lease (60s) plus the Store request timeout (30s) plus a 10s margin.
- * The timeout term covers both requests that may still be in flight when the
- * cap is reached — a renewal that lands late extends the lease by a full
- * lease from its own completion, and the capped attempt's seal must not
- * still be in flight either. After the bound the lease has expired and no
- * old request remains, so any acquire bumps the generation and fences the
- * old seal: the next load cold-opens safely without an operator (design open
- * question 8). A candidate, validated against the real Store timeout before
- * enablement.
+ * The post-cap reconciliation wait for a Session's own writer lease: the
+ * lease plus the Store request timeout plus a margin. The timeout term covers
+ * both requests that may still be in flight when the cap is reached — a
+ * renewal that lands late extends the lease by a full lease from its own
+ * completion, and the capped attempt's seal must not still be in flight
+ * either. After the bound the lease has expired and no old request remains,
+ * so any acquire bumps the generation and fences the old seal: the next load
+ * cold-opens safely without an operator (design open question 8).
+ *
+ * Derived from the lease rather than fixed, because the lease is
+ * client-supplied up to `MAX_LEASE_MILLIS` (300s): a constant tuned for the
+ * 60s default would clear the gate while a configured lease is still live.
+ * The timeout term assumes the Store client's default; a deployment that
+ * raises it must raise this margin too.
  */
-export const HOSTED_SUSPEND_RECONCILE_MS = 100_000;
+export function suspensionReconcileMs(leaseDurationMs: number): number {
+  return leaseDurationMs + STORE_REQUEST_TIMEOUT_MS + RECONCILE_MARGIN_MS;
+}
+/** The candidate wait at the 60s default lease; measured before enablement. */
+export const HOSTED_SUSPEND_RECONCILE_MS = suspensionReconcileMs(60_000);
 const JITTER_FRACTION = 0.1;
 const WORK_POLL_MS = 25;
 

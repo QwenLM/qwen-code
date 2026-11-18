@@ -355,14 +355,15 @@ import {
 import {
   HOSTED_COLD_OPEN_LIMIT,
   HOSTED_IDLE_SUSPEND_MS,
-  HOSTED_SUSPEND_RECONCILE_MS,
   admitSuspensionWork,
   armIdleSuspension,
   beginSuspensionClose,
   createSuspension,
+  disarmIdleSuspension,
   recordSuspensionActivity,
   releaseSuspensionWork,
   runSuspensionAttempt,
+  suspensionReconcileMs,
   suspensionRefusalCode,
   type SessionSuspension,
 } from './hosted-session-suspension.js';
@@ -4902,7 +4903,7 @@ export function registerHostedHarnessSessionRoutes(
         suspensions.get(sessionId) === gated &&
         !sessions.has(sessionId)
       )
-        suspensions.delete(sessionId);
+        dropSuspension(sessionId);
       return receipt;
     } catch (cause) {
       release.result = undefined;
@@ -4927,12 +4928,24 @@ export function registerHostedHarnessSessionRoutes(
     return suspension;
   };
 
+  // Dropping an entry must disarm its timer too: the callback outlives the
+  // map entry, and a leaked timer keeps firing for a Session nobody holds.
+  const dropSuspension = (sessionId: string): void => {
+    const entry = suspensions.get(sessionId);
+    if (entry) disarmIdleSuspension(entry);
+    suspensions.delete(sessionId);
+  };
+
   const armFor = (sessionId: string): void => {
     const session = sessions.get(sessionId);
     if (!session) return;
     const suspension = suspensionFor(sessionId);
     session.suspension = suspension;
     const onTimeout = () => {
+      // Tie the fire to the entry that armed it. A dropped entry's timer stays
+      // armed, and attemptSuspend re-resolves both actors by id: without this
+      // guard an orphaned timer suspends the resident a later reload built.
+      if (suspensions.get(sessionId) !== suspension) return;
       void attemptSuspend(sessionId).catch((cause) => {
         writeStderrLineSafe(
           `qwen serve: Hosted Session ${sessionId} suspension attempt failed: ${String(cause)}`,
@@ -5100,10 +5113,12 @@ export function registerHostedHarnessSessionRoutes(
         unresolvedOpenings.delete(sessionId);
       },
       rearm: () => {
-        // A reverted attempt never reached teardown; release the wake
-        // hold the mark set. No close can race this: the gate refuses
-        // detach/delete while closing.
-        session.mcpClosing = false;
+        // A reverted attempt never reached teardown; release only the wake
+        // hold this attempt set. A refused markClosing never set it, and a
+        // lifecycle-attached or being-replaced resident rests at true — an
+        // unconditional clear there hands the wake pump and every closing
+        // route a Session another operation is still driving.
+        if (marked) session.mcpClosing = false;
         armFor(sessionId);
       },
       retryBaseMs: options?.suspendRetryBaseMs,
@@ -5113,7 +5128,7 @@ export function registerHostedHarnessSessionRoutes(
       suspensionStats.cleanSuspensions += 1;
       // Drop the registry entry only if no reload already reused it.
       if (suspensions.get(sessionId) === suspension && !sessions.has(sessionId))
-        suspensions.delete(sessionId);
+        dropSuspension(sessionId);
       writeStderrLineSafe(
         `qwen serve: Hosted Session ${sessionId} suspended idle.`,
       );
@@ -5145,8 +5160,12 @@ export function registerHostedHarnessSessionRoutes(
       // safely; an operator is needed only if the Store stays unreachable,
       // which surfaces as the load's own transient Store failure. The gate
       // stays blocked (refusing loads) during the wait.
+      // Derived from this Session's own lease: it is client-supplied up to
+      // 300s, so a constant tuned for the 60s default would clear the gate
+      // while a configured lease is still live.
       const reconcileMs =
-        options?.suspendReconcileMs ?? HOSTED_SUSPEND_RECONCILE_MS;
+        options?.suspendReconcileMs ??
+        suspensionReconcileMs(session.storeDescriptor.leaseDurationMs);
       writeStderrLineSafe(
         `qwen serve: Hosted Session ${sessionId} teardown uncertain` +
           ` afterMs=${Date.now() - attemptStart} attempts=${suspension.teardownAttempts}` +
@@ -5155,7 +5174,7 @@ export function registerHostedHarnessSessionRoutes(
       const reconcileTimer = setTimeout(() => {
         const entry = suspensions.get(sessionId);
         if (entry === suspension && entry.gate === 'blocked') {
-          suspensions.delete(sessionId);
+          dropSuspension(sessionId);
           suspensionStats.reconciledGates += 1;
           writeStderrLineSafe(
             `qwen serve: Hosted Session ${sessionId} suspension gate reconciled; next load cold-opens.`,
@@ -5919,7 +5938,7 @@ export function registerHostedHarnessSessionRoutes(
         sessions.delete(sessionId);
         resident = undefined;
       } catch {
-        if (!sessions.has(sessionId)) suspensions.delete(sessionId);
+        if (!sessions.has(sessionId)) dropSuspension(sessionId);
         error(res, 503, 'hosted_turn_recovery_required');
         return;
       } finally {
@@ -14605,7 +14624,7 @@ export function registerHostedHarnessSessionRoutes(
       if (closeSettled || session.managed.authority.writerSealed) {
         for (const stop of session.streams) stop();
         sessions.delete(req.params['id']);
-        suspensions.delete(req.params['id']);
+        dropSuspension(req.params['id']);
       }
       session.mcpClosing = !!session.lifecycle;
       session.mcpBusy = false;

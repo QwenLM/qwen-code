@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HOSTED_IDLE_SUSPEND_MS,
+  HOSTED_SUSPEND_RECONCILE_MS,
   admitSuspensionWork,
   armIdleSuspension,
   beginSuspensionClose,
@@ -20,9 +21,24 @@ import {
   releaseSuspensionWork,
   revertSuspension,
   runSuspensionAttempt,
+  suspensionReconcileMs,
   suspensionRefusalCode,
   type SuspensionAttemptDeps,
 } from './hosted-session-suspension.js';
+
+describe('suspension reconciliation bound', () => {
+  it('exceeds the lease plus the Store request timeout at every lease', () => {
+    // The lease is client-supplied up to MAX_LEASE_MILLIS (300s). A bound
+    // tuned for the 60s default would clear the gate under a live lease.
+    for (const lease of [60_000, 120_000, 300_000]) {
+      expect(suspensionReconcileMs(lease)).toBeGreaterThan(lease + 30_000);
+    }
+    expect(HOSTED_SUSPEND_RECONCILE_MS).toBe(suspensionReconcileMs(60_000));
+    expect(suspensionReconcileMs(300_000)).toBeGreaterThan(
+      HOSTED_SUSPEND_RECONCILE_MS,
+    );
+  });
+});
 
 describe('suspension gate', () => {
   it('answers closing while converging and teardown_blocked at the cap', () => {
