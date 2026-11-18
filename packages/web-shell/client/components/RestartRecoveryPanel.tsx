@@ -38,7 +38,7 @@ export interface RestartRecoveryPanelProps {
 }
 
 function rowKey(row: { workspace: string; sessionId: string }): string {
-  return `${row.workspace}\n${row.sessionId}`;
+  return JSON.stringify([row.workspace, row.sessionId]);
 }
 
 function rowFromResult(entry: DaemonRestartRecoveryContinueResult): {
@@ -68,11 +68,11 @@ export function RestartRecoveryPanel({
   const [notice, setNotice] = useState<string | null>(null);
 
   const workspaceKey = useMemo(
-    () => [...workspaceCwds].sort().join('\n'),
+    () => JSON.stringify([...workspaceCwds].sort()),
     [workspaceCwds],
   );
-  const requestWorkspaces = useMemo(
-    () => workspaceKey.split('\n').filter(Boolean),
+  const requestWorkspaces = useMemo<string[]>(
+    () => JSON.parse(workspaceKey),
     [workspaceKey],
   );
 
@@ -194,6 +194,16 @@ export function RestartRecoveryPanel({
             : t('restartRecovery.title', { count: rows.length })}
         </span>
         <div className="flex shrink-0 gap-1">
+          {loadFailed && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => setLoadFailed(false)}
+            >
+              {t('restartRecovery.hide')}
+            </Button>
+          )}
           {open && rows.length > 0 && (
             <Button
               type="button"

@@ -267,6 +267,32 @@ describe('RestartRecoveryPanel', () => {
     ).toHaveLength(1);
   });
 
+  it('keeps a workspace path containing a newline intact', async () => {
+    client.getRestartRecoveries.mockResolvedValue({ workspaces: [] });
+    render({ workspaceCwds: ['/ws\nline'] });
+
+    await waitFor(() =>
+      expect(client.getRestartRecoveries).toHaveBeenCalledWith({
+        workspaces: ['/ws\nline'],
+      }),
+    );
+  });
+
+  it('lets the user dismiss a failed scan', async () => {
+    client.getRestartRecoveries.mockRejectedValue(new Error('scan failed'));
+    render();
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        'Could not read interrupted tasks',
+      ),
+    );
+    act(() => buttonByText('Hide').click());
+    expect(
+      container.querySelector('[data-testid="restart-recovery-panel"]'),
+    ).toBeNull();
+  });
+
   it('does not request when the daemon lacks the capability', async () => {
     render({ supported: false });
     await act(async () => {
