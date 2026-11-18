@@ -80,7 +80,9 @@ engine must source the witness from evidence, not from the transport promise.
   no-op — a live accepted turn keeps its chance to settle.
 - `acknowledge(operationId)` — releases a terminal row once the surface has
   consumed it (delegates to slice 1 `acknowledgeOperation`); non-terminal rows
-  are kept, and terminal rows stay readable until acknowledged.
+  are kept, and terminal rows stay readable until acknowledged. Superseded
+  terminal rows are pruned from the internal log on every rebuild, so
+  acknowledging the latest terminal row cannot resurrect an older one.
 - `setApprovalRequestLive(requestId, live)` — tracks the **set** of approval
   requests still valid (not superseded). The daemon keeps several permission
   requests pending at once, so currency is membership in that set, not a single
@@ -159,9 +161,12 @@ A thrown transport leaves admission `unknown`, which the truth table keeps
 `unsettled` under any witness; without an exit it would hold the phase open for
 the engine's lifetime. `abandon` terminalizes such an attempt as `failed` (never
 `established`) and is limited to `unknown` admission, so it cannot kill a live
-accepted turn whose real evidence must still land. `acknowledge` lets the surface
-release terminal rows it has consumed so retention does not grow without bound
-across distinct turns.
+accepted turn whose real evidence must still land. An abandoned attempt is
+flagged so a late transport response — even one that resolves after an in-flight
+abandon — cannot revive its terminal state. `acknowledge` lets the surface release
+terminal rows it has consumed, and every rebuild prunes superseded terminal rows
+from the internal log, so acknowledging the latest terminal row cannot resurrect
+an older one and retention does not grow without bound across distinct turns.
 
 ## Negative tests (land with the daemon adapter)
 
@@ -206,6 +211,14 @@ across distinct turns.
     request is live even though answering means it is no longer awaiting a
     decision; the engine releases the identity on settle, so a re-delivered
     decision for the same settled request no longer establishes.
+12. **Acknowledging a retry does not resurrect the superseded failure.** After a
+    first submit settles `failed` and a retry on the same target settles
+    `established`, acknowledging the retry leaves `operations` empty — the pruned
+    older failure does not reappear.
+13. **A late response cannot revive an abandoned cancel.** Abandoning a cancel
+    while its POST is in flight terminalizes it; the transport then resolving
+    `accepted` leaves the row `failed` and the phase `idle`, and a later settle is
+    a no-op.
 
 Supporting cases pin rejected admission (no outcome, untracked, settling its id
 is a no-op), a failed witness, settling an unknown id (no-op), bounded retention,
@@ -225,7 +238,9 @@ the operation id reds the correlation cases; recording the caller's target by
 reference instead of a frozen snapshot reds the recorded-target case; ignoring
 the retained in-flight witness reds the in-flight-evidence case; removing the
 `unknown`-admission guard from `abandon` reds the live-turn case; removing the
-clear-on-settle release reds the answer-then-settle case.
+clear-on-settle release reds the answer-then-settle case; skipping the prune of
+superseded terminal rows in rebuild reds the acknowledge-retry case; dropping the
+abandoned check after `await transport()` reds the late-response case.
 
 ## Constraints respected
 

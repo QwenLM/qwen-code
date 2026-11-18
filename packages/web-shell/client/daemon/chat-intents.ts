@@ -41,6 +41,9 @@ interface TrackedIntent {
   // once admission resolves so a settlement emitted before the POST response
   // is not discarded.
   witness?: OutcomeWitness;
+  // Set when the attempt is abandoned; a late transport response must not
+  // revive a terminalized attempt.
+  abandoned?: boolean;
 }
 
 export interface DaemonChatIntents {
@@ -129,7 +132,14 @@ export function createDaemonChatIntents(): DaemonChatIntents {
   let nextId = 0;
 
   const rebuild = (): void => {
-    snapshot = retainOperations(tracked.map((intent) => intent.operation));
+    const retained = retainOperations(
+      tracked.map((intent) => intent.operation),
+    );
+    // Drop superseded terminal rows from the internal log too, so acknowledging
+    // the latest terminal row cannot resurrect an older one on the next rebuild.
+    const keptIds = new Set(retained.map((operation) => operation.id));
+    tracked = tracked.filter((intent) => keptIds.has(intent.operation.id));
+    snapshot = retained;
   };
   const find = (operationId: string): TrackedIntent | undefined =>
     tracked.find((intent) => intent.operation.id === operationId);
@@ -192,6 +202,15 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       } catch {
         admission = 'unknown';
       }
+      if (intent.abandoned) {
+        // A late transport response must not revive an attempt that was
+        // abandoned while the POST was in flight; keep its terminal state.
+        rebuild();
+        return {
+          operationId,
+          result: resolveIntent(admission, 'failed', recordedTarget),
+        };
+      }
       if (admission === 'rejected') {
         // Rejected requests carry no outcome and are not tracked, so settling
         // this id is a no-op.
@@ -238,6 +257,7 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       // Only an unconfirmable admission may be abandoned; an accepted attempt
       // is a live turn whose real evidence must still be able to land.
       if (intent.admission !== 'unknown') return undefined;
+      intent.abandoned = true;
       intent.operation = { ...intent.operation, state: 'failed' };
       rebuild();
       return resolveIntent(intent.admission, 'failed', intent.operation.target);

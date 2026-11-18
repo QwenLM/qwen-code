@@ -441,4 +441,34 @@ describe('daemon intents: recorded-target and evidence boundaries', () => {
       'unsettled',
     );
   });
+
+  it('acknowledging the successful retry does not resurrect the superseded failure', async () => {
+    const intents = createDaemonChatIntents();
+    const first = await intents.dispatch('submit', target, accepted);
+    intents.settle(first.operationId, 'failed');
+    const retry = await intents.dispatch('submit', target, accepted);
+    intents.settle(retry.operationId, 'settled');
+    expect(intents.operations.map((op) => op.id)).toEqual([retry.operationId]);
+
+    intents.acknowledge(retry.operationId);
+    expect(intents.operations).toEqual([]);
+  });
+
+  it('a late transport response cannot revive an abandoned in-flight cancel', async () => {
+    const intents = createDaemonChatIntents();
+    const gate = deferredAdmission();
+    const pending = intents.dispatch('cancel', target, () => gate.promise);
+    const cancelId = intents.operations.find((op) => op.kind === 'cancel')!.id;
+    // Abandon while the POST is still in flight.
+    intents.abandon(cancelId);
+    expect(intents.phase('idle')).toBe('idle');
+    // The transport then resolves accepted; it must not revive the attempt.
+    gate.resolve('accepted');
+    await pending;
+    expect(intents.operations.find((op) => op.id === cancelId)?.state).toBe(
+      'failed',
+    );
+    expect(intents.phase('idle')).toBe('idle');
+    expect(intents.settle(cancelId, 'settled')).toBeUndefined();
+  });
 });

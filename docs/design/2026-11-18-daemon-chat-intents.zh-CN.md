@@ -63,7 +63,8 @@ cancel、被取代的 approval），以及一条见证关联测试，使每份�
   绝不 `established`，使失败的 transport 不会把 phase 钉死。未知 id、已终态尝试、
   以及 admission 已被确认的尝试都是空操作——存活的已准入 turn 仍保留其结算机会。
 - `acknowledge(operationId)`——在界面消费完一条终态行后释放它（委托 slice 1
-  `acknowledgeOperation`）；非终态行保留，终态行在被确认前保持可读。
+  `acknowledgeOperation`）；非终态行保留，终态行在被确认前保持可读。每次 rebuild
+  会从内部日志裁剪被取代的终态行，故确认最新终态行不会让旧行复现。
 - `setApprovalRequestLive(requestId, live)`——跟踪仍**有效（未被取代）**的 approval
   请求集合。daemon 同时保留多个待处理授权请求，故时效是「在该集合内」，而非单一
   「最新」id。请求到达时标为存活，仅在被取代或取消时标为不存活——**而非在被应答
@@ -121,8 +122,10 @@ daemon 同时保留至多 64 个待处理授权请求。在 `r2` 也在等待时
 抛错的 transport 留下 admission `unknown`，真值表使其在任何 witness 下都保持
 `unsettled`；若无出路，它会在引擎整个生命周期内把 phase 钉死。`abandon` 把这种
 尝试终态化为 `failed`（绝不 `established`），且仅限 `unknown` admission，故不会
-杀死真实证据仍须落地的存活已准入 turn；`acknowledge` 让界面释放已消费的终态行，
-使保留不会跨不同 turn 无限增长。
+杀死真实证据仍须落地的存活已准入 turn。被弃尝试打上标记，迟到的 transport 响应
+（即使在飞时 abandon、随后才 resolve）无法复活其终态。`acknowledge` 让界面释放已
+消费的终态行，且每次 rebuild 会从内部日志裁剪被取代的终态行，故确认最新终态行不会
+让旧行复现，保留不会跨不同 turn 无限增长。
 
 ## 负向测试（随 daemon 适配器落地）
 
@@ -157,6 +160,11 @@ daemon 同时保留至多 64 个待处理授权请求。在 `r2` 也在等待时
 11. **先应答后结算的顺序。** approval 在其请求存活时结算为 `established`，尽管应答
     意味着它已不再等待决定；引擎在结算时释放身份，故对同一已结算请求重投的决定不再
     建立。
+12. **确认重试不会复活被取代的失败。** 同一 target 上首次 submit 结算 `failed`、重试
+    结算 `established` 后，确认重试使 `operations` 为空——被裁剪的旧失败不再出现。
+13. **迟到响应不能复活已弃 cancel。** 在 cancel 的 POST 在飞时 abandon 使其终态化；
+    随后 transport resolve 为 `accepted`，该行仍 `failed`、phase 仍 `idle`，后续 settle
+    是空操作。
 
 配套用例钉住：rejected 准入（无 outcome、不跟踪，结算其 id 为空操作）、failed
 witness、对未知 id settle（空操作）、有界保留、状态变化之间 `operations` 快照身份
@@ -171,7 +179,8 @@ approval 用例转红；把记录移到 `await transport()` 之后会令派发�
 用例转红；按 kind 加 target 而非操作 id 结算会令关联用例转红；按引用记录调用方
 target 而非冻结快照会令记录 target 用例转红；忽略保留的在飞见证会令在飞证据用例
 转红；去掉 `abandon` 的 `unknown` admission 守卫会令存活 turn 用例转红；去掉结算时
-的时效释放会令先应答后结算用例转红。
+的时效释放会令先应答后结算用例转红；rebuild 时不裁剪被取代终态行会令确认重试用例
+转红；去掉 `await transport()` 后的 abandoned 检查会令迟到响应用例转红。
 
 ## 遵守的约束
 
