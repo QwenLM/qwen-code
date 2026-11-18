@@ -4584,7 +4584,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined,
             description:
-              'Realtime turn detection type. Unset or empty defaults to server_vad for qwen-audio realtime models and semantic_vad for all others. An invalid value blocks Live Voice calls and is reported in the Live Voice setup card, which can clear or replace it.',
+              'Realtime turn detection type. Unset or empty defaults to server_vad for qwen-audio realtime models and semantic_vad for all others. An invalid value blocks Live Voice calls and is reported as turnDetectionError by GET /live/setup; clear or replace it with turnDetection in POST /live/setup (empty restores the default) or in settings.json.',
             showInDialog: false,
             options: [
               { value: '', label: 'Default (model-aware)' },
