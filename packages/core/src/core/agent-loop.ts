@@ -145,6 +145,10 @@ export function turnModelRound(
   return {
     sendRound: (round, signal) =>
       runTurn(
+        // Built without isSessionTurn: every production caller of
+        // turnModelRound is a background round (subagent shared loop,
+        // unified-loop speculation) sharing the session Config, so it must not
+        // participate in the live turn's model-availability ledger.
         new Turn(chat, round.promptId),
         model,
         round.parts,
