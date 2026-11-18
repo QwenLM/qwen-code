@@ -10,6 +10,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { extractArchiveFile, extractFile } from './github.js';
+import {
+  managedSkillCatalogEntry,
+  MANAGED_SKILL_BODY_MAX_BYTES,
+} from './managed-skill-content.js';
 import { parseSkillContent } from '../skills/skill-load.js';
 import {
   compileManagedExtensionPackage,
@@ -19,6 +23,7 @@ import {
   ManagedPackageCompatibilityError,
   prepareManagedExtensionPackage,
   type ManagedPackageManifest,
+  type ManagedPackageSkill,
   type ManagedPackageTarget,
 } from './managed-package.js';
 import {
@@ -119,10 +124,7 @@ async function archiveCopy(file: string, directory: string): Promise<string> {
   return archive;
 }
 
-async function inspectDirectory(
-  root: string,
-  target: ManagedPackageTarget,
-): Promise<ManagedPackageInspection> {
+async function inspectDirectory(root: string, target: ManagedPackageTarget) {
   const compiled = await compileManagedExtensionPackage(root, {
     target,
     resolveRecipes: false,
@@ -163,7 +165,7 @@ async function inspectDirectory(
   };
   if (Buffer.byteLength(JSON.stringify(inspection)) > 2 * 1024 * 1024)
     invalid('package inspection exceeds its size limit');
-  return inspection;
+  return { inspection, skills: contributions.skills };
 }
 
 export async function inspectManagedPackageArchive(
@@ -171,6 +173,14 @@ export async function inspectManagedPackageArchive(
   metadata: ManagedPackageImportMetadata,
   signal?: AbortSignal,
 ): Promise<ManagedPackageInspection> {
+  return (await inspectArchive(file, metadata, signal)).inspection;
+}
+
+async function inspectArchive(
+  file: string,
+  metadata: ManagedPackageImportMetadata,
+  signal?: AbortSignal,
+) {
   const temporary = await fs.mkdtemp(
     path.join(os.tmpdir(), 'qwen-managed-inspect-'),
   );
@@ -193,6 +203,24 @@ export async function inspectManagedPackageArchive(
   }
 }
 
+function standaloneSkillMetadata(skill: ManagedPackageSkill) {
+  // MAS assigns every extension an ext_ prefixed UUID. Its value does not
+  // affect UTF-8 or JSON escaping, including inside expanded instructions.
+  const entry = managedSkillCatalogEntry(
+    skill,
+    'ext_00000000-0000-0000-0000-000000000000',
+  );
+  if (!entry.body.trim()) invalid('Standalone Skill body is empty');
+  if (Buffer.byteLength(entry.body) > MANAGED_SKILL_BODY_MAX_BYTES)
+    invalid('Standalone Skill body exceeds its size limit');
+  return {
+    name: entry.name,
+    description: entry.description,
+    userInvocable: entry.user_invocable,
+    catalogEntryBytes: Buffer.byteLength(JSON.stringify(entry)),
+  };
+}
+
 export async function prepareManagedPackageImport(
   file: string,
   metadata: ManagedPackageImportMetadata,
@@ -202,6 +230,12 @@ export async function prepareManagedPackageImport(
   packageDigest: string;
   manifest: ManagedPackageManifest;
   inspection: ManagedPackageInspection;
+  standaloneSkill?: {
+    name: string;
+    description: string;
+    userInvocable: boolean;
+    catalogEntryBytes: number;
+  };
   byteLength: number;
 }> {
   parseManagedPackageImportMetadata(metadata);
@@ -362,7 +396,7 @@ export async function prepareManagedPackageImport(
         signal: options.signal,
       },
     );
-    const inspection = await inspectManagedPackageArchive(
+    const { inspection, skills } = await inspectArchive(
       prepared.archivePath,
       {
         ...metadata,
@@ -376,6 +410,9 @@ export async function prepareManagedPackageImport(
     return {
       ...prepared,
       inspection,
+      ...(metadata.sourceKind === 'skill'
+        ? { standaloneSkill: standaloneSkillMetadata(skills[0]) }
+        : {}),
       byteLength: (await fs.stat(prepared.archivePath)).size,
     };
   } finally {
