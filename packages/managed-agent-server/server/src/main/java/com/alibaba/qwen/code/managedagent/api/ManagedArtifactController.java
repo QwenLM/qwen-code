@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellArtifactQueryR
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellArtifactRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellToolResultRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellWorkspaceArtifactQueryRequest;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
@@ -80,6 +81,17 @@ public class ManagedArtifactController {
             @Valid @RequestBody WebShellArtifactQueryRequest request) {
         return metadata(service.page(tenant, request.sessionId(), request.cursor(),
                 request.limit() == null ? 20 : request.limit()));
+    }
+
+    @PostMapping(WEB + "/workspaces/artifacts/query")
+    public ResponseEntity<WebShellPage<ArtifactResponse>> webWorkspaceArtifacts(TenantContext tenant,
+            @Valid @RequestBody WebShellWorkspaceArtifactQueryRequest request) {
+        // The workspace family's no-store convention: TenantContextFilter
+        // pre-sets it on /workspaces/ paths, so the session routes'
+        // private, no-store metadata() would leave two header values.
+        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+                .body(service.workspacePage(tenant, request.workspaceId(), request.cursor(),
+                        request.limit() == null ? 20 : request.limit()));
     }
 
     private static <T> ResponseEntity<T> metadata(T body) {

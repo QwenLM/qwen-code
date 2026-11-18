@@ -149,11 +149,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:ARTIFACT_GET',
   },
-  workspace_artifact_library: NO_MANAGED_EQUIVALENT(
-    'no Managed workspace-wide artifact query or explicit-pair batch removal',
-  ),
+  workspace_artifact_library: {
+    standing: 'managed',
+    evidence: 'surface:WORKSPACE_ARTIFACT_LIST',
+  },
   workspace_artifact_library_stream: NO_MANAGED_EQUIVALENT(
-    'no Managed progressive workspace artifact query with session summaries',
+    'Managed workspace artifact reads are JSON cursor pages, not progressive streams',
   ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
   generated_ui_state: NO_MANAGED_EQUIVALENT(

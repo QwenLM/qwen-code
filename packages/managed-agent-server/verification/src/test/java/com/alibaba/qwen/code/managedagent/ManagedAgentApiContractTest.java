@@ -201,6 +201,7 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellToolDetails.class, List.of("WebShellToolDetails")),
                     entry(ApiModels.WebShellShellResult.class, List.of("WebShellShellResult")),
                     entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
+                    entry(ApiModels.WebShellWorkspaceArtifactQueryRequest.class, List.of("WebShellWorkspaceArtifactQueryRequest")),
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
                     entry(SshWorkspaceController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryRequest")),
@@ -900,6 +901,9 @@ class ManagedAgentApiContractTest {
         exchange(drift, "queryWebShellArtifacts", 401,
                 post("/api/agent/web-shell/v1/artifacts/query").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchange(drift, "queryWebShellWorkspaceArtifacts", 401,
+                post("/api/agent/web-shell/v1/workspaces/artifacts/query").header(TENANT, tenant),
+                "{\"workspaceId\":\"workspace_missing\"}");
         exchange(drift, "getToolResult", 401,
                 get("/v1/agents/sessions/%s/items/item_missing/tool-result".formatted(sessionId))
                         .header(TENANT, tenant), null);

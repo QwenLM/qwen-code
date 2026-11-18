@@ -3,7 +3,9 @@ package com.alibaba.qwen.code.managedagent.api;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCreationStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.WorkspaceSummary;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceDiscoveryService;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceDiscoveryService.WorkspacePage;
 import com.fasterxml.jackson.annotation.JsonAnySetter;
@@ -27,10 +29,15 @@ import java.util.Locale;
 public class WorkspaceDiscoveryController {
     private final WorkspaceDiscoveryService service;
     private final WorkspaceCreationStore creation;
+    private final ManagedAgentSettings settings;
+    private final ManagedArtifactReader artifacts;
 
-    public WorkspaceDiscoveryController(WorkspaceDiscoveryService service, WorkspaceCreationStore creation) {
+    public WorkspaceDiscoveryController(WorkspaceDiscoveryService service, WorkspaceCreationStore creation,
+            ManagedAgentSettings settings, ManagedArtifactReader artifacts) {
         this.service = service;
         this.creation = creation;
+        this.settings = settings;
+        this.artifacts = artifacts;
     }
 
     @GetMapping("/v1/agents/workspaces")
@@ -64,7 +71,8 @@ public class WorkspaceDiscoveryController {
                 page.defaultWorkspace() == null ? null
                         : webShellItem(page.defaultWorkspace()), page.hasMore(),
                 page.nextCursor(), new WebShellCapabilities(true, false, creation.enabled(), true,
-                        creation.directorySelectionEnabled(), creation.localDirectoryImportEnabled())));
+                        creation.directorySelectionEnabled(), creation.localDirectoryImportEnabled(),
+                        settings.getArtifacts().isEnabled() && artifacts.supported())));
     }
 
     @PostMapping("/api/agent/web-shell/v1/workspaces/get")
@@ -144,7 +152,14 @@ public class WorkspaceDiscoveryController {
 
     public record WebShellCapabilities(boolean workspaceBinding,
             boolean workspaceContext, boolean workspaceCreation, boolean approvalModeSelection,
-            boolean workspaceDirectorySelection, boolean localDirectoryImport) {
+            boolean workspaceDirectorySelection, boolean localDirectoryImport,
+            boolean workspaceArtifactLibrary) {
+        public WebShellCapabilities(boolean workspaceBinding,
+                boolean workspaceContext, boolean workspaceCreation, boolean approvalModeSelection,
+                boolean workspaceDirectorySelection, boolean localDirectoryImport) {
+            this(workspaceBinding, workspaceContext, workspaceCreation, approvalModeSelection,
+                    workspaceDirectorySelection, localDirectoryImport, false);
+        }
         public WebShellCapabilities(boolean workspaceBinding,
                 boolean workspaceContext, boolean workspaceCreation, boolean approvalModeSelection,
                 boolean workspaceDirectorySelection) {

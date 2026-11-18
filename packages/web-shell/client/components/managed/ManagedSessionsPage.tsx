@@ -86,6 +86,7 @@ import {
 } from './ManagedArchivedSessions';
 import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
+import { ManagedArtifactLibraryPage } from './ManagedArtifactLibraryPage';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
@@ -670,6 +671,13 @@ function ManagedSessionsContent({
     if (detail.summary && !detail.summary.capabilities.artifacts)
       setOutputTarget(undefined);
   }, [detail.summary]);
+  // The library belongs to the workspace, not the open session: it survives
+  // session selection and clears only when the provider identity changes.
+  const [artifactLibraryWorkspace, setArtifactLibraryWorkspace] = useState<{
+    workspaceId: string;
+    label: string;
+  }>();
+  useEffect(() => setArtifactLibraryWorkspace(undefined), [provider]);
   const loadToolDetails = useMemo<ToolDetailsLoader | undefined>(() => {
     const reader = provider.toolDetails;
     if (!sessionId || !reader) return undefined;
@@ -2048,6 +2056,9 @@ function ManagedSessionsContent({
           onSelectWorkspace={onSelectWorkspace}
           onSelectSession={openSession}
           onWorkspacesChange={onWorkspacesChange}
+          onOpenArtifactLibrary={(workspaceId, label) =>
+            setArtifactLibraryWorkspace({ workspaceId, label })
+          }
         />
       ) : (
         sessions
@@ -3373,6 +3384,21 @@ function ManagedSessionsContent({
                 clientId={clientId}
                 itemId={outputTarget.itemId}
                 onClose={() => setOutputTarget(undefined)}
+              />
+            )}
+          {interactive &&
+            artifactLibraryWorkspace &&
+            provider.workspaceArtifacts &&
+            provider.toolResults && (
+              <ManagedArtifactLibraryPage
+                key={`${provider.storageKey}:${artifactLibraryWorkspace.workspaceId}`}
+                library={provider.workspaceArtifacts}
+                reader={provider.toolResults}
+                workspaceId={artifactLibraryWorkspace.workspaceId}
+                workspaceLabel={artifactLibraryWorkspace.label}
+                clientId={clientId}
+                sessions={sessions}
+                onClose={() => setArtifactLibraryWorkspace(undefined)}
               />
             )}
         </section>
