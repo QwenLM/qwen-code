@@ -67,10 +67,11 @@ Deeper structural dedup of the profiles (moving the shared Failsafe version
 and executions into `pluginManagement`) was originally blocked by the v0.26.5
 release-repair patch `scripts/patches/managed-runtime-v0.26.5-verification.patch`,
 which reverse-applied against the current pom and pinned the `pluginManagement`
-block byte-for-byte. That patch and its meta-test were removed by the dead-tag
-release-repair cleanup (pre-production convergence design, Slice 2), so the
-dedup is no longer blocked by a pin. It remains a separate careful change
-because it touches the CI lane definitions.
+block byte-for-byte. After the dead-tag release-repair cleanup (pre-production
+convergence design, Slice 2) removed that patch and its meta-test, the fifteen
+Failsafe-bearing profiles now inherit the version and `integration-test` /
+`verify` execution binding from `pluginManagement` instead of repeating them in
+each profile.
 
 ## Documentation policy
 

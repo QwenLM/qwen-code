@@ -481,6 +481,32 @@ function click(element: HTMLElement): void {
   clickSidebarElement(element, true);
 }
 
+async function selectSidebarWorkspaceFilter(label: string): Promise<void> {
+  const display = container.querySelector<HTMLElement>(
+    'button[aria-label="Display options"]',
+  );
+  expect(display).not.toBeNull();
+  await act(async () => click(display!, true));
+  const workspaceTrigger = Array.from(
+    document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((item) => item.textContent?.startsWith('Workspace'));
+  expect(workspaceTrigger).toBeDefined();
+  await act(async () => {
+    workspaceTrigger!.focus();
+    workspaceTrigger!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+    );
+  });
+  const option = Array.from(
+    document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+  ).find((item) => item.textContent === label);
+  expect(option).toBeDefined();
+  await act(async () => click(option!, true));
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
 function setInputValue(input: HTMLInputElement, value: string): void {
   Object.getOwnPropertyDescriptor(
     HTMLInputElement.prototype,
@@ -6808,6 +6834,20 @@ describe('WebShellSidebar Live group', () => {
     expect(container.querySelector('[data-live-pending-session]')).toBeNull();
   });
 
+  it('hides the pending Voice row when another workspace is selected', async () => {
+    renderSidebar({ showLive: true });
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'connecting',
+      });
+    });
+    expect(
+      container.querySelector('[data-live-pending-workspace]'),
+    ).not.toBeNull();
+    await selectSidebarWorkspaceFilter('other');
+    expect(container.querySelector('[data-live-pending-workspace]')).toBeNull();
+  });
+
   it('shows a loading Voice row immediately, then the created session without refresh', async () => {
     renderSidebar({ showLive: true });
     act(() => {
@@ -7509,6 +7549,46 @@ describe('WebShellSidebar standalone grouping', () => {
     ).toBeNull();
     expect(container.textContent).not.toContain('Archived');
     expect(listStandaloneSessionsPage).not.toHaveBeenCalled();
+  });
+
+  it('filters standalone sessions with the workspace display options', async () => {
+    const standaloneCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'standalone_sessions_v1'],
+    };
+    connection.capabilities = standaloneCapabilities;
+    workspace.capabilities = standaloneCapabilities;
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-existing',
+          displayName: 'Existing standalone conversation',
+          context: { kind: 'standalone' },
+        },
+      ],
+    });
+    renderSidebar({
+      onLoadStandaloneSession: vi.fn(),
+      onStandaloneNotice: vi.fn(),
+    });
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="standalone-active-group"]')
+          ?.textContent,
+      ).toContain('Existing standalone conversation'),
+    );
+
+    await selectSidebarWorkspaceFilter('other');
+    expect(
+      container.querySelector('[data-testid="standalone-active-group"]'),
+    ).toBeNull();
+    await selectSidebarWorkspaceFilter('No workspace');
+    await vi.waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="standalone-active-group"]')
+          ?.textContent,
+      ).toContain('Existing standalone conversation'),
+    );
   });
 
   it('starts one standalone draft without refreshing the list from the group header', async () => {

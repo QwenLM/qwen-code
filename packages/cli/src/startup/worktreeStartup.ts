@@ -268,6 +268,10 @@ export async function setupStartupWorktree(
     }
   }
   if (registered !== null) {
+    // Startup worktrees are always created on `worktree-<slug>`; Web Shell
+    // session re-attach goes through session-restore, not this flag. Any
+    // other occupant — including a detached checkout ('' branch) — is
+    // foreign and must be refused, not adopted.
     if (registered.branch !== expectedBranch) {
       // SOMETHING ELSE is occupying the path on a different branch —
       // refuse to clobber it.
@@ -275,7 +279,7 @@ export async function setupStartupWorktree(
         ok: false,
         error:
           `--worktree: ${expectedWorktreePath} is already a git worktree, but its branch ` +
-          `is ${registered.branch} (expected ${expectedBranch}). Refusing to re-attach. ` +
+          `is ${registered.branch || 'detached HEAD'} (expected ${expectedBranch}). Refusing to re-attach. ` +
           `Resolve the conflict manually (e.g. \`git worktree remove ${expectedWorktreePath}\`).`,
       };
     }

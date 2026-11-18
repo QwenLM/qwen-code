@@ -10,6 +10,7 @@ import type {
   AgentLoopOptions,
   AgentLoopResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -25319,6 +25320,36 @@ describe('useLlmStream', () => {
     expect(event.turnCount).toBe(3);
   });
 
+  describe('legacy agent loop round (unified off)', () => {
+    it('still logs the ink loop entry marker on the legacy path', async () => {
+      // The marker is unconditional, one line above the sharedSource ternary;
+      // the legacy arm (the behaviour this slice adds) must log it too, so a
+      // move behind the unified switch is caught here rather than staying green.
+      Object.assign(mockConfig, {
+        isUnifiedAgentLoopEnabled: vi.fn(() => false),
+        isEventBusAgentLoopEnabled: vi.fn(() => false),
+      });
+      mockRunAgentLoop.mockClear();
+      const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Hello.' };
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'Say hello.',
+          SendMessageType.UserQuery,
+          'prompt-legacy',
+        );
+      });
+      expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'ink');
+      expect(mockRunAgentLoop).not.toHaveBeenCalled();
+      entrySpy.mockRestore();
+    });
+  });
+
   describe.each([false, true])(
     'shared agent loop round (eventBusAgentLoop=%s)',
     (kernel) => {
@@ -25333,17 +25364,37 @@ describe('useLlmStream', () => {
         },
       });
 
+      let entrySpy: ReturnType<typeof vi.spyOn>;
       beforeEach(() => {
         Object.assign(mockConfig, {
-          isUnifiedAgentLoopEnabled: () => true,
-          isEventBusAgentLoopEnabled: () => kernel,
+          isUnifiedAgentLoopEnabled: vi.fn(() => true),
+          isEventBusAgentLoopEnabled: vi.fn(() => kernel),
         });
         mockRunAgentLoop.mockClear();
+        entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
       });
-      // Each round ran as one loop call, on the kernel when it is on.
+      // Each round ran as one loop call, on the kernel when it is on, and
+      // every loop read that happened names the 'ink' surface.
       afterEach(() => {
         for (const [options] of mockRunAgentLoop.mock.calls) {
           expect(options).toMatchObject({ maxRounds: 1, useEventBus: kernel });
+        }
+        // The ink loop entry marker must be logged for this surface.
+        expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'ink');
+        entrySpy.mockRestore();
+        const runtime = mockConfig as unknown as {
+          isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+          isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;
+        };
+        const loopCalls = runtime.isUnifiedAgentLoopEnabled.mock.calls;
+        if (loopCalls.length > 0) {
+          expect(loopCalls.every(([surface]) => surface === 'ink')).toBe(true);
+        }
+        const kernelCalls = runtime.isEventBusAgentLoopEnabled.mock.calls;
+        if (kernelCalls.length > 0) {
+          expect(kernelCalls.every(([surface]) => surface === 'ink')).toBe(
+            true,
+          );
         }
       });
 

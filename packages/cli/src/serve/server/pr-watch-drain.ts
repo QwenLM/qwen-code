@@ -7,11 +7,12 @@
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
-  DEFAULT_BOUND_ROLE_GUIDANCE,
+  DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE,
   resolveBoundActionTemplate,
   renderBoundActionTemplate,
   buildBoundEventPrompt,
   type BoundActionValues,
+  type BoundPromptLanguage,
 } from '@qwen-code/channel-base';
 import type { SessionPrBindingSummary } from '../routes/session-pr-bindings.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
@@ -31,6 +32,7 @@ import {
   type PrWatchPendingEntry,
   type PrWatchRoleGroup,
   type PrWatchState,
+  type PrTransitionType,
 } from './pr-watch-store.js';
 
 /** Pending entries older than this are dropped with a log line (master §5). */
@@ -63,6 +65,15 @@ export interface PrWatchRecipient {
   url: string;
 }
 
+/**
+ * The provenance line, per language. The summary is not here: it was rendered
+ * in the detection language by the observation and is passed through.
+ */
+const DRAIN_PROVENANCE: Readonly<Record<BoundPromptLanguage, string>> = {
+  en: 'Detected by the daemon PR-state watch.',
+  zh: '由 daemon PR 状态监视检测。',
+};
+
 export interface PrWatchDrainDeps {
   watchDir: string;
   locks: PathMutexRegistry;
@@ -84,8 +95,22 @@ export interface PrWatchDrainDeps {
   readPushedHeads: (
     recipient: PrWatchRecipient,
   ) => Promise<ReadonlySet<string> | undefined>;
-  actions?: ReadonlyMap<string, string>;
+  /**
+   * The templates for one entry's type on its PR's host. Undefined keeps the
+   * legacy single winner; a map — possibly empty — selects role-aware
+   * delivery. An empty map means no role subscribed that type.
+   */
+  actionsForEvent?: (
+    type: PrTransitionType,
+    host: string,
+  ) => ReadonlyMap<string, string> | undefined;
   wakeDormant?: boolean;
+  /**
+   * The language of the envelope, role guidance and provenance this drain
+   * composes. Absent means English. The transition summary is unaffected: it
+   * was persisted in the detection language by the observation.
+   */
+  language?: BoundPromptLanguage;
   now?: () => number;
   log?: (message: string) => void;
 }
@@ -416,7 +441,9 @@ export function buildDrainPrompt(
   entry: PrWatchPendingEntry,
   recipient: PrWatchRecipient,
   actions: ReadonlyMap<string, string> | undefined,
+  language?: BoundPromptLanguage,
 ): string {
+  const lang = language ?? 'en';
   const identity = state.pr;
   const repo = displayRepo(recipient.url, identity);
   const url = displayUrl(recipient.url, identity, repo);
@@ -443,7 +470,8 @@ export function buildDrainPrompt(
   ];
   return buildBoundEventPrompt({
     platform: 'GitHub',
-    provenance: 'Detected by the daemon PR-state watch.',
+    language: lang,
+    provenance: DRAIN_PROVENANCE[lang],
     ...(template !== undefined
       ? {
           instruction: {
@@ -459,7 +487,8 @@ export function buildDrainPrompt(
     ...(recipient.role !== undefined
       ? {
           role: recipient.role,
-          roleGuidance: DEFAULT_BOUND_ROLE_GUIDANCE[recipient.role],
+          roleGuidance:
+            DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[lang][recipient.role],
         }
       : {}),
     body: entry.summary,
@@ -694,9 +723,11 @@ async function drainEntry(
   log: (message: string) => void,
 ): Promise<{ delivered: number; done: boolean; entry: PrWatchPendingEntry }> {
   const identity = current.pr;
-  // An empty map is not a subscription: treat it as no actions so a
-  // momentarily empty configuration cannot strand live transitions.
-  const actions = deps.actions?.size ? deps.actions : undefined;
+  // The subscription decides per type: undefined keeps the legacy single
+  // winner, while a map — possibly empty — selects role-aware delivery. The
+  // alias uses the empty map to mean "no role subscribed", which must not
+  // fall back to the single winner.
+  const actions = deps.actionsForEvent?.(entry.type, identity.host);
   const roleAware = actions !== undefined;
   const deliveredKeys = new Set(current.delivered ?? []);
   const isGone = (sessionId: string): boolean => {
@@ -827,7 +858,13 @@ async function drainEntry(
         });
         break;
       }
-      const promptText = buildDrainPrompt(current, entry, recipient, actions);
+      const promptText = buildDrainPrompt(
+        current,
+        entry,
+        recipient,
+        actions,
+        deps.language,
+      );
       state.inFlight.set(key, {
         sessionId: recipient.sessionId,
         admitted: false,
@@ -940,12 +977,13 @@ async function restoreAndAdmit(
         const liveEntry = (current.pending ?? []).find(
           (p) => p.key === entry.key,
         );
-        const actions = deps.actions?.size ? deps.actions : undefined;
+        const actions = deps.actionsForEvent?.(entry.type, identity.host);
         const promptText = buildDrainPrompt(
           current,
           liveEntry ?? entry,
           recipient,
           actions,
+          deps.language,
         );
         try {
           await deps.admitPrompt(runtime, recipient.sessionId, promptText, key);

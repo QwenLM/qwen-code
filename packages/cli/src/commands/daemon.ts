@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -1902,8 +1903,7 @@ const tokenCommand: CommandModule<unknown, TokenArgs> = {
 };
 
 export const daemonCommand: CommandModule = {
-  command: 'daemon',
-  describe: 'Inspect and control local qwen serve daemons',
+  ...commandMetadata.daemon,
   builder: (yargs: Argv) =>
     yargs
       .command(startCommand)

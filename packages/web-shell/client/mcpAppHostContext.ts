@@ -4,6 +4,7 @@ import type {
   DaemonMcpAppToolCall,
   DaemonMcpAppToolResult,
 } from '@qwen-code/sdk/daemon';
+import type { ViewStateStore } from './generated-ui/view-state.js';
 
 export const McpAppHostContext = createContext<string | undefined>(undefined);
 
@@ -77,6 +78,8 @@ export const McpAppToolsContext = createContext<
         request: McpAppToolCallRequest,
         signal: AbortSignal,
       ) => Promise<DaemonMcpAppToolResult>;
+      /** The session's saved Generated UI card state, when the daemon keeps it. */
+      viewState?: Omit<ViewStateStore, 'sessionId'>;
     }
   | undefined
 >(undefined);
@@ -131,6 +134,7 @@ export const McpAppGeneratedUiOwnerContext = createContext<
 >(undefined);
 
 export const McpAppVisibilityContext = createContext(true);
+export const McpAppReadOnlyContext = createContext(false);
 
 const BUNDLED_GENERATED_UI_RESOURCE =
   'ui://qwen-code-generated-ui/view-v1.html';

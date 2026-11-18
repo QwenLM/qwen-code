@@ -264,6 +264,8 @@ export function assertManagedSessionChildContinuationEnabled(): void {
  */
 export const MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS = Object.freeze([
   'email',
+  'dingtalk',
+  'github',
 ] as const);
 
 /**

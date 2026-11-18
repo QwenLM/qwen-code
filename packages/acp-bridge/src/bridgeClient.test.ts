@@ -1729,6 +1729,97 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     });
   });
 
+  it('forwards a target workspace and rejects an unusable one', async () => {
+    const onCreate = vi.fn(async () => ({
+      sessionId: 'sub-11',
+      workspaceCwd: '/repos/b',
+    }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const workspaceGeneration = '5103aa8c-9a6e-4ad6-9b3b-7c765cdcbee5';
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'go',
+        completion: 'sent',
+        workspace: 'workspace-id',
+        workspaceGeneration,
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-11', workspaceCwd: '/repos/b' });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'sent',
+      workspace: 'workspace-id',
+      workspaceGeneration,
+      callerSessionId: 'caller-1',
+    });
+    for (const extra of [
+      { workspace: 'workspace-id' },
+      { workspaceGeneration },
+      { workspace: 'workspace-id', workspaceGeneration: '' },
+      { workspace: '' },
+      { workspace: 7 },
+      { workspace: 'a\u0000b' },
+      { workspace: 'x'.repeat(4097) },
+      {
+        workspace: '/repos/b',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'go',
+          completion: 'sent',
+          callerSessionId: 'caller-1',
+          ...extra,
+        }),
+      ).rejects.toThrow(/workspace/);
+    }
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards a follow-up session id and returns the completion task id', async () => {
+    const onCreate = vi.fn(async () => ({
+      sessionId: 'kid',
+      taskId: 'kid:prompt-1',
+    }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const res = await client.extMethod(METHOD, {
+      prompt: 'go',
+      completion: 'sent',
+      sessionId: 'kid',
+      callerSessionId: 'caller-1',
+    });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'sent',
+      sessionId: 'kid',
+      callerSessionId: 'caller-1',
+    });
+    expect(res).toEqual({ sessionId: 'kid', taskId: 'kid:prompt-1' });
+    for (const extra of [
+      { sessionId: '' },
+      { sessionId: 'a\u0000b' },
+      { sessionId: 'kid', model: 'm1' },
+      { sessionId: 'kid', name: 'n' },
+      {
+        sessionId: 'kid',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'go',
+          completion: 'sent',
+          callerSessionId: 'caller-1',
+          ...extra,
+        }),
+      ).rejects.toThrow(/sessionId/);
+    }
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
   it('omits result/stopReason when the handler does not return them (sent mode)', async () => {
     const client = makeClientWithCreateSubSession(async () => ({
       sessionId: 'sub-10',
@@ -5562,6 +5653,22 @@ describe('background execution ownership', () => {
     );
     expect(prepared.frames[0]).toMatchObject({ promptId: 'notification-1' });
     expect(prepared.frames[0].originatorClientId).toBeUndefined();
+    const deferredTool = client.prepareSessionUpdateFrames(
+      {
+        sessionId: 'session',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'old-tool',
+          status: 'completed',
+          _meta: { promptId: 'old-user', originatorClientId: 'old-client' },
+        },
+      },
+      entry as never,
+    );
+    expect(deferredTool.frames[0]).toMatchObject({
+      promptId: 'old-user',
+      originatorClientId: 'old-client',
+    });
     const completed = client.prepareSessionUpdateFrames(
       {
         sessionId: 'session',
