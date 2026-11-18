@@ -33,6 +33,38 @@ describe('Migration Framework Integration', () => {
       });
     });
 
+    it('keeps an explicit enableAutoUpdate in a versionless file that also has a stale disable* key', () => {
+      const handWritten = {
+        general: { disableUpdateNag: false, enableAutoUpdate: false },
+      };
+
+      const settings = runMigrations(handWritten, 'user').settings as Record<
+        string,
+        unknown
+      >;
+
+      expect(settings['$version']).toBe(SETTINGS_VERSION);
+      expect(settings['general']).toEqual({ enableAutoUpdate: false });
+    });
+
+    it('still unwraps V5 modelProviders in a versionless file that also has a disable* key', () => {
+      const handWritten = {
+        general: { disableAutoUpdate: true },
+        modelProviders: {
+          openai: { protocol: 'openai', models: [{ id: 'gpt-4o' }] },
+        },
+      };
+
+      const settings = runMigrations(handWritten, 'user').settings as Record<
+        string,
+        unknown
+      >;
+
+      expect(settings['modelProviders']).toEqual({
+        openai: [{ id: 'gpt-4o' }],
+      });
+    });
+
     it('should migrate V1 settings all the way to the current version', () => {
       const v1Settings = {
         theme: 'dark',

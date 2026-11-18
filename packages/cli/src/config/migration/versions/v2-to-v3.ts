@@ -10,6 +10,7 @@ import {
   getNestedProperty,
   setNestedPropertySafe,
 } from '../../settingsUtils.js';
+import { v5ToV4Migration } from './v5-to-v4.js';
 
 /**
  * Path mapping for boolean polarity migration (V2 disable* -> V3 enable*).
@@ -112,6 +113,8 @@ export class V2ToV3Migration implements SettingsMigration {
    * claims this shape, and the loader would otherwise stamp the current
    * `$version` over keys nothing reads any more: the setting would be ignored
    * for good. Same approach as V3 -> V4's versionless `gitCoAuthor` branch.
+   * A versionless file that V5 -> V4 would unwrap is left to it: once this
+   * migration stamps a `$version`, V5 -> V4 no longer recognises the file.
    */
   shouldMigrate(settings: unknown): boolean {
     if (typeof settings !== 'object' || settings === null) {
@@ -124,6 +127,9 @@ export class V2ToV3Migration implements SettingsMigration {
       return true;
     }
     if (s['$version'] === undefined) {
+      if (v5ToV4Migration.shouldMigrate(s)) {
+        return false;
+      }
       return Object.keys(V2_TO_V3_BOOLEAN_MAP).some(
         (path) => getNestedProperty(s, path) !== undefined,
       );
@@ -153,6 +159,7 @@ export class V2ToV3Migration implements SettingsMigration {
    * - Input object is not mutated.
    * - Valid migration and invalid cleanup are deterministic.
    * - Deprecated disable* keys are not retained after migration.
+   * - For versionless input, an enable* key that is already set is kept.
    */
   migrate(
     settings: unknown,
@@ -166,6 +173,12 @@ export class V2ToV3Migration implements SettingsMigration {
     const result = structuredClone(settings) as Record<string, unknown>;
     const processedPaths = new Set<string>();
     const warnings: string[] = [];
+    // A versionless file was hand-written, and may already set the enable*
+    // key next to a stale disable* key. Keep the explicit value there. V2
+    // files keep the existing policy of deriving the target from disable*.
+    const keepsExistingTarget = (path: string) =>
+      result['$version'] === undefined &&
+      getNestedProperty(result, path) !== undefined;
 
     // Step 1: Handle consolidated paths (multiple old paths → single new path)
     // Policy: if ANY of the old disable* settings is true, the new enable* should be false
@@ -195,7 +208,7 @@ export class V2ToV3Migration implements SettingsMigration {
         }
       }
 
-      if (hasAnyBooleanValue) {
+      if (hasAnyBooleanValue && !keepsExistingTarget(newPath)) {
         // enableAutoUpdate = !hasAnyDisable (if any disable* was true, enable should be false)
         setNestedPropertySafe(result, newPath, !hasAnyDisable);
       }
@@ -215,8 +228,10 @@ export class V2ToV3Migration implements SettingsMigration {
 
       deleteNestedPropertySafe(result, oldPath);
       if (normalized.isValid) {
-        // Set new property with inverted value
-        setNestedPropertySafe(result, newPath, !normalized.booleanValue);
+        if (!keepsExistingTarget(newPath)) {
+          // Set new property with inverted value
+          setNestedPropertySafe(result, newPath, !normalized.booleanValue);
+        }
       } else {
         warnings.push(
           `Removed deprecated setting '${oldPath}' from ${scope} settings because the value is invalid. Expected boolean or string "true"/"false".`,
