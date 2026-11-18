@@ -11,6 +11,13 @@ type ManagedTaskMessage =
 
 export const MANAGED_TASK_MESSAGES_EN: Record<string, ManagedTaskMessage> = {
   'managed.tasks.title': 'Session tasks',
+  'managed.tasks.activeChildren': (v) => `Active child Agents: ${v?.count}`,
+  'managed.tasks.awaitingApproval': 'Awaiting approval',
+  'managed.tasks.approvalMode': 'Approval mode',
+  'managed.tasks.childApproval': 'Child Agent approval',
+  'managed.tasks.viewChild': 'View child Session',
+  'managed.tasks.childSession': 'Child Session',
+  'managed.tasks.backToParent': 'Back to parent Session',
   'managed.tasks.recovery': 'Resume task cancellation',
   'managed.tasks.description': 'Task status and cancellation for this Session.',
   'managed.tasks.kind.child_agent': 'Child Agent',
@@ -82,6 +89,13 @@ export const MANAGED_TASK_MESSAGES_EN: Record<string, ManagedTaskMessage> = {
 
 export const MANAGED_TASK_MESSAGES_ZH: Record<string, ManagedTaskMessage> = {
   'managed.tasks.title': '会话任务',
+  'managed.tasks.activeChildren': (v) => `活动子 Agent：${v?.count}`,
+  'managed.tasks.awaitingApproval': '等待审批',
+  'managed.tasks.approvalMode': '审批模式',
+  'managed.tasks.childApproval': '子 Agent 审批',
+  'managed.tasks.viewChild': '查看子会话',
+  'managed.tasks.childSession': '子会话',
+  'managed.tasks.backToParent': '返回父会话',
   'managed.tasks.recovery': '恢复任务取消确认',
   'managed.tasks.description': '查看此会话的任务状态并请求取消。',
   'managed.tasks.kind.child_agent': '子 Agent',
@@ -139,4 +153,82 @@ export const MANAGED_TASK_MESSAGES_ZH: Record<string, ManagedTaskMessage> = {
   'managed.tasks.runtime.ready': '就绪',
   'managed.tasks.runtime.draining': '排空中',
   'managed.tasks.runtime.lost': '连接丢失',
+};
+
+export const MANAGED_TASK_MESSAGES_RU: Record<string, ManagedTaskMessage> = {
+  'managed.tasks.title': 'Задачи сессии',
+  'managed.tasks.activeChildren': (v) => `Активные дочерние Agent: ${v?.count}`,
+  'managed.tasks.awaitingApproval': 'Ожидает подтверждения',
+  'managed.tasks.approvalMode': 'Режим подтверждения',
+  'managed.tasks.childApproval': 'Подтверждение дочернего Agent',
+  'managed.tasks.viewChild': 'Открыть дочернюю сессию',
+  'managed.tasks.childSession': 'Дочерняя сессия',
+  'managed.tasks.backToParent': 'Назад к родительской сессии',
+  'managed.tasks.recovery': 'Продолжить отмену задачи',
+  'managed.tasks.description': 'Статус задач и отмена для этой сессии.',
+  'managed.tasks.kind.child_agent': 'Дочерний Agent',
+  'managed.tasks.kind.workflow': 'Workflow',
+  'managed.tasks.kind.background_shell': 'Фоновый Shell',
+  'managed.tasks.kind.monitor': 'Монитор',
+  'managed.tasks.kind.automation_run': 'Запуск автоматизации',
+  'managed.tasks.kind.channel_delivery': 'Доставка Channel',
+  'managed.tasks.kind.other': 'Задача',
+  'managed.tasks.close': 'Закрыть задачи',
+  'managed.tasks.back': 'Назад к задачам',
+  'managed.tasks.previous': 'Предыдущая страница',
+  'managed.tasks.next': 'Следующая страница',
+  'managed.tasks.empty': 'Задачи не найдены.',
+  'managed.tasks.emptyPage':
+    'На этой странице нет задач. Продолжите просмотр страниц задач.',
+  'managed.tasks.created': 'Создана',
+  'managed.tasks.started': 'Начата',
+  'managed.tasks.settled': 'Завершена',
+  'managed.tasks.elapsed': 'Прошло',
+  'managed.tasks.seconds': (v) => `${v?.seconds} с`,
+  'managed.tasks.notStarted': 'Не начата',
+  'managed.tasks.unsettled': 'Не завершена',
+  'managed.tasks.events': 'История состояний',
+  'managed.tasks.noEvents': 'Сохранённых событий пока нет.',
+  'managed.tasks.historyGap':
+    'Часть более ранних событий истекла. Показана доступная история.',
+  'managed.tasks.noArtifacts':
+    'Эта задача ещё не предоставила просматриваемые Artifacts.',
+  'managed.tasks.requestCancel': 'Запросить отмену',
+  'managed.tasks.confirmDescription':
+    'Отменить эту задачу? Остановка занимает время; уже полученные результаты сохраняются.',
+  'managed.tasks.confirmCancel': 'Подтвердить отмену',
+  'managed.tasks.keepRunning': 'Продолжить выполнение',
+  'managed.tasks.continue': 'Продолжить подтверждение',
+  'managed.tasks.cancel.submitting': 'Отправка запроса на отмену…',
+  'managed.tasks.cancel.stopping':
+    'Остановка запрошена. Ожидание завершения задачи.',
+  'managed.tasks.cancel.unconfirmed': 'Результат отмены не подтверждён.',
+  'managed.tasks.cancel.failed': 'Запрос на отмену не выполнен.',
+  'managed.tasks.forbidden': 'У вас нет прав на эту операцию с задачей.',
+  'managed.tasks.operationBusy':
+    'Выполняется другая операция сессии. Повторите после её завершения.',
+  'managed.tasks.sessionInactive':
+    'Эта сессия больше не принимает отмену задач.',
+  'managed.tasks.actionUnavailable':
+    'Эта задача больше не принимает отмену. Будет обновлено её последнее состояние.',
+  'managed.tasks.workspaceUnavailable': 'Workspace недоступен.',
+  'managed.tasks.notFound': 'Задачу или сессию больше нельзя прочитать.',
+  'managed.tasks.storage':
+    'Восстановительное хранилище браузера недоступно. Новую отмену нельзя начать безопасно.',
+  'managed.tasks.readFailed':
+    'Не удалось подтвердить последние сведения о задаче.',
+  'managed.tasks.state.pending': 'Ожидает',
+  'managed.tasks.state.running': 'Выполняется',
+  'managed.tasks.state.waiting': 'Ожидание',
+  'managed.tasks.state.completed': 'Завершена',
+  'managed.tasks.state.failed': 'Ошибка',
+  'managed.tasks.state.cancelled': 'Отменена',
+  'managed.tasks.state.degraded': 'Выполняется с пониженными гарантиями',
+  'managed.tasks.state.recovery_blocked':
+    'Исход требует подтверждения восстановления',
+  'managed.tasks.runtime.unbound': 'Не привязан',
+  'managed.tasks.runtime.provisioning': 'Подготовка',
+  'managed.tasks.runtime.ready': 'Готов',
+  'managed.tasks.runtime.draining': 'Освобождение',
+  'managed.tasks.runtime.lost': 'Соединение потеряно',
 };

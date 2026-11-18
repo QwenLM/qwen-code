@@ -28,8 +28,10 @@ import { fileURLToPath } from 'node:url';
 import type { spawnSync } from 'node:child_process';
 import { isolateOperatorReviewSettings } from './test-utils.js';
 import * as environment from '../../../config/environment.js';
+import { PROJECT_ENV_HARDCODED_EXCLUSIONS } from '../../../config/shared-env-keys.js';
 import {
   containerCommand,
+  containerCommandEnv,
   firstAnsweringRuntime,
   killContainer,
   containerPathFor,
@@ -329,6 +331,15 @@ describe('the decisions this module exists to make', () => {
         () => true,
       ),
     ).toBe('off');
+  });
+
+  it('keeps the policy key out of repository-sourced environment entirely', () => {
+    // The read-time predicate above protects this process. A child inheriting
+    // the value sees an empty provenance registry, so the loader must refuse
+    // the key before it can ever be written — the same closure
+    // QWEN_REVIEW_PREBUILD relies on, pinned here with the real symbol so
+    // neither side can drift.
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_REVIEW_SANDBOX');
   });
 
   it('reads either side the way an operator would write it', () => {
@@ -698,6 +709,91 @@ describe('containerCommand', () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it('gives a build and an install — not a test — its declared heap, on both channels, ahead of the image', () => {
+    // The direct spawn gets it through `buildRunEnv`; the allowlist has no
+    // NODE_OPTIONS, so without this a boxed `tsc --build` dies at Node's
+    // default heap — the failure the declared heap exists to prevent. npm
+    // replaces NODE_OPTIONS with the tree's own `node-options`, hence the
+    // second, which keeps the rest of what those say.
+    const npm = '--require=/w/preload.cjs --max-old-space-size=512';
+    const argv = (
+      kind: 'build' | 'test' | 'install',
+      // `null`: the tree has none.
+      own: string | null = npm,
+    ): string[] =>
+      containerCommand('npm run build', {
+        ...base,
+        cwd: join(tmpDir, 'review-pr-9'),
+        kind,
+        heapMb: 6144,
+        npmNodeOptions: own ?? undefined,
+      }).args;
+    const passed = (args: string[]): string[] =>
+      args.filter((_, i) => args[i - 1] === '--env');
+    for (const kind of ['build', 'install'] as const) {
+      const args = argv(kind);
+      expect(passed(args)).toContain('NODE_OPTIONS=--max-old-space-size=6144');
+      expect(passed(args)).toContain(
+        'npm_config_node_options=--require=/w/preload.cjs --max-old-space-size=6144',
+      );
+      // After the image they are `sh -lc`'s arguments, not the container's
+      // environment.
+      expect(args.slice(-4)).toEqual([
+        base.image,
+        'sh',
+        '-lc',
+        'npm run build',
+      ]);
+    }
+    // The install still gets the registry it is the one command to need.
+    const offline = (args: string[]): boolean =>
+      args.some((a, i) => a === '--network' && args[i + 1] === 'none');
+    expect(offline(argv('install'))).toBe(false);
+    expect(offline(argv('build'))).toBe(true);
+    // No npm options of the tree's own, or ones that already set enough:
+    // npm's channel is left as it is.
+    for (const own of [null, '--max-old-space-size=8192']) {
+      expect(
+        passed(argv('build', own)).some((e) =>
+          e.startsWith('npm_config_node_options='),
+        ),
+      ).toBe(false);
+    }
+    expect(
+      passed(argv('test')).some(
+        (e) =>
+          e.startsWith('NODE_OPTIONS=') ||
+          e.startsWith('npm_config_node_options='),
+      ),
+    ).toBe(false);
+    // Already expanded by npm: escaped, so the container's npm does not
+    // expand it again.
+    expect(passed(argv('build', '-r /w/${X}.cjs'))).toContain(
+      'npm_config_node_options=-r /w/\\${X}.cjs --max-old-space-size=6144',
+    );
+  });
+
+  it('builds the environment entries it passes from containerCommandEnv', () => {
+    const opts = {
+      ...base,
+      cwd: join(tmpDir, 'review-pr-9'),
+      kind: 'build' as const,
+      heapMb: 6144,
+    };
+    const args = containerCommand('npm run build', opts).args;
+    expect(args.filter((_, i) => args[i - 1] === '--env')).toEqual(
+      containerCommandEnv(opts),
+    );
+    expect(containerCommandEnv(opts)).toContain(
+      'NODE_OPTIONS=--max-old-space-size=6144',
+    );
+    expect(
+      containerCommandEnv({ ...opts, kind: 'test' }).some((e) =>
+        e.startsWith('NODE_OPTIONS='),
+      ),
+    ).toBe(false);
   });
 
   // Windows has no `process.getuid`, so the flag is correctly absent there —

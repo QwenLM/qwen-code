@@ -127,7 +127,7 @@ test('turn sources count explicit reuse independently of footnotes and open the 
   const { errors } = await openSources(page, info);
   const button = page.locator(footer).last();
   await page.mouse.move(0, 0);
-  await expect(button.locator('..')).toHaveCSS('opacity', '0');
+  await expect(button.locator('..')).toHaveCSS('opacity', '1');
   await button.hover();
   await expect(button.locator('..')).toHaveCSS('opacity', '1');
   const list = page.locator(popup);

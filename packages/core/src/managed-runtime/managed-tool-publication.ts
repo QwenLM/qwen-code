@@ -13,6 +13,7 @@ import {
   assertManagedSessionSequence,
   assertManagedSessionStableId,
   assertManagedSessionTime,
+  MANAGED_SESSION_LIMITS,
   managedSessionKeysEqual,
   parseManagedSessionRecordJson,
   type ManagedSessionDurableRef,
@@ -173,7 +174,10 @@ function ref(
     result.kind === kind &&
       result.schemaVersion === 1 &&
       result.byteLength > 0 &&
-      result.byteLength <= TOOL_PUBLICATION_LIMITS.maxBodyBytes,
+      result.byteLength <=
+        (kind === 'managed-checkpoint'
+          ? MANAGED_SESSION_LIMITS.maxEventBytes
+          : TOOL_PUBLICATION_LIMITS.maxBodyBytes),
   );
   return Object.freeze(result);
 }

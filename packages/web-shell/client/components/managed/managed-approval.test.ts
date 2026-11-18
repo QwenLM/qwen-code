@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '../../adapters/types';
+import { isExitPlanApprovalRequest } from '../../utils/todos';
 import type { ManagedAgentPendingAction } from './managed-agent-provider';
 import { managedEventsToMessages } from './managed-session-messages';
 import {
@@ -39,6 +40,65 @@ function toolGroup(turnId: string, callId: string): Message {
 }
 
 describe('Managed approval presentation', () => {
+  it.each(['preview', 'transcript'] as const)(
+    'identifies a public plan approval from its %s for the shared plan card',
+    (source) => {
+      const plan = '# Plan\n1. Read files\n2. Make changes after approval';
+      const text = JSON.stringify({
+        toolName: 'exit_plan_mode',
+        input: { plan },
+      });
+      const messages: Message[] =
+        source === 'transcript'
+          ? [
+              {
+                id: 'managed:s1:turn-2:1',
+                role: 'tool_group',
+                tools: [
+                  {
+                    callId: 'turn-2:call-1',
+                    toolName: 'exit_plan_mode',
+                    status: 'pending',
+                    args: { plan },
+                  },
+                ],
+              } as Message,
+            ]
+          : [];
+      const request = toManagedPermissionRequest(
+        {
+          ...action,
+          toolName: 'exit_plan_mode',
+          inputPreview: { text, truncated: false, byteLength: text.length },
+        },
+        messages,
+      );
+
+      expect(request.rawInput).toEqual({ plan });
+      expect(request.content).toEqual([{ type: 'text', text: plan }]);
+      expect(isExitPlanApprovalRequest(request)).toBe(true);
+      expect(request.toolKind).toBe('switch_mode');
+    },
+  );
+
+  it('recovers a complete public plan from its durable preview after transcript refresh', () => {
+    const plan = '# Plan\n1. Read files\n2. Make changes after approval';
+    const text = JSON.stringify({
+      toolName: 'exit_plan_mode',
+      input: { plan },
+    });
+    const request = toManagedPermissionRequest(
+      {
+        ...action,
+        toolName: 'exit_plan_mode',
+        inputPreview: { text, truncated: false, byteLength: text.length },
+      },
+      [],
+    );
+    expect(request.rawInput).toEqual({ plan });
+    expect(request.options[0]?.id).toBe('allow');
+    expect(request.options[1]?.kind).toBe('reject_once');
+  });
   it('uses the exact Action preview without parsing a truncated JSON prefix', () => {
     const text = ' {"toolName":"write_file","input":{"content":"<b>😀';
     const request = toManagedPermissionRequest(

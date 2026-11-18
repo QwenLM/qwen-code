@@ -24,7 +24,11 @@ import {
   parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonInputAnnotation,
+  DaemonInputSourceAnnotation,
+  SessionMessageTarget,
+} from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
 import { LinkifiedText } from './LinkifiedText';
 import { useWebShellCustomization } from '../../customization';
@@ -43,6 +47,7 @@ import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
+import { workspaceBasename } from '../../utils/workspace';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
@@ -80,6 +85,10 @@ interface UserMessageProps {
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
   /** Set when a workspace agent, not the user, posted this message. */
   author?: DaemonMessageAuthor;
+  /** Set when another session sent this message here. */
+  sentFrom?: DaemonInputSourceAnnotation;
+  /** Set when the user sent this message to another session with `/send`. */
+  sentTo?: SessionMessageTarget;
 }
 
 interface ScheduledTaskRunContent {
@@ -173,10 +182,29 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
         {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
       </div>
       <div className={styles.scheduledTaskPrompt}>
-        <LinkifiedText text={run.prompt} />
+        {renderUserMessageText(run.prompt)}
       </div>
     </div>
   );
+}
+
+function renderUserMessageText(text: string, isContinuation?: boolean) {
+  // Preserve captured line breaks separately from the slash tokens.
+  return text.split(/(^|\r\n?|\n)(\/[^ \r\n]*)/g).map((part, index) => {
+    const content = part.includes('://') ? (
+      <LinkifiedText key={index} text={part} />
+    ) : (
+      part
+    );
+    return index % 3 === 2 &&
+      (!isContinuation || index > 2 || text[0] !== '/') ? (
+      <span key={index} data-web-shell-user-slash-command>
+        {content}
+      </span>
+    ) : (
+      content
+    );
+  });
 }
 
 function DefaultUserMessageContent({
@@ -206,7 +234,7 @@ function DefaultUserMessageContent({
     <>
       {segments.map((segment, index) =>
         segment.type === 'text' ? (
-          <LinkifiedText key={index} text={segment.text} />
+          renderUserMessageText(segment.text, index > 0)
         ) : (
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
@@ -245,6 +273,8 @@ export const UserMessage = memo(function UserMessage({
   onImagePreview,
   onAttachmentPreview,
   author,
+  sentFrom,
+  sentTo,
 }: UserMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
@@ -337,10 +367,22 @@ export const UserMessage = memo(function UserMessage({
       parseUserMessageContent,
       '[WebShell] failed to parse user message content',
     );
-    if (!parts) return <LinkifiedText text={content} />;
-    return parts.map((part, index) => {
+    if (!parts) return renderUserMessageText(content);
+    const mergedParts: Array<(typeof parts)[number]> = [];
+    for (const part of parts) {
+      const previous = mergedParts.at(-1);
+      if (part.type === 'text' && previous?.type === 'text') {
+        mergedParts[mergedParts.length - 1] = {
+          type: 'text',
+          text: previous.text + part.text,
+        };
+      } else {
+        mergedParts.push(part);
+      }
+    }
+    return mergedParts.map((part, index) => {
       if (part.type === 'text') {
-        return <LinkifiedText key={index} text={part.text} />;
+        return renderUserMessageText(part.text, index > 0);
       }
       return (
         <ReadonlyComposerTag
@@ -404,6 +446,30 @@ export const UserMessage = memo(function UserMessage({
             : ''
         }`}
       >
+        {sentFrom && (
+          <div
+            className={styles.sentFrom}
+            data-web-shell-user-sent-from=""
+            title={sentFrom.workspaceCwd}
+          >
+            {t('user.sentFrom', {
+              session: sentFrom.title?.trim() || t('sidebar.untitledSession'),
+              workspace: workspaceBasename(sentFrom.workspaceCwd),
+            })}
+          </div>
+        )}
+        {sentTo && (
+          <div
+            className={styles.sentFrom}
+            data-web-shell-user-sent-to=""
+            title={sentTo.workspaceCwd}
+          >
+            {t('user.sentTo', {
+              session: sentTo.title?.trim() || t('sidebar.untitledSession'),
+              workspace: workspaceBasename(sentTo.workspaceCwd),
+            })}
+          </div>
+        )}
         {author && (
           <div className={styles.author}>
             <AuthorAvatar name={author.name} color={author.color} />

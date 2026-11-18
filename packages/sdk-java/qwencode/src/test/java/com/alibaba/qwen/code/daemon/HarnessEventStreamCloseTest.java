@@ -108,8 +108,8 @@ class HarnessEventStreamCloseTest {
                     session, new DeliverOnClose(FRAME), 1 << 20, 0,
                     HeldStreamHarness.EVENT_EPOCH);
             stream.startIdleWatchdog();
-            DaemonTransportException idle = assertThrows(
-                    DaemonTransportException.class, stream::next);
+            HostedHarnessStreamIdleException idle = assertThrows(
+                    HostedHarnessStreamIdleException.class, stream::next);
             assertEquals("Hosted Harness SSE idle timeout",
                     idle.getMessage());
             assertEquals(0, stream.getLastEventId());

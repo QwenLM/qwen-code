@@ -420,10 +420,13 @@ describe('LlmContentGenerator', () => {
   it('should prioritize contentGeneratorConfig samplingParams over request config', async () => {
     await withCg({
       model: 'gemini-1.5-flash',
-      samplingParams: { temperature: 0.1, top_p: 0.2 },
-    }).generateContent(flashReq({ temperature: 0.9, topP: 0.9 }), 'prompt-id');
+      samplingParams: { temperature: 0.1, top_p: 0.2, seed: 42 },
+    }).generateContent(
+      flashReq({ temperature: 0.9, topP: 0.9, seed: 1 }),
+      'prompt-id',
+    );
 
-    expectSentConfig({ temperature: 0.1, topP: 0.2 });
+    expectSentConfig({ temperature: 0.1, topP: 0.2, seed: 42 });
   });
 
   it.each([

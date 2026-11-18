@@ -28,11 +28,57 @@ export const MANAGED_MCP_WORKER_ROUTE = Object.freeze({
   cacheControl: 'no-store',
 } as const);
 
+export const MANAGED_MCP_DEFINITIONS_WORKER_ROUTE = Object.freeze({
+  ...MANAGED_MCP_WORKER_ROUTE,
+  key: 'mcp-definitions',
+  path: `${MANAGED_MCP_ROUTE}/definitions`,
+  requestBodyLimitBytes: 4096,
+} as const);
+
 export function registerManagedMcpRoutes(
   app: Application,
   identity: ManagedRuntimeRequestIdentity,
   runtime: ManagedMcpRuntime,
 ): void {
+  app.post(
+    MANAGED_MCP_DEFINITIONS_WORKER_ROUTE.path,
+    managedRuntimeNoStore,
+    authorizeManagedRuntime(identity),
+    managedRuntimeJsonBody(
+      MANAGED_MCP_DEFINITIONS_WORKER_ROUTE.requestBodyLimitBytes,
+    ),
+    (req: Request, res: Response) => {
+      const request = req.body as Record<string, unknown> | undefined;
+      if (
+        !request ||
+        Object.keys(request).sort().join(',') !==
+          'protocolVersion,tenantId,workspaceId' ||
+        request['protocolVersion'] !== 1 ||
+        typeof request['tenantId'] !== 'string' ||
+        typeof request['workspaceId'] !== 'string'
+      ) {
+        res.status(400).json({ code: 'managed_mcp_invalid' });
+        return;
+      }
+      try {
+        res.json({
+          protocolVersion: 1,
+          servers: runtime.publishedDefinitions(
+            request['tenantId'] as string,
+            request['workspaceId'] as string,
+          ),
+        });
+      } catch (cause) {
+        res.status(409).json({
+          code:
+            cause instanceof ManagedMcpError
+              ? cause.code
+              : 'managed_mcp_unavailable',
+        });
+      }
+    },
+    handleManagedRuntimeJsonError,
+  );
   app.post(
     MANAGED_MCP_ROUTE,
     managedRuntimeNoStore,

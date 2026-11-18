@@ -6,12 +6,18 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { stripTrailingUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
   stripSystemReminderBlocks,
 } from '../core/environmentContext.js';
+import { parseOutputLanguageMarker } from '../utils/output-language-table.js';
+import {
+  formatOutputLanguageInstruction,
+  readOutputLanguagePreference,
+} from '../utils/side-query-output-language.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
@@ -19,6 +25,7 @@ import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
 const debugLogger = createDebugLogger('SESSION_TITLE');
 
 const MAX_CONVERSATION_CHARS = 1000;
+const MAX_USER_LANGUAGE_SAMPLE_CHARS = 200;
 const RECENT_MESSAGE_WINDOW = 20;
 
 // The "Good examples" shown to the model in TITLE_SYSTEM_PROMPT, and the
@@ -35,11 +42,22 @@ const TITLE_PROMPT_EXAMPLE_TITLES = [
   '重构用户鉴权中间件',
 ];
 
-const TITLE_SYSTEM_PROMPT = `Generate a concise, sentence-case title (3-7 words) that captures what this programming-assistant session is about. Think of it as a git commit subject for the session.
+// Rules that make the title follow the conversation's language. They are sent
+// only when the output-language preference is `auto` or absent (#16793): the
+// English prompt otherwise pulls fast models into English titles for a Chinese
+// conversation, most often when the request is short or full of identifiers.
+// A fixed language gets the prompt unchanged: with these rules added, a fast
+// model broke a fixed English preference more often on Chinese conversations.
+const TITLE_LENGTH_RULE_ANY_SCRIPT =
+  '3-7 words, or about 8-20 characters for Chinese, Japanese or Korean.';
+const TITLE_AUTO_LANGUAGE_CONTEXT =
+  "For this title, the user's input means the human user's messages in the conversation transcript. Apply any language exception to those same messages.";
+
+function titleSystemPrompt(description: string, rules: string): string {
+  return `Generate ${description} that captures what this programming-assistant session is about. Think of it as a git commit subject for the session.
 
 Rules:
-- 3-7 words.
-- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.
+${rules}
 - No trailing punctuation.
 - No quotes, backticks, or markdown.
 - Be specific about the user's actual goal — name the feature, bug, or subject area. Avoid vague "Code changes", "Help request", "Conversation".
@@ -55,21 +73,44 @@ Bad (wrong case): {"title": "Fix Login Button On Mobile"}
 Bad (trailing punctuation): {"title": "Fix login button."}
 
 Return ONLY a JSON object with a single "title" key. No preamble, no reasoning, no closing remarks.`;
+}
+
+const TITLE_SYSTEM_PROMPT = titleSystemPrompt(
+  'a concise, sentence-case title (3-7 words)',
+  '- 3-7 words.\n- Sentence case: capitalize only the first word and proper nouns. NOT Title Case.',
+);
+const TITLE_SYSTEM_PROMPT_CONVERSATION_LANGUAGE = titleSystemPrompt(
+  'a concise title',
+  [
+    `- ${TITLE_LENGTH_RULE_ANY_SCRIPT}`,
+    '- Use sentence case only for languages with letter case. Capitalize only the first word and proper nouns.',
+    "- Write the title in the main language of the user's messages in the conversation.",
+    '- Keep personal names, code identifiers, file paths and product names exactly as written. Do not translate or transliterate them.',
+  ].join('\n'),
+);
 
 const TITLE_USER_PROMPT =
   'Generate the session title now. Populate the schema with a single short title string.';
 
-const TITLE_SCHEMA = {
-  type: 'object',
-  properties: {
-    title: {
-      type: 'string',
-      description:
-        'A concise sentence-case session title, 3-7 words, no trailing punctuation.',
+function titleSchema(description: string) {
+  return {
+    type: 'object',
+    properties: {
+      title: {
+        type: 'string',
+        description,
+      },
     },
-  },
-  required: ['title'],
-} as const;
+    required: ['title'],
+  } as const;
+}
+
+const TITLE_SCHEMA = titleSchema(
+  'A concise sentence-case session title, 3-7 words, no trailing punctuation.',
+);
+const TITLE_SCHEMA_CONVERSATION_LANGUAGE = titleSchema(
+  `A concise session title. ${TITLE_LENGTH_RULE_ANY_SCRIPT} Use sentence case for languages with letter case. No trailing punctuation.`,
+);
 
 const LEADING_MARKERS_RE = /^[\s>*\-#`"'_]+/;
 const TRAILING_MARKERS_RE = /[\s*`"'_]+$/;
@@ -113,8 +154,8 @@ export type SessionTitleOutcome =
   | { ok: false; reason: SessionTitleFailureReason };
 
 /**
- * Generate a short (3-7 word, sentence-case) title for the current session
- * using the configured fast model. Best-effort — never throws.
+ * Generate a short title for the current session using the configured fast
+ * model. Best-effort — never throws.
  *
  * Returns a discriminated result so callers can either handle failures
  * generically (`if (!outcome.ok) return null`) or map failure reasons to
@@ -123,7 +164,13 @@ export type SessionTitleOutcome =
 export async function tryGenerateSessionTitle(
   config: Config,
   abortSignal: AbortSignal,
-  userDisplayTexts: ReadonlyArray<string | undefined> = [],
+  // One entry per user turn: its display text, `undefined` when the turn
+  // recorded none, or `null` for a turn the person did not type, which offers
+  // the title nothing either way.
+  userDisplayTexts: ReadonlyArray<string | null | undefined> = [],
+  // The keys ({@link modPromptTitleKey}) of the messages the Mods submitted,
+  // which a title drawn from the conversation leaves out too.
+  modPromptKeys: ReadonlySet<string> = new Set(),
 ): Promise<SessionTitleOutcome> {
   try {
     const model = config.getFastModel();
@@ -132,32 +179,53 @@ export async function tryGenerateSessionTitle(
     const llmClient = config.getLlmClient();
     if (!llmClient) return { ok: false, reason: 'no_client' };
 
-    const fullHistory = llmClient.getHistoryShallow();
+    const fullHistory = withoutAutoMemorySnapshots(
+      llmClient.getHistoryShallow(),
+    );
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
     const hasDisplayProjection = userDisplayTexts.some(
-      (displayText) => displayText !== undefined,
+      (displayText) => typeof displayText === 'string',
     );
     const dialog = hasDisplayProjection
       ? userDisplayTexts.flatMap((displayText): Content[] =>
           displayText ? [{ role: 'user', parts: [{ text: displayText }] }] : [],
         )
-      : filterToDialog(fullHistory);
+      : filterToDialog(fullHistory, modPromptKeys);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) {
       return { ok: false, reason: 'empty_history' };
     }
 
+    const preference = await readOutputLanguagePreference(
+      config.getOutputLanguageFilePath?.(),
+    );
+    const isAuto =
+      parseOutputLanguageMarker(preference ?? '')?.toLowerCase() === 'auto';
+    const useConversationLanguage = preference === undefined || isAuto;
     const conversationText = flattenToTail(
       recentHistory,
-      MAX_CONVERSATION_CHARS,
+      useConversationLanguage,
     );
-    if (!conversationText.trim()) return { ok: false, reason: 'empty_history' };
+    if (!conversationText) return { ok: false, reason: 'empty_history' };
+
+    const titlePrompt = useConversationLanguage
+      ? TITLE_SYSTEM_PROMPT_CONVERSATION_LANGUAGE
+      : TITLE_SYSTEM_PROMPT;
+    const outputLanguageInstruction = formatOutputLanguageInstruction(
+      isAuto ? `${TITLE_AUTO_LANGUAGE_CONTEXT}\n\n${preference}` : preference,
+    );
 
     const result = await runSideQuery<{ title?: string }>(config, {
       purpose: 'session-title',
-      systemInstruction: TITLE_SYSTEM_PROMPT,
-      schema: TITLE_SCHEMA as unknown as Record<string, unknown>,
+      model,
+      systemInstruction: outputLanguageInstruction
+        ? `${titlePrompt}\n\n${outputLanguageInstruction}`
+        : titlePrompt,
+      skipOutputLanguagePreference: true,
+      schema: useConversationLanguage
+        ? TITLE_SCHEMA_CONVERSATION_LANGUAGE
+        : TITLE_SCHEMA,
       contents: [
         {
           role: 'user',
@@ -271,10 +339,36 @@ export function normalizeForEchoCompare(s: string): string {
  * only user prompts and the model's user-visible text. A single tool response
  * can be a 10K-token file dump that swamps the title-LLM with irrelevant detail.
  */
-function filterToDialog(history: Content[]): Content[] {
+/**
+ * What a Mod's message is found by in the conversation: the text the model
+ * read for it, its first text part as recorded.
+ */
+export function modPromptTitleKey(parts: readonly Part[]): string | undefined {
+  return parts.find((part) => typeof part?.text === 'string')?.text;
+}
+
+// The request that reaches history can carry reminders as parts of their own
+// and IDE context prepended to the first text part, so a part that ends with
+// the key after that separator is the Mod's text too.
+function isModPrompt(msg: Content, keys: ReadonlySet<string>): boolean {
+  if (msg.role !== 'user' || keys.size === 0) return false;
+  return (msg.parts ?? []).some((part) => {
+    const text = part?.text;
+    if (typeof text !== 'string') return false;
+    for (const key of keys)
+      if (text === key || text.endsWith(`\n\n${key}`)) return true;
+    return false;
+  });
+}
+
+function filterToDialog(
+  history: Content[],
+  modPromptKeys: ReadonlySet<string>,
+): Content[] {
   const out: Content[] = [];
   for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
+    if (isModPrompt(msg, modPromptKeys)) continue;
     const textParts: Part[] = [];
     const parts = stripTrailingUserPromptSubmitContextPart(msg.parts ?? []);
     for (const part of parts) {
@@ -311,25 +405,43 @@ function takeRecentDialog(history: Content[], windowSize: number): Content[] {
 }
 
 /**
- * Flatten filtered dialog to labeled plain text, then tail-slice to the last
- * N characters. Tail (rather than head) captures what the session has become,
- * not just how it opened — e.g. a session that starts with "help me debug X"
- * but ends up refactoring Y should get a title about Y.
+ * Keep the recent tail for the title topic. When the title follows the user's
+ * language, reserve space for a user sample if the tail cuts off the start of
+ * their latest message.
  */
-function flattenToTail(history: Content[], maxChars: number): string {
-  const lines: string[] = [];
+function flattenToTail(
+  history: Content[],
+  preserveUserLanguage: boolean,
+): string {
+  let transcript = '';
+  let latestUser: { offset: number; text: string } | undefined;
   for (const msg of history) {
-    const role = msg.role === 'user' ? 'User' : 'Assistant';
+    const role = msg.role === 'user' ? 'User: ' : 'Assistant: ';
     const text = (msg.parts ?? [])
       .map((p) => p.text ?? '')
       .join('')
       .trim();
     if (!text) continue;
-    lines.push(`${role}: ${text}`);
+    if (transcript) transcript += '\n';
+    if (msg.role === 'user') {
+      latestUser = { offset: transcript.length + role.length, text };
+    }
+    transcript += `${role}${text}`;
   }
-  const joined = lines.join('\n');
-  if (joined.length <= maxChars) return joined;
-  let tail = joined.slice(-maxChars);
+
+  const overflow = transcript.length - MAX_CONVERSATION_CHARS;
+  if (overflow <= 0) return transcript;
+
+  const userSample =
+    preserveUserLanguage && latestUser && latestUser.offset < overflow
+      ? latestUser.text
+          .slice(0, MAX_USER_LANGUAGE_SAMPLE_CHARS)
+          .replace(/[\uD800-\uDBFF]$/, '')
+      : '';
+  const prefix = userSample
+    ? `User (language sample): ${userSample}\n\nRecent conversation excerpt:\n`
+    : '';
+  let tail = transcript.slice(overflow + prefix.length);
   // `.slice` on a UTF-16 code-unit boundary can strand a lone low-surrogate
   // at the start (if the slice cut through a CJK supplementary char or emoji).
   // JSON-serializing that to the LLM produces an invalid surrogate that some
@@ -342,5 +454,5 @@ function flattenToTail(history: Content[], maxChars: number): string {
       tail = tail.slice(1);
     }
   }
-  return tail;
+  return prefix + tail;
 }

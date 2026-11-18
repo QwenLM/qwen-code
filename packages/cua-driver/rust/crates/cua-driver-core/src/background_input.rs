@@ -299,8 +299,9 @@ pub fn decide_background_input(
                     format!(
                         "pid {} owns {} other eligible top-level window(s); process-scoped \
                          key events cannot be proven to reach window {} and could mutate a \
-                         sibling window. Use an exact element action, the page tool for \
-                         browser content, or delivery_mode:\"foreground\"",
+                         sibling window. Use an exact element action or browser API. \
+                         For explicit desktop keyboard input, first observe the desktop \
+                         and focus the intended window",
                         target.pid, facts.competing_keyboard_destinations, target.window_id
                     ),
                     Some("accessibility"),
@@ -481,6 +482,24 @@ mod tests {
                 decide_background_input(TARGET, &facts, action).is_execute(),
                 "{action:?} is window-addressed and stays available"
             );
+        }
+    }
+
+    #[test]
+    fn same_pid_keyboard_recovery_uses_public_actions() {
+        let facts = BackgroundTargetFacts {
+            competing_keyboard_destinations: 1,
+            ..matched_facts()
+        };
+        for action in [BackgroundAction::InsertText, BackgroundAction::GenericKey] {
+            let BackgroundInputDecision::Refuse(refusal) =
+                decide_background_input(TARGET, &facts, action)
+            else {
+                panic!("ambiguous keyboard input must remain refused");
+            };
+            assert!(!refusal.reason.contains("delivery_mode"));
+            assert!(refusal.reason.contains("exact element action"));
+            assert!(refusal.reason.contains("desktop"));
         }
     }
 

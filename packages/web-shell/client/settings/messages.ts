@@ -16,6 +16,20 @@ type SettingsMessage =
   | ((vars?: Record<string, string | number>) => string);
 
 export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
+  'settings.label.general.outputLanguage': 'Language: Model output',
+  'settings.description.general.outputLanguage':
+    'Language the model replies in. Leave empty to follow your input language (auto). Changes rewrite the session’s output-language.md and apply to the running session.',
+  'settings.placeholder.general.outputLanguage': 'auto (follow input)',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `Use "${v?.value ?? ''}"`,
+  'settings.label.ui.accessibility.enableLoadingPhrases':
+    'Enable Loading Phrases',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    'Show rotating loading phrases. Turn off to hide both built-in and host-provided phrases.',
+  'settings.label.experimental.generatedUi': 'Generated UI',
+  'settings.description.experimental.generatedUi':
+    'Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default. Restart the owning session to apply changes.',
+
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
     'Leave empty to infer the limit from the model ID. Existing sessions need a restart to use the new limit.',
@@ -31,6 +45,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.description.voiceModel':
     'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
 
+  'settings.category.Archived': 'Archived conversations',
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
@@ -59,6 +74,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.localControl.qr': 'Local Control QR code',
   'settings.localControl.enable': 'Turn on Local Control',
   'settings.localControl.disable': 'Disconnect phone access',
+  'settings.localControl.explicitPick': 'Named at daemon start',
   'settings.localControl.encrypted': 'Encrypted',
   'settings.localControl.unencrypted':
     'Unencrypted — trusted networks only; re-enable after network changes',
@@ -109,6 +125,10 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
 };
 
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
+  'settings.label.experimental.generatedUi': 'Generated UI 生成式界面',
+  'settings.description.experimental.generatedUi':
+    '在 Web Shell 等受支持的本地会话中，用内置 Generated UI 展示交互视图。默认开启。重新创建所属会话后生效。',
+
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
     '留空根据模型 ID 自动推断。已有会话需重启后使用新窗口大小。',
@@ -150,6 +170,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.localControl.qr': '本地控制二维码',
   'settings.localControl.enable': '开启本地控制',
   'settings.localControl.disable': '断开手机访问',
+  'settings.localControl.explicitPick': '守护进程启动时指定',
   'settings.localControl.encrypted': '已加密',
   'settings.localControl.unencrypted':
     '未加密，仅限受信任网络；网络变化后请重新启用',
@@ -199,6 +220,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.category.Tools': '工具',
   'settings.category.Daemon': '守护进程',
   'settings.category.Connections': '连接',
+  'settings.category.Archived': '归档会话',
   'settings.category.Experimental': '实验性',
   'settings.category.Advanced': '高级',
   'settings.label.general.enableAutoUpdate': '启用自动更新',
@@ -222,6 +244,12 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.general.language': '语言：界面',
   'settings.description.general.language':
     '用户界面的语言。使用 auto 可根据系统设置自动检测；也可以在 ~/.qwen/locales/ 中放置 JS 语言文件来使用自定义语言代码。',
+  'settings.label.general.outputLanguage': '语言：模型输出',
+  'settings.description.general.outputLanguage':
+    '模型回复使用的语言。留空表示自动跟随你的输入语言（auto）。修改会重写当前会话读取的 output-language.md，并立即作用于当前会话。',
+  'settings.placeholder.general.outputLanguage': '自动（跟随输入）',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `使用“${v?.value ?? ''}”`,
   'settings.label.general.preventSystemSleep': '运行时防止系统睡眠',
   'settings.description.general.preventSystemSleep':
     '当 Qwen Code 正在流式生成模型回复或执行工具时防止系统睡眠。空闲输入状态和权限确认状态不会阻止睡眠。',
@@ -261,6 +289,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '一个 PR 要达到多少轮评审之后，评审才可以追加一段提示性文字，说明看起来成问题的是改动的方向而不是当前补丁本身。它只在 diff 自评审首次测量以来也膨胀了数倍时出现，且从不出现在 Approve 上。它仅是披露：不新增发现、不改变结论、不阻塞任何事——它存在的原因是每条发现都锚定在当前 diff 的某一行上，所以评审能报告某个方向在哪里漏，却永远说不出换个方向能一次性消除所有这些漏洞。保持 0 表示用内置的 5 轮阈值；调大让这段文字更晚出现；设得非常大则彻底关闭。非正整数的值会被忽略。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略，仓库无法为其评审者设定评审策略。',
   'settings.label.ui.theme': '主题',
   'settings.description.ui.theme': '界面的颜色主题。',
+  'settings.label.ui.allowedApprovalModes': 'Web Shell 审批模式',
+  'settings.description.ui.allowedApprovalModes':
+    'Web Shell 提供的执行审批模式。未配置时显示 default、auto-edit、auto 和 yolo；空列表不提供任何选项。宿主 allowedApprovalModes 优先于此设置。仅控制展示，不改变当前模式或强制约束后端权限。仅在 User、System、SystemDefaults 作用域生效；Workspace 作用域的值会被忽略并产生警告。请直接编辑 settings.json。',
   'settings.label.ui.hideTips': '隐藏提示',
   'settings.description.ui.hideTips': '隐藏界面中的帮助提示。',
   'settings.label.ui.enableWelcomeBack': '显示欢迎回来对话框',
@@ -285,6 +316,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.ui.showStatusInTitle':
     '在终端窗口标题中显示 Qwen Code 会话名称和状态。',
   'settings.label.ui.showResponseTokensPerSecond': '显示回复 Tokens/秒',
+  'settings.label.ui.accessibility.enableLoadingPhrases': '启用加载文案',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    '显示轮换加载文案。关闭后隐藏内置及宿主提供的文案。',
   'settings.description.ui.showResponseTokensPerSecond':
     '模型流式输出时，在回复 token 计数旁显示实时的 tokens/秒估值。下个会话生效。',
   'settings.label.ui.showToolCallDetails': '显示工具调用详情',
@@ -356,6 +390,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.tools.workflowsEnabled': '动态 Workflow',
   'settings.description.tools.workflowsEnabled':
     '启用 Workflow 工具：模型可以编写并运行一个编排多个子代理并行工作的脚本。默认关闭；一次运行可能派发大量子代理并相应消耗 token。QWEN_CODE_ENABLE_WORKFLOWS=1 和 QWEN_CODE_DISABLE_WORKFLOWS=1 环境变量会覆盖此设置（禁用时优先）。与 Session Workflow 的计划并审阅视图无关；要阻止“workflow”关键词引导对话走向，见“禁用 Workflow 关键词触发”。',
+  'settings.label.tools.lspEnabled': 'LSP 代码智能',
+  'settings.description.tools.lspEnabled':
+    '实验性。无需 `--experimental-lsp` 参数即可启用 LSP 代码智能服务：跳转定义、查找引用、悬浮提示、符号、诊断与代码操作。默认关闭。服务器来自工作区 `.lsp.json` 或已启用的扩展，并以你的权限运行；工作区声明的服务器要求文件夹被显式信任——启用 `security.folderTrust.enabled` 且该文件夹已受信任，或由 IDE 报告该工作区受信任——否则会被跳过。配置了 `tools.executionSandbox` 时会在启动时拒绝；`--safe-mode`、`QWEN_CODE_SAFE_MODE=1` 与 `--bare` 可在不启用 LSP 的情况下启动。QWEN_CODE_ENABLE_LSP=1 / QWEN_CODE_DISABLE_LSP=1 会覆盖该设置（禁用优先）；项目 `.env` 或 `settings.env` 无法设置它们。',
   'settings.label.tools.workflowSizeGuideline': '动态 Workflow 规模',
   'settings.description.tools.workflowSizeGuideline':
     '模型编写的动态 workflow 的建议规模指引：“small”目标少于 5 个 agent，“medium”（默认）少于 15 个，“large”少于 50 个，“unrestricted”不下发指引。这是建议而非强制限制。它同时决定运行中的 workflow 被标记为大型的 agent 数量（可用 QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS 覆盖该阈值）。修改从下一条消息起生效。',
@@ -378,6 +415,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.option.policy.permissionStrategy.designated': '指定发起方',
   'settings.option.policy.permissionStrategy.consensus': '共识法定人数',
   'settings.option.policy.permissionStrategy.local-only': '仅本机',
+  'settings.label.serve.maxSessions': '最大并发会话数',
+  'settings.description.serve.maxSessions':
+    '单个工作区同时存活的会话数上限；超出的新会话请求返回 503，接入已有会话不受影响。设为 0 表示不限制。仅在用户、系统、系统默认作用域生效；传入 qwen serve --max-sessions 时以命令行参数为准。修改后需要重启 daemon。',
   'settings.label.experimental.cron': '启用 Cron/Loop 工具',
   'settings.description.experimental.cron':
     '启用会话内 cron/loop 工具。启用后，模型可以用 cron_create、cron_list 和 cron_delete 创建周期性提示。也可通过 QWEN_CODE_DISABLE_CRON=1 环境变量禁用。',
@@ -396,6 +436,12 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.experimental.agentCollaboration': '启用 Agent 协作',
   'settings.description.experimental.agentCollaboration':
     '启用持久化的工作区 Agent 在共享任务线程上协作（实验性）。与 Agent Team 相互独立：两个开关互不隐含。启用只表示允许协作；把 Agent 开放给外部调用方、信任某个连接、注册 host 仍各自需要显式配置。也可通过 QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 环境变量启用。',
+  'settings.label.experimental.unifiedAgentLoop': '统一 Agent Loop',
+  'settings.description.experimental.unifiedAgentLoop':
+    '让会话运行在共享的 agent loop 上。未设置时，每个入口使用自己的默认值：headless 会话（`-p` 与 stream-json）、Ink TUI 和子代理运行在共享 loop 上，ACP 会话（Zed、VS Code、Web Shell、channel）、OpenTUI 和 Hosted Harness 仍用各自的 loop（在这些入口上属实验性）。设为 `true` 时它们都运行在共享 loop 上（Hosted Harness 的模型轮运行在它上面，同时保留其 journal 化工具派发），设为 `false` 时它们都用各自的 loop，headless、Ink TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 环境变量按入口覆盖此设置：`1` 开启所有入口，`0` 关闭所有入口，逗号分隔的列表（如 `headless,acp=0`）强制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作为整值识别，不在列表内生效；列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
+  'settings.label.experimental.eventBusAgentLoop': '事件总线 Agent Loop',
+  'settings.description.experimental.eventBusAgentLoop':
+    '让共享 agent loop 运行在事件总线架构上（实验性）。对运行在共享 agent loop 上的入口生效：默认是 headless 会话（`-p` 与 stream-json）、Ink TUI 和子代理，开启 experimental.unifiedAgentLoop 时还有 ACP 会话（Zed、VS Code、Web Shell、channel）和 OpenTUI；其他 surface 保留现有的 loop 内部实现。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 环境变量覆盖此设置：`1` 开启，`0` 关闭，逗号分隔的列表（如 `headless=0`）强制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 为保留名）。今天只有这些已接线的入口生效；裸 `1`/`0` 只作为整值识别，不在列表内生效，列表未点名的入口回退到此设置。项目级 `.env` 或 `settings.env` 无法设置该变量。',
   'settings.label.experimental.artifact': '启用 Artifacts',
   'settings.description.experimental.artifact':
     '启用 artifact 工具，默认开启。在交互式非 SDK 会话中，模型可以把自包含 HTML 页面发布为交互式 Artifact 并在浏览器中打开；非 SDK 的 daemon 会话可使用仅记录元数据的 record_artifact 工具。设为 false 或用 QWEN_CODE_DISABLE_ARTIFACT=1 可同时禁用两者。',
@@ -416,4 +462,119 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
+  'settings.label.worktree.defaultForNewSessions': '新会话默认使用 Worktree',
+  'settings.description.worktree.defaultForNewSessions':
+    '开启（默认）时，受信任 Git workspace 中的新 Web Shell 会话默认进入隔离 worktree：composer 缺省为 Worktree 模式，首条消息发送时创建 worktree。设为 false 则缺省使用当前分支。仅影响 Web Shell composer 的缺省值；显式模式选择与 daemon API 不变。',
+};
+
+export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
+  'settings.label.general.outputLanguage': 'Язык: вывод модели',
+  'settings.description.general.outputLanguage':
+    'Язык, на котором модель отвечает. Оставьте пустым, чтобы следовать языку ввода (auto). Изменения перезаписывают output-language.md сессии и применяются к текущей сессии.',
+  'settings.placeholder.general.outputLanguage': 'auto (следовать вводу)',
+  'settings.option.general.outputLanguage.useCustom': (v) =>
+    `Использовать «${v?.value ?? ''}»`,
+  'settings.label.ui.accessibility.enableLoadingPhrases':
+    'Включить фразы загрузки',
+  'settings.description.ui.accessibility.enableLoadingPhrases':
+    'Показывать сменяющиеся фразы загрузки. Выключите, чтобы скрыть и встроенные, и предоставленные хостом фразы.',
+  'settings.label.experimental.generatedUi': 'Generated UI',
+  'settings.description.experimental.generatedUi':
+    'Показывать интерактивные виды из встроенного Generated UI в поддерживаемых локальных сессиях, например Web Shell. Включено по умолчанию. Перезапустите владеющую сессию, чтобы применить изменения.',
+
+  'settings.models.editWindow': 'Изменить окно контекста',
+  'settings.models.windowHint':
+    'Оставьте пустым, чтобы вывести лимит из ID модели. Существующим сессиям нужен перезапуск, чтобы использовать новый лимит.',
+  'settings.models.windowSaved':
+    'Сохранено. Перезапустите существующие сессии, чтобы применить.',
+  'settings.models.saved': 'Сохранено',
+  'settings.label.advisorModel': 'Модель Advisor',
+  'settings.label.imageModel': 'Модель изображений',
+  'settings.label.voiceModel': 'Голосовая модель',
+  'settings.description.advisorModel':
+    'Модель для проверки недавнего хода разговора. Оставьте пустым, чтобы использовать основную модель.',
+  'settings.description.imageModel':
+    'Модель для генерации изображений. Добавьте пользовательскую модель с назначением «генерация изображений», затем выберите её здесь.',
+  'settings.description.voiceModel':
+    'Модель для голосовой транскрипции. Добавьте пользовательскую модель с назначением «голосовая транскрипция», затем выберите её здесь.',
+
+  'settings.category.Archived': 'Архивные разговоры',
+  'settings.title': 'Настройки',
+  'settings.loading': 'Загрузка настроек...',
+  'settings.empty': 'Настройки недоступны.',
+  'settings.footer':
+    '↑↓ Навигация  Enter Переключить  Tab Область  r Обновить  ESC Закрыть',
+  'settings.footer.edit': 'Enter Сохранить  ESC Отмена',
+  'settings.footer.theme': '↑↓ Навигация  Enter Выбрать  ESC Назад',
+  'settings.scope.user': 'Пользователь',
+  'settings.scope.workspace': 'Рабочая область',
+  'settings.value.on': 'ВКЛ',
+  'settings.value.off': 'ВЫКЛ',
+  'settings.action.edit': 'Изменить',
+  'settings.action.select': 'Выбрать',
+  'settings.action.save': 'Сохранить',
+  'settings.modifiedIn': (v) => `(Изменено в ${v?.scope ?? ''})`,
+  'settings.alsoModifiedIn': (v) => `(Также изменено в ${v?.scope ?? ''})`,
+  'settings.invalidNumber': 'Некорректное число',
+  'settings.requiresRestart': 'Это изменение вступит в силу после перезапуска.',
+  'settings.localControl.title': 'Local Control',
+  'settings.localControl.description':
+    'Продолжите эту сессию Qwen Code с телефона в той же доверенной сети.',
+  'settings.localControl.on': 'Вкл',
+  'settings.localControl.off': 'Выкл',
+  'settings.localControl.network': 'Локальная сеть',
+  'settings.localControl.selectNetwork': 'Выберите сеть',
+  'settings.localControl.qr': 'QR-код Local Control',
+  'settings.localControl.enable': 'Включить Local Control',
+  'settings.localControl.disable': 'Отключить доступ с телефона',
+  'settings.localControl.explicitPick': 'Задано при запуске демона',
+  'settings.localControl.encrypted': 'Зашифровано',
+  'settings.localControl.unencrypted':
+    'Без шифрования — только доверенные сети; включите снова после смены сети',
+  'settings.localControl.awake': 'Этот Mac останется активным',
+  'settings.localControl.maySleep': 'Этот Mac может уснуть',
+  'settings.localControl.urlRedacted':
+    'URL сопряжения здесь не показан, потому что у этого демона нет bearer token. Он напечатан в терминале, где запущен демон — сопрягите оттуда.',
+  'settings.models.title': 'Модели',
+  'settings.models.context': (v) => `Контекст: ${v?.tokens ?? ''} токенов`,
+  'settings.models.credentialEnv': 'Переменная окружения ключа',
+  'settings.models.add': '+ Добавить модель',
+  'settings.models.addDisabled': 'Хост отключил добавление моделей.',
+  'settings.models.setCurrent': 'Сделать текущей',
+  'settings.models.current': 'Текущая',
+  'settings.models.runtime': 'Runtime',
+  'settings.models.savedConfiguration': 'Сохранённая конфигурация',
+  'settings.models.ambiguousWindow':
+    'Несколько конфигураций используют этот маршрут. Окно контекста здесь изменить нельзя.',
+  'settings.models.delete': 'Удалить',
+  'settings.models.confirmDelete': 'Подтвердить',
+  'settings.models.cancel': 'Отмена',
+  'settings.models.empty': 'Настроенных моделей пока нет.',
+  'settings.models.loading': 'Загрузка моделей…',
+  'settings.models.deleteFailed': 'Не удалось удалить модель',
+  'settings.models.runtimeSyncFailed':
+    'Изменение сохранено, но запущенные сессии не удалось обновить. Перезапустите qwen serve, прежде чем пользоваться обновлённым списком моделей.',
+  'settings.models.fallbacks.title': 'Резервные модели',
+  'settings.models.fallbacks.hint': (v) =>
+    `Выберите до ${v?.max ?? 3}; пробуются по порядку, когда основная модель на пределе.`,
+  'settings.models.fallbacks.confirm': 'Подтвердить',
+  'settings.models.fallbacks.empty': 'Нет доступных моделей.',
+  'settings.models.fallbacks.saveFailed':
+    'Не удалось сохранить резервные модели',
+  'settings.models.fallbacks.limitReached': (v) =>
+    `Выбрано максимум ${v?.max ?? 3} резервных моделей; снимите одну, чтобы выбрать другую.`,
+  'settings.corrupted': (v) =>
+    `Файл настроек повреждён${v?.recovered === 'true' ? ' (восстановлен из резервной копии)' : ''}`,
+  'settings.label.ui.chatWidth': 'Ширина чата',
+  'settings.description.ui.chatWidth':
+    'Ширина содержимого чата только на фронтенде. Хранится в этом браузере.',
+  'settings.label.ui.enableFollowupSuggestions':
+    'Включить предложения следующих шагов',
+  'settings.description.ui.enableFollowupSuggestions':
+    'Показывать контекстные предложения после завершения задачи. Нажмите Tab или стрелку вправо, чтобы вставить, Enter — чтобы принять и отправить.',
+  'settings.option.ui.chatWidth.1000': 'Обычная',
+  'settings.option.ui.chatWidth.wide': 'Сверхширокая',
+  'settings.label.visionModel': 'Модель зрения',
+  'settings.description.visionModel':
+    'Модель с поддержкой изображений, используемая как мост зрения. Оставьте пустым для автовыбора.',
 };

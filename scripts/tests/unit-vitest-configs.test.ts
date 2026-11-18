@@ -5,21 +5,24 @@
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, matchesGlob, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
 import externalContextConfig from '../../integrations/external-context/vitest.config.js';
 import externalContextMem0Config from '../../integrations/external-context-mem0/vitest.config.js';
+import generatedUiConfig from '../../integrations/generated-ui/vitest.config.js';
 import acpBridgeConfig from '../../packages/acp-bridge/vitest.config.js';
 import audioCaptureConfig from '../../packages/audio-capture/vitest.config.js';
 import browserUseConfig from '../../packages/browser-use/vitest.config.js';
+import aoneConfig from '../../packages/channels/aone/vitest.config.js';
 import channelsBaseConfig from '../../packages/channels/base/vitest.config.js';
 import dingtalkConfig from '../../packages/channels/dingtalk/vitest.config.js';
 import dwsConfig from '../../packages/channels/dws/vitest.config.js';
 import emailConfig from '../../packages/channels/email/vitest.config.js';
 import feishuConfig from '../../packages/channels/feishu/vitest.config.js';
+import genericWebhookConfig from '../../packages/channels/generic-webhook/vitest.config.js';
 import githubConfig from '../../packages/channels/github/vitest.config.js';
 import gitlabConfig from '../../packages/channels/gitlab/vitest.config.js';
 import qqbotConfig from '../../packages/channels/qqbot/vitest.config.js';
@@ -29,6 +32,7 @@ import weixinConfig from '../../packages/channels/weixin/vitest.config.js';
 import chromeExtensionConfig from '../../packages/chrome-extension/vitest.config.js';
 import cliConfig from '../../packages/cli/vitest.config.js';
 import coreConfig from '../../packages/core/vitest.config.js';
+import networkPolicyConfig from '../../packages/network-policy/vitest.config.js';
 import nodeReplConfig from '../../packages/node-repl/vitest.config.js';
 import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js';
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
@@ -44,25 +48,72 @@ import scriptsTestsConfig from './vitest.config.js';
 // witness pins the flag in every guarded config so removing it from any
 // one of them fails the scripts suite on every platform.
 type ExemptionConfig = {
+  root?: string;
   test?: {
     dangerouslyIgnoreUnhandledErrors?: boolean;
+    outputFile?: { junit?: string };
+    reporters?: (string | [string, unknown])[];
     testTimeout?: number;
+    hookTimeout?: number;
     pool?: 'threads' | 'forks' | 'vmThreads';
     poolOptions?: { threads?: { maxThreads?: number } };
   };
 };
 
+/**
+ * Workspace directories declared by `pnpm-workspace.yaml` and `package.json`,
+ * expanded through their single `*` segment and minus the `!` exclusions. The
+ * two files are kept in lockstep by the repo, so a mismatch is a config bug
+ * and the union below is the workspace set a report can appear in.
+ */
+function declaredWorkspaceDirs(repoRoot: string): string[] {
+  const pnpm = parse(
+    readFileSync(join(repoRoot, 'pnpm-workspace.yaml'), 'utf8'),
+  ) as { packages?: string[] };
+  const pkg = JSON.parse(
+    readFileSync(join(repoRoot, 'package.json'), 'utf8'),
+  ) as { workspaces?: string[] };
+  const patterns = new Set([
+    ...(pnpm.packages ?? []),
+    ...(pkg.workspaces ?? []),
+  ]);
+  const dirs = new Set<string>();
+  const excluded = new Set<string>();
+  for (const pattern of patterns) {
+    if (pattern.startsWith('!')) {
+      excluded.add(pattern.slice(1).replace(/\/$/, ''));
+      continue;
+    }
+    if (!pattern.includes('*')) {
+      dirs.add(pattern.replace(/\/$/, ''));
+      continue;
+    }
+    const [head, tail] = pattern.split('*');
+    const base = head.replace(/\/$/, '');
+    for (const entry of readdirSync(join(repoRoot, base), {
+      withFileTypes: true,
+    })) {
+      if (!entry.isDirectory()) continue;
+      dirs.add(`${base}/${entry.name}${tail}`.replace(/\/$/, ''));
+    }
+  }
+  return [...dirs].filter((dir) => !excluded.has(dir)).sort();
+}
+
 const configs: Record<string, ExemptionConfig> = {
   'integrations/external-context': externalContextConfig,
   'integrations/external-context-mem0': externalContextMem0Config,
+  'integrations/generated-ui': generatedUiConfig,
   'packages/acp-bridge': acpBridgeConfig,
   'packages/audio-capture': audioCaptureConfig,
   'packages/browser-use': browserUseConfig,
+  'packages/channels/aone': aoneConfig,
   'packages/channels/base': channelsBaseConfig,
   'packages/channels/dingtalk': dingtalkConfig,
   'packages/channels/dws': dwsConfig,
   'packages/channels/email': emailConfig,
   'packages/channels/feishu': feishuConfig,
+  'packages/channels/generic-webhook': genericWebhookConfig,
   'packages/channels/github': githubConfig,
   'packages/channels/gitlab': gitlabConfig,
   'packages/channels/qqbot': qqbotConfig,
@@ -72,6 +123,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/chrome-extension': chromeExtensionConfig,
   'packages/cli': cliConfig,
   'packages/core': coreConfig,
+  'packages/network-policy': networkPolicyConfig,
   'packages/node-repl': nodeReplConfig,
   'packages/sdk-typescript': sdkTypescriptConfig,
   'packages/vscode-ide-companion': vscodeCompanionConfig,
@@ -89,6 +141,136 @@ describe('unhandled-error exemption on the platform lanes', () => {
       );
     });
   }
+});
+
+// The unit-test job's report steps collect every lane workspace's `junit.xml`
+// (ci.yml) relative to the repo root, and `if-no-files-found: ignore` turns a
+// wrong path into a silent no-op: the suite still runs, the artifact is just
+// empty. Pin each reporter's output to the package root so a relocated output
+// fails here, not silently in CI, and pin that every lane workspace reports at
+// all: a suite without a junit reporter stays invisible to the badge however
+// red it runs (on run 42994647525 the badge counted only the three workspaces
+// that reported).
+describe('JUnit report upload paths', () => {
+  const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const junitConfigs = Object.entries(configs).filter(
+    ([, config]) => config.test?.outputFile?.junit,
+  );
+
+  it.each(junitConfigs)(
+    '%s writes its report at the package root',
+    (name, config) => {
+      expect(
+        resolve(
+          repoRoot,
+          name,
+          config.root ?? '.',
+          config.test!.outputFile!.junit!,
+        ),
+      ).toBe(resolve(repoRoot, name, 'junit.xml'));
+    },
+  );
+
+  it('every lane workspace beside scripts/tests emits a badge-visible report', async () => {
+    // configModules is cross-checked below to cover every test:ci workspace,
+    // so a new lane workspace cannot join without a report. scripts/tests is
+    // the documented exception: its report would land outside both globs,
+    // and extending the badge to the scripts suite is a separate decision.
+    for (const [name, load] of Object.entries(configModules)) {
+      if (name === 'scripts/tests') continue;
+      const config = (await load()).default;
+      const test = config.test ?? {};
+      expect(name).toMatch(/^(packages|integrations)\//);
+      const junit = test.outputFile?.junit;
+      expect(junit, `${name} emits no JUnit report`).toBeTruthy();
+      expect(
+        resolve(repoRoot, name, config.root ?? '.', junit!),
+        `${name} writes its report outside its own root`,
+      ).toBe(resolve(repoRoot, name, 'junit.xml'));
+      const reporters = test.reporters ?? ['default'];
+      expect(
+        reporters.some(
+          (reporter) =>
+            (Array.isArray(reporter) ? reporter[0] : reporter) === 'junit',
+        ),
+        `${name} does not enable the junit reporter`,
+      ).toBe(true);
+    }
+  });
+
+  it('matches every lane report with a positive glob at a bounded depth', () => {
+    // The publisher (dorny/test-reporter) splits `path` on commas and globs
+    // each segment on its own (`src/main.ts` -> `local-file-provider.ts`) with
+    // `followSymbolicLinks` on by default. Two consequences, both blockers:
+    // a `!` segment has no positive set to subtract from and matches nothing,
+    // and `**` walks through pnpm's workspace link copies, counting one
+    // report once per dependent. So the publisher lists each workspace depth
+    // explicitly, and the coupling is pinned here in both directions.
+    const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+    const ci = parse(
+      readFileSync(join(repoRoot, '.github/workflows/ci.yml'), 'utf8'),
+    ) as {
+      jobs: Record<
+        string,
+        { steps: { name?: string; with?: { path?: string } }[] }
+      >;
+    };
+    const publisher = ci.jobs['test']?.steps.find(
+      (step) => step.name === 'Publish Test Report (for non-forks)',
+    );
+    const segments = String(publisher?.with?.path).split(',');
+    expect(
+      segments.filter((segment) => segment.startsWith('!')),
+      'a negation segment matches nothing in this action',
+    ).toEqual([]);
+    expect(
+      segments.filter((segment) => segment.includes('**')),
+      'a `**` segment follows pnpm link copies',
+    ).toEqual([]);
+
+    // Expected reports come from the workspace declarations, not from the
+    // pattern list: a workspace added at any depth joins this set and turns
+    // the coverage assertion below red until the publisher learns its depth.
+    const laneWorkspaces = Object.keys(configModules).filter(
+      (name) => name !== 'scripts/tests',
+    );
+    const declared = declaredWorkspaceDirs(repoRoot);
+    expect(
+      laneWorkspaces.filter((name) => !declared.includes(name)),
+      'lane workspace missing from pnpm-workspace.yaml/package.json',
+    ).toEqual([]);
+    const laneReports = laneWorkspaces.map((name) => `${name}/junit.xml`);
+    const declaredReports = declared.map((dir) => `${dir}/junit.xml`);
+    // Cover the whole declared workspace set, not only the lane ones: the
+    // artifact step reaches all of them through `packages/**`, so the badge
+    // must agree with the raw evidence a workspace reports into.
+    expect(
+      declaredReports.filter(
+        (path) => !segments.some((segment) => matchesGlob(path, segment)),
+      ),
+      'workspace report no publisher glob reaches',
+    ).toEqual([]);
+    expect(laneReports.length, 'lane workspace list is empty').toBeGreaterThan(
+      0,
+    );
+
+    // The other direction: every segment must reach at least one lane report,
+    // and none may reach a pnpm link copy (`packages/**` used to return 7
+    // matches for 4 reports on exactly this shape).
+    for (const segment of segments) {
+      expect(
+        declaredReports.some((path) => matchesGlob(path, segment)),
+        `${segment} matches no workspace report`,
+      ).toBe(true);
+      expect(
+        matchesGlob(
+          'packages/cli/node_modules/@qwen-code/core/junit.xml',
+          segment,
+        ),
+        `${segment} reaches a pnpm link copy`,
+      ).toBe(false);
+    }
+  });
 });
 
 // Every workspace that `npm run test:ci --workspaces` runs lands on the same
@@ -112,12 +294,16 @@ const configModules: Record<
     import('../../integrations/external-context-mem0/vitest.config.js'),
   'integrations/test-failure-explorer': () =>
     import('../../integrations/test-failure-explorer/vitest.config.js'),
+  'integrations/generated-ui': () =>
+    import('../../integrations/generated-ui/vitest.config.js'),
   'packages/acp-bridge': () =>
     import('../../packages/acp-bridge/vitest.config.js'),
   'packages/audio-capture': () =>
     import('../../packages/audio-capture/vitest.config.js'),
   'packages/browser-use': () =>
     import('../../packages/browser-use/vitest.config.js'),
+  'packages/channels/aone': () =>
+    import('../../packages/channels/aone/vitest.config.js'),
   'packages/channels/base': () =>
     import('../../packages/channels/base/vitest.config.js'),
   'packages/channels/dingtalk': () =>
@@ -128,6 +314,8 @@ const configModules: Record<
     import('../../packages/channels/email/vitest.config.js'),
   'packages/channels/feishu': () =>
     import('../../packages/channels/feishu/vitest.config.js'),
+  'packages/channels/generic-webhook': () =>
+    import('../../packages/channels/generic-webhook/vitest.config.js'),
   'packages/channels/github': () =>
     import('../../packages/channels/github/vitest.config.js'),
   'packages/channels/gitlab': () =>
@@ -144,6 +332,8 @@ const configModules: Record<
     import('../../packages/chrome-extension/vitest.config.js'),
   'packages/cli': () => import('../../packages/cli/vitest.config.js'),
   'packages/core': () => import('../../packages/core/vitest.config.js'),
+  'packages/network-policy': () =>
+    import('../../packages/network-policy/vitest.config.js'),
   'packages/node-repl': () =>
     import('../../packages/node-repl/vitest.config.js'),
   // qwen-live's ceiling is unconditional (its config carries a flat 60s), so
@@ -206,14 +396,18 @@ describe('shared-pool test timeout', () => {
     'integrations/external-context',
     'integrations/external-context-mem0',
     'integrations/test-failure-explorer',
+    'integrations/generated-ui',
     'packages/acp-bridge',
     'packages/audio-capture',
     'packages/browser-use',
+    'packages/channels/aone',
     'packages/channels/base',
     'packages/channels/dingtalk',
     'packages/channels/dws',
     'packages/channels/email',
     'packages/channels/feishu',
+    'packages/channels/generic-webhook',
+    'packages/network-policy',
     'packages/channels/github',
     'packages/channels/gitlab',
     'packages/channels/qqbot',
@@ -255,6 +449,9 @@ describe('shared-pool test timeout', () => {
     // `expectOffPoolCeilings` asserts it, node-repl/sdk-typescript/scripts/tests
     // carry flat ceilings, and qwen-live's ceiling is unconditional.
     vi.stubEnv('RUNNER_NAME', 'ubuntu-latest-runner');
+    // cli also keys its ceiling on RUNNER_OS === 'macOS'; drop the ambient
+    // value so this arm reads the off-macOS figure even on a macOS runner.
+    vi.stubEnv('RUNNER_OS', undefined);
     vi.resetModules();
     try {
       await expectOffPoolCeilings();
@@ -274,10 +471,48 @@ describe('shared-pool test timeout', () => {
     // passes the on-pool floor and the foreign-string off-pool sample above;
     // it must fail here, on the state the configs actually see off CI.
     vi.stubEnv('RUNNER_NAME', undefined);
+    vi.stubEnv('RUNNER_OS', undefined);
     vi.resetModules();
     try {
       await expectOffPoolCeilings();
     } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keys the cli hook and test ceilings on the macOS runner, not the host platform', async () => {
+    // cli gives the contended macOS nightly hosts the pool's hook AND test
+    // ceilings (the test ceiling moved here from a runtime vi.setConfig so it
+    // cannot outrank the autofix gate's --testTimeout; R4-1). Sample the
+    // runner signal against the host platform in both directions so this
+    // reads the config's logic on any host: dropping, inverting or flattening
+    // either arm fails here, and so does keying it on process.platform, which
+    // cannot tell a 3-core nightly runner from an idle laptop. The ECS arm
+    // stays pinned by `autofix gate load clamps`.
+    const originalPlatform = process.platform;
+    const setPlatform = (platform: NodeJS.Platform) =>
+      Object.defineProperty(process, 'platform', {
+        configurable: true,
+        enumerable: true,
+        value: platform,
+      });
+    vi.stubEnv('RUNNER_NAME', undefined);
+    try {
+      for (const [runnerOs, platform, hookTimeout, testTimeout] of [
+        ['macOS', 'linux', 60_000, 60_000],
+        ['Linux', 'darwin', undefined, 15_000],
+        [undefined, 'darwin', undefined, 15_000],
+      ] as const) {
+        vi.stubEnv('RUNNER_OS', runnerOs);
+        setPlatform(platform);
+        vi.resetModules();
+        const cli = await configModules['packages/cli']!();
+        const label = `RUNNER_OS=${runnerOs} platform=${platform}`;
+        expect(cli.default.test?.hookTimeout, label).toBe(hookTimeout);
+        expect(cli.default.test?.testTimeout, label).toBe(testTimeout);
+      }
+    } finally {
+      setPlatform(originalPlatform);
       vi.unstubAllEnvs();
     }
   });
@@ -457,12 +692,18 @@ describe('autofix gate load clamps', () => {
 });
 
 describe('bundle-guard timeout ceiling', () => {
-  it('keeps the bundle-guard timeout ceiling in packages/vscode-ide-companion', async () => {
+  it('keeps the bundle-guard timeout ceiling and worker cap in packages/vscode-ide-companion', async () => {
     // The config reads RUNNER_NAME at import time, so re-import it under
-    // each stub to pin both branches, not only the ambient one.
-    for (const [runnerName, expected] of [
-      ['ecs-qwen-parity', 60_000],
-      ['ubuntu-latest-runner', 15_000],
+    // each stub to pin both branches, not only the ambient one; the unset
+    // arm also catches a ternary that treats a missing variable as pool.
+    // maxWorkers is the default for runs carrying no VITEST_MAX_THREADS —
+    // CI lanes export it and vitest resolves it before config.maxWorkers —
+    // and must stay undefined off the pool so a flat '25%' cannot cap
+    // developer machines.
+    for (const [runnerName, expectedTimeout, expectedWorkers] of [
+      ['ecs-qwen-parity', 60_000, '25%'],
+      ['ubuntu-latest-runner', 15_000, undefined],
+      [undefined, 15_000, undefined],
     ] as const) {
       vi.stubEnv('RUNNER_NAME', runnerName);
       vi.resetModules();
@@ -470,7 +711,10 @@ describe('bundle-guard timeout ceiling', () => {
         '../../packages/vscode-ide-companion/vitest.config.js'
       );
       expect(mod.default.test?.testTimeout, `RUNNER_NAME=${runnerName}`).toBe(
-        expected,
+        expectedTimeout,
+      );
+      expect(mod.default.test?.maxWorkers, `RUNNER_NAME=${runnerName}`).toBe(
+        expectedWorkers,
       );
       vi.unstubAllEnvs();
     }
@@ -529,5 +773,67 @@ describe('scripts suite timeout', () => {
       readFileSync(join(tests, 'qwen-autofix-workflow.test.js'), 'utf8'),
       'the deferred-findings harness bounds its subprocess with its own figure',
     ).toContain('QWEN_SCRIPTS_TEST_TIMEOUT_MS');
+  });
+});
+
+describe('autofix-gate per-file ceiling floor', () => {
+  // The autofix verification gate launches every changed workspace with
+  // --testTimeout=60000 through an env -i allowlist that drops RUNNER_NAME,
+  // so a runtime vi.setConfig keyed on the slow-host helper resolves to its
+  // fast arm and OUTRANKS the flag — the suite then gets 15s inside the gate
+  // instead of the 60s it provisions (R4-1). The suites this PR tunes must
+  // therefore own no runtime testTimeout: the config layer holds the ceiling
+  // (cli keys it on the macOS runner) and the describe ceilings leave their
+  // fast arm undefined so it inherits whatever the lane grants. Scoped to
+  // these files on purpose — the other runtime-setConfig suites are the
+  // gate's documented residual, closed in a separate slice.
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const guarded = [
+    'packages/cli/src/ui/auth/SubscriptionDialog.test.tsx',
+    'packages/cli/src/serve/server/session-pr-refresh.test.ts',
+    'packages/cli/src/serve/managed-runtime-terminal.test.ts',
+    'packages/core/src/hooks/file-changed-watcher.test.ts',
+  ];
+  it('keeps the tuned suites from overriding the granted testTimeout', () => {
+    for (const file of guarded) {
+      const src = readFileSync(join(root, file), 'utf8');
+      expect(
+        src,
+        `${file} overrides the testTimeout the lane grants`,
+      ).not.toMatch(/vi\.setConfig\(\{[^}]*testTimeout/);
+      // A describe-level `{ timeout }` outranks --testTimeout exactly like a
+      // runtime setConfig (vitest resolves options.timeout ?? config.testTimeout),
+      // so the floor must cover that spelling too (R5-1). Check every ceiling
+      // constant's FAST arm — the one in force inside the gate, where env -i
+      // drops RUNNER_NAME/RUNNER_OS and the worker clamp keeps loadavg under
+      // the slow-host threshold: it must inherit (undefined) or equal the
+      // 60000 the gate grants. Below it the suite is cut before the gate's own
+      // budget (R4-1); above it the file outranks the grant and a hang runs to
+      // the file's figure instead of the lane's (R10-1).
+      const ceilings = [
+        ...src.matchAll(/const\s+(\w*CEILING\w*)\s*=\s*([^;]+);/g),
+      ];
+      // Without this the entry is decorative: a file that renames its ceiling
+      // constant matches nothing, and the loop below asserts nothing at all.
+      expect(
+        ceilings.length,
+        `${file} declares no *CEILING* constant for this guard to read`,
+      ).toBeGreaterThan(0);
+      for (const [, name, expr] of ceilings) {
+        let fast = expr.trim();
+        const q = fast.indexOf('?');
+        if (q >= 0) fast = fast.slice(fast.indexOf(':', q) + 1).trim();
+        if (fast === 'undefined') continue;
+        const n = Number(fast.replace(/_/g, ''));
+        expect(
+          Number.isFinite(n),
+          `${file}: ${name} fast arm "${fast}" is not a plain literal`,
+        ).toBe(true);
+        expect(
+          n,
+          `${file}: ${name} fast arm ${n} must equal the gate's 60000 grant, or inherit it (undefined)`,
+        ).toBe(60_000);
+      }
+    }
   });
 });

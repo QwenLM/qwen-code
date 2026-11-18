@@ -20,6 +20,7 @@ vi.mock('@opentui/core', () => ({
   MouseButton: { LEFT: 0 },
 }));
 
+import { getSettingDefinition } from '../../config/settingsUtils.js';
 import {
   buildSettingsListItems,
   editBackspace,
@@ -116,6 +117,19 @@ describe('settings row rendering contract', () => {
 });
 
 describe('buildSettingsListItems', () => {
+  it('finds the experimental Mods toggle by label and setting key', () => {
+    const items = buildSettingsListItems();
+    for (const query of ['Mods', 'experimental.mods']) {
+      expect(filterSettingsItems(items, query, () => '')).toEqual([
+        expect.objectContaining({
+          key: 'experimental.mods',
+          label: 'Mods (Experimental)',
+          type: 'boolean',
+        }),
+      ]);
+    }
+  });
+
   it('sources rows from the settings schema, in dialog order', () => {
     const items = buildSettingsListItems();
     expect(items.length).toBeGreaterThan(0);
@@ -166,6 +180,15 @@ describe('nextToggleValue', () => {
 
   it('turns an unset tri-state boolean off', () => {
     expect(nextToggleValue({ type: 'boolean' }, undefined)).toBe(false);
+  });
+
+  it('turns the unset unified agent loop setting on', () => {
+    expect(
+      nextToggleValue(
+        getSettingDefinition('experimental.unifiedAgentLoop'),
+        undefined,
+      ),
+    ).toBe(true);
   });
 
   it('cycles enums and loops back to the first option', () => {

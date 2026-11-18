@@ -41,9 +41,14 @@ export interface AutoMemoryExtractResult {
     | 'queued'
     | 'memory_tool'
     | 'memory_pressure'
-    | 'session_mismatch';
+    | 'session_mismatch'
+    | 'cadence';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
+  /** The extractor ran and used a tool (read or wrote memory files). */
+  extractorEngaged?: boolean;
+  /** Tool activity or a saved topic, independent of the replay cursor floor. */
+  madeGenuineProgress?: boolean;
 }
 
 function getSessionMismatchResult(
@@ -129,6 +134,14 @@ export async function runAutoMemoryExtract(params: {
   history: Content[];
   now?: Date;
   config?: Config;
+  skippedHistory?: Content[];
+  // Only the close-time cadence flush (#13004) sets this: an abandoned flush
+  // run aborts here instead of keeping a fork alive past its boundary.
+  abortSignal?: AbortSignal;
+  // Only the close-time cadence flush (#13004) sets this: the replayed
+  // snapshot's history can be shorter than the cursor a later run already
+  // persisted, so this run's write must not move that cursor backwards.
+  flushReplay?: boolean;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   if (!params.config) {
@@ -136,6 +149,7 @@ export async function runAutoMemoryExtract(params: {
       'Managed auto-memory extraction requires config for forked-agent execution.',
     );
   }
+  params.abortSignal?.throwIfAborted();
   const expectedSessionId = params.config.getSessionId();
   const earlyMismatch = getSessionMismatchResult(
     params.sessionId,
@@ -173,12 +187,18 @@ export async function runAutoMemoryExtract(params: {
   // Skip if there are no new, non-empty user messages in the unprocessed
   // slice. partToString runs only on this small slice and without the
   // global whitespace regex — the .trim().length check preserves the old
-  // behaviour of ignoring empty-text user turns.
-  const hasNewUserMessages = params.history
-    .slice(startOffset)
-    .some(
-      (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
-    );
+  // behaviour of ignoring empty-text user turns. A parked supplement
+  // (#13004) counts as new content on its own: the turns it holds are owed
+  // to the extractor, and an image-only live tail must not let this run
+  // advance the cursor past them without a fork.
+  const hasNewUserMessages =
+    (params.skippedHistory?.length ?? 0) > 0 ||
+    params.history
+      .slice(startOffset)
+      .some(
+        (m) =>
+          m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+      );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
@@ -199,6 +219,8 @@ export async function runAutoMemoryExtract(params: {
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
+    params.skippedHistory,
+    params.abortSignal,
   );
 
   if (agentResult.touchedTopics.length > 0) {
@@ -244,7 +266,15 @@ export async function runAutoMemoryExtract(params: {
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    processedOffset: madeGenuineProgress ? params.history.length : startOffset,
+    // A flush replay runs a parked snapshot whose history a later non-forking
+    // run may have already advanced the cursor past, so writing the snapshot's
+    // own offset would move that project cursor backwards and make the next run
+    // re-scan everything after it. Only the replay is floored: a genuine
+    // post-compaction run must still be able to move the cursor down.
+    processedOffset: Math.max(
+      params.flushReplay ? rawOffset : 0,
+      madeGenuineProgress ? params.history.length : startOffset,
+    ),
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);
@@ -258,5 +288,7 @@ export async function runAutoMemoryExtract(params: {
     touchedUserScope: agentResult.touchedUserScope,
     cursor,
     systemMessage: agentResult.systemMessage,
+    extractorEngaged: agentResult.extractorEngaged === true,
+    madeGenuineProgress,
   };
 }

@@ -71,8 +71,57 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 1_970_000;
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_030_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_143_100;
+// Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
+// (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
+// locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
+// 158ff26aeb without and with the change, leaving 3,278 below this ceiling.
+// Main 8345f5ceec then measured 2,049,419. Passing Web Shell theme tokens to
+// MCP Apps as standard style variables adds 820: 2,049,419 against 2,050,239
+// on that main without and with the change, leaving 2,761 below this ceiling.
+// Recovery UI and availability consumers (#14980) add 1,787, measured
+// against merged main 65051590d9, so the merged build stays below this
+// ceiling.
+//
+// The markdown-chart 0.1.12 -> 0.4.1 upgrade (#16021) measures 2,053,466 on
+// head de6c47d879 against 2,034,760 on its merge parent: +12,947 in
+// @datafe-open/markdown-chart, +4,251 in markdown-chart-echarts, +1,219 in the
+// transcript entry's new echartsChart.* labels, and +289 across the adapter
+// and its transitive inputs. The AG Grid graph the adapter now imports is
+// dead in document mode and stubbed out below, so it contributes no bytes
+// here. That head was last built before the 2026-11-09 Web Shell changes, so
+// the merged tree measures 2,065,087, 11,621 above the head figure. The
+// warning sits 913 above the merged measurement and the ceiling 4,913 above
+// it.
+//
+// The patched Zod 4 upgrade (#16434) adds 43,494 bytes when rebuilt against
+// the same candidate with Zod 3. Merged main 754792b8d1 measures 2,129,325
+// bytes and the forbidden-input guard still passes, leaving 2,675 bytes below
+// the previous 2,132,000-byte ceiling.
+// Main 0eb27d3b measures 2,132,531 bytes on Node 22.23.2 and 24.19.0,
+// with the forbidden-input guard passing, leaving 3,469 bytes below this cap.
+// The local-files usability copy (#17198: change-directory/reconnect notices,
+// the insecure-context tunnel instruction with its local-port branch, and the
+// deferred-change notice, across two locales) measures 2,136,115 bytes on
+// head 6286c8cb11 in CI, 115 above the previous 2,136,000 ceiling. The warning
+// sits 885 above that measurement and the ceiling 1,885 above it.
+// The composer task-explain side question (#17398: the explain display line,
+// the "?" aria label and tooltip, and the panel copy, across two locales, plus
+// the transcript-reachable explain wiring) adds 904 bytes: main d41eda5123
+// measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
+// d5f6a103a6 measures 2,138,797 in CI, 797 above it. The warning sits 203 above
+// that measurement and the ceiling 1,203 above it.
+// The `/send` command, its composer chip and session tab copy (ten keys
+// across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
+// 039ed577fb without and with the change. Recording the exchange in the
+// caller (the "To" and "From" lines on a user message, the waiting chip, and
+// the parsing of where a message went; four keys added and one removed,
+// across two locales) adds 1,497 more. Merged with the explain side question
+// above, the branch measured 2,141,606 locally on main 5fc5a98ecc; marking a
+// turn another session's reply starts (its card label, keeping the card in a
+// folded turn, and opening that session from it) brings it to 2,142,326. The
+// warning sits 774 above that measurement and the ceiling 1,774 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_144_100;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -101,7 +150,23 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
       'resolved to src/document-echarts-stub.ts by the strip plugin below.',
   },
   {
-    pattern: /(^|\/)node_modules\/(mermaid|@mermaid-js|cytoscape)\//,
+    pattern:
+      /(^|\/)node_modules\/(@datafe-open\/markdown-chart-table|ag-grid-community|ag-stack)\//,
+    why:
+      'The table data view is statically imported by ' +
+      '@datafe-open/markdown-chart-react@0.4.1, but document mode never renders ' +
+      'a chart (Markdown.tsx disables the integration outside the interactive ' +
+      'shell), so neither the table renderer nor its AG Grid Community graph ' +
+      'can run there. The import is static and IIFE output cannot code-split, ' +
+      'so it was flattened into the renderer asset; `markdown-chart-table` is ' +
+      'resolved to src/document-markdown-chart-table-stub.ts by the strip ' +
+      'plugin below, and the two AG Grid packages are named here too so ' +
+      'neither can return through another path — the same shape as the ' +
+      'echarts/zrender rule.',
+  },
+  {
+    pattern:
+      /(^|\/)node_modules\/(mermaid|@mermaid-js|cytoscape)\/|web-shell[\\/]dist[\\/]mermaid\.core-[\w-]+\.js$/,
     why:
       'Exported transcripts render a ```mermaid fence as a plain <pre>, the ' +
       'same degradation CodeBlock already applies to syntax highlighting in ' +
@@ -128,6 +193,10 @@ const FORBIDDEN_DOCUMENT_INPUTS = [
 const documentShikiStub = join(srcDir, 'document-shiki-stub.ts');
 const documentEchartsStub = join(srcDir, 'document-echarts-stub.ts');
 const documentMermaidStub = join(srcDir, 'document-mermaid-stub.ts');
+const documentMarkdownChartTableStub = join(
+  srcDir,
+  'document-markdown-chart-table-stub.ts',
+);
 const stripDocumentDeadModules = {
   name: 'strip-document-dead-modules',
   setup(build) {
@@ -140,6 +209,15 @@ const stripDocumentDeadModules = {
     build.onResolve({ filter: /^mermaid(\/|$)/ }, () => ({
       path: documentMermaidStub,
     }));
+    build.onResolve({ filter: /^\.\/mermaid\.core-[\w-]+\.js$/ }, (args) =>
+      /web-shell[\\/]dist[\\/]/.test(args.importer)
+        ? { path: documentMermaidStub }
+        : undefined,
+    );
+    build.onResolve(
+      { filter: /^@datafe-open\/markdown-chart-table(\/|$)/ },
+      () => ({ path: documentMarkdownChartTableStub }),
+    );
   },
 };
 
@@ -265,6 +343,16 @@ const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
   bundle: true,
   minify: true,
+  // esbuild escapes every non-ASCII character in a string literal by default
+  // (`charset: 'ascii'`), and this bundle carries the Web Shell's translation
+  // table for both locales, so `"\u4F60"` costs six bytes where the character
+  // is three in UTF-8. The escaped and literal forms are the same string value
+  // to the parser, and every path that serves this asset decodes it as UTF-8 —
+  // the document that loads it declares `<meta charset="UTF-8">`, and unpkg
+  // serves it as `application/javascript; charset=utf-8` — so this is bytes
+  // returned without changing what the renderer renders. Local main at
+  // bfa7a2f52e measured 2,049,210 bytes with the default; this emits 1,956,663.
+  charset: 'utf8',
   write: false,
   metafile: true,
   plugins: [stripDocumentDeadModules, extractTranscriptCss],

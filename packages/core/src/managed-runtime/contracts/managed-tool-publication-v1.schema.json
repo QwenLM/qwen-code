@@ -170,7 +170,7 @@
             "byteLength": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 65536
+              "maximum": 1048576
             },
             "digest": {
               "type": "string",

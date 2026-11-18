@@ -66,6 +66,7 @@ export enum HookEventName {
   TodoCompleted = 'TodoCompleted',
   // InstructionsLoaded - When an instruction or context file is loaded
   InstructionsLoaded = 'InstructionsLoaded',
+  FileChanged = 'FileChanged',
 }
 
 /**
@@ -290,6 +291,13 @@ export interface InstructionsLoadedInput extends HookInput {
   load_reason: InstructionLoadReason;
   trigger_file_path?: string;
   parent_file_path?: string;
+}
+
+export type FileChangeEvent = 'add' | 'change' | 'unlink';
+
+export interface FileChangedInput extends HookInput {
+  file_path: string;
+  event: FileChangeEvent;
 }
 
 /**
@@ -1107,6 +1115,7 @@ export interface SessionStartOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'SessionStart';
     additionalContext?: string;
+    watchPaths?: string[];
   };
 }
 
@@ -1395,6 +1404,11 @@ export function detectTodoChanges(
  * Hook execution result
  */
 export interface HookExecutionResult {
+  processReceipt?: {
+    readonly ownerId: string;
+    readonly scope: 'process_tree' | 'process_group';
+    readonly state: 'stopped' | 'outcome_unknown';
+  };
   /** True only if a managed command never starts or its owned cgroup is empty. */
   processTreeDrained?: boolean;
   httpRequestState?: 'not_started' | 'response_received' | 'outcome_unknown';
@@ -1418,6 +1432,7 @@ export interface HookExecutionResult {
 export interface HookExecutionPlan {
   eventName: HookEventName;
   hookConfigs: HookConfig[];
+  hookSources?: HooksConfigSource[];
   sequential: boolean;
 }
 

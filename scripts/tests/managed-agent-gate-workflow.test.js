@@ -37,8 +37,17 @@ function evaluate(text, context) {
     'needs',
     'inputs',
     'format',
+    'always',
+    'cancelled',
     `return (${body});`,
-  )(context.github ?? {}, context.needs ?? {}, context.inputs ?? {}, format);
+  )(
+    context.github ?? {},
+    context.needs ?? {},
+    context.inputs ?? {},
+    format,
+    () => true,
+    () => context.cancelled ?? false,
+  );
 }
 
 const interpolate = (text, context) =>
@@ -314,8 +323,93 @@ describe('Managed Agent gate required check', () => {
     },
   );
 
-  it('always reports after the tier selection and the suite', () => {
-    expect(gate.jobs.gate.if).toBe('${{ always() }}');
+  it.each([
+    ['pull_request', 'fast', false, true],
+    ['pull_request', 'fast', true, false],
+    ['pull_request', 'full', true, true],
+    ['pull_request_review', 'full', true, true],
+    ['push', 'fast', true, true],
+    ['merge_group', 'fast', true, true],
+    ['pull_request', '', false, true],
+    ['pull_request', '', true, false],
+    ['pull_request', 'none', true, false],
+  ])(
+    '%s %s tier with workflow cancelled=%s reports=%s',
+    (event, tier, cancelled, expected) => {
+      expect(
+        evaluate(gate.jobs.gate.if, {
+          // Only an approval on an open pull request reaches this arm.
+          github: github(
+            event,
+            event === 'pull_request_review'
+              ? {
+                  review: { state: 'approved' },
+                  pull_request: { state: 'open' },
+                }
+              : {},
+          ),
+          needs: { scope: { outputs: { tier } } },
+          cancelled,
+        }),
+      ).toBe(expected);
+    },
+  );
+
+  // A review that is not an approval can never select a tier above `none`
+  // (Choose the tier), so starting a run for it buys two runner slots and
+  // publishes a check nothing reads. Both jobs must skip instead.
+  it.each(['commented', 'changes_requested'])(
+    'a %s review starts no job',
+    (state) => {
+      const context = {
+        github: github('pull_request_review', {
+          review: { state },
+          pull_request: { state: 'open' },
+        }),
+        needs: { scope: { outputs: {} } },
+      };
+      expect(evaluate(gate.jobs.scope.if, context)).toBe(false);
+      expect(evaluate(gate.jobs.gate.if, context)).toBe(false);
+    },
+  );
+
+  it('an approval still runs both jobs', () => {
+    const context = {
+      github: github('pull_request_review', {
+        review: { state: 'approved' },
+        pull_request: { state: 'open' },
+      }),
+      needs: { scope: { outputs: { tier: 'none' } } },
+    };
+    expect(evaluate(gate.jobs.scope.if, context)).toBe(true);
+    expect(evaluate(gate.jobs.gate.if, context)).toBe(true);
+  });
+
+  // Branch protection no longer reads the check once a PR closes, and an
+  // automated reviewer can approve after merge (#14774). Starting the run
+  // would take two runners and publish a check nothing reads.
+  it('an approval on a closed pull request starts no job', () => {
+    const context = {
+      github: github('pull_request_review', {
+        review: { state: 'approved' },
+        pull_request: { state: 'closed' },
+      }),
+      needs: { scope: { outputs: {} } },
+    };
+    expect(evaluate(gate.jobs.scope.if, context)).toBe(false);
+    expect(evaluate(gate.jobs.gate.if, context)).toBe(false);
+  });
+
+  it.each(['pull_request', 'push', 'merge_group'])(
+    'a %s event ignores the review guard',
+    (event) => {
+      expect(
+        evaluate(gate.jobs.scope.if, { github: github(event), needs: {} }),
+      ).toBe(true);
+    },
+  );
+
+  it('reports after tier selection and the suite on the same runners', () => {
     expect(gate.jobs.gate.needs).toEqual(['scope', 'suite']);
     // Same trust routing as the scope job, which the runner-routing
     // inventory evaluates: a starved hosted queue must not hold the check.

@@ -951,6 +951,153 @@ describe('crawler', () => {
       ]);
       warnSpy.mockRestore();
     });
+
+    /**
+     * Makes the *real* `runCommand` hit a genuine `spawn` ENOENT partway
+     * through a crawl, without stubbing `__setCommandRunnerForTests`.
+     *
+     * `crawlWithGitLsFiles` reads `options.ignore.getDirectoryFilter()` after
+     * `rev-parse` and the `ls-files --others` / `--deleted` probes have already
+     * spawned successfully, but before it spawns `ls-files --cached` and before
+     * the ripgrep probe. Clearing `PATH` at that point makes those two spawns
+     * really fail with ENOENT — reproducing #14537's "`rg` is not installed"
+     * condition on any machine, including CI runners that do ship `rg`.
+     *
+     * Returns a restore function; callers must run it in a `finally`.
+     */
+    const breakSpawnMidCrawl = (ignore: Ignore): (() => void) => {
+      const savedPath = process.env['PATH'];
+      const realDirectoryFilter = ignore.getDirectoryFilter.bind(ignore);
+      let pathDropped = false;
+      const filterSpy = vi
+        .spyOn(ignore, 'getDirectoryFilter')
+        .mockImplementation(() => {
+          if (!pathDropped) {
+            pathDropped = true;
+            process.env['PATH'] = '';
+          }
+          return realDirectoryFilter();
+        });
+      return () => {
+        process.env['PATH'] = savedPath;
+        filterSpy.mockRestore();
+      };
+    };
+
+    /**
+     * `[crawler] command …` diagnostics matching `needle`, in order.
+     *
+     * Matched against *all* console.warn output on purpose: the `degradations()`
+     * helper filters to `[crawler] falling back to …`, which discards exactly the
+     * diagnostic lines under test here.
+     */
+    const commandDiagnostics = (warns: string[], needle: RegExp) =>
+      warns.filter((w) => w.startsWith('[crawler] command') && needle.test(w));
+
+    /**
+     * Crawls a real git repo whose `git`/`rg` spawns genuinely fail mid-crawl,
+     * returning every `console.warn` line the crawl produced.
+     */
+    const crawlWithGenuineSpawnFailure = async (ignore: Ignore) => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const restoreSpawn = breakSpawnMidCrawl(ignore);
+      try {
+        const results = await crawlTmp(ignore);
+        return {
+          results,
+          warns: warnSpy.mock.calls.map((c) => String(c[0])),
+        };
+      } finally {
+        restoreSpawn();
+        warnSpy.mockRestore();
+      }
+    };
+
+    it('should not emit raw spawn diagnostics when the ripgrep probe fails (#14537)', async () => {
+      tmpDir = await createTmpDir({ 'tracked.js': '' });
+      await initGitRepo(tmpDir);
+      const ignore = rules(tmpDir);
+
+      const { results, warns } = await crawlWithGenuineSpawnFailure(ignore);
+
+      // Silencing the probe loses no information: the crawl still succeeds via
+      // fdir and the degradation itself is still narrated.
+      expect(results).toContain('tracked.js');
+      expect(warns).toContain(
+        '[crawler] falling back to fdir (ripgrep unavailable)',
+      );
+      expect(commandDiagnostics(warns, /: rg(\s|$)/)).toEqual([]);
+    });
+
+    it('should report a single failed spawn once, not twice (#14537)', async () => {
+      tmpDir = await createTmpDir({ 'tracked.js': '' });
+      await initGitRepo(tmpDir);
+      const ignore = rules(tmpDir);
+
+      const { results, warns } = await crawlWithGenuineSpawnFailure(ignore);
+
+      expect(results).toContain('tracked.js');
+      expect(warns).toContain(
+        '[crawler] falling back to ripgrep (git ls-files unavailable)',
+      );
+      // `ls-files --cached` is deliberately *not* silent, so this one failed
+      // spawn stays observable: it must be reported exactly once. Before the
+      // fix the `error` handler logs `command spawn failed` and the `close`
+      // handler re-reports the same failure as `command failed … exit=-2`
+      // (libuv surfacing UV_ENOENT as the close code).
+      const diagnostics = commandDiagnostics(warns, /ls-files/);
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toContain('command spawn failed');
+    });
+
+    it('should suppress the close-handler diagnostic for a silent probe that exits non-zero (#14537)', async () => {
+      tmpDir = await createTmpDir({ 'plain.js': '' });
+      // Precondition guard, so the assertion below cannot pass vacuously:
+      // tmpDir really is outside any git repo, so `findGitRoot` really spawns
+      // git and really gets a non-zero *exit* — a different failure shape from
+      // the spawn ENOENT above, and the one where `silentOnFailure` (not
+      // `settled`) is the deciding leg of the close-handler guard.
+      await expect(
+        runExecFile('git', ['rev-parse', '--show-toplevel'], tmpDir),
+      ).rejects.toThrow();
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let results: string[] = [];
+      let warns: string[] = [];
+      try {
+        results = await crawlTmp(rules(tmpDir));
+        warns = warnSpy.mock.calls.map((c) => String(c[0]));
+      } finally {
+        warnSpy.mockRestore();
+      }
+
+      expect(results).toContain('plain.js');
+      expect(commandDiagnostics(warns, /: git(\s|$)/)).toEqual([]);
+    });
+
+    it('should stay quiet when the non-silent git listing succeeds (#14537)', async () => {
+      tmpDir = await createTmpDir({ 'tracked.js': '' });
+      await initGitRepo(tmpDir);
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      let results: string[] = [];
+      let warns: string[] = [];
+      try {
+        results = await crawlTmp(rules(tmpDir));
+        warns = warnSpy.mock.calls.map((c) => String(c[0]));
+      } finally {
+        warnSpy.mockRestore();
+      }
+
+      expect(results).toContain('tracked.js');
+      // Precondition guard: nothing fell back, so the git path really succeeded
+      // and the *non-silent* `ls-files --cached` really exited 0 — the case
+      // where `!ok` is the deciding leg of the close-handler guard.
+      expect(
+        warns.filter((w) => w.startsWith('[crawler] falling back to')),
+      ).toEqual([]);
+      expect(commandDiagnostics(warns, /.*/)).toEqual([]);
+    });
   });
 
   describe('throttling', () => {

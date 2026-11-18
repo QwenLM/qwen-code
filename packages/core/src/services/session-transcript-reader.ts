@@ -5,6 +5,14 @@
  */
 
 import {
+  mergeHookExecution,
+  parseHookLifecycle,
+  summarizeHookExecutions,
+  type HookExecutionEntry,
+  type HookTurnPage,
+} from '../telemetry/hook-lifecycle-contract.js';
+
+import {
   restoreSessionSources,
   type SessionSourcesRestoreState,
 } from './session-sources.js';
@@ -16,6 +24,7 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type { Content, Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
+import { userPromptTimestamp } from './last-user-prompt-time.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { addDaemonRequestAttribute } from '../telemetry/daemon-tracing.js';
@@ -33,6 +42,7 @@ import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
 import {
   isValidSessionApprovalModePayload,
+  isValidSessionWorkflowModePayload,
   isValidSessionModelPayload,
   isTurnResultRecordPayload,
   normalizeSessionApprovalModePayload,
@@ -41,6 +51,7 @@ import {
   type ParentSessionRecordPayload,
   type SessionModelRecordPayload,
   type SessionApprovalModeRecordPayload,
+  type SessionWorkflowModeRecordPayload,
   type SessionSourceRecordPayload,
   type TitleSource,
   type UiTelemetryRecordPayload,
@@ -196,6 +207,7 @@ export interface SessionTranscriptNavigationTurn {
   turnId: string;
   kind: SessionTranscriptNavigationTurnKind;
   promptId?: string;
+  historyPromptId?: string;
   timestamp?: string;
   label: string;
   detail?: string;
@@ -267,6 +279,7 @@ export interface SessionRestoreReplayPage {
   hasMore: boolean;
   anchorRecordId?: string;
   replay?: unknown;
+  branchPointsByAssistantUuid?: Readonly<Record<string, string>>;
   goalRecoverySourceUuid?: string;
   goalBootstrapRecords?: GoalRecoveryRecord[];
 }
@@ -281,6 +294,8 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   recording: {
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
+    turnPromptIds?: Array<string | undefined>;
+    turnDaemonPromptIds?: Array<string | undefined>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
@@ -288,6 +303,7 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
     sourceId?: string;
     sessionModel?: SessionModelRecordPayload;
     sessionApprovalMode?: SessionApprovalModeRecordPayload;
+    sessionWorkflowMode?: SessionWorkflowModeRecordPayload;
     lastAssistantModel?: string;
     executionEngine?: SessionExecutionEngine;
   };
@@ -369,7 +385,8 @@ function buildManagedSessionRestoreProjection(
       if (
         uiEvent &&
         uiEvent['event.name'] !== 'request_lifecycle' &&
-        uiEvent['event.name'] !== 'tool_lifecycle'
+        uiEvent['event.name'] !== 'tool_lifecycle' &&
+        uiEvent['event.name'] !== 'hook_lifecycle'
       ) {
         uiTelemetryEvents.push(uiEvent as UiEvent);
       }
@@ -410,6 +427,8 @@ function buildManagedSessionRestoreProjection(
       lastCompletedUuid:
         records[records.length - 1]?.uuid ?? input.fallbackLastCompletedUuid,
       turnParentUuids: turnStateValue.turnParentUuids,
+      turnPromptIds: turnStateValue.turnPromptIds,
+      turnDaemonPromptIds: turnStateValue.turnDaemonPromptIds,
       ...(input.customTitle !== undefined
         ? { customTitle: input.customTitle }
         : {}),
@@ -465,6 +484,18 @@ interface RestoreProjectionReadOptions {
   validateFirstRecord?: (record: ChatRecord) => boolean | Promise<boolean>;
 }
 
+interface LastUserPromptReadOptions {
+  preferCache?: boolean;
+  validateFirstRecord?: (
+    record: Pick<ChatRecord, 'sessionId' | 'cwd'>,
+  ) => boolean | Promise<boolean>;
+}
+
+interface LastUserPromptSnapshot {
+  lastUserPromptAt?: string;
+  firstRecordOwner?: Pick<ChatRecord, 'sessionId' | 'cwd'>;
+}
+
 interface SessionTranscriptFileIdentity {
   dev: number;
   ino: number;
@@ -499,6 +530,7 @@ interface AggregatedRecordReadContext {
 
 interface UuidIndexEntry {
   parentUuid: string | null;
+  lastUserPromptAt?: string;
   sessionIdMatchesFile: boolean;
   type: ChatRecord['type'];
   subtype?: TranscriptRecordInput['subtype'];
@@ -558,6 +590,10 @@ interface CacheEntry {
   byteSize?: number;
   value?: TranscriptIndex;
   pending?: Promise<TranscriptIndex>;
+  hookTurns?: Map<
+    string,
+    Pick<HookTurnPage, 'executions' | 'summary' | 'coverage'>
+  >;
 }
 
 const INDEX_CACHE_MAX_ENTRIES = 32;
@@ -646,6 +682,43 @@ function recordRestoreSelectionAttributes(
 }
 
 const indexCache = new Map<string, CacheEntry>();
+interface LastUserPromptCacheEntry {
+  fileIdentity: SessionTranscriptFileIdentity;
+  size: number;
+  lastUpdated: string;
+  snapshot: Promise<LastUserPromptSnapshot>;
+}
+
+const lastUserPromptScopes = new Map<
+  string,
+  Map<string, LastUserPromptCacheEntry>
+>();
+const lastUserPromptUpdates = new Map<string, object>();
+const LAST_USER_PROMPT_CACHE_MAX_ENTRIES = 100_000;
+
+function promptTimeScope(filePath: string, workspaceCwd: string) {
+  const key = JSON.stringify([path.dirname(filePath), workspaceCwd]);
+  let entries = lastUserPromptScopes.get(key);
+  if (!entries) entries = new Map();
+  lastUserPromptScopes.delete(key);
+  lastUserPromptScopes.set(key, entries);
+  while (lastUserPromptScopes.size > 64) {
+    lastUserPromptScopes.delete(lastUserPromptScopes.keys().next().value!);
+  }
+  return entries;
+}
+
+function trimPromptTimeScopes(): void {
+  let count = [...lastUserPromptScopes.values()].reduce(
+    (sum, entries) => sum + entries.size,
+    0,
+  );
+  while (count > LAST_USER_PROMPT_CACHE_MAX_ENTRIES) {
+    const oldest = lastUserPromptScopes.keys().next().value!;
+    count -= lastUserPromptScopes.get(oldest)!.size;
+    lastUserPromptScopes.delete(oldest);
+  }
+}
 // Per-workspace HMAC signing keys are cached for the daemon's lifetime (keyed by
 // key-file path). Rotating a key file externally therefore requires a daemon
 // restart to take effect — the only in-process invalidation is the corrupt
@@ -1802,13 +1875,18 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
       estimateStringBytes(uuid) +
       estimateStringBytes(entry.parentUuid) +
+      estimateStringBytes(entry.lastUserPromptAt) +
       estimateStringBytes(entry.type) +
       estimateStringBytes(entry.subtype) +
       estimateStringBytes(entry.navigationKind) +
       estimateStringBytes(entry.turnResultPromptId) +
       estimateStringBytes(entry.daemonPromptId) +
       estimateStringBytes(entry.turnHint.turnParentUuid) +
+      estimateStringBytes(entry.turnHint.turnPromptId) +
+      estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
       estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
+      estimateStringBytes(entry.turnHint.hookTurn?.promptId) +
+      estimateStringBytes(entry.turnHint.hookTurn?.parentUuid) +
       entry.segments.length * INDEX_SEGMENT_BYTES;
   }
   for (const turn of index.navigationTurns) {
@@ -2106,6 +2184,16 @@ async function readGoalStatePayloadBeforePosition(
   return parseGoalStateRecordPayloadV2(record?.systemPayload);
 }
 
+function lastUserPromptFromIndex(index: TranscriptIndex): string | undefined {
+  for (let position = index.replayUuids.length - 1; position >= 0; position--) {
+    const timestamp = index.byUuid.get(
+      index.replayUuids[position]!,
+    )?.lastUserPromptAt;
+    if (timestamp !== undefined) return timestamp;
+  }
+  return undefined;
+}
+
 /**
  * The index entry for one record's first fragment.
  *
@@ -2122,6 +2210,7 @@ function newIndexEntry(
   const navigationKind = navigationKindForRecord(record);
   return {
     parentUuid: record.parentUuid,
+    lastUserPromptAt: userPromptTimestamp(record),
     sessionIdMatchesFile: record.sessionId === sessionId,
     type: record.type,
     ...(record.subtype !== undefined ? { subtype: record.subtype } : {}),
@@ -2567,6 +2656,7 @@ async function hasSnapshotSignature(
   fileIdentity: SessionTranscriptFileIdentity,
   snapshotSize: number,
   lastUpdated: string,
+  allowAppend = false,
 ): Promise<boolean> {
   let stats: fs.Stats;
   try {
@@ -2576,9 +2666,11 @@ async function hasSnapshotSignature(
     throw error;
   }
   return (
-    stats.size === snapshotSize &&
+    (stats.size === snapshotSize ||
+      (allowAppend && stats.size > snapshotSize)) &&
     sameFileIdentity(fileIdentityFromStats(stats), fileIdentity) &&
-    new Date(stats.mtimeMs).toISOString() === lastUpdated
+    ((allowAppend && stats.size > snapshotSize) ||
+      new Date(stats.mtimeMs).toISOString() === lastUpdated)
   );
 }
 
@@ -2697,6 +2789,22 @@ function selectArtifactUuids(index: TranscriptIndex): string[] {
     index.physicalRecords,
     index.runtimeUuids,
   );
+}
+
+// Null prototype: record uuids are untrusted, and '__proto__' would silently
+// drop the entry on a plain object.
+function branchPointsForRecords(
+  index: TranscriptIndex,
+  records: readonly ChatRecord[],
+): Record<string, string> | undefined {
+  let branchPoints: Record<string, string> | undefined;
+  for (const record of records) {
+    const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
+    if (checkpointUuid !== undefined) {
+      (branchPoints ??= Object.create(null))[record.uuid] = checkpointUuid;
+    }
+  }
+  return branchPoints;
 }
 
 function indexHasManagedHeader(index: TranscriptIndex): boolean {
@@ -2886,7 +2994,10 @@ export class SessionTranscriptReader {
     this.storage = new Storage(workspaceCwd, runtimeBaseDir);
   }
 
-  getSessionFilePath(sessionId: string): string {
+  getSessionFilePath(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+  ): string {
     if (!SESSION_TRANSCRIPT_SESSION_ID_PATTERN.test(sessionId)) {
       debugLogger.debug(`invalid session id for transcript read: ${sessionId}`);
       throw makeSessionTranscriptNotFoundError(sessionId);
@@ -2894,8 +3005,188 @@ export class SessionTranscriptReader {
     return path.join(
       this.storage.getProjectDir(),
       'chats',
+      ...(archiveState === 'archived' ? ['archive'] : []),
       `${sessionId}.jsonl`,
     );
+  }
+
+  async getLastUserPromptAt(
+    sessionId: string,
+    archiveState: 'active' | 'archived' = 'active',
+    readOptions: LastUserPromptReadOptions = {},
+  ): Promise<string | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, archiveState);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    const warm = readOptions.preferCache
+      ? lastUserPromptCache.get(key)
+      : undefined;
+    if (warm) {
+      let snapshot = await warm.snapshot;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== warm) snapshot = await current.snapshot;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
+    const stats = await fsp.stat(filePath);
+    lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const fileIdentity = fileIdentityFromStats(stats);
+    const lastUpdated = new Date(stats.mtimeMs).toISOString();
+    const cached = lastUserPromptCache.get(key);
+    if (
+      cached &&
+      fileIdentity.ino === 0 &&
+      cached.fileIdentity.ino === 0 &&
+      (stats.size !== cached.size || lastUpdated !== cached.lastUpdated)
+    )
+      return undefined;
+    if (
+      cached &&
+      sameFileIdentity(cached.fileIdentity, fileIdentity) &&
+      stats.size >= cached.size &&
+      (stats.size !== cached.size || lastUpdated === cached.lastUpdated)
+    ) {
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, cached);
+      let snapshot = await cached.snapshot;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== cached) snapshot = await current.snapshot;
+      cached.size = stats.size;
+      cached.lastUpdated = lastUpdated;
+      return readOptions.validateFirstRecord &&
+        (!snapshot.firstRecordOwner ||
+          !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+        ? undefined
+        : snapshot.lastUserPromptAt;
+    }
+    if (stats.size > SESSION_TRANSCRIPT_MAX_INDEX_BYTES) return undefined;
+    const pending = (async (): Promise<LastUserPromptSnapshot> => {
+      let index: TranscriptIndex;
+      try {
+        index = await getCachedIndex({
+          filePath,
+          fileIdentity,
+          snapshotSize: stats.size,
+          lastUpdated,
+        });
+      } catch (error) {
+        if (
+          error instanceof EmptySessionTranscriptError &&
+          (await hasSnapshotSignature(
+            filePath,
+            fileIdentity,
+            stats.size,
+            lastUpdated,
+            true,
+          ))
+        )
+          return {};
+        throw error;
+      }
+      const [firstRecord] = await readAggregatedRecords(index, [
+        index.firstRecordUuid,
+      ]);
+      if (!firstRecord)
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      const effective = indexHasManagedHeader(index)
+        ? managedPageIndex(
+            index,
+            await this.readManagedRecords(sessionId, index, {}),
+          )
+        : index;
+      const timestamp = lastUserPromptFromIndex(effective);
+      if (
+        !(await hasSnapshotSignature(
+          filePath,
+          fileIdentity,
+          stats.size,
+          lastUpdated,
+          true,
+        ))
+      ) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      return {
+        lastUserPromptAt: timestamp,
+        firstRecordOwner: {
+          sessionId: firstRecord.sessionId,
+          cwd: firstRecord.cwd,
+        },
+      };
+    })();
+    const entry = {
+      fileIdentity,
+      size: stats.size,
+      lastUpdated,
+      snapshot: pending,
+    };
+    lastUserPromptCache.set(key, entry);
+    trimPromptTimeScopes();
+    let snapshot: LastUserPromptSnapshot;
+    try {
+      snapshot = await pending;
+      const current = promptTimeScope(filePath, this.workspaceCwd).get(key);
+      if (current && current !== entry) snapshot = await current.snapshot;
+    } catch (error) {
+      const currentScope = promptTimeScope(filePath, this.workspaceCwd);
+      if (currentScope.get(key) === entry) currentScope.delete(key);
+      throw error;
+    }
+    return readOptions.validateFirstRecord &&
+      (!snapshot.firstRecordOwner ||
+        !(await readOptions.validateFirstRecord(snapshot.firstRecordOwner)))
+      ? undefined
+      : snapshot.lastUserPromptAt;
+  }
+
+  invalidateLastUserPromptAt(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const filePath = this.getSessionFilePath(sessionId, state);
+      const key = JSON.stringify([filePath, this.workspaceCwd]);
+      lastUserPromptUpdates.delete(key);
+      promptTimeScope(filePath, this.workspaceCwd).delete(key);
+    }
+  }
+
+  async setLastUserPromptAt(
+    sessionId: string,
+    timestamp: string | undefined,
+  ): Promise<void> {
+    const filePath = this.getSessionFilePath(sessionId);
+    let lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+    const key = JSON.stringify([filePath, this.workspaceCwd]);
+    if (timestamp === undefined) {
+      this.invalidateLastUserPromptAt(sessionId);
+      return;
+    }
+    const update = {};
+    lastUserPromptUpdates.set(key, update);
+    try {
+      const stats = await fsp.stat(filePath);
+      if (lastUserPromptUpdates.get(key) !== update) return;
+      lastUserPromptCache = promptTimeScope(filePath, this.workspaceCwd);
+      lastUserPromptCache.delete(key);
+      lastUserPromptCache.set(key, {
+        fileIdentity: fileIdentityFromStats(stats),
+        size: stats.size,
+        lastUpdated: new Date(stats.mtimeMs).toISOString(),
+        snapshot: Promise.resolve({
+          lastUserPromptAt: timestamp,
+          firstRecordOwner: { sessionId, cwd: this.workspaceCwd },
+        }),
+      });
+      trimPromptTimeScopes();
+    } catch (error) {
+      if (lastUserPromptUpdates.get(key) === update)
+        promptTimeScope(filePath, this.workspaceCwd).delete(key);
+      throw error;
+    } finally {
+      if (lastUserPromptUpdates.get(key) === update)
+        lastUserPromptUpdates.delete(key);
+    }
   }
 
   private decodeSnapshot(snapshot: string): SessionTranscriptSnapshotState {
@@ -2912,24 +3203,14 @@ export class SessionTranscriptReader {
     );
   }
 
-  async readTurnIndexPage(
+  private async readTurnIndexSnapshot(
     sessionId: string,
-    options: SessionTranscriptReadTurnIndexOptions = {},
-  ): Promise<SessionTranscriptTurnIndexPage> {
-    const limit = normalizeLimit(options.limit);
-    if (options.start !== undefined && options.snapshot === undefined) {
-      throw new InvalidSessionTranscriptCursorError();
-    }
-    if (
-      options.start !== undefined &&
-      !isFiniteNonNegativeInteger(options.start)
-    ) {
-      throw new RangeError('Transcript turn index start must be non-negative');
-    }
+    encodedSnapshot?: string,
+  ) {
     const snapshot =
-      options.snapshot === undefined
+      encodedSnapshot === undefined
         ? undefined
-        : this.decodeSnapshot(options.snapshot);
+        : this.decodeSnapshot(encodedSnapshot);
     if (snapshot && snapshot.sessionId !== sessionId) {
       throw new InvalidSessionTranscriptCursorError();
     }
@@ -2941,7 +3222,10 @@ export class SessionTranscriptReader {
     const fileIdentity = snapshot?.fileIdentity ?? currentIdentity;
     if (
       stats.size < snapshotSize ||
-      !sameFileIdentity(currentIdentity, fileIdentity)
+      !sameFileIdentity(currentIdentity, fileIdentity) ||
+      (snapshot &&
+        stats.size === snapshotSize &&
+        new Date(stats.mtimeMs).toISOString() !== snapshot.lastUpdated)
     ) {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
@@ -2974,6 +3258,28 @@ export class SessionTranscriptReader {
       startTime,
       lastUpdated,
     };
+    return { index, snapshotState };
+  }
+
+  async readTurnIndexPage(
+    sessionId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<SessionTranscriptTurnIndexPage> {
+    const limit = normalizeLimit(options.limit);
+    if (options.start !== undefined && options.snapshot === undefined) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
+    if (
+      options.start !== undefined &&
+      !isFiniteNonNegativeInteger(options.start)
+    ) {
+      throw new RangeError('Transcript turn index start must be non-negative');
+    }
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    const { startTime, lastUpdated } = snapshotState;
     const projected =
       index !== undefined && indexHasManagedHeader(index)
         ? await this.readManagedRecords(sessionId, index, {})
@@ -3029,6 +3335,9 @@ export class SessionTranscriptReader {
     }
     const turns = selectedTurns.map((turn, offset) => {
       const preview = labels.get(turn.turnId);
+      const historyPromptId = projected
+        ? undefined
+        : index?.byUuid.get(turn.turnId)?.turnHint.turnPromptId;
       const detail = turn.finalAssistantRecordId
         ? details.get(turn.finalAssistantRecordId)
         : undefined;
@@ -3037,6 +3346,7 @@ export class SessionTranscriptReader {
         turnId: turn.turnId,
         kind: turn.kind,
         ...(turn.promptId ? { promptId: turn.promptId } : {}),
+        ...(historyPromptId ? { historyPromptId } : {}),
         ...(preview?.timestamp ? { timestamp: preview.timestamp } : {}),
         label: preview
           ? preview.label
@@ -3058,6 +3368,137 @@ export class SessionTranscriptReader {
       turns,
       startTime,
       lastUpdated,
+    };
+  }
+
+  async readTurnHooksPage(
+    sessionId: string,
+    promptId: string,
+    options: SessionTranscriptReadTurnIndexOptions = {},
+  ): Promise<HookTurnPage | undefined> {
+    const limit = normalizeLimit(options.limit ?? 50);
+    const start = options.start ?? 0;
+    if (
+      (options.start !== undefined && options.snapshot === undefined) ||
+      !isFiniteNonNegativeInteger(start)
+    )
+      throw new InvalidSessionTranscriptCursorError();
+    const { index, snapshotState } = await this.readTurnIndexSnapshot(
+      sessionId,
+      options.snapshot,
+    );
+    if (!index) return undefined;
+    const base = {
+      sessionId,
+      promptId,
+      snapshot: this.encodeSnapshot(snapshotState),
+      start,
+    };
+    if (indexHasManagedHeader(index)) {
+      return {
+        ...base,
+        totalExecutions: 0,
+        executions: [],
+        summary: null,
+        coverage: 'unsupported',
+      };
+    }
+    const cacheKey = makeCacheKey(
+      index.filePath,
+      index.fileIdentity,
+      index.snapshotSize,
+      index.lastUpdated,
+    );
+    const cached = indexCache.get(cacheKey);
+    let turn =
+      cached?.value === index ? cached.hookTurns?.get(promptId) : undefined;
+    if (!turn) {
+      const executionsById = new Map<string, HookExecutionEntry>();
+      let partial = !index.sourceReadComplete || index.gaps.length > 0;
+      await forEachAggregatedRecord(
+        index,
+        index.replayUuids.filter(
+          (uuid) =>
+            index.byUuid.get(uuid)?.turnHint.hookTurn?.promptId === promptId,
+        ),
+        (record) => {
+          const value = (
+            record.systemPayload as UiTelemetryRecordPayload | undefined
+          )?.uiEvent;
+          if (value?.['event.name'] !== 'hook_lifecycle') return;
+          const event = parseHookLifecycle(value);
+          if (!event) {
+            partial = true;
+            return;
+          }
+          if (event.sessionId !== sessionId || event.promptId !== promptId) {
+            partial = true;
+            return;
+          }
+          executionsById.set(
+            event.executionId,
+            mergeHookExecution(
+              executionsById.get(event.executionId),
+              event,
+              'replay',
+            ),
+          );
+        },
+      );
+      if (
+        executionsById.size === 0 &&
+        !index.replayUuids.some(
+          (uuid) => index.byUuid.get(uuid)?.turnHint.turnPromptId === promptId,
+        )
+      )
+        return undefined;
+      const entries = [...executionsById.values()].sort(
+        (a, b) =>
+          a.event.startedAt - b.event.startedAt ||
+          a.event.executionId.localeCompare(b.event.executionId),
+      );
+      partial ||= entries.some(
+        (entry) => entry.conflicted || entry.status === 'unknown',
+      );
+      turn = {
+        executions: entries,
+        summary: entries.length > 0 ? summarizeHookExecutions(entries) : null,
+        coverage: partial
+          ? 'partial'
+          : entries.length > 0
+            ? 'recorded'
+            : 'unrecorded',
+      };
+      if (
+        cached?.value === index &&
+        indexCache.get(cacheKey) === cached &&
+        !cached.hookTurns?.has(promptId)
+      ) {
+        const byteSize =
+          INDEX_CONTAINER_BASE_BYTES +
+          INDEX_MAP_ENTRY_BYTES +
+          entries.length *
+            (INDEX_ENTRY_BASE_BYTES + INDEX_CONTAINER_SLOT_BYTES) +
+          estimateStringBytes(promptId) +
+          estimateStringBytes(JSON.stringify(turn));
+        if (getIndexCacheBytes() + byteSize <= getIndexCacheMaxBytes()) {
+          cached.hookTurns ??= new Map();
+          cached.hookTurns.set(promptId, turn);
+          cached.byteSize = (cached.byteSize ?? 0) + byteSize;
+        }
+      }
+    }
+    const entries = turn.executions;
+    if (start > entries.length) throw new InvalidSessionTranscriptCursorError();
+    const executions = entries.slice(start, start + limit);
+    return {
+      ...base,
+      totalExecutions: entries.length,
+      ...structuredClone({ executions, summary: turn.summary }),
+      ...(start + executions.length < entries.length
+        ? { nextStart: start + executions.length }
+        : {}),
+      coverage: turn.coverage,
     };
   }
 
@@ -3148,6 +3589,7 @@ export class SessionTranscriptReader {
       if (
         position === compressionPosition ||
         ((entry?.type !== 'system' ||
+          entry?.subtype === 'memory_catalog_snapshot' ||
           entry?.subtype === 'goal_turn_end' ||
           entry?.subtype === 'slash_command') &&
           (compressionPosition < 0 || position > compressionPosition))
@@ -3192,6 +3634,13 @@ export class SessionTranscriptReader {
       );
     });
     const sessionApprovalModeSet = new Set(sessionApprovalModeUuids);
+    const sessionWorkflowModeUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return (
+        entry?.type === 'system' && entry.subtype === 'session_workflow_mode'
+      );
+    });
+    const sessionWorkflowModeSet = new Set(sessionWorkflowModeUuids);
     // The legacy-model fallback reads the last assistant record's `model`.
     // Without an explicit selection it is only dispatched when it happens to
     // land in the replay/model read sets, so on a resume whose tail is a
@@ -3241,6 +3690,7 @@ export class SessionTranscriptReader {
         sessionSourceUuid,
         ...sessionModelUuids,
         ...sessionApprovalModeUuids,
+        ...sessionWorkflowModeUuids,
         lastAssistantUuid,
       ].filter((uuid): uuid is string => uuid !== undefined),
     );
@@ -3266,6 +3716,7 @@ export class SessionTranscriptReader {
     let sourceId: string | undefined;
     let sessionModel: SessionModelRecordPayload | undefined;
     let sessionApprovalMode: SessionApprovalModeRecordPayload | undefined;
+    let sessionWorkflowMode: SessionWorkflowModeRecordPayload | undefined;
     let lastAssistantModel: string | undefined;
     let firstRecordSeen = false;
     const deferredPreReadRecords = new Map<string, ChatRecord>();
@@ -3279,7 +3730,8 @@ export class SessionTranscriptReader {
         if (
           uiEvent &&
           uiEvent['event.name'] !== 'request_lifecycle' &&
-          uiEvent['event.name'] !== 'tool_lifecycle'
+          uiEvent['event.name'] !== 'tool_lifecycle' &&
+          uiEvent['event.name'] !== 'hook_lifecycle'
         ) {
           uiTelemetryEvents.push(uiEvent as UiEvent);
         }
@@ -3305,6 +3757,10 @@ export class SessionTranscriptReader {
       } else if (sessionModelSet.has(record.uuid)) {
         if (isValidSessionModelPayload(record.systemPayload)) {
           sessionModel = record.systemPayload;
+        }
+      } else if (sessionWorkflowModeSet.has(record.uuid)) {
+        if (isValidSessionWorkflowModePayload(record.systemPayload)) {
+          sessionWorkflowMode = { enabled: record.systemPayload.enabled };
         }
       } else if (sessionApprovalModeSet.has(record.uuid)) {
         if (isValidSessionApprovalModePayload(record.systemPayload)) {
@@ -3480,12 +3936,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(replayGoalRecoverySourceUuid &&
         !replaySet.has(replayGoalRecoverySourceUuid)
@@ -3521,6 +3981,8 @@ export class SessionTranscriptReader {
       recording: {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
+        turnPromptIds: turnStateValue.turnPromptIds,
+        turnDaemonPromptIds: turnStateValue.turnDaemonPromptIds,
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
@@ -3528,6 +3990,7 @@ export class SessionTranscriptReader {
         ...(sourceId !== undefined ? { sourceId } : {}),
         ...(sessionModel !== undefined ? { sessionModel } : {}),
         ...(sessionApprovalMode !== undefined ? { sessionApprovalMode } : {}),
+        ...(sessionWorkflowMode !== undefined ? { sessionWorkflowMode } : {}),
         ...(lastAssistantModel !== undefined ? { lastAssistantModel } : {}),
         ...(index.executionEngine.status === 'verified' &&
         index.executionEngine.recorded
@@ -3853,12 +4316,16 @@ export class SessionTranscriptReader {
       const goalState = goalStateUuid
         ? goalStatePayloads.get(goalStateUuid)
         : undefined;
+      const replayBranchPoints = branchPointsForRecords(index, replayRecords);
       replay = {
         records: replayRecords,
         gaps: index.gaps,
         hasMore: replaySelection.hasMore,
         ...(replaySelection.hasMore && replayRecords[0]
           ? { anchorRecordId: replayRecords[0].uuid }
+          : {}),
+        ...(replayBranchPoints
+          ? { branchPointsByAssistantUuid: replayBranchPoints }
           : {}),
         ...(goalState
           ? {
@@ -4046,15 +4513,7 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? pageStartPosition + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    // Null prototype: record uuids are untrusted, and '__proto__' would
-    // silently drop the entry on a plain object.
-    const pageBranchPoints: Record<string, string> = Object.create(null);
-    for (const record of records) {
-      const checkpointUuid = index.branchPointsByAssistantUuid.get(record.uuid);
-      if (checkpointUuid !== undefined) {
-        pageBranchPoints[record.uuid] = checkpointUuid;
-      }
-    }
+    const pageBranchPoints = branchPointsForRecords(index, records);
     const backwardGoalState =
       direction === 'backward' || options.atRecordId !== undefined
         ? await readGoalStatePayloadBeforePosition(
@@ -4108,7 +4567,7 @@ export class SessionTranscriptReader {
           : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
-      ...(Object.keys(pageBranchPoints).length > 0
+      ...(pageBranchPoints
         ? { branchPointsByAssistantUuid: pageBranchPoints }
         : {}),
       ...(options.atRecordId !== undefined
@@ -4122,6 +4581,8 @@ export class SessionTranscriptReader {
 }
 
 export function resetSessionTranscriptIndexCacheForTest(): void {
+  lastUserPromptScopes.clear();
+  lastUserPromptUpdates.clear();
   indexCache.clear();
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;

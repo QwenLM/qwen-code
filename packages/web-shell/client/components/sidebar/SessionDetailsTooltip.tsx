@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ReactElement,
+  type ReactNode,
 } from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
@@ -30,6 +31,7 @@ import {
   sessionIssueStateLabel,
   sessionPrStateLabel,
 } from '../SessionPrStateIcon';
+import { openableSessionPrs } from '../SessionPrBadge';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 
@@ -38,7 +40,9 @@ interface SessionDetailsTooltipProps {
   label: string;
   time: string;
   completedUnread: boolean;
+  statusLabel?: string;
   workspaceLabel?: string;
+  details?: ReactNode;
   openOnClick?: boolean;
   ownerToken?: string;
   open?: boolean;
@@ -52,7 +56,9 @@ export function SessionDetailsTooltip({
   label,
   time,
   completedUnread,
+  statusLabel,
   workspaceLabel,
+  details,
   openOnClick = false,
   ownerToken,
   open: controlledOpen,
@@ -90,10 +96,9 @@ export function SessionDetailsTooltip({
       : resolveSessionDetailsCollisionBoundary(anchorRef.current)
     : null;
   const folderPath = session.workspaceCwd;
-  const branch = session.worktree?.branch ?? session.branch?.name;
-  const prs = [...(session.prs ?? [])]
-    .reverse()
-    .filter((pr) => isExternalOpenUrl(pr.url));
+  const branch =
+    session.worktree?.branch || session.worktree?.slug || session.branch?.name;
+  const prs = openableSessionPrs([...(session.prs ?? [])].reverse());
   // Stacked PRs can close the same issue; list it once, under its newest PR.
   const seenIssueUrls = new Set<string>();
   const issues = prs
@@ -344,8 +349,9 @@ export function SessionDetailsTooltip({
           })}
           <div className={styles.sessionDetailsRow}>
             <RadioTowerIcon aria-hidden="true" />
-            <span>{status}</span>
+            <span>{statusLabel ?? status}</span>
           </div>
+          {details}
           <div className={styles.sessionDetailsIdRow}>
             <span
               className="!whitespace-normal break-all"

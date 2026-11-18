@@ -61,12 +61,12 @@ describe('isOpenTuiRuntimeSupported', () => {
     expect(isOpenTuiRuntimeSupported({ bun: '1.0.0' })).toBe(false);
   });
 
-  it('accepts Node at or above the floor', () => {
-    expect(isOpenTuiRuntimeSupported({ node: '26.4.0' })).toBe(true);
-    expect(isOpenTuiRuntimeSupported({ node: '27.0.0' })).toBe(true);
+  it('rejects Node-only runtimes even when native FFI is available', () => {
+    expect(isOpenTuiRuntimeSupported({ node: '26.4.0' })).toBe(false);
+    expect(isOpenTuiRuntimeSupported({ node: '27.0.0' })).toBe(false);
   });
 
-  it('rejects Node below the floor, including the project minimum', () => {
+  it('rejects older Node-only runtimes, including the project minimum', () => {
     expect(isOpenTuiRuntimeSupported({ node: '24.15.0' })).toBe(false);
     expect(isOpenTuiRuntimeSupported({ node: '22.0.0' })).toBe(false);
     expect(isOpenTuiRuntimeSupported({ node: '26.3.9' })).toBe(false);
@@ -109,6 +109,24 @@ describe('selectTuiRenderer', () => {
     expect(selection.renderer).toBe('ink');
     expect(selection.reason).toContain('native FFI');
   });
+
+  it.each(['26.4.0', '27.0.0'])(
+    'keeps Node-only %s on Ink or rejects strict OpenTUI',
+    (node) => {
+      const probe = { node };
+      const selection = selectTuiRenderer('opentui', probe, {});
+      expect(selection.renderer).toBe('ink');
+      expect(selection.reason).toContain('Bun');
+      expect(selection.reason).not.toContain('Node >=');
+      expect(() =>
+        selectTuiRenderer('opentui', probe, {
+          [TUI_RENDERER_STRICT_ENV_VAR]: '1',
+        }),
+      ).toThrow(TUI_RENDERER_STRICT_ENV_VAR);
+      expect(selectTuiRenderer(undefined, probe, {}).renderer).toBe('ink');
+      expect(selectTuiRenderer('ink', probe, {}).renderer).toBe('ink');
+    },
+  );
 
   it('keeps ink in screen-reader mode even on a supported runtime', () => {
     const selection = selectTuiRenderer(

@@ -25,6 +25,9 @@ import {
   useWorkspaceSessionLiveState,
 } from './workspace-session-live-state';
 
+import { DaemonAvailabilityContext } from '../daemon/availability-context.js';
+import { offlineDaemon } from '../daemon/availability.test-fixtures.js';
+
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 function liveState(
@@ -145,14 +148,17 @@ describe('useWorkspaceSessionLiveState', () => {
     organizationEnabled = false,
     sourceType?: string,
     pollIntervalMs?: number,
+    availability?: ReturnType<typeof offlineDaemon>['availability'],
   ): Promise<void> {
     await act(async () => {
       root.render(
-        <Probe
-          organizationEnabled={organizationEnabled}
-          sourceType={sourceType}
-          pollIntervalMs={pollIntervalMs}
-        />,
+        <DaemonAvailabilityContext.Provider value={availability}>
+          <Probe
+            organizationEnabled={organizationEnabled}
+            sourceType={sourceType}
+            pollIntervalMs={pollIntervalMs}
+          />
+        </DaemonAvailabilityContext.Provider>,
       );
       await Promise.resolve();
       await Promise.resolve();
@@ -633,6 +639,40 @@ describe('useWorkspaceSessionLiveState', () => {
     });
     expect(getLiveState.mock.calls.length).toBeGreaterThan(1);
     expect(container.textContent).toBe('false:false:no-group');
+  });
+
+  it('expires live authority during a sustained shared outage without sending requests', async () => {
+    const { availability, server } = offlineDaemon();
+    getLiveState.mockResolvedValue(liveState(1, true));
+    try {
+      await renderProbe(false, undefined, undefined, availability);
+      const store = getSessionCatalogStore(client);
+      const expiry =
+        SESSION_LIVE_STATE_STALE_AFTER_FAILURES *
+        SESSION_LIVE_STATE_ERROR_RETRY_MS;
+      await act(async () => availability.check(true));
+      const reads = getLiveState.mock.calls.length;
+      await act(async () => vi.advanceTimersByTimeAsync(expiry - 1));
+      expect(store.hasLiveSessions('/work')).toBe(true);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(store.hasLiveSessions('/work')).toBe(false);
+      expect(getLiveState).toHaveBeenCalledTimes(reads);
+      expect(store.getSnapshot(query).page?.sessions[0].displayName).toBe(
+        'Session A',
+      );
+      server.healthy = true;
+      await act(async () => availability.check(true));
+      expect(store.hasLiveSessions('/work')).toBe(true);
+      server.healthy = false;
+      await act(async () => availability.check(true));
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      server.healthy = true;
+      await act(async () => availability.check(true));
+      await act(async () => vi.advanceTimersByTimeAsync(expiry));
+      expect(store.hasLiveSessions('/work')).toBe(true);
+    } finally {
+      availability.dispose();
+    }
   });
 
   it('drops the retained snapshot once the channel stops answering', async () => {

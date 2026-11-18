@@ -47,6 +47,7 @@ vi.mock('./MessageItem', async () => {
     MessageItem: ({
       message,
       showAssistantActions,
+      assistantFooterAlwaysVisible,
       showAssistantBranch,
       onBranchSession,
       branchRecordId,
@@ -54,11 +55,13 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo,
       sendFailed,
       onRetrySend,
+      onEditUserMessage,
       assistantFeedbackPromptId,
     }: {
       message: Message;
       assistantFeedbackPromptId?: string;
       showAssistantActions?: boolean;
+      assistantFooterAlwaysVisible?: boolean;
       showAssistantBranch?: boolean;
       onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
       branchRecordId?: string;
@@ -66,6 +69,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
       onRetrySend?: () => void;
+      onEditUserMessage?: () => void;
     }) => {
       if (message.role === 'tool_group') {
         messageItemTestState.toolArrays.push(message.tools);
@@ -79,6 +83,7 @@ vi.mock('./MessageItem', async () => {
         {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
+          'data-footer-visible': String(Boolean(assistantFooterAlwaysVisible)),
           'data-feedback-prompt': assistantFeedbackPromptId,
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
@@ -109,6 +114,17 @@ vi.mock('./MessageItem', async () => {
                 type: 'button',
               },
               'retry',
+            )
+          : null,
+        onEditUserMessage
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': `edit-${message.id}`,
+                onClick: onEditUserMessage,
+                type: 'button',
+              },
+              'edit',
             )
           : null,
         message.role === 'thinking'
@@ -378,6 +394,7 @@ function mount(
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
+    onEditUserMessage?: (turnIndex: number, content: string) => void;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -419,6 +436,7 @@ function mount(
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
+                onEditUserMessage={opts.onEditUserMessage}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -577,17 +595,24 @@ const dispatchTopScroll = async (list: HTMLElement) => {
   });
 };
 const mockMessageListWidth = (width: number) =>
-  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
-    width,
-    height: 600,
-    top: 0,
-    right: width,
-    bottom: 600,
-    left: 0,
-    x: 0,
-    y: 0,
-    toJSON: () => ({}),
-  });
+  vi
+    .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+    .mockImplementation(function (this: HTMLElement) {
+      const isContent = this.hasAttribute('data-web-shell-message-row');
+      const left = isContent ? 64 : 0;
+      const contentWidth = isContent ? Math.max(0, width - 128) : width;
+      return {
+        width: contentWidth,
+        height: 600,
+        top: 0,
+        right: left + contentWidth,
+        bottom: 600,
+        left,
+        x: left,
+        y: 0,
+        toJSON: () => ({}),
+      };
+    });
 const simpleTurns = (count: number): Message[] =>
   Array.from({ length: count }, (_, index) => {
     const turn = index + 1;
@@ -701,6 +726,28 @@ describe('MessageList — failed prompt retry', () => {
     );
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
+});
+
+it('keeps Edit on the latest ordinary prompt when send records follow it', () => {
+  const sendRecord = (id: string): UserMessage => ({
+    ...userMsg(id),
+    agentMessage: {
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+    },
+  });
+  const onEditUserMessage = vi.fn();
+  const container = mount(
+    [userMsg('u1'), sendRecord('s1'), userMsg('u2'), sendRecord('s2')],
+    undefined,
+    { onEditUserMessage },
+  );
+
+  expect(container.querySelector('[data-testid="edit-s2"]')).toBeNull();
+  const edit = container.querySelector('[data-testid="edit-u2"]');
+  expect(edit).not.toBeNull();
+  click(edit!);
+  expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
 });
 
 describe('MessageList — compact mode', () => {
@@ -1343,7 +1390,9 @@ describe('MessageList — turn collapse (DOM)', () => {
     await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(reloadSignal?.aborted).toBe(false);
 
-    const list = container.firstElementChild as HTMLElement;
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
     list.scrollTop = 400;
     act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
     expect(reloadSignal?.aborted).toBe(true);
@@ -4420,6 +4469,10 @@ describe('MessageList — turn collapse (DOM)', () => {
 
   it.each([
     [7069, '8s'],
+    [59999, '1m 0s'],
+    [60000, '1m 0s'],
+    [60001, '1m 1s'],
+    [397000, '6m 37s'],
     [0, '0s'],
     ['1000', '14s'],
     [-1, '14s'],
@@ -4561,6 +4614,31 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(
       c.querySelector('[data-testid="assistant-turn-footer"]')?.textContent,
     ).toBe('u1:a1:answer');
+  });
+
+  it('keeps only the newest completed turn footer visible and releases it on the next prompt', () => {
+    const messages = [
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(messages);
+    c.querySelector<HTMLElement>('[data-web-shell-message-list]')!.scrollTo =
+      vi.fn();
+    const visible = (id: string) =>
+      c
+        .querySelector(`[data-testid="msg-${id}"]`)
+        ?.getAttribute('data-footer-visible');
+    expect(visible('a1')).toBe('false');
+    expect(visible('a2')).toBe('true');
+    rerenderMessages(c, [...messages, userShellMsg('shell')]);
+    expect(visible('a2')).toBe('true');
+    rerenderMessages(c, [...messages, userMsg('u3')], { isResponding: true });
+    expect(visible('a2')).toBe('false');
+    rerenderMessages(c, [...messages, userMsg('u3'), asstMsg('a3')]);
+    expect(visible('a2')).toBe('false');
+    expect(visible('a3')).toBe('true');
   });
 
   it('maps each completed turn footer to its own turn id', () => {
@@ -4755,6 +4833,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(buttons[0]?.getAttribute('aria-label')).toBe(
       'Turn 1: q. Current turn',
     );
+    expect(c.querySelector('button')).toBe(buttons[0]);
     expect(buttons[0]?.hasAttribute('title')).toBe(false);
     expect(entries[0]?.getAttribute('data-in-current-range')).toBe('true');
     expect(entries[1]?.getAttribute('data-in-current-range')).toBe('true');
@@ -4894,6 +4973,9 @@ describe('MessageList — turn collapse (DOM)', () => {
         }
         const item = this.closest('[data-testid="session-timeline-entry"]');
         if (item) return rect(58, 16, 20, 12);
+        if (this.hasAttribute('data-web-shell-message-row')) {
+          return rect(1072, 600, 0, 64);
+        }
         return rect(1200, 600, 0);
       });
     Object.defineProperty(window, 'innerHeight', {
@@ -4914,6 +4996,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         '[data-testid="session-timeline-detail"]',
       );
       expect(detail?.style.top).toBe('45px');
+      expect(detail?.style.left).toBe('48px');
 
       focusOut(firstEntryButton!);
       detailRect = rect(240, 100, 30, 80);
@@ -5035,6 +5118,9 @@ describe('MessageList — turn collapse (DOM)', () => {
         if (item) {
           const index = Number(item.getAttribute('data-timeline-index'));
           return rect(58, 16, 40 + index * 60 - markerOffset);
+        }
+        if (this.hasAttribute('data-web-shell-message-row')) {
+          return rect(1072, 600, 0, 64);
         }
         return rect(1200, 600, 0);
       });
@@ -5225,13 +5311,46 @@ describe('MessageList — turn collapse (DOM)', () => {
     scrollIntoView.mockRestore();
   });
 
-  it('hides the session timeline below the default content width', async () => {
-    const rectSpy = mockMessageListWidth(999);
+  it('hides the session timeline below the minimum content width', async () => {
+    const rectSpy = mockMessageListWidth(560);
 
     const c = mount(simpleTurns(4));
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('shows the session timeline above the minimum content width', async () => {
+    const rectSpy = mockMessageListWidth(700);
+
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).not.toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('coalesces transcript mutations into one navigation measurement per frame', async () => {
+    const rectSpy = mockMessageListWidth(700);
+    const measure = rectSpy.getMockImplementation()!;
+    const reads: HTMLElement[] = [];
+    rectSpy.mockImplementation(function (this: HTMLElement) {
+      reads.push(this);
+      return measure.call(this);
+    });
+    const c = mount([userMsg('u1')]);
+    await nextFrame();
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    reads.length = 0;
+
+    for (let index = 0; index < 3; index++) {
+      list.append(document.createElement('span'));
+      await Promise.resolve();
+    }
+    await nextFrame();
+
+    expect(reads.filter((element) => element === list)).toHaveLength(1);
     rectSpy.mockRestore();
   });
 
@@ -6363,6 +6482,201 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
+  it.each(['before reconnect', 'during replay'])(
+    'preserves a reading pause started %s after catch-up completes',
+    async (timing) => {
+      let scrollTop = 600;
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        value: 1200,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.max(0, Math.min(value, 600));
+        },
+      });
+      const messages = [userMsg('u1'), asstMsg('a1')];
+      const ref = createRef<MessageListHandle>();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container, transcriptRenderMode: 'interactive' });
+      renderInto(root, messages, ref);
+      const list = container.querySelector<HTMLElement>(
+        '[data-web-shell-message-list]',
+      )!;
+      if (timing === 'during replay') {
+        renderInto(root, messages, ref, { catchingUp: true });
+      }
+      act(() => {
+        list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300 }));
+        list.scrollTop = 300;
+        list.dispatchEvent(new Event('scroll'));
+      });
+      if (timing === 'before reconnect') {
+        renderInto(root, messages, ref, { catchingUp: true });
+      }
+      renderInto(root, messages, ref, { catchingUp: false });
+      await nextFrame();
+      expect(scrollTop).toBe(300);
+
+      renderInto(root, [...messages, asstMsg('a2')], ref, {
+        catchingUp: false,
+      });
+      await nextFrame();
+      expect(scrollTop).toBe(300);
+
+      act(() => ref.current?.scrollToBottom('auto'));
+      expect(scrollTop).toBe(600);
+    },
+  );
+
+  it.each([
+    ['session switch', 'with a replay'],
+    ['session switch', 'without a replay'],
+    ['/clear', 'with a replay'],
+    ['/clear', 'without a replay'],
+  ])('resumes follow after a %s while paused, %s', async (reset, replay) => {
+    let scrollHeight = 1200;
+    let scrollTop = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const transcriptA = [userMsg('u1'), asstMsg('a1')];
+    const c = mount(transcriptA, undefined, { sessionKey: 'session-a' });
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    act(() => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300 }));
+      list.scrollTop = 300;
+      list.dispatchEvent(new Event('scroll'));
+    });
+    // A same-session catch-up cycle must keep the pause; this pins that the
+    // gesture above actually paused following.
+    rerenderMessages(c, transcriptA, {
+      sessionKey: 'session-a',
+      catchingUp: true,
+    });
+    rerenderMessages(c, transcriptA, {
+      sessionKey: 'session-a',
+      catchingUp: false,
+    });
+    await nextFrame();
+    expect(scrollTop).toBe(300);
+
+    // The /clear leg keeps the session key, so only the empty-transcript
+    // effect can drop the pause the gesture armed.
+    const nextSessionKey = reset === '/clear' ? 'session-a' : 'session-b';
+    if (reset === '/clear') {
+      rerenderMessages(c, [], { sessionKey: nextSessionKey });
+    }
+    // Reuse the user id on the /clear leg: a fresh id would let the new-user
+    // scroll resume follow on its own and hide a pause the reset failed to
+    // drop.
+    const nextTranscript = [
+      userMsg(reset === '/clear' ? 'u1' : 'u2'),
+      asstMsg('a2'),
+    ];
+    if (replay === 'with a replay') {
+      rerenderMessages(c, nextTranscript, {
+        sessionKey: nextSessionKey,
+        catchingUp: true,
+      });
+      rerenderMessages(c, nextTranscript, {
+        sessionKey: nextSessionKey,
+        catchingUp: false,
+      });
+    } else {
+      rerenderMessages(c, nextTranscript, { sessionKey: nextSessionKey });
+    }
+    await nextFrame();
+    expect(scrollTop).toBe(600);
+
+    scrollHeight = 1800;
+    rerenderMessages(c, [...nextTranscript, asstMsg('a3')], {
+      sessionKey: nextSessionKey,
+    });
+    await nextFrame();
+    expect(scrollTop).toBe(1200);
+  });
+
+  it.each([
+    ['disclosure', 'session switch'],
+    ['disclosure', '/clear'],
+    ['turn toggle', 'session switch'],
+    ['turn toggle', '/clear'],
+  ])(
+    'keeps following after an old %s callback was queued before a %s',
+    (action, reset) => {
+      vi.useFakeTimers();
+      resizeObserversFireOnObserve = false;
+      let scrollHeight = 1200;
+      let scrollTop = 600;
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        get: () => scrollHeight,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+        },
+      });
+      const c = mount(
+        action === 'disclosure'
+          ? [userMsg('u1'), thinkingMsg('t1')]
+          : [userMsg('u1'), toolMsg('g1'), asstMsg('a1')],
+        undefined,
+        { sessionKey: 'session-a' },
+      );
+      act(() => vi.advanceTimersByTime(500));
+      click(action === 'disclosure' ? disclosure(c, 't1') : toggle(c, 'u1'));
+      // Reuse the user id so the new-user scroll cannot bypass the queued
+      // recheck and conceal a stale reading pause. The /clear leg keeps the
+      // session key, so only the empty-transcript effect can reset it.
+      const nextSessionKey = reset === '/clear' ? 'session-a' : 'session-b';
+      if (reset === '/clear') {
+        rerenderMessages(c, [], { sessionKey: nextSessionKey });
+      }
+      const nextTranscript = [userMsg('u1'), asstMsg('a2')];
+      scrollHeight = 1800;
+      rerenderMessages(c, nextTranscript, { sessionKey: nextSessionKey });
+      expect(scrollTop).toBe(1200);
+
+      // Content can grow before its next render. An old animation timer
+      // must not interpret that geometry as a new user reading pause.
+      scrollHeight = 2400;
+      act(() => vi.advanceTimersByTime(500));
+      rerenderMessages(c, [...nextTranscript, asstMsg('a3')], {
+        sessionKey: nextSessionKey,
+      });
+      act(() => vi.advanceTimersByTime(500));
+      expect(scrollTop).toBe(1800);
+    },
+  );
+
   it('finishes cooldown following unless the user scrolls up', () => {
     resizeObserversFireOnObserve = false;
     let scrollHeight = 1200;
@@ -6567,6 +6881,47 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(assistantActions(c, 'a1')).toBe('true');
   });
 
+  it.each([
+    [true, true],
+    [false, false],
+  ])(
+    'keeps the card of a turn another session started in view: from a session %s',
+    (fromSession, visible) => {
+      const backgroundTurn = {
+        turnId: 'turn-b',
+        taskId: 'kid',
+        kind: 'agent' as const,
+        label: 'projB · Kid',
+        startedAt: 10,
+      };
+      const card: SystemMessage = {
+        id: 'card',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'projB · Kid',
+        data: {
+          ...backgroundTurn,
+          backgroundTask: {
+            status: 'completed',
+            ...(fromSession ? { fromSession: { sessionId: 'kid' } } : {}),
+          },
+        },
+        backgroundTurn,
+      };
+      const c = mount([
+        userMsg('u1'),
+        asstMsg('a0'),
+        card,
+        toolMsg('g1'),
+        { ...asstMsg('a1'), backgroundTurn },
+      ]);
+      expect(isCollapsed(c, 'g1')).toBe(true);
+      expect(has(c, 'card')).toBe(visible);
+      expect(has(c, 'a1')).toBe(true);
+    },
+  );
+
   it('gives a turn of only an agent reply no final answer', () => {
     const c = mount([
       userMsg('u1'),
@@ -6653,7 +7008,9 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
     await nextFrame();
 
-    const list = container.firstElementChild as HTMLElement;
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
     list.scrollTop = 600;
     act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
     await nextFrame();
@@ -6693,7 +7050,9 @@ describe('MessageList — turn collapse (DOM)', () => {
       isResponding: true,
       onCanScrollToBottomChange,
     });
-    const list = container.firstElementChild as HTMLElement;
+    const list = container.querySelector<HTMLElement>(
+      '[data-web-shell-message-list]',
+    )!;
 
     act(() => {
       list.dispatchEvent(new WheelEvent('wheel', { deltaY: -8 }));
@@ -6881,7 +7240,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
     await nextFrame();
 
-    const list = c.firstElementChild as HTMLElement;
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
     scrollTop = 0;
     act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
     await nextFrame();

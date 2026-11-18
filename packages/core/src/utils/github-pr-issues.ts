@@ -6,7 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import { findGitRoot } from './gitUtils.js';
-import { ghEnv, ghErrorMessage } from './github-prs.js';
+import { ghEnv, ghErrorMessage, resolveGhBinary } from './github-prs.js';
 
 const GH_TIMEOUT_MS = 10_000;
 const GH_MAX_BUFFER = 16 * 1024 * 1024;
@@ -189,9 +189,10 @@ function runGhGraphql(
   env: Readonly<Record<string, string | undefined>> | undefined,
   query: string,
 ): Promise<string> {
+  const childEnv = ghEnv(env);
   return new Promise((resolve, reject) => {
     execFile(
-      'gh',
+      resolveGhBinary(childEnv, gitRoot),
       [
         'api',
         'graphql',
@@ -208,7 +209,7 @@ function runGhGraphql(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: ghEnv(env),
+        env: childEnv,
       },
       (error, stdout, stderr) => {
         // gh exits non-zero whenever the response carries GraphQL errors,

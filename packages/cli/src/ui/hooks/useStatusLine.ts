@@ -7,14 +7,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
 import wrapAnsi from 'wrap-ansi';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { getReasoningForDisplay } from '../../acp-integration/model-configuration.js';
-import { SettingScope } from '../../config/settings.js';
-import { useSettings } from '../contexts/SettingsContext.js';
-import { useUIState } from '../contexts/UIStateContext.js';
-import { useConfig } from '../contexts/ConfigContext.js';
-import { useVimModeState } from '../contexts/VimModeContext.js';
-import { useTerminalSize } from './useTerminalSize.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import type { UIState } from '../contexts/UIStateContext.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
 import {
   aggregateModelTokens,
@@ -153,7 +150,7 @@ function parsePullRequestNumber(stdout: string): string | undefined {
 }
 
 function getStatusLineConfig(
-  settings: ReturnType<typeof useSettings>,
+  settings: LoadedSettings,
 ): StatusLineConfig | undefined {
   const raw = settings.merged.ui?.statusLine;
   // `null` explicitly disables the status line; `undefined` (unset) falls
@@ -235,7 +232,31 @@ function buildMetricsPayload(
  * on a timer so external data (git branch, quota, clock) stays fresh even
  * when no Agent state has changed.
  */
-export function useStatusLine(
+export type StatusLineState = Pick<
+  UIState,
+  | 'sessionStats'
+  | 'currentModel'
+  | 'branchName'
+  | 'activeWorktree'
+  | 'streamingState'
+  | 'statusLineConfigOverride'
+  | 'statusLineSettingsVersion'
+>;
+
+export function useStatusLineState(
+  {
+    settings,
+    config,
+    state: uiState,
+    terminalWidth,
+    vimMode,
+  }: {
+    settings: LoadedSettings;
+    config: Config;
+    state: StatusLineState;
+    terminalWidth: number;
+    vimMode?: string;
+  },
   keepAutomaticContextIndicator = false,
   availableWidth?: number,
 ): {
@@ -244,12 +265,6 @@ export function useStatusLine(
   respectUserColors: boolean;
   hideContextIndicator: boolean;
 } {
-  const settings = useSettings();
-  const uiState = useUIState();
-  const config = useConfig();
-  const { vimEnabled, vimMode } = useVimModeState();
-  const { columns: terminalWidth } = useTerminalSize();
-
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
   const statusLineConfig =
@@ -285,8 +300,6 @@ export function useStatusLine(
   uiStateRef.current = uiState;
   const configRef = useRef(config);
   configRef.current = config;
-  const vimEnabledRef = useRef(vimEnabled);
-  vimEnabledRef.current = vimEnabled;
   const vimModeRef = useRef(vimMode);
   vimModeRef.current = vimMode;
   const statusLineCommandRef = useRef(statusLineCommand);
@@ -303,7 +316,7 @@ export function useStatusLine(
   // Track previous trigger values to detect actual changes.
   // Initialized with current values so the state-change effect
   // does not fire redundantly on mount.
-  const { lastPromptTokenCount } = uiState.sessionStats;
+  const { sessionId, lastPromptTokenCount } = uiState.sessionStats;
   const { currentModel, branchName, activeWorktree, streamingState } = uiState;
   // Track only the slug — equality on the whole object would re-fire on
   // every render because `activeWorktree` is rebuilt by AppContainer's
@@ -313,7 +326,7 @@ export function useStatusLine(
   const totalLinesAdded = uiState.sessionStats.metrics.files.totalLinesAdded;
   const totalLinesRemoved =
     uiState.sessionStats.metrics.files.totalLinesRemoved;
-  const effectiveVim = vimEnabled ? vimMode : undefined;
+  const effectiveVim = vimMode;
   // Reasoning effort lives on the content-generator config, not uiState, so it
   // isn't a natural render trigger. Track it as a string key so the status line
   // recomputes immediately when `/effort` changes it mid-session.
@@ -323,6 +336,7 @@ export function useStatusLine(
   const reasoningEffortKey =
     reasoningConfig === false ? 'off' : (reasoningConfig?.effort ?? '');
   const prevStateRef = useRef<{
+    sessionId: string;
     promptTokenCount: number;
     currentModel: string;
     effectiveVim: string | undefined;
@@ -334,6 +348,7 @@ export function useStatusLine(
     streamingState: string;
     reasoningEffortKey: string;
   }>({
+    sessionId,
     promptTokenCount: lastPromptTokenCount,
     currentModel,
     effectiveVim,
@@ -535,7 +550,7 @@ export function useStatusLine(
         },
       }),
       metrics: buildMetricsPayload(m),
-      ...(vimEnabledRef.current && {
+      ...(vimModeRef.current !== undefined && {
         vim: { mode: vimModeRef.current },
       }),
     };
@@ -638,6 +653,7 @@ export function useStatusLine(
 
     const prev = prevStateRef.current;
     if (
+      sessionId !== prev.sessionId ||
       lastPromptTokenCount !== prev.promptTokenCount ||
       currentModel !== prev.currentModel ||
       effectiveVim !== prev.effectiveVim ||
@@ -649,6 +665,7 @@ export function useStatusLine(
       streamingState !== prev.streamingState ||
       reasoningEffortKey !== prev.reasoningEffortKey
     ) {
+      prev.sessionId = sessionId;
       prev.promptTokenCount = lastPromptTokenCount;
       prev.currentModel = currentModel;
       prev.effectiveVim = effectiveVim;
@@ -667,6 +684,7 @@ export function useStatusLine(
     statusLinePresetUseThemeColors,
     statusLinePresetItemsKey,
     statusLineSettingsVersion,
+    sessionId,
     lastPromptTokenCount,
     currentModel,
     effectiveVim,

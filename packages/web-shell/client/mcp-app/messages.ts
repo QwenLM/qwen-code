@@ -4,7 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const MCP_APP_MESSAGES_EN: Record<string, string> = {
+type Message = string | ((vars?: Record<string, string | number>) => string);
+
+export const MCP_APP_MESSAGES_EN: Record<string, Message> = {
+  'mcpApp.generatedUi.reset': 'Reopen and reset',
+  'mcpApp.generatedUi.reopen': 'Reopen interactive view',
+  'mcpApp.generatedUi.openElsewhere': 'Already open elsewhere.',
+  'mcpApp.generatedUi.reopenNotice':
+    'Reopening starts from the original content and any state the view saved; other interactions are discarded. Check the original session first: analysis already sent is not revoked or automatically resent.',
+  'mcpApp.generatedUi.resetNotice':
+    'Resetting clears the state this view saved and starts from the original content. Check the original session first: analysis already sent is not revoked or automatically resent.',
+  'mcpApp.generatedUi.state.saving': 'Saving…',
+  'mcpApp.generatedUi.state.saved': 'Saved in this conversation',
+  'mcpApp.generatedUi.state.stale':
+    'Not saved: this view changed elsewhere. Refresh the page to load the latest state.',
+  'mcpApp.generatedUi.state.too_large':
+    'Not saved: the view state is larger than 16 KiB.',
+  'mcpApp.generatedUi.state.failed':
+    'Not saved: the session could not store the view state.',
+  'mcpApp.generatedUi.state.unavailable':
+    'The saved view state could not be loaded, so changes are not saved.',
+  'mcpApp.generatedUi.unavailable':
+    'Interactive views are off for this session, so only the summary is shown.',
+  'mcpApp.generatedUi.title': 'Interactive view',
+  'mcpApp.generatedUi.contextTag': ({ title } = {}) =>
+    `Interactive view values: ${title}`,
+  'mcpApp.generatedUi.loading': 'Loading the interactive view…',
+  'mcpApp.loading': 'Loading the MCP App…',
+  'toolName.mcp__generated-ui__generated_ui_show': 'Interactive view',
   'mcpApp.message.title': 'Review App message',
   'mcpApp.message.description':
     'This text comes from an MCP App. Sending starts an ordinary request in the session below; normal tool approvals still apply.',
@@ -31,7 +58,28 @@ export const MCP_APP_MESSAGES_EN: Record<string, string> = {
     'Acceptance could not be confirmed. Check the original session before sending again. This request will not be retried automatically.',
 };
 
-export const MCP_APP_MESSAGES_ZH: Record<string, string> = {
+export const MCP_APP_MESSAGES_ZH: Record<string, Message> = {
+  'mcpApp.generatedUi.reset': '重新打开并重置',
+  'mcpApp.generatedUi.reopen': '重新打开交互视图',
+  'mcpApp.generatedUi.openElsewhere': '已在另一处打开。',
+  'mcpApp.generatedUi.reopenNotice':
+    '重新打开将从原始内容和视图保存的状态开始，其他交互不会恢复。请先检查原会话：已发送的分析不会撤销，也不会自动重发。',
+  'mcpApp.generatedUi.resetNotice':
+    '重置会清除此视图保存的状态，并从原始内容开始。请先检查原会话：已发送的分析不会撤销，也不会自动重发。',
+  'mcpApp.generatedUi.state.saving': '正在保存…',
+  'mcpApp.generatedUi.state.saved': '已保存到此对话',
+  'mcpApp.generatedUi.state.stale':
+    '未保存：此视图已在别处修改。刷新页面即可载入最新状态。',
+  'mcpApp.generatedUi.state.too_large': '未保存：视图状态超过 16 KiB。',
+  'mcpApp.generatedUi.state.failed': '未保存：会话无法保存视图状态。',
+  'mcpApp.generatedUi.state.unavailable':
+    '无法载入已保存的视图状态，因此修改不会被保存。',
+  'mcpApp.generatedUi.unavailable': '此会话未开启交互视图，仅显示摘要。',
+  'mcpApp.generatedUi.title': '交互视图',
+  'mcpApp.generatedUi.contextTag': ({ title } = {}) => `交互视图参数：${title}`,
+  'mcpApp.generatedUi.loading': '正在加载交互视图…',
+  'mcpApp.loading': '正在加载 MCP App…',
+  'toolName.mcp__generated-ui__generated_ui_show': '交互视图',
   'mcpApp.message.title': '审阅 App 消息',
   'mcpApp.message.description':
     '以下文字来自 MCP App。发送后将作为普通请求进入下方会话，工具仍需按正常规则审批。',
@@ -51,4 +99,55 @@ export const MCP_APP_MESSAGES_ZH: Record<string, string> = {
   'mcpApp.message.failed': '消息未被接收，原文保留在此。',
   'mcpApp.message.unknown':
     '无法确认是否已接收。再次发送前请检查原会话，本请求不会自动重试。',
+};
+
+export const MCP_APP_MESSAGES_RU: Record<string, Message> = {
+  'mcpApp.generatedUi.reset': 'Открыть заново и сбросить',
+  'mcpApp.generatedUi.reopen': 'Снова открыть интерактивный вид',
+  'mcpApp.generatedUi.openElsewhere': 'Уже открыто в другом месте.',
+  'mcpApp.generatedUi.reopenNotice':
+    'Повторное открытие начинается с исходного содержимого и сохранённого видом состояния; остальные взаимодействия отбрасываются. Сначала проверьте исходную сессию: уже отправленный анализ не отменяется и не пересылается автоматически.',
+  'mcpApp.generatedUi.resetNotice':
+    'Сброс удаляет сохранённое видом состояние и начинает с исходного содержимого. Сначала проверьте исходную сессию: уже отправленный анализ не отменяется и не пересылается автоматически.',
+  'mcpApp.generatedUi.state.saving': 'Сохранение…',
+  'mcpApp.generatedUi.state.saved': 'Сохранено в этом разговоре',
+  'mcpApp.generatedUi.state.stale':
+    'Не сохранено: вид изменён в другом месте. Обновите страницу, чтобы загрузить последнее состояние.',
+  'mcpApp.generatedUi.state.too_large':
+    'Не сохранено: состояние вида больше 16 КиБ.',
+  'mcpApp.generatedUi.state.failed':
+    'Не сохранено: сессия не смогла сохранить состояние вида.',
+  'mcpApp.generatedUi.state.unavailable':
+    'Не удалось загрузить сохранённое состояние вида, поэтому изменения не сохраняются.',
+  'mcpApp.generatedUi.unavailable':
+    'Интерактивные виды для этой сессии выключены, поэтому показана только сводка.',
+  'mcpApp.generatedUi.title': 'Интерактивный вид',
+  'mcpApp.generatedUi.contextTag': ({ title } = {}) =>
+    `Значения интерактивного вида: ${title}`,
+  'mcpApp.generatedUi.loading': 'Загрузка интерактивного вида…',
+  'mcpApp.loading': 'Загрузка MCP App…',
+  'toolName.mcp__generated-ui__generated_ui_show': 'Интерактивный вид',
+  'mcpApp.message.title': 'Проверить сообщение App',
+  'mcpApp.message.description':
+    'Этот текст пришёл из MCP App. Отправка запускает обычный запрос в сессии ниже; обычные подтверждения инструментов по-прежнему действуют.',
+  'mcpApp.message.server': 'Сервер',
+  'mcpApp.message.resource': 'Ресурс',
+  'mcpApp.message.session': 'Целевая сессия',
+  'mcpApp.message.receipt': 'Квитанция запроса',
+  'mcpApp.message.send': 'Отправить в сессию',
+  'mcpApp.message.stopWaiting': 'Перестать ждать квитанцию',
+  'mcpApp.message.busy':
+    'Сессия занята. Дождитесь завершения, затем отправьте сообщение снова.',
+  'mcpApp.message.reviewing': 'Просмотрите полное сообщение перед отправкой.',
+  'mcpApp.message.preparing': 'Сообщение готовится. Его ещё можно отменить.',
+  'mcpApp.message.dispatched':
+    'Отправка. Ожидание подтверждения приёма сессией.',
+  'mcpApp.message.accepted':
+    'Сессия приняла этот запрос. Анализ может ещё выполняться.',
+  'mcpApp.message.cancelled': 'Отменено до отправки.',
+  'mcpApp.message.expired':
+    'Проверка истекла до отправки. Запросите новую проверку из App.',
+  'mcpApp.message.failed': 'Сообщение не принято. Текст сохранён здесь.',
+  'mcpApp.message.unknown':
+    'Не удалось подтвердить приём. Перед повторной отправкой проверьте исходную сессию. Этот запрос не будет повторён автоматически.',
 };

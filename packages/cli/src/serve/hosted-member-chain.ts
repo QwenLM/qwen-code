@@ -41,13 +41,14 @@ export const HOSTED_BROADCAST_POSITIONS = MANAGED_TEAM_LIMITS.maxMembers;
 
 /**
  * The Turn half of a call key. A wake turn acknowledging a child result —
- * an acceptance or a blocked outcome — collapses to a digest, so its keys
+ * an acceptance, a blocked outcome or a crash continuation — collapses to a digest, so its keys
  * never grow across hops; every other Turn keys its calls by its prompt id
  * verbatim.
  */
 export function hostedPromptKey(promptId: string): string {
   return promptId.endsWith(':accept:notify') ||
-    promptId.endsWith(':blocked:notify')
+    promptId.endsWith(':blocked:notify') ||
+    promptId.startsWith('wake-recovery:')
     ? createHash('sha256').update(promptId).digest('hex').slice(0, 16)
     : promptId;
 }

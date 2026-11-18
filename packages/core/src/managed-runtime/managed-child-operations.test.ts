@@ -108,6 +108,82 @@ describe('managed child operations (H4b)', () => {
       ).toEqual(envelope);
     });
 
+    it('round-trips a closed public snapshot without changing legacy envelopes', () => {
+      const publicLaunch = {
+        version: 1 as const,
+        sourcePromptId: 'prompt-1',
+        approvalMode: 'auto-edit' as const,
+        approvalRevision: 7,
+        modelId: 'model-1',
+        modelRevision: 2,
+        modelRoute: {
+          authType: 'openai',
+          endpointDigest: 'a'.repeat(64),
+          providerPin: 'b'.repeat(64),
+        },
+        skillsRef: null,
+      };
+      const envelope = {
+        description: 'audit',
+        prompt: 'review',
+        definition: DEFINITION,
+        publicLaunch,
+      };
+      expect(
+        decodeChildLaunchEnvelope(encodeChildLaunchEnvelope(envelope)),
+      ).toEqual(envelope);
+      const origin = { modelId: 'source-model', ...publicLaunch.modelRoute };
+      const fallbackEnvelope = {
+        ...envelope,
+        publicLaunch: {
+          ...publicLaunch,
+          modelRoute: { ...publicLaunch.modelRoute, origin },
+        },
+      };
+      expect(
+        decodeChildLaunchEnvelope(encodeChildLaunchEnvelope(fallbackEnvelope)),
+      ).toEqual(fallbackEnvelope);
+      for (const invalid of [
+        null,
+        { ...origin, extra: true },
+        { ...origin, modelId: ' ' },
+        { ...origin, providerPin: 'bad' },
+      ]) {
+        expect(() =>
+          encodeChildLaunchEnvelope({
+            ...fallbackEnvelope,
+            publicLaunch: {
+              ...fallbackEnvelope.publicLaunch,
+              modelRoute: {
+                ...publicLaunch.modelRoute,
+                origin: invalid as typeof origin,
+              },
+            },
+          }),
+        ).toThrow();
+      }
+      for (const patch of [
+        { extra: true },
+        { version: '1' },
+        { version: true },
+        { version: ['1'] },
+        { approvalMode: ['yolo'] },
+        { approvalRevision: -1 },
+        { modelRevision: Number.MAX_SAFE_INTEGER + 1 },
+        { sourcePromptId: ' ' },
+        { modelId: '中'.repeat(200) },
+        { skillsRef: {} },
+      ]) {
+        const bytes = Buffer.from(
+          JSON.stringify({
+            ...envelope,
+            publicLaunch: { ...publicLaunch, ...patch },
+          }),
+        );
+        expect(() => decodeChildLaunchEnvelope(bytes)).toThrow();
+      }
+    });
+
     it('refuses an oversized description and envelope', () => {
       expect(() =>
         encodeChildLaunchEnvelope({

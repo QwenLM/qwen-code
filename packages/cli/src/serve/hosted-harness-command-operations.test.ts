@@ -20,6 +20,8 @@ import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import {
   assertManagedSessionDurableRef,
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionJournalFencedError,
   ManagedSessionRecordError,
   ManagedSessionWritesStoppedError,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -56,6 +58,9 @@ vi.mock(
       await importOriginal<
         typeof import('@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js')
       >();
+    const unexpectedStoreOperation = async (): Promise<never> => {
+      throw new Error('Unexpected HTTP-store operation in command test');
+    };
     return {
       ...actual,
       createHttpManagedSessionStores: (
@@ -67,6 +72,8 @@ vi.mock(
         });
         state.resources = resources;
         return {
+          supportsModelDiagnostics: () => false,
+          supportsExecutionDiagnostics: () => false,
           journalStore: new LocalJsonlManagedSessionJournalStore({
             runtimeBaseDir: state.root,
             sessionId: options.sessionKey.sessionId,
@@ -76,10 +83,24 @@ vi.mock(
           toolResultResources: resources,
           assertWritable: async () => undefined,
           stopLocal: async () => undefined,
+          quiesceOwnership: unexpectedStoreOperation,
+          releaseOwnership: unexpectedStoreOperation,
           close: async () => undefined,
           setLifecycleAuthority: () => undefined,
           authorizeLifecycle: async () => undefined,
           authorizeOrdinary: async () => undefined,
+          approvalSelection: async () => undefined,
+          modelConfig: unexpectedStoreOperation,
+          memory: unexpectedStoreOperation,
+          automationsCreate: unexpectedStoreOperation,
+          automationsList: unexpectedStoreOperation,
+          automationsRetire: unexpectedStoreOperation,
+          claimUserMessages: async () => [],
+          csiRetirement: {
+            joinWriter: unexpectedStoreOperation,
+            prepare: unexpectedStoreOperation,
+            complete: unexpectedStoreOperation,
+          },
           publication: {
             owner: async () => ({
               writerId: options.writerId,
@@ -302,6 +323,24 @@ afterEach(async () => {
 
 describe('Hosted Harness answered command operations', () => {
   it.each([
+    new ManagedSessionAppendUnsettledError(new Error('ack lost')),
+    new ManagedSessionJournalFencedError('journal fenced'),
+  ])('preserves current $name retry mapping through HTTP', async (cause) => {
+    await fixture();
+    const settling = vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'settlePendingAppend')
+      .mockRejectedValueOnce(cause);
+    const response = await expectOperation(
+      answered(),
+      503,
+      'session_command_failed',
+      'store',
+    );
+    expect(response.body.message).toBe(cause.message);
+    expect(settling).toHaveBeenCalled();
+  });
+
+  it.each([
     undefined,
     null,
     {},
@@ -488,10 +527,11 @@ describe('Hosted Harness answered command operations', () => {
       publish.mock.calls.filter(([kind]) => kind === 'managed-command-reply'),
     ).toHaveLength(1);
     const publications = publish.mock.calls.length;
-    const first = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, 'transcript.jsonl'),
-      key,
-    );
+    const first = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, 'transcript.jsonl'),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
     const commits = first.events.filter(
       (event) =>
         event.kind === 'domain.committed' &&
@@ -529,10 +569,11 @@ describe('Hosted Harness answered command operations', () => {
     );
     expect(replay.body).toEqual({ operationId: replayId, state: 'settled' });
     expect(publish).toHaveBeenCalledTimes(publications);
-    const afterReplay = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, 'transcript.jsonl'),
-      key,
-    );
+    const afterReplay = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, 'transcript.jsonl'),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
     expect(afterReplay.events).toEqual(first.events);
   });
 

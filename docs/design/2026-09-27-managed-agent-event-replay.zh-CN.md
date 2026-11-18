@@ -244,7 +244,7 @@ resync。连续损坏超过三帧（即第四帧起，其间的心跳不打断�
 ## 7. 验证
 
 - Managed Agent 服务的完整测试与 Checkstyle 通过。
-- `ManagedAgentMySqlIT` 在 CI 所用的 `mariadb:10.11.18` 以及 `mysql:8.4` 上通过。
+- `ManagedAgentMySqlIT` 已在 `mariadb:10.11.18` 与 `mysql:8.4` 上通过。
 - 打包后的 Spring Boot jar 把 MariaDB 数据库迁移到 V15，说明 Flyway 能在 jar 中
   找到这个 Java 迁移。
 - 以下变更分别使对应测试失败：忽略 `Last-Event-ID`、跳过下限检查、hub 隐瞒溢出、

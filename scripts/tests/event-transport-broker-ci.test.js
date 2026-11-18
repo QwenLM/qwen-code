@@ -11,9 +11,17 @@
 // them fails the gate only on CI, after a broker boot, or not at all.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
@@ -25,17 +33,20 @@ const step = (name) => {
   return found;
 };
 const script = readFileSync('scripts/rocketmq-lite-broker.sh', 'utf8');
-const pom = readFileSync('packages/managed-agent-server/pom.xml', 'utf8');
+const pom = readFileSync(
+  'packages/managed-agent-server/verification/pom.xml',
+  'utf8',
+);
 const profile = pom
   .split('<id>event-transport-broker-gates</id>')[1]
   .split('</profile>')[0];
-const server = 'packages/managed-agent-server/src';
+const server = 'packages/managed-agent-server';
 const properties = readFileSync(
-  `${server}/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java`,
+  `${server}/server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java`,
   'utf8',
 );
 const gate = readFileSync(
-  `${server}/test/java/com/alibaba/qwen/code/managedagent/EventTransportBrokerGate.java`,
+  `${server}/verification/src/test/java/com/alibaba/qwen/code/managedagent/EventTransportBrokerGate.java`,
   'utf8',
 );
 
@@ -65,7 +76,7 @@ describe('EventTransport broker gates CI', () => {
     expect(profile.match(/<include>/g)).toHaveLength(1);
     expect(profile).toContain('<failIfNoTests>true</failIfNoTests>');
     expect(profile).toMatch(
-      /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration><skipTests>true<\/skipTests>/,
+      /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration>\s*<skipTests>true<\/skipTests>/,
     );
   });
 
@@ -97,7 +108,7 @@ describe('EventTransport broker gates CI', () => {
     );
   });
 
-  it('routes like the MariaDB lane, with the JDK 17 the broker needs', () => {
+  it('routes like the non-Hosted MySQL lane, with the JDK 17 the broker needs', () => {
     // The evaluated routing matrix lives in ci-runner-routing.test.mjs.
     expect(job['runs-on']).toBe(workflow.jobs['mysql-integration']['runs-on']);
     const java = step('Set up Java').with['java-version'];
@@ -120,6 +131,7 @@ describe('EventTransport broker gates CI', () => {
       order.indexOf('Start the RocketMQ LiteTopic cluster'),
     );
     const dir = mkdtempSync(join(tmpdir(), 'rmq-ports-'));
+    let holderDir;
     try {
       const envFile = join(dir, 'github_env');
       writeFileSync(envFile, '');
@@ -134,14 +146,42 @@ describe('EventTransport broker gates CI', () => {
           .split('\n')
           .map((line) => line.split('=')),
       );
-      expect(Object.keys(chosen).sort()).toEqual([...names].sort());
-      const ports = Object.values(chosen).map(Number);
+      expect(Object.keys(chosen).sort()).toEqual(
+        [...names, 'RMQ_HOLDER_DIR'].sort(),
+      );
+      const ports = names.map((name) => Number(chosen[name]));
       expect(new Set(ports).size).toBe(names.length);
       // The broker also binds listenPort - 2 (fast channel) and + 1 (HA).
       const broker = Number(chosen.RMQ_BROKER_PORT);
       expect(ports).not.toContain(broker - 2);
       expect(ports).not.toContain(broker + 1);
+      // Every chosen port (and the broker companions) stays parked behind a
+      // live holder process until the broker script takes it over, so a
+      // sibling job cannot steal the port in between.
+      holderDir = chosen.RMQ_HOLDER_DIR;
+      const held = readdirSync(holderDir).sort();
+      expect(held).toHaveLength(6);
+      for (const file of held) {
+        const pid = Number(readFileSync(join(holderDir, file), 'utf8'));
+        try {
+          process.kill(pid, 0);
+        } catch {
+          throw new Error(
+            `holder ${pid} for port ${file} is not alive (dir ${holderDir})`,
+          );
+        }
+      }
     } finally {
+      if (holderDir && existsSync(holderDir)) {
+        for (const file of readdirSync(holderDir)) {
+          try {
+            process.kill(Number(readFileSync(join(holderDir, file), 'utf8')));
+          } catch {
+            // Holder already gone.
+          }
+        }
+        rmSync(holderDir, { recursive: true, force: true });
+      }
       rmSync(dir, { recursive: true, force: true });
     }
     const verify = step('Verify the EventTransport broker gates').run;
@@ -151,6 +191,128 @@ describe('EventTransport broker gates CI', () => {
     const text = JSON.stringify(job);
     for (const name of names) {
       expect(text).not.toContain(scriptDefault(name));
+    }
+  });
+
+  it('reselects a broker port when its HA companion exceeds the TCP range', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rmq-port-boundary-'));
+    let holderDir;
+    try {
+      const preload = join(dir, 'boundary.mjs');
+      const observed = join(dir, 'observed');
+      writeFileSync(
+        preload,
+        `import net from 'node:net';
+import childProcess from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const createServer = net.createServer;
+const candidates = [41000, 42000, 43000, 65535, 44000];
+const allocated = [];
+const held = new Set();
+const holders = new Map();
+const attempts = [];
+let nextPid = 1_000_000;
+childProcess.spawn = (executable, args) => {
+  const port = Number(args[2]);
+  const pid = ++nextPid;
+  attempts.push(port);
+  if (port >= 1 && port <= 65535 && !held.has(port)) {
+    held.add(port);
+    holders.set(pid, port);
+    writeFileSync(args[3], String(pid) + '\\n');
+  }
+  return { pid, unref() {} };
+};
+process.kill = (pid) => {
+  if (!holders.has(pid)) throw new Error('Unknown fixture holder');
+  held.delete(holders.get(pid));
+  holders.delete(pid);
+  return true;
+};
+syncBuiltinESMExports();
+net.createServer = (...args) => {
+  const server = createServer(...args);
+  const listen = server.listen;
+  let selected;
+  server.listen = function (port, host, callback) {
+    if (port < 0 || port > 65535) return listen.call(this, port, host, callback);
+    selected = port === 0 ? candidates.shift() : port;
+    if (selected === undefined) throw new Error('Candidate sequence exhausted');
+    if (port === 0) allocated.push(selected);
+    if (held.has(selected)) {
+      queueMicrotask(() => server.emit('error', new Error('Port in use')));
+    } else {
+      held.add(selected);
+      queueMicrotask(callback);
+    }
+    return server;
+  };
+  server.address = () => ({ port: selected });
+  server.close = () => {
+    held.delete(selected);
+    return server;
+  };
+  return server;
+};
+process.on('exit', () => writeFileSync(${JSON.stringify(observed)}, JSON.stringify({ allocated, attempts, held: [...held] })));
+`,
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          '--import',
+          pathToFileURL(preload).href,
+          '.github/scripts/choose-rocketmq-ports.mjs',
+        ],
+        { encoding: 'utf8', timeout: 10_000 },
+      );
+      const chosen = Object.fromEntries(
+        result.stdout
+          .trim()
+          .split('\n')
+          .map((line) => line.split('=')),
+      );
+      holderDir = chosen.RMQ_HOLDER_DIR;
+      expect(result.status, result.stderr).toBe(0);
+      const reservation = JSON.parse(readFileSync(observed, 'utf8'));
+      expect(reservation.allocated).toEqual([
+        41000, 42000, 43000, 65535, 44000,
+      ]);
+      expect(reservation.attempts).not.toContain(65536);
+      expect(reservation.held.sort((a, b) => a - b)).toEqual([
+        41000, 42000, 43000, 43998, 44000, 44001,
+      ]);
+      expect(Object.keys(chosen).sort()).toEqual(
+        [
+          'RMQ_HOLDER_DIR',
+          'RMQ_NAMESRV_PORT',
+          'RMQ_BROKER_PORT',
+          'RMQ_PROXY_GRPC_PORT',
+          'RMQ_PROXY_REMOTING_PORT',
+        ].sort(),
+      );
+      const ports = [
+        'RMQ_NAMESRV_PORT',
+        'RMQ_BROKER_PORT',
+        'RMQ_PROXY_GRPC_PORT',
+        'RMQ_PROXY_REMOTING_PORT',
+      ].map((name) => Number(chosen[name]));
+      expect(new Set(ports).size).toBe(4);
+      for (const port of ports) {
+        expect(Number.isInteger(port)).toBe(true);
+        expect(port).toBeGreaterThanOrEqual(1);
+        expect(port).toBeLessThanOrEqual(65535);
+      }
+      const broker = Number(chosen.RMQ_BROKER_PORT);
+      expect(broker).toBe(44000);
+      expect(broker - 2).toBeGreaterThanOrEqual(1);
+      expect(broker + 1).toBeLessThanOrEqual(65535);
+      expect(ports).not.toContain(broker - 2);
+      expect(ports).not.toContain(broker + 1);
+    } finally {
+      if (holderDir) rmSync(holderDir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -195,7 +357,7 @@ describe('EventTransport broker gates CI', () => {
       propertyDefault('wakeBootstrapLiteTopic'),
       /CAPABILITY_PROBE_LITE = "([^"]+)"/.exec(
         readFileSync(
-          `${server}/main/java/com/alibaba/qwen/code/managedagent/config/EventTransportConfiguration.java`,
+          `${server}/server/src/main/java/com/alibaba/qwen/code/managedagent/config/EventTransportConfiguration.java`,
           'utf8',
         ),
       )[1],

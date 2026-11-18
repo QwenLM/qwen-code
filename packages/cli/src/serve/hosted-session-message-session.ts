@@ -378,6 +378,7 @@ export class HostedSessionMessageSession {
     readonly contentDigest: string;
   }): Promise<string> {
     return this.children.serialized(async () => {
+      await this.store.authority.settlePendingAppend();
       const contentDigest = createHash('sha256')
         .update(params.content)
         .digest('hex');
@@ -524,6 +525,7 @@ export class HostedSessionMessageSession {
    * Harness no longer holds, so its wake pump reads a waiting message.
    */
   async consume(messageId: string): Promise<void> {
+    await this.store.authority.settlePendingAppend();
     const receipt = this.message(messageId);
     if (receipt === undefined || receipt.direction !== 'inbound') {
       throw new ManagedSessionRecordError(

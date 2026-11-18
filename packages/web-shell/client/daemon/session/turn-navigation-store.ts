@@ -701,7 +701,11 @@ export function createDaemonTurnNavigationStore(
   }
 
   function handleSessionEvent(type: string): void {
-    if (type === 'session_rewound' || type === 'session.rewound') {
+    if (
+      type === 'session_rewound' ||
+      type === 'session.rewound' ||
+      type === 'session_messages_deleted'
+    ) {
       liveLocations = new Map();
       livePromptAliases = new Map();
       liveRecordIds = new Set();

@@ -85,16 +85,27 @@ java_env() {
   export JAVA_OPT_EXT="-Xms${RMQ_HEAP} -Xmx${RMQ_HEAP} -Duser.home=${RMQ_WORK_DIR}/home"
 }
 
+download_file() {
+  log "downloading $2"
+  curl -fsSL --connect-timeout 10 --max-time 45 --retry 1 \
+    --retry-max-time 45 -o "$1" "$2"
+}
+
 download() {
   mkdir -p "${RMQ_CACHE_DIR}"
   local zip="${RMQ_CACHE_DIR}/${DIST_NAME}.zip"
   local sum="${RMQ_CACHE_DIR}/${DIST_NAME}.zip.sha512"
   local base
-  if [ ! -s "${zip}" ] || [ ! -s "${sum}" ]; then
-    for base in "https://dlcdn.apache.org/rocketmq/${RMQ_VERSION}" \
-      "https://archive.apache.org/dist/rocketmq/${RMQ_VERSION}"; do
-      if curl -fsSL --retry 3 -o "${zip}.part" "${base}/${DIST_NAME}.zip" &&
-        curl -fsSL --retry 3 -o "${sum}" "${base}/${DIST_NAME}.zip.sha512"; then
+  if [ ! -s "${zip}" ] || { [ "${RMQ_VERSION}" != "5.5.1" ] && [ ! -s "${sum}" ]; }; then
+    local bases=("https://dlcdn.apache.org/rocketmq/${RMQ_VERSION}"
+      "https://archive.apache.org/dist/rocketmq/${RMQ_VERSION}")
+    if [ "${RMQ_VERSION}" = "5.5.1" ]; then
+      bases=("https://mirrors.aliyun.com/apache/rocketmq/${RMQ_VERSION}" "${bases[@]}")
+    fi
+    for base in "${bases[@]}"; do
+      if download_file "${zip}.part" "${base}/${DIST_NAME}.zip" &&
+        { [ "${RMQ_VERSION}" = "5.5.1" ] ||
+          download_file "${sum}" "${base}/${DIST_NAME}.zip.sha512"; }; then
         mv "${zip}.part" "${zip}"
         break
       fi
@@ -102,6 +113,7 @@ download() {
     done
   fi
   [ -s "${zip}" ] || die "could not download ${DIST_NAME}.zip"
+  [ "${RMQ_VERSION}" = "5.5.1" ] || [ -s "${sum}" ] || die "could not download ${DIST_NAME}.zip.sha512"
   # Apache publishes the digest in `gpg --print-md` form ("name: HEX HEX …"
   # across lines, upper case); sha512sum form is "hex  name". Accept both.
   local expected actual
@@ -167,6 +179,46 @@ listener_pid() {
 
 process_group() {
   ps -o pgid= -p "$1" 2> /dev/null | tr -d ' ' || true
+}
+
+# The workflow's port chooser (.github/scripts/choose-rocketmq-ports.mjs)
+# parks every chosen port behind a detached holder process, because between
+# the chooser step and this launch anything else on the pool host could bind
+# them. Before a launch, the holder of exactly this port is killed, so the
+# real listener inherits a port that stayed occupied the whole way through.
+unhold_port() {
+  [ -n "${RMQ_HOLDER_DIR:-}" ] || return 0
+  local file="${RMQ_HOLDER_DIR}/$1.pid" pid
+  [ -s "${file}" ] || return 0
+  read -r pid < "${file}"
+  # Touch only the holder that still listens on this port; a stale pid file
+  # may name a pid the system has since reused.
+  if [ -n "${pid}" ] && [ "$(listener_pid "$1")" = "${pid}" ]; then
+    kill "${pid}" 2> /dev/null || true
+    for _ in $(seq 1 50); do
+      [ -z "$(listener_pid "$1")" ] && break
+      sleep 0.1
+    done
+  fi
+  rm -f "${file}"
+}
+
+# Kills every holder this job has not unheld yet. A start that rolls back
+# mid-way must not leave ports (and Node processes) parked on the host;
+# neither may a successful stop.
+release_holders() {
+  [ -n "${RMQ_HOLDER_DIR:-}" ] && [ -d "${RMQ_HOLDER_DIR}" ] || return 0
+  local file pid port
+  for file in "${RMQ_HOLDER_DIR}"/*.pid; do
+    [ -s "${file}" ] || continue
+    read -r pid < "${file}"
+    port="$(basename "${file}" .pid)"
+    if [ -n "${pid}" ] && [ "$(listener_pid "${port}")" = "${pid}" ]; then
+      kill "${pid}" 2> /dev/null || true
+    fi
+    rm -f "${file}"
+  done
+  rmdir "${RMQ_HOLDER_DIR}" 2> /dev/null || true
 }
 
 # Starts one component and waits for its port. The launch script runs the
@@ -248,6 +300,7 @@ roll_back_start() {
     # shellcheck disable=SC2086 # component names, split on purpose
     stop_components ${STARTED}
   fi
+  release_holders
   if [ "${RAMDISK_BEFORE}" -eq 0 ] && [ -d /Volumes/RAMDisk ]; then
     diskutil eject /Volumes/RAMDisk > /dev/null 2>&1 ||
       log "/Volumes/RAMDisk is still in use; left mounted"
@@ -263,15 +316,24 @@ start() {
   [ -x "${ROCKETMQ_HOME}/bin/mqbroker" ] || download
   java_env
   write_config
+  unhold_port "${RMQ_NAMESRV_PORT}"
   launch namesrv "${RMQ_NAMESRV_PORT}" "boot success" \
     "${ROCKETMQ_HOME}/bin/mqnamesrv" -c "${RMQ_WORK_DIR}/conf/namesrv.conf" ||
     die "the NameServer did not start"
+  # The broker also binds listenPort - 2 (fast channel) and + 1 (HA). These
+  # operands must stay unquoted: macOS's system Bash 3.2 rejects a quoted
+  # number in arithmetic.
+  unhold_port "${RMQ_BROKER_PORT}"
+  unhold_port "$((RMQ_BROKER_PORT - 2))"
+  unhold_port "$((RMQ_BROKER_PORT + 1))"
   launch broker "${RMQ_BROKER_PORT}" "boot success" \
     "${ROCKETMQ_HOME}/bin/mqbroker" -c "${RMQ_WORK_DIR}/conf/broker.conf" ||
     die "the broker did not start"
   # The proxy's first start can fail creating a system topic before the
   # broker has registered with the NameServer; a retry succeeds.
   local attempt started
+  unhold_port "${RMQ_PROXY_GRPC_PORT}"
+  unhold_port "${RMQ_PROXY_REMOTING_PORT}"
   for attempt in 1 2 3; do
     started=0
     launch proxy "${RMQ_PROXY_GRPC_PORT}" "startup successfully" \
@@ -310,6 +372,7 @@ EOF
     touch "${RMQ_WORK_DIR}/created-ramdisk"
   fi
   trap - EXIT
+  release_holders
   log "ready: endpoints 127.0.0.1:${RMQ_PROXY_GRPC_PORT}, topic ${RMQ_TOPIC}"
   log "note: the proxy (${RMQ_PROXY_GRPC_PORT}, ${RMQ_PROXY_REMOTING_PORT}) and the broker HA port listen on every interface"
 }
@@ -349,6 +412,7 @@ eject_ramdisk() {
 
 stop() {
   stop_components proxy broker namesrv
+  release_holders
   eject_ramdisk
 }
 

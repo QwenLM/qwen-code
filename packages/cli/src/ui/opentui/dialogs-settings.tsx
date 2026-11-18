@@ -189,13 +189,18 @@ export function nextToggleValue(
         type?: SettingsType;
         options?: ReadonlyArray<{ value: SettingsValue }>;
         default?: SettingsValue;
+        unsetToggleValue?: boolean;
       }
     | undefined,
   currentValue: SettingsValue,
 ): SettingsValue | undefined {
   if (!definition || !TOGGLE_TYPES.has(definition.type)) return undefined;
   if (definition.type === 'boolean') {
-    return nextBooleanSettingValue(currentValue, definition.default);
+    return nextBooleanSettingValue(
+      currentValue,
+      definition.default,
+      definition.unsetToggleValue,
+    );
   }
   if (definition.type === 'enum' && definition.options) {
     const options = definition.options;
@@ -457,6 +462,11 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
         settings,
         selectedScope,
       );
+      if (key === 'ui.disableWorkflowKeywordTrigger') {
+        config?.setWorkflowKeywordTriggerEnabled(
+          settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+        );
+      }
       onSettingApplied?.(key, value);
       setModifiedSettings((prev) => {
         const updated = new Set(prev);

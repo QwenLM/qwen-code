@@ -6,6 +6,9 @@ import type { DaemonMetricsSeriesBucket } from '@qwen-code/web-shell/daemon-reac
 import { I18nProvider } from '../../i18n';
 import { getDaemonToken, persistDaemonToken } from '../../config/daemon';
 
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
+import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
+
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const summaryReport = {
@@ -40,6 +43,7 @@ const summaryReport = {
     maxPendingPromptsPerSession: 5,
     listenerMaxConnections: null,
     eventRingSize: 1024,
+    eventRingMaxBytes: 8 * 1024 * 1024,
     promptDeadlineMs: 120_000,
     writerIdleTimeoutMs: null,
     channelIdleTimeoutMs: 60_000,
@@ -109,6 +113,11 @@ const fullReport = {
         pendingPermissionCount: 2,
         hasActivePrompt: true,
         lastEventId: 42,
+        eventRingCount: 0,
+        eventRingBytes: 0,
+        eventRingEvictedEvents: 0,
+        eventRingEvictedBytes: 0,
+        availableCommandsSnapshotBytes: 0,
       },
     ],
     acpConnections: [{ connectionId: 'conn-1' }],
@@ -197,6 +206,10 @@ let fullState: HookState = {
 };
 const seenDetails: Array<string | undefined> = [];
 const seenAutoLoads: Array<boolean | undefined> = [];
+const usagePrefetch = vi.fn(async () => undefined);
+const workspaceActionsState = {
+  loadUsageDashboard: usagePrefetch,
+};
 const workspaceState = {
   baseUrl: 'http://localhost:4170',
   status: 'connected' as const,
@@ -204,6 +217,15 @@ const workspaceState = {
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState,
+  useWorkspaceActions: () => workspaceActionsState,
+  // The Usage tab mounts UsageDashboardTab, which calls useUsageDashboard; a
+  // missing mock would throw into the tab's ErrorBoundary on tab-switch.
+  useUsageDashboard: () => ({
+    dashboard: undefined,
+    loading: false,
+    error: undefined,
+    reload: vi.fn(async () => undefined),
+  }),
   useStatusReport: (options: { autoLoad?: boolean; detail?: string } = {}) => {
     seenDetails.push(options.detail);
     seenAutoLoads.push(options.autoLoad);
@@ -218,6 +240,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   },
 }));
 
+vi.mock('../RemoteAccessSettingsCard', () => ({
+  RemoteAccessSettingsCard: () => null,
+}));
+
 const { DaemonConnectionsSettings, DaemonStatusDialog } = await import(
   './DaemonStatusDialog'
 );
@@ -230,17 +256,20 @@ function mount(
   language: 'en' | 'zh-CN' = 'en',
   onChangeTarget?: (daemonOrigin: string, token?: string) => void,
   standalone = true,
+  availability?: ReturnType<typeof offlineDaemon>['availability'],
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <StandaloneContext.Provider value={standalone}>
-        <I18nProvider language={language}>
-          <DaemonStatusDialog onChangeTarget={onChangeTarget} />
-        </I18nProvider>
-      </StandaloneContext.Provider>,
+      <DaemonAvailabilityContext.Provider value={availability}>
+        <StandaloneContext.Provider value={standalone}>
+          <I18nProvider language={language}>
+            <DaemonStatusDialog onChangeTarget={onChangeTarget} />
+          </I18nProvider>
+        </StandaloneContext.Provider>
+      </DaemonAvailabilityContext.Provider>,
     );
   });
 }
@@ -296,6 +325,8 @@ beforeEach(() => {
   summaryReload.mockImplementation(async () => undefined);
   fullReload.mockReset();
   fullReload.mockImplementation(async () => undefined);
+  usagePrefetch.mockReset();
+  usagePrefetch.mockImplementation(async () => undefined);
 });
 
 afterEach(() => {
@@ -307,6 +338,24 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
+  it.each([false, true])(
+    'shows outage and connection repair (cached=%s)',
+    async (cached) => {
+      const report = cached ? summaryReport : undefined;
+      const { availability } = offlineDaemon();
+      try {
+        await availability.check(true);
+        summaryState.report = report;
+        fullState.report = undefined;
+        mount('zh-CN', undefined, true, availability);
+        expect(container!.textContent).toContain('无法连接服务。');
+        expect(container!.querySelector('form')).not.toBeNull();
+      } finally {
+        availability.dispose();
+      }
+    },
+  );
+
   it('does not load status reports for the Connections settings page', () => {
     vi.useFakeTimers();
     mountConnections();
@@ -315,6 +364,91 @@ describe('DaemonStatusDialog', () => {
     act(() => vi.advanceTimersByTime(15_000));
     expect(summaryReload).not.toHaveBeenCalled();
     expect(fullReload).not.toHaveBeenCalled();
+    expect(usagePrefetch).not.toHaveBeenCalled();
+  });
+
+  it('prefetches the usage aggregate once on open so the Usage tab is warm', () => {
+    mount();
+
+    // Fired in the background on open (range-independent server-side), before
+    // the operator ever clicks the Usage tab.
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+    expect(usagePrefetch).toHaveBeenCalledWith({ range: 'today' });
+
+    // A real re-render (switching tabs) must not re-fire it: the effect deps
+    // are stable for the life of the connection target.
+    const tabs = container!.querySelectorAll('[role="tab"]');
+    act(() => {
+      tabs[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not prefetch usage while the daemon is unavailable', async () => {
+    const { availability } = offlineDaemon();
+    try {
+      await availability.check(true);
+      mount('en', undefined, true, availability);
+      expect(usagePrefetch).not.toHaveBeenCalled();
+    } finally {
+      availability.dispose();
+    }
+  });
+
+  it('swallows a prefetch rejection so it never becomes an unhandled error', async () => {
+    usagePrefetch.mockRejectedValueOnce(new Error('usage load failed'));
+    mount();
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+    // Let the rejected prefetch settle; the effect's .catch must absorb it.
+    // Without the .catch this is an unhandled rejection, which fails the run
+    // on Linux (dangerouslyIgnoreUnhandledErrors is false there).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container!.querySelectorAll('[role="tab"]').length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('rejects a mixed-content target before passing its token to navigation', () => {
+    const originalLocation = Object.getOwnPropertyDescriptor(
+      window,
+      'location',
+    )!;
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: new URL('https://shell.example/'),
+    });
+    const onAddConnection = vi.fn();
+    try {
+      mountConnections(onAddConnection);
+      const address = container!.querySelector<HTMLInputElement>(
+        '#daemon-connection-address',
+      )!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(address, 'http://remote.example:4173');
+        address.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const token = typeToken('secret');
+      act(() => {
+        token
+          .closest('form')!
+          .dispatchEvent(
+            new Event('submit', { bubbles: true, cancelable: true }),
+          );
+      });
+      expect(onAddConnection).not.toHaveBeenCalled();
+      expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
+        'HTTPS page cannot connect',
+      );
+      expect(container!.textContent).toContain('Allow remote connections');
+      expect(window.localStorage.getItem('qwen-remote-connections')).toBeNull();
+    } finally {
+      Object.defineProperty(window, 'location', originalLocation);
+    }
   });
 
   it('adds a new remote origin without replacing the current target', () => {
@@ -557,6 +691,7 @@ describe('DaemonStatusDialog', () => {
   // a failed probe keeps the old token instead of navigating.
   it.each([
     [401, 'rejected'],
+    [403, 'HTTP 403'],
     [503, 'did not accept'],
   ])(
     'keeps the stored credential when a same-target probe returns %i',
@@ -571,10 +706,11 @@ describe('DaemonStatusDialog', () => {
         await submitConnect(token);
         expect(fetchMock).toHaveBeenCalledWith(
           'http://localhost:4170/capabilities',
-          expect.objectContaining({
-            headers: { Authorization: 'Bearer bad-token' },
-          }),
+          expect.anything(),
         );
+        expect(
+          new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers),
+        ).toEqual(new Headers({ Authorization: 'Bearer bad-token' }));
         expect(onChangeTarget).not.toHaveBeenCalled();
         expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
         expect(
@@ -603,7 +739,7 @@ describe('DaemonStatusDialog', () => {
       expect(onChangeTarget).not.toHaveBeenCalled();
       expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
       expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
-        'did not accept',
+        'browser could not reach',
       );
     } finally {
       persistDaemonToken('', 'http://localhost:4170');
@@ -640,7 +776,7 @@ describe('DaemonStatusDialog', () => {
       expect(onChangeTarget).not.toHaveBeenCalled();
       expect(getDaemonToken('http://localhost:4170')).toBe('working-token');
       expect(container!.querySelector('[role="alert"]')!.textContent).toContain(
-        'did not accept',
+        'browser could not reach',
       );
     } finally {
       persistDaemonToken('', 'http://localhost:4170');
@@ -1554,6 +1690,11 @@ describe('DaemonStatusDialog', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 1,
+              eventRingCount: 0,
+              eventRingBytes: 0,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
             },
           ],
         },

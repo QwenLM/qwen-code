@@ -449,5 +449,72 @@
     "https://xn--a",
     "https://xn--bcher-kva.example",
     "https://broker.xn--bcher-kva"
-  ]
+  ],
+  "finalizationBoot6": {
+    "type": "boot",
+    "version": 6,
+    "managedCsi": "managed-csi/2",
+    "identity": {
+      "profile": "csi-files-retirement/1",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+    },
+    "context": {
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+      "epoch": 4,
+      "isolationClass": "session",
+      "leaseId": "lease-01",
+      "managedContext": "managed-context/1",
+      "mountRoot": "/runtime/workspaces/workspace-a",
+      "provisionRequestId": "provision-01",
+      "runtimeIncarnation": "boot-01",
+      "runtimeInstanceId": "runtime-01",
+      "storageId": "storage://pvc/workspace-a",
+      "tenantId": "tenant-a",
+      "token": "fixture-token",
+      "type": "boot",
+      "version": 2,
+      "workspaceGeneration": "7",
+      "workspaceId": "workspace-a"
+    },
+    "storage": {
+      "clusterDomain": "cluster-a",
+      "namespace": "runtimes",
+      "pvcUid": "pvc-01",
+      "pvUid": "pv-01",
+      "driver": "diskplugin.csi.alibabacloud.com",
+      "volumeHandle": "opaque-handle",
+      "backendDomain": "ack:account-a:cn-beijing",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "physicalKey": "fd253342f447e25d365b3ba1d37f108c06b25cfba254de78c7d830c36029c5cb",
+      "registrationRevision": "1",
+      "reservationId": "12345678-1234-5678-9abc-123456789abc",
+      "reservationRevision": "1"
+    },
+    "authority": {
+      "protocolVersion": 1,
+      "origin": "https://broker.example"
+    },
+    "finalization": "qwen-csi-file-finalize/1"
+  },
+  "finalizationReady6": {
+    "type": "ready",
+    "version": 6,
+    "managedCsi": "managed-csi/2",
+    "identity": {
+      "profile": "csi-files-retirement/1",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+    },
+    "context": {
+      "managedContext": "managed-context/1",
+      "runtimeInstanceId": "runtime-01",
+      "runtimeIncarnation": "boot-01",
+      "leaseId": "lease-01",
+      "epoch": 4,
+      "type": "ready",
+      "version": 2,
+      "url": "http://127.0.0.1:43190"
+    }
+  }
 }

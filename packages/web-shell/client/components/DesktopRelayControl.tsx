@@ -46,53 +46,55 @@ export type DesktopRelayBlocker =
   | 'workspace-ineligible'
   | 'workspace-resolving';
 
+const EN_COPY = {
+  'desktopRelay.title': 'This computer',
+  'desktopRelay.trigger': 'Use this computer',
+  'desktopRelay.hint':
+    'Lets this session run code on this computer and see and control its screen, for Computer Use. You approve each connection in a dialog on this computer.',
+  'desktopRelay.connect': 'Connect this computer',
+  'desktopRelay.disconnect': 'Disconnect',
+  'desktopRelay.checkAgain': 'Check again',
+  'desktopRelay.copy': 'Copy command',
+  'desktopRelay.copied': 'Copied',
+  'desktopRelay.setupHint':
+    'If not installed, run this once in a terminal on this computer, then check again. If already installed, check browser connection errors. It registers a macOS launchd socket; nothing keeps running in the background.',
+  'desktopRelay.approveHint':
+    'Approve the request in the dialog that opened on this computer.',
+  'desktopRelay.otherSessionHint':
+    'This computer is connected to another session. Connecting here replaces that connection.',
+  'desktopRelay.needsSessionHint':
+    'Start a session first. The connection binds to exactly one session.',
+  'desktopRelay.status.checking': 'Checking…',
+  'desktopRelay.status.permissionRequired': 'Browser permission required',
+  'desktopRelay.status.missing': 'Relay not detected',
+  'desktopRelay.status.unknown': 'Connection status unknown',
+  'desktopRelay.unknownHint':
+    'If previously connected, that session may still control this computer. To request a local disconnect without the browser or network, run the installed relay in a terminal on this computer (for a custom installation, adjust the executable path and add --home <dir>):',
+  'desktopRelay.status.idle': 'Not connected',
+  'desktopRelay.status.awaitingApproval': 'Waiting for approval',
+  'desktopRelay.status.connecting': 'Connecting…',
+  'desktopRelay.status.connected': 'Connected',
+  'desktopRelay.status.otherSession': 'In use by another session',
+  'desktopRelay.status.failed': 'Failed',
+  'desktopRelay.status.unavailable': 'Unavailable here',
+  'desktopRelay.status.needsSession': 'Waiting for a session',
+  'desktopRelay.blocker.insecureContext':
+    'Browsers only let a secure page reach this computer. Open the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
+  'desktopRelay.blocker.unsupportedDaemon':
+    'This daemon does not advertise the reverse tool channel (client_mcp_over_ws). Start it with QWEN_SERVE_CLIENT_MCP_OVER_WS=1.',
+  'desktopRelay.blocker.workspaceIneligible':
+    "This conversation's workspace cannot use this computer (untrusted or live workspace).",
+  'desktopRelay.blocker.workspaceResolving':
+    'Which workspace this conversation belongs to is not known yet.',
+  'desktopRelay.permissionHint':
+    'Allow local network access for this site in the browser prompt or site settings, then check again.',
+  'desktopRelay.error.denied': 'The request was declined on this computer.',
+  'desktopRelay.error.unreachable':
+    'Could not reach the desktop relay on this computer.',
+} as const;
+
 const COPY = {
-  en: {
-    'desktopRelay.title': 'This computer',
-    'desktopRelay.trigger': 'Use this computer',
-    'desktopRelay.hint':
-      'Lets this session run code on this computer and see and control its screen, for Computer Use. You approve each connection in a dialog on this computer.',
-    'desktopRelay.connect': 'Connect this computer',
-    'desktopRelay.disconnect': 'Disconnect',
-    'desktopRelay.checkAgain': 'Check again',
-    'desktopRelay.copy': 'Copy command',
-    'desktopRelay.copied': 'Copied',
-    'desktopRelay.setupHint':
-      'If not installed, run this once in a terminal on this computer, then check again. If already installed, check browser connection errors. It registers a macOS launchd socket; nothing keeps running in the background.',
-    'desktopRelay.approveHint':
-      'Approve the request in the dialog that opened on this computer.',
-    'desktopRelay.otherSessionHint':
-      'This computer is connected to another session. Connecting here replaces that connection.',
-    'desktopRelay.needsSessionHint':
-      'Start a session first. The connection binds to exactly one session.',
-    'desktopRelay.status.checking': 'Checking…',
-    'desktopRelay.status.permissionRequired': 'Browser permission required',
-    'desktopRelay.status.missing': 'Relay not detected',
-    'desktopRelay.status.unknown': 'Connection status unknown',
-    'desktopRelay.unknownHint':
-      'If previously connected, that session may still control this computer. To request a local disconnect without the browser or network, run the installed relay in a terminal on this computer (for a custom installation, adjust the executable path and add --home <dir>):',
-    'desktopRelay.status.idle': 'Not connected',
-    'desktopRelay.status.awaitingApproval': 'Waiting for approval',
-    'desktopRelay.status.connecting': 'Connecting…',
-    'desktopRelay.status.connected': 'Connected',
-    'desktopRelay.status.otherSession': 'In use by another session',
-    'desktopRelay.status.failed': 'Failed',
-    'desktopRelay.status.unavailable': 'Unavailable here',
-    'desktopRelay.status.needsSession': 'Waiting for a session',
-    'desktopRelay.blocker.insecureContext':
-      'Browsers only let a secure page reach this computer. Open the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
-    'desktopRelay.blocker.unsupportedDaemon':
-      'This daemon does not advertise the reverse tool channel (client_mcp_over_ws). Start it with QWEN_SERVE_CLIENT_MCP_OVER_WS=1.',
-    'desktopRelay.blocker.workspaceIneligible':
-      "This conversation's workspace cannot use this computer (untrusted or live workspace).",
-    'desktopRelay.blocker.workspaceResolving':
-      'Which workspace this conversation belongs to is not known yet.',
-    'desktopRelay.permissionHint':
-      'Allow local network access for this site in the browser prompt or site settings, then check again.',
-    'desktopRelay.error.denied': 'The request was declined on this computer.',
-    'desktopRelay.error.unreachable':
-      'Could not reach the desktop relay on this computer.',
-  },
+  en: EN_COPY,
   'zh-CN': {
     'desktopRelay.title': '这台电脑',
     'desktopRelay.trigger': '使用这台电脑',
@@ -135,13 +137,63 @@ const COPY = {
     'desktopRelay.error.denied': '请求在这台电脑上被拒绝。',
     'desktopRelay.error.unreachable': '无法连接到这台电脑上的桌面中继。',
   },
+  ru: {
+    'desktopRelay.title': 'Этот компьютер',
+    'desktopRelay.trigger': 'Использовать этот компьютер',
+    'desktopRelay.hint':
+      'Позволяет этой сессии выполнять код на этом компьютере, видеть и управлять его экраном — для Computer Use. Каждое подключение вы подтверждаете в диалоге на этом компьютере.',
+    'desktopRelay.connect': 'Подключить этот компьютер',
+    'desktopRelay.disconnect': 'Отключить',
+    'desktopRelay.checkAgain': 'Проверить снова',
+    'desktopRelay.copy': 'Скопировать команду',
+    'desktopRelay.copied': 'Скопировано',
+    'desktopRelay.setupHint':
+      'Если не установлено, один раз выполните это в терминале на этом компьютере, затем проверьте снова. Если уже установлено, проверьте ошибки подключения браузера. Регистрируется macOS launchd socket; в фоне ничего не остаётся работать.',
+    'desktopRelay.approveHint':
+      'Подтвердите запрос в диалоге, который открылся на этом компьютере.',
+    'desktopRelay.otherSessionHint':
+      'Этот компьютер подключён к другой сессии. Подключение здесь заменит то соединение.',
+    'desktopRelay.needsSessionHint':
+      'Сначала запустите сессию. Подключение привязывается ровно к одной сессии.',
+    'desktopRelay.status.checking': 'Проверка…',
+    'desktopRelay.status.permissionRequired': 'Требуется разрешение браузера',
+    'desktopRelay.status.missing': 'Реле не обнаружено',
+    'desktopRelay.status.unknown': 'Статус подключения неизвестен',
+    'desktopRelay.unknownHint':
+      'Если ранее было подключение, та сессия всё ещё может управлять этим компьютером. Чтобы запросить локальное отключение без браузера или сети, запустите установленное реле в терминале на этом компьютере (для своей установки скорректируйте путь к исполняемому файлу и добавьте --home <dir>):',
+    'desktopRelay.status.idle': 'Не подключено',
+    'desktopRelay.status.awaitingApproval': 'Ожидание подтверждения',
+    'desktopRelay.status.connecting': 'Подключение…',
+    'desktopRelay.status.connected': 'Подключено',
+    'desktopRelay.status.otherSession': 'Используется другой сессией',
+    'desktopRelay.status.failed': 'Ошибка',
+    'desktopRelay.status.unavailable': 'Здесь недоступно',
+    'desktopRelay.status.needsSession': 'Ожидание сессии',
+    'desktopRelay.blocker.insecureContext':
+      'Браузеры разрешают доступ к этому компьютеру только с защищённой страницы. Откройте Web Shell по https или перенаправьте порт демона через SSH и откройте http://localhost:<port>.',
+    'desktopRelay.blocker.unsupportedDaemon':
+      'Этот демон не объявляет обратный канал инструментов (client_mcp_over_ws). Запустите его с QWEN_SERVE_CLIENT_MCP_OVER_WS=1.',
+    'desktopRelay.blocker.workspaceIneligible':
+      'Рабочая область этого разговора не может использовать этот компьютер (недоверенная или live-область).',
+    'desktopRelay.blocker.workspaceResolving':
+      'Пока неизвестно, к какой рабочей области относится этот разговор.',
+    'desktopRelay.permissionHint':
+      'Разрешите доступ к локальной сети для этого сайта в запросе браузера или в настройках сайта, затем проверьте снова.',
+    'desktopRelay.error.denied': 'Запрос был отклонён на этом компьютере.',
+    'desktopRelay.error.unreachable':
+      'Не удалось связаться с настольным реле на этом компьютере.',
+  },
 } as const;
 
 type CopyKey = keyof (typeof COPY)['en'];
 
 function useDesktopRelayCopy(): (key: CopyKey) => string {
   const { language } = useI18n();
-  return useCallback((key: CopyKey) => COPY[language][key], [language]);
+  // The provider is typed to the shipped languages, but the runtime value is
+  // not checked: a locale without a dictionary must fall back to English
+  // instead of crashing the whole shell on the first lookup.
+  const copy = COPY[language] ?? COPY.en;
+  return useCallback((key: CopyKey) => copy[key], [copy]);
 }
 
 export interface DesktopRelayStatus {

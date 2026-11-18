@@ -480,6 +480,13 @@ export class ToolRegistry {
       );
       return;
     }
+    // Pool discovery uses a bootstrap Config; admission belongs to this owner.
+    if (
+      tool instanceof DiscoveredMCPTool &&
+      this.config.isBundledGeneratedUiServer?.(tool.serverName)
+    ) {
+      tool = tool.withSessionConfig(tool.trust, tool.alwaysLoad, this.config);
+    }
     if (tool instanceof DiscoveredMCPTool) {
       if (tool.isAppVisible) {
         this.mcpAppTools.set(

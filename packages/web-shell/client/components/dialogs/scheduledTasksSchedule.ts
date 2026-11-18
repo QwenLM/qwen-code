@@ -270,7 +270,7 @@ export function formatCountdown(msRemaining: number, t: TranslateFn): string {
  * scheduler can't fire it during its creation minute — that stamp is NOT a
  * real run, so anything at or before the creation minute reads as "never". */
 export function describeLastRun(
-  task: { createdAt: number; lastFiredAt: number | null },
+  task: { createdAt: number; lastFiredAt: number | null; gate?: string | null },
   t: TranslateFn,
 ): string {
   const createdMinute = task.createdAt - (task.createdAt % 60_000);
@@ -283,5 +283,12 @@ export function describeLastRun(
   } catch {
     return t('scheduledTasks.never');
   }
-  return t('scheduledTasks.lastFired', { when });
+  // A gated task's slot ran its gate, not necessarily its prompt: a quiet
+  // gate skips the fire, which the gate line beside this one counts.
+  return t(
+    task.gate ? 'scheduledTasks.lastChecked' : 'scheduledTasks.lastFired',
+    {
+      when,
+    },
+  );
 }

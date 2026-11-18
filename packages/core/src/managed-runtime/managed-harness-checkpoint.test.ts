@@ -689,12 +689,15 @@ describe('harness checkpoint v1', () => {
     expect(parseHarnessCheckpointV1(bytesOf(advanced))).toEqual(advanced);
   });
 
-  it('treats a checkpoint without an agentWait key as carrying none', () => {
-    const bytes = mutate(seed(), (value) => {
-      delete value['agentWait'];
-    });
-    expect(parseHarnessCheckpointV1(bytes).agentWait).toBeNull();
-  });
+  it.each(['agentWait', 'commandWait', 'commandLock'])(
+    'rejects a checkpoint without the %s group',
+    (group) => {
+      const bytes = mutate(seed(), (value) => {
+        delete value[group];
+      });
+      expect(() => parseHarnessCheckpointV1(bytes)).toThrow(group);
+    },
+  );
 
   it('rejects an await_agent checkpoint against the other wait families', () => {
     expect(() =>
@@ -1192,13 +1195,11 @@ describe('harness checkpoint v1', () => {
     ).toMatchObject([{ childRunId: 'run-1', consumed: true }]);
   });
 
-  it('omits the agentWait key whenever no group rides the checkpoint (R1-29)', () => {
-    // A pre-agentWait reader rejects unknown root keys; absent parses as
-    // null on both sides, so a checkpoint that carries no group must not
-    // name the key — an older daemon can still open these bytes.
+  it('writes a null agentWait group when no child wait is active', () => {
     const bytes = bytesOf(seed());
-    expect(Object.keys(JSON.parse(bytes.toString('utf8')))).not.toContain(
+    expect(JSON.parse(bytes.toString('utf8'))).toHaveProperty(
       'agentWait',
+      null,
     );
     expect(parseHarnessCheckpointV1(bytes).agentWait).toBeNull();
     // And the group itself always writes the key.
@@ -1380,9 +1381,10 @@ describe('command wait', () => {
       promptId: null,
     });
     expect(settled.commandLock).toBeNull();
-    expect(
-      Object.keys(JSON.parse(bytesOf(settled).toString('utf8'))),
-    ).not.toContain('commandLock');
+    expect(JSON.parse(bytesOf(settled).toString('utf8'))).toHaveProperty(
+      'commandLock',
+      null,
+    );
     const nextTurn = createNextTurnReadyHarnessCheckpoint({
       previous: locked,
       checkpointId: 'ckpt-7',
@@ -1396,10 +1398,11 @@ describe('command wait', () => {
     expect(harnessCommandLocked(nextTurn, 'turn-2')).toBe(false);
   });
 
-  it('omits the commandLock key while the Turn is unlocked and rejects a malformed lock', () => {
+  it('writes a null commandLock while the Turn is unlocked and rejects a malformed lock', () => {
     const bytes = bytesOf(seed());
-    expect(Object.keys(JSON.parse(bytes.toString('utf8')))).not.toContain(
+    expect(JSON.parse(bytes.toString('utf8'))).toHaveProperty(
       'commandLock',
+      null,
     );
     expect(parseHarnessCheckpointV1(bytes).commandLock).toBeNull();
     expect(() =>
@@ -1432,13 +1435,6 @@ describe('command wait', () => {
         }),
       ),
     ).toThrow(/commandWait/);
-  });
-
-  it('treats a checkpoint without a commandWait key as carrying none', () => {
-    const bytes = mutate(seed(), (value) => {
-      delete value['commandWait'];
-    });
-    expect(parseHarnessCheckpointV1(bytes).commandWait).toBeNull();
   });
 
   it('rejects an await_command checkpoint against the other wait families', () => {
@@ -1671,10 +1667,11 @@ describe('command wait', () => {
     ).toThrow(/all-folded command wait/);
   });
 
-  it('omits the commandWait key whenever no group rides the checkpoint', () => {
+  it('writes a null commandWait group when no command wait is active', () => {
     const bytes = bytesOf(seed());
-    expect(Object.keys(JSON.parse(bytes.toString('utf8')))).not.toContain(
+    expect(JSON.parse(bytes.toString('utf8'))).toHaveProperty(
       'commandWait',
+      null,
     );
     expect(parseHarnessCheckpointV1(bytes).commandWait).toBeNull();
     const wait = createAwaitCommandHarnessCheckpoint({

@@ -203,7 +203,14 @@ interface DaemonStatusLimits {
   maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   listenerMaxConnections: number | null;
+  /**
+   * Effective admission cap for concurrent REST SSE streams
+   * (`runtime.transport.restSseActive` is the live occupancy).
+   * `null` = unlimited (listener cap disabled, or explicit opt-out).
+   */
+  maxSseConnections?: number | null;
   eventRingSize: number;
+  eventRingMaxBytes: number;
   compactedReplayMaxBytes: number;
   maxJournalEvents: number;
   maxJournalBytes: number;
@@ -1007,12 +1014,22 @@ export async function buildDaemonStatusResponse(
       maxPendingPromptsPerSession:
         bridgeSnapshot.limits.maxPendingPromptsPerSession,
       listenerMaxConnections: listenerMaxConnections(input.opts.maxConnections),
+      maxSseConnections: sseMaxConnections(
+        input.opts.maxConnections,
+        input.opts.maxSseConnections,
+      ),
       eventRingSize: bridgeSnapshot.limits.eventRingSize,
+      eventRingMaxBytes: bridgeSnapshot.limits.eventRingMaxBytes,
       compactedReplayMaxBytes: bridgeSnapshot.limits.compactedReplayMaxBytes,
       maxJournalEvents: bridgeSnapshot.limits.maxJournalEvents,
       maxJournalBytes: bridgeSnapshot.limits.maxJournalBytes,
       promptDeadlineMs: positiveFiniteOrNull(input.opts.promptDeadlineMs),
-      writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
+      // Effective budget, not the raw flag: the reaper is default-on, so
+      // `null` here means "disabled" (direct embeds passing 0), never
+      // "no writer eviction" — an unset flag reports the 60s default.
+      writerIdleTimeoutMs: positiveFiniteOrNull(
+        resolveWriterIdleBudgetMs(input.opts.writerIdleTimeoutMs),
+      ),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       sessionPromptSettledCloseGraceMs:
@@ -1710,10 +1727,74 @@ export function listenerMaxConnections(
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+/**
+ * Fraction of the listener cap reserved for long-lived REST SSE streams.
+ * The remainder is headroom for short requests (`/health`, static assets,
+ * JSON API calls) so SSE accumulation can never silently occupy every
+ * listener slot and take the whole HTTP surface down at accept time.
+ */
+export const SSE_LISTENER_CAP_FRACTION = 0.8;
+
+/**
+ * Effective admission cap for concurrent REST SSE streams (`null` means
+ * unlimited). Without an explicit `maxSseConnections`, the cap derives
+ * from the effective listener cap (80%, at least one stream); a disabled
+ * listener cap disables the derived SSE cap too. An explicit value is
+ * honoured downward but normalised: fractional values floor to at least
+ * one stream (so `0.8` cannot collapse into the enforcement site's
+ * `> 0` "unlimited" gate while status publishes `0`), and the result is
+ * clamped to the listener's headroom ceiling so an explicit cap above the
+ * listener budget cannot silently erase the reserved short-request
+ * headroom. `0` / `Infinity` keep meaning unlimited even when the
+ * listener cap is disabled — an explicit cap still applies in that case.
+ */
+export function sseMaxConnections(
+  listenerCap: number | undefined,
+  sseCap: number | undefined,
+): number | null {
+  const listener = listenerMaxConnections(listenerCap);
+  // At least one stream must be admittable even for tiny listener caps.
+  const ceiling =
+    listener === null
+      ? null
+      : Math.max(1, Math.floor(listener * SSE_LISTENER_CAP_FRACTION));
+  if (sseCap !== undefined) {
+    if (sseCap === 0 || sseCap === Infinity) return null;
+    if (!Number.isFinite(sseCap) || sseCap < 0) return null;
+    const floor = Math.max(1, Math.floor(sseCap));
+    return ceiling === null ? floor : Math.min(ceiling, floor);
+  }
+  return ceiling;
+}
+
 export function positiveFiniteOrNull(value: number | undefined): number | null {
   return value !== undefined && Number.isFinite(value) && value > 0
     ? value
     : null;
+}
+
+/**
+ * Default writer-stall budget applied when `--writer-idle-timeout-ms` is
+ * unset. The reaper only fires while a write is stuck waiting for `drain`
+ * (the consumer stopped reading and the kernel send buffer is full), so
+ * healthy idle streams — whose 15s heartbeats keep flushing — are never
+ * evicted regardless of this value. 60s bounds how long a stalled writer
+ * can pin a listener slot before it is force-evicted.
+ */
+export const DEFAULT_WRITER_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * Resolve the effective writer-stall budget. Unset ⇒ default-on reaper;
+ * an explicit positive value wins; non-positive (direct embeds only — the
+ * CLI flag validates positive integers) disables the reaper. Lives here
+ * (not in the route module) so status surfaces can report the effective
+ * budget without importing route code.
+ */
+export function resolveWriterIdleBudgetMs(
+  flagValue: number | undefined,
+): number {
+  if (flagValue === undefined) return DEFAULT_WRITER_IDLE_TIMEOUT_MS;
+  return flagValue > 0 ? flagValue : 0;
 }
 
 function zeroRateHits(): Record<RateLimitTier, number> {

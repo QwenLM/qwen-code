@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MonitorWakeTransientReadError } from './hosted-monitor-wake.js';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type {
@@ -52,6 +53,7 @@ import {
   workflowLaunchBody,
   type ChildAdmission,
   type ChildLaunchEnvelope,
+  type PublicChildLaunchSnapshot,
   type WorkflowLaunchEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 import {
@@ -100,6 +102,7 @@ import {
 /** The narrow authority/resource pair a HostedChildAgentSession commits through. */
 export interface HostedChildAgentStore {
   readonly authority: {
+    settlePendingAppend(): Promise<void>;
     extensionRecord(
       domain: ManagedSessionDomain,
       recordId: string,
@@ -124,6 +127,7 @@ export interface HostedChildAgentStore {
 }
 
 export interface ChildAgentLaunchParams {
+  readonly publicLaunch?: PublicChildLaunchSnapshot;
   readonly childRunId: string;
   readonly ownerScopeId: string;
   readonly rootSessionId: string;
@@ -503,7 +507,91 @@ export class HostedChildAgentSession {
   constructor(
     private readonly store: HostedChildAgentStore,
     private readonly key: ManagedSessionKey,
+    private readonly sourceCancelled: (promptId: string) => boolean = () =>
+      false,
+    private readonly launchEnabled: () => boolean = () => true,
   ) {}
+
+  async cancelledNotification(turnId: string): Promise<boolean> {
+    if (this.sourceCancelled(turnId)) return true;
+    const suffix = [':accept:notify', ':blocked:notify'].find((value) =>
+      turnId.endsWith(value),
+    );
+    if (!suffix) return false;
+    const record = this.record(turnId.slice(0, -suffix.length));
+    return record !== undefined && this.cancelledLaunch(record);
+  }
+
+  private async cancelledLaunch(record: ChildSessionRun): Promise<boolean> {
+    if (record.kind !== 'child_agent') return false;
+    let bytes: Buffer;
+    try {
+      bytes = await this.store.resources.read(record.inputRef);
+    } catch (cause) {
+      throw new MonitorWakeTransientReadError(String(cause), { cause });
+    }
+    const launch = decodeChildLaunchEnvelope(bytes);
+    return (
+      launch.publicLaunch !== undefined &&
+      this.sourceCancelled(launch.publicLaunch.sourcePromptId)
+    );
+  }
+
+  async publicLaunchSnapshot(
+    childRunId: string,
+  ): Promise<PublicChildLaunchSnapshot | undefined> {
+    const record = this.record(childRunId);
+    return record?.kind === 'child_agent'
+      ? decodeChildLaunchEnvelope(
+          await this.store.resources.read(record.inputRef),
+        ).publicLaunch
+      : undefined;
+  }
+
+  async stopCancelledSources(): Promise<void> {
+    await this.cancelSourcePrompt();
+  }
+
+  cancelSourcePrompt(
+    promptId?: string,
+    fence?: () => Promise<unknown>,
+  ): Promise<void> {
+    return this.inWrites(async () => {
+      await fence?.();
+      for (const entry of this.store.authority.extensionRecordsInDomain(
+        'child_run',
+      )) {
+        const record = parseChildRun(entry.record);
+        if (
+          record.kind !== 'child_agent' ||
+          record.stopRequested ||
+          isTerminalRunState(record.run.state)
+        )
+          continue;
+        const launch = decodeChildLaunchEnvelope(
+          await this.store.resources.read(record.inputRef),
+        );
+        const source = launch.publicLaunch?.sourcePromptId;
+        if (
+          source === undefined ||
+          (promptId !== undefined && source !== promptId) ||
+          !this.sourceCancelled(source)
+        )
+          continue;
+        const next = childStopRequestedBody(record);
+        await this.store.authority.commitExtensionRecord(
+          {
+            operation: 'cancelSourcePromptChildren',
+            commandId: `${record.childRunId}:source-cancel`,
+            sessionKey: this.key,
+            contentDigest: digest(next),
+          },
+          { domain: 'child_run', record: next },
+          TRUSTED,
+        );
+      }
+    });
+  }
 
   /** The last committed body of one child run, parsed. Both child Session
    * kinds answer: the relay and cascade verbs are kind-blind (#13803 K2). */
@@ -1193,6 +1281,7 @@ export class HostedChildAgentSession {
       description: params.description,
       prompt: params.prompt,
       definition: params.definition,
+      ...(params.publicLaunch ? { publicLaunch: params.publicLaunch } : {}),
     };
     const replay = await this.admitLaunch(params, {
       bytes: () => encodeChildLaunchEnvelope(envelope),
@@ -1202,6 +1291,8 @@ export class HostedChildAgentSession {
         return (
           committed.description === params.description &&
           isDeepStrictEqual(committed.definition, params.definition) &&
+          committed.publicLaunch?.sourcePromptId ===
+            params.publicLaunch?.sourcePromptId &&
           (committed.prompt === params.prompt ||
             isSentInstruction(committed.prompt, sentPrompt))
         );
@@ -1507,9 +1598,12 @@ export class HostedChildAgentSession {
       const previous = this.parseSessionRun(existing.record, childRunId);
       const next = childRecoveryBlockedBody(previous, params);
       if (isDeepStrictEqual(previous, next)) return;
+      // The line renders the blocked revision this commit lands, never
+      // the running one it replaces (#14165 FG10d).
       const notification =
-        previous.completion === 'sent'
-          ? await this.buildBlockedNotification(childRunId, previous)
+        previous.completion === 'sent' &&
+        !(await this.cancelledLaunch(previous))
+          ? await this.buildBlockedNotification(childRunId, next)
           : undefined;
       await this.store.authority.commitExtensionRecord(
         {
@@ -1621,7 +1715,7 @@ export class HostedChildAgentSession {
         return child.resultRef!;
       }
       const notification =
-        params.notification === undefined
+        params.notification === undefined || (await this.cancelledLaunch(child))
           ? undefined
           : await this.buildResultNotification(
               childRunId,
@@ -1916,6 +2010,16 @@ export class HostedChildAgentSession {
   ): Promise<void> {
     const write = this.writes.then(async () => {
       const existing = this.store.authority.extensionRecord(domain, recordId);
+      if (
+        operation === 'startChildRun' &&
+        existing === undefined &&
+        ((await this.cancelledLaunch(record as ChildSessionRun)) ||
+          !this.launchEnabled())
+      ) {
+        throw new ManagedSessionConflictError(
+          'New child launches are disabled or the source prompt was cancelled.',
+        );
+      }
       if (
         existing !== undefined &&
         domain === 'child_acceptance' &&

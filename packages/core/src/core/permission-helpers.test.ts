@@ -136,6 +136,37 @@ describe('persistPermissionOutcome', () => {
     expect(addPersistentRule).not.toHaveBeenCalled();
   });
 
+  it('stops permission updates after cancellation while a rule is being persisted', async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const persist = vi.fn(() => barrier);
+    const addPersistentRule = vi.fn();
+    const controller = new AbortController();
+    const saving = persistPermissionOutcome(
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+      {
+        type: 'exec',
+        title: 'Confirm shell',
+        command: 'echo one',
+        rootCommand: 'echo',
+        permissionRules: ['Bash(echo one)', 'Bash(echo two)'],
+        onConfirm: async () => undefined,
+      },
+      persist,
+      { addPersistentRule } as never,
+      undefined,
+      () => !controller.signal.aborted,
+    );
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledOnce());
+    controller.abort();
+    release();
+    await saving;
+    expect(persist).toHaveBeenCalledOnce();
+    expect(addPersistentRule).not.toHaveBeenCalled();
+  });
+
   it('keeps legacy exec always-allow project persistence', async () => {
     const persist = vi.fn();
 

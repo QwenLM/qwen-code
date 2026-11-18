@@ -28,8 +28,16 @@
 // report a green compile for code it never compiled. Narrowing to the changed
 // package alone would be fast and wrong; that is the trade this module refuses.
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
+import { isAbsolute, join, relative } from 'node:path';
+import { heapFlagMb } from './heap.js';
+import { stripComments } from './js-source.js';
 
 /** One workspace package, as its own `package.json` describes it. */
 export interface WorkspacePackage {
@@ -241,17 +249,189 @@ export function readRootPackage(root: string): RootPackage | null {
  * run includes it); a fan-out root BUILD is skipped by the build loop because
  * an aggregator produces no artifacts of its own — the scoped loop already
  * builds the members it drives. Detected from the script text: the
- * `--workspaces` flag (and npm's `-ws`/`--ws` shorthands) is the fan-out;
- * `-w`/`--workspace` (singular) deliberately does NOT match, and neither does
- * an explicit opt-OUT like `--workspaces=false` — the flag must stand alone
- * (whitespace or end), not merely prefix-match. Other aggregators (turbo, nx,
- * lerna) are not modeled and run as written.
+ * `--workspaces` flag (and npm's `-ws`/`--ws` shorthands) is the fan-out, and
+ * so is pnpm's `-r`/`--recursive` as pnpm's own first argument (a later `-r`
+ * belongs to the command pnpm runs, like mocha's); `-w`/`--workspace`
+ * (singular) deliberately does NOT match, and neither does an explicit
+ * opt-OUT like `--workspaces=false` — the flag must stand alone, not merely
+ * prefix-match. It follows whitespace or the start, and is followed by
+ * whitespace, a quote or the end: a command quoted inside a script ends at
+ * the quote, while a quote BEFORE the flag is the flag as data
+ * (`argv.includes('--workspaces')`), not a command that passes it. Other
+ * aggregators (turbo, nx, lerna) are not modeled and run as written.
  */
 export function scriptFansOut(text: unknown): boolean {
   return (
     typeof text === 'string' &&
-    /(^|\s)(--workspaces(?=\s|$)|--?ws(?=\s|$))/.test(text)
+    (/(^|\s)(--workspaces|--?ws)(?=[\s'"`]|$)/.test(text) ||
+      /\bpnpm\s+(-r|--recursive)(?=[\s'"`]|$)/.test(text))
   );
+}
+
+/** What separates one command of a script from the next. */
+const COMMAND_SEPARATOR_RE = /[;&|\n]+/;
+
+/**
+ * Whether a script runs more than one command — `a && b`, `a | tee log`,
+ * `a & wait`, two lines. Over-counts a redirect like `2>&1`, which only
+ * discloses more.
+ */
+export function chainsCommands(text: string): boolean {
+  return (
+    text.split(COMMAND_SEPARATOR_RE).filter((c) => c.trim() !== '').length > 1
+  );
+}
+
+/**
+ * Node flags whose value can be the next word — a preload or a path, not the
+ * script. One missing from here makes its value read as the script, which
+ * then does not fan out: the build runs as written.
+ */
+const NODE_VALUE_FLAGS = new Set([
+  '-r',
+  '--require',
+  '--import',
+  '--loader',
+  '--experimental-loader',
+  '-C',
+  '--conditions',
+  '--env-file',
+  '--env-file-if-exists',
+  '--input-type',
+  '--title',
+  '--redirect-warnings',
+  '--watch-path',
+  '--diagnostic-dir',
+  '--report-dir',
+  '--cpu-prof-dir',
+  '--heap-prof-dir',
+  '--icu-data-dir',
+  '--openssl-config',
+]);
+/** What runs a local script file: Node, or tsx, which takes Node's flags. */
+const SCRIPT_RUNNERS = new Set(['node', 'tsx']);
+/** Node flags after which no script file follows: the code is inline. */
+const NODE_INLINE_FLAGS = new Set(['-e', '--eval', '-p', '--print', '-']);
+
+/**
+ * The script file each `node …` (or `tsx …`) command in a script runs: the
+ * first word after the runner that is not a flag, stepping over a
+ * value-taking flag's value (`--import tsx/esm`, `--require ./hooks.js`), so
+ * neither a preload nor a flag is taken for the script.
+ */
+function nodeScripts(text: string): string[] {
+  const files: string[] = [];
+  for (const command of text.split(COMMAND_SEPARATOR_RE)) {
+    const words = command.trim().split(/\s+/);
+    const runner = words.findIndex((w) => SCRIPT_RUNNERS.has(w));
+    for (let i = runner + 1; i > 0 && i < words.length; i++) {
+      const word = words[i]!;
+      if (NODE_INLINE_FLAGS.has(word)) break;
+      if (word.startsWith('-')) {
+        if (NODE_VALUE_FLAGS.has(word)) i++;
+        continue;
+      }
+      if (/^[\w@./-]+\.[cm]?[jt]s$/.test(word)) files.push(word);
+      break;
+    }
+  }
+  return files;
+}
+
+/**
+ * The commands a script hands to a child process: the first argument of each
+ * `exec`/`execSync`/`execFile`/`spawn`/… call, when it is a string or
+ * template literal, read off source with its comments blanked. Only these can
+ * run a fan-out — a string the script prints, compares or tests for cannot.
+ * An argument built elsewhere (`execSync(cmd)`) or split into an argv
+ * (`spawnSync('pnpm', ['-r', …])`) is not read, and the build runs as
+ * written. A template's `${…}` stays in the text: this repo's own hand-off is
+ * `` execSync(`corepack pnpm -r ${filter} run build`) ``.
+ */
+function childProcessCommands(src: string): string[] {
+  const commands: string[] = [];
+  for (const m of stripComments(src).matchAll(
+    /\b(?:exec|execSync|execFile|execFileSync|spawn|spawnSync)\s*\(\s*('(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)/g,
+  )) {
+    commands.push(m[1]!.slice(1, -1));
+  }
+  return commands;
+}
+
+/**
+ * A hand-off script larger than this is not read. Build scripts are a few
+ * KB; the bound is what keeps a reviewed tree from handing this process a
+ * multi-GB file (or a device) to read outside every command deadline.
+ */
+const MAX_HAND_OFF_SCRIPT_BYTES = 1024 * 1024;
+
+/**
+ * The local script the root's `build` hands off to with `node <file>`, when
+ * that script fans out over the workspaces — or undefined.
+ *
+ * This is where a monorepo's root build lives once the fan-out moves into a
+ * build script (`node scripts/build.js`, which runs `pnpm -r … run build`),
+ * and the script text alone cannot show it. Run as a root build after the
+ * scoped loop has already built every member, it is the whole-monorepo build
+ * again — measured on this repo, it spent the rest of the whole-call budget
+ * and no suite ran.
+ *
+ * A match says the script fans out, NOT that fanning out is all it does: it
+ * can also generate files of its own. So this names the script rather than
+ * answering yes or no, and the caller decides whether skipping it is safe.
+ * Only a command the script runs counts (`childProcessCommands`), so one that
+ * merely mentions `pnpm -r` — in a comment, a log line, a usage string — is
+ * not matched. A file whose real path leaves the root (`..`, or a symlink out
+ * of it) is not read, nor one that is not a regular file of a script's size.
+ */
+export function rootBuildFanOutScript(
+  root: string,
+  text: unknown,
+): string | undefined {
+  if (typeof text !== 'string') return undefined;
+  for (const file of nodeScripts(text)) {
+    try {
+      const path = realpathSync(join(root, file));
+      const inRoot = relative(realpathSync(root), path);
+      if (inRoot.startsWith('..') || isAbsolute(inRoot)) continue;
+      const stat = statSync(path);
+      if (!stat.isFile() || stat.size > MAX_HAND_OFF_SCRIPT_BYTES) continue;
+      if (childProcessCommands(readFileSync(path, 'utf8')).some(scriptFansOut))
+        return file;
+    } catch {
+      // Unreadable is not evidence of a fan-out: the build runs as written.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The V8 heap the root's `build` script declares for its compile
+ * (`--max-old-space-size=<MB>` in a `NODE_OPTIONS` assignment), or undefined
+ * when it declares none.
+ *
+ * A scoped build runs each member's own `build` and so bypasses the root
+ * script — and with it the heap the project says its compile needs. This
+ * repo's root build sets 6144 MB, and `packages/cli`'s `tsc --build` peaks
+ * above Node's ~4 GB default, so the scoped build of that one package died of
+ * heap exhaustion while the root build of the same tree passes.
+ */
+export function declaredBuildHeapMb(root: string): number | undefined {
+  const text = readRootPackage(root)?.scriptsText['build'];
+  if (typeof text !== 'string') return undefined;
+  // Only `NODE_OPTIONS` reaches the compilers the build starts. The same flag
+  // elsewhere in the text — an argument to a child, a usage string, a node
+  // flag that sizes only the build script's own process — declares nothing
+  // for them. The largest declaration wins: one number is applied to every
+  // scoped build, and the compile that needed the larger one is among them.
+  let declared: number | undefined;
+  for (const m of text.matchAll(
+    /\bNODE_OPTIONS=(?:"([^"]*)"|'([^']*)'|(\S*))/g,
+  )) {
+    const mb = heapFlagMb(m[1] ?? m[2] ?? m[3] ?? '');
+    if (mb !== undefined) declared = Math.max(declared ?? 0, mb);
+  }
+  return declared;
 }
 
 /** The manifest fields this module reads. */
@@ -407,7 +587,13 @@ export function affectedWorkspaces(
 
 /** Forward edges for a package list: dir -> the workspace dirs it depends on. */
 function dependencyEdges(packages: WorkspacePackage[]): Map<string, string[]> {
-  const byName = new Map(packages.map((p) => [p.name, p]));
+  // A dependency on a name the root shares with a member is on the MEMBER:
+  // npm links workspace members by name, never the root. This repo's root
+  // and `packages/cli` are both `@qwen-code/qwen-code`.
+  const byName = new Map<string, WorkspacePackage>();
+  for (const p of packages) {
+    if (p.dir !== '.' || !byName.has(p.name)) byName.set(p.name, p);
+  }
   const dependsOn = new Map<string, string[]>();
   for (const p of packages) {
     dependsOn.set(
@@ -418,6 +604,26 @@ function dependencyEdges(packages: WorkspacePackage[]): Map<string, string[]> {
     );
   }
   return dependsOn;
+}
+
+/**
+ * `dirs` and every workspace they depend on, transitively, sorted — what
+ * their code can import by package name. The forward half only: unlike
+ * `buildSetFor`, no consumer joins it.
+ */
+export function dependencyClosure(
+  dirs: string[],
+  packages: WorkspacePackage[],
+): string[] {
+  const dependsOn = dependencyEdges(packages);
+  const closure = new Set<string>();
+  const add = (dir: string): void => {
+    if (closure.has(dir)) return;
+    closure.add(dir);
+    for (const d of dependsOn.get(dir) ?? []) add(d);
+  };
+  dirs.forEach(add);
+  return [...closure].sort();
 }
 
 /**

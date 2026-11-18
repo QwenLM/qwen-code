@@ -10,14 +10,24 @@ import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import path from 'node:path';
-import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
+import {
+  LocalJsonlManagedSessionJournalHandle,
+  LocalJsonlManagedSessionJournalStore,
+} from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
+import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import type { ManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import type {
+  ManagedSessionJournalHandle,
+  ManagedSessionJournalStore,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import { HOSTED_STORE_PREFIX } from '../scratch-dir.js';
 
 // An HTTP transport fixture, not a substitute for the Spring/MySQL slice.
-export async function startHostedSessionStore(sessionId: string) {
+export async function startHostedSessionStore(
+  sessionId: string,
+  options: { supportedStorageVersion?: 2 | 4 } = {},
+) {
   const root = await mkdtemp(path.join(tmpdir(), HOSTED_STORE_PREFIX));
   const sessionKey = {
     tenantId: 'tenant',
@@ -25,11 +35,21 @@ export async function startHostedSessionStore(sessionId: string) {
     sessionId,
   };
   const transcriptPath = path.join(root, `${sessionId}.jsonl`);
-  const journal = new LocalJsonlManagedSessionJournalStore({
-    runtimeBaseDir: root,
-    sessionId,
-    transcriptPath,
-  });
+  // This transport fixture retains the HTTP journal's native transaction shape.
+  const journal: ManagedSessionJournalStore = {
+    open: async (request) =>
+      new LocalJsonlManagedSessionJournalHandle(
+        await SessionWriterLease.acquire({
+          runtimeBaseDir: root,
+          sessionId,
+          transcriptPath,
+          takeoverPolicy: 'certified',
+          lockSchema: { schemaVersion: 3, formatVersion: 1 },
+        }),
+        request.sessionKey,
+        true,
+      ),
+  };
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: root,
     sessionKey,
@@ -43,8 +63,13 @@ export async function startHostedSessionStore(sessionId: string) {
   let writerId: string | undefined;
   let writerGeneration = 0;
   let seals = 0;
+  let storageVersion = 1;
   const scan = () =>
-    LocalJsonlManagedSessionJournalStore.read(transcriptPath, sessionKey);
+    LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath,
+      sessionKey,
+      runtimeBaseDir: root,
+    });
   const server = createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     const request = (async () => {
@@ -102,21 +127,31 @@ export async function startHostedSessionStore(sessionId: string) {
         json({
           ...head,
           leaseUntil: Date.now() + Number(body.leaseMillis),
-          // Matches ManagedSessionReaderVersion.SUPPORTED on the Java store:
-          // the Harness writes Hosted recovery records at storage version 2.
-          supportedStorageVersion: 2,
+          supportedStorageVersion: options.supportedStorageVersion ?? 2,
         });
+      } else if (route === '/user-messages:claim') {
+        assert.equal(req.method, 'POST');
+        assert(handle);
+        assert.equal(body.writerId, writerId);
+        assert.equal(body.writerGeneration, writerGeneration);
+        json([]);
       } else if (route === '/execution:authorize') {
         assert.equal(req.method, 'POST');
         assert(handle);
         assert.equal(body.writerId, writerId);
         assert.equal(body.writerGeneration, writerGeneration);
         json({ authorized: true });
+      } else if (route === '/approval:query') {
+        assert.equal(req.method, 'POST');
+        assert(handle);
+        assert.equal(body.writerId, writerId);
+        assert.equal(body.writerGeneration, writerGeneration);
+        json({ mode: 'default', revision: 0 });
       } else if (route === '/restore') {
         json({
           ...head,
           state: 'ACTIVE',
-          storageVersion: 1,
+          storageVersion,
           latestCheckpointResourceId: null,
           compactedThroughRevision: 0,
           recoveryStatus: 'READY',
@@ -167,6 +202,23 @@ export async function startHostedSessionStore(sessionId: string) {
           byteLength: bytes.length,
           recordEncoding: 'identity',
         });
+        if (options.supportedStorageVersion === 4) {
+          const kinds = (body.resources as ManagedSessionDurableRef[]).map(
+            (resource) => resource.kind,
+          );
+          if (kinds.includes('managed-execution-diagnostics'))
+            storageVersion = 4;
+          else if (
+            kinds.some((kind) =>
+              [
+                'managed-hosted-model-usage-v2',
+                'managed-hook-model-usage-v2',
+                'managed-session-model-stats',
+              ].includes(kind),
+            )
+          )
+            storageVersion = Math.max(storageVersion, 3);
+        }
         json({
           ...body,
           journalRevision: transactions.length,

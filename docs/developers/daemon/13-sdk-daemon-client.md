@@ -167,6 +167,32 @@ await client
 
 `DaemonSkillBatchToggleResult` contains ordered `results`, a compatibility `errors` array, and batch-level activation/session-refresh counts. Current daemons process every structurally valid name in request order, persist all resulting declaration changes together in at most one locked settings write, refresh active sessions once when anything changed, and return an empty `errors` array without consulting the loaded Skill catalog. Enabling records an explicit workspace `skills.enabled` opt-in even for names not yet installed, so it can override Extension-internal disablement; an identical repeated declaration remains a no-op. The error item types remain available so the SDK can still decode responses from older daemons. The method throws on a non-200 response.
 
+`installWorkspaceSkill`, `deleteWorkspaceSkill`, `setWorkspaceSkillEnabled` and `setWorkspaceSkillsEnabled` use native REST even when the client negotiates ACP HTTP or WebSocket for other operations. Single and batch toggles follow the same rule on workspace-qualified clients. These mutations have no supported ACP methods; REST preserves the configured daemon base path, authentication and normal HTTP error handling; the single and batch toggles also forward the caller's optional `clientId`.
+
+Explicit Skill and Extension refreshes accept optional `sessionIds`:
+
+```ts
+await client.refreshWorkspaceSkills(
+  { sessionIds: ['session-1'] },
+  'dashboard-1',
+);
+await client.refreshExtensions('dashboard-1', { sessionIds: ['session-1'] });
+
+const workspace = client.workspaceByCwd('/work/secondary');
+await workspace.refreshSkillRuntime(
+  { sessionIds: ['session-2'] },
+  'dashboard-1',
+);
+const refresh = await workspace.refreshExtensionRuntime('dashboard-1', {
+  sessionIds: ['session-2'],
+});
+await client.waitForExtensionOperation(refresh);
+```
+
+Omitting `sessionIds` refreshes every live session in the selected runtime; `[]` selects none. Duplicate IDs refresh once. Unknown IDs and IDs owned by another workspace return HTTP 404 before refresh begins. Selection controls immediate session refresh and command notifications; shared runtime caches can change, and automatic reconciliation can still refresh other sessions later. Existing Skill toggles, Extension activation calls and automatic refresh callers retain their behavior.
+
+The new Skill methods always require `workspace_session_refresh` and return `DaemonSkillRefreshResult` with `sessionsRefreshed`, `sessionsFailed`, `configsRefreshed`, `configsFailed` and `reason: 'all'`. Extension methods check that capability only when `sessionIds` is supplied, including `[]`, so an older daemon cannot ignore a selection and refresh everything. Existing `refreshExtensions(clientId?)` and `refreshExtensionRuntime(clientId?)` calls keep their argument order and send `{}` without an additional capability request. Primary Extension refresh returns synchronous counts; qualified Extension refresh still returns an asynchronous operation handle. A selected Extension refresh never advances the workspace-wide applied generation.
+
 V2 Extension batch activation retains the asynchronous Extension operation model. Pre-flight `extension_batch_activation_v2`, submit a global default batch or a selected-workspace override batch, then poll it with the existing operation helper:
 
 ```ts
@@ -428,7 +454,11 @@ When `workspace_session_export` is advertised, `client.workspaceById(workspaceId
 
 When `workspace_archived_session_export` is advertised, use `client.workspaceById(workspaceId).exportArchivedSession(sessionId, { format })` or the corresponding `workspaceByCwd` method to export only the selected workspace's archived persisted transcript. The method uses the same result type and native REST behavior as active export, but it never falls back to an active session; support cannot be inferred from any active export capability.
 
+Workspace list pages, batch catalog entries and `sessionStatus()` preserve optional `DaemonSessionSummary.lastUserPromptAt`. It is the recorded ISO time of the latest genuine user input on the effective main branch, including persisted human mid-turn, attachment and voice input. It is independent of activity `updatedAt`; older daemons or sessions without a qualifying record omit it. Clients must not substitute creation time, activity time or current time when it is absent. Cold reads recover the value from persisted history; subsequent persisted human input updates daemon memory, so assistant-only appends do not cause full transcript rescans for this field. Set `sortBy: 'lastUserPromptAt'` on `listWorkspaceSessionsPage`, qualified workspace lists, `listSessionsCatalog` options or `listStandaloneSessionsPage` for descending question order across the complete candidate set before paging. SDK calls preflight `session_last_user_prompt_sort` and reject older daemons that lack it. Unknown question times sort last with session-id ties; organized views keep pinned rows first. Reusing a cursor with a different sort is invalid. Omitting `sortBy` or selecting `updatedAt` preserves default behavior. Memory-only live-state responses remain unchanged.
+
 When `workspace_session_live_state` is advertised, `client.getWorkspaceSessionLiveState(workspaceCwd)` or the scoped `client.workspaceById(workspaceId).getSessionLiveState()` / `client.workspaceByCwd(workspaceCwd).getSessionLiveState()` reads the selected trusted workspace's memory-only live-session snapshot plus its catalog version, returning `DaemonWorkspaceSessionLiveState` (`{ v: 1, catalogVersion: DaemonSessionCatalogVersion, sessions: DaemonSessionLiveState[] }`). These methods always use native REST with bearer authentication and an encoded workspace selector, preserve optional client identity, and use the existing short-request timeout. They do not call `requireCapability()` — a capability probe on every poll would double request volume — so consumers pre-flight `workspace_session_live_state` once from their already-loaded capabilities and fall back to existing catalog polling when the tag is absent. Do not infer support from `workspace_qualified_rest_core`. Each `DaemonSessionLiveState` carries an optional `updatedAt` activity watermark that lets a consumer refresh the recency of a catalog row it already holds instead of reloading the catalog after a completed turn; it is absent before the first running-turn terminal in the current bridge and after a daemon or runtime replacement, so a consumer must keep its existing catalog fallback for a missing value rather than treating absence as unsupported.
+
+When `workspace_session_live_state_batch` is advertised, `client.getSessionsLiveState({ workspaces: ['workspace-a', '/work/b'] }, { signal, timeoutMs })` reads complete memory-only snapshots for 1–20 explicitly selected registered workspaces through one authenticated native REST `POST /sessions/live-state` request. Selectors are workspace ids or absolute cwd paths. The result is `DaemonSessionLiveStateBatchResult`, with one ordered `DaemonSessionLiveStateBatchSnapshot | DaemonSessionLiveStateBatchError` per selector. A successful entry adds the original `workspace` selector and canonical `workspaceId` and `cwd` to the existing `{ v: 1, catalogVersion, sessions }` snapshot; a failed entry carries `error: { code, message, status }` and resolved identity when available, never an empty successful snapshot. The optional second argument controls cancellation and per-call timeout without entering the request body. Pre-flight this distinct capability once from already-loaded capabilities and use single-workspace live-state reads on older daemons. The method does not probe capabilities or automatically fan out.
 
 When `session_catalog_batch` is advertised, `client.listSessionsCatalog(request, { signal, timeoutMs })` reads independent pages for up to 20 public registered workspaces in one native REST request. The method accepts `workspaces: 'all'` or an ordered array of `{ workspace, cursor? }`, shared `options`, and optional `includeGroups`. Selectors can be workspace ids or absolute cwd paths. Options match `DaemonSessionListPageOptions` except that cursors belong to individual entries; `pageSize` is sent as wire `size` and must be 1–100 (default 20). The SDK preserves values for server validation. The optional second argument controls cancellation and the per-call timeout; neither option is serialized into the request body. Source, archive, parent, and organization filters retain the catalog rules.
 
@@ -454,7 +484,7 @@ if (caps.features.includes('session_catalog_batch')) {
 }
 ```
 
-The result is `DaemonSessionCatalogResult`, with an ordered array of `DaemonSessionCatalogPage | DaemonSessionCatalogError`. A successful page contains canonical `cwd`, `workspaceId`, the original `workspace` selector, existing page metadata, and the full `DaemonSessionGroupCatalog` when requested. One failed workspace does not discard successful pages. Continue each workspace with its own batch cursor and unchanged filters; batch default cursors are opaque and cannot be exchanged with legacy numeric list cursors. `all` excludes internal workspaces and fails explicitly above 20 entries, so larger callers split explicit selections. Discover the capability once from connection capabilities and use qualified list/group methods on older daemons. The method does not probe capabilities or automatically fan out: each refresh makes exactly one authenticated HTTP request, even with a custom ACP transport configured.
+The result is `DaemonSessionCatalogResult`, with an ordered array of `DaemonSessionCatalogPage | DaemonSessionCatalogError`. A successful page contains canonical `cwd`, `workspaceId`, the original `workspace` selector, existing page metadata, and the full `DaemonSessionGroupCatalog` when requested. One failed workspace does not discard successful pages. Continue each workspace with its own batch cursor and unchanged filters; batch default cursors are opaque and cannot be exchanged with the persisted list cursors. `all` excludes internal workspaces and fails explicitly above 20 entries, so larger callers split explicit selections. Discover the capability once from connection capabilities and use qualified list/group methods on older daemons. The method does not probe capabilities or automatically fan out: each refresh makes exactly one authenticated HTTP request, even with a custom ACP transport configured.
 
 ### Seeding `lastEventId` at Construction
 
@@ -486,10 +516,13 @@ The value must be a finite, non-negative integer (validated at construction). In
 ## Caveats & Known Limits
 
 - **Disposing the optional `AutoReconnectTransport` stops reconnect retries.** If an asynchronous transport factory finishes after disposal, its returned transport is released and pending retry calls reject with `DaemonTransportClosedError`.
+- **`AutoReconnectTransport.supportsReplay` follows the current transport.** Re-read it after reconnecting: a WebSocket-to-REST fallback enables replay, while a replacement WebSocket transport does not support it. The Web Shell availability wrapper also forwards the current transport type and replay capability.
 
 - **`fetchTimeoutMs` is per-call, not connection-level.** Long body reads share the timer. A daemon that streams responses must override per-call or set the timeout to `0`.
+- **Transport negotiation applies its deadline through the capabilities body.** `negotiateTransport` uses `probeTimeoutMs` (5 seconds by default) for both response headers and JSON body consumption; receiving headers alone does not end the deadline. The default fetch aborts a stalled request or body read and negotiation falls back to REST. An injected `fetchFn` must preserve `init.signal` and abort the pending request or body read for the same guarantee.
 - **SSE bypasses the fetch timeout** — long-lived SSE connections are not killed by `fetchTimeoutMs`. Use `AbortSignal` for caller-controlled cancellation.
 - **`parseSseStream` buffer cap is 16 MiB** as a defensive bound. A single frame larger than this aborts the iterator (the daemon never legitimately emits such frames).
+- **WebSocket negotiation releases its deadline.** A settled WebSocket probe clears its timeout, so a short-lived Node process is not held open by a probe timer.
 - **`asKnownDaemonEvent` returns `undefined` for unrecognized event types.** SDK consumers must handle this branch rather than assuming the union is exhaustive; that is the forward-compatibility contract. Unrecognized events increment `DaemonSessionViewState.unrecognizedKnownEventCount`.
 - **`client_evicted`, `slow_client_warning`, `stream_error` are not in the replay ring.** Reconnecting after eviction picks up from the daemon's ring; you will not see the eviction frame again.
 - **`DaemonClient` does not auto-retry.** Network failures surface as rejections; reconnect / replay strategy is the caller's responsibility (`DaemonSessionClient.events()` makes replay easy but reconnect is still per-call).

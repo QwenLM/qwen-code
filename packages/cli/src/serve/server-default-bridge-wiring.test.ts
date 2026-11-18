@@ -55,15 +55,10 @@ function makeBridge(
 // The ecs-qwen pool runs several jobs at once; under that contention these
 // tests pass alone in milliseconds but blow the 15s ceiling without any
 // real hang. Give that pool the raised budget its other suites already use.
-const timeoutMs = isSlowTestHost() ? 60_000 : 15_000;
+const timeoutMs = isSlowTestHost() ? 60_000 : 30_000;
 vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 describe('createServeApp default bridge wiring', () => {
-  // Every test below resets the module registry and re-imports the full
-  // serve module graph; under heavy parallel CI load that can exceed the
-  // default timeout without any real hang.
-  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
-
   afterEach(() => {
     vi.doUnmock('./acp-session-bridge.js');
     vi.resetModules();
@@ -292,6 +287,7 @@ describe('createServeApp default bridge wiring', () => {
       maxSessions: 7,
       maxPendingPromptsPerSession: 8,
       eventRingSize: 1234,
+      eventRingMaxBytes: 1_234_567,
       compactedReplayMaxBytes: 2_345_678,
       maxJournalEvents: 3456,
       maxJournalBytes: 4_567_890,
@@ -303,7 +299,9 @@ describe('createServeApp default bridge wiring', () => {
       ...enabled,
       experimentalPairedEngines: true,
     });
+    expect(plain.eventRingMaxBytes).toBeUndefined();
     expect(plainEnabled).toMatchObject({
+      eventRingMaxBytes: 1_234_567,
       sessionShellCommandEnabled: true,
       initializeTimeoutMs: 12_345,
       permissionResponseTimeoutMs: 56_789,

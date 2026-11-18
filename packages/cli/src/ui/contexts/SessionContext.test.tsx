@@ -295,6 +295,9 @@ describe('SessionStatsContext', () => {
       totalTtftMs: 100,
       totalGenerationDurationMs: 400,
       totalThroughputOutputTokens: 20,
+      totalTimedGenerationDurationMs: 400,
+      totalOutputSpeedTokens: 20,
+      totalOutputSpeedDurationMs: 500,
       last: {
         model: 'qwen3-coder',
         ttftMs: 100,
@@ -325,6 +328,41 @@ describe('SessionStatsContext', () => {
       150,
     );
 
+    uiTelemetryService.reset();
+  });
+
+  it('copies billing and updates when only the total or source attribution changes', () => {
+    uiTelemetryService.reset();
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    const metrics = uiTelemetryService.getMetrics();
+    metrics.billableOutputTokens = {
+      model: { total: 20, bySource: { main: 20 } },
+    };
+    const emit = () =>
+      act(() => {
+        uiTelemetryService.emit('update', { metrics, lastPromptTokenCount: 0 });
+      });
+    emit();
+    const previous = result.current.stats.metrics.billableOutputTokens;
+    metrics.billableOutputTokens.model.total = 30;
+    emit();
+    expect(result.current.stats.metrics.billableOutputTokens?.model.total).toBe(
+      30,
+    );
+    expect(previous?.model.total).toBe(20);
+    metrics.billableOutputTokens.model.bySource.main = 0;
+    metrics.billableOutputTokens.model.bySource.researcher = 30;
+    emit();
+    expect(
+      result.current.stats.metrics.billableOutputTokens?.model.bySource,
+    ).toEqual({
+      main: 0,
+      researcher: 30,
+    });
+    expect(previous?.model.bySource).toEqual({ main: 20 });
+    unmount();
     uiTelemetryService.reset();
   });
 

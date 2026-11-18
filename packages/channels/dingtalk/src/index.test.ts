@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import * as dingtalkPackage from './index.js';
 import { plugin } from './index.js';
 
 describe('DingTalk management fields', () => {
@@ -16,5 +17,17 @@ describe('DingTalk management fields', () => {
       'clientSecret',
       'interactiveCards',
     ]);
+  });
+});
+
+describe('DingTalk package export surface (#17173 R3)', () => {
+  it('exports the managed adapter surface the CLI and deps consume', () => {
+    // Reverting the managed export block must red this suite, not leave
+    // every consumer test green on its direct module import.
+    expect(typeof dingtalkPackage.ManagedDingtalkAdapter).toBe('function');
+    expect(typeof dingtalkPackage.dingtalkSettings).toBe('function');
+    expect(typeof dingtalkPackage.createManagedDingtalkDeps).toBe('function');
+    expect(typeof dingtalkPackage.DingtalkChannel).toBe('function');
+    expect(typeof dingtalkPackage.webhookPlugin).toBe('object');
   });
 });

@@ -19,6 +19,7 @@ import { writeClipboardText } from '../../../utils/clipboard';
 import { Button } from '../../ui/button';
 import {
   extractText,
+  hasRecordedOutput,
   getToolDescription,
   isActiveToolStatus,
   localizeToolDisplayName,
@@ -80,13 +81,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
   }, [live, result, text, active, tool.rawOutput]);
   const output = segments?.map((seg) => seg.text).join('') ?? '';
   const emptyOutput = t(
-    raw == null &&
-      !tool.content?.some(
-        (block) =>
-          block.type === 'content' && typeof block.content?.text === 'string',
-      )
-      ? 'shell.result.unavailable'
-      : 'shell.result.empty',
+    hasRecordedOutput(tool) ? 'shell.result.empty' : 'shell.result.unavailable',
   );
   const outputRef = useRef<HTMLPreElement>(null);
   const following = useRef(true);
@@ -299,7 +294,10 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
             {t('shell.result.signal')}: {result.signal}
           </div>
         )}
-        {(result || showTimeout || live || elapsed) && (
+        {(result ||
+          showTimeout ||
+          live?.totalLines !== undefined ||
+          live?.totalBytes !== undefined) && (
           <details className={styles.shellDetails} open={documentMode}>
             <summary>{t('shell.result.details')}</summary>
             <dl>

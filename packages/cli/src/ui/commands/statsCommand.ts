@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { MessageType } from '../types.js';
 import { formatDuration } from '../utils/formatters.js';
+import { computeGenerationRates } from '../utils/computeStats.js';
 import {
   type CommandContext,
   type SlashCommand,
@@ -17,7 +18,10 @@ import {
   CommandKind,
 } from './types.js';
 import { getCurrentLanguage, t } from '../../i18n/index.js';
-import { calculateCost } from '../../utils/costCalculator.js';
+import {
+  billableOutputTokens,
+  calculateCost,
+} from '../../utils/costCalculator.js';
 import {
   formatTokenUsageSummaryAsCsv,
   formatTokenUsageSummaryAsJson,
@@ -46,19 +50,7 @@ function formatGenerationMetrics(metrics: GenerationMetrics | undefined) {
     return [];
   }
 
-  const lastTps =
-    last.generationDurationMs > 0
-      ? last.outputTokens / (last.generationDurationMs / 1000)
-      : undefined;
-  const averageTtft =
-    metrics.timedRequests > 0
-      ? metrics.totalTtftMs / metrics.timedRequests
-      : undefined;
-  const sessionTps =
-    metrics.totalGenerationDurationMs > 0
-      ? metrics.totalThroughputOutputTokens /
-        (metrics.totalGenerationDurationMs / 1000)
-      : undefined;
+  const { lastTps, averageTtft, sessionTps } = computeGenerationRates(metrics);
 
   return [
     '',
@@ -66,7 +58,7 @@ function formatGenerationMetrics(metrics: GenerationMetrics | undefined) {
     `${t('Model')}: ${last.model}`,
     `TTFT: ${formatDuration(last.ttftMs)}`,
     `${t('Generation Time')}: ${formatDuration(last.generationDurationMs)}`,
-    `${t('Output Tokens')}: ${formatInteger(last.outputTokens)}`,
+    `${t('Output (incl. Reasoning)')}: ${formatInteger(last.outputTokens)}`,
     `TPS: ${lastTps === undefined ? '—' : `${lastTps.toFixed(1)} tok/s`}`,
     `${t('Requests')}: ${formatInteger(metrics.timedRequests)}`,
     `${t('Average TTFT')}: ${
@@ -779,10 +771,19 @@ export const statsCommand: SlashCommand = {
             lines.push(
               `${modelName}: ${t('prompt')}=${modelMetrics.tokens.prompt}, ${t('output')}=${modelMetrics.tokens.candidates}, ${t('cached')}=${modelMetrics.tokens.cached}`,
             );
+            // billableOutputTokens clamps per record and is not additive, so
+            // bill the same per-source buckets the stats panel renders; the
+            // model aggregate can fall out of band and re-bill reasoning.
+            const buckets = Object.values(modelMetrics.bySource);
+            if (buckets.length === 0) buckets.push(modelMetrics);
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,
               outputTokens:
-                modelMetrics.tokens.candidates + modelMetrics.tokens.thoughts,
+                metrics.billableOutputTokens?.[modelName]?.total ??
+                buckets.reduce(
+                  (sum, bucket) => sum + billableOutputTokens(bucket.tokens),
+                  0,
+                ),
               pricing: pricing?.[modelName],
             });
             if (cost != null) {

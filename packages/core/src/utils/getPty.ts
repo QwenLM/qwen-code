@@ -10,7 +10,7 @@ import { isBunRuntime } from './runtime-info.js';
 export type PtyImplementation = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   module: any;
-  name: 'lydell-node-pty' | 'node-pty';
+  name: 'lydell-node-pty' | 'node-pty' | 'qwen-bun-pty';
 } | null;
 
 export interface PtyProcess {
@@ -42,13 +42,28 @@ export interface PtyLoadResult {
  * callers that only need the backend use getPty().
  */
 export const loadPty = async (): Promise<PtyLoadResult> => {
-  // Bun can load @lydell/node-pty, but it hangs under Desktop's runtime.
+  // @lydell/node-pty's wrapper feeds the master fd through a `tty.ReadStream`,
+  // which Bun destroys on the first EAGAIN — the child then runs on with no
+  // output ever arriving. Under Bun, drive the same pinned native addon
+  // through the thin backend in bun-pty.ts instead; the Node path is untouched.
   if (isBunRuntime()) {
-    return {
-      impl: null,
-      loadError:
-        'the PTY backend is disabled under the Bun runtime; use the Node runtime',
-    };
+    if (process.platform === 'win32') {
+      return {
+        impl: null,
+        loadError:
+          'the PTY backend is not yet available under the Bun runtime on Windows; use the Node runtime',
+      };
+    }
+    try {
+      const module = await import('./bun-pty.js');
+      // The import alone proves nothing: the addon is loaded by path from
+      // the platform package, so probe it here and let a missing prebuild
+      // degrade to null like the Node arm's import-time failure.
+      module.loadAddon();
+      return { impl: { module, name: 'qwen-bun-pty' }, loadError: null };
+    } catch (error) {
+      return { impl: null, loadError: getErrorMessage(error) };
+    }
   }
 
   try {

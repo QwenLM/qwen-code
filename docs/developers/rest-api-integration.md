@@ -139,9 +139,14 @@ whole bearer-gated API, and a trusted loopback caller gets full authority
 including code execution as the daemon user. There is no per-end-user principal
 model. If you are putting
 this behind a multi-user product, your backend owns user identity and must not
-hand the daemon token to browsers. Containerised and multi-tenant deployment
-are explicitly deferred — see "v0.16-alpha known limits" in the
-[user guide](../users/qwen-serve.md).
+hand the daemon token to browsers. Containerised deployments must apply the
+same listener, token, and browser-origin rules. Multi-tenant deployments also
+require an external orchestrator with separate daemons for independent
+security principals — see
+[Deployment and security notes](../users/qwen-serve.md#deployment-and-security-notes)
+and
+[Multi-session & multi-workspace deployment](../users/qwen-serve.md#multi-session--multi-workspace-deployment)
+in the user guide.
 
 Configured channel webhook ingress (`POST /channels/:channelName/webhooks/:source`)
 uses its own `x-qwen-webhook-secret` authentication before bearer

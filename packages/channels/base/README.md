@@ -145,14 +145,15 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 
 **Provided methods:**
 
-| Method                                                     | Description                                                                                                                                           |
-| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `handleInbound(envelope)`                                  | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler.                     |
-| `setBridge(bridge)`                                        | Replace the agent bridge after crash recovery                                                                                                         |
-| `registerCommand(name, handler)`                           | Register a custom slash command (e.g. `/mycommand`)                                                                                                   |
-| `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                   |
-| `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op) |
-| `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode) |
+| Method                                                     | Description                                                                                                                                                                                           |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `handleInbound(envelope)`                                  | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler.                                                                     |
+| `setBridge(bridge)`                                        | Replace the agent bridge after crash recovery                                                                                                                                                         |
+| `registerCommand(name, handler)`                           | Register a custom slash command (e.g. `/mycommand`)                                                                                                                                                   |
+| `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                                                                   |
+| `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op)                                                 |
+| `isProactivePromptTurn(sessionId)`                         | `true` for loop and webhook turns whose result base delivers once via `pushProactive`; a sink that flushes streamed chunks must suppress those turns (base never calls `onResponseComplete` for them) |
+| `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode)                                                 |
 
 **Built-in slash commands:** `/clear` (`/reset`, `/new`), `/help`, `/status`
 
@@ -294,11 +295,14 @@ sender check an adapter makes itself must go through
 group's setting is silently ignored on that lane. A group gate never carries
 `pairing`: an approval there would also unlock direct messages.
 
-**Operators:** commands that act on a shared session (`/approve`, `/cancel`,
+**Operators:** commands that act on a shared session (`/approve-always`, `/cancel`,
 `/clear`, `/loop`, the loop tool, steering, ...) check
 `isSharedSessionOperator`, not the sender gates. Only explicit `config.operators`
 grants shared-session operator permissions; omitted or empty means nobody.
 Private policy, user pairing, and group member admission never imply this role.
+An admitted sender may still `/approve` once or `/deny` their own pending request
+in the current attended run, in the same chat and thread. This does not grant
+session-management permissions or permission to answer another member's request.
 
 `resolvePrivatePolicy(config)` resolves the four-value private policy. Explicit
 `privatePolicy` takes precedence over deprecated `dmPolicy` and `senderPolicy`;
