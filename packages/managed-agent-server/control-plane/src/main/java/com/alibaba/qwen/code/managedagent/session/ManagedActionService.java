@@ -246,12 +246,6 @@ public class ManagedActionService {
                 session, id, web);
     }
 
-    private JsonNode get(String tenant, SessionPrincipal principal, String session,
-            String id, boolean web) {
-        return get(tenant, principal, principal == null ? null : principal.userId(),
-                session, id, web);
-    }
-
     private JsonNode get(String tenant, SessionPrincipal principal,
             String rawActor, String session, String id, boolean web) {
         readable(tenant, principal, rawActor, session);
