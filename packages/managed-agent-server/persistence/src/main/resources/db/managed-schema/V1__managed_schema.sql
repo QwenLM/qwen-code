@@ -3,7 +3,6 @@
 -- Do not add V2+ migrations or increment the database schema version before that release.
 -- Development catalogs must be recreated when the baseline changes; no upgrade path is maintained.
 -- No old-schema upgrade or compatibility objects are provided.
--- Generated-column comments stay on a continuation line because validation reads the expression line.
 
 CREATE TABLE ma_session (
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
@@ -896,11 +895,14 @@ CREATE TABLE ma_extension_package (
     package_digest CHAR(64) NOT NULL COMMENT 'Digest of the extension package content.',
     manifest_json LONGTEXT NOT NULL COMMENT 'Validated extension package manifest.',
     source_json LONGTEXT NULL COMMENT 'External source identity, exact business revision and verified source digest, null for direct uploads.',
+    standalone_skill_json LONGTEXT NULL COMMENT 'Compiled standalone Skill metadata for the initial Session catalog.',
+    is_catalog_listed TINYINT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Whether an explicit publication lists this revision in the Workspace catalog.',
     byte_length BIGINT UNSIGNED NOT NULL COMMENT 'Total published package size in bytes.',
     state VARCHAR(16) NOT NULL COMMENT 'Package publication state: PREPARING or PUBLISHED.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_extension_package_business_key UNIQUE (package_key),
     CONSTRAINT uk_ma_extension_package UNIQUE (scope_key, extension_id, package_revision),
+    CONSTRAINT ck_ma_extension_package_listed CHECK (is_catalog_listed >= 0 AND is_catalog_listed <= 1),
     CONSTRAINT ck_ma_extension_package_revision CHECK (package_revision > 0),
     CONSTRAINT ck_ma_extension_package_bytes CHECK (byte_length >= 0 AND byte_length <= 104857600),
     CONSTRAINT ck_ma_extension_package_state CHECK (CASE state WHEN 'PREPARING' THEN 9 WHEN 'PUBLISHED' THEN 9 ELSE -1 END = CHAR_LENGTH(state)),

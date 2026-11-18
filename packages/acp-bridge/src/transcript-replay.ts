@@ -480,9 +480,25 @@ export function createAgentRecordTranscriptUpdate(
     typeof payload['error'] === 'string' && payload['error'].length > 0
       ? payload['error']
       : undefined;
+  const sentTo = isObjectRecord(payload['sentTo'])
+    ? payload['sentTo']
+    : undefined;
   const mentionMeta: QwenAgentMessageMeta = {
     kind: 'agent_mention',
     mentionedAgentIds,
+    ...(sentTo &&
+    typeof sentTo['sessionId'] === 'string' &&
+    typeof sentTo['workspaceCwd'] === 'string'
+      ? {
+          sentTo: {
+            sessionId: sentTo['sessionId'],
+            workspaceCwd: sentTo['workspaceCwd'],
+            ...(typeof sentTo['title'] === 'string'
+              ? { title: sentTo['title'] }
+              : {}),
+          },
+        }
+      : {}),
     ...(mentionedSquadIds.length > 0 ? { mentionedSquadIds } : {}),
     ...(mentionError ? { error: mentionError } : {}),
     ...(author ? { author } : {}),

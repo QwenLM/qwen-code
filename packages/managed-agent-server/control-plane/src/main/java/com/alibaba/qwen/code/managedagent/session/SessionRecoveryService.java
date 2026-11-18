@@ -189,6 +189,7 @@ public class SessionRecoveryService {
     private static boolean recoveryIntent(TurnRecord turn) {
         return turn != null && ACTIVE.contains(turn.status())
                 && ("CANCELLING".equals(turn.status())
+                        || TurnExecutionStore.HARNESS_RECOVERY_BLOCKED.equals(turn.errorCode())
                         || TurnExecutionStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode())
                         || TurnExecutionStore.WORKFLOW_RECOVERY_BLOCKED.equals(turn.errorCode()));
     }

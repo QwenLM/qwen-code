@@ -111,6 +111,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed session source metadata field',
   ),
   session_side_task: NO_MANAGED_EQUIVALENT('no Managed side-task surface'),
+  session_sub_session_send: NO_MANAGED_EQUIVALENT(
+    'no Managed sub-session send surface',
+  ),
   session_prompt: { standing: 'managed', evidence: 'surface:TURN_SUBMIT' },
   session_turn_status: NO_MANAGED_EQUIVALENT(
     'Managed reads Turns by list and get, not a status route',
@@ -400,6 +403,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed GitHub setup route',
   ),
   workspace_github_prs: NO_MANAGED_EQUIVALENT('no Managed GitHub PRs route'),
+  workspace_github_pr_files: NO_MANAGED_EQUIVALENT(
+    'no Managed GitHub PR files route',
+  ),
+  workspace_git_log_exclude_refs: NO_MANAGED_EQUIVALENT(
+    'no Managed git log exclude-refs route',
+  ),
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
   ),
@@ -572,6 +581,8 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed worktrees',
   ),
   session_worktree_reset_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
+  session_worktree_branch_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
+  session_worktree_handoff_v1: NO_MANAGED_EQUIVALENT('no Managed worktrees'),
   workspace_qualified_acp: LEGACY_ONLY('no ACP in Managed'),
   client_mcp_over_ws: NO_MANAGED_EQUIVALENT(
     'no client-hosted MCP over the Managed transport',

@@ -120,6 +120,53 @@ function fixture(prompt: string) {
 }
 
 describe('Hosted durable command expansion', () => {
+  it.each([
+    'ordinary input',
+    '$$',
+    '$&',
+    '$`',
+    "$'",
+    '$ARGUMENTS ${extensionPath} {{args}}',
+  ])(
+    'keeps argument text literal when expanding %s in a hosted prompt',
+    async (args) => {
+      const context = fixture(
+        'From ${extensionPath}: {{args}} and $ARGUMENTS.',
+      );
+      context.options.args = args;
+      const prompt = await expandHostedExtensionCommand(context.options);
+      expect(prompt).toContain(`From extension://sample: ${args} and ${args}.`);
+      expect(context.decide).not.toHaveBeenCalled();
+      expect(context.control).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps argument text literal when expanding a hosted file path', async () => {
+    const context = fixture('@{${extensionPath}/ctx-{{args}}.md}');
+    context.options.args = '$& ${extensionPath}';
+    const input = {
+      file_path: 'extension://sample/ctx-$& ${extensionPath}.md',
+    };
+
+    expect(await expandHostedExtensionCommand(context.options)).toContain(
+      '\nRESULT\n',
+    );
+    expect(context.decide).toHaveBeenCalledTimes(1);
+    expect(context.decide).toHaveBeenCalledWith(
+      expect.any(String),
+      'read_file',
+      input,
+    );
+    expect(context.control).toHaveBeenCalledTimes(1);
+    expect(context.control).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'execute',
+        toolName: 'read_file',
+        input,
+      }),
+    );
+  });
+
   it('expands pure prompt arguments without starting Runtime work', async () => {
     const context = fixture('Review {{args}}');
     const prompt = await expandHostedExtensionCommand(context.options);
@@ -145,6 +192,27 @@ describe('Hosted durable command expansion', () => {
     expect(context.control).toHaveBeenCalledTimes(1);
     expect(context.decide).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    { placeholder: '{{args}}', expected: "'${extensionPath} $ARGUMENTS'" },
+    { placeholder: "'{{args}}'", expected: "'${extensionPath} $ARGUMENTS'" },
+    {
+      placeholder: '"{{args}}"',
+      expected: '"\\${extensionPath} \\$ARGUMENTS"',
+    },
+  ])(
+    'expands the template extension path without rewriting arguments in $placeholder',
+    async ({ placeholder, expected }) => {
+      const context = fixture(
+        `!{printf '%s %s' "\${extensionPath}" ${placeholder}}`,
+      );
+      context.options.args = '${extensionPath} $ARGUMENTS';
+      await expandHostedExtensionCommand(context.options);
+      expect(context.decide.mock.calls[0]?.[2]).toMatchObject({
+        command: `printf '%s %s' "\${QWEN_EXTENSION_ROOT}" ${expected}`,
+      });
+    },
+  );
 
   it('queries an unknown original step without dispatching it again', async () => {
     const context = fixture('!{pwd}');
