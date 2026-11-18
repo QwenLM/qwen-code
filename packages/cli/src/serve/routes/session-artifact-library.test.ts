@@ -28,6 +28,11 @@ import { ConversationRuntimeActivityGate } from '../conversations/conversation-r
 import { registerSessionRoutes } from './session.js';
 import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
 import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
+import {
+  resolveSseAdmissionCaps,
+  type SseAdmissionCaps,
+} from '../daemon-status.js';
+import { countSseStream, getSseOccupancy } from '../sse-occupancy.js';
 import type { WorkspaceSessionArtifactsEnvelope } from '../server/session-artifact-library.js';
 
 vi.mock('../../runtime/live-session-source.js', async (original) => ({
@@ -67,7 +72,12 @@ function runtime(workspaceId = 'primary', live = true): WorkspaceRuntime {
     } as unknown as AcpSessionBridge,
   } as WorkspaceRuntime;
 }
-function setup(runtimes = [runtime()], persistence = true, authorized = true) {
+function setup(
+  runtimes = [runtime()],
+  persistence = true,
+  authorized = true,
+  caps?: SseAdmissionCaps,
+) {
   const app = express();
   app.use(express.json());
   const registry = createWorkspaceRegistry(runtimes);
@@ -88,6 +98,7 @@ function setup(runtimes = [runtime()], persistence = true, authorized = true) {
     sessionShellCommandEnabled: true,
     sessionArtifactsPersistenceAvailable: persistence,
     languageCodes: ['en'],
+    sseAdmissionCaps: caps,
   });
   return { app, registry, coordinator, activity };
 }
@@ -1142,5 +1153,93 @@ describe('artifact library progressive queries', () => {
       .set('Accept', 'text/event-stream');
     expect(disabled.status).toBe(409);
     expect(disabled.headers['content-type']).toContain('application/json');
+  });
+});
+
+describe('artifact library SSE admission (issue #17554)', () => {
+  it('refuses the SSE variant at the shared cap while JSON keeps serving', async () => {
+    const { app } = setup(
+      [runtime()],
+      true,
+      true,
+      resolveSseAdmissionCaps({ maxConnections: 10, maxSseConnections: 1 }),
+    );
+    // Fill the only admission slot with a counted stream on any surface.
+    const release = countSseStream('restEvents', {
+      socket: {},
+    } as never);
+    try {
+      const response = await request(app)
+        .post(`${collectionRoute}/query`)
+        .set('Accept', 'text/event-stream')
+        .send({ sessionIds: [id] });
+      expect(response.status).toBe(503);
+      expect(response.headers['retry-after']).toBe('5');
+      expect(response.body).toEqual({
+        error:
+          'Daemon SSE connection limit reached (1/1). ' +
+          'Retry after the Retry-After interval.',
+        code: 'sse_connection_limit_exceeded',
+        limit: 1,
+        active: 1,
+        scope: 'daemon',
+      });
+      // The JSON variant is a short request: the cap must not touch it.
+      const json = await request(app)
+        .post(`${collectionRoute}/query`)
+        .send({ sessionIds: [id] });
+      expect(json.status).toBe(200);
+      expect(json.headers['content-type']).toContain('application/json');
+    } finally {
+      release();
+    }
+  });
+
+  it('counts the open SSE stream in the shared occupancy', async () => {
+    const { app } = setup([runtime()], true, true, resolveSseAdmissionCaps({}));
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(WorkspaceArtifactCache.prototype, 'read').mockImplementation(
+      async () => {
+        await blocked;
+        return streamEnvelope(id);
+      },
+    );
+    const server = await listen(app);
+    const before = getSseOccupancy();
+    try {
+      const response = await fetch(serverUrl(server), {
+        method: 'POST',
+        headers: {
+          Accept: 'text/event-stream',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ sessionIds: [id] }),
+      });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      expect(new TextDecoder().decode(first.value)).toContain('event: start');
+      expect(getSseOccupancy().bySurface.artifactLibrary).toBe(
+        before.bySurface.artifactLibrary + 1,
+      );
+      release();
+      while (!(await reader.read()).done) {
+        // Drain the completed stream so its close hook releases the slot.
+      }
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().bySurface.artifactLibrary).toBe(
+            before.bySurface.artifactLibrary,
+          );
+        },
+        { timeout: 5_000 },
+      );
+    } finally {
+      release();
+      await closeServer(server);
+    }
   });
 });
