@@ -47,18 +47,19 @@ Then enter:
    Interactive sessions that load servers from `settings.json` pick up
    `mcpServers` changes without a restart (hot reload).
 
-> [!note]
->
-> Servers from a project's `.mcp.json` or `.qwen/settings.json` require
-> approval before connecting, except in YOLO mode. If `qwen mcp list` shows
-> “Pending approval”, run `qwen mcp approve <name>` in that project and
-> start a new interactive session. To deny the server, run
-> `qwen mcp reject <name>`.
->
-> With `--bare` or `--safe-mode`, Qwen Code ignores servers in `settings.json`
-> even after a restart. To use a server in these modes, pass it at startup with
-> `--mcp-config`. The [Linux tool execution sandbox](./sandbox.md#linux-tool-execution-sandbox)
-> disables MCP entirely.
+### Server approval and session restrictions
+
+- In an [untrusted folder](../configuration/trusted-folders.md), the session
+  skips MCP connections, including servers configured at user scope.
+- Servers from a project's `.mcp.json` or `.qwen/settings.json` require
+  approval, except in YOLO mode. In the interactive terminal, approve a pending
+  server in `/mcp` to connect it in the current session. From a shell, run
+  `qwen mcp approve <name>` in that project and start a new interactive session,
+  or use `qwen mcp reject <name>` to deny it.
+- With `--bare` or `--safe-mode`, Qwen Code ignores servers from `settings.json`
+  and the project's `.mcp.json`. Pass servers at startup with `--mcp-config`.
+  The [Linux tool execution sandbox](./sandbox.md#linux-tool-execution-sandbox)
+  disables MCP entirely.
 
 If the session supports settings-based servers and an eligible server still
 does not appear in `/mcp` after a settings change, restart Qwen Code in the
