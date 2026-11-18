@@ -283,12 +283,14 @@ describe('ChannelsManagerPage', () => {
       language: 'en' as const,
       name: 'Generic Webhook',
       title: 'Configure Generic Webhook',
+      methodTitle: 'Choose a Generic Webhook connection',
       url: 'Webhook URL',
     },
     {
       language: 'zh-CN' as const,
       name: '通用 Webhook',
       title: '配置通用 Webhook',
+      methodTitle: '选择通用 Webhook的连接方式',
       url: 'Webhook 地址',
     },
   ])(
@@ -315,10 +317,16 @@ describe('ChannelsManagerPage', () => {
         container.querySelector('[data-slot="card"]')?.textContent,
       ).toContain(copy.name);
       await act(async () => platform.click());
+      expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
       const dialog = document.querySelector('[role="dialog"]')!;
       expect(dialog.textContent).toContain(copy.title);
       expect(inputByLabel(copy.url)).not.toBeNull();
-      expect(dialog.querySelectorAll('[role="dialog"]')).toHaveLength(0);
+      expect(
+        Array.from(
+          document.querySelectorAll('h2'),
+          (heading) => heading.textContent,
+        ),
+      ).not.toContain(copy.methodTitle);
     },
   );
 

@@ -439,7 +439,17 @@ describe('ScheduledTaskDeliveryFields configured destinations', () => {
       target: { channelName: 'app-bot', type: 'chat', id: '' },
     };
     expect(onChange).toHaveBeenLastCalledWith(manualDelivery);
-    await render(manualDelivery);
+    for (const [language, chat] of [
+      ['en', 'Chat'],
+      ['zh-CN', '群聊'],
+    ] as const) {
+      await render(manualDelivery, {}, language);
+      expect(
+        container.querySelector(
+          '#scheduled-task-delivery-type option[value="chat"]',
+        )?.textContent,
+      ).toBe(chat);
+    }
     expect(
       container.querySelector('#scheduled-task-delivery-id'),
     ).not.toBeNull();

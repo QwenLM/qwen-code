@@ -2797,6 +2797,9 @@ describe('ChannelEditorDialog', () => {
         ?.closest('[data-slot="collapsible"]');
     const panel = panelOf('Message Routes');
     expect(panel?.textContent).toContain('Advanced settings');
+    expect(panel?.textContent).toContain(
+      'Rarely changed tuning for connection, routing, and session behavior.',
+    );
     expect(panelOf('Default Message Route')).toBe(panel);
   });
 

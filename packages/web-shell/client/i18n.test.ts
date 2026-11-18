@@ -642,6 +642,28 @@ describe('web-shell i18n catalog', () => {
 // ru is a full shipped catalog. These pins guard the normalizer branches,
 // Goal pluralisation, and that chrome keys resolve from RU rather than EN.
 describe('web-shell ru locale', () => {
+  it.each([
+    'scheduledTasks.delivery.configuredEndpointHint',
+    'scheduledTasks.delivery.endpoint',
+    'channels.editor.field.genericWebhook.webhookUrl',
+    'channels.editor.field.genericWebhook.webhookUrl.description',
+    'channels.editor.field.genericWebhook.bearerToken',
+    'channels.editor.field.genericWebhook.bearerToken.description',
+    'channels.editor.field.genericWebhook.allowPrivateNetwork',
+    'channels.editor.field.genericWebhook.allowPrivateNetwork.description',
+    'channels.editor.field.genericWebhook.networkDescription',
+  ])('localizes Generic Webhook copy in Russian: %s', (key) => {
+    const translated = getTranslator('ru')(key);
+    expect(translated).not.toBe(key);
+    expect(translated).not.toBe(getTranslator('en')(key));
+  });
+
+  it('keeps the Generic Webhook platform name unchanged in Russian', () => {
+    expect(getTranslator('ru')('channels.platform.name.generic-webhook')).toBe(
+      'Generic Webhook',
+    );
+  });
+
   it('normalizes ru spellings to ru and leaves the en/zh mappings untouched', () => {
     for (const value of [
       'ru',
