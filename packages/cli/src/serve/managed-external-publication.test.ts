@@ -399,6 +399,42 @@ describe.skipIf(process.platform === 'win32')(
       );
     });
 
+    it('revives a lapsed channel on the owning dispatch\'s re-begin and renewal', async () => {
+      const expiresAt = Date.now() + 1_000;
+      const id = await publication!.begin(request, expiresAt, captureId);
+      // A lapsed horizon is the state a Broker outage leaves behind: the
+      // channel's own drain paths now refuse.
+      vi.spyOn(Date, 'now').mockReturnValue(expiresAt + 1);
+      await expect(publication!.read(id, 'stdout', 0, -1)).rejects.toThrow(
+        'publication is closed',
+      );
+      // The recovered dispatch re-runs begin on the same execution with the
+      // identical captured input and its own fresh horizon, which revives the
+      // channel instead of refusing it.
+      const fresh = expiresAt + 2;
+      expect(await publication!.begin(request, fresh + 60_000, captureId)).toBe(
+        id,
+      );
+      // Renewal revives a lapsed channel the same way.
+      vi.spyOn(Date, 'now').mockReturnValue(fresh + 60_001);
+      await expect(publication!.read(id, 'stdout', 0, -1)).rejects.toThrow(
+        'publication is closed',
+      );
+      await publication!.renew(id, fresh + 120_000);
+      // A different captured input on the same execution is still the
+      // closed-lane refusal.
+      await expect(
+        publication!.begin(
+          {
+            ...request,
+            capture: { ...request.capture, bindingGeneration: '2' },
+          },
+          fresh + 120_000,
+          captureId,
+        ),
+      ).rejects.toThrow('publication is closed');
+    });
+
     it('captures real binary stdout/stderr with bounded replay and refuses drain until acknowledged EOF', async () => {
       const channelId = await publication!.begin(
         request,

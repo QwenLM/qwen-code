@@ -9,7 +9,9 @@
 //   - the EOF is its own empty sequence, so every earlier sequence has bytes;
 //   - acknowledgedSequence may equal the sequence being read but never exceed
 //     it, which is the only way the last one — the EOF included — is acked;
-//   - the channel horizon only moves forward, and an expired channel is closed.
+//   - the channel horizon only moves forward; an expired channel refuses its
+//     own drain paths, but its owner revives it on begin/renew with a fresh
+//     horizon and the identical captured input.
 import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -53,6 +55,9 @@ const value = (name) => {
 const stdout = Buffer.from(value('stdout') ?? 'witness\n', 'utf8');
 const stderr = Buffer.from(value('stderr') ?? '', 'utf8');
 const exitCode = Number(value('exit-code') ?? '0');
+// The storage revision this worker registered with. A request carrying any
+// other revision is the closed-lane refusal, as on the shipped worker.
+const revision = Number(value('storage-revision') ?? '1');
 // A wedged channel: read answers pending for ever, so only the Broker's own
 // bounded wait can end the drain.
 const neverReady = flag('never-ready');
@@ -104,6 +109,7 @@ function authenticated(request) {
     request.headers['x-qwen-managed-lease-epoch'] === String(boot.epoch) &&
     request.headers['x-qwen-managed-runtime-incarnation'] ===
       boot.runtimeIncarnation &&
+    request.headers['x-qwen-managed-storage-revision'] === String(revision) &&
     request.headers['cache-control'] === 'no-store'
   );
 }
@@ -223,9 +229,12 @@ function begin(response, body) {
       400,
     );
   }
-  const key = `${capture.executionCallId}:${capture.bindingGeneration}`;
+  // The shipped worker keys the idempotent retry on the execution alone: the
+  // request digest — which covers the binding generation — is the fence, so a
+  // re-begin with a changed generation is the closed-lane refusal, not a
+  // second channel whose cursors restart at zero.
   const existing = [...channels.values()].find(
-    (channel) => channel.key === key,
+    (channel) => channel.executionCallId === capture.executionCallId,
   );
   if (existing) {
     // The captured input is fixed at begin; only the horizon may move.
@@ -238,6 +247,8 @@ function begin(response, body) {
         'Publication channel was opened for another capture.',
       );
     }
+    // A lapsed horizon revives on its owner's re-begin: the fresh expiresAt
+    // plus the identical request digest are the authorization.
     existing.horizon = Math.max(existing.horizon, expiresAt);
     respond(response, 200, {
       protocolVersion: 2,
@@ -247,8 +258,8 @@ function begin(response, body) {
   }
   const channelId = randomUUID();
   channels.set(channelId, {
-    key,
     channelId,
+    executionCallId: capture.executionCallId,
     captureId,
     requestDigest: digestOf(reference, capture, captureId),
     horizon: expiresAt,
@@ -282,11 +293,16 @@ function digestOf(reference, capture, captureId) {
     .digest('hex');
 }
 
-function live(body) {
+function channelOf(body) {
   const channel = channels.get(body.channelId);
   if (!channel) {
     throw refusal(CLOSED, 'Managed Runtime publication is closed.');
   }
+  return channel;
+}
+
+function live(body) {
+  const channel = channelOf(body);
   if (channel.horizon <= Date.now()) {
     throw refusal(CLOSED, 'Managed Runtime publication channel expired.');
   }
@@ -347,10 +363,11 @@ function read(response, body) {
 }
 
 function renew(response, body) {
-  const channel = live(body);
+  const channel = channelOf(body);
   if (!Number.isSafeInteger(body.expiresAt) || body.expiresAt <= Date.now()) {
     throw refusal(CLOSED, 'Managed Runtime publication is closed.');
   }
+  // A lapsed horizon revives on its owner's renewal, as on re-begin.
   // Only ever forward: a stale renewal must not shorten a live channel.
   channel.horizon = Math.max(channel.horizon, body.expiresAt);
   respond(response, 200, { protocolVersion: 2, renewed: true });

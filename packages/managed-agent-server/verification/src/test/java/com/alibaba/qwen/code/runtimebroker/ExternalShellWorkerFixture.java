@@ -94,7 +94,8 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
         var script = Path.of("src/test/resources/external-shell-worker.mjs").toAbsolutePath();
         assumeTrue(Files.isRegularFile(script), "The worker stand-in is required");
         var command = new ArrayList<>(List.of("node", script.toString(),
-                "--stdout=" + stdout, "--stderr=" + stderr));
+                "--stdout=" + stdout, "--stderr=" + stderr,
+                "--storage-revision=" + revision));
         command.addAll(List.of(extra));
         var process = new ProcessBuilder(command).redirectErrorStream(false).start();
         var scope = request.getScope();
@@ -243,6 +244,35 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
                     fields.path("code").asText(), fields.path("error").asText(), false);
         } catch (IOException failure) {
             throw new AssertionError("The worker exchange failed", failure);
+        }
+    }
+
+    /**
+     * The worker's own answer to a begin this fixture holds the full capture
+     * shape for, including a refusal, for the identity fences the transport
+     * validates only on success.
+     */
+    public java.net.http.HttpResponse<String> beginRaw(Map<String, Object> reference,
+            Map<String, Object> capture, long expiresAt, String captureId) {
+        return exchange("begin", Map.of("protocolVersion", 2, "reference", reference,
+                "capture", capture, "expiresAt", expiresAt, "captureId", captureId), lease);
+    }
+
+    /**
+     * The stop-drained refusal the real transport throws, for cases that must
+     * prove the worker itself rejected the stop rather than merely answering
+     * undrained.
+     */
+    public RuntimeBrokerException stopDrainedRefusal(HttpRuntimeTransport transport) {
+        try {
+            transport.stopExternalWorkspaceDrained(lease, request, seed, revision)
+                    .toCompletableFuture().join();
+            throw new AssertionError("The drained stop was not refused");
+        } catch (java.util.concurrent.CompletionException refused) {
+            if (refused.getCause() instanceof RuntimeBrokerException failure) {
+                return failure;
+            }
+            throw refused;
         }
     }
 

@@ -300,4 +300,104 @@ class ExternalShellWorkerProtocolTest {
             }
         }
     }
+
+    @Test
+    @Timeout(60)
+    void aLapsedChannelRevivesOnItsOwnersBegin() throws Exception {
+        try (var worker = ExternalShellWorkerFixture.start("witness\n", "")) {
+            var transport = worker.transport();
+            var channel = begin(worker, transport, System.currentTimeMillis() + 1_000);
+            // Let the horizon lapse, the state a Broker outage leaves behind:
+            // the channel's own drain paths now refuse.
+            Thread.sleep(1_100);
+            var lapsedRead = worker.postRefused("read", Map.of("protocolVersion", 2,
+                    "channelId", channel, "streamId", "stdout", "sequence", 0,
+                    "acknowledgedSequence", -1), worker.lease);
+            assertEquals(409, lapsedRead.getStatusCode());
+            assertEquals("managed_runtime_publication_closed", lapsedRead.getCode());
+
+            // The recovered dispatch re-runs begin on the same execution with
+            // the identical captured input and its own fresh horizon, which
+            // revives the channel instead of refusing it.
+            var revived = worker.beginRaw(REFERENCE, CAPTURE,
+                    System.currentTimeMillis() + 600_000, "capture-a");
+            assertEquals(200, revived.statusCode());
+            assertEquals(channel,
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                            .readTree(revived.body()).get("channelId").asText());
+
+            // A different captured input on the same execution — the rebind a
+            // recovered dispatch may carry — is the closed-lane refusal, and
+            // it must not mint a second channel.
+            assertEquals("witness\n", worker.copy(transport, channel, "stdout").bytes());
+            worker.copy(transport, channel, "stderr");
+            assertEquals("drained", worker.stopDrained(transport));
+
+            var conflict = worker.beginRaw(REFERENCE,
+                    java.util.Map.of("tenantId", "tenant", "sessionId", "harness",
+                            "turnId", "turn", "executionCallId", "execution",
+                            "bindingGeneration", "2", "capturePolicy", "complete_required"),
+                    System.currentTimeMillis() + 600_000, "capture-a");
+            assertEquals(409, conflict.statusCode());
+            assertEquals("managed_runtime_publication_closed",
+                    new com.fasterxml.jackson.databind.ObjectMapper()
+                            .readTree(conflict.body()).get("code").asText());
+            assertEquals(1, worker.routes("begin").stream()
+                    .map(route -> route.get("capture").get("executionCallId").asText())
+                    .distinct().count(),
+                    "The conflicting begin must not mint a second channel");
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    void aLapsedChannelRevivesOnItsOwnersRenewal() throws Exception {
+        try (var worker = ExternalShellWorkerFixture.start("witness\n", "")) {
+            var transport = worker.transport();
+            var channel = begin(worker, transport, System.currentTimeMillis() + 1_000);
+            Thread.sleep(1_100);
+            var lapsed = worker.postRefused("read", Map.of("protocolVersion", 2,
+                    "channelId", channel, "streamId", "stdout", "sequence", 0,
+                    "acknowledgedSequence", -1), worker.lease);
+            assertEquals(409, lapsed.getStatusCode());
+            // The owning Broker's renewal carries its fresh horizon, which
+            // revives the channel; the shipped worker applies the same rule.
+            transport.externalPublicationRenew(worker.lease, worker.request, worker.seed,
+                    REVISION, channel, System.currentTimeMillis() + 600_000)
+                    .toCompletableFuture().join();
+            assertEquals("witness\n", worker.copy(transport, channel, "stdout").bytes());
+            worker.copy(transport, channel, "stderr");
+            assertEquals("drained", worker.stopDrained(transport));
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    void aForeignStorageRevisionNeverReachesTheCapture() throws Exception {
+        try (var worker = ExternalShellWorkerFixture.start("witness\n", "")) {
+            var transport = worker.transport();
+            var channel = begin(worker, transport);
+            // A publication request attested against a stale storage revision
+            // is the worker's own closed-lane refusal, not the transport's.
+            var stale = new RuntimeProvisionSeed(worker.seed.getProvisionRequestId(),
+                    worker.seed.getProvisionalRuntimeId(), worker.seed.getGatewayIncarnation(),
+                    worker.seed.getLeaseId(), worker.seed.getEpoch(), worker.seed.getToken());
+            var refused = assertThrows(CompletionException.class, () ->
+                    transport.externalPublicationRead(worker.lease, worker.request, stale,
+                            REVISION + 1, channel, "stdout", 0, -1)
+                            .toCompletableFuture().join());
+            // The worker's own gate refuses the stale revision, and the
+            // transport surfaces that as its protocol refusal rather than the
+            // worker's closed-lane body.
+            assertTrue(refused.getCause() instanceof RuntimeBrokerException invalid
+                    && invalid.getStatusCode() == 400
+                    && "managed_runtime_attestation_invalid".equals(invalid.getCode()),
+                    "A stale storage revision never reaches the capture: "
+                            + refused.getCause());
+            // The revision the worker registered with still works after it.
+            assertEquals("witness\n", worker.copy(transport, channel, "stdout").bytes());
+            worker.copy(transport, channel, "stderr");
+            assertEquals("drained", worker.stopDrained(transport));
+        }
+    }
 }
