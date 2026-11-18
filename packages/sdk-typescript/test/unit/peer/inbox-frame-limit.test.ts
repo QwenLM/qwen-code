@@ -17,6 +17,7 @@ import {
   MAX_FRAME_CHARS,
 } from '../../../src/peer/frames.js';
 import { startPeerInbox, type PeerInbox } from '../../../src/peer/inbox.js';
+import { noUnixSockets } from './helpers.js';
 
 vi.mock('node:net', async (importOriginal) => ({
   ...(await importOriginal<typeof net>()),
@@ -35,7 +36,7 @@ function frameOfLength(length: number): string {
   return encodePeerFrame(frame);
 }
 
-describe('peer inbox frame limits', () => {
+describe.skipIf(noUnixSockets)('peer inbox frame limits', () => {
   let root: string;
   let inbox: PeerInbox;
   let socket: EventEmitter & { destroy: () => void };
