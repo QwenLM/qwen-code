@@ -141,12 +141,18 @@ clicked, using the list data the sidebar already holds.
   the seed, so the preconditions cannot drift: the read is capped at the
   same 64 MiB as the library mutation read with the same inclusive boundary
   (exactly 64 MiB seeds, above skips, a failed size probe skips), and one
-  session yields one list row through either funnel. A conversation
-  transcript keeps the uncapped seed — its read is the load itself, and the
-  restore payload's embedded snapshot must not depend on the sidecar cap —
-  and sessions with a conversation keep the selective read's zero-extra-I/O
-  contract (pinned by a read spy). Both funnels and the library guard share
-  one seed method and one record-composition helper. The
+  session yields one list row through either funnel. Only a transcript
+  with a loadable conversation keeps the uncapped seed — its read is the
+  load itself, and the restore payload's embedded snapshot must not depend
+  on the sidecar cap. Everything else goes through the helper, whose shape
+  gate is the sole admission test: the raw records are unvalidated, so a
+  conversation-less transcript carrying a record the validator drops
+  (unknown type, invalid identity) is not all-system on the raw array and
+  is refused rather than seeded from an empty active set — which would
+  heal a correct count to zero. Sessions with a conversation keep the
+  selective read's zero-extra-I/O contract (pinned by a read spy). Both
+  funnels and the library guard share one seed method and one
+  record-composition helper. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no
   record-level damage warnings — the same predicate the library mutation
@@ -329,7 +335,12 @@ clicked, using the list data the sidebar already holds.
   funnel, creation-time `session_model` metadata admitted by the shape gate
   on both funnels, the shared cap pinned on both funnels — above-cap skips
   the auxiliary read, exactly-at-cap seeds, a failed size probe skips — and
-  the conversation load seed staying uncapped, conversation sessions
+  the conversation load seed staying uncapped, a conversation-less
+  transcript carrying an unvalidatable record (unknown type, invalid
+  identity) refused by both funnels instead of healing a correct count to
+  zero, the helper's empty-records and foreign-project guards, a partial
+  read through the projection funnel refused via the threaded
+  incomplete-read flag, conversation sessions
   untouched by the projection read), in both
   active and archived states, from
   event and snapshot (fork) records, counting the cold-restorable set
