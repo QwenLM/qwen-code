@@ -1319,7 +1319,6 @@ async function configureWebhook(
                   key: 'allowPrivateNetwork',
                   label: 'Allow local and private endpoints',
                   kind: 'boolean' as const,
-                  default: 'false',
                 },
               ]
             : []),

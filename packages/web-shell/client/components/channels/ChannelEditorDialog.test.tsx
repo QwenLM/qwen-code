@@ -564,6 +564,7 @@ describe('ChannelEditorDialog', () => {
       url: 'Webhook URL',
       token: 'Bearer token',
       advanced: 'Advanced settings',
+      networkDescription: 'Network access for this endpoint.',
       private: 'Allow local and private endpoints',
       hint: 'Localhost refers to the Qwen Code daemon host or container.',
       save: 'Save',
@@ -576,6 +577,7 @@ describe('ChannelEditorDialog', () => {
       url: 'Webhook 地址',
       token: 'Bearer 令牌',
       advanced: '高级设置',
+      networkDescription: '此端点的网络访问设置。',
       private: '允许本地和私网端点',
       hint: 'localhost 指 Qwen Code daemon 所在的主机或容器。',
       save: '保存',
@@ -607,7 +609,6 @@ describe('ChannelEditorDialog', () => {
             key: 'allowPrivateNetwork',
             label: 'Network (descriptor)',
             kind: 'boolean',
-            default: 'false',
           },
         ],
       };
@@ -622,6 +623,9 @@ describe('ChannelEditorDialog', () => {
       await expandAdvancedSettings(copy.advanced);
       const network = fieldByLabel(copy.private)!;
       expect(network.getAttribute('aria-checked')).toBe('false');
+      expect(
+        network.closest('[data-slot="collapsible"]')?.textContent,
+      ).toContain(copy.networkDescription);
       expect(document.body.textContent).toContain(copy.hint);
       expect(document.body.textContent).not.toContain('(descriptor)');
       for (const hidden of copy.hidden) {

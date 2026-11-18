@@ -307,6 +307,9 @@ describe('ChannelsManagerPage', () => {
         '[data-testid="channel-platform-generic-webhook"]',
       )!;
       expect(platform.textContent).toContain(copy.name);
+      expect(platform.querySelector('[aria-hidden="true"]')?.textContent).toBe(
+        'WH',
+      );
       expect(platform.getAttribute('aria-label')).toBe(copy.title);
       expect(
         container.querySelector('[data-slot="card"]')?.textContent,
