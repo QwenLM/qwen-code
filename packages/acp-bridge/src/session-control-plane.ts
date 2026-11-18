@@ -13463,7 +13463,13 @@ export function createSessionControlPlane(
 
     setSessionBaseCommit(sessionId, baseCommit) {
       const entry = byId.get(sessionId);
-      if (entry && baseCommit) {
+      // Fill-only: the start commit is immutable once recorded at creation.
+      // A plain session that visits a worktree already carries its creation
+      // start S; promoting the worktree's later creation tip T on hand-back
+      // must not overwrite S (that would permanently hide the S..T commits).
+      // Sessions created as a worktree have no top-level start, so this fills
+      // their boundary on hand-back (R6-1).
+      if (entry && baseCommit && entry.baseCommit === undefined) {
         entry.baseCommit = baseCommit;
         markSessionCatalogChanged();
       }

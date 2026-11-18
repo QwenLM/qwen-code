@@ -28084,6 +28084,13 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
         'startsha',
       );
+      // Fill-only (R6-1): a second write (e.g. promoting a worktree's later
+      // creation tip on hand-back) must NOT overwrite the recorded creation
+      // start. Two distinct values pin immutability, not just presence.
+      bridge.setSessionBaseCommit?.(session.sessionId, 'latertip');
+      expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+        'startsha',
+      );
       // A missing entry is a no-op, not a throw.
       bridge.setSessionBaseCommit?.('missing-session', 'startsha');
       await bridge.shutdown();

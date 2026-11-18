@@ -192,6 +192,28 @@ describe('useChangeOverview', () => {
     );
   });
 
+  it('prefers the session creation start over a later worktree creation tip (R6-1)', async () => {
+    // A plain session recorded start S, then committed A,B (HEAD moved to T)
+    // and handed off into a worktree whose creation tip is T. The session's
+    // own start S must win over worktree.baseCommit T, or the pre-handoff
+    // S..T commits vanish from the panel for as long as it lives in the
+    // worktree. Two distinct values pin the precedence, not just presence.
+    mock.sessionStatus.mockResolvedValue({
+      prs: [],
+      baseCommit: 'sessionstartS',
+      worktree: { path: '/work/wt', baseCommit: 'handofftipT' },
+    });
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
+      20,
+      0,
+      '/work/wt',
+      'sessionstartS..HEAD',
+      { sessionId: 's1' },
+    );
+  });
+
   it('excludes the worktree base branch so upstream integration is not re-listed', async () => {
     // A worktree session has no branch meta; its base branch is carried on
     // worktree.baseBranch. Integrating upstream advances HEAD past the start

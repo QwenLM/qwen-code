@@ -96,13 +96,18 @@ export function useChangeOverview(
         boundPrs = (summary?.prs ?? []).filter((pr) => pr.source !== 'review');
         baseBranch =
           summary?.branch?.baseBranch ?? summary?.worktree?.baseBranch;
-        // The immutable commit the session started from (branch base or
-        // worktree base tip). Preferred fallback boundary; absent on legacy
-        // sessions, which fall back to the base branch or suppress.
+        // The immutable commit the session started from. The session's own
+        // creation-time start (top-level baseCommit) wins over a derived
+        // branch/worktree base tip: a plain session that hands off into a
+        // worktree must keep its pre-handoff commits (the worktree's creation
+        // tip T is later than the session start S, and T..HEAD would hide
+        // S..T). Sessions created as a branch/worktree have no top-level start,
+        // so they fall through to that meta's base. Absent on legacy sessions,
+        // which fall back to the base branch or suppress.
         startCommit =
+          summary?.baseCommit ??
           summary?.branch?.baseCommit ??
-          summary?.worktree?.baseCommit ??
-          summary?.baseCommit;
+          summary?.worktree?.baseCommit;
         gitCwd = summary?.worktree?.path ?? workspaceCwd;
       }
 
