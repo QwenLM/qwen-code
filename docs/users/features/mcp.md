@@ -49,7 +49,13 @@ Then enter:
 
 > [!note]
 >
-> **Hot reload vs. restart:** `mcpServers` edits in `settings.json` are picked up by a running interactive session without a restart; a server added to project settings waits for your approval before it connects. `--bare` and `--safe-mode` sessions only use MCP servers passed explicitly at invocation (e.g. `--mcp-config`); they ignore `settings.json` servers entirely, so these edits do not apply after a restart either. Sessions inside a shell-execution sandbox do not hot reload; restart to apply edits.
+> Servers added to project settings need your approval before they connect,
+> except in YOLO mode.
+>
+> With `--bare` or `--safe-mode`, Qwen Code ignores servers in `settings.json`
+> even after a restart. To use a server in these modes, pass it at startup with
+> `--mcp-config`. The [Linux tool execution sandbox](./sandbox.md#linux-tool-execution-sandbox)
+> disables MCP entirely.
 
 ## Where configuration is stored (scopes)
 
