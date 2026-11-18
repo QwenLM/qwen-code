@@ -158,6 +158,8 @@ function isUnescapedWordBoundary(command: string, i: number): boolean {
   return backslashes % 2 === 0;
 }
 
+const HEREDOC_WORD_BOUNDARY = /[ \t\n;|&<>()]/;
+
 /**
  * Remove heredoc bodies before segmentation. A heredoc body is data written to
  * a file/stdin, not shell structure: a quote character in the body (e.g. the
@@ -171,10 +173,6 @@ function isUnescapedWordBoundary(command: string, i: number): boolean {
  * heredoc or quote means the caller has not found a complete command boundary.
  */
 function stripHeredocBodies(command: string): string | undefined {
-  // Shell removes a backslash-newline line continuation before parsing, joining
-  // the lines. Normalize it to a space (as segmentation does) so a `#` that
-  // follows a continuation is judged against the joined line: in `: \<newline>
-  // # Use <<'EOF' …` the `#` begins a real comment, not an escaped word.
   let result = '';
   let quote: ShellQuote | null = null;
   let arithmeticDepth = 0;
@@ -188,8 +186,8 @@ function stripHeredocBodies(command: string): string | undefined {
     const ch = command[i]!;
     if (ch === '\\' && quote !== "'") {
       if (i + 1 === command.length) return undefined;
-      if (command[i + 1] === '\n' || command.startsWith('\r\n', i + 1)) {
-        i += command[i + 1] === '\r' ? 3 : 2;
+      if (command[i + 1] === '\n') {
+        i += 2;
         continue;
       }
       result += command.slice(i, i + 2);
@@ -224,24 +222,21 @@ function stripHeredocBodies(command: string): string | undefined {
     // unescaped, so the `#` in `tee review\ #1.md` (part of the filename) does
     // not hide the real heredoc that follows it.
     if (ch === '#' && isUnescapedWordBoundary(result, result.length)) {
-      while (i < command.length && command[i] !== '\n' && command[i] !== '\r') {
+      while (i < command.length && command[i] !== '\n') {
         result += command[i];
         i++;
       }
       continue;
     }
-    if (pending.length > 0 && (ch === '\n' || ch === '\r')) {
-      const bodyStart = ch === '\r' && command[i + 1] === '\n' ? i + 2 : i + 1;
-      result += command.slice(i, bodyStart);
-      i = bodyStart;
+    if (pending.length > 0 && ch === '\n') {
+      result += ch;
+      i++;
       for (const { delimiter, stripTabs, quoted } of pending) {
         let closed = false;
         let continued = '';
         while (i < command.length) {
           const end = command.indexOf('\n', i);
-          const line = command
-            .slice(i, end === -1 ? undefined : end)
-            .replace(/\r$/, '');
+          const line = command.slice(i, end === -1 ? undefined : end);
           i = end === -1 ? command.length : end + 1;
           const logicalLine = continued + line;
           if (!quoted && end !== -1 && /(?:^|[^\\])(?:\\\\)*\\$/.test(line)) {
@@ -286,8 +281,8 @@ function stripHeredocBodies(command: string): string | undefined {
         while (j < command.length && command[j] !== dq) {
           if (dq === '"' && command[j] === '\\') {
             const escaped = command[j + 1];
-            if (escaped === '\n' || command.startsWith('\r\n', j + 1)) {
-              j += escaped === '\r' ? 3 : 2;
+            if (escaped === '\n') {
+              j += 2;
               continue;
             }
             if (
@@ -306,11 +301,11 @@ function stripHeredocBodies(command: string): string | undefined {
         }
         if (j === command.length) return undefined;
         j++;
-        if (j < command.length && !/[\s;|&<>()]/.test(command[j]!)) {
+        if (j < command.length && !HEREDOC_WORD_BOUNDARY.test(command[j]!)) {
           return undefined;
         }
       } else {
-        while (j < command.length && !/[\s;|&<>()]/.test(command[j]!)) {
+        while (j < command.length && !HEREDOC_WORD_BOUNDARY.test(command[j]!)) {
           const char = command[j]!;
           if (char === "'" || char === '"') return undefined;
           if (char !== '\\') {
@@ -323,10 +318,6 @@ function stripHeredocBodies(command: string): string | undefined {
           if (escaped === undefined) return undefined;
           j += 2;
           if (escaped === '\n') continue;
-          if (escaped === '\r' && command[j] === '\n') {
-            j++;
-            continue;
-          }
           quoted = true;
           delim += escaped;
         }

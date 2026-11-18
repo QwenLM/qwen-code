@@ -273,30 +273,28 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
-  it('does not end a heredoc at a delimiter missing its literal backslash', () => {
-    const command = 'gh pr comment 1 --body-file - <<END\\\\MARK\nENDMARK';
-    const delimiter = 'END\\MARK';
-    const header = '\nDirectory: (root)\nOutput (stdout and stderr combined): ';
-    const footer =
-      '\nExecution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)';
-    const exampleUrl = 'https://github.com/o/r/pull/1#issuecomment-99';
-    const postedUrl = 'https://github.com/o/r/pull/1#issuecomment-42';
-    const entry = shellResult(
-      command,
-      '',
-      'Command: ' +
-        command +
-        header +
-        exampleUrl +
-        footer +
-        '\n\nEnd of example.\n' +
-        delimiter +
-        header +
-        postedUrl +
-        footer,
-    );
-    expect(extractPostedCommentIds(entry)).toEqual([]);
-  });
+  it.each([
+    ['END\\\\MARK', 'ENDMARK', 'END\\MARK'],
+    ['END\u00a0OF_NOTE', 'END', 'END\u00a0OF_NOTE'],
+    ["'NOTE'", 'NOTE\r', 'NOTE'],
+  ])(
+    'does not end a heredoc at a lookalike delimiter (%j, %j)',
+    (opener, bodyLine, delimiter) => {
+      const command = `gh pr comment 1 --body-file - <<${opener}\n${bodyLine}`;
+      const header =
+        '\nDirectory: (root)\nOutput (stdout and stderr combined): ';
+      const footer =
+        '\nExecution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)';
+      const exampleUrl = 'https://github.com/o/r/pull/1#issuecomment-99';
+      const postedUrl = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}${header}${exampleUrl}${footer}\n\nEnd of example.\n${delimiter}${header}${postedUrl}${footer}`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual([]);
+    },
+  );
 
   it.each([
     String.raw`gh pr comment 1 --body 'It'\''s fixed; ready'`,
@@ -327,6 +325,17 @@ describe('extractPostedCommentIds', () => {
     'cat > note.md <<END\\ MARK\\;\nbody\nEND MARK;',
     'cat > note.md <<NO\\\nTE\nbody\nNO\\\nTE',
   ])('preserves backslashes according to heredoc quoting (%j)', (setup) => {
+    const entry = shellResult(
+      `${setup}\ngh pr comment 1 --body-file note.md`,
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it.each([
+    'cat > note.md <<END\u00a0OF_NOTE\nbody\nEND\u00a0OF_NOTE',
+    "cat > note.md <<'NOTE\r'\nbody\nNOTE\r",
+  ])('attributes a complete heredoc with a literal delimiter (%j)', (setup) => {
     const entry = shellResult(
       `${setup}\ngh pr comment 1 --body-file note.md`,
       'https://github.com/o/r/pull/1#issuecomment-42',
