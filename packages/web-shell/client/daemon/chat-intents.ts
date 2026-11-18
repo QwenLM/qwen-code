@@ -37,6 +37,10 @@ export interface DaemonIntentDispatch {
 interface TrackedIntent {
   operation: ChatOperation;
   admission: Admission;
+  // Evidence that arrived while the transport was still in flight; applied
+  // once admission resolves so a settlement emitted before the POST response
+  // is not discarded.
+  witness?: OutcomeWitness;
 }
 
 export interface DaemonChatIntents {
@@ -77,8 +81,9 @@ export interface DaemonChatIntents {
   /**
    * Give an attempt whose admission can never be confirmed (a thrown transport
    * leaves it `unknown`) an exit: terminalize it as `failed`, never
-   * `established`, so it stops holding the phase open. Already-terminal or
-   * unknown operations are a no-op.
+   * `established`, so it stops holding the phase open. Unknown ids,
+   * already-terminal attempts, and attempts with a confirmed admission are a
+   * no-op — a live accepted turn must keep its chance to settle.
    */
   abandon(operationId: string): IntentResult | undefined;
   /**
@@ -87,9 +92,12 @@ export interface DaemonChatIntents {
    */
   acknowledge(operationId: string): void;
   /**
-   * Track whether an approval request is still awaiting a decision. The daemon
-   * keeps several permission requests pending at once, so currency is a set,
-   * not a single "newest" id; a decision applies while its request is live.
+   * Track whether an approval request is still valid (not superseded). The
+   * daemon keeps several permission requests pending at once, so currency is a
+   * set, not a single "newest" id. Mark a request live when it arrives and
+   * not-live only when it is superseded or cancelled — not when it is answered;
+   * the engine releases the identity itself once the decision settles, so a
+   * decision establishes while its request has not been superseded.
    */
   setApprovalRequestLive(requestId: string, live: boolean): void;
 }
@@ -125,6 +133,28 @@ export function createDaemonChatIntents(): DaemonChatIntents {
   };
   const find = (operationId: string): TrackedIntent | undefined =>
     tracked.find((intent) => intent.operation.id === operationId);
+  const applyEvidence = (
+    intent: TrackedIntent,
+    witness: OutcomeWitness,
+  ): IntentResult => {
+    const { kind, target } = intent.operation;
+    // A superseded approval never establishes on positive evidence: the
+    // decision must apply to a request that is still live. Negative evidence
+    // is not rewritten, so a decision that genuinely failed terminalizes.
+    const effective =
+      kind === 'approval' &&
+      witness === 'settled' &&
+      (target.requestId === undefined ||
+        !liveApprovalRequests.has(target.requestId))
+        ? 'none'
+        : witness;
+    const result = resolveIntent(intent.admission, effective, target);
+    intent.operation = {
+      ...intent.operation,
+      state: stateFor(kind, result.outcome),
+    };
+    return result;
+  };
 
   return {
     get operations() {
@@ -139,11 +169,19 @@ export function createDaemonChatIntents(): DaemonChatIntents {
     },
     async dispatch(kind, target, transport) {
       const operationId = `daemon-intent-${++nextId}`;
+      // Snapshot the target so a caller that keeps and mutates its object
+      // cannot retarget the recorded attempt after dispatch.
+      const recordedTarget = Object.freeze({ ...target });
       // Record the attempt before the transport runs so the row exists while
       // the request is in flight and rows stay in dispatch order (retention
       // keeps the latest terminal row by position).
       const intent: TrackedIntent = {
-        operation: { id: operationId, kind, state: 'pending', target },
+        operation: {
+          id: operationId,
+          kind,
+          state: 'pending',
+          target: recordedTarget,
+        },
         admission: 'unknown',
       };
       tracked = [...tracked, intent];
@@ -161,40 +199,35 @@ export function createDaemonChatIntents(): DaemonChatIntents {
         rebuild();
         return {
           operationId,
-          result: resolveIntent('rejected', 'none', target),
+          result: resolveIntent('rejected', 'none', recordedTarget),
         };
       }
-      // Transport acceptance is admission only; no outcome evidence exists at
-      // dispatch, so the witness is 'none' and the outcome stays unsettled.
+      // Transport acceptance is admission only. Apply any evidence that
+      // arrived while the POST was in flight; otherwise the witness is 'none'
+      // and the outcome stays unsettled until evidence arrives.
       intent.admission = admission;
-      const result = resolveIntent(admission, 'none', target);
-      intent.operation = {
-        ...intent.operation,
-        state: stateFor(kind, result.outcome),
-      };
+      const result = applyEvidence(intent, intent.witness ?? 'none');
       rebuild();
       return { operationId, result };
     },
     settle(operationId, witness) {
       const intent = find(operationId);
       if (!intent) return undefined;
-      const { kind, target, state } = intent.operation;
-      if (isTerminal(state)) return undefined;
-      // A superseded approval never establishes on positive evidence: the
-      // decision must apply to a request that is still live. Negative evidence
-      // is not rewritten, so a decision that genuinely failed terminalizes.
-      const effectiveWitness =
+      if (isTerminal(intent.operation.state)) return undefined;
+      // Retain the evidence so a settlement delivered while the transport is
+      // still in flight is applied once admission resolves, not discarded.
+      intent.witness = witness;
+      const result = applyEvidence(intent, witness);
+      // A settled approval is no longer pending: release its request identity
+      // so the live set does not grow with every answered request.
+      const { kind, target } = intent.operation;
+      if (
         kind === 'approval' &&
-        witness === 'settled' &&
-        (target.requestId === undefined ||
-          !liveApprovalRequests.has(target.requestId))
-          ? 'none'
-          : witness;
-      const result = resolveIntent(intent.admission, effectiveWitness, target);
-      intent.operation = {
-        ...intent.operation,
-        state: stateFor(kind, result.outcome),
-      };
+        target.requestId !== undefined &&
+        isTerminal(intent.operation.state)
+      ) {
+        liveApprovalRequests.delete(target.requestId);
+      }
       rebuild();
       return result;
     },
@@ -202,6 +235,9 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       const intent = find(operationId);
       if (!intent) return undefined;
       if (isTerminal(intent.operation.state)) return undefined;
+      // Only an unconfirmable admission may be abandoned; an accepted attempt
+      // is a live turn whose real evidence must still be able to land.
+      if (intent.admission !== 'unknown') return undefined;
       intent.operation = { ...intent.operation, state: 'failed' };
       rebuild();
       return resolveIntent(intent.admission, 'failed', intent.operation.target);

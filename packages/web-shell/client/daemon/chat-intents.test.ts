@@ -363,3 +363,82 @@ describe('daemon intents: observable snapshot and retention', () => {
     );
   });
 });
+
+describe('daemon intents: recorded-target and evidence boundaries', () => {
+  it('a caller mutating its target object cannot revive a superseded approval', async () => {
+    const intents = createDaemonChatIntents();
+    const mutableTarget: IntentTarget = { sessionId: 's1', requestId: 'r1' };
+    intents.setApprovalRequestLive('r1', true);
+    const { operationId } = await intents.dispatch(
+      'approval',
+      mutableTarget,
+      accepted,
+    );
+    intents.setApprovalRequestLive('r1', false);
+    intents.setApprovalRequestLive('r2', true);
+    // The caller retargets the object it still holds after dispatch.
+    mutableTarget.requestId = 'r2';
+
+    expect(intents.settle(operationId, 'settled')?.outcome).toBe('unsettled');
+    // The recorded row still claims the identity it was dispatched for.
+    expect(
+      intents.operations.find((op) => op.id === operationId)?.target.requestId,
+    ).toBe('r1');
+  });
+
+  it('evidence delivered during the POST is applied once admission resolves', async () => {
+    const intents = createDaemonChatIntents();
+    const gate = deferredAdmission();
+    const pending = intents.dispatch('cancel', target, () => gate.promise);
+    // Settlement arrives while the transport is still in flight.
+    const early = intents.settle(
+      intents.operations.find((op) => op.kind === 'cancel')!.id,
+      'settled',
+    );
+    expect(early?.outcome).toBe('unsettled');
+    gate.resolve('accepted');
+    const { operationId } = await pending;
+    expect(intents.operations.find((op) => op.id === operationId)?.state).toBe(
+      'established',
+    );
+    expect(intents.phase('idle')).toBe('idle');
+  });
+
+  it('abandon is a no-op on an accepted attempt so its evidence can still land', async () => {
+    const intents = createDaemonChatIntents();
+    const { operationId } = await intents.dispatch('submit', target, accepted);
+    expect(intents.operations.find((op) => op.id === operationId)?.state).toBe(
+      'running',
+    );
+    expect(intents.abandon(operationId)).toBeUndefined();
+    expect(intents.operations.find((op) => op.id === operationId)?.state).toBe(
+      'running',
+    );
+    expect(intents.settle(operationId, 'settled')?.outcome).toBe('established');
+  });
+
+  it('an approval establishes while its request is live and the engine releases it on settle', async () => {
+    const intents = createDaemonChatIntents();
+    intents.setApprovalRequestLive('r1', true);
+    const first = await intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      accepted,
+    );
+    // Answering the request (settling it) while it is still live establishes;
+    // the caller does not clear liveness on answer.
+    expect(intents.settle(first.operationId, 'settled')?.outcome).toBe(
+      'established',
+    );
+    // The engine released the identity, so a re-delivered decision for the
+    // same settled request no longer establishes.
+    const again = await intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      accepted,
+    );
+    expect(intents.settle(again.operationId, 'settled')?.outcome).toBe(
+      'unsettled',
+    );
+  });
+});

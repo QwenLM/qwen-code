@@ -50,15 +50,17 @@ engine must source the witness from evidence, not from the transport promise.
 
 `createDaemonChatIntents()` returns a tracker with:
 
-- `dispatch(kind, target, transport)` — mints an operation id and records the
-  attempt as `pending` **before** running the transport, so the row exists (and
-  evidence can bind to it) while the request is in flight and rows stay in
-  dispatch order. It then derives admission (`accepted` / `rejected`; a thrown
-  transport is `unknown`) and returns `{ operationId, result }`. The operation
-  id is the identity its settlement evidence must name. The outcome is resolved
-  with witness `none`, so an admitted intent is `unsettled` until evidence
-  arrives. A `rejected` admission carries no outcome and drops the row, so
-  settling its id is a no-op.
+- `dispatch(kind, target, transport)` — mints an operation id, snapshots the
+  target (frozen, so a caller that keeps and mutates its object cannot retarget
+  the recorded attempt), and records the attempt as `pending` **before** running
+  the transport, so the row exists (and evidence can bind to it) while the
+  request is in flight and rows stay in dispatch order. It then derives admission
+  (`accepted` / `rejected`; a thrown transport is `unknown`) and returns
+  `{ operationId, result }`. The operation id is the identity its settlement
+  evidence must name. With no evidence yet the outcome is resolved with witness
+  `none`, so an admitted intent is `unsettled`; evidence that arrived during the
+  POST is retained and applied once admission resolves. A `rejected` admission
+  carries no outcome and drops the row, so settling its id is a no-op.
 - `settle(operationId, witness)` — applies authoritative evidence to the one
   attempt that id identifies and recomputes its outcome. Unknown or
   already-terminal ids are a no-op, so evidence can never settle an attempt it
@@ -67,19 +69,25 @@ engine must source the witness from evidence, not from the transport promise.
   live: if the recorded `target.requestId` is absent or not in the live set, the
   positive witness is forced to `none` and the decision does not establish.
   Negative evidence is not rewritten, so a superseded decision that genuinely
-  failed still terminalizes as `failed`.
+  failed still terminalizes as `failed`. Once an approval settles terminal the
+  engine releases its request identity, so the live set does not grow with every
+  answered request.
 - `abandon(operationId)` — gives an attempt whose admission can never be
   confirmed (a thrown transport leaves it `unknown`, which no witness can
   terminalize) an exit: it terminalizes the row as `failed`, never
-  `established`, so a failed transport does not latch the phase open. Terminal
-  or unknown ids are a no-op.
+  `established`, so a failed transport does not latch the phase open. Unknown
+  ids, already-terminal attempts, and attempts with a confirmed admission are a
+  no-op — a live accepted turn keeps its chance to settle.
 - `acknowledge(operationId)` — releases a terminal row once the surface has
   consumed it (delegates to slice 1 `acknowledgeOperation`); non-terminal rows
   are kept, and terminal rows stay readable until acknowledged.
 - `setApprovalRequestLive(requestId, live)` — tracks the **set** of approval
-  requests still awaiting a decision. The daemon keeps several permission
+  requests still valid (not superseded). The daemon keeps several permission
   requests pending at once, so currency is membership in that set, not a single
-  "newest" id; a decision applies while its request is live.
+  "newest" id. Mark a request live when it arrives and not-live only when it is
+  superseded or cancelled — not when it is answered; the engine releases the
+  identity on settle, so a decision establishes while its request has not been
+  superseded.
 - `operations` — the retained operation list (slice 1 `retainOperations`:
   every non-terminal entry, at most the latest terminal per kind and target,
   latest by dispatch order). The snapshot is materialized once per state change,
@@ -137,11 +145,23 @@ is therefore membership in the live-request set, judged at `settle` time. The
 guard narrows to positive evidence only, so a superseded decision that genuinely
 failed still terminalizes instead of leaking a permanent `unsettled` row.
 
+"Live" means **not superseded**, not "awaiting a decision": once a decision is
+being settled it is by definition no longer awaiting one, so clearing liveness
+when the user answers would make every approval `unsettled`. The caller marks a
+request live on arrival and not-live only on supersede/cancel; the engine itself
+releases the identity when the decision settles terminal, which both keeps the
+natural answer-then-settle ordering correct and bounds the set. The recorded
+target is a frozen snapshot, so a caller mutating the object it passed cannot
+retarget a dispatched attempt into a live request and revive a superseded
+decision.
+
 A thrown transport leaves admission `unknown`, which the truth table keeps
 `unsettled` under any witness; without an exit it would hold the phase open for
 the engine's lifetime. `abandon` terminalizes such an attempt as `failed` (never
-`established`), and `acknowledge` lets the surface release terminal rows it has
-consumed so retention does not grow without bound across distinct turns.
+`established`) and is limited to `unknown` admission, so it cannot kill a live
+accepted turn whose real evidence must still land. `acknowledge` lets the surface
+release terminal rows it has consumed so retention does not grow without bound
+across distinct turns.
 
 ## Negative tests (land with the daemon adapter)
 
@@ -171,7 +191,21 @@ consumed so retention does not grow without bound across distinct turns.
    (later-dispatched) attempt.
 7. **Unknown admission has an exit.** A thrown submit/cancel transport latches
    the phase until `abandon` terminalizes it, after which the phase is `idle`;
-   `abandon` never establishes and is a no-op on terminal/unknown ids.
+   `abandon` never establishes and is a no-op on terminal/unknown ids and on a
+   confirmed admission.
+8. **Recorded target is immutable.** A caller that mutates the target object it
+   passed after dispatch cannot retarget the attempt into a live request: a
+   superseded decision stays `unsettled` and the row still claims the identity it
+   was dispatched for.
+9. **In-flight evidence is not discarded.** A settlement delivered while the
+   transport is in flight is applied once admission resolves, establishing the
+   attempt and clearing the phase without re-delivery.
+10. **Abandon cannot kill a live turn.** `abandon` on an accepted, running
+    attempt is a no-op; its real evidence still establishes it.
+11. **Answer-then-settle ordering.** An approval settles `established` while its
+    request is live even though answering means it is no longer awaiting a
+    decision; the engine releases the identity on settle, so a re-delivered
+    decision for the same settled request no longer establishes.
 
 Supporting cases pin rejected admission (no outcome, untracked, settling its id
 is a no-op), a failed witness, settling an unknown id (no-op), bounded retention,
@@ -187,7 +221,11 @@ a single slot reds the concurrent-approvals case; recording the attempt after
 `await transport()` reds the dispatch-order and in-flight cases; making
 `abandon` a no-op reds the exit cases; dropping the `established` half of the
 terminal guard reds the re-settle case; settling by kind plus target instead of
-the operation id reds the correlation cases.
+the operation id reds the correlation cases; recording the caller's target by
+reference instead of a frozen snapshot reds the recorded-target case; ignoring
+the retained in-flight witness reds the in-flight-evidence case; removing the
+`unknown`-admission guard from `abandon` reds the live-turn case; removing the
+clear-on-settle release reds the answer-then-settle case.
 
 ## Constraints respected
 
