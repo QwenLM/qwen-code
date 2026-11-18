@@ -51563,7 +51563,9 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       );
     } finally {
       await pair.restore();
-      await fsp.rm(logDir, { recursive: true, force: true });
+      await handle.close();
+      handle = undefined;
+      await fsp.rm(logDir, { recursive: true, force: true, maxRetries: 5 });
     }
   }, 30_000);
 
