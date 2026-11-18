@@ -36,8 +36,21 @@ export const TABLE_ROW_RE = /^\s*\|(.+)\|\s*$/;
 /** A markdown table separator: `| --- | :--: |` etc. */
 export const TABLE_SEPARATOR_RE =
   /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
-/** A fenced code block delimiter. Group 1 is the fence (``` or ~~~ run). */
+/** A code fence: group 1 is the marker run, group 2 is info/trailing text. */
 export const CODE_FENCE_RE = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+
+export function isClosingCodeFence(
+  match: RegExpMatchArray | null,
+  openingFence: string,
+): boolean {
+  return (
+    match !== null &&
+    match[1]!.startsWith(openingFence[0]!) &&
+    match[1]!.length >= openingFence.length &&
+    // Raw CRLF lines and a stream paused before LF can retain the final CR.
+    /^[ \t]*\r?$/.test(match[2] ?? '')
+  );
+}
 
 function readTableInlineMathSpan(row: string, index: number): string | null {
   return readInlineMathSpanAt(row, index);
@@ -173,11 +186,7 @@ export function fitPendingSlice(
     if (codeFence) {
       // Inside a code block: charge the line as code (one row, wrapped), and
       // close on a matching fence. Never treat contents as a table.
-      if (
-        fenceMatch &&
-        fenceMatch[1]!.startsWith(codeFence[0]!) &&
-        fenceMatch[1]!.length >= codeFence.length
-      ) {
+      if (isClosingCodeFence(fenceMatch, codeFence)) {
         codeFence = '';
       }
       rendered += estimateWrappedRows(line, contentWidth);

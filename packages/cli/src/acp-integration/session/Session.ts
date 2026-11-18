@@ -5601,6 +5601,7 @@ export class Session implements SessionContext {
       ?.setLastUserPromptRecordedCallback?.(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.config.getSessionService().setSessionPrBoundCallback(undefined);
+    this.config.getSessionService().setSessionGoalChangedCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
@@ -14033,6 +14034,23 @@ export class Session implements SessionContext {
           })
           .catch(() => {
             // Best-effort: a dropped notification only delays the badge
+            // until the client's next catalog refresh.
+          });
+      });
+
+    // Goal transitions persist the goal sidecar in the child's journal
+    // hook; carry the catalog-clock mark so version-watching clients
+    // refetch the sidebar marker the same way they pick up PR bindings.
+    this.config
+      .getSessionService()
+      .setSessionGoalChangedCallback((sessionId) => {
+        void this.client
+          .extNotification('qwen/notify/session/goal-changed', {
+            v: 1,
+            sessionId,
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the marker
             // until the client's next catalog refresh.
           });
       });

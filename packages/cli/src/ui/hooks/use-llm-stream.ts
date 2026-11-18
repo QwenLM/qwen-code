@@ -2567,7 +2567,7 @@ export const useLlmStream = (
       );
       const tableClampRows = Math.max(2, viewportRows - 3);
       while (true) {
-        const bufferLines = newLlmMessageBuffer.split('\n');
+        const bufferLines = newLlmMessageBuffer.split(/\r?\n/);
         const { keptLines, clipped } = fitPendingSlice(
           bufferLines,
           commitWidth,
