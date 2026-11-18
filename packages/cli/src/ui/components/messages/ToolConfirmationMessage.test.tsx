@@ -2726,6 +2726,51 @@ describe('ToolConfirmationMessage', () => {
       );
     });
 
+    it('renders a plan that fits the one row the budget leaves', async () => {
+      // A two-row body leaves one row for plan text once the hint is charged, and
+      // a one-line plan needs exactly that. The view's two-row floor exists to pay
+      // for a cue it does not need here, so treating the floor as a verdict dropped
+      // the plan whole: the user approved a plan they had not been shown, and the
+      // announcement that should have said so was itself past the cap.
+      const availableTerminalHeight = 10;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'plan',
+                title: 'Allow entry into Plan Mode?',
+                plan: 'Cache the parsed frame and reuse it.',
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toContain('Cache the parsed frame');
+        expect(frame).toContain('overflowing:0');
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame).not.toMatch(/plan hidden/);
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      // The plan is what this confirmation asks about, so it keeps the row and
+      // the hint is the row the cap takes; nothing was hidden at this size, so
+      // there is no reveal to advertise either way.
+      expect(frame).not.toContain('o open full plan in editor');
+      expect(frame).toContain('Allow entry into Plan Mode?');
+      expect(frame).toContain('Yes, and manually approve edits');
+      expect(frame).toContain('No, keep planning (esc)');
+    });
+
     it('leaves a body that fits the budget untouched', () => {
       const { lastFrame } = renderWithProviders(
         <ToolConfirmationMessage

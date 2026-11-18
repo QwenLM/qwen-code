@@ -742,13 +742,30 @@ export const ToolConfirmationMessage: React.FC<
     });
 
     bodyBudget = compactClamp(availableBodyContentHeight());
-    // Reserve one row for the "o open full plan" hint below the plan body.
+    const planRows =
+      bodyBudget === undefined ? 0 : wrappedRows(planProps.plan, contentWidth);
+    // The "o open full plan" hint is the way out of a clipped plan, so it keeps
+    // its row only when the plan is clipped. A plan that fits the rows on offer
+    // has nothing to escape from, and at a grant that fits one of the two the
+    // plan takes the row: it is what this confirmation asks about.
+    const planClipped =
+      bodyBudget !== undefined &&
+      planRows > Math.max(bodyBudget - MARKER_ROW, 1);
+    const planHintRow = planClipped ? MARKER_ROW : 0;
     const planHeight =
-      bodyBudget === undefined ? undefined : Math.max(bodyBudget - 1, 1);
+      bodyBudget === undefined
+        ? undefined
+        : Math.max(bodyBudget - planHintRow, 1);
     // The plan view floors its ceiling at MINIMUM_MAX_HEIGHT and spends one of
     // those rows on its own truncation cue, so below that it renders nothing.
+    // The floor is about paying for a cue, not about whether the plan fits: a
+    // plan that needs no more rows than the grant keeps its rows on screen,
+    // because dropping it would hide the thing being approved behind a cue the
+    // cap cuts away anyway.
     const planDropped =
-      planHeight !== undefined && planHeight < MINIMUM_MAX_HEIGHT;
+      planHeight !== undefined &&
+      planHeight < MINIMUM_MAX_HEIGHT &&
+      planRows > planHeight;
     bodyContent = (
       <Box
         flexDirection="column"
@@ -774,20 +791,23 @@ export const ToolConfirmationMessage: React.FC<
           />
         )}
         {/* The plan can be height-truncated above, and the user is about to
-            approve it — always offer a way to read the WHOLE thing. See #7001. */}
+            approve it — so when it is, offer a way to read the WHOLE thing.
+            This row also reads as the signal that the plan is not all here,
+            which is why it outranks the announcement below it at a one-row
+            grant. See #7001. */}
         {planViewError ? (
           <Box flexShrink={0}>
             <Text color={theme.status.error} wrap="truncate">
               {planViewError}
             </Text>
           </Box>
-        ) : (
+        ) : planHintRow > 0 ? (
           <Box flexShrink={0}>
             <Text color={theme.text.secondary} wrap="truncate">
               {t('o open full plan in editor')}
             </Text>
           </Box>
-        )}
+        ) : null}
         {/* Last so the row a one-row budget clips away is this announcement and
             not the hint above it. Registering the overflow is what makes
             ctrl-s, which lifts the budget and restores the whole plan, offer
