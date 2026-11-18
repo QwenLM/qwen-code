@@ -28137,6 +28137,126 @@ describe('createAcpSessionBridge', () => {
       }
     });
 
+    it('does not recompute the start commit when attaching after HEAD moves (R5-1 ordering)', async () => {
+      // The capture is safe only because it sits after the attach/coalesce
+      // early returns: a second spawnOrAttach attaches to the existing session
+      // and must NOT re-read the (now moved) HEAD over the recorded start.
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-base-attach-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'init');
+      const start = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: repo });
+        expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+          start,
+        );
+        // HEAD moves past the recorded start.
+        await fsp.writeFile(path.join(repo, 'b.txt'), 'b');
+        git('add', '.');
+        git('commit', '-qm', 'later work');
+        const moved = git('rev-parse', 'HEAD');
+        expect(moved).not.toBe(start);
+        // Attaching again coalesces to the same session; the start is immutable.
+        const again = await bridge.spawnOrAttach({ workspaceCwd: repo });
+        expect(again.sessionId).toBe(session.sessionId);
+        expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+          start,
+        );
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps the creation start S across a worktree visit and hand-back (R6-1 lifecycle)', async () => {
+      // Real bridge + real git, two distinct commits: the session starts at S,
+      // commits to T, hands off into a worktree whose creation tip is T, then
+      // hands back. The session start S must survive the whole lifecycle — the
+      // worktree meta carries T, but the fill-only promotion on hand-back must
+      // not overwrite S, and clearing the worktree must leave S as the boundary.
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-r61-life-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'session start');
+      const S = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        // The session starts at S; the pre-handoff work T is committed AFTER
+        // creation, so the recorded start must stay S even though HEAD moves.
+        const session = await bridge.spawnOrAttach({ workspaceCwd: repo });
+        expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(S);
+        await fsp.writeFile(path.join(repo, 'b.txt'), 'b');
+        git('add', '.');
+        git('commit', '-qm', 'pre-handoff work');
+        const T = git('rev-parse', 'HEAD');
+        expect(T).not.toBe(S);
+        // Hand off into a worktree created at the current tip T.
+        bridge.setSessionWorktree(session.sessionId, {
+          slug: 'wt',
+          path: path.join(repo, '.wt'),
+          branch: '',
+          baseCommit: T,
+          baseBranch: 'main',
+        });
+        const inWorktree = bridge.getSessionSummary(session.sessionId);
+        expect(inWorktree.baseCommit).toBe(S);
+        expect(inWorktree.worktree?.baseCommit).toBe(T);
+        // Hand back: promote the worktree base (fill-only) then clear the meta.
+        bridge.setSessionBaseCommit?.(session.sessionId, T);
+        bridge.clearSessionWorktree?.(session.sessionId);
+        const backLocal = bridge.getSessionSummary(session.sessionId);
+        expect(backLocal.worktree).toBeUndefined();
+        expect(backLocal.baseCommit).toBe(S);
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
+    });
+
     it('advances on a persisted-only branch without a live registration', async () => {
       const handle = makeChannel({
         extMethodImpl: (method) => {

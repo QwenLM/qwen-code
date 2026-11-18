@@ -414,6 +414,7 @@ describe('POST /session/:id/worktree-handoff', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.worktree.branch).toBe('');
+    expect(res.body.currentCwd).toBe(res.body.worktree.path);
     // The live worktree meta carries the start commit + base branch so the
     // commit fallback keeps a boundary in the handoff-to-restart window (R5-1).
     expect(res.body.worktree.baseCommit).toMatch(/^[0-9a-f]{40}$/);

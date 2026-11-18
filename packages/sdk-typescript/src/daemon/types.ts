@@ -1453,9 +1453,12 @@ export interface DaemonWorktreeInfo {
   /** Empty string while the worktree is detached (no branch ref). */
   branch: string;
   /**
-   * The base tip the worktree was created from — the session's start commit.
-   * Immutable; absent on worktrees persisted before this field. The commit
-   * fallback scopes its window to `<baseCommit>..HEAD`.
+   * The base tip the worktree was created from (its physical creation base).
+   * A legacy sidecar without `worktreeBase` is restored from
+   * `originalHeadCommit`, so this is populated on restore even for worktrees
+   * persisted before the field. The commit fallback prefers the session's own
+   * top-level start commit over this derived tip, so a plain session that
+   * hands off into a worktree keeps its pre-handoff commits.
    */
   baseCommit?: string;
   /**

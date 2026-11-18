@@ -8,8 +8,9 @@ Language: English | [中文](./2026-11-16-web-shell-change-overview.zh-CN.md)
 > newest-ancestor-head window — was **retired** by the follow-up
 > [change overview boundary fix](./2026-11-17-change-overview-boundary-fix.md),
 > which scopes the window to the session's immutable start commit and excludes
-> every commit reachable from any bound PR head (and the base branch) in one
-> native `git log <range> --not <refs>`. The Files route, UI assembly,
+> every commit reachable from any bound PR head (and the base branch's
+> remote-tracking refs, `origin/<base>` / `upstream/<base>`, not the local base
+> name) in one native `git log <range> --not <refs>`. The Files route, UI assembly,
 > Degradation, and Files affected sections below describe the original
 > ancestry-probe mechanism in the present tense for historical accuracy; read
 > them as superseded by the follow-up, not as the current behavior.
@@ -285,7 +286,8 @@ which replaces the newest-ancestor-head heuristic with a single
   sessions start fresh" premise was false. The follow-up records the session
   start commit and composes `<startCommit>..HEAD`; with no start commit it
   falls back to `<baseBranch>..HEAD` when a base branch is recorded, and
-  suppresses only when neither exists — a range-less walk is never issued. (A
+  suppresses when neither exists or when the recorded boundary fails the
+  single-ref whitelist (fail-closed) — a range-less walk is never issued. (A
   legacy worktree sidecar with `originalBranch` but an empty
   `originalHeadCommit` therefore still gets a window bounded by the moving
   local branch name.) The start commit is **durable for worktree sessions**

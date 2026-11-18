@@ -2016,7 +2016,13 @@ describe('fetchGitLog excludeRefs', () => {
       range: `${base}..HEAD`,
       excludeRefs: [head1, head2],
     });
+    // Positive arm: a refused (null) fetch would satisfy the negative
+    // assertions below vacuously over `?? []`, so pin that the fetch succeeded
+    // and a merge commit (a descendant of the excluded heads, not reachable
+    // from them) survives the exclusion.
+    expect(both).not.toBeNull();
     const subjects = both?.entries.map((e) => e.subject) ?? [];
+    expect(subjects).toContain('merge PR2');
     expect(subjects).not.toContain('PR1 work');
     expect(subjects).not.toContain('PR2 work');
   });

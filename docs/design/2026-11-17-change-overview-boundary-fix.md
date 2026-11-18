@@ -77,9 +77,13 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
   on `worktreeMeta` **and durably** in the worktree sidecar (`worktreeBase`,
   falling back to `originalHeadCommit` for legacy sidecars). Both
   `session-restore.ts` rebuild sites and `enrichWorktreeSidecars` read
-  `worktreeBase || originalHeadCommit` (the worktree's own base, not the source
-  checkout's HEAD, which differs for a worktree created from a sibling managed
-  worktree); the journaled branch-worktree, worktree-reset, and "Create branch
+  `worktreeBase || originalHeadCommit`. The `worktreeBase` arm is the
+  worktree's own base, not the source checkout's HEAD (which differs for a
+  worktree created from a sibling managed worktree); the legacy
+  `originalHeadCommit` fallback is the source checkout's HEAD recorded at
+  handoff, so a legacy sidecar without `worktreeBase` restores that moving
+  local tip rather than a fixed worktree base. The journaled branch-worktree,
+  worktree-reset, and "Create branch
   here" (`worktree-branch`) flows carry `baseCommit`/`baseBranch`, so a daemon
   restart still scopes the window. `baseBranch` (the branch the worktree was
   created from, sidecar `originalBranch`) is projected so the hook can exclude
@@ -88,7 +92,16 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
   the session starts from) and project it as the summary's top-level
   `baseCommit`; a failed read stays `undefined` (no boundary). Live-only (not
   restored across a daemon restart). The hook prefers
-  `branch.baseCommit ?? worktree.baseCommit ?? summary.baseCommit`.
+  `summary.baseCommit ?? branch.baseCommit ?? worktree.baseCommit`: the
+  session's own creation start wins over a derived branch/worktree base tip,
+  so a plain session that hands off into a worktree keeps its pre-handoff
+  commits (the worktree's creation tip is later than the session start). The
+  hand-back promotion (`setSessionBaseCommit`) is fill-only
+  (`entry.baseCommit === undefined`), so it never overwrites a recorded start;
+  a session created as a worktree has no top-level start and still gains its
+  boundary on hand-back. `worktreeBase` keeps its physical meaning (the
+  worktree's own creation base, used by the handoff rewind classification and
+  orphan cleanup), distinct from the session start.
 - The status-route hydration and summary projection forward the new fields;
   legacy sessions without them stay `undefined`.
 
@@ -96,8 +109,9 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
 
 - `fetchGitLog` gains `excludeRefs?: string[]`. When present, the revision
   list appends `--not <ref…>` after the range, so git natively returns the
-  window minus commits reachable from any excluded ref. One git invocation;
-  no per-entry ancestry calls.
+  window minus commits reachable from any excluded ref. One log invocation
+  plus a cheap presence probe per excluded ref (below); no per-entry ancestry
+  calls.
 - Each excluded ref is validated against the single-ref whitelist
   (`isSafeSingleRef`: charset, no leading `-` or `^`, no `..`); an unsafe ref
   drops the whole exclusion set into a refused (`available:false`) result
@@ -170,9 +184,15 @@ summary.baseCommit` (plain session) → `<start>..HEAD`; else `baseBranch`
   far more common absorbed case, so the local name is left out; the
   worktree-handoff flow can record `originalBranch` from a sibling checkout
   whose HEAD diverges from the recorded base commit, so in that rare case the
-  base-branch narrowing can be imprecise; and plain sessions record no
+  base-branch narrowing can be imprecise; plain sessions record no
   `baseBranch`, so they get no base-branch narrowing (the start-commit window
-  still bounds their work). In every case the start-commit window still bounds
+  still bounds their work); and a worktree session handed **back** to local
+  loses its base-branch narrowing, because the only `baseBranch` carriers
+  (`branch.baseBranch` / `worktree.baseBranch`) are cleared with the worktree
+  meta and the base branch is not persisted as a top-level session field — so
+  upstream integrations made before the hand-back can re-list as loose work
+  afterwards (the same durability gap as the live-only plain start commit).
+  In every case the start-commit window still bounds
   the session's work; these residuals only affect the best-effort upstream
   narrowing within that window.
 - Keep the guard: if any produced PR unit failed to resolve a head, suppress

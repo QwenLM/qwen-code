@@ -289,6 +289,7 @@ export function useChangeOverview(
               ...(excludeRefs.length > 0 ? { excludeRefs } : {}),
             })
             .catch(() => undefined);
+          if (!active) return;
           // A bound PR head can be missing from the local object database — a
           // headRefOid refreshed after a remote update, a force-pushed/gc'd
           // head, a legacy cross-repo binding. `git log --not <missing>` then

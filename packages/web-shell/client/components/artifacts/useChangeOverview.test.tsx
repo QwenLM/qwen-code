@@ -556,10 +556,13 @@ describe('useChangeOverview', () => {
   });
 
   it('suppresses the unscoped walk when bound PRs exist without the files capability', async () => {
-    // prResults stays empty without the capability even though the session
-    // has bindings; keying the suppression on prResults would walk HEAD
-    // unscoped and re-list the bindings' commits as this session's loose
-    // work. The discriminator must be the bindings themselves.
+    // Without the files capability the bindings render no PR units (the files
+    // fetch is gated off, prResults stays empty). This mock also records no
+    // boundary, so the fallback suppresses via the no-boundary rule — no
+    // unscoped walk is issued. The bound-PR discriminator itself (files
+    // present, exclude absent, a boundary recorded) is pinned separately by
+    // the capability-skew test below; here we pin that the files fetch stays
+    // gated and no range-less walk leaks when bindings exist without it.
     mock.features = [];
     mock.sessionStatus.mockResolvedValue({
       prs: [{ number: 1, url: 'https://github.com/o/r/pull/1' }],
@@ -815,13 +818,15 @@ describe('useChangeOverview', () => {
     expect(output.units).toEqual([]);
   });
 
-  it('degrades to the no-exclusion window when a bound PR head is missing locally', async () => {
-    // A bound head absent from the object database (refreshed headRefOid, a
-    // gc'd head, a cross-repo binding) makes `git log --not <head>` fail
-    // permanently. The excluded log is unavailable, so retry the same boundary
-    // window without excludeRefs: the loose commits render (this PR's commits
-    // may duplicate in the degraded window — the accepted residual) instead of
-    // blanking every unit.
+  it('degrades to the no-exclusion window when the excluded log is unavailable', async () => {
+    // The hook's degraded path: when the excluded log comes back unavailable
+    // (an unsafe excluded ref fails closed, or the start commit itself is
+    // absent from the object database), retry the same boundary window without
+    // excludeRefs so the loose commits render instead of blanking every unit.
+    // A merely missing bound PR head no longer reaches here as unavailable —
+    // the log route's presence probe drops absent refs and keeps the present
+    // exclusions (pinned in the core gitDiff suite). This PR's commits may
+    // duplicate in the degraded window — the accepted residual.
     const ws = {
       workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
       workspaceGitHubPullRequestFiles: vi

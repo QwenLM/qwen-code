@@ -74,14 +74,20 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
 - 普通会话：创建时捕获 `getHeadCommit(workspaceCwd)`（会话起始的 HEAD），投影
   为摘要顶层 `baseCommit`；读取失败保持 `undefined`（无边界）。仅 live（不在
   daemon 重启后恢复）。hook 优先
-  `branch.baseCommit ?? worktree.baseCommit ?? summary.baseCommit`。
+  `summary.baseCommit ?? branch.baseCommit ?? worktree.baseCommit`：会话自身
+  创建时的起点优先于派生的分支/worktree 基线顶端，故普通会话移交给 worktree
+  后仍保住移交前的提交（worktree 的创建顶端晚于会话起点）。回本地的提升
+  （`setSessionBaseCommit`）为仅填充（`entry.baseCommit === undefined`），绝不
+  覆盖已记录的起点；作为 worktree 创建的会话无顶层起点，回本地时仍由此补上
+  边界。`worktreeBase` 保持物理语义（worktree 自身的创建基线，供 handoff 回退
+  分类与孤儿清理使用），与会话起点不同。
 - status 路由水合与摘要投影转发新字段；无此字段的 legacy 会话保持 `undefined`。
 
 ### 层 2——log 路由的可达性排除（core + cli + SDK）
 
 - `fetchGitLog` 增 `excludeRefs?: string[]`。存在时修订列表在 range 后追加
-  `--not <ref…>`，git 原生返回窗口减去从任一排除 ref 可达的提交。单次 git
-  调用；无逐条目祖先调用。
+  `--not <ref…>`，git 原生返回窗口减去从任一排除 ref 可达的提交。单次 log
+  调用，外加每个排除 ref 一次廉价存在性探针（见下）；无逐条目祖先调用。
 - 每个排除 ref 按单 ref 白名单校验（`isSafeSingleRef`：字符集、无前导 `-`/`^`、
   无 `..`）；不安全 ref 使整个排除集落入拒绝（`available:false`）结果，而非
   静默无范围运行。前导 `^` 被拒，因为 git 的 `--not ^ref` 把双重否定异或成
@@ -110,9 +116,10 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
 
 ### 层 3——hook 重写（web-shell）
 
-- 边界优先级：`branch.baseCommit ?? worktree.baseCommit ?? summary.baseCommit`
-  （普通会话）→ `<start>..HEAD`；否则 `baseBranch`（非 `'HEAD'`、白名单安全）→
-  `<base>..HEAD`；否则**抑制**（永不再无范围遍历）。
+- 边界优先级：`summary.baseCommit ?? branch.baseCommit ?? worktree.baseCommit`
+  （会话自身起点优先于派生基线顶端）→ `<start>..HEAD`；否则 `baseBranch`
+  （非 `'HEAD'`、白名单安全）→ `<base>..HEAD`；否则**抑制**（永不再无范围
+  遍历）。
 - exclude 能力存在且 PR head 已解析时，把每个绑定 PR `headSha` 作为
   `excludeRefs` 传入。可达性排除统一处理已合并、并行、不可比 head。
 - 基线分支的**远程跟踪 ref** 加入排除集。记录的 `baseBranch`
@@ -134,7 +141,11 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   本地名会破坏远更常见的吸收形态，故不含本地名；worktree-handoff 流程可能从
   兄弟检出记录 `originalBranch`，其 HEAD 与记录的 base commit 分叉，故该罕见
   情形下基线收窄可能不精确；普通会话不记录 `baseBranch`，故无基线收窄（起点
-  commit 窗口仍定界其工作）。任何情形下起点 commit 窗口都仍定界会话工作；这些
+  commit 窗口仍定界其工作）；worktree 会话**移交回本地**后也会失去基线收窄，
+  因为 `baseBranch` 的唯一载体（`branch.baseBranch` / `worktree.baseBranch`）
+  随 worktree 元数据一起被清除，而基线分支并未作为顶层会话字段持久化——故移交
+  回本地之前的上游整合可能在之后作为松散工作重现（与仅 live 的普通起点 commit
+  同一耐久性缺口）。任何情形下起点 commit 窗口都仍定界会话工作；这些
   残留只影响窗口内的尽力上游收窄。
 - 保留守卫：任一产出 PR 单元未解析出 head 则抑制兜底（其提交无法被排除，
   故不得重新列出）。
