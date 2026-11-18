@@ -43,8 +43,10 @@ daemon 重启后，正在运行的会话会留下被中断的最后一轮。Web 
   `packages/core/src/core/session-recovery.ts`。
 - prompt 终端 ledger 已经持久化了查找中断会话所需的证据。每个会话在 transcript
   旁边有一个只追加的 `<sessionId>.ledger.jsonl`，见
-  `packages/core/src/services/sessionService.ts` 的 `getPromptLedgerPath`。记录只包含
-  `promptId`、`state`、`at` 和可选的 `tailUuid`；按设计不包含 prompt 内容，见
+  `packages/core/src/services/sessionService.ts` 的 `getPromptLedgerPath`。记录有两种
+  形状：进行中（`{ v, promptId, state: 'in_flight', at, tailUuid? }`）或终态
+  （`{ v, promptId, terminal: 'completed' | 'cancelled' | 'error' | 'interrupted',
+code?, stopReason?, at }`）。两种形状都不包含 prompt 内容，见
   `packages/acp-bridge/src/prompt-ledger.ts`。
 - daemon 正常停机时会为待处理的 prompt 写入 `code: 'daemon_shutdown'` 的终态记录，
   见 `packages/acp-bridge/src/bridge-prompt-ledger.test.ts`。崩溃会留下没有终态的
@@ -73,18 +75,19 @@ daemon 重启后，正在运行的会话会留下被中断的最后一轮。Web 
 ### 扫描数据源
 
 对每个选中的 workspace runtime，枚举活跃 chats 目录，读取每个
-`<sessionId>.ledger.jsonl` 的有界尾部。会话枚举复用已有的按项目列举逻辑，它会读取
-transcript 的首条记录以排除其他项目的会话；扫描本身从不读取 transcript 正文。
-ledger 很小（每个 prompt 约两条记录），且在准入和停机时已经写入，因此扫描成本是
-每会话一次小读取。
+`<sessionId>.ledger.jsonl` 的 64 KiB 有界尾部。会话枚举复用已有的按项目列举逻辑，
+它会读取 transcript 的首条记录以排除其他项目的会话；扫描本身从不读取 transcript
+正文。ledger 很小（每个 prompt 约两条记录），且在准入和停机时已经写入，因此扫描成本
+是每会话一次小读取。扫描只能分类最新记录位于该有界尾部的 prompt；早于尾部的
+`in_flight` 记录不会被本次扫描恢复（失败关闭）。
 
 在产出条目前，路由会检查 runtime 的内存会话摘要，跳过 prompt 正在执行或排队的
 会话。该检查不加载会话；这样 Web Shell 在回合运行中打开时，不会把活动回合误标为
 重启中断。
 
-把每个 ledger 按 `promptId` 归约到该 prompt 的最新记录。只要任一 prompt 仍为
-`in_flight`，会话就算中断，即使另一个 prompt 的终态在文件里更晚追加。否则由最新的
-终态决定：
+把每个 ledger 按 `promptId` 归约到该 prompt 在尾部内最新的记录。只要尾部内任一
+prompt 仍为 `in_flight`，会话就算中断，即使另一个 prompt 的终态在文件里更晚追加。
+否则由尾部内最新的终态决定：
 
 - `in_flight`：`interruption: 'in_flight'`。这覆盖崩溃，也覆盖前一个 prompt 已结算、
   后一个 prompt 仍在排队的会话。
@@ -160,10 +163,11 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 
 服务端串行处理列表，每次请求最多 10 个会话。对每个条目：
 
-1. 重新读取该会话的 ledger。如果最新 prompt 现在有 `completed`、`cancelled` 或
-   无关的 `error` 终态，返回 `not_continuable` 和 `code: 'already_moved'`。这覆盖
-   扫描后被其他客户端继续到已结算轮次的会话。新的 `in_flight` 记录表示轮次正在执行；
-   第 5 步的 `canContinue` 检查会拒绝它。`daemon_shutdown`/`daemon_lost` 错误仍可恢复。
+1. 重新读取该会话的 ledger。如果没有 prompt 仍为 `in_flight`，且最新终态为
+   `completed`、`cancelled` 或无关的 `error`，返回 `not_continuable` 和
+   `code: 'already_moved'`。这覆盖扫描后被其他客户端继续到已结算轮次的会话。新的
+   `in_flight` 记录表示轮次正在执行；第 5 步的 `canContinue` 检查会拒绝它。
+   `daemon_shutdown`、`daemon_lost`、`channel_closed` 终态仍可恢复。
 2. 从请求指定的 workspace 解析所属 runtime，应用与 `POST /session/:id/continue`
    相同的归属、信任和 generation 守卫，且不回退到主运行环境。standalone 会话不在
    范围内，会在冷加载时失败。
@@ -305,7 +309,7 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
    带 `daemon_shutdown`、`channel_closed` 的 `error` 终态；无关的 `error` 终态；
    正在执行的活动 prompt；最后一个 prompt 为 `completed`；最后一个 prompt 为
    `cancelled`；多个 prompt 中较早的一个被中断；ledger 缺失；尾部截断；ledger 尾部
-   过大；归档会话；窗口之外的条目；以及恰好 200 条的上限。
+   过大；尾部之外的陈旧 `in_flight`；归档会话；窗口之外的条目；以及恰好 200 条的上限。
 2. 路由测试扫描批量：1–20 个选择器、超限批量、未知 workspace、不受信任 workspace、
    runtime 不可用、逐成员失败、稳定排序、`sinceMs` 的钳制、归档排除、活动 prompt
    排除，以及 transcript 记录 id 不符合持久化 id 的情况。
@@ -313,9 +317,9 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
    活跃轮次、取消确认、不带与带 `confirmToolTurn` 的 `interrupted_turn`、加载失败、
    非 accepted 路径的 detach，以及 10 个会话上限。
 4. 端到端：启动真实 daemon，开始一轮，杀掉 daemon 进程，重启，查询恢复批量，继续
-   一个会话，并断言其 transcript 出现新轮次。SIGKILL 情形已提交在
-   `integration-tests/cli/qwen-serve-restart-recovery.test.ts`；再用正常停机重复一次，
-   断言出现 `daemon_shutdown` 条目。
+   一个会话，并断言其 transcript 出现新轮次。SIGKILL（`in_flight`）和 SIGTERM
+   （`daemon_shutdown`）两种情形都已提交在
+   `integration-tests/cli/qwen-serve-restart-recovery.test.ts`。
 5. Web Shell 测试：横幅只在可用性恢复后出现，选择与确认路径可用，成功的行从面板
    移除，失败的行保留并显示原因，取消确认引导到会话内，未知 code 有本地化回退，
    “全部继续”按 10 条分批，当前会话不改变。

@@ -158,7 +158,7 @@ describe('scanRestartRecoveries', () => {
     },
   );
 
-  it('lists a crash whose newest record sits beyond the bounded tail', () => {
+  it('parses an oversized ledger whose newest record is in the tail', () => {
     const root = makeScanRoot();
     const records = Array.from({ length: 1500 }, (_, index) =>
       inFlight(`p${index}`, NOW - (1500 - index)),
@@ -178,6 +178,25 @@ describe('scanRestartRecoveries', () => {
         interruption: 'in_flight',
       },
     ]);
+  });
+
+  it('does not claim a stale in-flight record older than the bounded tail', () => {
+    const root = makeScanRoot();
+    const records: PromptLedgerRecord[] = [
+      inFlight('stale', WINDOW_START - 60_000),
+    ];
+    for (let index = 0; index < 2000; index += 1) {
+      records.push(terminal(`p${index}`, NOW - index, 'completed'));
+    }
+    writeLedger(root, 'stale-beyond-tail', records);
+
+    expect(
+      scanRestartRecoveries({
+        sessionService: root.sessionService,
+        sessionIds: ['stale-beyond-tail'],
+        sinceMs: WINDOW_START,
+      }).items,
+    ).toEqual([]);
   });
 
   it.each(['daemon_shutdown', 'channel_closed'] as const)(
@@ -222,7 +241,29 @@ describe('scanRestartRecoveries', () => {
     ).toEqual([
       {
         sessionId: 'queued-behind-completion',
-        lastActivityAt: new Date(NOW - 2000).toISOString(),
+        lastActivityAt: new Date(NOW - 1000).toISOString(),
+        interruption: 'in_flight',
+      },
+    ]);
+  });
+
+  it('uses the newest record for the window even when an older prompt is in flight', () => {
+    const root = makeScanRoot();
+    writeLedger(root, 'old-flight-newer-terminal', [
+      inFlight('p1', NOW - 2 * 60 * 60 * 1000),
+      terminal('p2', NOW - 1000, 'interrupted', 'daemon_lost'),
+    ]);
+
+    expect(
+      scanRestartRecoveries({
+        sessionService: root.sessionService,
+        sessionIds: ['old-flight-newer-terminal'],
+        sinceMs: WINDOW_START,
+      }).items,
+    ).toEqual([
+      {
+        sessionId: 'old-flight-newer-terminal',
+        lastActivityAt: new Date(NOW - 1000).toISOString(),
         interruption: 'in_flight',
       },
     ]);

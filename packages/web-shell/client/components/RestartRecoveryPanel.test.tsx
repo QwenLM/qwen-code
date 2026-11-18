@@ -364,7 +364,18 @@ describe('RestartRecoveryPanel', () => {
         'Open the conversation to confirm this cancellation.',
       ),
     );
-    expect(buttonByText('Continue').disabled).toBe(true);
+    act(() =>
+      (
+        container.querySelector(
+          '[data-testid="restart-recovery-row-dismiss"]',
+        ) as HTMLButtonElement
+      ).click(),
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="restart-recovery-panel"]'),
+      ).toBeNull(),
+    );
   });
 
   it('drops a session the daemon says is no longer continuable', async () => {
@@ -392,10 +403,14 @@ describe('RestartRecoveryPanel', () => {
     act(() => buttonByText('Continue').click());
 
     await waitFor(() =>
-      expect(
-        container.querySelector('[data-testid="restart-recovery-panel"]'),
-      ).toBeNull(),
+      expect(container.textContent).toContain(
+        'This task is no longer waiting for recovery. (not_continuable)',
+      ),
     );
+    act(() => buttonByText('Hide').click());
+    expect(
+      container.querySelector('[data-testid="restart-recovery-panel"]'),
+    ).toBeNull();
   });
 
   it('falls back to a translated label for unknown interruption codes', async () => {

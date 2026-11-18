@@ -165,6 +165,18 @@ function daemonEnv(workspace: string, qwenHome: string): NodeJS.ProcessEnv {
   };
 }
 
+function signalDaemonGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  try {
+    if (process.platform !== 'win32' && child.pid !== undefined) {
+      process.kill(-child.pid, signal);
+    } else {
+      child.kill(signal);
+    }
+  } catch {
+    child.kill('SIGKILL');
+  }
+}
+
 async function startDaemon(
   workspace: string,
   qwenHome: string,
@@ -219,42 +231,64 @@ async function startDaemon(
     running.stderr += String(chunk);
   });
   running.baseUrl = await new Promise<string>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('daemon boot timeout')),
-      30_000,
-    );
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.stdout?.off('data', onData);
+      child.off('exit', onExit);
+    };
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      signalDaemonGroup(child, 'SIGKILL');
+      reject(
+        new Error(
+          `${message}; stdout=${running.stdout}; stderr=${running.stderr}`,
+        ),
+      );
+    };
+    const timer = setTimeout(() => fail('daemon boot timeout'), 30_000);
     const onData = (chunk: Buffer) => {
       const match = `${running.stdout}${chunk}`.match(
         /listening on http:\/\/127\.0\.0\.1:(\d+)/,
       );
-      if (!match) return;
-      clearTimeout(timer);
-      child.stdout?.off('data', onData);
+      if (!match || settled) return;
+      settled = true;
+      cleanup();
       resolve(`http://127.0.0.1:${match[1]}`);
     };
+    const onExit = (code: number | null) => {
+      fail(`daemon exited before listening with ${code}`);
+    };
     child.stdout?.on('data', onData);
-    child.once('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`daemon exited before listening with ${code}`));
-    });
+    child.once('exit', onExit);
   });
   return running;
 }
 
-async function stopDaemon(daemon: RunningDaemon): Promise<void> {
+async function stopDaemon(
+  daemon: RunningDaemon,
+  options: { signal?: NodeJS.Signals; group?: boolean; waitMs?: number } = {},
+): Promise<void> {
   if (daemon.child.exitCode !== null) return;
-  try {
-    if (process.platform !== 'win32' && daemon.child.pid !== undefined) {
-      process.kill(-daemon.child.pid, 'SIGKILL');
-    } else {
-      daemon.child.kill('SIGKILL');
-    }
-  } catch {
-    daemon.child.kill('SIGKILL');
+  const signal = options.signal ?? 'SIGKILL';
+  const group = options.group ?? true;
+  const waitMs = options.waitMs ?? 15_000;
+  if (group) {
+    signalDaemonGroup(daemon.child, signal);
+  } else {
+    daemon.child.kill(signal);
   }
-  await Promise.race([once(daemon.child, 'exit'), sleep(15_000)]).catch(
+  await Promise.race([once(daemon.child, 'exit'), sleep(waitMs)]).catch(
     () => undefined,
   );
+  if (daemon.child.exitCode === null) {
+    signalDaemonGroup(daemon.child, 'SIGKILL');
+    await Promise.race([once(daemon.child, 'exit'), sleep(5_000)]).catch(
+      () => undefined,
+    );
+  }
 }
 
 const describeDaemon = SKIP ? describe.skip : describe;
@@ -265,10 +299,11 @@ describeDaemon('qwen serve — restart recovery', () => {
   let qwenHome = '';
   let fake: FakeOpenAIServer | undefined;
   let daemon: RunningDaemon | undefined;
-  let releaseFirst: (() => void) | undefined;
-  const firstHold = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
+  const holdState: { release?: () => void } = {};
+  const releaseHeld = () => {
+    holdState.release?.();
+  };
+  let holdNext = true;
 
   beforeAll(async () => {
     root = mkdtempSync(path.join(tmpdir(), 'qwen-restart-recovery-'));
@@ -290,21 +325,27 @@ describeDaemon('qwen serve — restart recovery', () => {
       ),
     );
     fake = await startFakeOpenAIServer(
-      ({ requestIndex }) =>
-        requestIndex === 0
-          ? {
-              contentChunks: ['partial response before the crash'],
-              holdAfterChunks: 1,
-              holdUntil: firstHold,
-            }
-          : { content: 'recovered answer after restart' },
+      () => {
+        if (holdNext) {
+          holdNext = false;
+          const hold = new Promise<void>((resolve) => {
+            holdState.release = resolve;
+          });
+          return {
+            contentChunks: ['partial response before the crash'],
+            holdAfterChunks: 1,
+            holdUntil: hold,
+          };
+        }
+        return { content: 'recovered answer after restart' };
+      },
       { listenHost: '127.0.0.1', baseUrlHost: '127.0.0.1' },
     );
     daemon = await startDaemon(workspace, qwenHome, fake.baseUrl);
   }, 60_000);
 
   afterAll(async () => {
-    releaseFirst?.();
+    releaseHeld();
     if (daemon) await stopDaemon(daemon);
     await fake?.close();
     if (root) rmSync(root, { recursive: true, force: true });
@@ -363,7 +404,7 @@ describeDaemon('qwen serve — restart recovery', () => {
 
     const oldDaemon = daemon;
     await stopDaemon(oldDaemon);
-    releaseFirst?.();
+    releaseHeld();
     await sleep(500);
     daemon = await startDaemon(workspace, qwenHome, fakeServer.baseUrl);
 
@@ -456,5 +497,109 @@ describeDaemon('qwen serve — restart recovery', () => {
     );
     expect(ledger).toContain(String(continuationPromptId));
     expect(ledger).toContain('"terminal":"completed"');
+  }, 120_000);
+
+  it('lists and continues a session after a graceful shutdown', async () => {
+    if (!daemon || !fake) return;
+    const fakeServer = fake;
+    holdNext = true;
+    holdState.release = undefined;
+
+    await waitFor(
+      'daemon runtime',
+      async () => {
+        const health = await fetch(`${daemon!.baseUrl}/health`);
+        return health.ok;
+      },
+      60_000,
+    );
+    await waitFor(
+      'daemon runtime ready',
+      async () => {
+        const ready = await jsonFetch(daemon!.baseUrl, '/sessions/recovery', {
+          method: 'POST',
+          body: JSON.stringify({ workspaces: [workspace] }),
+        });
+        const record = asRecord(ready.body);
+        return (
+          ready.status !== 503 || record?.['code'] !== 'daemon_runtime_starting'
+        );
+      },
+      60_000,
+    );
+
+    const created = await jsonFetch(daemon.baseUrl, '/session', {
+      method: 'POST',
+      body: JSON.stringify({ cwd: workspace, sessionScope: 'thread' }),
+    });
+    expect(created.status).toBe(200);
+    const sessionId = asRecord(created.body)?.['sessionId'];
+    if (typeof sessionId !== 'string') {
+      throw new Error('session create returned no sessionId');
+    }
+
+    const requestCount = fakeServer.requests.length;
+    const prompt = await jsonFetch(
+      daemon.baseUrl,
+      `/session/${sessionId}/prompt`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          prompt: [{ type: 'text', text: 'E2E graceful recovery' }],
+        }),
+      },
+    );
+    expect(prompt.status).toBe(202);
+    await waitFor(
+      'fake model request',
+      async () => fakeServer.requests.length > requestCount,
+      30_000,
+    );
+
+    const oldDaemon = daemon;
+    await stopDaemon(oldDaemon, {
+      signal: 'SIGTERM',
+      group: false,
+      waitMs: 30_000,
+    });
+    releaseHeld();
+    await sleep(500);
+    daemon = await startDaemon(workspace, qwenHome, fakeServer.baseUrl);
+
+    let scanItems: RecoveryItem[] | undefined;
+    await waitFor(
+      'recovery scan',
+      async () => {
+        const scan = await jsonFetch(daemon!.baseUrl, '/sessions/recovery', {
+          method: 'POST',
+          body: JSON.stringify({ workspaces: [workspace] }),
+        });
+        const record = asRecord(scan.body);
+        if (record?.['code'] === 'daemon_runtime_starting') return false;
+        expect(scan.status).toBe(200);
+        scanItems = recoveryItems(scan.body);
+        return scanItems !== undefined;
+      },
+      60_000,
+    );
+    const item = scanItems?.find((entry) => entry.sessionId === sessionId);
+    expect(item).toMatchObject({
+      sessionId,
+      interruption: 'daemon_shutdown',
+    });
+
+    const continuation = await jsonFetch(
+      daemon.baseUrl,
+      '/sessions/recovery/continue',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          sessions: [{ workspace, sessionId }],
+        }),
+      },
+    );
+    const records = asRecord(continuation.body)?.['results'];
+    const result = Array.isArray(records) ? asRecord(records[0]) : undefined;
+    expect(result).toMatchObject({ status: 'accepted' });
   }, 120_000);
 });

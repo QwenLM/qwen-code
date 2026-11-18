@@ -2202,7 +2202,7 @@ export interface DaemonSessionLiveStateBatchResult {
 /** One session whose newest prompt did not settle. */
 export interface DaemonRestartRecoveryItem {
   sessionId: string;
-  /** ISO timestamp of the newest prompt-ledger record. */
+  /** ISO timestamp of the newest prompt-ledger record in the scan tail. */
   lastActivityAt: string;
   /** `in_flight`, a terminal code such as `daemon_shutdown`, or `interrupted`. */
   interruption: string;

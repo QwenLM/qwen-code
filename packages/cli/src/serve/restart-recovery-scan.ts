@@ -27,7 +27,7 @@ export const MAX_RESTART_RECOVERY_ITEMS = 200;
 
 export interface RestartRecoveryItem {
   sessionId: string;
-  /** ISO timestamp of the newest ledger record for this session. */
+  /** ISO timestamp of the newest ledger record in the scan tail. */
   lastActivityAt: string;
   /**
    * `in_flight` for a crash before the terminal was persisted, otherwise the
@@ -86,6 +86,7 @@ export function readRestartRecoveryState(
   }
   let newestInFlight: PromptLedgerRecord | undefined;
   let newestTerminal: PromptLedgerTerminalRecord | undefined;
+  let newestAt = -Infinity;
   const seenPromptIds = new Set<string>();
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index]!;
@@ -96,6 +97,7 @@ export function readRestartRecoveryState(
     if (!Number.isFinite(record.at) || Math.abs(record.at) > 8.64e15) {
       continue;
     }
+    newestAt = Math.max(newestAt, record.at);
     if (!isPromptLedgerTerminalRecord(record)) {
       newestInFlight ??= record;
     } else {
@@ -103,15 +105,14 @@ export function readRestartRecoveryState(
     }
   }
 
-  const chosen = newestInFlight ?? newestTerminal;
-  if (chosen === undefined) return { kind: 'missing' };
-  if (sinceMs !== undefined && chosen.at < sinceMs) return { kind: 'settled' };
+  if (newestAt === -Infinity) return { kind: 'missing' };
+  if (sinceMs !== undefined && newestAt < sinceMs) return { kind: 'settled' };
 
   if (newestInFlight !== undefined) {
     return {
       kind: 'interrupted',
       interruption: 'in_flight',
-      lastActivityAt: new Date(newestInFlight.at).toISOString(),
+      lastActivityAt: new Date(newestAt).toISOString(),
     };
   }
   if (newestTerminal === undefined) return { kind: 'missing' };
@@ -130,7 +131,7 @@ export function readRestartRecoveryState(
       typeof code === 'string' && TERMINAL_CODE_PATTERN.test(code)
         ? code
         : 'interrupted',
-    lastActivityAt: new Date(newestTerminal.at).toISOString(),
+    lastActivityAt: new Date(newestAt).toISOString(),
   };
 }
 

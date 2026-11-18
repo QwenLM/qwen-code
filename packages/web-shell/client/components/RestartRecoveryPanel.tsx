@@ -151,7 +151,7 @@ export function RestartRecoveryPanel({
           })),
           ...(confirmToolTurn ? { confirmToolTurn: true } : {}),
         });
-        const hasNotContinuable = result.results.some(
+        const notContinuable = result.results.find(
           (entry) => entry.status === 'not_continuable',
         );
         setRows((current) => {
@@ -193,8 +193,10 @@ export function RestartRecoveryPanel({
           }
           return next;
         });
-        if (hasNotContinuable) {
-          setNotice(t('restartRecovery.notContinuable'));
+        if (notContinuable) {
+          setNotice(
+            `${t('restartRecovery.notContinuable')} (${notContinuable.code ?? notContinuable.status})`,
+          );
         }
       } catch {
         setNotice(t('restartRecovery.failed'));
@@ -215,8 +217,14 @@ export function RestartRecoveryPanel({
     }
   }, [rows, runBatch]);
 
-  if (rows.length === 0 && !loadFailed && scanFailures.length === 0)
+  if (
+    rows.length === 0 &&
+    !loadFailed &&
+    scanFailures.length === 0 &&
+    notice === null
+  ) {
     return null;
+  }
 
   return (
     <div
@@ -232,9 +240,24 @@ export function RestartRecoveryPanel({
               })
             : loadFailed
               ? t('restartRecovery.loadFailed')
-              : t('restartRecovery.title', { count: rows.length })}
+              : rows.length > 0
+                ? t('restartRecovery.title', { count: rows.length })
+                : ''}
         </span>
         <div className="flex shrink-0 gap-1">
+          {notice !== null &&
+            rows.length === 0 &&
+            !loadFailed &&
+            scanFailures.length === 0 && (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setNotice(null)}
+              >
+                {t('restartRecovery.hide')}
+              </Button>
+            )}
           {(loadFailed || scanFailures.length > 0) && (
             <Button
               type="button"
@@ -326,19 +349,39 @@ export function RestartRecoveryPanel({
                   </p>
                 )}
               </div>
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={busy || row.needsConversation === true}
-                onClick={() =>
-                  void runBatch([row], row.needsToolConfirmation === true)
-                }
-              >
-                {row.needsToolConfirmation
-                  ? t('restartRecovery.confirmToolTurn')
-                  : t('restartRecovery.continue')}
-              </Button>
+              <div className="flex shrink-0 gap-1">
+                {row.needsConversation ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    data-testid="restart-recovery-row-dismiss"
+                    onClick={() =>
+                      setRows((current) =>
+                        current.filter(
+                          (candidate) => rowKey(candidate) !== rowKey(row),
+                        ),
+                      )
+                    }
+                  >
+                    {t('restartRecovery.hide')}
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() =>
+                      void runBatch([row], row.needsToolConfirmation === true)
+                    }
+                  >
+                    {row.needsToolConfirmation
+                      ? t('restartRecovery.confirmToolTurn')
+                      : t('restartRecovery.continue')}
+                  </Button>
+                )}
+              </div>
             </li>
           ))}
         </ul>

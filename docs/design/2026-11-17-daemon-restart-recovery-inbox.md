@@ -59,9 +59,11 @@ this slice and are tracked in Open questions.
   interrupted sessions. Each session has an append-only
   `<sessionId>.ledger.jsonl` next to its transcript
   (`packages/core/src/services/sessionService.ts`, `getPromptLedgerPath`).
-  Records carry only `promptId`, `state`, `at`, and an optional `tailUuid`;
-  prompt content is deliberately excluded
-  (`packages/acp-bridge/src/prompt-ledger.ts`).
+  A record has one of two shapes: in-flight
+  (`{ v, promptId, state: 'in_flight', at, tailUuid? }`) or terminal
+  (`{ v, promptId, terminal: 'completed' | 'cancelled' | 'error' |
+'interrupted', code?, stopReason?, at }`). Neither shape carries prompt
+  content (`packages/acp-bridge/src/prompt-ledger.ts`).
 - A normal daemon shutdown flushes a terminal record with
   `code: 'daemon_shutdown'` for a pending prompt
   (`packages/acp-bridge/src/bridge-prompt-ledger.test.ts`). A crash leaves the
@@ -97,21 +99,24 @@ this slice and are tracked in Open questions.
 ### Scan source
 
 For each selected workspace runtime, enumerate the active chats directory and
-read the bounded tail of every `<sessionId>.ledger.jsonl`. Session enumeration
-uses the existing project-scoped listing, which reads the first transcript
-record to keep other projects' sessions out; the scan never reads transcript
-bodies. The ledger is small (roughly two records per prompt) and is already
-written at admission and at shutdown, so the scan costs one small read per
-session.
+read the bounded 64 KiB tail of every `<sessionId>.ledger.jsonl`. Session
+enumeration uses the existing project-scoped listing, which reads the first
+transcript record to keep other projects' sessions out; the scan never reads
+transcript bodies. The ledger is small (roughly two records per prompt) and is
+already written at admission and at shutdown, so the scan costs one small read
+per session. The scan can only classify prompts whose latest record is inside
+that bounded tail; an `in_flight` record older than the tail is not recovered by
+this scan (fail closed).
 
 Before emitting an item, the route checks the runtime's in-memory session
 summary and omits a session whose prompt is active or queued. That check does
 not load the session; it keeps a live turn from being mislabeled as a restart
 interruption when Web Shell scans while work is running.
 
-Reduce each ledger by `promptId` to that prompt's latest record. A session is
-interrupted when any prompt is still `in_flight`, even if a different prompt's
-terminal was appended later. Otherwise the newest terminal decides:
+Reduce each ledger by `promptId` to that prompt's latest record in the bounded
+tail. A session is interrupted when any prompt in the tail is still `in_flight`,
+even if a different prompt's terminal was appended later. Otherwise the newest
+terminal in the tail decides:
 
 - `in_flight`: `interruption: 'in_flight'`. This covers a crash and a queued
   prompt whose predecessor has already settled.
@@ -197,12 +202,13 @@ from it; this panel identifies a row by its workspace and shortened session id.
 The server processes the list serially, at most 10 sessions per request. For
 each entry:
 
-1. Re-read that session's ledger. If the newest prompt now has a `completed`,
-   `cancelled`, or unrelated `error` terminal, return `not_continuable` with the
-   `already_moved` code. This covers a session that another client continued
-   to a settled turn after the scan. A new `in_flight` record means a turn is
-   active; the `canContinue` check in step 5 rejects it. A
-   `daemon_shutdown`/`daemon_lost` error remains recoverable.
+1. Re-read that session's ledger. If no prompt remains `in_flight` and the
+   newest terminal is `completed`, `cancelled`, or an unrelated `error`,
+   return `not_continuable` with the `already_moved` code. This covers a
+   session that another client continued to a settled turn after the scan. A
+   new `in_flight` record means a turn is active; the `canContinue` check in
+   step 5 rejects it. `daemon_shutdown`, `daemon_lost`, and `channel_closed`
+   terminals remain recoverable.
 2. Resolve the owner runtime from the requested workspace, applying the same
    ownership, trust, and generation guards as `POST /session/:id/continue`,
    with no primary-runtime fallback. Standalone conversations are out of scope
@@ -381,7 +387,8 @@ instead of falling back to another endpoint.
    and `channel_closed`; an unrelated terminal `error`; a live active prompt;
    last prompt `completed`; last prompt `cancelled`; multiple prompts where an
    older one is interrupted; missing ledger; torn tail; oversized ledger tail;
-   archived session; entry outside the window; and exactly the 200-item cap.
+   a stale in-flight record beyond the tail; archived session; entry outside the
+   window; and exactly the 200-item cap.
 2. Route-test the scan batch: 1–20 selectors, an over-limit batch, unknown
    workspace, untrusted workspace, unavailable runtime, per-member failure,
    stable ordering, the clamp on `sinceMs`, archived exclusion, live-active
@@ -392,9 +399,9 @@ instead of falling back to another endpoint.
    failure, detach on non-accepted paths, and the 10-session cap.
 4. End-to-end: start a real daemon, start a turn, kill the daemon process,
    restart it, query the recovery batch, continue one session, and assert a new
-   turn appears in its transcript. The SIGKILL case is committed in
-   `integration-tests/cli/qwen-serve-restart-recovery.test.ts`; repeat with the
-   daemon shut down normally and assert the `daemon_shutdown` item appears.
+   turn appears in its transcript. Both the SIGKILL (`in_flight`) and SIGTERM
+   (`daemon_shutdown`) cases are committed in
+   `integration-tests/cli/qwen-serve-restart-recovery.test.ts`.
 5. Web Shell test: banner appears only after availability returns, selection
    and confirmation paths work, successful rows leave the panel, failures stay
    with a reason, cancellation confirmations point to the conversation,
