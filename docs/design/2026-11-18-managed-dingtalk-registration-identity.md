@@ -35,11 +35,19 @@ The shared `destinationKey` comment in `channel-base` is updated to name WeCom *
 - `packages/channels/dingtalk/src/managed-dingtalk-adapter.test.ts` — `fakeControlPlane` gains a `destinationKey`; destination/workspace isolation and shared-lock witnesses added.
 - This design doc and its Chinese version.
 
+## Upgrade consequence and diagnostics
+
+The ledger file is renamed from `managed-state.json` to `managed-state-<ledgerKey>.json` with **no adoption**: the first restart after upgrading starts on a pristine identity-keyed ledger. A claim that was staged (persisted and acked `SUCCESS` to the DingTalk stream, which does not redeliver an acked frame) but not yet admitted is stranded — the control plane never saw it (only `submitInbound` makes a claim visible), so only this client's own ledger could re-drive it, and the new ledger does not contain it. The same reset drops un-receipted outbound segments, the dedupe window and the webhook reply-target map. This is the deliberate stranding tradeoff the WeCom design records: adopting the legacy ledger would replay one registration's pending into another, the cross-ownership hazard the keying prevents.
+
+To make the drop explicit rather than silent, `connect()` detects the legacy ledger when the identity-keyed file is absent and a sibling `managed-state.json` exists, and logs one line naming that path and its pending/outbound counts (`strandedLegacyLedger()`); it does not adopt it. `load()` also names `this.file` and keeps the fs `{ cause }`, splitting I/O failure from corrupt JSON, so an operator facing several `<hash>.json` ledgers can tell which registration is down.
+
+The webhook reply-target cache (`state.webhooks`) lives inside the identity-keyed ledger, so it is now scoped per registration: after an identity change a webhook-less frame for a previously-known conversation has no cached reply target and is dropped (acked + deduped), where the old shared ledger would still have admitted it. This is a cost of the partition, pinned by a test; hoisting the cache to entry scope is a possible follow-up if webhook-less frames across identity changes prove common.
+
 ## Scope boundaries
 
-- The DingTalk stream connection, webhook reply path, and admission/outbound discipline are unchanged.
+- The DingTalk stream connection and admission/outbound discipline are unchanged. The webhook reply _mechanism_ is unchanged, but the webhook cache is now identity-scoped (see Upgrade consequence): a webhook-less frame after an identity change is dropped rather than admitted from a cross-registration cache.
 - The `disconnect()` row-deregistration gate is a separate concern and is not touched here.
-- No control-plane (Java) change; no `channel-base` change (the `destinationKey` contract already exists).
+- No control-plane (Java) change; no `channel-base` contract/API change — only the `destinationKey` doc comment is updated to name WeCom and DingTalk as the adapters that bind the registration identity.
 - The email and GitHub stores are out of scope. GitHub keys its single ledger by name + endpoint (`baseUrl`) only, and email is a separate variant; neither binds the full registration identity, so each is its own follow-up rather than part of this DingTalk change.
 
 ## Open questions

@@ -236,7 +236,21 @@ export class ManagedDingtalkAdapter {
       );
     }
     try {
-      this.state = this.store.load() ?? {
+      const loaded = this.store.load();
+      if (!loaded) {
+        // The upgrade to per-registration ledgers strands the legacy
+        // managed-state.json: make the drop explicit (its staged-but-unadmitted
+        // claims were acked to the provider and are lost), never silent. The
+        // legacy ledger is not adopted — that would replay one registration's
+        // pending into another.
+        const legacy = this.store.strandedLegacyLedger();
+        if (legacy) {
+          this.log(
+            `Managed DingTalk upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${legacy.pending} pending, ${legacy.outbound} outbound) is stranded and not replayed; its staged-but-unadmitted claims were acked to the provider and are lost.`,
+          );
+        }
+      }
+      this.state = loaded ?? {
         version: 1,
         generation: 1,
         pending: [],

@@ -2621,4 +2621,67 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
     );
     await adapterA.disconnect();
   });
+
+  it('logs the stranded legacy ledger on upgrade rather than dropping it silently', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    // Seed the pre-upgrade single ledger in the entry directory before connect.
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:legacy',
+            event: { platformEventId: 'dingtalk:legacy' },
+          },
+        ],
+        outbound: [{ deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' }],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) => l.includes('stranded'));
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain(join(dir, 'managed-state.json'));
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).toContain('1 outbound');
+    // Not adopted: the legacy pending never replays into the new ledger.
+    expect(plane.submit).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('a webhook-less frame after an identity change is dropped (cache is identity-scoped)', async () => {
+    const cwd = tempCwd();
+    // Identity A admits a frame carrying a sessionWebhook, caching it for conv-1.
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA);
+    await adapterA.connect();
+    fakeA.push('a1', messageData({ msgId: 'a1' }));
+    await adapterA.tick();
+    expect(planeA.submit).toHaveLength(1);
+    await adapterA.disconnect();
+
+    // Identity B (same entry, different registration) starts with an empty
+    // webhook cache: a webhook-less frame for the known conversation conv-1 has
+    // no reply target and is dropped (acked + deduped), not admitted. This pins
+    // the identity-scoped partition of the webhook cache (R1-5): hoisting the
+    // cache to entry scope would admit this frame and red this test.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1|actor|ws|.');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB);
+    await adapterB.connect();
+    fakeB.push('b1', messageData({ msgId: 'b1', sessionWebhook: '' }));
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
+  });
 });

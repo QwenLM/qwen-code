@@ -7,6 +7,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
+  existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -160,16 +161,66 @@ export class ManagedDingtalkStateStore {
   }
 
   load(): ManagedDingtalkState | undefined {
+    // Name the file and keep the cause, and keep an I/O failure distinguishable
+    // from a corrupt state: the directory now holds a ledger per registration,
+    // so the operator must know WHICH file is unreadable (e.g. EISDIR) versus
+    // merely invalid, while a sibling registration's healthy ledger sits beside
+    // it. Mirrors the WeCom store this change parallels.
+    let raw: string;
     try {
-      const value: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
-      if (!validManagedDingtalkState(value)) throw new Error('invalid state');
-      return value;
+      raw = readFileSync(this.file, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw new Error(
-        'Managed DingTalk state is unreadable or invalid; restore it before restarting.',
+        `Managed DingTalk state at ${this.file} could not be read; restore it before restarting.`,
+        { cause: error },
       );
     }
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(
+        `Managed DingTalk state at ${this.file} is not valid JSON; restore it before restarting.`,
+        { cause: error },
+      );
+    }
+    if (!validManagedDingtalkState(value)) {
+      throw new Error(
+        `Managed DingTalk state at ${this.file} is invalid; restore it before restarting.`,
+      );
+    }
+    return value;
+  }
+
+  /**
+   * The pre-registration-identity ledger this entry used before the upgrade.
+   * When the identity-keyed ledger is absent and a sibling `managed-state.json`
+   * exists, the upgrade strands it: its staged-but-unadmitted claims were acked
+   * to the provider (which does not redeliver an acked frame) and the control
+   * plane never saw them, so they are lost. Report the path and its pending /
+   * outbound counts so the drop is explicit, never silent. The legacy ledger is
+   * NOT adopted — adopting it would replay one registration's pending into
+   * another, the cross-ownership hazard the identity keying prevents.
+   */
+  strandedLegacyLedger():
+    | { path: string; pending: number; outbound: number }
+    | undefined {
+    const legacyPath = join(this.directory, 'managed-state.json');
+    if (existsSync(this.file) || !existsSync(legacyPath)) return undefined;
+    let pending = 0;
+    let outbound = 0;
+    try {
+      const value = JSON.parse(readFileSync(legacyPath, 'utf8')) as {
+        pending?: unknown[];
+        outbound?: unknown[];
+      };
+      pending = Array.isArray(value.pending) ? value.pending.length : 0;
+      outbound = Array.isArray(value.outbound) ? value.outbound.length : 0;
+    } catch {
+      // A corrupt legacy ledger still strands; report it with zero counts.
+    }
+    return { path: legacyPath, pending, outbound };
   }
 
   save(state: ManagedDingtalkState): void {

@@ -288,18 +288,87 @@ describe('ManagedDingtalkStateStore', () => {
     expect(store().load()).toBeUndefined();
   });
 
-  it('throws on a corrupt (unparseable) file', () => {
+  it('throws on a corrupt (unparseable) file, naming the file and keeping the cause', () => {
     const s = store();
     mkdirSync(s.directory, { recursive: true });
     writeFileSync(s.file, '{not json');
-    expect(() => s.load()).toThrow(/unreadable or invalid/);
+    let caught: unknown;
+    try {
+      s.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(s.file);
+    expect((caught as Error).message).toMatch(/is not valid JSON/);
+    expect((caught as Error).cause).toBeInstanceOf(SyntaxError);
   });
 
-  it('throws on a parseable but invalid state', () => {
+  it('throws on a parseable but invalid state, naming the file', () => {
     const s = store();
     mkdirSync(s.directory, { recursive: true });
     writeFileSync(s.file, JSON.stringify({ ...baseState(), generation: 0 }));
-    expect(() => s.load()).toThrow(/unreadable or invalid/);
+    let caught: unknown;
+    try {
+      s.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(s.file);
+    expect((caught as Error).message).toMatch(/is invalid/);
+  });
+
+  it('an I/O read failure is distinct from a corrupt state and keeps the cause', () => {
+    const s = store();
+    mkdirSync(s.directory, { recursive: true });
+    // A directory at the ledger path makes readFileSync fail with an I/O error
+    // (EISDIR on POSIX), not a corrupt state; the diagnostic names the file and
+    // keeps the cause so an unreadable ledger is distinguishable from an invalid
+    // sibling under the same entry directory. The errno is platform-specific.
+    mkdirSync(s.file);
+    let caught: unknown;
+    try {
+      s.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(s.file);
+    expect((caught as Error).message).toMatch(/could not be read/);
+    expect((caught as Error).cause).toBeInstanceOf(Error);
+  });
+
+  it('reports a stranded legacy ledger on upgrade, without adopting it', () => {
+    const s = store();
+    mkdirSync(s.directory, { recursive: true });
+    // Seed the pre-upgrade single ledger with one pending claim and one
+    // outbound segment; the identity-keyed ledger does not exist yet.
+    const legacy = {
+      ...baseState(),
+      pending: [{ eventId: 'dingtalk:m1', event: inbound('m1') }],
+      outbound: [{ deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' }],
+    };
+    writeFileSync(
+      join(s.directory, 'managed-state.json'),
+      JSON.stringify(legacy),
+    );
+    const stranded = s.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.path).toBe(join(s.directory, 'managed-state.json'));
+    expect(stranded!.pending).toBe(1);
+    expect(stranded!.outbound).toBe(1);
+    // The legacy ledger is reported, not adopted: load() still returns undefined
+    // (the identity-keyed file is absent), so no pending replays across identities.
+    expect(s.load()).toBeUndefined();
+    // Once the identity-keyed ledger exists, the legacy file is no longer reported.
+    s.save(baseState());
+    expect(s.strandedLegacyLedger()).toBeUndefined();
+  });
+
+  it('no stranded legacy ledger when none exists', () => {
+    const s = store();
+    expect(s.strandedLegacyLedger()).toBeUndefined();
   });
 
   it('keeps the state file 0600 inside a 0700 directory (R4)', () => {
