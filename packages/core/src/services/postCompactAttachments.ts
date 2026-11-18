@@ -19,7 +19,10 @@ import type { Content, Part } from '@google/genai';
 import { readFile, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
-import { CHARS_PER_TOKEN, estimateCjkTextTokens } from './tokenEstimation.js';
+import {
+  CHARS_PER_TOKEN,
+  estimateRestorationTextTokens,
+} from './tokenEstimation.js';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   getFunctionResponseParts,
@@ -381,7 +384,7 @@ export async function readFileSizeAdaptive(
  *  - One embed block per small file with full content.
  *  - Nothing for missing/binary files.
  *
- * Files that would exceed the CJK-aware token budget (50K by default) are
+ * Files that would exceed the token budget (50K by default) are
  * downgraded to references. The per-file reader first applies its existing
  * character-size cap to bound disk reads.
  */
@@ -409,7 +412,7 @@ export async function buildFileRestorationBlocks(
       continue;
     }
     // embed — check global budget; downgrade to reference if over.
-    const fileTokens = estimateCjkTextTokens(result.content);
+    const fileTokens = estimateRestorationTextTokens(result.content);
     if (usedTokens + fileTokens > tokenBudget) {
       references.push(filePath);
       continue;

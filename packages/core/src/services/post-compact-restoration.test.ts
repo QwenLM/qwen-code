@@ -276,34 +276,45 @@ it('embeds CJK files that fit and references the remaining files', async () => {
   }
 });
 
-it.each([true, false])(
-  'drops a budget-fitting CJK file when the full candidate overflows with usage=%s',
-  async (hasUsage) => {
+it.each([
+  { script: 'Chinese', character: '中', hasUsage: true },
+  { script: 'Chinese', character: '中', hasUsage: false },
+  { script: 'Thai', character: 'ท', hasUsage: true },
+  { script: 'Thai', character: 'ท', hasUsage: false },
+])(
+  'drops a budget-fitting $script file when the full candidate overflows with usage=$hasUsage',
+  async ({ character, hasUsage }) => {
     const { files, history, config, chat } = restorationFixture(
       16_000,
       1,
       2640,
-      '中',
+      character,
     );
-    history[0] = userText('Earlier conversation '.repeat(1100));
+    const historyTokens = tokenEstimation.estimateContentTokens(history);
+    const nonVisibleTokens = 11_500;
     vi.spyOn(sideQuery, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>Completed file inspections.</state_snapshot>',
       usage: hasUsage
-        ? { promptTokenCount: 6600, candidatesTokenCount: 100 }
+        ? { promptTokenCount: historyTokens + 1000, candidatesTokenCount: 100 }
         : undefined,
     } as never);
+    const compose = vi.spyOn(
+      postCompactAttachments,
+      'composePostCompactHistory',
+    );
     const result = await new ChatCompressionService().compress(chat, {
-      promptId: 'cjk-restoration-overflow',
+      promptId: 'non-ascii-restoration-overflow',
       force: true,
       config,
       consecutiveFailures: 0,
-      originalTokenCount: 18_000,
+      originalTokenCount: historyTokens + nonVisibleTokens,
     });
+    const initialHistory = await compose.mock.results[0].value;
+    expect(historyText(initialHistory)).toContain(files[0].body);
+    expect(compose).toHaveBeenCalledTimes(2);
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-    expect(result.info.newTokenCount).toBeGreaterThan(12_000);
-    expect(result.info.newTokenCount).toBeLessThan(
-      computeThresholds(16_000).auto,
-    );
+    expect(result.info.newTokenCount).toBeGreaterThanOrEqual(nonVisibleTokens);
+    expect(result.info.newTokenCount).toBeLessThan(16_000 - HARD_BUFFER);
     expect(historyText(result.newHistory)).not.toContain(files[0].body);
   },
 );
@@ -433,22 +444,30 @@ it('drops restored bodies below the auto threshold to leave request headroom', a
   );
 });
 
-it.each([false, true])(
-  'corrects a CJK summary only when estimated locally (usage=%s)',
-  async (withUsage) => {
+it.each([
+  { character: '中', usage: 'absent' },
+  { character: '中', usage: 'reported' },
+  { character: 'ท', usage: 'absent' },
+  { character: 'ท', usage: 'prompt-only' },
+  { character: 'ท', usage: 'reported' },
+])(
+  'corrects a $character summary when the output count is $usage',
+  async ({ character, usage }) => {
     const { history, files, summary, run } = compressionFixture();
-    const originalTokenCount =
-      tokenEstimation.estimateContentTokens(history) + 7500;
-    const text = `<state_snapshot>${'中'.repeat(3000)}</state_snapshot>`;
+    const historyTokens = tokenEstimation.estimateContentTokens(history);
+    const originalTokenCount = historyTokens + 7500;
+    const summaryBody = character.repeat(3000);
+    const text = `<state_snapshot>${summaryBody}</state_snapshot>`;
+    const providerOutputCount = usage === 'reported' ? 800 : undefined;
     summary.mockResolvedValue({
       text,
-      ...(withUsage && {
-        usage: {
-          promptTokenCount:
-            tokenEstimation.estimateContentTokens(history) + 1000,
-          candidatesTokenCount: 800,
-        },
-      }),
+      usage:
+        usage === 'absent'
+          ? undefined
+          : {
+              promptTokenCount: historyTokens + 1000,
+              candidatesTokenCount: providerOutputCount,
+            },
     } as never);
     const compose = vi.spyOn(
       postCompactAttachments,
@@ -462,17 +481,32 @@ it.each([false, true])(
     expect(initialCount + 3750).toBeGreaterThan(16_000 - HARD_BUFFER);
     expect(
       files.filter((file) => result.text.includes(file.body)),
-    ).toHaveLength(withUsage ? 2 : 0);
-    expect(compose).toHaveBeenCalledTimes(withUsage ? 1 : 2);
-    expect(result.text).toContain('中'.repeat(3000));
-    const expectedCount = withUsage
-      ? 7500 +
-        800 +
-        tokenEstimation.estimateContentTokens(result.newHistory!.slice(2))
-      : 7500 + tokenEstimation.estimateContentTokens(result.newHistory!);
+    ).toHaveLength(usage === 'reported' ? 2 : 0);
+    expect(compose).toHaveBeenCalledTimes(usage === 'reported' ? 1 : 2);
+    expect(result.text).toContain(summaryBody);
+    const expectedCount =
+      usage === 'absent'
+        ? 7500 + tokenEstimation.estimateContentTokens(result.newHistory!)
+        : 7500 +
+          (providerOutputCount ?? tokenEstimation.estimateCjkTextTokens(text)) +
+          tokenEstimation.estimateContentTokens(result.newHistory!.slice(2));
     expect(result.info.newTokenCount).toBe(expectedCount);
   },
 );
+
+it('keeps fitting files when a locally estimated summary strips non-ASCII analysis', async () => {
+  const { history, files, summary, run } = compressionFixture();
+  const historyTokens = tokenEstimation.estimateContentTokens(history);
+  summary.mockResolvedValue({
+    text: `<analysis>${'ท'.repeat(3100)}</analysis><state_snapshot>Completed file inspections.</state_snapshot>`,
+    usage: { promptTokenCount: historyTokens + 1000 },
+  } as never);
+  const result = await run({ originalTokenCount: historyTokens + 7500 });
+  expect(files.filter((file) => result.text.includes(file.body))).toHaveLength(
+    2,
+  );
+  expect(result.text).not.toContain('ท');
+});
 
 it('estimates the restored-content base once', async () => {
   const estimate = vi.spyOn(tokenEstimation, 'estimateContentTokens');
@@ -687,6 +721,8 @@ it.each([
   { character: 'x', withUsage: true, kept: 2 },
   { character: '中', withUsage: false, kept: 0 },
   { character: '中', withUsage: true, kept: 0 },
+  { character: 'ท', withUsage: false, kept: 0 },
+  { character: 'ท', withUsage: true, kept: 0 },
 ])(
   'corrects pending plain-text $character input with usage=$withUsage',
   async ({ character, withUsage, kept }) => {
@@ -722,10 +758,10 @@ it.each([
         ? 100 + tokenEstimation.estimateContentTokens(initialHistory.slice(2))
         : tokenEstimation.estimateContentTokens(initialHistory));
     const correction =
-      tokenEstimation.estimateCjkTextTokens(character.repeat(3000)) -
+      tokenEstimation.estimateRestorationTextTokens(character.repeat(3000)) -
       pendingTokens;
     expect(initialCount).toBeLessThan(16_000 - HARD_BUFFER);
-    if (character === '中') {
+    if (kept === 0) {
       expect(initialCount + correction).toBeGreaterThan(16_000);
     }
     expect(
@@ -956,7 +992,7 @@ it('logs the threshold, pending correction, and counts on attachment removal', a
     expect.stringContaining('removed 3 restoration blocks'),
   );
   expect(logger.debug).toHaveBeenCalledWith(
-    expect.stringContaining('5000 pending CJK correction'),
+    expect.stringContaining('5000 pending non-ASCII correction'),
   );
   expect(logger.debug).toHaveBeenCalledWith(
     expect.stringMatching(/post-compression count \d+ -> \d+/),
@@ -990,17 +1026,43 @@ it('accepts shrinking CJK restoration when summary usage is missing', async () =
 });
 
 it.each(['я', 'é', 'α', 'א', 'ท'])(
-  'restores non-CJK %s text within its character-based budget',
+  'keeps the path when 16000 %s characters exceed the 16K restoration budget',
   async (character) => {
-    const { files } = restorationFixture(16_000, 1, 6000, character);
-    const blocks = await buildFileRestorationBlocks(
-      files.map((file) => file.path),
-      undefined,
-      4000,
+    const { files, config, chat } = restorationFixture(
+      16_000,
+      1,
+      16_000,
+      character,
     );
-    expect(historyText(blocks)).toContain(files[0].body);
+    vi.spyOn(sideQuery, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>Completed file inspections.</state_snapshot>',
+      usage: { promptTokenCount: 11_000, candidatesTokenCount: 100 },
+    } as never);
+    const result = await new ChatCompressionService().compress(chat, {
+      promptId: 'non-ascii-restoration-budget',
+      force: true,
+      config,
+      consecutiveFailures: 0,
+      originalTokenCount: 18_000,
+    });
+    const restored = historyText(result.newHistory);
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(restored).toContain(files[0].path);
+    expect(restored).not.toContain(files[0].body);
   },
 );
+
+it('embeds Latin prose with accents that fits the restoration budget', async () => {
+  const { files } = restorationFixture(16_000, 1);
+  const body = 'Le rapport est presque terminé. '.repeat(250);
+  writeFileSync(files[0].path, body);
+  const blocks = await buildFileRestorationBlocks(
+    [files[0].path],
+    undefined,
+    4000,
+  );
+  expect(historyText(blocks)).toContain(body);
+});
 
 it.each([
   { maxImages: 0, imageTokenEstimate: 1600, embedded: 2 },

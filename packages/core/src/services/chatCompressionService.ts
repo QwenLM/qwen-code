@@ -43,6 +43,7 @@ import {
   estimateCjkTextTokens,
   estimateContentTokens,
   estimatePromptTokens,
+  estimateRestorationTextTokens,
 } from './tokenEstimation.js';
 import {
   buildStateReminderParts,
@@ -157,7 +158,7 @@ export const HARD_BUFFER = 3_000;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
-function estimatePostCompactCjkCorrection(contents: Content[]): number {
+function estimatePostCompactTextCorrection(contents: Content[]): number {
   const texts: string[] = [];
   for (const content of contents) {
     for (const part of content.parts ?? []) {
@@ -165,7 +166,10 @@ function estimatePostCompactCjkCorrection(contents: Content[]): number {
     }
   }
   const text = texts.join('');
-  return estimateCjkTextTokens(text) - Math.ceil(text.length / CHARS_PER_TOKEN);
+  return (
+    estimateRestorationTextTokens(text) -
+    Math.ceil(text.length / CHARS_PER_TOKEN)
+  );
 }
 
 /**
@@ -1542,8 +1546,15 @@ export class ChatCompressionService {
         // anchor needs its latest model output added explicitly. Count new
         // restoration/temporal context, not the retained tail, a second time.
         newTokenCount += restorationTokenCount;
+        if (outputCountIsEstimated) {
+          summaryTokenCorrection = Math.max(
+            0,
+            estimateRestorationTextTokens(stripAnalysisBlock(summary)) -
+              compressionOutputTokenCount,
+          );
+        }
       } else {
-        summaryTokenCorrection = estimatePostCompactCjkCorrection(
+        summaryTokenCorrection = estimatePostCompactTextCorrection(
           extraHistory.slice(0, 2),
         );
         const estimatedOriginalVisibleTokenCount = estimateContentTokens(
@@ -1587,13 +1598,13 @@ export class ChatCompressionService {
       }
 
       // The published count already carries the pending user message at char/4.
-      // Apply CJK corrections only to this gate so the inflation guard keeps
-      // comparing counts on the same basis as originalHistoryTokenCount.
-      const pendingTokenCorrection = estimatePostCompactCjkCorrection(
+      // Apply non-ASCII corrections only to the gate so the inflation guard
+      // keeps comparing counts on the same basis as originalHistoryTokenCount.
+      const pendingTokenCorrection = estimatePostCompactTextCorrection(
         visiblePendingUserHistory,
       );
       const restorationTokenCorrection =
-        estimatePostCompactCjkCorrection(restoredHistory);
+        estimatePostCompactTextCorrection(restoredHistory);
       if (
         canCalculateNewTokenCount &&
         hasEmbeddedRestoration &&
@@ -1633,9 +1644,9 @@ export class ChatCompressionService {
           .getDebugLogger()
           .debug(
             `[chat-compression] dropped restored files and images: ` +
-              `${tokenCountBeforeDroppingRestoration} + ${pendingTokenCorrection} pending CJK correction ` +
-              `+ ${restorationTokenCorrection} restoration CJK correction ` +
-              `+ ${summaryTokenCorrection} summary CJK correction ` +
+              `${tokenCountBeforeDroppingRestoration} + ${pendingTokenCorrection} pending non-ASCII correction ` +
+              `+ ${restorationTokenCorrection} restoration non-ASCII correction ` +
+              `+ ${summaryTokenCorrection} summary non-ASCII correction ` +
               `reached the restoration target ${restorationTarget}; ` +
               `removed ${restoredBlockCount} restoration blocks; ` +
               `post-compression count ${tokenCountBeforeDroppingRestoration} -> ${newTokenCount}`,
