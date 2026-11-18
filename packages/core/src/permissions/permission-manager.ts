@@ -762,7 +762,9 @@ export class PermissionManager {
 
     let mostRestrictive: ResolvedDecision = 'allow';
     const contexts = compoundContexts(ctx, subCommands);
-    const changesDirectory = contexts.some((context) => context.cwdUnknown);
+    const changesDirectory =
+      contexts.some((context) => context.cwdUnknown) ||
+      subCommands.some((command) => /^\s*(?:cd|pushd)(?:\s|$)/.test(command));
 
     for (const subCtx of contexts) {
       const subCmd = subCtx.command!;

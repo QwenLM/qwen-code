@@ -98,9 +98,13 @@ for (const command of [
   'env A=1 -Scat /etc/shadow',
 ]) {
   add(
-    `env options stop at assignment: ${command}`,
+    `env options after assignment retain possible file effects: ${command}`,
     command,
-    { operationsEmpty: true },
+    {
+      decision: 'deny',
+      operation: { virtualTool: 'read_file', filePath: '/etc/shadow' },
+      strictPrefixUnsupported: true,
+    },
     { deny: ['Read(//etc/shadow)'] },
   );
 }

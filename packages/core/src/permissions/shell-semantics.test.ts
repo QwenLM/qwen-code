@@ -787,8 +787,8 @@ describe('extractShellOperationsAcrossCommand', () => {
       "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
       [write(REPO_SETTINGS)],
     ],
-    // A newline does not prove cd succeeded. Keep the successful path as a
-    // representative, with uncertainty only affecting relative file targets.
+    // A newline does not prove cd succeeded. Keep both reachable paths, with
+    // uncertainty only affecting relative file targets.
     [
       'splits literal newlines as command boundaries',
       'cd .qwen\ncp /tmp/malicious settings.json',
@@ -799,6 +799,7 @@ describe('extractShellOperationsAcrossCommand', () => {
           pathMayDependOnCwd: false,
         },
         uncertainWrite(REPO_SETTINGS),
+        uncertainWrite('/repo/settings.json'),
       ],
     ],
     [
@@ -820,7 +821,7 @@ describe('extractShellOperationsAcrossCommand', () => {
         'EOF',
         'echo > settings.json',
       ].join('\n'),
-      [uncertainWrite(REPO_SETTINGS)],
+      [uncertainWrite(REPO_SETTINGS), uncertainWrite('/repo/settings.json')],
     ],
     [
       'retains executable commands after a quoted heredoc ending in a backslash',
@@ -852,7 +853,7 @@ describe('extractShellOperationsAcrossCommand', () => {
     [
       'does not treat quoted heredoc-looking text as a heredoc marker',
       ["echo '<<EOF'", 'cd .qwen', "echo '{}' > settings.json"].join('\n'),
-      [uncertainWrite(REPO_SETTINGS)],
+      [uncertainWrite(REPO_SETTINGS), uncertainWrite('/repo/settings.json')],
     ],
     [
       'handles `cd --` and other POSIX flag forms before the target',
@@ -1197,6 +1198,7 @@ describe('quoted and decoded tilde targets', () => {
     // the rest of the segment runs in a cwd the analysis cannot know.
     expect(across(String.raw`cd $'\x7e' ; cat > settings.json`)).toEqual([
       uncertainWrite('/repo/~/settings.json'),
+      uncertainWrite('/repo/settings.json'),
     ]);
   });
 
@@ -1205,6 +1207,7 @@ describe('quoted and decoded tilde targets', () => {
     (target) => {
       expect(across(`cd ${target}; cat > settings.json`)).toEqual([
         uncertainWrite('/repo/~/x/settings.json'),
+        uncertainWrite('/repo/settings.json'),
       ]);
     },
   );
@@ -1212,12 +1215,14 @@ describe('quoted and decoded tilde targets', () => {
   it('keeps an empty quote in a cd tilde prefix uncertain', () => {
     expect(across("cd ~''; cat > settings.json")).toEqual([
       uncertainWrite('/repo/~/settings.json'),
+      uncertainWrite('/repo/settings.json'),
     ]);
   });
 
   it('keeps a quoted cd target uncertain', () => {
     expect(across('cd "~/x" ; cat > y')).toEqual([
       uncertainWrite('/repo/~/x/y'),
+      uncertainWrite('/repo/y'),
     ]);
   });
 });

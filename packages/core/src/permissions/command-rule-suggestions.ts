@@ -9,7 +9,12 @@ import {
   extractCommandRules,
   parseShellCommand,
 } from '../utils/shellAstParser.js';
-import { getShellConfiguration, splitCommands } from '../utils/shell-utils.js';
+import {
+  getShellConfiguration,
+  splitCommands,
+  stripShellCommandPrefixes,
+  stripShellWrapper,
+} from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ToolExecuteConfirmationDetails } from '../tools/tools.js';
 import {
@@ -247,6 +252,14 @@ export async function suggestCommandRules(
   });
   for (const { text: part } of selected) {
     if (bash && hasUnsupportedShellSyntax(part)) {
+      continue;
+    }
+    const unprefixed = bash ? stripShellCommandPrefixes(part) : part;
+    if (
+      unprefixed !== undefined &&
+      stripShellWrapper(unprefixed) !== unprefixed
+    ) {
+      // An outer shell wildcard would authorize every script passed to -c.
       continue;
     }
     let rules: string[] = [];

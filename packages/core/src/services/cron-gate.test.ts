@@ -817,13 +817,13 @@ describe('gateCommandError', () => {
       "bash -c './probe.sh --gate'",
       'not wrapped in a shell such as `bash -c`: the permission rules would check "./probe.sh --gate", not the command as written',
     ],
-    // The normalization takes a `/`-word for a flag and the `-c` after it
-    // for a wrapper's: the rules would check `config.yml`. Refused, and the
-    // error shows what they would read.
+    // The analysis parser misreads the script's -c argument as a wrapper.
+    // The safety view now retains the unmodeled script invocation; the gate
+    // still refuses the mismatch without naming config.yml as its rule input.
     [
       'a script by absolute path given a -c argument',
       'bash /opt/probe.sh -c config.yml',
-      'the permission rules would check "config.yml", not',
+      'not wrapped in a shell',
     ],
     [
       'an env-prefixed wrapper',

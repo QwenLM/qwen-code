@@ -40,10 +40,12 @@ import {
 } from '../utils/shell-utils.js';
 import {
   envSplitStringCommand,
+  getMapfileCallback,
   getShellPrefixCommand,
   MAX_SHELL_UNWRAP_DEPTH,
 } from '../utils/shell-command-prefixes.js';
 import { tokenizeShellWords as tokenize } from '../utils/shell-word-tokenizer.js';
+import { ShellCommentContext } from '../utils/shell-comment-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { splitCompoundCommandSegments } from './rule-parser.js';
 import {
@@ -1241,18 +1243,12 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       if (looksLikePath(arg)) startingPoints.push(resolvePath(arg, cwd));
     }
     if (startingPoints.length === 0) {
-      return [
-        { virtualTool: 'list_directory', filePath: cwd },
-        ...extractFindExecOps(args, cwd),
-      ];
+      return [{ virtualTool: 'list_directory', filePath: cwd }];
     }
-    return [
-      ...startingPoints.map((p) => ({
-        virtualTool: 'list_directory' as const,
-        filePath: p,
-      })),
-      ...extractFindExecOps(args, cwd),
-    ];
+    return startingPoints.map((p) => ({
+      virtualTool: 'list_directory' as const,
+      filePath: p,
+    }));
   },
 
   tree: (args, cwd) =>
@@ -1991,6 +1987,18 @@ export function extractShellOperations(
   cwd: string,
   depth = 0,
 ): ShellOperation[] {
+  return extractShellOperationsAtCwds(
+    simpleCommand,
+    { cwds: [cwd], unknown: false },
+    depth,
+  );
+}
+
+function extractShellOperationsAtCwds(
+  simpleCommand: string,
+  state: ShellCwdState,
+  depth: number,
+): ShellOperation[] {
   if (!simpleCommand.trim()) return [];
 
   const fdRedirects = new Set<number>();
@@ -2001,8 +2009,25 @@ export function extractShellOperations(
 
   // Extract I/O redirections before dispatching to the command handler.
   // This mutates `tokens` in-place by removing redirect tokens.
-  const { readFiles: redirectReads, writeFiles: redirectWrites } =
-    extractRedirects(tokens, cwd, fdRedirects, fdCloses, bares);
+  const originalTokens = [...tokens];
+  const originalBares = [...bares];
+  const firstCwd = state.cwds[0]!;
+  const firstRedirects = extractRedirects(
+    tokens,
+    firstCwd,
+    fdRedirects,
+    fdCloses,
+    bares,
+  );
+  const redirectOps = operationsAtCwds(state, simpleCommand, (cwd) =>
+    toRedirectOperations(
+      cwd === firstCwd
+        ? firstRedirects
+        : extractRedirects([...originalTokens], cwd, fdRedirects, fdCloses, [
+            ...originalBares,
+          ]),
+    ),
+  );
 
   while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
     tokens.shift();
@@ -2019,13 +2044,18 @@ export function extractShellOperations(
     const prefix = getShellPrefixCommand(tokens, commandIndex);
     if (prefix === undefined) break;
     if (prefix.splitString !== undefined) {
-      if (depth < MAX_SHELL_UNWRAP_DEPTH) {
+      if (depth <= MAX_SHELL_UNWRAP_DEPTH) {
         const payload = envSplitStringCommand(
           prefix.splitString,
           tokens.slice(prefix.commandIndex),
         );
         if (payload !== undefined) {
-          ops.push(...walkCompoundCommand(payload, cwd, depth + 1, true));
+          const innerState = { ...state, unknown: true };
+          ops.push(
+            ...(depth < MAX_SHELL_UNWRAP_DEPTH
+              ? walkCompoundCommand(payload, innerState, depth + 1)
+              : extractShellOperationsAtCwds(payload, innerState, depth + 1)),
+          );
         }
       }
       commandIndex = tokens.length;
@@ -2037,29 +2067,34 @@ export function extractShellOperations(
   const cmdName = tokens[commandIndex];
   if (!cmdName) {
     // Only assignments and/or redirections were present.
-    return [
-      ...ops,
-      ...toRedirectOperations({
-        readFiles: redirectReads,
-        writeFiles: redirectWrites,
-      }),
-    ];
+    return [...ops, ...redirectOps];
   }
 
   // Prefixes advance through the same argv; reparsing joined words would turn
   // quoted arguments such as `echo 'hi > file'` into executable redirections.
+  const callback = getMapfileCallback(tokens, commandIndex);
+  if (callback !== undefined && depth < MAX_SHELL_UNWRAP_DEPTH) {
+    ops.push(
+      ...walkCompoundCommand(callback, { ...state, unknown: true }, depth + 1),
+    );
+  }
   const handler = COMMANDS[cmdName];
   if (handler) {
-    ops.push(...handler(tokens.slice(commandIndex + 1), cwd));
+    ops.push(
+      ...operationsAtCwds(state, simpleCommand, (cwd) =>
+        handler(tokens.slice(commandIndex + 1), cwd),
+      ),
+    );
+  }
+  if (cmdName === 'find' && depth < MAX_SHELL_UNWRAP_DEPTH) {
+    // Execution clauses share the complete cwd set and nesting budget.
+    ops.push(
+      ...extractFindExecOps(tokens.slice(commandIndex + 1), state, depth),
+    );
   }
 
   // Append redirect-derived operations
-  ops.push(
-    ...toRedirectOperations({
-      readFiles: redirectReads,
-      writeFiles: redirectWrites,
-    }),
-  );
+  ops.push(...redirectOps);
 
   return ops;
 }
@@ -2218,10 +2253,14 @@ export function extractShellOperationsAcrossCommand(
   command: string,
   cwd: string,
 ): ShellOperation[] {
-  return walkCompoundCommand(command, cwd, 0, false);
+  return walkCompoundCommand(command, { cwds: [cwd], unknown: false }, 0);
 }
 
-function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
+function extractFindExecOps(
+  args: string[],
+  state: ShellCwdState,
+  depth: number,
+): ShellOperation[] {
   const ops: ShellOperation[] = [];
   for (let i = 0; i < args.length; i++) {
     const marker = args[i]!;
@@ -2245,11 +2284,12 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
     const innerCommand = inner
       .map((arg) => arg.replaceAll('{}', '__find_exec_path__'))
       .join(' ');
-    const innerOps = extractShellOperationsAcrossCommand(innerCommand, cwd);
     ops.push(
-      ...(marker.endsWith('dir')
-        ? markCwdUnknownOps(innerOps, innerCommand, cwd)
-        : innerOps),
+      ...walkCompoundCommand(
+        innerCommand,
+        { ...state, unknown: state.unknown || marker.endsWith('dir') },
+        depth + 1,
+      ),
     );
   }
   return ops;
@@ -2258,6 +2298,42 @@ function extractFindExecOps(args: string[], cwd: string): ShellOperation[] {
 interface HeredocDelimiter {
   text: string;
   quoted: boolean;
+}
+
+function hasUnclosedShellQuote(command: string): boolean {
+  let quote = '';
+  let pendingDollar = false;
+  const comments = new ShellCommentContext();
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    const afterDollar: boolean = pendingDollar;
+    pendingDollar = false;
+    const comment = comments.read(
+      command,
+      index,
+      quote === "'" || quote === "$'",
+      quote === '"',
+    );
+    if (comment) {
+      index = comment.end;
+      continue;
+    }
+    if (character === '\\' && quote !== "'") {
+      if (command[index + 1] === '\n' && quote !== "$'")
+        pendingDollar = afterDollar;
+      index++;
+      continue;
+    }
+    if (quote) {
+      if (character === quote || (quote === "$'" && character === "'"))
+        quote = '';
+    } else if (character === "'" || character === '"') {
+      quote = character === "'" && afterDollar ? "$'" : character;
+    } else if (character === '$') {
+      pendingDollar = !afterDollar;
+    }
+  }
+  return quote !== '';
 }
 
 function stripHeredocBodies(command: string): string {
@@ -2287,7 +2363,8 @@ function stripHeredocBodies(command: string): string {
 
     while (
       index + 1 < lines.length &&
-      !removeShellLineContinuations(line + '\n').endsWith('\n')
+      (!removeShellLineContinuations(line + '\n').endsWith('\n') ||
+        hasUnclosedShellQuote(line))
     ) {
       line += '\n' + lines[++index]!;
     }
@@ -2361,33 +2438,56 @@ function getHeredocDelimiters(line: string): HeredocDelimiter[] {
 }
 
 interface ShellCwdState {
-  cwd: string;
+  cwds: string[];
   unknown: boolean;
 }
 
-// Keep one representative path, but never grant from it when execution paths
-// disagree. This bounds the analysis regardless of the number of &&/|| joins.
+const MAX_KNOWN_SHELL_CWDS = 64;
+
+// Preserve concrete deny candidates. Truncation keeps the unknown signal, so
+// relative file effects outside the bounded set cannot silently receive grants.
 function joinCwdStates(
   first: ShellCwdState,
   second: ShellCwdState,
 ): ShellCwdState {
+  const cwds = [...new Set([...first.cwds, ...second.cwds])];
   return {
-    cwd: first.cwd,
-    unknown: first.unknown || second.unknown || first.cwd !== second.cwd,
+    cwds: cwds.slice(0, MAX_KNOWN_SHELL_CWDS),
+    unknown: first.unknown || second.unknown || cwds.length > 1,
   };
+}
+
+function operationsAtCwds(
+  state: ShellCwdState,
+  command: string,
+  extract: (cwd: string, index: number) => ShellOperation[],
+): ShellOperation[] {
+  // Deduplicate candidate directories without collapsing repeated operations
+  // inside one command or in later commands.
+  const seen = new Set<string>();
+  return state.cwds.flatMap((cwd, index) => {
+    const extracted = extract(cwd, index);
+    const candidates = state.unknown
+      ? markCwdUnknownOps(extracted, command, cwd)
+      : extracted;
+    const fresh = candidates.filter(
+      (operation) => !seen.has(JSON.stringify(operation)),
+    );
+    for (const operation of candidates) seen.add(JSON.stringify(operation));
+    return fresh;
+  });
 }
 
 function walkCompoundCommand(
   command: string,
-  cwd: string,
+  initialState: ShellCwdState,
   depth: number,
-  initialCwdUnknown: boolean,
 ): ShellOperation[] {
   command = removeShellLineContinuations(stripHeredocBodies(command));
   const subCommands = splitCompoundCommandSegments(command);
 
   const ops: ShellOperation[] = [];
-  let succeeded: ShellCwdState = { cwd, unknown: initialCwdUnknown };
+  let succeeded = initialState;
   let failed = succeeded;
   let listStart = succeeded;
   let previous = '';
@@ -2418,20 +2518,32 @@ function walkCompoundCommand(
     for (let part = index; part <= pipelineEnd; part++) {
       const rawSub = subCommands[part]!.command;
       const sub = stripShellCommandNegation(rawSub);
-      const cdTarget = resolveCdTargetCwd(sub, input.cwd, input.unknown);
-      if (cdTarget.kind !== 'not-cd') {
-        const redirectOps = toRedirectOperations(cdTarget.redirects);
+      const cdTargets = input.cwds.map((cwd) =>
+        resolveCdTargetCwd(sub, cwd, input.unknown),
+      );
+      if (cdTargets.some((target) => target.kind !== 'not-cd')) {
         ops.push(
-          ...(input.unknown
-            ? markCwdUnknownOps(redirectOps, sub, input.cwd)
-            : redirectOps),
+          ...operationsAtCwds(input, sub, (_cwd, index) => {
+            const target = cdTargets[index]!;
+            return target.kind === 'not-cd'
+              ? []
+              : toRedirectOperations(target.redirects);
+          }),
         );
-        if (cdTarget.kind === 'static') {
-          nextSuccess = { cwd: cdTarget.cwd, unknown: cdTarget.cwdUnknown };
-          nextFailure = input;
-        } else {
+        if (cdTargets.some((target) => target.kind === 'dynamic')) {
           // source/. can change cwd even when the sourced command fails.
           nextSuccess = nextFailure = { ...input, unknown: true };
+        } else {
+          nextSuccess = { cwds: [], unknown: false };
+          for (const target of cdTargets) {
+            if (target.kind === 'static') {
+              nextSuccess = joinCwdStates(nextSuccess, {
+                cwds: [target.cwd],
+                unknown: target.cwdUnknown,
+              });
+            }
+          }
+          nextFailure = input;
         }
       } else {
         // Unwrap after the outer split so sibling segments remain visible.
@@ -2439,23 +2551,12 @@ function walkCompoundCommand(
         const unprefixed =
           strictPrefix ?? stripShellCommandPrefixes(sub, true) ?? sub;
         const subCwdUnknown = input.unknown || strictPrefix === undefined;
-        const subOps = extractShellOperations(sub, input.cwd, depth);
-        ops.push(
-          ...(subCwdUnknown
-            ? markCwdUnknownOps(subOps, sub, input.cwd)
-            : subOps),
-        );
+        const subState = { ...input, unknown: subCwdUnknown };
+        ops.push(...extractShellOperationsAtCwds(sub, subState, depth));
         const unwrapped = stripShellWrapper(unprefixed);
         if (unwrapped !== unprefixed) {
           if (depth < MAX_SHELL_UNWRAP_DEPTH) {
-            ops.push(
-              ...walkCompoundCommand(
-                unwrapped,
-                input.cwd,
-                depth + 1,
-                subCwdUnknown,
-              ),
-            );
+            ops.push(...walkCompoundCommand(unwrapped, subState, depth + 1));
           } else {
             shellSemanticsDebugLogger.warn(
               `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,

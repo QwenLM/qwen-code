@@ -24,6 +24,7 @@ import {
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import {
+  getMapfileCallback,
   MAX_SHELL_UNWRAP_DEPTH,
   SHELL_ASSIGNMENT_PREFIX,
   SHELL_EXECUTION_ENV_VARIABLE,
@@ -1373,6 +1374,8 @@ export function hasUnsupportedShellSyntax(
           .some((word) => /^-[^-]*s/.test(word) || word.includes('$'))) ||
       // printf -v can assign CDPATH or a nameref; its output is shell state.
       (firstWord === 'printf' && words[1]?.startsWith('-v')) ||
+      // mapfile/readarray callbacks are shell code, not ordinary input data.
+      getMapfileCallback(words) !== undefined ||
       ([
         'export',
         'declare',
@@ -1389,6 +1392,14 @@ export function hasUnsupportedShellSyntax(
           .some((word) => SHELL_EXECUTION_ENV_VARIABLE.test(word))) ||
       hasUnmodeledShellCommandString(unprefixed) ||
       ['xargs', 'parallel'].includes(firstWord?.split('/').at(-1) ?? '') ||
+      // find callbacks share the tracker's recursion bound. Known operations
+      // still enforce denies; an unexpanded callback must not become a grant.
+      (firstWord?.split('/').at(-1) === 'find' &&
+        words
+          .slice(1)
+          .some((word) =>
+            ['-exec', '-execdir', '-ok', '-okdir'].includes(word),
+          )) ||
       /^[^\s()]+\s*\(\s*\)/.test(unprefixed) ||
       /^(?:[({]|(?:if|then|elif|else|fi|while|until|for|select|case|esac|do|done|function)(?:\s|$))/.test(
         unprefixed,
@@ -1676,6 +1687,33 @@ function matchesStaticShellCommand(
         (candidate.kind === redirect.kind || candidate.kind === 'readwrite') &&
         matchesCommandText(redirect.target, candidate.target),
     ),
+  );
+}
+
+/** Preserve inner restrictions when Monitor must retain the outer wrapper. */
+function matchesRestrictiveShellPayload(
+  pattern: string,
+  command: string,
+  depth = 0,
+): boolean {
+  if (depth >= MAX_SHELL_UNWRAP_DEPTH) return false;
+  const inner = stripShellWrapper(command);
+  if (inner === command || inner === command.trim()) return false;
+  const literal = stripShellWrapper(command, true) === inner;
+  // Keep the old textual restriction view of an expanded payload, but never
+  // descend into it as a known program. Positional arguments are not payloads.
+  return splitCompoundCommand(inner, literal).some(
+    (segment) =>
+      matchesCommandPattern(pattern, segment) ||
+      matchesCommandText(pattern, trimCommandPadding(segment)) ||
+      matchesCommandText(
+        normalizeRedirectSpacing(pattern, true),
+        normalizeRedirectSpacing(segment),
+      ) ||
+      // Startup files and earlier segments can change cwd. Compare explicit
+      // paths without resolving a relative target against the invocation cwd.
+      matchesStaticShellCommand(pattern, segment) ||
+      (literal && matchesRestrictiveShellPayload(pattern, segment, depth + 1)),
   );
 }
 
@@ -2557,6 +2595,9 @@ export function matchesRule(
             command,
             pathContext?.cwd,
           );
+          specifierMatched ||=
+            SHELL_TOOL_NAMES.has(canonicalCtxToolName) &&
+            matchesRestrictiveShellPayload(rule.specifier, command);
         }
         break;
       }

@@ -151,10 +151,11 @@ export function gateCommandError(gate: unknown): string | null {
   // and joined into one line can differ from what the shell runs (adjacent
   // quotes, a trailing `\`, an open quote, a command after the script), so
   // a gate must be a command the normalization leaves as it is. A gate
-  // already runs in a shell; the wrapper adds nothing. The error names what
-  // the rules would check, as the normalization also misreads a few plain
-  // commands (`bash /opt/probe.sh -c x` reads as `x`).
-  const checked = normalizeMonitorCommand(gate).safetyCommand;
+  // already runs in a shell; the wrapper adds nothing. If an unmodeled wrapper
+  // keeps its original safety string, the separate analysis view still makes
+  // the wrapper visible to this refusal.
+  const normalized = normalizeMonitorCommand(gate);
+  const checked = normalized.safetyCommand;
   if (checked !== gate.trim()) {
     let shown = checked;
     if (checked.length > 80) {
@@ -163,6 +164,9 @@ export function gateCommandError(gate: unknown): string | null {
       shown = `${checked.slice(0, high >= 0xd800 && high <= 0xdbff ? 78 : 79)}…`;
     }
     return `must be the command itself, not wrapped in a shell such as \`bash -c\`: the permission rules would check ${JSON.stringify(shown)}, not the command as written`;
+  }
+  if (normalized.analysisCommand !== gate.trim()) {
+    return 'must be the command itself, not wrapped in a shell such as `bash -c`';
   }
   return null;
 }

@@ -27,14 +27,19 @@ describe('splitCompoundCommandSegments', () => {
     ]);
   });
 
-  it.each(['(echo hi)#x', '(( 1 ))#x'])(
-    'keeps ambiguous adjacent hashes for conservative analysis in %s',
-    (command) => {
-      expect(splitCompoundCommandSegments(command, true)).toEqual([
-        { command, terminator: '' },
-      ]);
-    },
-  );
+  it('strips an adjacent comment after a shell group', () => {
+    expect(splitCompoundCommandSegments('(echo hi)#x', true)).toEqual([
+      { command: '(echo hi)', terminator: '' },
+    ]);
+  });
+
+  it('keeps the conservative reading after an arithmetic command', () => {
+    // Arithmetic contents are still treated as quoted by the operator scanner.
+    const command = '(( 1 ))#x';
+    expect(splitCompoundCommandSegments(command, true)).toEqual([
+      { command, terminator: '' },
+    ]);
+  });
 
   it.each<[string, CompoundCommandSegment[]]>([
     [

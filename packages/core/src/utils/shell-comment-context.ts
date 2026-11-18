@@ -12,8 +12,10 @@ interface ShellComment {
 /** Shared comment context for scanners that already track quotes and escapes. */
 export class ShellCommentContext {
   private parameterQuotes: boolean[] = [];
+  private parenthesisWords: boolean[] = [];
   private wordStart = true;
   private pendingDollar = false;
+  private pendingProcessSubstitution = false;
   private backticks = false;
   private comment: ShellComment | undefined;
 
@@ -24,7 +26,9 @@ export class ShellCommentContext {
     doubleQuoted: boolean,
   ): ShellComment | undefined {
     const afterDollar = this.pendingDollar;
+    const afterProcessSubstitution = this.pendingProcessSubstitution;
     this.pendingDollar = false;
+    this.pendingProcessSubstitution = false;
     if (this.comment) {
       if (index < this.comment.end) return this.comment;
       this.comment = undefined;
@@ -42,8 +46,10 @@ export class ShellCommentContext {
       return undefined;
     }
     if (character === '\\') {
-      if (command[index + 1] === '\n') this.pendingDollar = afterDollar;
-      else this.wordStart = false;
+      if (command[index + 1] === '\n') {
+        this.pendingDollar = afterDollar;
+        this.pendingProcessSubstitution = afterProcessSubstitution;
+      } else this.wordStart = false;
       return undefined;
     }
     if (character === '`') {
@@ -80,7 +86,17 @@ export class ShellCommentContext {
       return this.comment;
     }
 
-    // A closing substitution/group can still be part of the current word.
+    if (!doubleQuoted && this.parameterQuotes.length === 0) {
+      this.pendingProcessSubstitution = character === '<' || character === '>';
+      if (character === '(') {
+        this.parenthesisWords.push(afterDollar || afterProcessSubstitution);
+      } else if (character === ')') {
+        // A shell group ends a word; a command/process expansion remains in it.
+        this.wordStart = !this.parenthesisWords.pop();
+        return undefined;
+      }
+    }
+
     this.wordStart = !doubleQuoted && /[ \t\n;&|(<>]/.test(character);
     return undefined;
   }

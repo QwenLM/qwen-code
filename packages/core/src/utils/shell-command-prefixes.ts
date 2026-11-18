@@ -18,6 +18,10 @@ const PREFIX_COMMAND_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
       '--login-class',
       '-D',
       '--chdir',
+      '-R',
+      '--chroot',
+      '-h',
+      '--host',
       '-p',
       '--prompt',
       '-r',
@@ -30,7 +34,8 @@ const PREFIX_COMMAND_FLAGS_WITH_VALUE = new Map<string, ReadonlySet<string>>([
       '--other-user',
     ]),
   ],
-  ['env', new Set(['-u', '--unset', '-S', '--split-string'])],
+  ['env', new Set(['-u', '--unset', '-S', '--split-string', '-C', '--chdir'])],
+  ['time', new Set(['-o', '--output', '-f', '--format'])],
   ['doas', new Set(['-u', '-C'])],
   ['stdbuf', new Set(['-i', '--input', '-o', '--output', '-e', '--error'])],
   [
@@ -87,10 +92,38 @@ export const MAX_SHELL_UNWRAP_DEPTH = 4;
 export const SHELL_ASSIGNMENT_PREFIX =
   /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=/;
 
-// These variables can change directory lookup, shell options or startup code.
+// These variables can change executable/loader lookup, directories or startup code.
 // An assignment is not a transparent prefix to the command being analysed.
 export const SHELL_EXECUTION_ENV_VARIABLE =
-  /^(?:HOME|CDPATH|BASHOPTS|SHELLOPTS|BASH_ENV|ENV)(?:\[|\+?=|$)/;
+  /^(?:HOME|PATH|LD_PRELOAD|LD_LIBRARY_PATH|CDPATH|BASHOPTS|SHELLOPTS|BASH_ENV|ENV)(?:\[|\+?=|$)/;
+
+/** Locate literal callback source without treating option values as flags. */
+export function getMapfileCallback(
+  tokens: readonly string[],
+  start = 0,
+): string | undefined {
+  if (!['mapfile', 'readarray'].includes(tokens[start] ?? '')) return undefined;
+  let callback: string | undefined;
+  for (let index = start + 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--' || token === '-' || !token.startsWith('-'))
+      return callback;
+    for (let offset = 1; offset < token.length; offset++) {
+      const flag = token[offset]!;
+      if (flag === 'C') {
+        callback =
+          offset + 1 < token.length ? token.slice(offset + 1) : tokens[++index];
+        break;
+      }
+      if ('dnOsuc'.includes(flag)) {
+        // A separate value, including `--`, belongs to this option.
+        if (offset === token.length - 1) index++;
+        break;
+      }
+    }
+  }
+  return callback;
+}
 
 const ENV_SPLIT_ESCAPES: Readonly<Record<string, string>> = {
   f: '\f',
@@ -105,7 +138,7 @@ const ENV_SPLIT_ESCAPES: Readonly<Record<string, string>> = {
   $: '$',
 };
 
-/** Rebuild static GNU env -S argv without turning argument data into shell syntax. */
+/** Rebuild static env -S argv without turning argument data into shell syntax. */
 export function envSplitStringCommand(
   value: string,
   trailing: readonly string[],
@@ -135,7 +168,14 @@ function splitEnvString(value: string): string[] | undefined {
       finishWord();
       continue;
     }
-    if (character === '#' && !started) break;
+    if (character === '#' && !started) {
+      // uutils resumes after a comment's newline; GNU stops at the comment.
+      // Retain potentially executable words for restrictive inspection.
+      const newline = value.indexOf('\n', index);
+      if (newline === -1) break;
+      index = newline;
+      continue;
+    }
     if (
       (character === "'" || character === '"') &&
       (!quote || quote === character)
@@ -204,8 +244,20 @@ export function getShellPrefixCommand(
   let hasUnsupportedOption = false;
   let homeRemoved = false;
   let options = true;
+  let envAssignmentSeen = false;
+  let timeoutDurationSeen = false;
   while (index < tokens.length) {
     const token = tokens[index]!;
+    if (
+      options &&
+      token.startsWith('-') &&
+      ((command === 'env' && envAssignmentSeen) ||
+        (command === 'timeout' && timeoutDurationSeen))
+    ) {
+      // uutils accepts options here; GNU stops option parsing at the operand.
+      // Inspect the possible command without granting a portable prefix.
+      hasUnsupportedOption = true;
+    }
     if (options && token === '--') {
       index++;
       options = false;
@@ -235,8 +287,15 @@ export function getShellPrefixCommand(
         if (removed === 'HOME' || /[$`]/.test(removed ?? ''))
           homeRemoved = true;
       }
-      // The operation tracker cannot follow a prefix's working-directory change.
-      if (command === 'sudo' && (flag === '-D' || flag === '--chdir')) {
+      // These directory, remote-host and output effects are not transparent.
+      if (
+        (command === 'sudo' &&
+          ['-D', '--chdir', '-R', '--chroot', '-h', '--host'].includes(
+            flag ?? '',
+          )) ||
+        (command === 'env' && (flag === '-C' || flag === '--chdir')) ||
+        (command === 'time' && flag !== undefined)
+      ) {
         hasUnsupportedOption = true;
       }
       // These operand positions support restrictive inspection only. Keep
@@ -267,19 +326,24 @@ export function getShellPrefixCommand(
       }
     } else if (SHELL_ASSIGNMENT_PREFIX.test(token)) {
       if (command === 'env') {
-        options = false;
+        envAssignmentSeen = true;
         if (SHELL_EXECUTION_ENV_VARIABLE.test(token))
           hasUnsupportedOption = true;
       }
+      index++;
+    } else if (
+      command === 'timeout' &&
+      !timeoutDurationSeen &&
+      /^\d/.test(token)
+    ) {
+      timeoutDurationSeen = true;
       index++;
     } else {
       break;
     }
   }
-  if (command === 'timeout') {
-    if (index < tokens.length && /^\d/.test(tokens[index]!)) index++;
-    else hasUnsupportedOption = true;
-  }
+  if (command === 'timeout' && !timeoutDurationSeen)
+    hasUnsupportedOption = true;
   return {
     commandIndex: index,
     hasUnsupportedOption,

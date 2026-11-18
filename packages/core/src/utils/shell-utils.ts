@@ -1026,27 +1026,37 @@ export function stripShellCommandPrefixes(
 
 /** Shell programs that the operation tracker cannot inspect. */
 export function hasUnmodeledShellCommandString(command: string): boolean {
-  let head = takeLeadingToken(command);
+  const head = takeLeadingToken(command);
   if (!head) return false;
-  let name = getShellWrapperBase(resolveShellWord(head.token));
-  let busybox = false;
-  if (name === 'busybox') {
-    head = takeLeadingToken(head.rest);
-    if (!head) return false;
-    name = getShellWrapperBase(resolveShellWord(head.token));
-    busybox = true;
-  }
-  // Recognize the shell families, including restricted/ksh variants and
-  // BusyBox applets, without treating arbitrary programs' -c as shell code.
+  const name = getShellWrapperBase(resolveShellWord(head.token));
+  // These dispatchers can run another program with untracked argv, cwd,
+  // namespace or startup code. Their payload is not a transparent prefix.
   if (
-    !/^(?:r?(?:ba|z|k)?sh(?:93)?|[om]ksh|pdksh|yash|dash|ash|hush|fish|t?csh)(?:\.exe)?$/.test(
+    [
+      'busybox',
+      'taskset',
+      'chroot',
+      'flock',
+      'setpriv',
+      'unshare',
+      'prlimit',
+      'chrt',
+      'watch',
+      'script',
+    ].includes(name ?? '')
+  ) {
+    return true;
+  }
+  // Recognize shell families, including restricted/ksh variants, without
+  // treating arbitrary programs' -c as shell code.
+  if (
+    !/^(?:r?(?:ba|z|k)?sh(?:93)?|[om]ksh|pdksh|yash|dash|ash|msh|hush|fish|t?csh)(?:\.exe)?$/.test(
       name ?? '',
     )
   ) {
     return false;
   }
-  const modeledCommandString =
-    !busybox && isKnownMonitorWrapperToken(head.token);
+  const modeledCommandString = isKnownMonitorWrapperToken(head.token);
   let rest = head.rest;
   for (;;) {
     const token = takeLeadingToken(rest);
@@ -1055,28 +1065,37 @@ export function hasUnmodeledShellCommandString(command: string): boolean {
     if (!token) return true;
     const word = resolveShellWord(token.token);
     if (word === '--version' || word === '--help') return false;
-    // o/O consume a separate option operand even in clusters such as -cO.
-    // They can also enable lastpipe. Do not mistake their operand for code.
-    if (/^[-+][^-]*[oO]/.test(word)) return true;
-    if (name === 'fish' && /^--(?:init-)?command(?:=|$)/.test(word)) {
+    // Only options that keep the same explicit command string are transparent.
+    // Startup files, option operands and unknown shell flags require review.
+    if (
+      !['--noprofile', '--norc'].includes(word) &&
+      !/^-[cefnuvx]+$/.test(word) &&
+      !/^\+[efnuvx]+$/.test(word)
+    ) {
       return true;
     }
     if (isMonitorCommandMarker(head.token, word)) {
+      const payload = takeLeadingToken(token.rest);
+      if (
+        payload &&
+        !isOptionTerminatorWord(payload.token) &&
+        /^[-+]/.test(resolveShellWord(payload.token))
+      ) {
+        // Bash continues parsing options after -c, before the script word.
+        return true;
+      }
       return (
         !modeledCommandString || stripShellWrapper(command) === command.trim()
       );
     }
-    if (word === '--' || !isShellWrapperFlagToken(word)) return true;
     rest = token.rest;
-    if (shellWrapperFlagConsumesOperand(word)) {
-      const operand = takeLeadingToken(rest);
-      if (!operand) return true;
-      rest = operand.rest;
-    }
   }
 }
 
-export function stripShellWrapper(command: string): string {
+export function stripShellWrapper(
+  command: string,
+  literalPayloadOnly = false,
+): string {
   const trimmed = trimBashEdgeSeparators(command);
   let rest = trimmed;
 
@@ -1115,6 +1134,16 @@ export function stripShellWrapper(command: string): string {
       }
       const commandToken = takeLeadingToken(markerRest);
       if (!commandToken) return trimmed;
+      if (literalPayloadOnly) {
+        const removed = shellWordQuoteRemoval(commandToken.token);
+        if (
+          removed === null ||
+          removed.hasExpansion ||
+          shellWrapperCommandConsumesRest(wrapperToken.token)
+        ) {
+          return trimmed;
+        }
+      }
       const { value, quote } = stripSymmetricQuotes(commandToken.token);
       // The resolved word, not its spelling: an ANSI-C or locale payload
       // (`$'cat > /etc/motd'`, `$"…"`) is the script bash runs, so the
@@ -1936,6 +1965,13 @@ function takeLeadingToken(
       commandSubstitutionDepth++;
       idx += 2;
       continue;
+    }
+
+    if ((char === '(' || char === ')') && commandSubstitutionDepth === 0) {
+      // Bare grouping operators delimit words. Keep substitutions whole, but
+      // let consumers inspect a wrapper inside `( bash -c '...' )`.
+      if (idx === 0) idx++;
+      break;
     }
 
     if (char === '(') {
