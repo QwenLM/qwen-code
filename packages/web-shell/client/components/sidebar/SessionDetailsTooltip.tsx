@@ -114,7 +114,11 @@ export function SessionDetailsTooltip({
     : session.isWaitingForUserQuestion
       ? t('sessionsOverview.status.askUserQuestion')
       : session.hasActivePrompt
-        ? t('sidebar.running')
+        ? // A turn in flight hides the row's background dot, so the details
+          // status is where background work still gets named.
+          session.hasRunningBackgroundTasks
+          ? `${t('sidebar.running')} · ${t('background.running')}`
+          : t('sidebar.running')
         : session.hasRunningBackgroundTasks
           ? t('background.running')
           : session.activeWorkState === 'active'

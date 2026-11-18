@@ -5775,6 +5775,19 @@ export function WebShellSidebar({
       const running = Boolean(session.hasActivePrompt || sessionWorkActive);
       const backgroundRunning =
         !session.hasActivePrompt && session.hasRunningBackgroundTasks;
+      // The status dot is prompt-gated, so a turn in flight hides the background
+      // dot. The busy marker must not be: it is the only place left that can
+      // still say this row is running background work.
+      const backgroundTasks = session.hasRunningBackgroundTasks === true;
+      const busyLabel = backgroundRunning
+        ? t('background.running')
+        : sessionWorkActive
+          ? t('sidebar.activeWork')
+          : t('sidebar.running');
+      const busyTitle =
+        backgroundTasks && !backgroundRunning
+          ? `${busyLabel} · ${t('background.running')}`
+          : busyLabel;
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -6036,14 +6049,14 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
-                {running && !backgroundRunning ? (
+                {running || backgroundTasks ? (
                   <span
-                    className={styles.sessionLoading}
-                    aria-label={
-                      sessionWorkActive
-                        ? t('sidebar.activeWork')
-                        : t('sidebar.running')
-                    }
+                    className={cx(
+                      styles.sessionLoading,
+                      backgroundTasks && styles.sessionLoadingBackground,
+                    )}
+                    aria-label={busyLabel}
+                    title={backgroundTasks ? busyTitle : undefined}
                   />
                 ) : !attention && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>

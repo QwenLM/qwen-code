@@ -533,6 +533,12 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       renderSidebar(false);
       await flushSidebar();
     };
+    const busyMarker = () =>
+      container.querySelector(`.${sidebarStyles.sessionLoading}`);
+    const isBackgroundBusy = () =>
+      busyMarker()?.classList.contains(
+        sidebarStyles.sessionLoadingBackground,
+      ) === true;
     await update(true, true);
     expect(
       container.querySelector('[data-web-shell-session-running]'),
@@ -540,6 +546,13 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(
       container.querySelector('[data-web-shell-session-background-running]'),
     ).toBeNull();
+    // The dot is prompt-gated, so during a turn the busy marker is the only
+    // surface left that can name the background work.
+    expect(busyMarker()?.getAttribute('aria-label')).toBe('Running');
+    expect(busyMarker()?.getAttribute('title')).toBe(
+      'Running · Background tasks running',
+    );
+    expect(isBackgroundBusy()).toBe(true);
     await update(false, true);
     expect(
       container.querySelector('[data-web-shell-session-running]'),
@@ -553,13 +566,44 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(
       container.querySelector('[data-web-shell-session-active-work]'),
     ).toBeNull();
+    expect(busyMarker()?.getAttribute('aria-label')).toBe(
+      'Background tasks running',
+    );
+    expect(isBackgroundBusy()).toBe(true);
     await update(false, false);
     expect(
       container.querySelector('[data-web-shell-session-background-running]'),
     ).toBeNull();
+    expect(isBackgroundBusy()).toBe(false);
+    expect(busyMarker()?.getAttribute('title')).toBeNull();
     await update(false);
     expect(
       container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+    expect(isBackgroundBusy()).toBe(false);
+  });
+
+  it('keeps the busy marker when background work is the only activity', async () => {
+    // A monitor holds no active-work category, so the daemon grades the row
+    // idle while background tasks are running. Gating the marker on `running`
+    // alone would drop it here and leave the row looking finished.
+    active.sessions = [
+      makeSession('monitor-only', {
+        hasActivePrompt: false,
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+    const marker = container.querySelector(`.${sidebarStyles.sessionLoading}`);
+    expect(marker?.getAttribute('aria-label')).toBe('Background tasks running');
+    expect(
+      marker?.classList.contains(sidebarStyles.sessionLoadingBackground),
+    ).toBe(true);
+    expect(
+      container.querySelector('[data-web-shell-session-active-work]'),
     ).toBeNull();
   });
 

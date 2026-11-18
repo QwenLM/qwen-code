@@ -124,6 +124,15 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     expect(nonHoverCss).not.toMatch(/\.sessionMetaSlotReserved/);
   });
 
+  it('hides the busy marker when a background-only row reveals its actions', () => {
+    // A background-only row is not .runningSession, so hovering anywhere on
+    // the row reveals the overlay — not just hovering the meta slot. Without
+    // this the amber busy marker sits under the revealed action buttons.
+    expect(hoverMedia).toMatch(
+      /\.sessionRow:hover:not\(\.runningSession\)\s*\.sessionLoading,[^{]*\{[^}]*opacity:\s*0;/,
+    );
+  });
+
   it('hides the trailing markers whenever the overlay is revealed', () => {
     for (const marker of [
       'sessionGitIcon',

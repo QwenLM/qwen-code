@@ -117,6 +117,42 @@ describe('SessionDetailsTooltip', () => {
     },
   );
 
+  it('names background work alongside a running turn', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'status',
+                workspaceCwd: '/workspace',
+                hasActivePrompt: true,
+                hasRunningBackgroundTasks: true,
+                activeWorkState: 'active',
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Running · Background tasks running',
+      );
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('supports a ref-forwarding click trigger, keyboard dismissal and the host portal', async () => {
     const container = document.createElement('div');
     container.setAttribute('data-web-shell-root', '');
