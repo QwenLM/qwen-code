@@ -66,3 +66,10 @@ round-3 merge `a7b50eb`); web-shell sources byte-identical to the r2 head.
 `assets-pr17663` dir `pr17663-r3/` (raw 200 image/png each). G5 API suite
 re-ran 13/13 at the same head (access-log lines carry the new daemon pid).
 Posted as an issue comment on #17663 clearing the closeout hold at this head.
+
+## Addendum r4 — re-bound to head 82a5aa07f0ac (2026-11-18)
+
+Four states re-verified at `82a5aa07f0ac` (#17662, carrying this PR's content
+after the merges); web-shell byte-identical to 23675ccc128e. 4/4 PASS, zero
+page errors; screenshots + manifest on fork branch `assets-pr17663` dir
+`pr17663-r4/`. G5 13/13 at same head. Posted as an issue comment on #17663.
