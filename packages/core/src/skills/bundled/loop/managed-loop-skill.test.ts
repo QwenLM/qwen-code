@@ -439,13 +439,21 @@ describe('managed loop skill parity', () => {
         (profile) => [profile[1]!, match[2]!] as const,
       ),
     );
-    expect(Object.fromEntries(routing)).toEqual({
+    // forProfile is an if / else-if chain, so the FIRST matching branch wins
+    // and a later branch naming the same profile is dead code. Resolve the
+    // same way: Object.fromEntries would let the last duplicate win and so
+    // would certify a mapping Java never produces.
+    const routed = new Map<string, string>();
+    for (const [profile, key] of routing) {
+      if (!routed.has(profile)) routed.set(profile, key);
+    }
+    expect(Object.fromEntries(routed)).toEqual({
       SHELL_V4: 'union',
       FILES_V4: 'cron',
       INTERNAL_TEAM_LEAD_V2: 'cron',
       SHELL_V3: 'wakeup',
     });
-    expect([...new Set(routing.map(([, key]) => key))].sort()).toEqual(
+    expect([...new Set(routed.values())].sort()).toEqual(
       [...MANAGED_LOOP_PROFILES].sort(),
     );
   });

@@ -73,7 +73,7 @@
 
 - **N ≤ 31 多算一档（low）。** 与第二轮评审抓到的 critical 同一缺陷；由上文 N ≤ 30 修正关闭。
 - **调用点之后的 sibling fallback（覆盖缺口）。** 语句锚定计数钉看不到写在门*之后*的 fallback（`if (blockAnswer === undefined) return …allow…`）：两个计数仍为 2，而 fire fake 重新误答侧查询，只在打包臂可见。首次响应改为「数成分」——block allow 字面量与决策变量引用计数。round 3 随后证明：经 helper 在*第二个绑定*下重新推导 allow 的 sibling 两个成分都不新增，故那两条计数同样盲；且对原始源码文本计数会因注释仅提到绑定而以难定位的计数不匹配变红。两者均被 AST 接线钉取代（见 Round-3）；成分计数已移除，结构化钉不再需要为计数无歧义而改写注释。
-- **parity 计数陈旧（nit）。** PR 正文与上文验收标准改为当前套件规模（core 32、scripts 元 183）与最新真实栈 occurrence key。
+- **parity 计数陈旧（nit）。** PR 正文与上文验收标准改为当前套件规模（core 33、scripts 元 183）与最新真实栈 occurrence key。
 
 ## Round-3 评审精化
 
@@ -109,9 +109,17 @@
 
 见证（各字节级还原）：成员写入、`Object.assign`、计算工具名、模板字面量 sibling、gap 对调、路由 key 对调、删 cron 的 `No interval` 规则、令 `parseCron` 分歧，各使对应断言红；拼写 `key = "wakeup";` 的 Java 注释保持绿；此前形态（第二绑定、换 call id、手搭 tool call、`let` + 内联 allow、`??=`、伪造来源、usage 行 `??`、门改宽为 `blockProperties !== undefined`）全部仍红，提到绑定名的注释保持绿。扫描器返回的每份库存都至少有一条自己的见证。被执行的扫描器正向控制携带全部**扫描器侧**形态——伪造来源、成员写入、`Object.assign`、`delete`、`??=` 改写、内联 allow、计算工具名与模板字面量 sibling，故无库存空转——外加一个无关回调，其 `respond_in_schema` 回答被证明在域外。core 侧形态（gap 对调、路由 key 对调、shell 规则删除、解析器分歧）则如上所列，通过变异真实源并重生来见证。core 33/33、scripts 元 183/183、eslint/prettier/core typecheck 净。
 
-## Round-8：第三轮验证的存活缺口
+## Round-7 评审
 
-第三轮独立验证把第二轮的四个存活缺口全部复测为已闭、并逐个确认新钉承重，随后又测出三个同属「原地写入 / 手搭 tool call」家族的兄弟形状。三条连同本地实测的别名写入，全部在**本 PR**关闭，不转后续。
+第七轮无 inline 发现、三条延后项。每条先实测再处置：
+
+- **别名写入**——`const propsAlias = blockProperties; propsAlias['shouldBlock'] = …`——**存活**（88/88 绿）。在下一节的提交中通过「被跟踪绑定集随别名声明增长」关闭。
+- **两参 `fakeToolCall('respond_in_schema', blockAnswer)`** 与**拼写工具名的手搭 tool call**——两者**本已红**（按回调域的工具名计数移动）。记为实测已闭，避免后续轮次重复上报。但两参且名字为*计算值*是另一回事，见下文 Round-8。
+- **Java 刮取依赖形态**（对 `forProfile()` 做保持行为的 switch 重写会红到 `packages/core`）与 **Parsing 规则语法被抄三份**（bundled 库存测试、各 shell 库存测试、生产 drift guard）。两者属实且仍在 #17673 开放：它们是「钉子如何读 Java」与「语法住在哪」的重构，不是对本 PR 所交付内容的更正。
+
+## 第三轮验证：剩余的写入与 tool-call 兄弟形状
+
+第三轮独立验证把第二轮的四个存活缺口全部复测为已闭、并逐个确认新钉承重，随后又测出三个同属「原地写入 / 手搭 tool call」家族的兄弟形状。三条连同 Round-7 的别名写入，全部在**本 PR**关闭，不转后续。
 
 - **写入者集合不是全集。** helper 调用前的 `Reflect.set(blockProperties, 'shouldBlock', …)` 与 `Object.defineProperties(blockProperties, …)` 使两套套件全绿。调用型写入分支现按名集判定——`Object.assign` / `defineProperty` / `defineProperties` 与 `Reflect.set` / `defineProperty`——仍要求首参解析到决策或其输入。
 - **别名携带同一个值。** `const propsAlias = blockProperties; propsAlias['shouldBlock'] = …` 不动任何库存，因为写入以两个绑定名为键。被跟踪集合现随别名声明增长，故经决策或其输入的别名写入都会入账，按源码顺序支持任意长度链。
@@ -122,6 +130,19 @@
 每种形态都进入被执行的敌意控制（故无库存空转），并注入真实 fire 回调实测：`Reflect.set`、`Object.defineProperties`、计算名手搭调用、别名写入各使钉红（1 失败 / 87 通过）；此前全部形态仍红——第二绑定、换 call id、拼写名字的手搭调用、`let` + 内联 allow、`??=`、伪造来源、usage 行 `??`、计算工具名、门改宽、成员写入、模板字面量 sibling、`Object.assign`、短 `fakeToolCall`——而提到绑定名的注释保持绿。全部字节级还原。
 
 **为何反复出现、什么能终结它。** 这些兄弟形状都是「写同一个值或发同一个答案，但不按扫描器寻找的拼写来写」。扫描器是对内联判定的拼写级守卫，故 evasion 面无界。打包 `--loop-fire` 臂端到端驱动 fake 的真实回答，因而是行为级守卫，而这些结构钉是快速层的尽力近似；「该臂在每个具体兄弟形状下会失败」是从变异对 fake 的作用推断的，此处未单独实测。持久修复是把接缝画在整个判定之外——schema 查找、收窄、门、answer——每臂执行一个纯函数并退役库存。该重构、`CronSlots.java` fixture 绑定、与形态无关的 Java 路由断言、唯一导出的 Parsing 语法，以及派生退化阈值，均记于 #17673。
+
+## Round-8 评审精化
+
+第八轮无 inline 发现、六条延后项。六条都是对本 PR 已交付内容的更正——三条记录失实、三条守卫缺陷——故全部在此修掉而非延后。
+
+- **域限定不完整。** `loopClassifierScope` 只把十份库存中的四份限定到 loop 回调；`definitions`、`declarations`、`gates`、`helperCalls`、`reassignments` 仍按 file-wide 断言，故无关 fake 回调复用 helper 或同名绑定就会红到 loop 钉。现每份库存都携带回调并被限定，唯 `allowSites` 有意保持 file-wide——唯一合法构造点在 `classifierBlockAnswer` 内，位于所有回调之外。
+- **计算工具名只在三参时记录。** 两参 `fakeToolCall(computedName, answer)` 让名字逃过所有库存。计算名分支现按任意 arity 运行；answer 库存仍要求三参，因为它要读 call id。被执行的控制用例携带两种 arity。
+- **路由钉建模为 last-wins，而 Java 是 first-match。** `Object.fromEntries(routing)` 会让靠后的重复分支覆盖靠前者，而 `forProfile()` 是 `if / else-if` 链：首个匹配生效，后面再点名同一 profile 的分支是死代码。钉子现以 first-match 解析进 `Map`，并由其派生可达 key 集合。
+- **记录：core 套件规模自相矛盾。** 验证跟进的 nit 仍写「core 32」，而验收标准与后文记录写 33。双语均改为 33。
+- **记录：声称已做却未做的 PR 正文更正。** 记录声称运行时内容的说法已处处更正，但正文「Why it's needed」段仍写「运行中 Session 读的唯一产物是 sidecar JSON」。该段双语已改为与 Risk 段一致：无运行时*代码*改动，但 bundled `SKILL.md` 随构建发布并在运行时读取，故模型面向内容确有改动。
+- **记录：缺一个轮次。** 记录从合并的 Round-5/6 小节直接跳到 Round-8，没有 Round-7。已在上文补出，并逐条给出其实测处置。
+
+三条守卫修复的见证（各字节级还原）：向真实 fire 回调注入**两参**计算名 `fakeToolCall` 使计算名库存红（1 失败 / 87 通过）；追加一个点名已匹配 profile 的**死 Java 分支**使 core 套件保持 **33/33 绿**（first-match 将其化解，last-wins 则会红），而对调两个路由 key 仍红；被执行控制用例的无关回调现复用 helper、绑定名与工具名，file-wide 库存显示其贡献（2 definitions、2 declarations、2 gates、3 helper calls、4 answer 站点、6 工具名站点），而每个 loop 域内库存不变。此前十八种变异形态全部仍红，注释形态保持绿。
 
 ## 开放问题
 
