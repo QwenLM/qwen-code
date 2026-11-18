@@ -162,3 +162,21 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     }
   });
 });
+
+describe('WebShellSidebar more-menu stylesheet', () => {
+  it('sizes the popup to its longest label instead of a fixed English width', () => {
+    expect(sidebarCss).toMatch(
+      /\.moreMenu\s*\{[^}]*width:\s*max-content;[^}]*min-width:\s*240px;[^}]*max-width:\s*min\(22rem,\s*calc\(100vw - 24px\)\);/,
+    );
+    expect(sidebarCss).not.toMatch(/\.moreMenu\s*\{[^}]*[^-\w]width:\s*240px;/);
+  });
+
+  it('keeps more-menu rows a uniform height with left-aligned, unwrapped labels', () => {
+    expect(sidebarCss).toMatch(
+      /\.moreMenu \.footerButton,\s*\.moreMenu \.collapseButton,[\s\S]*?height:\s*36px;[\s\S]*?text-align:\s*start;/,
+    );
+    expect(sidebarCss).toMatch(
+      /\.moreMenu \.footerButtonLabel,\s*\.moreMenu \.collapseButton > span\s*\{[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;[^}]*text-align:\s*start;/,
+    );
+  });
+});
