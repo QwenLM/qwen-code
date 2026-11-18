@@ -91,6 +91,6 @@ This uses the existing local launchd socket at `127.0.0.1:47821`. In a secure We
 
 `qwen-cua-driver mcp` exposes the same 19 native Computer Use operations directly. App calls use `app`; desktop-capable calls use `scope:"desktop"` instead. `key_down/key_up` are desktop-only. Advanced native tools remain available through the host opt-in `CUA_DRIVER_EXTRA_TOOLS=1`.
 
-If the server is unavailable, check `qwen mcp list` and, if the server does not appear, restart Qwen Code. If capture fails, check the current desktop session and OS permissions. If native download fails, check the exact release version/checksum asset or supply a locally built matching payload through `QWEN_CUA_SDK_NATIVE_DIR`. A locked desktop cannot provide GUI acceptance evidence.
+If the server is unavailable, run `qwen mcp list` from the same project to check its configuration and connection status. If it connects there but is missing from `/mcp` in the running interactive session, restart Qwen Code in that project. If capture fails, check the current desktop session and OS permissions. If native download fails, check the exact release version/checksum asset or supply a locally built matching payload through `QWEN_CUA_SDK_NATIVE_DIR`. A locked desktop cannot provide GUI acceptance evidence.
 
 See [MCP servers](./mcp.md), [Approval Mode](./approval-mode.md) and [Sandboxing](./sandbox.md).

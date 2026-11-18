@@ -334,7 +334,7 @@ qwen mcp add deja-context deja mcp --context-search --timeout 8000 --include-too
 
 To remove the server later, run `qwen mcp remove deja-context` (or delete the
 `deja-context` entry from `mcpServers` in `~/.qwen/settings.json`); a running
-session picks up the removal without a restart.
+interactive session picks up the removal without a restart.
 
 ---
 
