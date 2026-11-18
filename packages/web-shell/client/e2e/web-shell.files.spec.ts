@@ -817,6 +817,7 @@ test('@smoke keeps large source files readable without tokenizing the entire tex
   await browser
     .getByRole('textbox', { name: 'Filter files…', exact: true })
     .fill('src/large.ts');
+  // The filter keeps large.ts and its parent directory, src.
   await expect(
     browser.getByRole('tree', { name: 'Files' }).getByRole('treeitem'),
   ).toHaveCount(2);
