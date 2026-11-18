@@ -64,7 +64,14 @@ import {
   type WorktreeSession,
   parseGoalControlRequest,
   readArtifactSnapshot,
+  isValidCronTaskRoutingId,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
 } from '@qwen-code/qwen-code-core';
+import {
+  MAX_SUB_SESSION_PROMPT_CHARS,
+  MAX_SUB_SESSION_WORKSPACE_CHARS,
+} from '@qwen-code/acp-bridge/bridgeOptions';
+import type { SubSessionLauncher } from '../create-sub-session.js';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   SESSION_ATTACHMENT_CHUNK_BYTES,
@@ -6729,6 +6736,102 @@ export function registerSessionRoutes(
     ),
   );
 
+  // A person's "send to another session" from Web Shell: the open session
+  // is the caller, and the launcher of its workspace runs the launch.
+  app.post(
+    '/session/:id/sub-sessions',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/sub-sessions',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const prompt = body['prompt'];
+        if (
+          typeof prompt !== 'string' ||
+          prompt.trim().length === 0 ||
+          prompt.length > MAX_SUB_SESSION_PROMPT_CHARS
+        ) {
+          res.status(400).json({
+            code: 'invalid_sub_session_prompt',
+            error: `\`prompt\` must be a non-empty string of at most ${MAX_SUB_SESSION_PROMPT_CHARS} characters`,
+          });
+          return;
+        }
+        const workspace = body['workspace'];
+        if (
+          workspace !== undefined &&
+          (typeof workspace !== 'string' ||
+            workspace.trim().length === 0 ||
+            workspace.length > MAX_SUB_SESSION_WORKSPACE_CHARS ||
+            // eslint-disable-next-line no-control-regex -- rejecting C0 control chars
+            /[\x00-\x1f\x7f]/.test(workspace))
+        ) {
+          res.status(400).json({
+            code: 'invalid_sub_session_workspace',
+            error: `\`workspace\` must be a non-empty string of at most ${MAX_SUB_SESSION_WORKSPACE_CHARS} characters without control characters`,
+          });
+          return;
+        }
+        const targetSessionId = body['targetSessionId'];
+        if (
+          targetSessionId !== undefined &&
+          !isValidCronTaskRoutingId(targetSessionId)
+        ) {
+          res.status(400).json({
+            code: 'invalid_sub_session_target',
+            error: `\`targetSessionId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters`,
+          });
+          return;
+        }
+        const launcher = (
+          req.app.locals as {
+            subSessionLauncherFor?: (
+              runtime: WorkspaceRuntime,
+            ) => SubSessionLauncher | undefined;
+          }
+        ).subSessionLauncherFor?.(runtime);
+        if (!launcher) {
+          res.status(501).json({
+            code: 'sub_session_send_unavailable',
+            error: 'This session cannot start sub-sessions.',
+          });
+          return;
+        }
+        let result: Awaited<ReturnType<SubSessionLauncher['launchForPerson']>>;
+        try {
+          result = await launcher.launchForPerson({
+            callerSessionId: sessionId,
+            prompt: prompt.trim(),
+            ...(typeof workspace === 'string' ? { workspace } : {}),
+            ...(typeof targetSessionId === 'string'
+              ? { sessionId: targetSessionId }
+              : {}),
+          });
+        } catch (error) {
+          // The launcher refuses with plain errors (untrusted or unknown
+          // workspace, an unknown target, caps), written for the person.
+          // Typed errors keep their usual status.
+          if (!(error instanceof Error) || error.constructor !== Error) {
+            throw error;
+          }
+          res.status(409).json({
+            code: 'sub_session_send_refused',
+            error: error.message,
+          });
+          return;
+        }
+        res.status(202).json({
+          sessionId: result.sessionId,
+          ...(result.workspaceCwd !== undefined
+            ? { workspaceCwd: result.workspaceCwd }
+            : {}),
+          ...(result.taskId !== undefined ? { taskId: result.taskId } : {}),
+        });
+      },
+      { rejectStandalone: true },
+    ),
+  );
+
   app.post(
     '/session/:id/cd',
     mutate(),
@@ -7784,15 +7887,39 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/tasks',
       async (req, res, sessionId, runtime) => {
-        res.status(200).json(
-          await runtime.bridge.getSessionTasksStatus(sessionId, {
-            // Same fail-closed shape as the workflow control surfaces:
-            // opting in here leaks strictly more than the redacted
-            // supported-commands surface on an untrusted workspace.
-            includeWorkflows:
-              runtime.trusted && req.query['includeWorkflows'] === 'true',
-          }),
-        );
+        const status = await runtime.bridge.getSessionTasksStatus(sessionId, {
+          // Same fail-closed shape as the workflow control surfaces:
+          // opting in here leaks strictly more than the redacted
+          // supported-commands surface on an untrusted workspace.
+          includeWorkflows:
+            runtime.trusted && req.query['includeWorkflows'] === 'true',
+        });
+        if (req.query['includeSubSessions'] !== 'true') {
+          res.status(200).json(status);
+          return;
+        }
+        // The daemon, not the child, reports these launches back, so it
+        // lists them here beside the child's own tasks.
+        const launcher = (
+          req.app.locals as {
+            subSessionLauncherFor?: (
+              runtime: WorkspaceRuntime,
+            ) => SubSessionLauncher | undefined;
+          }
+        ).subSessionLauncherFor?.(runtime);
+        res.status(200).json({
+          ...status,
+          subSessions: (launcher?.listOutgoing(sessionId) ?? []).map(
+            (task) => ({
+              kind: 'session',
+              ...task,
+              runtimeMs: Math.max(
+                0,
+                (task.endTime ?? status.now) - task.startTime,
+              ),
+            }),
+          ),
+        });
       },
     ),
   );

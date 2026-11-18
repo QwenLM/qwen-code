@@ -8864,6 +8864,7 @@ describe('createAcpSessionBridge', () => {
     'session_metadata_updated',
     'session_cwd_changed',
     'artifact_changed',
+    'sub_session_task_changed',
     'settings_changed',
     'extensions_changed',
     'mcp_server_changed',
@@ -9078,6 +9079,7 @@ describe('createAcpSessionBridge', () => {
         bookkeepingType === 'agent_changed' ||
         bookkeepingType === 'git_status_changed' ||
         bookkeepingType === 'git_branch_changed' ||
+        bookkeepingType === 'sub_session_task_changed' ||
         bookkeepingType === 'github_setup_completed'
       ) {
         // The workspace service, git watcher, memory / agent CRUD, and the
@@ -9805,7 +9807,32 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('drops the stale turn error when a queued terminal folds newer automatic-turn content', async () => {
+  it.each([
+    ['agent_message_chunk', undefined, false],
+    [
+      'user_message_chunk',
+      { kind: 'agent_mention', mentionedAgentIds: [] },
+      false,
+    ],
+    [
+      'user_message_chunk',
+      {
+        kind: 'agent_mention',
+        mentionedAgentIds: [],
+        sentTo: { sessionId: 'other-session', workspaceCwd: WS_A },
+      },
+      true,
+    ],
+  ] as const)(
+    'refreshes after a queued terminal folds %s (%j)',
+    verifyQueuedTerminalRefresh,
+  );
+
+  async function verifyQueuedTerminalRefresh(
+    subtype: 'agent_message_chunk' | 'user_message_chunk',
+    qwenAgentMessage: Record<string, unknown> | undefined,
+    keepsError: boolean,
+  ) {
     // A queued terminal is a turn boundary on the bus: ingesting it folds
     // and resets the live journal. When newer turn content was journaled
     // after the pending loop terminal, that content supersedes the stale
@@ -9863,7 +9890,7 @@ describe('createAcpSessionBridge', () => {
         if (
           !sawContent &&
           event.type === 'session_update' &&
-          JSON.stringify(event.data).includes('automatic turn content')
+          JSON.stringify(event.data).includes('later transcript content')
         ) {
           sawContent = true;
           continue;
@@ -9921,45 +9948,49 @@ describe('createAcpSessionBridge', () => {
     );
     await expect(first).rejects.toThrow('Loop protection stopped this turn');
 
-    // An automatic turn journals content after the loop terminal; the
-    // queued terminal that follows folds it.
+    // The queued terminal folds this update, even when it came from an
+    // out-of-turn /send receipt.
     await handle.agentConnection.sessionUpdate({
       sessionId: session.sessionId,
       update: {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'automatic turn content' },
+        sessionUpdate: subtype,
+        content: { type: 'text', text: 'later transcript content' },
+        ...(qwenAgentMessage ? { _meta: { qwenAgentMessage } } : {}),
       },
     });
 
+    const assertRefresh = async () => {
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const compactedReplay = refreshed.compactedReplay ?? [];
+      expect(compactedReplay[0]).toMatchObject({
+        type: 'session_update',
+        data: expect.objectContaining({
+          content: { type: 'text', text: 'persisted turn content' },
+        }),
+      });
+      expect(
+        compactedReplay.some(
+          (event) =>
+            event.type === 'turn_error' &&
+            (event.data as { errorKind?: string }).errorKind ===
+              'loop_detected',
+        ),
+      ).toBe(keepsError);
+    };
+    await assertRefresh();
     expect(
       bridge.removePendingPrompt(session.sessionId, 'prompt-queued'),
     ).toEqual({ removed: true });
     await sawContentThenQueuedTerminal;
-
-    const refreshed = await bridge.loadSession({
-      sessionId: session.sessionId,
-      workspaceCwd: WS_A,
-      clientId: session.clientId,
-      historyReplay: 'response',
-      historyPageSize: 100,
-    });
-
-    const compactedReplay = refreshed.compactedReplay ?? [];
-    expect(compactedReplay[0]).toMatchObject({
-      type: 'session_update',
-      data: expect.objectContaining({
-        content: { type: 'text', text: 'persisted turn content' },
-      }),
-    });
-    expect(
-      compactedReplay.some(
-        (event) =>
-          event.type === 'turn_error' &&
-          (event.data as { errorKind?: string }).errorKind === 'loop_detected',
-      ),
-    ).toBe(false);
-    // The supersede only drops the refresh-replay record; the session
-    // summary still carries the active turn's failure.
+    await assertRefresh();
+    // The session summary still carries the active turn's failure.
     expect(bridge.getSessionSummary(session.sessionId).turnError).toMatchObject(
       { code: 'LOOP_DETECTED' },
     );
@@ -9967,7 +9998,7 @@ describe('createAcpSessionBridge', () => {
     abort.abort();
     releaseCancel();
     await bridge.shutdown();
-  });
+  }
 
   it('drops the turn error on refresh after a subsequent successful interactive turn', async () => {
     // Loop reject, then a successful prompt, then refresh: the newer turn's

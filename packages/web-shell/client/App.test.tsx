@@ -355,6 +355,7 @@ function activeGoalSnapshot(
 }
 
 type ChatEditorTestProps = {
+  slashArgumentCompleter?: import('./completions/slashCompletion').SlashArgumentCompleter;
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
   liveVoicePortalContainer?: HTMLElement | null;
@@ -578,6 +579,7 @@ const {
   const qualifiedSetWorkspaceSetting = vi.fn();
   const runtimeStop = vi.fn();
   const workspaceClient = {
+    sendToSubSession: vi.fn(),
     runtimeStopOptions: vi.fn(),
     liveSetupStatus: vi
       .fn()
@@ -12848,6 +12850,95 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
     await Promise.resolve();
   });
 }
+
+describe('App /send', () => {
+  const callerCwd = '/tmp/project';
+  const targetCwd = '/tmp/backend';
+
+  beforeEach(() => {
+    mockConnection.capabilities.features = ['session_sub_session_send'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'caller-id',
+          cwd: callerCwd,
+          displayName: targetCwd,
+          primary: true,
+          trusted: true,
+        },
+        { id: 'target-id', cwd: targetCwd, primary: false, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspace.client.sendToSubSession.mockReset();
+  });
+
+  it('only clears the submitted draft after the daemon accepts it', async () => {
+    const send = deferred<{ sessionId: string }>();
+    mockWorkspace.client.sendToSubSession.mockReturnValue(send.promise);
+    const { container } = renderApp();
+    testState.prompt = '/send hello';
+    await clickSubmit(container);
+    await clickSubmit(container);
+    expect(
+      mockWorkspace.client.sendToSubSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { prompt: 'hello' },
+      'client-1',
+    );
+    expect(editorCommit).not.toHaveBeenCalled();
+
+    await act(async () => send.resolve({ sessionId: 'target' }));
+    expect(editorCommit).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the draft if the host refuses the outgoing prompt', async () => {
+    const onSubmitBefore = vi.fn().mockRejectedValue(new Error('host refusal'));
+    const { container } = renderApp({ onSubmitBefore });
+    testState.prompt = '/send --workspace target-id hello';
+    await clickSubmit(container);
+    expect(onSubmitBefore).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+    });
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send --workspace target-id hello');
+  });
+
+  it('does not restore a late refusal into another session', async () => {
+    const send = deferred<never>();
+    mockWorkspace.client.sendToSubSession.mockReturnValue(send.promise);
+    const { container, rerender } = renderApp();
+    testState.prompt = '/send hello';
+    await clickSubmit(container);
+    expect(mockWorkspace.client.sendToSubSession).toHaveBeenCalledOnce();
+
+    mockConnection.sessionId = 'session-2';
+    testState.prompt = '';
+    rerender();
+    await act(async () => send.reject(new Error('target refused')));
+    expect(testState.prompt).toBe('');
+    expect(editorCommit).not.toHaveBeenCalled();
+  });
+
+  it('offers a stable selector for a colliding workspace name and honors the lock', async () => {
+    const { container } = renderApp({ lockedWorkspaceCwd: callerCwd });
+    await flush();
+    const result =
+      testState.latestChatEditorProps?.slashArgumentCompleter?.(
+        '/send --workspace ',
+      );
+    expect(result?.items).toMatchObject([
+      { detail: callerCwd, apply: '/send --workspace caller-id ' },
+    ]);
+
+    testState.prompt = `/send --workspace ${targetCwd} hello`;
+    await clickSubmit(container);
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+  });
+});
 
 function deferred<T>(): {
   promise: Promise<T>;

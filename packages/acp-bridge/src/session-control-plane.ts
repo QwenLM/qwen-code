@@ -1676,6 +1676,7 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'session_metadata_updated',
   'session_cwd_changed',
   'artifact_changed',
+  'sub_session_task_changed',
   'source_changed',
   'settings_changed',
   'extensions_changed',
@@ -1737,9 +1738,25 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   const meta = updateRecord['_meta'];
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
   const metaRecord = meta as Record<string, unknown>;
-  return (
+  if (
     metaRecord['source'] === 'user-shell' ||
     metaRecord['hookLifecycle'] !== undefined
+  ) {
+    return true;
+  }
+  // A /send receipt records a message without starting a new turn here.
+  // Ordinary agent mentions still count as turn content.
+  if (subtype !== 'user_message_chunk') return false;
+  const agentMessage = metaRecord['qwenAgentMessage'];
+  if (!agentMessage || typeof agentMessage !== 'object') return false;
+  const { kind, sentTo } = agentMessage as Record<string, unknown>;
+  if (kind !== 'agent_mention' || !sentTo || typeof sentTo !== 'object') {
+    return false;
+  }
+  const target = sentTo as Record<string, unknown>;
+  return (
+    typeof target['sessionId'] === 'string' &&
+    typeof target['workspaceCwd'] === 'string'
   );
 }
 
@@ -12607,6 +12624,12 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.lastEventId;
+    },
+
+    getSessionPendingPermissionIds(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return [...entry.pendingPermissionIds];
     },
 
     getSessionEventEpoch(sessionId) {
