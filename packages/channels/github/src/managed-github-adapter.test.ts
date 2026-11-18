@@ -2955,4 +2955,94 @@ describe('managed GitHub adapter PR watch', () => {
     );
     await adapter.disconnect();
   });
+
+  it('runs the reply lane before the watch pass', async () => {
+    const { adapter, watch, plane, journal } = await watchAdapter();
+    watch.setBindings([binding()]);
+    plane.enqueue([delivery('d-reply', 1)]);
+    await adapter.tick();
+    const receiptAt = journal.findIndex((l) => l.startsWith('receipt:d-reply'));
+    const pullAt = journal.findIndex((l) => l === 'getPullRequest');
+    expect(receiptAt).toBeGreaterThanOrEqual(0);
+    expect(pullAt).toBeGreaterThanOrEqual(0);
+    // The user-visible outbox must not wait behind the watch's GitHub reads.
+    expect(receiptAt).toBeLessThan(pullAt);
+    await adapter.disconnect();
+  });
+
+  it('persists at most once on an all-quiet tick', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline (a real change, persisted)
+    const save = vi.spyOn(ManagedGithubStateStore.prototype, 'save');
+    await adapter.tick(); // nothing changed: no transition, stable baseline
+    expect(save).not.toHaveBeenCalled();
+    save.mockRestore();
+    // A real detection still persists.
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('retires the binding when the Harness reports the Session pump-less', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectError(
+      Object.assign(new Error('pump-less'), {
+        status: 409,
+        code: 'pr_event_wake_unavailable',
+      }),
+    );
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    // The binding can never work: retire it instead of leaving it listed to
+    // drop every future transition.
+    expect(watch.retired).toHaveLength(1);
+    expect(watch.retired[0]!.prNumber).toBe(9);
+    await adapter.disconnect();
+  });
+
+  it('does not retire a terminal PR binding after losing the state-file lock', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline open
+    // The PR turns terminal, but the lock is compromised mid-observation: a
+    // process that no longer owns the state file must not delete a binding
+    // another owner now serves.
+    fake.knobs.pullFor = () => {
+      fake.compromise();
+      return {
+        headSha: 'sha-a',
+        mergeable: true,
+        mergeableState: 'clean',
+        state: 'closed',
+      };
+    };
+    await adapter.tick();
+    expect(watch.retired).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('rotates the window across a restart via the durable sweep offset', async () => {
+    const cwd = tempCwd();
+    const bindings = Array.from({ length: 31 }, (_, i) =>
+      binding({ prNumber: i + 1 }),
+    );
+    const first = await watchAdapter(cwd);
+    first.watch.setBindings(bindings);
+    await first.adapter.tick(); // observes PRs 1-30, persists sweepStart=30
+    expect(first.fake.pullsSeen.some((p) => p.prNumber === 31)).toBe(false);
+    await first.adapter.disconnect();
+    // A fresh process must resume the window at the durable offset, not at 0:
+    // an in-memory-only cursor would starve PR 31 on the first tick of every
+    // process lifetime (the defect R1-1 fixed, returning on restart).
+    const second = await watchAdapter(cwd);
+    second.watch.setBindings(bindings);
+    await second.adapter.tick();
+    expect(second.fake.pullsSeen.some((p) => p.prNumber === 31)).toBe(true);
+    await second.adapter.disconnect();
+  });
 });

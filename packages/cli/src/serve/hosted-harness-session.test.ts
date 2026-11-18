@@ -61,6 +61,8 @@ import {
 import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import { channelInputId } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js';
 import { HostedChannelSession } from './hosted-channel-session.js';
+import { submitPrEventInput } from './hosted-pr-watch-session.js';
+import { PR_EVENT_INPUT_SOURCE } from '@qwen-code/qwen-code-core/managed-runtime/managed-pr-watch-operations.js';
 import { HostedMcpManager } from './hosted-mcp-settings.js';
 import { commitHostedFileHistory } from './hosted-file-history.js';
 import {
@@ -9526,6 +9528,99 @@ describe('Hosted Harness no-tool session', () => {
       .expect(204);
   });
 
+  it('settles a pending pr_event input as session_closing when the Session closes', async () => {
+    // R2-2: a not-yet-due pr_event input the pump deferred. Without
+    // PR_EVENT_INPUT_SOURCE in DELETE's settle source list it survives the
+    // close and fires after reload, pinning Workspace close/delete.
+    const inputId = `prw-${'e'.repeat(64)}:input`;
+    await prewritePrEventInput(inputId, Date.now() + 3_600_000);
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const settled = journal.events.filter(
+      (event) =>
+        event.kind === 'turn.settled' && event.payload['turnId'] === inputId,
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.payload).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'session_closing',
+    });
+    // Settled model-free: the close spoke for an input that never ran.
+    expect(state.model).not.toHaveBeenCalled();
+  });
+
+  it('settles a pending pr_event input in the v2 lifecycle non-effects close', async () => {
+    // R2-2, second arm: the settle_resources phase carries its own source
+    // list. Without PR_EVENT_INPUT_SOURCE there the input survives the
+    // non-effects close exactly as it would survive DELETE.
+    const inputId = `prw-${'f'.repeat(64)}:input`;
+    await prewritePrEventInput(inputId, Date.now() + 3_600_000);
+    mockBrokerBroker();
+    const server = await app(true);
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const authority = { operationId: 'v2-close-pr-event', claimGeneration: 1 };
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      lifecycleProtocolVersion: 2,
+      lifecycleAuthority: authority,
+    });
+    expect(loaded.status).toBe(200);
+    const cleanup = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    await cleanup(supertest(server).post(`/session/${SESSION_ID}/lifecycle`))
+      .send({
+        protocolVersion: 2,
+        phase: 'settle_resources',
+        kind: 'close',
+        toolProfile: 'hosted-workspace-shell/1',
+        sessionKey: key,
+        authority,
+      })
+      .expect(200);
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const settled = journal.events.filter(
+      (event) =>
+        event.kind === 'turn.settled' && event.payload['turnId'] === inputId,
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.payload).toMatchObject({
+      outcome: 'cancelled',
+      stopReason: 'session_closing',
+    });
+    expect(state.model).not.toHaveBeenCalled();
+    await cleanup(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .send({ authority })
+      .expect(204);
+  });
+
   it('admits a shell/3 Session with public children and approval selection', async () => {
     mockBrokerBroker();
     const server = await app(true);
@@ -9816,6 +9911,53 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
+  it('delivers a committed pr_event input through the wake pump as an ordinary turn', async () => {
+    // R2-9a: pr_event rides the wake pump. Deleting it from
+    // isWakeInputSource makes the pump's next() skip the input, so no turn
+    // ever runs and the wait below times out. The real funnel's envelope
+    // must also read back as the turn's text.
+    const inputId = `prw-${'d'.repeat(64)}:input`;
+    await prewritePrEventInput(inputId);
+    mockBrokerBroker();
+    state.model.mockReset();
+    state.model.mockResolvedValue({ text: 'stub reply', model: 'stub-model' });
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read({
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+          runtimeBaseDir: state.root,
+          sessionKey: {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        });
+        const accepted = journal.events.filter(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            event.payload['inputId'] === inputId,
+        );
+        expect(accepted).toHaveLength(1);
+        expect(accepted[0]!.payload['source']).toBe(PR_EVENT_INPUT_SOURCE);
+        const settled = journal.events.filter(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === inputId,
+        );
+        expect(settled).toHaveLength(1);
+        expect(settled[0]!.payload['outcome']).toBe('completed');
+      },
+      { timeout: settleTimeoutMs(), interval: 50 },
+    );
+    expect(state.model).toHaveBeenCalled();
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
   it('defers a future loop wakeup and delivers it once due', async () => {
     const loopTurnId = 'loop:wakeup-compaction';
     await prewriteLoopWakeupInput(Date.now() + 600);
@@ -10027,6 +10169,106 @@ describe('Hosted Harness no-tool session', () => {
     }
   }
 
+  /**
+   * A Session journal owning one committed pr_event input. With no
+   * `notBefore` the input rides the real injection funnel and is due at
+   * once; a future `notBefore` parks it past the pump's pick so only the
+   * close path may settle it (the funnel itself carries no deferral).
+   */
+  async function prewritePrEventInput(
+    inputId: string,
+    notBefore?: number,
+  ): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    try {
+      if (notBefore === undefined) {
+        await submitPrEventInput(managed, key, {
+          inputId,
+          owner: 'Owner',
+          repo: 'Repo',
+          prNumber: 7,
+          transition: 'ci_failure',
+          headSha: 'a'.repeat(40),
+          evidence: 'Failed checks: build.',
+          text: 'Inspect the pull request.',
+          episode: 1,
+        });
+      } else {
+        await managed.authority.submitInput(
+          {
+            operation: 'submitInput',
+            commandId: inputId,
+            sessionKey: key,
+            contentDigest: 'a'.repeat(64),
+          },
+          {
+            inputId,
+            turnId: inputId,
+            source: PR_EVENT_INPUT_SOURCE,
+            contentRef: await managed.resources.publish(
+              'managed-input',
+              Buffer.from(
+                JSON.stringify({ text: 'Inspect the pull request.' }),
+                'utf8',
+              ),
+            ),
+            admissionRef: await managed.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+            notBefore,
+          },
+        );
+      }
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  }
+
   it('classifier user-text map carries loop continuations for arm vetting', async () => {
     const key = {
       tenantId: 'tenant',
@@ -10220,14 +10462,17 @@ describe('Hosted Harness no-tool session', () => {
   });
 
   /**
-   * A channel turn died inside write_file, leaving an await_runtime
+   * A pump-owned turn died inside write_file, leaving an await_runtime
    * checkpoint and file_history.pendingTurn. Shared by the attachment
-   * and the transient-retry witnesses.
+   * and the transient-retry witnesses. `inputSource` selects which wake
+   * source owns the parked turn — channel by default, pr_event for the
+   * PR-watch load-gate witness.
    */
   async function prewriteChannelWriteInterruption(
     cleanupDebt = false,
     previousPromptId?: string,
     interruption: 'runtime' | 'queued' | 'approval' = 'runtime',
+    inputSource: 'channel' | 'pr_event' = 'channel',
   ): Promise<string> {
     const key = {
       tenantId: 'tenant',
@@ -10282,7 +10527,10 @@ describe('Hosted Harness no-tool session', () => {
       platformEventId: '1700:99',
       semanticRevision: 1,
     };
-    const channelTurn = channelInputId(channelIdentity);
+    const channelTurn =
+      inputSource === 'pr_event'
+        ? `prw-${'c'.repeat(64)}:input`
+        : channelInputId(channelIdentity);
     try {
       const channels = new HostedChannelSession(
         {
@@ -10336,33 +10584,47 @@ describe('Hosted Harness no-tool session', () => {
           },
         } as ChatRecord);
       }
-      await channels.submitInput({
-        inputId: channelTurn,
-        channelInstanceId: channelIdentity.channelInstanceId,
-        accountId: 'agent@example.com',
-        accountGeneration: channelIdentity.accountGeneration,
-        platformEventId: channelIdentity.platformEventId,
-        semanticRevision: 1,
-        scope: {
-          kind: 'chat_thread',
-          senderId: null,
+      if (inputSource === 'pr_event') {
+        await submitPrEventInput(managed, key, {
+          inputId: channelTurn,
+          owner: 'Owner',
+          repo: 'Repo',
+          prNumber: 7,
+          transition: 'ci_failure',
+          headSha: 'a'.repeat(40),
+          evidence: 'Failed checks: build.',
+          text: 'write deploy.txt',
+          episode: 1,
+        });
+      } else {
+        await channels.submitInput({
+          inputId: channelTurn,
+          channelInstanceId: channelIdentity.channelInstanceId,
+          accountId: 'agent@example.com',
+          accountGeneration: channelIdentity.accountGeneration,
+          platformEventId: channelIdentity.platformEventId,
+          semanticRevision: 1,
+          scope: {
+            kind: 'chat_thread',
+            senderId: null,
+            chatId: 'alice@example.com',
+            threadId: 'thread-1',
+          },
+          policy: {
+            adapter: 'email',
+            senderPolicy: 'allowlist',
+            allowedSenders: ['alice@example.com'],
+            dispatchMode: 'followup',
+          },
+          senderId: 'alice@example.com',
           chatId: 'alice@example.com',
           threadId: 'thread-1',
-        },
-        policy: {
-          adapter: 'email',
-          senderPolicy: 'allowlist',
-          allowedSenders: ['alice@example.com'],
-          dispatchMode: 'followup',
-        },
-        senderId: 'alice@example.com',
-        chatId: 'alice@example.com',
-        threadId: 'thread-1',
-        subject: 'Deploy',
-        text: 'write deploy.txt',
-        attachments: [],
-        replyContext: { parent: '<a@example.com>', references: [] },
-      });
+          subject: 'Deploy',
+          text: 'write deploy.txt',
+          attachments: [],
+          replyContext: { parent: '<a@example.com>', references: [] },
+        });
+      }
       if (interruption === 'queued') return channelTurn;
       // The wake turn began — its user record is minted — and died inside
       // write_file before the tool result arrived.
@@ -10830,6 +11092,77 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: settleTimeoutMs() },
     );
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        )
+      ).status,
+    ).toBe(204);
+  });
+
+  it('cold-loads a pr_event turn parked inside a Workspace write instead of refusing the load', async () => {
+    // R2-1: the load gate's pump-owned exemption must cover pr_event too.
+    // The input is pump-owned, so no takeover can match its pendingTurn;
+    // narrowing isPumpOwnedToolTurn back to channel-only refuses this load
+    // 409 hosted_turn_recovery_required and kills the pump that would
+    // settle the turn.
+    const prEventTurn = await prewriteChannelWriteInterruption(
+      false,
+      undefined,
+      'runtime',
+      'pr_event',
+    );
+    mockBrokerBroker();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+    });
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const readJournal = () =>
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+    // The park really is a pr_event turn's, not a channel one.
+    const accepted = (await readJournal()).events.filter(
+      (event) =>
+        event.kind === 'input.accepted' &&
+        event.payload['turnId'] === prEventTurn,
+    );
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0]!.payload['source']).toBe(PR_EVENT_INPUT_SOURCE);
+    // …and the pump recovers the parked attempt right after attachment
+    // rather than delivering the input as a fresh turn: no model call, and
+    // the turn settles. That is what proves the load let through a turn
+    // genuinely owing a file-history recovery. pr_event rides the generic
+    // wake-crash aftermath, whose terminal label differs from the
+    // channel-specific one, so the label itself is not pinned here.
+    await vi.waitFor(
+      async () => {
+        const settled = (await readJournal()).events.filter(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === prEventTurn,
+        );
+        expect(settled).toHaveLength(1);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    expect(state.model).not.toHaveBeenCalled();
     expect(
       (
         await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
@@ -19398,6 +19731,70 @@ describe('Hosted Harness no-tool session', () => {
       });
     expect(response.status).toBe(409);
     expect(response.body.code).toBe('pr_event_wake_unavailable');
+  });
+
+  it('accepts a pr_event input into the resident Session that owns the wake pump', async () => {
+    // R2-9b: the positive half of the refusal above. The default profile
+    // installs a wake pump, so the route must commit through THIS
+    // Session's own managed authority and session key — swapping either
+    // lands the input nowhere (or refuses) and the journal read below
+    // finds no admission.
+    mockBrokerBroker();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+      })
+      .expect(200);
+    expect(capturedWakeSession().monitorWake).toBeDefined();
+    const inputId = `prw-${'b'.repeat(64)}:input`;
+    const response = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/channels/operations`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({
+        operationId: randomUUID(),
+        kind: 'submit_pr_event_input',
+        inputId,
+        owner: 'Owner',
+        repo: 'Repo',
+        prNumber: 7,
+        transition: 'ci_failure',
+        headSha: 'a'.repeat(40),
+        evidence: 'Failed checks: build.',
+        text: 'Inspect the pull request.',
+        episode: 1,
+      });
+    expect(response.status).toBe(202);
+    expect(response.body).toMatchObject({
+      inputId,
+      turnId: inputId,
+      replayed: false,
+    });
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      runtimeBaseDir: state.root,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+    });
+    const accepted = journal.events.filter(
+      (event) =>
+        event.kind === 'input.accepted' && event.payload['inputId'] === inputId,
+    );
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0]!.payload).toMatchObject({
+      source: PR_EVENT_INPUT_SOURCE,
+      turnId: inputId,
+    });
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId as string,
+    );
   });
 
   it('preserves external files on cold load without hidden lanes and closes with lifecycle v1', async () => {

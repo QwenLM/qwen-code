@@ -131,6 +131,9 @@ transition, headSha, evidence } }`；wake pump 读 `text` 作 prompt。private-o
 - **wake pump 是准入前置。** Session 无进程内 wake pump（如 external-files profile）时拒绝 `submit_pr_event_input`（409），绝不把 input 确认进一个无法执行它的 Session。
 - **入口对包装后信封限界。** 路由在 staging 前拒绝包装后 prompt 超 Harness 字符/字节上限的负载，使被接受的请求即可准入（不留永久 staged、不可注入的行）。线上上限保持 `text ≤ 32000`、`evidence ≤ 4000`。
 - **按条目隔离 drain。** 瞬时注入失败隔离到该 PR 的队列；一个不健康 Session 不饿死其他绑定。被 fired 环抑制的 `ci_failure` 仍钉住该 head，CI 读取不会每 tick 重发。
+- **已提交的真实进程见证。** adapter↔控制面 E2E 为永久脚本 `scripts/run-managed-pr-watch-e2e.mjs`（`npm run test:e2e:managed-pr-watch`），接入 Hosted failover E2E job 并由 `scripts/tests/hosted-process-ci.test.js` 钉死。它跑 bundled CLI + 真实 Octokit 对可变 fake GitHub 与 recording fake 控制面（用真实 core `prWatchInputId` 派生 id）；其 private-only、per-ref CI、once-per-head 检查读取记录计数器，故可失败。
+
+第 2 轮另闭环：CLOSED 绑定 Session 现也被惰性退订（不只 DELETED/跨 Workspace）；冷加载文件历史豁免覆盖 `pr_event` 停泊的工具回合；关闭路径结算挂起的 `pr_event` input；watch pass 移到回复通道之后且仅在变化时持久化；终态退订带 ownership 守卫；pump-less 绑定在首次 `pr_event_wake_unavailable` 时退订；失败检查列表带不完整标记；parity fixture 双向化（TS 测试读取它）并钉死信封上限；`channels.enabled` 说明列出四个 `pr-watch:*` 路由。
 
 ## 开放问题
 

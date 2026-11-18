@@ -1,7 +1,12 @@
 {
-  "comment": "TS/Java parity fixture for the PR-watch identity derivation (episode revision). Generated from packages/core/src/managed-runtime/managed-pr-watch-operations.ts (the authoritative TS contract): inputId joins episode LAST, after headSha; bindingId carries no episode. The Java mirror (PrWatchOperations) must derive byte-identical ids and refuse the same invalid identities with the same messages. Owned by the Java control-plane slice; the TS test may read this same file.",
+  "comment": "TS/Java parity fixture for the PR-watch identity derivation (episode revision). Generated from packages/core/src/managed-runtime/managed-pr-watch-operations.ts (the authoritative TS contract): inputId joins episode LAST, after headSha; bindingId carries no episode. The Java mirror (PrWatchOperations) must derive byte-identical ids and refuse the same invalid identities with the same messages. Two-directional: the TS contract test (managed-pr-watch-operations.test.ts) reads this file and asserts its own derivation/limits/refusals against it, and the Java parity test does the same, so a change on either side turns the other red.",
   "source": "pr_event",
   "transitions": ["ci_failure", "merge_conflict", "head_change"],
+  "limits": {
+    "maxTextChars": 32000,
+    "maxEnvelopeBytes": 65536,
+    "maxEvidenceChars": 4000
+  },
   "cases": [
     {
       "id": "identity-0",
@@ -410,6 +415,90 @@
         "episode": 9007199254740992
       },
       "message": "episode must be a positive safe integer."
+    },
+    {
+      "id": "empty-channel",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "channelInstanceId must be non-empty and hold no NUL."
+    },
+    {
+      "id": "nul-channel",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "a\u0000b",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "channelInstanceId must be non-empty and hold no NUL."
+    },
+    {
+      "id": "empty-owner",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "owner must be non-empty and hold no NUL."
+    },
+    {
+      "id": "nul-repo",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "a\u0000b",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "repo must be non-empty and hold no NUL."
+    },
+    {
+      "id": "empty-head-sha",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "ci_failure",
+        "headSha": "",
+        "episode": 1
+      },
+      "message": "headSha must be non-empty and hold no NUL."
+    },
+    {
+      "id": "nul-transition",
+      "identity": {
+        "tenantId": "tenant-1",
+        "channelInstanceId": "github-1",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "prNumber": 42,
+        "transition": "a\u0000b",
+        "headSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "episode": 1
+      },
+      "message": "transition must be non-empty and hold no NUL."
     },
     {
       "id": "binding-zero-pr",

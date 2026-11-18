@@ -278,6 +278,22 @@ when the guard is removed:
 - **Per-entry drain isolation.** A transient injection failure isolates to that PR's
   queue; one unhealthy Session does not starve the other bindings. A ring-suppressed
   `ci_failure` still pins the head so the CI read is not re-issued every tick.
+- **Committed real-process witness.** The adapter↔control-plane E2E is a permanent
+  script, `scripts/run-managed-pr-watch-e2e.mjs` (`npm run test:e2e:managed-pr-watch`),
+  wired into the Hosted failover E2E job and pinned by
+  `scripts/tests/hosted-process-ci.test.js`. It runs the bundled CLI + real Octokit
+  against a mutable fake GitHub and a recording fake control plane that derives ids
+  with the real core `prWatchInputId`; its private-only, per-ref CI, and
+  once-per-head checks read recorded counters so they can fail.
+
+Round 2 additionally closed: a CLOSED bound Session is now lazily retired (not only
+DELETED/foreign); the cold-load file-history exemption covers `pr_event` parked tool
+turns; the close path settles pending `pr_event` inputs; the watch pass runs after the
+reply lane and persists only on change; the terminal retire is ownership-guarded; a
+pump-less binding is retired on the first `pr_event_wake_unavailable`; the failed-check
+list carries an incompleteness marker; the parity fixture is two-directional (a TS test
+reads it) and pins the envelope limits; and the `channels.enabled` description names the
+four `pr-watch:*` routes.
 
 ## Open questions
 

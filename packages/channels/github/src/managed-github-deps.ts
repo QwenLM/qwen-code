@@ -291,6 +291,9 @@ async function createClient(
       let sawFailure = false;
       let sawPending = false;
       let sawSuccess = false;
+      // The retired watch's honesty marker: the failed-check list handed to
+      // the bound agent may be partial (early pagination stop or name cap).
+      let namesIncomplete = false;
       const failedChecks: string[] = [];
       await octokit.paginate(
         octokit.rest.checks.listForRef,
@@ -314,12 +317,12 @@ async function createClient(
               FAILING_CHECK_RUN_CONCLUSIONS.has(run.conclusion)
             ) {
               sawFailure = true;
-              if (
-                typeof run.name === 'string' &&
-                run.name.length > 0 &&
-                failedChecks.length < MAX_REPORTED_FAILED_CHECKS
-              ) {
-                failedChecks.push(run.name.slice(0, MAX_CHECK_NAME_CHARS));
+              if (typeof run.name === 'string' && run.name.length > 0) {
+                if (failedChecks.length < MAX_REPORTED_FAILED_CHECKS) {
+                  failedChecks.push(run.name.slice(0, MAX_CHECK_NAME_CHARS));
+                } else {
+                  namesIncomplete = true;
+                }
               }
             } else if (run.conclusion) {
               // Any other concluded run (success, neutral, skipped) counts as
@@ -332,7 +335,12 @@ async function createClient(
           // A failure decides the aggregate: no later page can overturn it,
           // so stop paging instead of spending one request per page of a head
           // that carries hundreds of check runs (the retired watch's #16665).
-          if (sawFailure) done();
+          // The stop is only honest if the unread pages are flagged.
+          if (sawFailure) {
+            const link = (response.headers as { link?: string }).link ?? '';
+            if (/<[^<>]+>;\s*rel="next"/.test(link)) namesIncomplete = true;
+            done();
+          }
           return [];
         },
       );
@@ -367,6 +375,7 @@ async function createClient(
               ? 'passing'
               : 'none',
         failedChecks,
+        namesIncomplete,
       };
     },
     pollIntervalFloorMs: () =>

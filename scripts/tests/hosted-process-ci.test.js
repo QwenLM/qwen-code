@@ -736,9 +736,9 @@ describe('Hosted real-process gates', () => {
     // must still leave the O4 gates time to run.
     ['hosted-harness-mysql', 299, 332, 33],
     // Thirty deterministic E2E arms at 10 each plus the capped
-    // rewritten-command cgroup delegation at 10; the allowance is ~13 minutes
-    // of setup plus 2.
-    ['hosted-failover-e2e', 310, 325, 15],
+    // rewritten-command cgroup delegation at 10 plus the PR-watch
+    // bound-session rig at 10; the allowance is ~13 minutes of setup plus 2.
+    ['hosted-failover-e2e', 320, 335, 15],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling, allowance) => {
@@ -776,10 +776,16 @@ describe('Hosted real-process gates', () => {
     expect(job.services).toBeUndefined();
     expect(job['runs-on']).toBe('ubuntu-latest');
     expect(job.env.QWEN_E2E_REGISTER_STORAGE).toBe('1');
-    // Every arm the job runs has a row above, so none runs unpinned.
+    // Every arm the job runs has a row above, so none runs unpinned. The
+    // PR-watch bound-session rig is a separate channel gate (its own runner,
+    // not the failover runner) and is pinned by its own case below.
     expect(
       job.steps
-        .filter((step) => /^Run .* E2E$/.test(step.name ?? ''))
+        .filter(
+          (step) =>
+            /^Run .* E2E$/.test(step.name ?? '') &&
+            step.name !== 'Run managed PR-watch bound-session E2E',
+        )
         .map((step) => step.name)
         .sort(),
     ).toEqual(failoverArms.map(([name]) => name).sort());
@@ -812,6 +818,35 @@ describe('Hosted real-process gates', () => {
     expect(new Set(failoverArms.map(([name]) => name)).size).toBe(
       failoverArms.length,
     );
+  });
+
+  it('pins the PR-watch bound-session rig into the Hosted failover job', () => {
+    // A rename of the rig, the npm script, or the workflow step must turn
+    // this red, so the adapter<->control-plane witness cannot silently
+    // disappear from CI.
+    const script = 'test:e2e:managed-pr-watch';
+    expect(pkg.scripts[script]).toBe(
+      'node scripts/run-managed-pr-watch-e2e.mjs',
+    );
+    expect(
+      existsSync(
+        new URL('../../scripts/run-managed-pr-watch-e2e.mjs', import.meta.url),
+      ),
+    ).toBe(true);
+    const job = java.jobs['hosted-failover-e2e'];
+    const step = job.steps.find(
+      (s) => s.name === 'Run managed PR-watch bound-session E2E',
+    );
+    expect(step).toBeDefined();
+    expect(step.run).toContain(`npm run ${script}`);
+    expect(step['timeout-minutes']).toBe(10);
+    expect(step['continue-on-error']).toBeUndefined();
+    // It needs only the bundled CLI + core dist, so it runs right after the
+    // install/build/bundle step, before the Maven packaging.
+    const bundle = job.steps.findIndex((s) =>
+      /corepack pnpm install --frozen-lockfile/.test(s.run ?? ''),
+    );
+    expect(job.steps.indexOf(step)).toBeGreaterThan(bundle);
   });
 
   it.each(failoverArms)(

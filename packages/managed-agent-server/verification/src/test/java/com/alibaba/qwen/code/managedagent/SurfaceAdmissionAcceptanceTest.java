@@ -684,6 +684,149 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isAccepted());
     }
 
+    // The walk's pr-watch probes name a missing channel, so a swapped
+    // (tenantId, channelId) argument pair still 404s there. These arms
+    // register their own channel and Session and pin the service's own
+    // domain answers, so each handler is reached with the arguments in
+    // order.
+    @Test
+    public void prWatchRoutesAnswerTheirOwnDomainOverARegisteredChannel()
+            throws Exception {
+        String channel = "channel-prwatch-admitted";
+        String session = createSession(tenant, OWNER, true);
+        registerPrWatchChannel(channel);
+        MvcResult created = mvc.perform(post(
+                        "/internal/managed-channels/v1/channels/" + channel
+                                + "/pr-watch:create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\","
+                                + "\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"events\":[\"ci_failure\"]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(session))
+                .andExpect(jsonPath("$.prNumber").value(42))
+                .andReturn();
+        String bindingId = JSON.readTree(created.getResponse()
+                .getContentAsString()).path("bindingId").asText();
+        assertThat(bindingId).isNotBlank();
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:list")
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bindings[0].bindingId")
+                        .value(bindingId));
+        // A transition the binding does not enable is the service's own
+        // domain refusal — reached only when the channel resolved under the
+        // caller's tenant, never a missing-channel 404.
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:inject")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"transition\":\"merge_conflict\","
+                                + "\"headSha\":\"" + digest() + "\","
+                                + "\"episode\":1,\"evidence\":\"\","
+                                + "\"text\":\"probe\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("pr_watch_transition_not_enabled"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:retire")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bindingId").value(bindingId));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:list")
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bindings").isEmpty());
+    }
+
+    @Test
+    public void prWatchRoutesRefuseFractionalIntegerTokens() throws Exception {
+        // The TS contract refuses a fractional prNumber/episode; the MVC
+        // converter must refuse it too (ACCEPT_FLOAT_AS_INT disabled) with
+        // a 400, never truncate 1.5 into 1. The channel and binding exist,
+        // so a silently truncated token would answer admitted instead.
+        String channel = "channel-prwatch-fractional";
+        String session = createSession(tenant, OWNER, true);
+        registerPrWatchChannel(channel);
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\","
+                                + "\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"events\":[\"ci_failure\"]}"))
+                .andExpect(status().isOk());
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\","
+                                + "\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":1.5,"
+                                + "\"events\":[\"ci_failure\"]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:inject")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"transition\":\"ci_failure\","
+                                + "\"headSha\":\"" + digest() + "\","
+                                + "\"episode\":1.5,\"evidence\":\"\","
+                                + "\"text\":\"probe\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:inject")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":1.5,"
+                                + "\"transition\":\"ci_failure\","
+                                + "\"headSha\":\"" + digest() + "\","
+                                + "\"episode\":1,\"evidence\":\"\","
+                                + "\"text\":\"probe\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:retire")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":1.5}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+    }
+
+    private void registerPrWatchChannel(String channel) throws Exception {
+        mvc.perform(put("/internal/managed-channels/v1/channels/" + channel)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"platform\":\"github\","
+                                + "\"accountId\":\"bot-account\","
+                                + "\"accountGeneration\":1,"
+                                + "\"actorId\":\"" + OWNER + "\","
+                                + "\"workspaceId\":\"ws\","
+                                + "\"cwdRelative\":\".\","
+                                + "\"policy\":{\"adapter\":\"github\","
+                                + "\"senderPolicy\":\"allowlist\","
+                                + "\"allowedSenders\":[\"maintainer\"],"
+                                + "\"dispatchMode\":\"followup\"}}"))
+                .andExpect(status().isOk());
+    }
+
     // The admitted list probes only prove "not refused": pin that a
     // reader's task list really serves the child task whose committed body
     // the view reads for its child Session link (#13746 F2).

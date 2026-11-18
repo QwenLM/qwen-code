@@ -1,7 +1,12 @@
 package com.alibaba.qwen.code.managedagent.channel;
 
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchCreateRequest;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchInjectRequest;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.exc.MismatchedInputException;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -39,6 +44,13 @@ class PrWatchOperationsParityTest {
         List<String> transitions = new ArrayList<>();
         fixtures.get("transitions").forEach(node -> transitions.add(node.asText()));
         assertThat(PrWatchOperations.PR_WATCH_TRANSITIONS).isEqualTo(transitions);
+        JsonNode limits = fixtures.get("limits");
+        assertThat(PrWatchOperations.MAX_TEXT_CHARS)
+                .isEqualTo(limits.get("maxTextChars").asInt());
+        assertThat(PrWatchOperations.MAX_ENVELOPE_BYTES)
+                .isEqualTo(limits.get("maxEnvelopeBytes").asInt());
+        assertThat(PrWatchOperations.MAX_EVIDENCE_CHARS)
+                .isEqualTo(limits.get("maxEvidenceChars").asInt());
     }
 
     @Test
@@ -74,10 +86,35 @@ class PrWatchOperationsParityTest {
             String message = fixture.get("message").asText();
             double prNumber = identity.get("prNumber").asDouble();
             double episode = identity.path("episode").asDouble(1);
-            // A fractional component cannot reach the long-typed Java mirror;
-            // JSON binding rejects it before the derivation. The TS refusal
-            // stays pinned in the fixture for the TS-side test.
+            // A fractional component never reaches the long-typed Java
+            // mirror: the MVC converter disables ACCEPT_FLOAT_AS_INT, so the
+            // wire binding refuses the token (route-level 400, pinned by
+            // SurfaceAdmissionAcceptanceTest). Pin the same refusal on the
+            // request record the route binds; the TS refusal stays pinned in
+            // the fixture for the TS-side test.
             if (prNumber != Math.rint(prNumber) || episode != Math.rint(episode)) {
+                ObjectMapper strict = new ObjectMapper()
+                        .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
+                ObjectNode wire = JSON.createObjectNode();
+                wire.put("owner", identity.get("owner").asText());
+                wire.put("repo", identity.get("repo").asText());
+                wire.set("prNumber", identity.get("prNumber"));
+                if (identity.has("transition")) {
+                    wire.put("transition", identity.get("transition").asText());
+                    wire.put("headSha", identity.get("headSha").asText());
+                    wire.set("episode", identity.path("episode"));
+                    wire.put("evidence", "");
+                    wire.put("text", "probe");
+                    assertThatThrownBy(() -> strict.readValue(wire.toString(),
+                            PrWatchInjectRequest.class))
+                            .as(id).isInstanceOf(MismatchedInputException.class);
+                } else {
+                    wire.put("sessionId", "session-1");
+                    wire.putArray("events").add("ci_failure");
+                    assertThatThrownBy(() -> strict.readValue(wire.toString(),
+                            PrWatchCreateRequest.class))
+                            .as(id).isInstanceOf(MismatchedInputException.class);
+                }
                 continue;
             }
             if (identity.has("transition")) {

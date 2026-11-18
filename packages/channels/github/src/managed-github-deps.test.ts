@@ -558,11 +558,55 @@ describe('managed GitHub deps against a fake GitHub endpoint', () => {
     expect(await client.getCiStatus('Owner', 'Repo', 'sha-a')).toEqual({
       aggregate: 'failing',
       failedChecks: ['build'],
+      namesIncomplete: false,
     });
     // A failure decides the aggregate: the combined status is never fetched.
     expect(github.requests.map((r) => r.url)).toEqual([
       expect.stringContaining('/repos/Owner/Repo/commits/sha-a/check-runs'),
     ]);
+  });
+
+  it('flags the failed-check list incomplete when the early stop leaves unread pages', async () => {
+    // Page 1 carries a failure and a next-page link: the aggregate is decided
+    // and paging stops, but the names handed to the agent are only page 1's.
+    const withNext = await clientFor((_method, url) => {
+      if (url.includes('/check-runs')) {
+        return {
+          status: 200,
+          headers: {
+            link: '<https://api.github.com/repositories/1/check-runs?page=2>; rel="next"',
+          },
+          body: {
+            total_count: 150,
+            check_runs: [
+              { name: 'build', status: 'completed', conclusion: 'failure' },
+            ],
+          },
+        };
+      }
+      return { status: 200, body: { state: 'success', total_count: 0 } };
+    });
+    expect(
+      await withNext.client.getCiStatus('Owner', 'Repo', 'sha-a'),
+    ).toMatchObject({ aggregate: 'failing', namesIncomplete: true });
+    // No next page: the single page is the whole list, so no marker.
+    const noNext = await clientFor((_method, url) => {
+      if (url.includes('/check-runs')) {
+        return {
+          status: 200,
+          body: {
+            total_count: 1,
+            check_runs: [
+              { name: 'build', status: 'completed', conclusion: 'failure' },
+            ],
+          },
+        };
+      }
+      return { status: 200, body: { state: 'success', total_count: 0 } };
+    });
+    expect(
+      await noNext.client.getCiStatus('Owner', 'Repo', 'sha-a'),
+    ).toMatchObject({ aggregate: 'failing', namesIncomplete: false });
   });
 
   it('counts cancelled and stale runs as failing (the daemon CI definition)', async () => {

@@ -111,6 +111,8 @@ export interface GithubCiObservation {
   aggregate: ManagedGithubCiAggregate;
   /** Names of failed checks (capped), for the event's evidence line. */
   failedChecks: string[];
+  /** True when the failed-check list is partial (early page stop / name cap). */
+  namesIncomplete?: boolean;
 }
 
 /** One PR-watch binding as the control plane lists it (pr-watch:list). */
@@ -575,14 +577,17 @@ export class ManagedGithubAdapter {
     await this.release();
   }
 
-  /** One admission re-drive, one inbound poll, one PR watch and one outbox pull. */
+  /** One admission re-drive, one inbound poll, one outbox pull, one PR watch. */
   async tick(): Promise<void> {
     await this.ensureRegistered(this.state!);
     await this.resubmitPending();
     await this.pollInbound();
-    await this.watchPrs();
+    // The user-visible reply lane runs before the watch pass: the watch is not
+    // admission-critical and can spend dozens of sequential GitHub round-trips,
+    // which must not delay claiming deliveries and posting comment replies.
     await this.reportOrphanedOutbound();
     await this.pullOutbox();
+    await this.watchPrs();
   }
 
   private async runLoop(): Promise<void> {
@@ -1048,9 +1053,12 @@ export class ManagedGithubAdapter {
         ci.failedChecks.length > 0
           ? ` Failed checks: ${ci.failedChecks.join(', ')}.`
           : '';
+      const incomplete = ci.namesIncomplete
+        ? ' The failed-check list may be incomplete.'
+        : '';
       detected.push({
         transition: 'ci_failure',
-        evidence: `CI failed on head ${pr.headSha}.${names}`,
+        evidence: `CI failed on head ${pr.headSha}.${names}${incomplete}`,
       });
     }
     if (
@@ -1164,21 +1172,32 @@ export class ManagedGithubAdapter {
         delete episodes[keys[i]!];
       }
     }
+    // Persist only when the observation actually changed the entry: an
+    // all-quiet tick must not pay one full-state write + fsync per binding.
+    const entryChanged =
+      previous === undefined ||
+      JSON.stringify(next) !== JSON.stringify(previous);
     watch.prs[key] = next;
-    try {
-      this.persist();
-    } catch (error) {
-      // A failed save must not leave the detection in memory: roll back so
-      // the next tick re-observes and re-derives it (the pollInbound discipline).
-      if (previous === undefined) delete watch.prs[key];
-      else watch.prs[key] = previous;
-      throw error;
+    if (entryChanged) {
+      try {
+        this.persist();
+      } catch (error) {
+        // A failed save must not leave the detection in memory: roll back so
+        // the next tick re-observes and re-derives it (the pollInbound discipline).
+        if (previous === undefined) delete watch.prs[key];
+        else watch.prs[key] = previous;
+        throw error;
+      }
     }
     // A terminal (merged/closed) PR's binding is retired so it stops consuming
     // an observation slot and the PR can be bound to another Session.
     // Best-effort and idempotent: while the PR stays terminal the next tick
     // re-drives the retire; the episode watermark survives the later prune.
     if (terminal) {
+      // Same post-await side-effect discipline as the rest of the pass: a
+      // process that lost the state-file lock or was stopped must not delete
+      // a binding another owner now serves.
+      if (!this.running || this.ownershipLost) return;
       const plane = this.deps.prWatchControlPlane;
       if (plane) {
         try {
@@ -1242,6 +1261,29 @@ export class ManagedGithubAdapter {
             this.log(
               `Managed GitHub PR event ${pending.key} injection was refused (${status}); the event drops.`,
             );
+            // A pump-less bound Session can never run a pr_event turn: retire
+            // the binding rather than leave it listed to drop every future
+            // transition (the Harness refusal itself stays — R1-4).
+            if (
+              (error as { code?: unknown }).code === 'pr_event_wake_unavailable'
+            ) {
+              if (!this.running || this.ownershipLost) return;
+              try {
+                await plane.retirePrWatchBinding({
+                  owner: pending.owner,
+                  repo: pending.repo,
+                  prNumber: pending.prNumber,
+                });
+              } catch (retireError) {
+                if (this.isRegistrationRefusal(retireError)) {
+                  this.registeredGeneration = 0;
+                  return;
+                }
+                this.log(
+                  `Managed GitHub could not retire the pump-less PR binding ${pending.key}: ${String(retireError)}.`,
+                );
+              }
+            }
             entry.pending = entry.pending.slice(1);
             try {
               this.persist();

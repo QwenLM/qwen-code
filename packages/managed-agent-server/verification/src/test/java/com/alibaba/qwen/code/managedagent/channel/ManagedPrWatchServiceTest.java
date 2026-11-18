@@ -14,6 +14,8 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcPrWatchBindingStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcPrWatchInjectionRepository;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.managedagent.repository.PrWatchBindingStore.PrWatchBinding;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,6 +34,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * The PR-watch bound-session service against the real stores on H2 and a
@@ -455,6 +458,82 @@ class ManagedPrWatchServiceTest {
     }
 
     @Test
+    void keepsTheOwnershipGuardAtomicAgainstARacingPrWatchBind()
+            throws InterruptedException {
+        // The ownership-move UPDATE counts PR-watch bindings in its own
+        // subquery: a bind committed between the pre-check and the write
+        // must still flatten the write to zero rows. The channel starts
+        // with zero bindings of either class, so the pre-check passes and
+        // only the UPDATE's own count can refuse the move.
+        java.util.concurrent.CountDownLatch atCount =
+                new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch bound =
+                new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicLong preCheck =
+                new java.util.concurrent.atomic.AtomicLong(-1);
+        JdbcTemplate latching = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+            @Override
+            public <T> T queryForObject(String sql, Class<T> requiredType,
+                    Object... args) {
+                T value = super.queryForObject(sql, requiredType, args);
+                if (sql.contains(
+                        "SELECT COUNT(*) FROM ma_channel_binding")) {
+                    preCheck.set(((Number) value).longValue());
+                    atCount.countDown();
+                    try {
+                        bound.await();
+                    } catch (InterruptedException error) {
+                        throw new RuntimeException(error);
+                    }
+                }
+                return value;
+            }
+        };
+        JdbcChannelInstanceStore.ChannelInstance snapshot = instances
+                .findInstance(TENANT, channel).orElseThrow();
+        JdbcChannelInstanceStore racingStore =
+                new JdbcChannelInstanceStore(latching);
+        String sessionId = createSession(WORKSPACE);
+        Thread binder = new Thread(() -> {
+            try {
+                atCount.await();
+                bindings.bind(new PrWatchBinding(TENANT, channel,
+                        PrWatchOperations.prWatchBindingId(TENANT, channel,
+                                OWNER, REPO, PR),
+                        OWNER, REPO, PR, sessionId, "[\"ci_failure\"]", 0));
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            } finally {
+                bound.countDown();
+            }
+        });
+        binder.start();
+        try {
+            IllegalStateException error = assertThrows(
+                    IllegalStateException.class,
+                    () -> racingStore.register(
+                            new JdbcChannelInstanceStore.ChannelInstance(TENANT,
+                                    channel, "github", "bot-account", 2,
+                                    "connected", "other-actor", WORKSPACE, ".",
+                                    snapshot.policyJson(), 0, 0)));
+            assertThat(error.getMessage())
+                    .isEqualTo("channel_ownership_conflict");
+        } finally {
+            binder.interrupt();
+            binder.join(10_000);
+        }
+        // The pre-check saw zero bindings: the refusal came from the
+        // UPDATE's own PR-watch count, not from the earlier SELECT. The
+        // stored connection keeps its owner and the raced-in binding stays.
+        assertThat(preCheck.get()).isZero();
+        assertThat(instances.findInstance(TENANT, channel)).get()
+                .extracting(JdbcChannelInstanceStore.ChannelInstance::actorId)
+                .isEqualTo(ACTOR);
+        assertThat(bindings.findBinding(TENANT, channel, OWNER, REPO, PR))
+                .isPresent();
+    }
+
+    @Test
     void injectRefusesAndRetiresWhenTheBoundSessionIsGone() {
         String sessionId = createSession(WORKSPACE);
         bind(sessionId);
@@ -475,6 +554,28 @@ class ManagedPrWatchServiceTest {
     }
 
     @Test
+    void injectRefusesAndRetiresWhenTheBoundSessionIsClosed() {
+        String sessionId = createSession(WORKSPACE);
+        bind(sessionId);
+        jdbc.update("UPDATE ma_session SET status = 'CLOSED'"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT, sessionId);
+        // CLOSED is terminal — the Session can never accept an input again.
+        // inject fails closed with the liveness refusal, and the lazy-retire
+        // fires on session_not_active too, so the PR can be rebound instead
+        // of being blocked by the dead binding forever.
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, "text")))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("session_not_active");
+                });
+        assertThat(bindings.findBinding(TENANT, channel, OWNER, REPO, PR))
+                .isEmpty();
+        String fresh = createSession(WORKSPACE);
+        assertThat(bind(fresh).sessionId()).isEqualTo(fresh);
+    }
+
+    @Test
     void injectRefusesAnUnadmittableWrappedPromptBeforeStaging() {
         String sessionId = createSession(WORKSPACE);
         bind(sessionId);
@@ -483,6 +584,46 @@ class ManagedPrWatchServiceTest {
         // forever and every redelivery would replay the un-admittable payload.
         assertThatThrownBy(() -> service.inject(TENANT, channel,
                 inject("ci_failure", HEAD, "x".repeat(32_000))))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(400);
+                    assertThat(error.getCode()).isEqualTo("invalid_request");
+                });
+        assertThat(ledgerRows(sessionId)).isEmpty();
+        assertThat(harness.calls).isEmpty();
+    }
+
+    @Test
+    void injectRefusesEvidenceOverTheCharacterBoundBeforeStaging() {
+        String sessionId = createSession(WORKSPACE);
+        bind(sessionId);
+        // Defence in depth beside the @Size wire bound: the service itself
+        // refuses evidence past the contract's character cap.
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                new PrWatchInjectRequest(OWNER, REPO, PR, "ci_failure", HEAD,
+                        1, "x".repeat(4_001), "text")))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(400);
+                    assertThat(error.getCode()).isEqualTo("invalid_request");
+                });
+        assertThat(ledgerRows(sessionId)).isEmpty();
+        assertThat(harness.calls).isEmpty();
+    }
+
+    @Test
+    void injectRefusesAnEnvelopeOverTheByteBoundBeforeStaging() {
+        String sessionId = createSession(WORKSPACE);
+        bind(sessionId);
+        // Each control character JSON-serializes to a 6-byte escape: 12000
+        // of them stay under the wrapped char cap yet push the envelope past
+        // the byte cap — the branch the plain-text char-bound test never
+        // reaches.
+        String text = "\u0001".repeat(12_000);
+        String wrapped = PrWatchOperations.prWatchInputText(OWNER, REPO, PR,
+                "ci_failure", HEAD, "checks: build / test", text);
+        assertThat(wrapped.length())
+                .isLessThanOrEqualTo(PrWatchOperations.MAX_TEXT_CHARS);
+        assertThatThrownBy(() -> service.inject(TENANT, channel,
+                inject("ci_failure", HEAD, text)))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(400);
                     assertThat(error.getCode()).isEqualTo("invalid_request");

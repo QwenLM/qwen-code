@@ -88,6 +88,8 @@ async function fakeGithub(pr) {
     posted: [],
     pullsGets: 0,
     ciReads: 0,
+    ciRefs: [],
+    statusRefs: [],
     journal: [],
     port: 0,
   };
@@ -127,6 +129,7 @@ async function fakeGithub(pr) {
       );
       if (req.method === 'GET' && checksMatch) {
         state.ciReads += 1;
+        state.ciRefs.push(checksMatch[1]);
         state.journal.push('checks');
         return send(200, {
           total_count: state.pr.checks.length,
@@ -137,6 +140,7 @@ async function fakeGithub(pr) {
         /^\/repos\/Owner\/Repo\/commits\/([0-9a-f]+)\/status$/,
       );
       if (req.method === 'GET' && statusMatch) {
+        state.statusRefs.push(statusMatch[1]);
         return send(200, {
           state: state.pr.combinedState,
           total_count: state.pr.combinedCount,
@@ -176,6 +180,7 @@ async function fakeControlPlane(opts = {}) {
     retires: [],
     admitted: new Set(opts.preadmitted ?? []),
     queue: [],
+    deliveriesServed: 0,
     journal: [],
     injectDelayMs: opts.injectDelayMs ?? 0,
     bindings: opts.bindings ?? [
@@ -253,7 +258,9 @@ async function fakeControlPlane(opts = {}) {
         req.method === 'POST' &&
         url.pathname === `${root}/deliveries:claim`
       ) {
-        return send(200, { deliveries: state.queue.splice(0) });
+        const claimed = state.queue.splice(0);
+        state.deliveriesServed += claimed.length;
+        return send(200, { deliveries: claimed });
       }
       if (req.method === 'POST' && url.pathname === `${root}/inbound`) {
         return send(200, {
@@ -454,12 +461,20 @@ async function scenarioP1() {
     gh.state.posted,
   );
   check(
-    'PRIVATE-ONLY: no channel_delivery queued',
-    cp.state.queue.length === 0,
-    cp.state.queue,
+    'PRIVATE-ONLY: no channel_delivery served',
+    cp.state.deliveriesServed === 0,
+    cp.state.deliveriesServed,
+  );
+  // The CI read must target the head the adapter reports, not an arbitrary
+  // ref: every recorded check-runs ref equals the injected head.
+  check(
+    'CI read for the reported head',
+    gh.state.ciRefs.length > 0 && gh.state.ciRefs.every((r) => r === SHA_A),
+    gh.state.ciRefs,
   );
   // The fired pin keeps ci_failure once-per-head: a flapping aggregate on the
-  // same head must not re-fire.
+  // same head must not re-fire, and the pin must also suppress the CI re-read.
+  const ciReadsAfterFire = gh.state.ciReads;
   gh.state.pr.checks = [
     { name: 'build', status: 'completed', conclusion: 'success' },
   ];
@@ -472,6 +487,11 @@ async function scenarioP1() {
     'ci_failure once-per-head (flap does not re-fire)',
     cp.state.injects.length === 1,
     cp.state.injects,
+  );
+  check(
+    'once-per-head pin suppresses the CI re-read on the same head',
+    gh.state.ciReads === ciReadsAfterFire,
+    { ciReadsAfterFire, now: gh.state.ciReads },
   );
   proc.child.kill('SIGTERM');
   await waitFor(() => proc.child.exitCode !== null, 30_000, 'cli exit');

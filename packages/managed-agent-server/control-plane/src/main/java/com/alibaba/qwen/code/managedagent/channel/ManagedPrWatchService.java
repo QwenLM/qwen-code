@@ -143,10 +143,14 @@ public class ManagedPrWatchService {
         try {
             requireTargetSession(tenantId, instance, binding.sessionId());
         } catch (ManagedAgentException error) {
-            if (error.getStatus() == 404) {
-                // The bound Session is gone or left the Workspace (permanent):
-                // retire the dead binding so the PR can be bound to another
-                // Session instead of being blocked by it forever.
+            if (error.getStatus() == 404
+                    || "session_not_active".equals(error.getCode())) {
+                // The bound Session is gone, left the Workspace, or closed
+                // (CLOSED/ARCHIVED are terminal — it can never accept an input
+                // again): retire the dead binding so the PR can be bound to
+                // another Session instead of being blocked by it forever.
+                // retire keys on the business key and is a tolerated no-op when
+                // the row is already gone.
                 bindings.retire(tenantId, channelId, request.owner(),
                         request.repo(), request.prNumber());
             }
@@ -212,6 +216,11 @@ public class ManagedPrWatchService {
      * are (text ≤ 32000, evidence ≤ 4000).
      */
     private void validateEnvelopeBounds(PrWatchInjectRequest request) {
+        if (request.evidence().length()
+                > PrWatchOperations.MAX_EVIDENCE_CHARS) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    "The PR-watch evidence exceeds the character bound.");
+        }
         String wrapped = PrWatchOperations.prWatchInputText(request.owner(),
                 request.repo(), request.prNumber(), request.transition(),
                 request.headSha(), request.evidence(), request.text());

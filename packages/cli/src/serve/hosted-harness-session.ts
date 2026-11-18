@@ -1983,7 +1983,7 @@ function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
 // exactly like the unsettled-input arithmetic above treats it — including
 // the file-history obligation the turn left behind. Naming this once
 // keeps the load gate's exception aligned with the pump's ownership.
-function isChannelInputTurn(session: HostedSession, turnId: string): boolean {
+function isPumpOwnedToolTurn(session: HostedSession, turnId: string): boolean {
   const authority = session.managed.authority;
   return authority
     .eventsInSequenceRange(1, authority.committedSequence)
@@ -1991,7 +1991,8 @@ function isChannelInputTurn(session: HostedSession, turnId: string): boolean {
       (event) =>
         event.kind === 'input.accepted' &&
         event.payload['turnId'] === turnId &&
-        event.payload['source'] === CHANNEL_INPUT_SOURCE,
+        (event.payload['source'] === CHANNEL_INPUT_SOURCE ||
+          event.payload['source'] === PR_EVENT_INPUT_SOURCE),
     );
 }
 
@@ -7653,21 +7654,21 @@ export function registerHostedHarnessSessionRoutes(
           );
         }
       }
-      // H5/F5 follow-up: a channel turn interrupted inside a Write/Edit
-      // owes the wake pump its recovery, but refusing here would kill that
-      // pump before it started — the input is pump-owned, so the takeover
-      // arithmetic above can never match its pendingTurn. Let the load
-      // through: the pump proves the stop and settles right after
-      // attachment.
-      const channelParked =
+      // H5/F5 follow-up: a pump-owned tool turn (channel or pr_event)
+      // interrupted inside a Write/Edit owes the wake pump its recovery, but
+      // refusing here would kill that pump before it started — the input is
+      // pump-owned, so the takeover arithmetic above can never match its
+      // pendingTurn. Let the load through: the pump proves the stop and
+      // settles right after attachment.
+      const pumpOwnedParked =
         fileHistory?.pendingTurn !== null &&
         fileHistory?.pendingTurn !== undefined &&
-        isChannelInputTurn(session, fileHistory.pendingTurn);
+        isPumpOwnedToolTurn(session, fileHistory.pendingTurn);
       // A takeover's own parked Turn is exempt from the settle probe; a
       // stranger's record is named pending_turn_mismatch outright rather
       // than by whichever conjunct of it the probe trips first.
       const settle: HostedFileHistorySettlement | null =
-        !fileHistory?.pendingUndo && fileHistory?.pendingTurn && !channelParked
+        !fileHistory?.pendingUndo && fileHistory?.pendingTurn && !pumpOwnedParked
           ? (takeover || extensionsCommandStepTakeover) &&
             unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
@@ -8799,6 +8800,7 @@ export function registerHostedHarnessSessionRoutes(
             ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
             ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
             LOOP_INPUT_SOURCE,
+            PR_EVENT_INPUT_SOURCE,
           ],
         });
         await session.automations?.reconcileRuns();
@@ -14147,6 +14149,7 @@ export function registerHostedHarnessSessionRoutes(
               ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
               ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
               LOOP_INPUT_SOURCE,
+              PR_EVENT_INPUT_SOURCE,
             ],
           });
           // A refused settle revision never blocks the close: the next open

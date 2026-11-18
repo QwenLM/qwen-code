@@ -5,6 +5,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   MANAGED_PR_WATCH_LIMITS,
@@ -187,5 +189,69 @@ describe('prWatchInputText', () => {
 
   it('exposes the pr_event source constant', () => {
     expect(PR_EVENT_INPUT_SOURCE).toBe('pr_event');
+  });
+});
+
+// Two-directional parity: the Java parity test reads this same fixture, so a
+// change to the TS derivation/limits/refusals here turns the Java side red and
+// vice versa. The fixture is no longer a hand-maintained one-way Java copy.
+describe('cross-language parity fixture (TS side)', () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../../managed-agent-server/verification/src/test/resources/pr-watch/managed-pr-watch-v1.fixtures.json',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    ),
+  ) as {
+    source: string;
+    transitions: string[];
+    limits: {
+      maxTextChars: number;
+      maxEnvelopeBytes: number;
+      maxEvidenceChars: number;
+    };
+    cases: Array<{
+      id: string;
+      identity: PrWatchEventIdentity;
+      inputId: string;
+      bindingId: string;
+    }>;
+    refusals: Array<{
+      id: string;
+      identity: Record<string, unknown>;
+      message: string;
+    }>;
+  };
+
+  it('pins the source, transition set, and envelope limits', () => {
+    expect(fixture.source).toBe(PR_EVENT_INPUT_SOURCE);
+    expect(fixture.transitions).toEqual([...PR_WATCH_TRANSITIONS]);
+    expect(fixture.limits).toEqual({
+      maxTextChars: MANAGED_PR_WATCH_LIMITS.maxTextChars,
+      maxEnvelopeBytes: MANAGED_PR_WATCH_LIMITS.maxEnvelopeBytes,
+      maxEvidenceChars: MANAGED_PR_WATCH_LIMITS.maxEvidenceChars,
+    });
+  });
+
+  it('derives every fixture inputId/bindingId byte-for-byte', () => {
+    for (const c of fixture.cases) {
+      expect(prWatchInputId(c.identity), c.id).toBe(c.inputId);
+      expect(prWatchBindingId(c.identity), c.id).toBe(c.bindingId);
+    }
+  });
+
+  it('refuses every fixture invalid identity with the same message', () => {
+    for (const r of fixture.refusals) {
+      const identity = r.identity as unknown as PrWatchEventIdentity;
+      if ('transition' in r.identity) {
+        expect(() => prWatchInputId(identity), r.id).toThrow(r.message);
+      } else {
+        expect(() => prWatchBindingId(identity), r.id).toThrow(r.message);
+      }
+    }
   });
 });
