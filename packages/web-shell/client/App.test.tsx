@@ -312,6 +312,10 @@ type MockConnection = {
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
+  restoredArtifacts?: DaemonSessionArtifact[];
+  restoredArtifactsSessionId?: string;
+  artifactCountHint?: number;
+  artifactCountHintSessionId?: string;
   error?: string;
   errorStatus?: number;
   missingSession?: boolean;
@@ -355,6 +359,7 @@ function activeGoalSnapshot(
 }
 
 type ChatEditorTestProps = {
+  slashArgumentCompleter?: import('./completions/slashCompletion').SlashArgumentCompleter;
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
   liveVoicePortalContainer?: HTMLElement | null;
@@ -449,6 +454,10 @@ type ChatEditorTestProps = {
   }) => void;
   gitBranch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
+  gitWorktree?: boolean;
+  gitCwd?: string;
+  onCreateWorktreeBranch?: (name: string) => Promise<void>;
+  onHandoff?: (to: 'local' | 'worktree') => Promise<void>;
   onOpenGitDiff?: () => void;
   visibleToolbarActions?: string[];
   tokenCount?: number;
@@ -574,6 +583,7 @@ const {
   const qualifiedSetWorkspaceSetting = vi.fn();
   const runtimeStop = vi.fn();
   const workspaceClient = {
+    sendToSubSession: vi.fn(),
     runtimeStopOptions: vi.fn(),
     liveSetupStatus: vi
       .fn()
@@ -806,6 +816,18 @@ const {
     addArtifact: vi.fn().mockResolvedValue({}),
     loadSession: vi.fn().mockResolvedValue(undefined),
     reloadSession: vi.fn().mockResolvedValue(undefined),
+    handoffWorktree: vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      worktree: null,
+      currentCwd: '/workspace',
+    }),
+    createWorktreeBranch: vi.fn().mockResolvedValue({
+      worktree: {
+        slug: 'feat-a',
+        path: '/workspace/.qwen/worktrees/feat-a',
+        branch: 'feat/new',
+      },
+    }),
   };
   const mockPaneSessionActions = {
     ...mockSessionActions,
@@ -925,6 +947,7 @@ const {
         | undefined,
       streamingState: 'idle' as StreamingState,
       sessionHasActivePrompt: false,
+      renderStreamingTrailing: false,
       blocks: [] as unknown[],
       liveBlocks: undefined as unknown[] | undefined,
       snapshotCallOptions: [] as Array<
@@ -959,6 +982,9 @@ const {
         | null,
       latestTaskChipsIncludeAgents: null as boolean | null,
       latestTaskChipsOnSelectTask: null as
+        | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
+        | null,
+      latestTaskChipsOnExplainTask: null as
         | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
         | null,
       openTurnCalls: undefined as
@@ -1009,6 +1035,7 @@ const {
         question: string;
         answer: string;
         isPending: boolean;
+        hidePrefix?: boolean;
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestSessionOverviewProps: null as {
@@ -1987,7 +2014,11 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
-      onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onLoadSession?: (
+        sessionId: string,
+        workspaceCwd?: string,
+        artifactCount?: number,
+      ) => Promise<void> | void;
       onLoadStandaloneSession?: (
         sessionId: string,
         displayName?: string,
@@ -2156,6 +2187,16 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'load-session-with-count',
+            type: 'button',
+            onClick: () =>
+              props.onLoadSession?.('session-2', '/tmp/project', 3),
+          },
+          'load session with count',
         ),
         React.createElement(
           'button',
@@ -2399,10 +2440,12 @@ vi.doMock('./components/ComposerTaskChips', async () => {
       tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
       includeAgents: boolean;
       onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+      onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
     }) {
       testState.latestTaskChipsTasks = props.tasks;
       testState.latestTaskChipsIncludeAgents = props.includeAgents;
       testState.latestTaskChipsOnSelectTask = props.onSelectTask;
+      testState.latestTaskChipsOnExplainTask = props.onExplainTask ?? null;
       return React.createElement('div', {
         'data-testid': 'composer-task-chips',
       });
@@ -2416,17 +2459,23 @@ vi.doMock('./components/StreamingStatus', async () => {
       startedAt,
       hasActivePrompt,
       showPhrase,
+      trailing,
     }: {
       startedAt?: number;
       hasActivePrompt?: boolean;
       showPhrase?: boolean;
+      trailing?: import('react').ReactNode;
     }) =>
-      React.createElement('div', {
-        'data-testid': 'streaming-status',
-        'data-started-at': startedAt,
-        'data-has-active-prompt': String(hasActivePrompt === true),
-        'data-show-phrase': String(showPhrase !== false),
-      }),
+      React.createElement(
+        'div',
+        {
+          'data-testid': 'streaming-status',
+          'data-started-at': startedAt,
+          'data-has-active-prompt': String(hasActivePrompt === true),
+          'data-show-phrase': String(showPhrase !== false),
+        },
+        testState.renderStreamingTrailing ? trailing : null,
+      ),
   };
 });
 vi.doMock('./components/ToastHost', async () => {
@@ -4428,6 +4477,100 @@ describe('task activity key', () => {
     expect(
       container.querySelector('[data-web-shell-artifacts-entry]'),
     ).toBeNull();
+  });
+
+  it('shows the header artifacts entry from the click-time hint before the load lands', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const makeArtifact = (id: string): DaemonSessionArtifact => ({
+      id,
+      kind: 'html',
+      storage: 'workspace',
+      source: 'tool',
+      status: 'available',
+      title: id,
+      workspacePath: `${id}.html`,
+      clientRetained: false,
+      createdAt: '2026-09-07T00:00:00.000Z',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+    });
+    // The gated fetch stays pending: no authoritative data exists yet, so
+    // the keyed click-time hint from the session-list summary must surface.
+    const pending = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    mockSessionActions.loadArtifacts.mockReturnValue(pending.promise);
+    mockConnection.artifactCountHint = 3;
+    mockConnection.artifactCountHintSessionId = mockConnection.sessionId;
+    try {
+      const { container } = renderApp();
+      await flush();
+
+      const entry = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-artifacts-entry]',
+      );
+      expect(entry).not.toBeNull();
+      expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (3)');
+
+      // The authoritative list supersedes the hint once it lands.
+      await act(async () => {
+        pending.resolve({ artifacts: [makeArtifact('report')] });
+        await pending.promise;
+      });
+      await flush();
+      expect(
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+          ?.getAttribute('aria-label'),
+      ).toBe('Open artifacts (1)');
+    } finally {
+      mockConnection.artifactCountHint = undefined;
+      mockConnection.artifactCountHintSessionId = undefined;
+    }
+  });
+
+  it('withholds the click-time hint keyed to another session', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const pending = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    mockSessionActions.loadArtifacts.mockReturnValue(pending.promise);
+    mockConnection.artifactCountHint = 3;
+    mockConnection.artifactCountHintSessionId = `${mockConnection.sessionId}-other`;
+    try {
+      const { container } = renderApp();
+      await flush();
+
+      expect(
+        container.querySelector('[data-web-shell-artifacts-entry]'),
+      ).toBeNull();
+    } finally {
+      mockConnection.artifactCountHint = undefined;
+      mockConnection.artifactCountHintSessionId = undefined;
+    }
+  });
+
+  it('forwards the clicked session artifact count into loadSession options', async () => {
+    // Pins the sidebar → App → loadSession wiring: the count the sidebar
+    // row carries must reach the action options, or the hint never lands
+    // on the connection and the entry reverts to load-response timing.
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-session-with-count"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'session-2',
+      expect.objectContaining({ artifactCountHint: 3 }),
+    );
   });
 
   it('exposes the artifact count and opener to a custom chat header', async () => {
@@ -7125,6 +7268,182 @@ describe('task activity key', () => {
     ).not.toHaveBeenCalled();
   });
 
+  it('drops a restored change overview tab when the host stopped listing it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'change_overview',
+          tabs: [
+            {
+              id: 'change_overview',
+              kind: 'change_overview',
+              title: 'Change overview',
+              workspaceCwd: '/tmp/project',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    // A stored tab must not be a second way in for a host that turned the
+    // feature off: it would render the panel and keep fetching git state.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).toBeNull();
+  });
+
+  it('round-trips a persisted change overview tab when the host lists it', async () => {
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'change_overview',
+          tabs: [
+            {
+              id: 'change_overview',
+              kind: 'change_overview',
+              title: 'Change overview',
+              workspaceCwd: '/tmp/project',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+
+    const { container } = renderApp({
+      rightPanel: { items: ['review', 'changeOverview'] },
+    });
+    await flush();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).not.toBeNull();
+  });
+
+  it('stamps the live session onto a change overview tab opened on the new-task page', async () => {
+    // A tab opened before the first prompt has no session; the reconciliation
+    // effect is the only writer that adopts the materialized session id.
+    // Without it the tab runs useChangeOverview(cwd, undefined) forever: no
+    // bound PRs, no base branch, no worktree scoping.
+    // Align the session-less workspace cwd with the session fixture's and
+    // arm the real first-prompt path (createSession materializes the session)
+    // so the draft panel state carries over to the session key.
+    mockConnection.sessionId = undefined;
+    testState.messages = [];
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        { id: 'project', cwd: '/tmp/project', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-1';
+      return { sessionId: 'session-1' };
+    });
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const actions = container.querySelector(
+      '[data-testid="right-panel-empty-actions"]',
+    );
+    expect(actions).not.toBeNull();
+    const openButton = Array.from(actions!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Change overview'),
+    );
+    expect(openButton).toBeDefined();
+    await act(async () => {
+      openButton!.click();
+    });
+    await flush();
+    expect(
+      container.querySelector('button[title="Change overview"]'),
+    ).not.toBeNull();
+    expect(mockWorkspace.client.sessionStatus).not.toHaveBeenCalled();
+
+    // Materialize the session through the real first-prompt submission, the
+    // way the new-task panel regression harness does: createSession arms the
+    // draft carry-over and reports the session live.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        undefined,
+        undefined,
+        editorCommit,
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    // The draft carry-over persists panel state in a layout effect before the
+    // passive reconciliation effect stamps the session id, so settle through
+    // re-renders rather than asserting on the first flush. Assert on the
+    // persisted tab itself: sessionStatus is a shared mock that sibling
+    // consumers also call once a session is live, so it cannot discriminate
+    // whether THIS tab adopted the session.
+    await vi.waitFor(async () => {
+      await flush();
+      const raw = window.localStorage.getItem(
+        'qwen-code-web-shell-right-panel-state',
+      );
+      const state = JSON.parse(raw ?? '{}') as Record<
+        string,
+        { tabs?: Array<{ kind?: string; sessionId?: string }> }
+      >;
+      const entry = state['/tmp/project\0session-1'];
+      expect(
+        entry?.tabs?.some(
+          (tab) =>
+            tab.kind === 'change_overview' && tab.sessionId === 'session-1',
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it('does not duplicate the change overview tab when opened twice', async () => {
+    mockConnection.sessionId = undefined;
+    const { container } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const actions = container.querySelector(
+      '[data-testid="right-panel-empty-actions"]',
+    );
+    const openButton = Array.from(actions!.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Change overview'),
+    );
+    expect(openButton).toBeDefined();
+    await act(async () => {
+      openButton!.click();
+      openButton!.click();
+    });
+    await flush();
+    expect(
+      container.querySelectorAll('button[title="Change overview"]'),
+    ).toHaveLength(1);
+  });
+
   it('opens one trajectory tab from the panel and reuses it', async () => {
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
@@ -8341,12 +8660,13 @@ describe('task activity key', () => {
     const shell: DaemonSessionShellTaskStatus = {
       kind: 'shell',
       id: 'shell-1',
+      label: 'npm test',
+      description: 'npm test',
       command: 'npm test',
+      cwd: '/tmp/project',
       status: 'running',
       startTime: 1_000,
       runtimeMs: 5_000,
-      output: '',
-      exitCode: null,
     };
     mockWorkspace.client.sessionTasks.mockResolvedValue({
       v: 1,
@@ -12643,6 +12963,95 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
   });
 }
 
+describe('App /send', () => {
+  const callerCwd = '/tmp/project';
+  const targetCwd = '/tmp/backend';
+
+  beforeEach(() => {
+    mockConnection.capabilities.features = ['session_sub_session_send'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'caller-id',
+          cwd: callerCwd,
+          displayName: targetCwd,
+          primary: true,
+          trusted: true,
+        },
+        { id: 'target-id', cwd: targetCwd, primary: false, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspace.client.sendToSubSession.mockReset();
+  });
+
+  it('only clears the submitted draft after the daemon accepts it', async () => {
+    const send = deferred<{ sessionId: string }>();
+    mockWorkspace.client.sendToSubSession.mockReturnValue(send.promise);
+    const { container } = renderApp();
+    testState.prompt = '/send hello';
+    await clickSubmit(container);
+    await clickSubmit(container);
+    expect(
+      mockWorkspace.client.sendToSubSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { prompt: 'hello' },
+      'client-1',
+    );
+    expect(editorCommit).not.toHaveBeenCalled();
+
+    await act(async () => send.resolve({ sessionId: 'target' }));
+    expect(editorCommit).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the draft if the host refuses the outgoing prompt', async () => {
+    const onSubmitBefore = vi.fn().mockRejectedValue(new Error('host refusal'));
+    const { container } = renderApp({ onSubmitBefore });
+    testState.prompt = '/send --workspace target-id hello';
+    await clickSubmit(container);
+    expect(onSubmitBefore).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+    });
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send --workspace target-id hello');
+  });
+
+  it('does not restore a late refusal into another session', async () => {
+    const send = deferred<never>();
+    mockWorkspace.client.sendToSubSession.mockReturnValue(send.promise);
+    const { container, rerender } = renderApp();
+    testState.prompt = '/send hello';
+    await clickSubmit(container);
+    expect(mockWorkspace.client.sendToSubSession).toHaveBeenCalledOnce();
+
+    mockConnection.sessionId = 'session-2';
+    testState.prompt = '';
+    rerender();
+    await act(async () => send.reject(new Error('target refused')));
+    expect(testState.prompt).toBe('');
+    expect(editorCommit).not.toHaveBeenCalled();
+  });
+
+  it('offers a stable selector for a colliding workspace name and honors the lock', async () => {
+    const { container } = renderApp({ lockedWorkspaceCwd: callerCwd });
+    await flush();
+    const result =
+      testState.latestChatEditorProps?.slashArgumentCompleter?.(
+        '/send --workspace ',
+      );
+    expect(result?.items).toMatchObject([
+      { detail: callerCwd, apply: '/send --workspace caller-id ' },
+    ]);
+
+    testState.prompt = `/send --workspace ${targetCwd} hello`;
+    await clickSubmit(container);
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+  });
+});
+
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value?: T | PromiseLike<T>) => void;
@@ -12770,6 +13179,7 @@ function makePendingPermissionBlock(
       raw: Record<string, unknown>;
     }>;
     content?: unknown[];
+    rawInput?: Record<string, unknown>;
   } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
@@ -12788,6 +13198,7 @@ function makePendingPermissionBlock(
         ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
       },
       ...(overrides.content ? { content: overrides.content } : {}),
+      ...(overrides.rawInput ? { rawInput: overrides.rawInput } : {}),
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -13069,6 +13480,7 @@ beforeEach(() => {
   testState.promptImages = undefined;
   testState.streamingState = 'idle';
   testState.sessionHasActivePrompt = false;
+  testState.renderStreamingTrailing = false;
   testState.blocks = [];
   testState.liveBlocks = undefined;
   testState.snapshotCallOptions = [];
@@ -13090,6 +13502,7 @@ beforeEach(() => {
   testState.latestTaskChipsTasks = null;
   testState.latestTaskChipsIncludeAgents = null;
   testState.latestTaskChipsOnSelectTask = null;
+  testState.latestTaskChipsOnExplainTask = null;
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
@@ -18593,7 +19006,11 @@ describe('App session callbacks', () => {
   it('hands workspace context from the welcome composer to the session header', async () => {
     mockConnection.sessionId = undefined;
     testState.messages = [];
-    const { container, rerender } = renderApp();
+    // Session-scoped entries only: the workspace-scoped changeOverview default
+    // would otherwise surface the header on the session-less welcome page.
+    const { container, rerender } = renderApp({
+      rightPanel: { items: ['review', 'sideTask'] },
+    });
     await flush();
     expect(testState.latestChatEditorProps?.contextChipPlacement).toBe('below');
     expect(
@@ -19309,6 +19726,1828 @@ describe('App session callbacks', () => {
       container.querySelector('[data-testid="composer-task-chips"]'),
     ).toBeNull();
     expect(testState.latestTaskChipsTasks).toBeNull();
+  });
+
+  it('explains a task as a side question from the chips "?" affordance', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.btwSessionStream).toHaveBeenCalledWith(
+      expect.stringContaining('Command: npm run build'),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(container.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    expect(testState.latestBtwMessageProps?.answer).toBe('side answer');
+    // The panel echoes a short localized line, not the composed prompt:
+    // the model receives the facts, the user does not.
+    expect(testState.latestBtwMessageProps?.question).toBe(
+      'Explain what this task is doing: npm run build',
+    );
+    expect(testState.latestBtwMessageProps?.question).not.toContain(
+      'Task facts:',
+    );
+  });
+
+  it('keeps the panel echo short when the task label is a multi-KB command', async () => {
+    const command = 'echo ' + 'x'.repeat(4_000);
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-long',
+      label: command,
+      description: command,
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command,
+      cwd: '/tmp/project',
+    };
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+
+    const panelQuestion = testState.latestBtwMessageProps?.question ?? '';
+    expect(panelQuestion.length).toBeLessThanOrEqual(200);
+    expect(panelQuestion).toContain('…');
+    expect(panelQuestion).not.toContain('Task facts:');
+    // The model still receives the composed facts, not the display line.
+    const streamed = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[0];
+    expect(streamed).toContain('Task facts:');
+    expect(streamed.length).toBeGreaterThan(panelQuestion.length);
+  });
+
+  it('renders the zh display line in the panel for a zh session', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-zh',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    renderApp({ language: 'zh-CN' });
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestBtwMessageProps?.question).toBe(
+      '解释这个任务在做什么：npm run build',
+    );
+  });
+
+  it('mirrors the task explanation into the detail panel props', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    renderApp();
+    await flush();
+
+    // Open the shell detail panel the way clicking its chip does.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'shell-running',
+    );
+
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+
+    const explanation = testState.latestArtifactPanelProps?.taskExplanation;
+    expect(explanation?.taskId).toBe('shell-running');
+    expect(explanation?.question).toBe(
+      'Explain what this task is doing: npm run build',
+    );
+    expect(testState.latestArtifactPanelProps?.onExplainTask).toBeTypeOf(
+      'function',
+    );
+  });
+
+  it('keeps a settled explanation when Enter activates a button', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.answer).toBe('side answer');
+
+    // The window-capture dismiss shortcut must not swallow keyboard
+    // activation of buttons while a settled explanation is showing. The
+    // composer must be empty: with text, Enter is not a dismissal at all
+    // and the pin would be vacuous.
+    testState.prompt = '';
+    const button = document.querySelector('button');
+    expect(button).not.toBeNull();
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      button!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('resolves the panel explain task for an agent tab opened without toolUseId', async () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-no-tool',
+      label: 'Research',
+      description: 'Research',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    testState.backgroundTasks = [agent];
+    renderApp();
+    await flush();
+
+    // The chip open path registers the tab under toolUseId ?? id.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(agent);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'agent-no-tool',
+    );
+  });
+
+  it.each(['c', 'd'])(
+    'cancels a pending explanation with Ctrl+%s while a button holds focus',
+    async (key) => {
+      const finish = deferred<void>();
+      mockSessionActions.btwSessionStream.mockImplementationOnce(
+        async function* () {
+          await finish.promise;
+          yield {
+            v: 1,
+            type: 'done',
+            requestId: 'btw-request',
+            answer: 'too late',
+          } as const;
+        },
+      );
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      renderApp();
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+      // Clicking the "?" leaves focus on the button; the cancel chords
+      // never activate a control, so they must reach the dismiss path.
+      const button = document.querySelector('button');
+      expect(button).not.toBeNull();
+      const event = new KeyboardEvent('keydown', {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        button!.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+      const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+        ?.signal as AbortSignal | undefined;
+      expect(signal?.aborted).toBe(true);
+
+      // A done that lands after the dismissal must not resurrect the panel
+      // with a stale answer. Resolve only after the key dispatch and flush:
+      // the stream loop re-checks the abort ref per event.
+      await act(async () => {
+        finish.resolve();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    },
+  );
+
+  it.each(['c', 'd'])(
+    'cancels a pending explanation with Ctrl+%s while a drawer is open',
+    async (key) => {
+      const finish = deferred<void>();
+      mockSessionActions.btwSessionStream.mockImplementationOnce(
+        async function* () {
+          await finish.promise;
+          yield {
+            v: 1,
+            type: 'done',
+            requestId: 'btw-request',
+            answer: 'too late',
+          } as const;
+        },
+      );
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+
+      // Below 1001px the detail panel renders inside DrawerContent, so an
+      // open modal surface is permanently present while it is shown. The
+      // cancel chords must still abort the pending side query — the drawer
+      // owns Escape, not Ctrl+C/Ctrl+D.
+      const drawer = document.createElement('div');
+      drawer.setAttribute('data-slot', 'drawer-content');
+      drawer.setAttribute('data-state', 'open');
+      const drawerButton = document.createElement('button');
+      drawer.append(drawerButton);
+      container.append(drawer);
+
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+      const event = new KeyboardEvent('keydown', {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        drawerButton.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+      const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+        ?.signal as AbortSignal | undefined;
+      expect(signal?.aborted).toBe(true);
+
+      await act(async () => {
+        finish.resolve();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    },
+  );
+
+  it.each(['Enter', ' '])(
+    'dismisses a settled explanation with %s while a drawer is open',
+    async (key) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      const drawer = document.createElement('div');
+      drawer.setAttribute('data-slot', 'drawer-content');
+      drawer.setAttribute('data-state', 'open');
+      container.append(drawer);
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      // The drawer owns Escape only; Enter/Space on a non-activatable
+      // surface still dismiss the settled explanation the footer advertises.
+      const surface = document.createElement('div');
+      container.append(surface);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        surface.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    },
+  );
+
+  it('cancels a pending explanation with Ctrl+D in the composer editor under a drawer', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const drawer = document.createElement('div');
+    drawer.setAttribute('data-slot', 'drawer-content');
+    drawer.setAttribute('data-state', 'open');
+    const editor = document.createElement('textarea');
+    editor.setAttribute('data-web-shell-composer-editor', '');
+    drawer.append(editor);
+    container.append(drawer);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    // Ctrl+D has no copy role, even on a text surface under a drawer.
+    const event = new KeyboardEvent('keydown', {
+      key: 'd',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      editor.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it.each(['c', 'd'])(
+    'cancels a pending explanation with Ctrl+%s on a button inside a keyboard scope',
+    async (key) => {
+      const finish = deferred<void>();
+      mockSessionActions.btwSessionStream.mockImplementationOnce(
+        async function* () {
+          await finish.promise;
+          yield {
+            v: 1,
+            type: 'done',
+            requestId: 'btw-request',
+            answer: 'too late',
+          } as const;
+        },
+      );
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      const scope = document.createElement('div');
+      scope.setAttribute('data-keyboard-scope', '');
+      const button = document.createElement('button');
+      scope.append(button);
+      container.append(scope);
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+      // A keyboard scope is not a text surface; a button inside it cancels.
+      const event = new KeyboardEvent('keydown', {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        button.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(true);
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+      const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+        ?.signal as AbortSignal | undefined;
+      expect(signal?.aborted).toBe(true);
+      await act(async () => {
+        finish.resolve();
+        await Promise.resolve();
+      });
+      await flush();
+      expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    },
+  );
+
+  it('preserves Ctrl+C copy on a text surface under a drawer', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const drawer = document.createElement('div');
+    drawer.setAttribute('data-slot', 'drawer-content');
+    drawer.setAttribute('data-state', 'open');
+    const input = document.createElement('input');
+    drawer.append(input);
+    container.append(drawer);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    // Ctrl+C on a real text surface keeps its copy role — no dismiss/abort.
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      input.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(false);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+  });
+
+  it.each(['Enter', ' '])(
+    'keeps a settled explanation when %s is consumed by a keyboard scope',
+    async (key) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      // A keyboard-scoped status card consumes Enter/Space itself (open/close
+      // detail, server actions); the explanation must yield, not dismiss.
+      const scope = document.createElement('div');
+      scope.setAttribute('data-keyboard-scope', '');
+      container.append(scope);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        scope.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    },
+  );
+
+  it.each([
+    ['textarea', 'textarea'],
+    ['CodeMirror editor', 'cm-editor'],
+    ['select', 'select'],
+    ['contenteditable empty', 'contenteditable-empty'],
+    ['contenteditable plaintext-only', 'contenteditable-plaintext'],
+  ])('preserves Ctrl+C copy on a %s under a drawer', async (_label, kind) => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const drawer = document.createElement('div');
+    drawer.setAttribute('data-slot', 'drawer-content');
+    drawer.setAttribute('data-state', 'open');
+    let surface: HTMLElement;
+    if (kind === 'cm-editor') {
+      surface = document.createElement('div');
+      surface.className = 'cm-editor';
+    } else if (kind === 'contenteditable-empty') {
+      surface = document.createElement('div');
+      surface.setAttribute('contenteditable', '');
+    } else if (kind === 'contenteditable-plaintext') {
+      surface = document.createElement('div');
+      surface.setAttribute('contenteditable', 'plaintext-only');
+    } else {
+      surface = document.createElement(kind);
+    }
+    drawer.append(surface);
+    container.append(drawer);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      surface.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(false);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+  });
+
+  it('cancels a pending explanation with Ctrl+C on a text surface without a guard', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const input = document.createElement('input');
+    container.append(input);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    // With no guard present the copy carve-out does not apply; Ctrl+C cancels.
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      input.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it.each(['Enter', ' '])(
+    'keeps a settled explanation when %s is consumed by a DialogShell dialog scope',
+    async (key) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      // DialogShell marks its dialog content a keyboard scope, so a real
+      // dialog keeps Enter/Space (form submit / list actions) — unlike a
+      // drawer or a marker-less dialog, which own Escape only.
+      const dialog = document.createElement('div');
+      dialog.setAttribute('data-slot', 'dialog-content');
+      dialog.setAttribute('data-state', 'open');
+      dialog.setAttribute('data-keyboard-scope', '');
+      container.append(dialog);
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        dialog.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    },
+  );
+
+  it('dismisses a settled explanation with Enter on a dialog body without a keyboard scope', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // A modal surface without the scope marker owns Escape only; Enter on
+    // its body still dismisses the settled explanation.
+    const dialog = document.createElement('div');
+    dialog.setAttribute('data-slot', 'dialog-content');
+    dialog.setAttribute('data-state', 'open');
+    container.append(dialog);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('cancels a pending explanation with Ctrl+C on a contenteditable="false" surface under a drawer', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    const drawer = document.createElement('div');
+    drawer.setAttribute('data-slot', 'drawer-content');
+    drawer.setAttribute('data-state', 'open');
+    const surface = document.createElement('div');
+    surface.setAttribute('contenteditable', 'false');
+    drawer.append(surface);
+    container.append(drawer);
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    // An explicit contenteditable="false" is not a text surface, so Ctrl+C
+    // cancels even under a guard (the :not([contenteditable="false"]) half).
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      surface.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    const signal = mockSessionActions.btwSessionStream.mock.calls.at(-1)?.[1]
+      ?.signal as AbortSignal | undefined;
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it.each(['Enter', ' '])(
+    'keeps a settled explanation when %s is consumed by the waiting minigame',
+    async (key) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      // Render the StreamingStatus trailing slot so the real minigame trigger
+      // mounts, and keep the streaming state non-idle so the open flag sticks.
+      testState.streamingState = 'responding';
+      testState.renderStreamingTrailing = true;
+      const { container } = renderApp();
+      await flush();
+      const trigger = container.querySelector(
+        '[data-component="waiting-minigame-trigger"]',
+      );
+      expect(trigger).not.toBeNull();
+      await act(async () => {
+        trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await Promise.resolve();
+      });
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      // The open minigame owns Enter/Space (pause/restart); the guard yields,
+      // so the settled explanation survives. Panel survival is decided by the
+      // guard alone, independent of whether the board also prevents default.
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        document.body.dispatchEvent(event);
+      });
+      await flush();
+      expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    },
+  );
+
+  it.each(['switch', 'tab', 'option', 'checkbox', 'radio'])(
+    'keeps a settled explanation when Enter activates a %s',
+    async (role) => {
+      const shell: DaemonSessionShellTaskStatus = {
+        kind: 'shell',
+        id: 'shell-running',
+        label: 'npm run build',
+        description: 'npm run build',
+        status: 'running',
+        startTime: 2,
+        runtimeMs: 20,
+        command: 'npm run build',
+        cwd: '/tmp/project',
+      };
+      const { container } = renderApp();
+      await flush();
+      await act(async () => {
+        testState.latestTaskChipsOnExplainTask?.(shell);
+        await Promise.resolve();
+      });
+      await flush();
+      expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+      testState.prompt = '';
+
+      const widget = document.createElement('div');
+      widget.setAttribute('role', role);
+      widget.setAttribute('tabindex', '0');
+      container.append(widget);
+      const event = new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        widget.dispatchEvent(event);
+      });
+      expect(event.defaultPrevented).toBe(false);
+      expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    },
+  );
+
+  it('keeps a settled explanation when Enter activates a summary', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    details.append(summary);
+    container.append(details);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      summary.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('keeps a settled explanation when Enter activates a contenteditable', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    const editable = document.createElement('div');
+    editable.setAttribute('contenteditable', 'true');
+    container.append(editable);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      editable.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('dismisses a settled explanation with Escape from the composer editor', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // Escape inside the chip row belongs to the row, not to the dismiss
+    // path — the companion operand to the editor marker below.
+    const chipRow = document.createElement('div');
+    chipRow.setAttribute('data-web-shell-composer-task-chips', '');
+    const rowButton = document.createElement('button');
+    chipRow.append(rowButton);
+    container.append(chipRow);
+    const buttonEvent = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      rowButton.dispatchEvent(buttonEvent);
+    });
+    expect(buttonEvent.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+
+    // On mobile the editor is a textarea carrying the composer marker, so
+    // it matches both the marker exemption and the textarea selector; the
+    // marker must win and Escape must still dismiss the settled answer.
+    const editor = document.createElement('textarea');
+    editor.setAttribute('data-web-shell-composer-editor', '');
+    container.append(editor);
+    const editorEvent = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      editor.dispatchEvent(editorEvent);
+    });
+    expect(editorEvent.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('dismisses a settled explanation with Enter in the composer editor', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // On mobile the composer is a textarea carrying the editor marker, so
+    // it matches the guard's textarea selector; the marker exclusion is
+    // what keeps Enter reaching the dismiss path with an empty composer.
+    const editor = document.createElement('textarea');
+    editor.setAttribute('data-web-shell-composer-editor', '');
+    container.append(editor);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      editor.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('keeps a settled explanation when Enter activates a menu item', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // Radix menu items activate from their own keydown handler downstream
+    // of the window capture phase; the exemption must name their role or
+    // Enter dismisses the panel and the item never activates.
+    const item = document.createElement('div');
+    item.setAttribute('role', 'menuitem');
+    item.setAttribute('tabindex', '0');
+    container.append(item);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      item.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('keeps a settled explanation when Escape closes a menu', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // Escape inside an open menu belongs to the menu (Radix closes it from
+    // its own keydown handler); dismissing the explanation instead would
+    // leave the menu open and swallow the key the widget advertises.
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    const item = document.createElement('div');
+    item.setAttribute('role', 'menuitem');
+    item.setAttribute('tabindex', '0');
+    menu.append(item);
+    container.append(menu);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      item.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('keeps a settled explanation when Space activates a button', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    const button = document.createElement('button');
+    container.append(button);
+    const event = new KeyboardEvent('keydown', {
+      key: ' ',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      button.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('keeps a settled explanation when Enter is pressed with composer text', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    // With text in the composer, Enter belongs to the prompt, not to the
+    // dismiss path — the editorHasText operand must keep the panel up.
+    testState.prompt = 'draft prompt text';
+
+    const editor = document.createElement('textarea');
+    editor.setAttribute('data-web-shell-composer-editor', '');
+    container.append(editor);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      editor.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('keeps a settled explanation when Escape closes a confirm dialog', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // A component-local Radix confirm portals in as an open alert-dialog
+    // surface; it owns Escape, so the explanation must survive.
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'alertdialog');
+    dialog.setAttribute('data-slot', 'alert-dialog-content');
+    dialog.setAttribute('data-state', 'open');
+    const confirmButton = document.createElement('button');
+    dialog.append(confirmButton);
+    container.append(dialog);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      confirmButton.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('keeps a settled explanation and does not arm cancel when Escape is inside a keyboard scope', async () => {
+    testState.streamingState = 'responding';
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    const scope = document.createElement('div');
+    scope.setAttribute('data-keyboard-scope', '');
+    const inner = document.createElement('button');
+    scope.append(inner);
+    container.append(scope);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      inner.dispatchEvent(event);
+    });
+    await flush();
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+    // The scoped surface's own delayed handler owns Escape; the app-level
+    // handler must not arm the two-press turn cancel behind the panel.
+    expect(testState.latestChatEditorProps?.cancelArmed).toBe(false);
+  });
+
+  it('keeps a settled explanation when Enter opens a grid row', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // The trajectory grid opens the active row on Enter/Space.
+    const grid = document.createElement('div');
+    grid.setAttribute('role', 'grid');
+    grid.setAttribute('tabindex', '0');
+    container.append(grid);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      grid.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('dismisses a settled explanation with Escape on a grid without a selection', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // The grid claims Escape only with a row selection; with none, Escape
+    // belongs to the explanation, not to the grid.
+    const grid = document.createElement('div');
+    grid.setAttribute('role', 'grid');
+    grid.setAttribute('tabindex', '0');
+    container.append(grid);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      grid.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('does not arm a turn cancel when Escape dismisses the explanation over a grid', async () => {
+    testState.streamingState = 'responding';
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    const grid = document.createElement('div');
+    grid.setAttribute('role', 'grid');
+    grid.setAttribute('tabindex', '0');
+    container.append(grid);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      grid.dispatchEvent(event);
+    });
+    await flush();
+    // The dismissal consumes the key (preventDefault), so the app-level
+    // Escape handler bails and never arms the two-press turn cancel.
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    expect(testState.latestChatEditorProps?.cancelArmed).toBe(false);
+  });
+
+  it('dismisses a settled explanation with Space on a non-activatable surface', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // The footer advertises Space to dismiss; on a non-activatable surface
+    // with an empty composer, Space must reach the dismiss path.
+    const surface = document.createElement('div');
+    container.append(surface);
+    const event = new KeyboardEvent('keydown', {
+      key: ' ',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      surface.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('dismisses a settled explanation with Escape outside the chip row', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // Escape inside the chip row belongs to the row's own handlers (close
+    // the list back to its chip), not to the dismiss path.
+    const chipRow = document.createElement('div');
+    chipRow.setAttribute('data-web-shell-composer-task-chips', '');
+    const rowButton = document.createElement('button');
+    chipRow.append(rowButton);
+    container.append(chipRow);
+    const rowEvent = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      rowButton.dispatchEvent(rowEvent);
+    });
+    expect(rowEvent.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+
+    // Escape on any other control — e.g. the panel header "?" that holds
+    // focus after a click — dismisses, as the panel's key hint advertises.
+    const panelButton = document.createElement('button');
+    container.append(panelButton);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      panelButton.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('cancels a pending explanation with Escape on a button outside the chip row', async () => {
+    const finish = deferred<void>();
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* () {
+        await finish.promise;
+        yield {
+          v: 1,
+          type: 'done',
+          requestId: 'btw-request',
+          answer: 'too late',
+        } as const;
+      },
+    );
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+
+    const panelButton = document.createElement('button');
+    container.append(panelButton);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      panelButton.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+
+    // A done that lands after the dismissal must not resurrect the panel.
+    await act(async () => {
+      finish.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('resolves the panel explain task for an agent tab opened with toolUseId', async () => {
+    const agent: DaemonSessionAgentTaskStatus = {
+      kind: 'agent',
+      id: 'agent-with-tool',
+      toolUseId: 'agent-call',
+      label: 'Research',
+      description: 'Research',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      isBackgrounded: true,
+      subagentType: 'general-purpose',
+    };
+    testState.backgroundTasks = [agent];
+    renderApp();
+    await flush();
+
+    // Real background agents carry a toolUseId; the open path registers
+    // the tab under it, so the first operand is the production path.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(agent);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'agent-with-tool',
+    );
+  });
+
+  it('resolves the panel explain task for a monitor tab', async () => {
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    testState.backgroundTasks = [monitor];
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'monitor-1',
+    );
+  });
+
+  it('offers no panel explain task for a workflow tab', async () => {
+    mockConnection.capabilities.features = [
+      'session_agents',
+      'session_agent_trace',
+    ];
+    mockWorkspace.client.sessionAgentTrace.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      nodes: [],
+      rootAgentIds: [],
+      warnings: [],
+    });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'workflow:session-1',
+          tabs: [
+            {
+              id: 'workflow:session-1',
+              kind: 'workflow',
+              title: 'Workflow',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+    renderApp();
+    await flush();
+    await flush();
+
+    // Workflow tabs name no run; the resolver's tail returns null. The
+    // panel must actually be showing the workflow tab, or the null would
+    // be satisfied by an absent panel instead of the resolver.
+    expect(testState.latestArtifactPanelProps).not.toBeNull();
+    expect(testState.latestArtifactPanelProps?.explainTask ?? null).toBeNull();
+  });
+
+  it('keeps the /btw prefix and never mirrors a typed side question', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    // An explainable tab is active, so a derivation that mirrored every
+    // btw answer would produce a mirror here — the typed answer must not.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestArtifactPanelProps?.explainTask?.id).toBe(
+      'shell-running',
+    );
+
+    testState.prompt = '/btw explain the current implementation';
+    await clickSubmit(container);
+    await flush();
+
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    // A typed /btw echoes the user's own command: the prefix stays, and
+    // without a taskId the answer must not mirror into the detail panel.
+    expect(testState.latestBtwMessageProps?.hidePrefix).toBe(false);
+    expect(
+      testState.latestArtifactPanelProps?.taskExplanation ?? null,
+    ).toBeNull();
   });
 
   it('locates a workflow chip in the transcript and opens its row', async () => {
@@ -20085,7 +22324,11 @@ describe('App session callbacks', () => {
   it('hides the new-task header when nothing workspace-scoped is available', async () => {
     mockConnection.sessionId = undefined;
     testState.messages = [];
-    const { container } = renderApp();
+    // Session-scoped entries only, so nothing workspace-scoped is available on
+    // the new-task page (changeOverview is workspace-scoped and in the default).
+    const { container } = renderApp({
+      rightPanel: { items: ['review', 'sideTask'] },
+    });
     await flush();
 
     expect(
@@ -20364,7 +22607,9 @@ describe('App session callbacks', () => {
   });
 
   it('keeps the right-panel action visible and opens a review-only empty state', () => {
-    const { container } = renderApp();
+    // Scope to review only: the default list also offers the workspace-scoped
+    // changeOverview action, which this review-only assertion does not cover.
+    const { container } = renderApp({ rightPanel: { items: ['review'] } });
     const rightPanelButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Toggle right panel"]',
     );
@@ -25631,6 +27876,524 @@ describe('App session callbacks', () => {
     );
   });
 
+  const worktreeDefaultSetting = (
+    effective: boolean,
+  ): DaemonSettingDescriptor => ({
+    key: 'worktree.defaultForNewSessions',
+    type: 'boolean',
+    label: 'Default Worktree For New Web Shell Sessions',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: true,
+    values: { effective },
+  });
+
+  it('defaults the composer to worktree mode when the setting is on', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('default worktree session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toEqual({});
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('defaults a detached-HEAD workspace to worktree mode', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: null, detached: true }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+  });
+
+  it('keeps the composer off worktree mode when the workspace has no commits', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue({ branch: 'main', hasHead: false }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    // An unborn HEAD has no worktree base; the create path would refuse
+    // with worktree_base_unavailable, so the composer must stay current.
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    expect(
+      testState.latestChatEditorProps?.onGitModeIntentChange,
+    ).toBeUndefined();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('unborn head session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toBeUndefined();
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('drops an armed worktree intent when the fresh status reports an unborn HEAD', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    // The fast status omits hasHead (eligible — the default arms); the
+    // fresh status then reports the unborn HEAD. The intent must drop in
+    // the same render the chip hides, or the first prompt requests a
+    // worktree the daemon refuses with no control left to undo it.
+    let status: { branch: string; hasHead?: boolean; workspaceCwd?: string } = {
+      branch: 'main',
+      workspaceCwd: '/workspace',
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => status),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    status = { branch: 'main', hasHead: false, workspaceCwd: '/workspace' };
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('unborn head session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toBeUndefined();
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('applies the branch and handoff responses to the worktree association', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockSessionActions.createWorktreeBranch.mockResolvedValue({
+      worktree: {
+        slug: 'feat-a',
+        path: '/workspace/.qwen/worktrees/feat-a',
+        branch: 'feat/new',
+      },
+    });
+    mockSessionActions.handoffWorktree.mockResolvedValue({
+      sessionId: 'session-1',
+      worktree: null,
+      currentCwd: '/workspace',
+    });
+    const worktreePath = '/workspace/.qwen/worktrees/feat-a';
+    mockWorkspace.client.sessionStatus.mockResolvedValue({
+      worktree: { slug: 'feat-a', path: worktreePath, branch: '' },
+    });
+    mockWorkspace.capabilities = {
+      features: ['session_worktree_handoff_v1', 'session_worktree_branch_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.onHandoff).toBeDefined();
+      expect(testState.latestChatEditorProps?.gitWorktree).toBe(true);
+    });
+    expect(testState.latestChatEditorProps?.gitCwd).toBe(worktreePath);
+    // A detached worktree with the capability offers "Create branch here".
+    expect(
+      testState.latestChatEditorProps?.onCreateWorktreeBranch,
+    ).toBeDefined();
+
+    // The callback's setSessionWorktree update is the only thing that
+    // retires the affordance once the branch exists.
+    await act(async () => {
+      await testState.latestChatEditorProps?.onCreateWorktreeBranch?.(
+        'feat/new',
+      );
+    });
+    await flush();
+    expect(mockSessionActions.createWorktreeBranch).toHaveBeenCalledWith(
+      'feat/new',
+    );
+    expect(
+      testState.latestChatEditorProps?.onCreateWorktreeBranch,
+    ).toBeUndefined();
+
+    // Handoff to local: the null worktree clears the association.
+    await act(async () => {
+      await testState.latestChatEditorProps?.onHandoff?.('local');
+    });
+    await flush();
+    expect(mockSessionActions.handoffWorktree).toHaveBeenCalledWith('local');
+    expect(testState.latestChatEditorProps?.gitWorktree).toBe(false);
+    expect(testState.latestChatEditorProps?.gitCwd).toBeUndefined();
+  });
+
+  it('ignores a handoff response that lands after a session switch', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockWorkspace.client.sessionStatus.mockResolvedValue({ worktree: null });
+    mockWorkspace.capabilities = {
+      features: ['session_worktree_handoff_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.onHandoff).toBeDefined();
+    });
+    expect(testState.latestChatEditorProps?.gitWorktree).toBe(false);
+
+    let resolveHandoff!: (value: unknown) => void;
+    mockSessionActions.handoffWorktree.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveHandoff = resolve;
+        }),
+    );
+    let pending: Promise<void> | undefined;
+    act(() => {
+      pending = testState.latestChatEditorProps?.onHandoff?.('worktree');
+    });
+    // The user switches sessions while the request is in flight; the
+    // response belongs to the old session and must not apply.
+    mockConnection.sessionId = 'session-2';
+    resolveHandoff({
+      sessionId: 'session-1',
+      worktree: { slug: 'stale', path: '/stale', branch: '' },
+      currentCwd: '/stale',
+    });
+    await act(async () => {
+      await pending;
+    });
+    await flush();
+    expect(testState.latestChatEditorProps?.gitWorktree).toBe(false);
+    mockConnection.sessionId = 'session-1';
+  });
+
+  it('re-arms the worktree default on New chat from an empty draft', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    // "New chat" with sessionId and workspace unchanged produces no
+    // rising edge on the eligibility deps; the default must survive.
+    const newSessionButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    )!;
+    await act(async () => {
+      newSessionButton.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+  });
+
+  it('keeps the current-branch default when the setting is off', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(false)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('plain session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toBeUndefined();
+    expect(request.branch).toBeUndefined();
+  });
+
+  it('applies the worktree default when settings arrive after the composer renders', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    // The status setter bails on content-equal statuses (isSameGitStatus),
+    // so the focus refetch must report a changed branch to force the
+    // re-render that reads the late settings (the real hook re-renders on
+    // its own fetch resolution; the mock reads testState directly).
+    let branch = 'main';
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => ({ branch })),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+
+    testState.settings = [worktreeDefaultSetting(true)];
+    branch = 'feat/late-settings';
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+  });
+
+  it('does not override an explicit current-branch choice when settings arrive late', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    let branch = 'main';
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => ({ branch })),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    expect(intentChange).toBeDefined();
+    act(() => {
+      intentChange?.({ mode: 'current' });
+    });
+    await flush();
+
+    testState.settings = [worktreeDefaultSetting(true)];
+    branch = 'feat/late-settings';
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('does not re-apply the worktree default after the user resets to current', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    let branch = 'main';
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockImplementation(async () => ({ branch })),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    act(() => {
+      intentChange?.({ mode: 'current' });
+    });
+    await flush();
+
+    branch = 'feat/after-reset';
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
+  it('keeps an explicit current-branch choice across a transient git-status failure', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    act(() => {
+      intentChange?.({ mode: 'current' });
+    });
+    await flush();
+
+    // Both fetch paths of one round fail: eligibility drops transiently.
+    // The touched flag must survive the drop (no draft boundary occurred),
+    // so the recovery round does not re-apply the worktree default.
+    workspaceGit.mockRejectedValueOnce(new Error('daemon busy'));
+    workspaceGit.mockRejectedValueOnce(new Error('daemon busy'));
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'current',
+    });
+  });
+
   it('keeps an armed worktree intent across a transient git-status failure', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {
@@ -29240,6 +32003,41 @@ describe('App session callbacks', () => {
       {
         workspaceCwd: '/new',
         sessionContext: { kind: 'workspace', cwd: '/new' },
+      },
+    );
+  });
+
+  it('only opens qualified transcript links within the workspace lock', async () => {
+    renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'other-session',
+            workspaceCwd: '/other',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'locked-session',
+            workspaceCwd: '/locked',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'locked-session',
+      {
+        workspaceCwd: '/locked',
+        sessionContext: { kind: 'workspace', cwd: '/locked' },
       },
     );
   });
@@ -37754,6 +40552,33 @@ describe('App session callbacks', () => {
     await flush();
     expect(firstHandler).not.toHaveBeenCalled();
     expect(secondHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'create_sub_session',
+        kind: 'other',
+        rawInput: { workspace: '/repos/b' },
+        options: [
+          {
+            optionId: 'proceed_once',
+            label: 'Allow',
+            raw: { kind: 'allow_once' },
+          },
+        ],
+      }),
+    ];
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+    });
+
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: false,
+    });
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
   });
 
   it.each(['default', 'auto-edit', 'auto', 'yolo'])(

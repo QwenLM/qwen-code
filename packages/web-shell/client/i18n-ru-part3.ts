@@ -348,6 +348,9 @@ export const RU_PART3: Record<
   'scheduledTasks.delivery.channel': 'Канал доставки',
   'scheduledTasks.delivery.configuredGroupHint':
     'Сообщения отправляются в группу, заданную для этого канала.',
+  'scheduledTasks.delivery.configuredEndpointHint':
+    'Сообщения отправляются на конечную точку, заданную для этого канала.',
+  'scheduledTasks.delivery.endpoint': 'Конечная точка',
   'scheduledTasks.delivery.configuredHint':
     'Сообщения отправляются по адресу, заданному для этого канала.',
   'scheduledTasks.delivery.useConfiguredDestination':
@@ -633,6 +636,13 @@ export const RU_PART3: Record<
   'sidebar.pinnedSessions': 'Закреплённые',
   'sidebar.sessionSort': 'Сортировка сессий',
   'sidebar.sessionDisplay': 'Параметры отображения',
+  'sidebar.groupBy': 'Группировать по',
+  'sidebar.groupWorkspace': 'Рабочая область',
+  'sidebar.groupActivityDate': 'Дата активности',
+  'sidebar.groupThisWeek': 'На этой неделе',
+  'sidebar.groupLast30Days': 'За последние 30 дней',
+  'sidebar.groupOlder': 'Ранее',
+  'sidebar.recentConversations': 'Недавние разговоры',
   'sidebar.sortBy': 'Сортировать',
   'sidebar.sortActivity': 'Недавняя активность',
   'sidebar.sortQuestion': 'Последний вопрос',

@@ -181,6 +181,23 @@ it('refuses a Broker URL with a path, which qwen serve refuses at boot', async (
   ]);
 });
 
+// The Harness resolver also requires a canonical spelling; the launcher must
+// refuse it here (naming the variable) rather than let the child exit at boot.
+it.each([
+  'https://runtime-broker.example.internal.:8443',
+  'https://0177.0.0.1:8443',
+  'https://127.1:8443',
+])('refuses non-canonical Broker URL %s before spawning', async (url) => {
+  state.process.env.QWEN_MANAGED_RUNTIME_BROKER_URL = url;
+  await launch();
+
+  expect(state.process.exitCode).toBe(1);
+  expect(state.spawned).toHaveLength(0);
+  expect(state.errors).toEqual([
+    'The pool requires a canonical Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+  ]);
+});
+
 it('sets every variable the launcher reads in the Harness container', () => {
   const read = new Set(
     [

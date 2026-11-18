@@ -99,6 +99,7 @@ let inflightFailover = false;
 let continuationFailover = false;
 let bigOutput = false;
 let loopSkill = false;
+let loopFire = false;
 let harnessOnly = false;
 let freeze = false;
 let modelRoundFailover = false;
@@ -146,6 +147,8 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     bigOutput = true;
   } else if (argument === '--loop-skill') {
     loopSkill = true;
+  } else if (argument === '--loop-fire') {
+    loopFire = true;
   } else if (argument === '--continuation-failover') {
     continuationFailover = true;
   } else if (argument === '--harness-only') {
@@ -164,7 +167,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output|--loop-skill] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|command-rewrite|after-earlier-tools|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output|--loop-skill|--loop-fire] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|command-rewrite|after-earlier-tools|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -227,6 +230,7 @@ if (
     modelRoundFailover,
     bigOutput,
     loopSkill,
+    loopFire,
   ].filter(Boolean).length > 1
 ) {
   throw new Error('The deterministic E2E modes are exclusive');
@@ -322,7 +326,7 @@ const springJar = path.join(
 for (const required of [
   cliBundle,
   springJar,
-  ...(durableFailover || loopSkill ? [] : [settingsPath]),
+  ...(durableFailover || loopSkill || loopFire ? [] : [settingsPath]),
 ]) {
   if (!existsSync(required)) {
     throw new Error(`Required file is missing: ${required}`);
@@ -1061,7 +1065,7 @@ try {
         : {}),
     });
   }
-  if (durableFailover || loopSkill) {
+  if (durableFailover || loopSkill || loopFire) {
     for (const home of durableFailover
       ? [harnessHome, replacementHarnessHome]
       : [harnessHome]) {
@@ -2633,6 +2637,76 @@ async function waitForTerminal(
   return { events, lastSequence: cursor };
 }
 
+// Attests the admission replace path bidirectionally. The caller loop import's
+// marker must be gone (the server replaced it with the profile variant), and a
+// separate probe skill's marker must remain (caller skills reached admission and
+// were published). The loop marker's absence alone has two causes — the replace
+// path ran, or caller skills never arrived — so the preserved probe disambiguates.
+// Kept a top-level pure declaration so the meta-test can extract and execute it.
+function assertCallerImportReplaced(
+  messages: unknown,
+  removedMarker: string,
+  preservedMarker: string,
+): void {
+  const text = JSON.stringify(messages);
+  if (text.includes(removedMarker)) {
+    throw new Error(
+      `Caller loop import survived admission; the replace path did not run. firstRound=${text.slice(0, 1500)}`,
+    );
+  }
+  if (!text.includes(preservedMarker)) {
+    throw new Error(
+      `Caller skills never reached admission; the probe skill marker is absent. firstRound=${text.slice(0, 1500)}`,
+    );
+  }
+}
+
+const loopFirePrompt = 'LOOP-FIRE-PROMPT check the deploy';
+const loopFireWakeResponse = 'LOOP_FIRE_OBSERVED';
+
+// Attests a scheduled fire bidirectionally: the ledger must record an
+// occurrence the scanner fired (trigger scheduled, outcome fired — a manual
+// run or a skipped slot must not pass), and the model round that ran must
+// carry that same occurrence's framing: its key verbatim, the minted
+// Automation ID and the scheduled trigger. A fired row alone could ride a
+// turn the model never saw; a framed round alone could be a client prompt in
+// disguise. Kept a top-level pure declaration so the meta-test can extract
+// and execute it.
+function assertScheduledFireWitness(
+  runs: unknown,
+  wakeText: string,
+  scheduleId: string,
+): { occurrenceKey: string } {
+  const rows = (Array.isArray(runs) ? runs : []) as {
+    trigger?: string;
+    outcome?: string;
+    occurrence_key?: string;
+  }[];
+  const fired = rows.find(
+    (row) => row.trigger === 'scheduled' && row.outcome === 'fired',
+  );
+  if (!fired) {
+    throw new Error(
+      `No scheduled occurrence settled fired; the scanner never fired the schedule. runs=${JSON.stringify(rows).slice(0, 1500)}`,
+    );
+  }
+  const occurrenceKey = fired.occurrence_key;
+  if (typeof occurrenceKey !== 'string' || !wakeText.includes(occurrenceKey)) {
+    throw new Error(
+      `The wake round does not name the fired occurrence; ledger and model round are not the same fire. occurrenceKey=${JSON.stringify(occurrenceKey)} wakeText=${wakeText.slice(0, 1500)}`,
+    );
+  }
+  if (
+    !wakeText.includes(`Automation ID: ${scheduleId}`) ||
+    !wakeText.includes('Trigger: scheduled')
+  ) {
+    throw new Error(
+      `The wake round lacks the scheduled framing for ${scheduleId}; it is not the fire's turn. wakeText=${wakeText.slice(0, 1500)}`,
+    );
+  }
+  return { occurrenceKey };
+}
+
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
 const failoverSecondMarker = 'MANAGED_SESSION_FAILOVER_SECOND_TURN';
 const bigOutputSource = 'abcdefghijklmnopqrstu长😀'.repeat(
@@ -2727,7 +2801,9 @@ try {
               ? 'managed-model-round-failover-e2e'
               : loopSkill
                 ? 'managed-loop-skill-e2e'
-                : 'real-model-e2e';
+                : loopFire
+                  ? 'managed-loop-fire-e2e'
+                  : 'real-model-e2e';
   const springArguments = ['-jar', springJar];
   springArguments.push(
     `--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=${tenant}`,
@@ -2943,9 +3019,9 @@ try {
     // a cron tool's own call id in the history means it already executed, so the
     // round after it confirms. The skill tool result alone must not confirm.
     fake = await startFakeOpenAIServer(({ body }) => {
-      // The cron admission classifier (and the loop fire classifier) are
-      // structured side queries delivered as a respond_in_schema synthetic tool.
-      // Answer them with an allow so cron_create is admitted; without this the
+      // cron_create's admission classifies the call through a structured side
+      // query delivered as a respond_in_schema synthetic tool. Answer that
+      // query with an allow so cron_create is admitted; without this the
       // classifier reports unavailable and cron_create is denied unreviewed.
       const tools = Array.isArray(body['tools']) ? body['tools'] : [];
       const schemaTool = tools.find(
@@ -2959,15 +3035,19 @@ try {
             };
           }
         | undefined;
-      if (schemaTool) {
-        // Answer the classifier side query with an allow, matching the stage's
-        // schema exactly: stage 1 permits only shouldBlock (additionalProperties
-        // is false), stage 2 adds thinking/reason. Extra keys fail validation
-        // and report the classifier unavailable, denying cron_create unreviewed.
-        const properties = schemaTool.function?.parameters?.properties ?? {};
+      // Match the block schema, not the tool name: other structured side
+      // queries (title, tool-use summary, next speaker) also emit
+      // respond_in_schema, and a {shouldBlock:false} answer is schema-invalid
+      // for them — it would silently mis-answer a real feature.
+      const blockProperties = schemaTool?.function?.parameters?.properties;
+      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
+        // Answer with the stage's own schema exactly: stage 1 permits only
+        // shouldBlock (additionalProperties is false), stage 2 adds
+        // thinking/reason. Extra keys fail validation and report the
+        // classifier unavailable, denying cron_create unreviewed.
         const answer: Record<string, unknown> = { shouldBlock: false };
-        if ('thinking' in properties) answer['thinking'] = '';
-        if ('reason' in properties) answer['reason'] = '';
+        if ('thinking' in blockProperties) answer['thinking'] = '';
+        if ('reason' in blockProperties) answer['reason'] = '';
         return {
           toolCalls: [
             fakeToolCall('respond_in_schema', answer, 'loop-classifier'),
@@ -3050,8 +3130,110 @@ try {
           };
     });
   }
+  if (loopFire) {
+    // The /loop scheduled-fire arm: the create turn drives cron_create at
+    // the cron minimum cadence; the scanner then fires the next minute slot
+    // on its own, and the wake pump drives a turn whose latest user text is
+    // the automation framing. Answer that wake round with a terminal marker
+    // and no tools; a /loop clear turn retires the minted schedule.
+    fake = await startFakeOpenAIServer(({ body }) => {
+      // Same block-schema match as the skill arm: cron_create's arm-time
+      // review arrives as a respond_in_schema side query, and only the block
+      // schema may be answered with an allow.
+      const tools = Array.isArray(body['tools']) ? body['tools'] : [];
+      const schemaTool = tools.find(
+        (tool) =>
+          (tool as { function?: { name?: string } }).function?.name ===
+          'respond_in_schema',
+      ) as
+        | {
+            function?: {
+              parameters?: { properties?: Record<string, unknown> };
+            };
+          }
+        | undefined;
+      const blockProperties = schemaTool?.function?.parameters?.properties;
+      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
+        const answer: Record<string, unknown> = { shouldBlock: false };
+        if ('thinking' in blockProperties) answer['thinking'] = '';
+        if ('reason' in blockProperties) answer['reason'] = '';
+        return {
+          toolCalls: [
+            fakeToolCall('respond_in_schema', answer, 'loop-fire-classifier'),
+          ],
+        };
+      }
+      if (body['stream'] !== true) return { content: 'fixture' };
+      const messages = Array.isArray(body['messages']) ? body['messages'] : [];
+      const hasToolResult = (callId: string) =>
+        messages.some((message) => {
+          const entry = message as { role?: string; tool_call_id?: string };
+          return entry.role === 'tool' && entry.tool_call_id === callId;
+        });
+      let text = '';
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i] as { role?: string; content?: unknown };
+        if (message.role !== 'user') continue;
+        text =
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content ?? '');
+        break;
+      }
+      // The wake round is the fire's own turn: its latest user text carries
+      // the automation framing header, never a client /loop input. The
+      // scheduled-trigger discrimination lives in the guard, not here, so a
+      // relayed trigger drift reddens the guard while the turn still runs.
+      if (text.includes('Scheduled automation:')) {
+        return { content: loopFireWakeResponse };
+      }
+      if (/\/loop\s+clear/.test(text)) {
+        if (hasToolResult('loop-fire-delete')) {
+          return { content: 'LOOP_FIRE_DONE' };
+        }
+        const createResultText = messages
+          .filter((message) => {
+            const entry = message as {
+              role?: string;
+              tool_call_id?: string;
+            };
+            return (
+              entry.role === 'tool' && entry.tool_call_id === 'loop-fire-create'
+            );
+          })
+          .map((message) => JSON.stringify(message))
+          .join('');
+        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        return {
+          toolCalls: [
+            fakeToolCall(
+              'cron_delete',
+              { id: createdId ?? 'missing-schedule-id' },
+              'loop-fire-delete',
+            ),
+          ],
+        };
+      }
+      return hasToolResult('loop-fire-create')
+        ? { content: 'LOOP_FIRE_DONE' }
+        : {
+            toolCalls: [
+              fakeToolCall(
+                'cron_create',
+                {
+                  cron: '*/1 * * * *',
+                  prompt: loopFirePrompt,
+                  recurring: true,
+                  durable: true,
+                },
+                'loop-fire-create',
+              ),
+            ],
+          };
+    });
+  }
   const fakeBaseUrl = fake?.baseUrl;
-  if ((durableFailover || loopSkill) && fakeBaseUrl === undefined) {
+  if ((durableFailover || loopSkill || loopFire) && fakeBaseUrl === undefined) {
     throw new Error('Fake model server did not start');
   }
 
@@ -3171,12 +3353,16 @@ try {
           : {}),
         QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
         QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
-        ...(loopSkill
+        ...(loopSkill || loopFire
           ? {
               QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:
                 'hosted-workspace-files/4',
             }
           : {}),
+        // The fire arm waits for a real minute-boundary slot; a 1s scan
+        // delay keeps the tick from adding its default 10s on top. The
+        // cadence itself stays the cron minimum (D2: no clock shortcut).
+        ...(loopFire ? { QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY: '1s' } : {}),
         ...(commandRewriteRecovery
           ? commandRewriteSpringEnvironment(
               commandRewriteCgroupRoot!,
@@ -3333,7 +3519,7 @@ try {
         QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFolders,
         QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST: capabilityDigest,
         QWEN_SERVER_TOKEN: harnessToken,
-        ...(durableFailover || loopSkill
+        ...(durableFailover || loopSkill || loopFire
           ? {
               OPENAI_API_KEY: 'fake-key',
               OPENAI_BASE_URL: fakeBaseUrl,
@@ -3366,10 +3552,38 @@ try {
   if (loopSkill) {
     // The managed /loop skill model-turn arm. A creator-bearing definition
     // (files/4) makes the Java admission inject the committed cron loop sidecar
-    // into the Session catalog; the client-initiated skill call loads that body
-    // before the model's first round, and the scripted model drives the real
-    // cron tools (create -> list -> clear). The model is fake, but the skill
-    // loading and tool execution run through the full managed pipeline.
+    // into the Session catalog. The Session-create body carries a caller `loop`
+    // import whose body is the verbatim bundled reference, so admission's
+    // replace path runs as in a real creation: the caller entry is removed and
+    // its invocable flags move onto the variant. The import's description is a
+    // marker the arm asserts is gone, attesting the replace path ran. The
+    // client-initiated skill call loads the variant body before the model's
+    // first round, and the scripted model drives the real cron tools
+    // (create -> list -> clear). The model is fake, but the skill loading and
+    // tool execution run through the full managed pipeline.
+    const contractsDir = path.join(
+      root,
+      'packages/core/src/managed-runtime/contracts',
+    );
+    const readSidecar = (variant: string) =>
+      JSON.parse(
+        readFileSync(
+          path.join(contractsDir, `managed-loop-skill-${variant}.json`),
+          'utf8',
+        ),
+      ) as { description?: string; body: string };
+    const bundledLoopImport = readSidecar('bundled-body');
+    // The caller import's body is the verbatim bundled reference (the exact
+    // bytes isBundledLoop matches, so admission takes the replace path). Its
+    // description carries a marker instead of the bundled prose: the replace
+    // path swaps in the server variant's own description, so the marker leaves
+    // the catalog; a preserve branch would keep the caller entry and its
+    // marker. A second, non-loop probe skill carries another marker the server
+    // does not rewrite: its presence proves caller skills reached admission,
+    // so the loop marker's absence attests the replace path ran rather than
+    // caller skills never arriving. assertCallerImportReplaced checks both.
+    const callerImportMarker = 'CALLER-LOOP-IMPORT-MARKER';
+    const callerProbeMarker = 'CALLER-PROBE-SKILL-MARKER';
     const definitionResponse = await fetch(`${springUrl}/v1/agents`, {
       method: 'POST',
       headers: {
@@ -3403,6 +3617,22 @@ try {
         agent_id: definition.id,
         input: [{ type: 'text', text: '/loop 5m check the deploy' }],
         workspace: { workspace_id: boundWorkspaceId },
+        skills: [
+          {
+            name: 'loop',
+            description: callerImportMarker,
+            body: bundledLoopImport.body,
+            model_invocable: true,
+            user_invocable: true,
+          },
+          {
+            name: 'loopprobe',
+            description: callerProbeMarker,
+            body: 'Probe skill: attests caller skills reached admission.',
+            model_invocable: true,
+            user_invocable: true,
+          },
+        ],
         metadata: { title: 'Managed /loop skill model-turn E2E' },
       }),
     });
@@ -3477,23 +3707,10 @@ try {
     // Discriminate the cron sidecar from the union one with phrases verified
     // against the committed assets: 'requires a fixed interval' is cron-only,
     // 'LoopWakeup' is absent from cron but present in union/wakeup/bundled.
-    const contractsDir = path.join(
-      root,
-      'packages/core/src/managed-runtime/contracts',
-    );
-    const sidecarBody = (variant: string) =>
-      (
-        JSON.parse(
-          readFileSync(
-            path.join(contractsDir, `managed-loop-skill-${variant}.json`),
-            'utf8',
-          ),
-        ) as { body: string }
-      ).body;
     const cronOnlyPhrase = 'requires a fixed interval';
     const unionMarker = 'LoopWakeup';
-    const cronBody = sidecarBody('cron');
-    const unionBody = sidecarBody('union');
+    const cronBody = readSidecar('cron').body;
+    const unionBody = readSidecar('union').body;
     if (
       !cronBody.includes(cronOnlyPhrase) ||
       unionBody.includes(cronOnlyPhrase) ||
@@ -3509,6 +3726,14 @@ try {
         ? loopRequests[0].body['messages']
         : []
     ) as { role?: string }[];
+    // Bidirectional replace-path attestation: the loop import's marker must be
+    // gone (replaced by the server variant) while the probe skill's marker
+    // remains (caller skills reached admission). See assertCallerImportReplaced.
+    assertCallerImportReplaced(
+      firstRoundMessages,
+      callerImportMarker,
+      callerProbeMarker,
+    );
     if (
       JSON.stringify(firstRoundMessages).includes('defaults to session-only')
     ) {
@@ -3565,11 +3790,12 @@ try {
           .map((call) => call.id),
       ),
     );
-    for (const callId of [
+    const cronCallIds = [
       'loop-cron-create',
       'loop-cron-list',
       'loop-cron-delete',
-    ]) {
+    ];
+    for (const callId of cronCallIds) {
       if (!calledIds.has(callId)) {
         throw new Error(`Cron tool ${callId} was never called`);
       }
@@ -3612,11 +3838,267 @@ try {
         sessionId: loopSession.id,
         definitionId: definition.id,
         modelRounds: loopRequests.length,
-        cronToolResults: loopToolResults.length,
+        // The three witnessed calls, not a cumulative tool-message count:
+        // chat-completions bodies repeat every prior result, so the flattened
+        // length grows with the round count instead of the executions.
+        cronToolResults: cronCallIds.filter(
+          (callId) => toolResultFor(callId) !== undefined,
+        ).length,
         managedSkillBody: true,
         cronCreate: true,
         cronList: true,
         cronDelete: true,
+      },
+      null,
+      2,
+    );
+  }
+
+  if (loopFire) {
+    // The managed /loop scheduled-fire arm. The create turn drives
+    // cron_create at the cron minimum cadence (*/1), then the runner sends
+    // no further input: the Java scanner must claim the armed definition,
+    // fire the next minute slot through the Harness relay, and the wake pump
+    // must drive a model turn whose framing names that occurrence. The
+    // ledger's fired row and the model round are tied to one occurrence by
+    // assertScheduledFireWitness; a /loop clear turn then retires the
+    // schedule so no live every-minute definition survives the arm.
+    const fireDefinitionResponse = await fetch(`${springUrl}/v1/agents`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `loop-fire-definition-${Date.now()}`,
+        ...tenantHeaders(tenant),
+      },
+      body: JSON.stringify({
+        model: {},
+        instructions: '',
+        tools: [
+          { type: 'hosted_profile', profile: 'hosted-workspace-files/4' },
+        ],
+        permission_policy: {},
+      }),
+    });
+    if (fireDefinitionResponse.status !== 202) {
+      throw new Error(
+        `Loop fire definition create returned ${fireDefinitionResponse.status}: ${await fireDefinitionResponse.text()}`,
+      );
+    }
+    const fireDefinition = (await fireDefinitionResponse.json()) as {
+      id: string;
+    };
+    // No caller skills: files/4 admission injects the variant
+    // unconditionally, and the replace path already has its bidirectional
+    // attestation in the skill arm (design D4).
+    const fireCreate = await fetch(`${springUrl}/v1/agents/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `loop-fire-create-${Date.now()}`,
+        ...tenantHeaders(tenant),
+      },
+      body: JSON.stringify({
+        agent_id: fireDefinition.id,
+        input: [{ type: 'text', text: `/loop 1m ${loopFirePrompt}` }],
+        workspace: { workspace_id: boundWorkspaceId },
+        metadata: { title: 'Managed /loop scheduled-fire E2E' },
+      }),
+    });
+    if (fireCreate.status !== 202) {
+      throw new Error(
+        `Loop fire Session create returned ${fireCreate.status}: ${await fireCreate.text()}`,
+      );
+    }
+    const fireSession = (await fireCreate.json()) as { id: string };
+    const fireCreated = await waitForTerminal(
+      springUrl,
+      tenant,
+      fireSession.id,
+      0,
+      harness,
+      120_000,
+    );
+    const sendFireInput = async (text: string, after: number) => {
+      const response = await fetch(
+        `${springUrl}/v1/agents/sessions/${fireSession.id}/events`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'idempotency-key': `loop-fire-${text.replace(/\W+/g, '-')}-${Date.now()}`,
+            ...tenantHeaders(tenant),
+          },
+          body: JSON.stringify({
+            type: 'agent.session.input.message',
+            input: [{ type: 'text', text }],
+          }),
+        },
+      );
+      if (response.status !== 202) {
+        throw new Error(
+          `Loop fire input returned ${response.status}: ${await response.text()}`,
+        );
+      }
+      return waitForTerminal(
+        springUrl,
+        tenant,
+        fireSession.id,
+        after,
+        harness,
+        120_000,
+      );
+    };
+    const streamedRounds = () =>
+      (fake?.requests ?? []).filter(
+        (request) => request.body['stream'] === true,
+      );
+    const latestUserText = (request: { body: Record<string, unknown> }) => {
+      const messages = Array.isArray(request.body['messages'])
+        ? request.body['messages']
+        : [];
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i] as { role?: string; content?: unknown };
+        if (message.role !== 'user') continue;
+        return typeof message.content === 'string'
+          ? message.content
+          : JSON.stringify(message.content ?? '');
+      }
+      return '';
+    };
+    // The create turn's rounds are exactly those whose latest user text is
+    // the /loop input (the wake round's latest user text is the framing, so
+    // it never joins this set — the negative below is race-free). None of
+    // them may carry the automation framing: the fire round must be new.
+    const createRounds = streamedRounds().filter((request) =>
+      latestUserText(request).includes('/loop 1m'),
+    );
+    if (createRounds.length === 0) {
+      throw new Error('No model round ran the /loop create input');
+    }
+    for (const request of createRounds) {
+      if (
+        JSON.stringify(request.body['messages']).includes(
+          'Scheduled automation:',
+        )
+      ) {
+        throw new Error(
+          'A create-turn round already carried the automation framing; the fire round is not new',
+        );
+      }
+    }
+    const fireToolResult = (callId: string) =>
+      streamedRounds()
+        .flatMap((request) =>
+          Array.isArray(request.body['messages'])
+            ? request.body['messages']
+            : [],
+        )
+        .find(
+          (message) =>
+            (message as { role?: string }).role === 'tool' &&
+            (message as { tool_call_id?: string }).tool_call_id === callId,
+        );
+    const fireCreateResult = fireToolResult('loop-fire-create');
+    const fireScheduleId = /asch_[0-9a-f]{32}/.exec(
+      JSON.stringify(fireCreateResult ?? {}),
+    )?.[0];
+    if (!fireScheduleId) {
+      throw new Error(
+        `cron_create printed no automation id; createResult=${JSON.stringify(fireCreateResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    // No client input from here: the scanner's fire must drive a wake turn on
+    // its own. A harness-driven wake turn does not ride the public turn event
+    // stream — that stream is written by the control plane's dispatched-turn
+    // pipeline — so its public lifecycle is the automation run mirror, whose
+    // state settles from the wake turn's own committed result. The wake is
+    // therefore witnessed on the runs route: an occurrence the scanner fired,
+    // settled completed. The budget covers the worst-case minute-boundary
+    // wait plus the 1s tick, the relay and the turn (design D2).
+    let fireRuns: Record<string, unknown>[] = [];
+    let firedRun: Record<string, unknown> | undefined;
+    await waitUntil(
+      'Scheduled fire ledger row',
+      async () => {
+        const page = await fetchJson<PublicList<Record<string, unknown>>>(
+          `${springUrl}/v1/agent-automations/${fireScheduleId}/runs?limit=100`,
+          { headers: tenantHeaders(tenant) },
+        );
+        fireRuns = page.data;
+        firedRun = fireRuns.find(
+          (row) =>
+            row['trigger'] === 'scheduled' &&
+            row['outcome'] === 'fired' &&
+            row['state'] === 'completed',
+        );
+        return firedRun !== undefined;
+      },
+      150_000,
+      harness,
+    );
+    // The fire's prompt must have reached the model in a round whose latest
+    // user text is the automation framing — the wake turn the completed
+    // occurrence settles. The fake model answers that round with the wake
+    // marker and no tools, so the completed run proves the marker answer ran.
+    const wakeRequest = streamedRounds().find((request) =>
+      latestUserText(request).includes('Scheduled automation:'),
+    );
+    if (!wakeRequest) {
+      throw new Error('No model round carried the automation framing');
+    }
+    const wakeFraming = latestUserText(wakeRequest);
+    if (!wakeFraming.includes(loopFirePrompt)) {
+      throw new Error(
+        `The fire's prompt never reached the model; framing=${wakeFraming.slice(0, 1500)}`,
+      );
+    }
+    const { occurrenceKey } = assertScheduledFireWitness(
+      fireRuns,
+      wakeFraming,
+      fireScheduleId,
+    );
+    // The clear leg is a client turn: it rides the public event stream (the
+    // wake turn added none), and its terminal proves the schedule stays
+    // cancellable after a fire.
+    const fireCleared = await sendFireInput(
+      '/loop clear',
+      fireCreated.lastSequence,
+    );
+    for (const [label, turn] of [
+      ['create', fireCreated],
+      ['clear', fireCleared],
+    ] as const) {
+      const terminals = turn.events.filter((event) => event.terminal);
+      if (terminals.length !== 1 || terminals[0].type !== 'turn.completed') {
+        throw new Error(
+          `Loop-fire ${label} turn ended with ${JSON.stringify(terminals.map((event) => event.type))}`,
+        );
+      }
+    }
+    const fireDeleteResult = fireToolResult('loop-fire-delete');
+    if (
+      !JSON.stringify(fireDeleteResult ?? {}).includes(
+        `Retired cron schedule ${fireScheduleId}.`,
+      )
+    ) {
+      throw new Error(
+        `cron_delete did not retire ${fireScheduleId}; deleteResult=${JSON.stringify(fireDeleteResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    resultJson = JSON.stringify(
+      {
+        mode: 'loop-fire',
+        sessionId: fireSession.id,
+        definitionId: fireDefinition.id,
+        scheduleId: fireScheduleId,
+        occurrenceKey,
+        fireTrigger: firedRun?.['trigger'],
+        fireOutcome: firedRun?.['outcome'],
+        fireState: firedRun?.['state'],
+        scheduledFire: true,
+        wakeModelRound: true,
+        cronDelete: true,
+        modelRounds: streamedRounds().length,
       },
       null,
       2,
@@ -7121,7 +7603,7 @@ try {
       saveEvidence('summary.json', summary);
       g3SummaryJson = JSON.stringify(summary, null, 2);
     }
-  } else if (!loopSkill) {
+  } else if (!loopSkill && !loopFire) {
     const idempotencyKey = `create-${Date.now()}`;
     const prompt = [
       'Before using any tool, emit the visible text MODEL_READY.',

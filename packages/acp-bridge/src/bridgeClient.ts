@@ -75,6 +75,7 @@ import type {
   LiveScreenContextCaptureHandler,
   LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
+  ResolveSubSessionWorkspaceHandler,
 } from './bridgeOptions.js';
 
 import {
@@ -83,6 +84,7 @@ import {
   MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS,
   MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
   MAX_SUB_SESSION_NAME_CHARS,
+  MAX_SUB_SESSION_WORKSPACE_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
@@ -258,6 +260,16 @@ function isExistingSessionScheduledTaskCreateErrorShape(
     Number.isFinite(status) &&
     typeof code === 'string' &&
     code.length > 0
+  );
+}
+
+function isSubSessionWorkspaceSelector(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= MAX_SUB_SESSION_WORKSPACE_CHARS &&
+    // eslint-disable-next-line no-control-regex -- rejecting C0 control chars
+    !/[\x00-\x1f\x7f]/.test(value)
   );
 }
 
@@ -1045,6 +1057,7 @@ export class BridgeClient implements Client {
       entry: BridgeClientSessionEntry,
       timestamp: string | undefined,
     ) => Promise<void>,
+    private readonly onResolveSubSessionWorkspace?: ResolveSubSessionWorkspaceHandler,
   ) {}
 
   async requestPermission(
@@ -1676,6 +1689,20 @@ export class BridgeClient implements Client {
     // extension and returns the correlated response.
     if (method === SERVE_CONTROL_EXT_METHODS.clientMcpMessage) {
       return this.handleClientMcpMessage(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace) {
+      const resolve = this.onResolveSubSessionWorkspace;
+      if (!resolve) throw RequestError.methodNotFound(method);
+
+      const callerSessionId = this.requireSubSessionCaller(params);
+      const workspace = params['workspace'];
+      if (!isSubSessionWorkspaceSelector(workspace)) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid workspace selector',
+        );
+      }
+      return { ...resolve(callerSessionId, workspace) };
     }
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);
@@ -2351,22 +2378,41 @@ export class BridgeClient implements Client {
         `\`name\` exceeds the ${MAX_SUB_SESSION_NAME_CHARS}-character limit`,
       );
     }
-    // `callerSessionId` keys the launcher's per-caller concurrency bucket AND
-    // its depth-1 nesting gate. A child that names a session it does not own
-    // could evade its own cap (a fabricated id starts every bucket at zero) or
-    // exhaust a victim session's; a child that OMITS the field would get an
-    // anonymous per-call bucket and skip the nesting gate entirely. Neither is
-    // acceptable, so it is required and authenticated. Every real caller has
-    // one — the tool runs inside a session's turn.
-    const callerSessionId = params['callerSessionId'];
+    const callerSessionId = this.requireSubSessionCaller(params);
+    const workspace = params['workspace'];
+    const workspaceGeneration = params['workspaceGeneration'];
     if (
-      typeof callerSessionId !== 'string' ||
-      callerSessionId.length === 0 ||
-      !this.ownsSession(callerSessionId)
+      workspace !== undefined &&
+      (!isSubSessionWorkspaceSelector(workspace) ||
+        isScheduledTaskRunSource(source))
     ) {
       throw RequestError.invalidParams(
         undefined,
-        '`callerSessionId` is required and must name a session owned by this connection',
+        `\`workspace\` must be a non-empty string of at most ${MAX_SUB_SESSION_WORKSPACE_CHARS} characters without control characters, and is not supported for scheduled-task runs`,
+      );
+    }
+    if (
+      workspace === undefined
+        ? workspaceGeneration !== undefined
+        : typeof workspaceGeneration !== 'string' ||
+          workspaceGeneration.length !== 36
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Named sub-sessions require a workspace generation from approval',
+      );
+    }
+    const sessionId = params['sessionId'];
+    if (
+      sessionId !== undefined &&
+      (!isValidCronTaskRoutingId(sessionId) ||
+        isScheduledTaskRunSource(source) ||
+        params['model'] !== undefined ||
+        params['name'] !== undefined)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`sessionId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters, and cannot be combined with \`model\`, \`name\` or a scheduled-task run`,
       );
     }
     const model = params['model'];
@@ -2392,11 +2438,19 @@ export class BridgeClient implements Client {
       ...(typeof model === 'string' ? { model } : {}),
       ...(typeof groupId === 'string' ? { groupId } : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
+      ...(typeof workspace === 'string' &&
+      typeof workspaceGeneration === 'string'
+        ? { workspace, workspaceGeneration }
+        : {}),
+      ...(typeof sessionId === 'string' ? { sessionId } : {}),
       ...source,
       callerSessionId,
     });
     return {
       sessionId: result.sessionId,
+      ...(result.workspaceCwd !== undefined
+        ? { workspaceCwd: result.workspaceCwd }
+        : {}),
       ...(result.result !== undefined ? { result: result.result } : {}),
       ...(result.stopReason !== undefined
         ? { stopReason: result.stopReason }
@@ -2404,7 +2458,23 @@ export class BridgeClient implements Client {
       ...(result.parentSessionPersisted !== undefined
         ? { parentSessionPersisted: result.parentSessionPersisted }
         : {}),
+      ...(result.taskId !== undefined ? { taskId: result.taskId } : {}),
     };
+  }
+
+  private requireSubSessionCaller(params: Record<string, unknown>): string {
+    const callerSessionId = params['callerSessionId'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` is required and must name a session owned by this connection',
+      );
+    }
+    return callerSessionId;
   }
 
   private async handleCreateCurrentSessionScheduledTask(
@@ -2653,7 +2723,8 @@ export class BridgeClient implements Client {
    * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-changed`,
-   * `qwen/notify/session/mcp-budget-event` — each translated into a
+   * `qwen/notify/session/mcp-budget-event`,
+   * `qwen/notify/session/mod-log` (a Mod's log line) — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
    */
@@ -3038,6 +3109,22 @@ export class BridgeClient implements Client {
       this.publishExtNotification(sessionId, 'session_recording_degraded', {
         sessionId,
         reason: 'write_failed',
+      });
+      return;
+    }
+    if (method === 'qwen/notify/session/mod-log') {
+      const { sessionId, plugin, text } = params;
+      if (
+        typeof sessionId !== 'string' ||
+        typeof plugin !== 'string' ||
+        typeof text !== 'string' ||
+        !this.ownsSession(sessionId)
+      )
+        return;
+      this.publishExtNotification(sessionId, 'mod_log', {
+        sessionId,
+        plugin,
+        text,
       });
       return;
     }

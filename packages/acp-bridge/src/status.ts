@@ -305,6 +305,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
     'qwen/control/session/managed-conversation-binding/commit',
   sessionManagedConversationBindingRelease:
     'qwen/control/session/managed-conversation-binding/release',
+  resolveSubSessionWorkspace: 'qwen/control/resolve-sub-session-workspace',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
    * `create_sub_session` tool, running inside a child's agent turn, asks the
@@ -675,6 +676,8 @@ export interface ServeSessionContextStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /** Whether the session can durably accept a daemon completion notification. */
+  canAcceptBackgroundNotifications?: boolean;
   recovery?: {
     kind:
       | 'clean'
