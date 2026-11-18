@@ -10,6 +10,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonRestartRecoveryBatchResult } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
+import { formatTimestamp } from './MessageTimestamp';
 import { RestartRecoveryPanel } from './RestartRecoveryPanel';
 
 const SESSION_A = '11111111-1111-4111-8111-111111111111';
@@ -138,6 +139,9 @@ describe('RestartRecoveryPanel', () => {
     expect(container.textContent).toContain('workspace-one');
     expect(container.textContent).toContain('11111111');
     expect(container.textContent).toContain('Daemon restarted');
+    expect(container.textContent).toContain(
+      formatTimestamp(Date.parse('2026-11-17T09:12:31.000Z')),
+    );
 
     act(() => buttonByText('Continue').click());
     await waitFor(() =>
