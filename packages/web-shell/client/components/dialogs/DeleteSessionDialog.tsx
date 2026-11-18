@@ -10,7 +10,7 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
-import { hasLiveWork } from '../../session-catalog/session-live-work';
+import { sessionBlocksDelete } from '../../session-catalog/session-live-work';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
 
@@ -102,14 +102,30 @@ export function DeleteSessionDialog({
   // sidebar row advertises and already refuses to delete.
   const blocksDelete = useCallback(
     (session: DaemonSessionSummary) =>
-      session.hasRunningBackgroundTasks === true ||
-      (session.sessionId === currentSessionId && hasLiveWork(session)),
+      sessionBlocksDelete(session, session.sessionId === currentSessionId),
     [currentSessionId],
   );
 
   const toggleSelection = useCallback(
     (session: DaemonSessionSummary) => {
-      if (blocksDelete(session)) return;
+      if (blocksDelete(session)) {
+        // The danger button is disabled in this state, so this click is the
+        // only place the user can be told why the row will not tick.
+        setMessage(
+          session.sessionId === currentSessionId
+            ? t('delete.cannotCurrent')
+            : t('sidebar.deleteRunningDisabled'),
+        );
+        return;
+      }
+      // Clear only a refusal this function set, so a load or delete error in
+      // the same hint survives a successful tick.
+      setMessage((prev) =>
+        prev === t('delete.cannotCurrent') ||
+        prev === t('sidebar.deleteRunningDisabled')
+          ? null
+          : prev,
+      );
       const sessionId = session.sessionId;
       setSelectedIds((prev) => {
         const next = new Set(prev);
@@ -121,7 +137,7 @@ export function DeleteSessionDialog({
         return next;
       });
     },
-    [blocksDelete],
+    [blocksDelete, currentSessionId, t],
   );
 
   useEffect(() => {
@@ -243,15 +259,9 @@ export function DeleteSessionDialog({
 
     const session = filtered[selectedIdx];
     if (!session) return;
-    if (blocksDelete(session)) {
-      // Only the attached-session refusal may say "the current session".
-      setMessage(
-        session.sessionId === currentSessionId
-          ? t('delete.cannotCurrent')
-          : t('sidebar.deleteRunningDisabled'),
-      );
-      return;
-    }
+    // Unreachable from the button, which is disabled with an empty selection;
+    // kept as a guard. The reason is reported by toggleSelection instead.
+    if (blocksDelete(session)) return;
     setDeleting(true);
     deleteSession(session.sessionId)
       .then((removed) => {

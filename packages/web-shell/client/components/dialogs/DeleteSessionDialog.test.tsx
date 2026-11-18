@@ -397,6 +397,61 @@ describe('DeleteSessionDialog selection', () => {
     expect(deleteSessionsMock).toHaveBeenCalledWith(['s1']);
   });
 
+  it('keeps a non-attached row with a running turn selectable', () => {
+    // Only background work blocks other rows. Widening the guard to every
+    // kind of live work would make this row untickable here while the sidebar
+    // still offers Delete for it.
+    sessions = [
+      { ...initialSessions[0], hasActivePrompt: true },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(true);
+    expect(dangerButton().disabled).toBe(false);
+  });
+
+  it('names the reason when a refused row is clicked', () => {
+    // The danger button is disabled in this state, so the click on the row is
+    // the only place the refusal can reach the user.
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      { ...initialSessions[2], hasActivePrompt: true },
+    ];
+    mount();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+    clickRow(2);
+    expect(isChecked(rows()[2]!)).toBe(false);
+    expect(hint()).toBe(
+      'Cannot delete the current session while it is running.',
+    );
+    // A successful tick clears the refusal so the count is readable again.
+    clickRow(1);
+    expect(isChecked(rows()[1]!)).toBe(true);
+    expect(hint()).toContain('1');
+  });
+
+  it('keeps a load error in the hint when a row is ticked', () => {
+    // Clearing the refusal must not clobber an unrelated error sharing the hint.
+    scopedSessionsError = new Error('load boom');
+    sessions = initialSessions.slice();
+    mount();
+    expect(hint()).toContain('load boom');
+    clickRow(1);
+    expect(isChecked(rows()[1]!)).toBe(true);
+    expect(hint()).toContain('load boom');
+  });
+
   it('clears checked rows and disarms delete when the filter changes', () => {
     mount();
 

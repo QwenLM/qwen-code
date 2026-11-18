@@ -79,11 +79,18 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   confirmation (which previously spelled the same disjunction out twice). A
   row that says it is busy must not offer the action that ends the work, and no
   two entry points may disagree.
+- The delete rule itself lives beside that predicate as `sessionBlocksDelete`,
+  which takes the caller's own notion of "current" rather than deriving it from
+  an id: the sidebar compares workspace-qualified identity and lets the
+  recent/standalone adapters override it, while the dialog compares session ids.
+  All three delete gates call it, so the rule has one home.
 - Delete refuses background work on any row, not just the attached one, in
   both the sidebar and the delete dialog: the delete route has no idle guard,
   so confirming would kill work the row advertises, and the Session Overview
-  card already refuses that session. The dialog's refusal message only says
-  "the current session" when the row really is the attached one.
+  card already refuses that session. Clicking a refused row in the dialog
+  names the reason in its hint — the danger button is disabled in that state,
+  so the row click is the only place the refusal can reach the user — and only
+  the attached row's wording says "the current session".
   An idle attached session stays deletable (#12619).
 - Three staleness holes close with it. Selection mode keeps its own copy of
   each ticked session, so its refresh contract now carries the background flag
