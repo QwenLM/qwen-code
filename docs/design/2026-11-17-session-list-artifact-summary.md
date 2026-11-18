@@ -150,17 +150,26 @@ clicked, using the list data the sidebar already holds.
   empty-message refusal covers the artifact-only shape — seeding either
   from an empty active set would heal a correct count to zero. The
   daemon/ACP restore funnel reads selectively via `readRestoreProjection`
-  and never calls `loadSession`, so the projection read runs the same
-  helper for a defined projection with an empty apiHistory; a missing
-  projection is not a restore candidate (nothing downstream carries an
-  artifactSnapshot for it) and pays no auxiliary read. Both funnels call
-  one shared helper that owns the size probe, the auxiliary read,
-  ownership, the shape gate and the seed, so the preconditions cannot
-  drift: the read is capped at the same 64 MiB as the library mutation read
-  with the same inclusive boundary (exactly 64 MiB seeds, above skips, a
-  failed size probe skips), and one session yields one list row through
-  either funnel. Sessions with a conversation keep the selective read's
-  zero-extra-I/O contract (pinned by a read spy). Both funnels and the
+  and never calls `loadSession`. For a defined projection with an empty
+  apiHistory it counts exactly the set that projection delivers —
+  `runtime.artifactSnapshot.artifacts` filtered by the shared restorable
+  predicate — and heals an existing sidecar to that count. Count and
+  delivery share one source: the projection's snapshot is built from the
+  active-segment side-record selection, which can be narrower than a
+  whole-transcript rebuild (an event parented to a non-tail metadata
+  record — the recorder writes titles and re-anchored sources with
+  `updateActiveTail: false` — is counted by a rebuild but delivered by
+  nobody), so counting the rebuild here would advertise artifacts the
+  cold open cannot show. A missing projection is not a restore candidate
+  (nothing downstream carries an artifactSnapshot for it). The projection
+  funnel pays no auxiliary read at all — the reader already indexed the
+  transcript. The load funnel's conversation-less seed goes through the
+  shared helper that owns the size probe, the auxiliary read, ownership,
+  the shape gate and the seed: the read is capped at the same 64 MiB as
+  the library mutation read with the same inclusive boundary (exactly
+  64 MiB seeds, above skips, a failed size probe skips). Sessions with a
+  conversation keep the selective read's zero-extra-I/O contract (pinned
+  by a read spy). Both funnels and the
   library guard share one seed method and one record-composition helper. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no
@@ -353,9 +362,13 @@ clicked, using the list data the sidebar already holds.
   without a sidecar by both funnels, a missing projection paying no
   auxiliary read, the helper's empty-records and foreign-project guards, a
   partial read through the projection funnel refused via the threaded
-  incomplete-read flag, a generated_ui_state-only journal accepted as a
-  legal library removal target, conversation sessions
-  untouched by the projection read), in both
+  incomplete-read flag (load funnel), the projection funnel counting its
+  own delivery (a non-tail-parented event counted by a whole-transcript
+  rebuild but delivered by nobody writes no sidecar; a stale sidecar heals
+  to the delivery; the restorable subset of the delivery is counted), the
+  projection funnel paying no auxiliary read on either branch, a
+  generated_ui_state-only journal accepted as a legal library removal
+  target, conversation sessions untouched by the projection read), in both
   active and archived states, from
   event and snapshot (fork) records, counting the cold-restorable set
   (non-snapshot published file locators excluded via the shared bridge/core
