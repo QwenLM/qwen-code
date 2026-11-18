@@ -59,6 +59,9 @@ destinations are invisible.
 Out of scope: changing confirmation options, the approval classifier, the
 shell-level pending-region clamp in `MainContent.tsx`, and the
 `o`-opens-full-plan-in-editor affordance, which already exists (#7001).
+Whether an uninspectable subject should block approval at all is a protocol
+question, tracked as issue #17715 and proposed in
+[Permission decision readiness](2026-11-18-permission-decision-readiness.md).
 
 ## Design
 
