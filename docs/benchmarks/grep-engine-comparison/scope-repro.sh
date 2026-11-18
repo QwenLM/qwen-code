@@ -42,12 +42,12 @@ echo '=== 1. git grep --untracked (main strategy 1) ==='
 git grep --untracked -l -E --ignore-case -e needle | sort
 echo
 echo '=== 2. rg --hidden (preview engine flags) ==='
-rg --hidden -l needle -- . | sort
+rg --hidden --glob '!.git' --glob '!.jj' --glob '!.svn' --glob '!.hg' --glob '!.bzr' --glob '!.sl' -l needle -- . | sort
 echo
 echo 'Expected differences:'
 echo '  - force-added ignored file (force.txt): git grep --untracked NO, rg NO.'
 echo '    Measured on git 2.50.1: --untracked applies the exclude machinery to'
-echo '    tracked files too, while plain `git grep` and `git grep --cached` DO find'
+echo '    tracked files too, while plain git grep and git grep --cached DO find'
 echo '    it. The fixed fallback corpus (ls-files --cached) also lists it, so in'
 echo '    this one edge the fallbacks search a file the primary skips (section 4).'
 echo '  - .rgignore-hidden file (hidden-secret.txt): git grep YES, rg NO (repo-controlled exclusion)'
@@ -55,7 +55,7 @@ echo '  - ignored build output (dist/, ignored/): both NO'
 echo '  - untracked non-ignored (untracked.txt): both YES'
 echo
 echo '=== 3. old main fallback (grep -r, pre-fix) ==='
-grep -r -l -E --exclude-dir=.git -e needle . | sort
+grep -r -l -E --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=bower_components --exclude-dir=.svn --exclude-dir=.hg -e needle . | sort
 echo 'Expected: also lists dist/bundle.js and ignored/x.txt (the scope pollution this PR fixes)'
 echo
 echo '=== 4. fixed main fallback corpus (git ls-files | grep) ==='
@@ -90,7 +90,7 @@ echo 'fixed main fallback: the corpus drops symlinks, so they never become an op
 echo 'pre-fix behaviour, symlink as a plain grep operand:'
 grep -l -E -e needle -- symlink.txt || echo '  (no match)'
 echo '  ^ listing symlink.txt here means grep read src.txt through the link'
-echo 'the pre-fix recursive arm does NOT follow (BSD grep 2.6.0-FreeBSD, measured):'
+echo 'explicit recursive operand: BSD grep 2.6.0-FreeBSD skips it; GNU grep follows:'
 grep -r -l -E -e needle -- symlink.txt || echo '  (no match: -r does not follow an explicit symlink operand)'
 echo 'the pre-fix JavaScript arm DID follow: globStream yields the link and'
 echo 'readFile dereferences it. The corpus filter closes both.'

@@ -1,3 +1,7 @@
+# Review annotation: the system-grep rows below were case-sensitive; their
+# original '-i default' labels were incorrect. Raw recorded rows are preserved.
+# The original 'js patched' label below has no retained patch or harness that
+# establishes what was patched; it is not evidence of a controlled JS baseline.
 js patched
 common word        | main:git-grep (content, -i default)                        | median     737 ms | matches   50567 | out    5546 KB
 common word        | main:system-grep (content, -i default)                     | median   60130 ms | matches 1022948 | out 1219378 KB

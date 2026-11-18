@@ -70,11 +70,9 @@ interface GrepMatch {
 }
 
 /**
- * The corpus `git grep --untracked` searches: tracked + untracked files
- * surviving .gitignore, info/exclude and global excludes. The fallback
- * strategies must search the same set — a plain recursive walk also scans
- * ignored build output (dist/), returning a different result set than
- * strategy 1 on the same repository.
+ * Ignore-aware tracked + untracked candidates for the fallback strategies.
+ * A plain recursive walk also scans ignored build output (dist/). If the
+ * listing is unavailable, null preserves the legacy unscoped fallback.
  */
 async function gitAwareFileList(
   cwd: string,
@@ -205,10 +203,9 @@ async function grepOverFileList(
           reject(new Error('system grep was aborted'));
           return;
         }
-        // Exit 1 stays the "no matches" contract, and the per-operand
-        // diagnostics the recursive branch also tolerates must not discard the
-        // matches grep already printed for the healthy operands.
-        if (code === 0 || code === 1 || unexpectedBytes === 0) {
+        // GNU grep can warn about an unsupported pattern and still exit 0/1.
+        // Only trust output without unexpected diagnostics, regardless of code.
+        if (unexpectedBytes === 0) {
           resolve(Buffer.concat(chunks).toString('utf8'));
         } else {
           const summary = Buffer.concat(unexpected).toString('utf8').trim();
@@ -226,9 +223,10 @@ async function grepOverFileList(
     for (const match of parse(output, cwd)) matches.push(match);
   };
   for (const file of files) {
-    const size = Buffer.byteLength(file) + 1;
+    const operand = file === '-' ? './-' : file;
+    const size = Buffer.byteLength(operand) + 1;
     if (bytes + size > ARGV_BUDGET_BYTES && batch.length > 0) await flush();
-    batch.push(file);
+    batch.push(operand);
     bytes += size;
   }
   await flush();

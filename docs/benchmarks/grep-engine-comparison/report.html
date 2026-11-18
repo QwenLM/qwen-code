@@ -195,7 +195,8 @@
             >：策略 1（git grep）传 <code>--ignore-case</code>、策略 3（JS）用
             <code>new RegExp(pattern, 'i')</code>，而策略 2 的两条 system grep
             argv 都不含 <code>-i</code>，与工具描述承诺的 “Case-insensitive by
-            default” 相矛盾（实测同一语料上 12.6% 的匹配集仅因大小写而不同）。
+            default” 相矛盾（同一语料上 47,678 → 50,567，差 2,889/50,567 ≈
+            5.7%）。
             <strong
               >评审后已给 scoped argv 补上 <code>--ignore-case</code></strong
             >，因此下文“修复后”的 system grep 计数就是 shipped 行为；只在无 git
@@ -315,7 +316,7 @@
           </tr>
           <tr>
             <td rowspan="6">
-              absent string<br /><code>zzqxx_absent_token_9f3e</code>
+              absent string<br /><code>zzqxx_absent_token_9f3&#101;</code>
             </td>
             <td><span class="badge main">main</span> git grep</td>
             <td>379 ms</td>
@@ -356,8 +357,9 @@
           </tr>
         </table>
         <p>
-          <strong>JS 回退（修复前）</strong>：49,361 / 50,642 / 49,731 ms；walk
-          165,575 文件；匹配 1,079,867 / 1,020 / 4。
+          <strong>JS 回退（历史基线，非受控对照）</strong>：49,361 / 50,642 /
+          49,731 ms；记录读取 165,575 文件；匹配 1,079,867 / 1,020 / 4。原始
+          harness 与工作树状态不足以核对，见 §3 表下注。
         </p>
         <p>
           <strong>scope 计数</strong>（'function' 命中文件数）：git grep -l -i =
@@ -372,7 +374,8 @@
             138 ms 仅 ≈ 2.7×）；rg content 恒 ~140ms，不随模式复杂度波动。
           </li>
           <li>
-            rg vs main 回退链：<strong>快 380–900×</strong>。回退的慢
+            rg 与 main system-grep 回退的耗时见上表；JS
+            历史基线不作为受控比值。回退的慢
             <strong>主要</strong>源于 scope 错误（不尊重 gitignore，扫
             dist/），但初版"不是引擎慢"这句不成立：§3 在同一份语料上修掉 scope
             之后，回退仍是 git grep 的
@@ -389,15 +392,10 @@
             §3 的 (2) 与 §4 的符号链接行），因此"等价"只在匹配计数层面 成立。
           </li>
           <li>
-            <strong>absent 模式合并后不可复现（披露）</strong>：本页把标记
-            <code>zzqxx_absent_token_9f3e</code> 原样印出，而本页与同目录 JSON
-            都是被 git 跟踪的文件，合并后该 token 就进入了语料 （<code
-              >git ls-files --cached --others --exclude-standard</code
-            >
-            会列出本页，策略 1 的 <code>git grep --untracked</code>
-            也会命中）。fixed-results 中 absent string 各行记为
-            <code>matches: 0</code>，在合并后的 commit 上重跑会得到
-            1，无法据此区分"正常"与 scope 回归。复现请改用未写入仓库的 token。
+            <strong>absent 模式</strong>：本页用 HTML 字符实体展示标记
+            <code>zzqxx_absent_token_9f3&#101;</code>，避免把完整搜索字面量写入
+            被搜索的源码。fixed-results 中 absent string 各行记为
+            <code>matches: 0</code>；复测时仍需核对当前语料是否含有该标记。
           </li>
           <li>
             <code>--json</code> 代价：同匹配集 16.7MB vs git
@@ -415,8 +413,9 @@
         <p>
           修复（本 PR，含评审后修正）：回退策略 2/3 改用
           <code>git ls-files -z --cached --others --exclude-standard</code>
-          语料（与策略 1 同集合），再按 <code>lstat</code> 只保留常规文件——git
-          同时会列出符号链接、submodule gitlink 与索引里已消失的条目，而 grep
+          语料（除 §4 的 force-add 边界外与策略 1 同集合），再按
+          <code>lstat</code> 只保留常规文件——git 同时会列出符号链接、submodule
+          gitlink 与索引里已消失的条目，而 grep
           对显式操作数会解引用符号链接，读到搜索根之外的内容；语料还要按
           <code>getGlobExcludes()</code> 导出的目录名过滤，因为
           <code>--exclude-dir</code> 对显式操作数无效（已实测），而策略 3
@@ -468,7 +467,7 @@
             <td>JS 回退</td>
             <td>49,361 ms</td>
             <td>6,532 ms</td>
-            <td>7.6×</td>
+            <td>未作受控比较</td>
             <td>50,734</td>
             <td>读取 15,134（前 165,575）· 仍枚举全树，见表下注</td>
           </tr>
@@ -492,7 +491,7 @@
             <td>JS 回退</td>
             <td>50,642 ms</td>
             <td>6,710 ms</td>
-            <td>7.5×</td>
+            <td>未作受控比较</td>
             <td>114</td>
             <td>15,134</td>
           </tr>
@@ -516,7 +515,7 @@
             <td>JS 回退</td>
             <td>49,731 ms</td>
             <td>5,476 ms</td>
-            <td>9.1×</td>
+            <td>未作受控比较</td>
             <td>0</td>
             <td>15,134</td>
           </tr>
@@ -534,13 +533,23 @@
           <code>globStream('**/*', { ignore: getGlobExcludes() })</code>
           遍历整棵树，只是在循环里丢掉不属于语料的条目——降下来的是
           <code>readFile</code> 次数，遍历本身、逐项 stat 与 ignore
-          匹配仍与树大小成正比。实测本工作树：遍历产出
-          <strong>37,071</strong> 个条目，而语料只有 15,197 个，约 59%
-          的枚举项落在语料之外。因此在"被 gitignore
+          匹配仍与树大小成正比。后续在本工作树的独立测量遍历产出
+          <strong>37,071</strong> 个条目，语料为 15,197 个；这不是原始基准的
+          同轮计数。原始 JS 基线记录 165,575 次读取，但未保留足以核对工作树
+          状态与排除参数的证据，因此保留历史原始值，不把它与修复后数据之比
+          作为性能提升结论，也不据此推导枚举减少比例。在"被 gitignore
           但不属于那五个排除目录名"的仓库里（例如构建产物放在
           <code>build/</code>、<code>coverage/</code>），JS
           回退的枚举开销不会因本 PR 消失。system grep
           那一列没有这个问题：语料直接作为操作数交给 grep，不存在遍历。
+        </p>
+        <p>
+          <strong>适用边界</strong>：上述范围收敛依赖成功取得 Git
+          语料，且路径能以 UTF-8 字符串表示。 Git 不可用或 ls-files
+          失败时仍保留旧递归/无语料 JS 行为；非 UTF-8 文件名可能在解码后被遗漏。
+          两项契约问题留作
+          <a href="https://github.com/QwenLM/qwen-code/issues/17679">#17679</a
+          >，本 PR 不声称已经修复。
         </p>
         <p>
           <strong>修复后 vs preview rg（同轮）</strong>：rg content -i 146 / 144
@@ -549,8 +558,9 @@
           git grep 快 <strong>2.3–14×</strong>。
         </p>
         <div class="callout warn">
-          <strong>残留不等价（披露，评审后更正）</strong
-          >：修复后<strong>文件集</strong>等价，匹配计数仍有两处口径问题。
+          <strong>残留不等价（披露，评审后更正）</strong>：在上述适用边界内，除
+          §4 的 force-add
+          边界外，修复后<strong>文件集</strong>等价；匹配计数另有两处口径问题。
           <br /><br />
           <strong>(1) 大小写：已在评审后关闭。</strong> scoped argv 现在传
           <code>--ignore-case</code>，与策略 1 和工具描述的 “Case-insensitive by
@@ -716,9 +726,9 @@
         <div class="callout key">
           <strong>本 PR 范围</strong>：修复回退链 scope（必要但不充分）——消除
           20× 污染与 8–11× 无效扫描；修复后回退 5.5–11.3s，仍比 rg 慢
-          32–78×，应作无 rg 环境兜底。<strong>注</strong>：本节倍数与耗时取自带
-          <code>-i</code> 的测量组；shipped argv 的大小写敏感口径（污染缩减
-          21.4×、grep 累计 3.7s）见 §3 披露。
+          32–78×，应作无 rg 环境兜底。<strong>注</strong>：scoped argv
+          已忽略大小写； 修复前递归 argv 为大小写敏感，不能把两者的全部差值归于
+          scope。 统一大小写口径的补充测量见 §3；JS 历史基线不作受控提速结论。
         </div>
         <ul>
           <li>
@@ -733,19 +743,19 @@
             降二级、修复后 grep/JS 作三级回退。不整体照搬 preview 的工具实现。
           </li>
           <li>
-            <strong>follow-up</strong>：回退链大小写对齐（策略 2 是否补
-            <code>-i</code>，见 §3 披露）；grep 回退加 <code>-I</code>、JS
-            回退二进制嗅探（匹配计数对齐）；deny 结果过滤移植；四类 scope
+            <strong>follow-up</strong>：无 Git 语料时的旧递归分支大小写对齐；
+            三条策略的二进制处理决策（见 §3，不把单独加
+            <code>-I</code> 当作对齐）；deny 结果过滤移植；四类 scope
             边界的接受/补偿决策。
           </li>
         </ul>
         <p class="ev">
-          验证：packages/core grep.test.ts 61/61 通过（含新增 scope
+          基准首轮验证：packages/core grep.test.ts 61/61 通过（含新增 scope
           回归测试）；core tsc --noEmit 退出
           0。原始数据：bench-grep-results.json（修复前矩阵，中位转录自完整运行日志
           bench-grep-unfixed-run.log，逐样本数组未保留，json 内含
           provenance）、bench-grep-js-results.json（JS 修复前 + scope
-          计数，含样本）、bench-grep-fixed-results.json（修复后矩阵，含样本）。
+          计数，单次测量，无逐样本数组）、bench-grep-fixed-results.json（修复后矩阵，含样本）。
         </p>
       </section>
     </main>

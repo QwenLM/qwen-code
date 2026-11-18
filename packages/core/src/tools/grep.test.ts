@@ -798,6 +798,50 @@ describe('GrepTool', () => {
       },
     );
 
+    it.each([0, 1])(
+      'recovers into JavaScript on unexpected diagnostics with exit %i',
+      async (code) => {
+        stubGit(['fileA.txt']);
+        const gitImpl = spawnMock.getMockImplementation()!;
+        spawnMock.mockImplementation((cmd, args, options) =>
+          cmd === 'grep'
+            ? fakeChild(
+                'fileA.txt' + '\0' + '1:wrong ERE match\n',
+                code,
+                'grep: warning: ? at start of expression',
+              )
+            : gitImpl(cmd, args, options),
+        );
+
+        const result = await grepTool
+          .build({ pattern: 'world' })
+          .execute(abortSignal);
+
+        expect(result.llmContent).toContain('hello world');
+        expect(result.llmContent).not.toContain('wrong ERE match');
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'searches a file named - without reading stdin',
+      async () => {
+        await fs.writeFile(path.join(tempRootDir, '-'), 'dash-file-content\n');
+        stubGit(['-']);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2000);
+        try {
+          const result = await grepTool
+            .build({ pattern: 'dash-file' })
+            .execute(controller.signal);
+
+          expect(result.llmContent).toContain('dash-file-content');
+          expect(grepArgv().flat()).toContain('./-');
+        } finally {
+          clearTimeout(timeout);
+        }
+      },
+    );
+
     // Root reads mode-000 files, so there would be no stderr to overflow.
     it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
       'settles when grep writes more than a pipe of stderr',
