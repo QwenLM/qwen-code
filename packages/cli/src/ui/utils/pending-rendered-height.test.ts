@@ -208,6 +208,22 @@ describe('hasMermaidFence', () => {
     // A mermaid info string inside a code block is code, not a fence opener.
     expect(hasMermaidFence(['```ts', '```mermaid', '```'])).toBe(false);
   });
+
+  it('keeps a fence open on a line carrying an info string', () => {
+    // The renderer keeps the outer fence open through '```mermaid' and draws
+    // 'flowchart TD' as a diagram; a closer test that ignores the info string
+    // would swallow the real opener and miss it.
+    expect(
+      hasMermaidFence([
+        '```md',
+        '```mermaid',
+        '```',
+        '```mermaid',
+        'flowchart TD',
+        '```',
+      ]),
+    ).toBe(true);
+  });
 });
 
 describe('fitPendingSlice', () => {
@@ -246,6 +262,26 @@ describe('fitPendingSlice', () => {
       showLineNumbers: false,
     });
     expect(unguttered.clipped).toBe(false);
+  });
+
+  it('charges a fence body opened by a line that carries an info string', () => {
+    // The lookahead must close on the same block the walk closes: '```ts'
+    // inside the open '```js' block is content, so the body is 12 lines and
+    // the gutter is three columns wide, not a zero-line block's two.
+    const body = Array.from({ length: 11 }, () => 'x'.repeat(17));
+    const withInfo = fitPendingSlice(
+      ['```js', '```ts', ...body, '```'],
+      20,
+      1000,
+      1000,
+    );
+    const withoutInfo = fitPendingSlice(
+      ['```js', 'zzzzz', ...body, '```'],
+      20,
+      1000,
+      1000,
+    );
+    expect(withInfo.renderedRows).toBe(withoutInfo.renderedRows);
   });
 
   it('reports renderedRows even when a kept first table overflows the budget', () => {

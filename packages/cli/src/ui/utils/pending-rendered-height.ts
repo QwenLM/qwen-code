@@ -93,13 +93,9 @@ export function hasMermaidFence(lines: string[]): boolean {
   for (const line of lines) {
     const match = CODE_FENCE_RE.exec(line);
     if (fence) {
-      if (
-        match &&
-        match[1]!.startsWith(fence[0]!) &&
-        match[1]!.length >= fence.length
-      ) {
-        fence = null;
-      }
+      // Delegate to the predicate the renderer's own walk uses: a fence line
+      // carrying an info string is content inside the block, not its closer.
+      if (isClosingCodeFence(match, fence)) fence = null;
       continue;
     }
     if (match) {
@@ -361,11 +357,7 @@ export function fitPendingSlice(
       let close = -1;
       for (let k = i + 1; k < allLines.length; k++) {
         const closing = CODE_FENCE_RE.exec(allLines[k]!);
-        if (
-          closing &&
-          closing[1]!.startsWith(codeFence[0]!) &&
-          closing[1]!.length >= codeFence.length
-        ) {
+        if (isClosingCodeFence(closing, codeFence)) {
           close = k;
           break;
         }
