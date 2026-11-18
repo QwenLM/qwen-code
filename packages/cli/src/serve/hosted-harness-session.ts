@@ -7668,7 +7668,9 @@ export function registerHostedHarnessSessionRoutes(
       // stranger's record is named pending_turn_mismatch outright rather
       // than by whichever conjunct of it the probe trips first.
       const settle: HostedFileHistorySettlement | null =
-        !fileHistory?.pendingUndo && fileHistory?.pendingTurn && !pumpOwnedParked
+        !fileHistory?.pendingUndo &&
+        fileHistory?.pendingTurn &&
+        !pumpOwnedParked
           ? (takeover || extensionsCommandStepTakeover) &&
             unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
