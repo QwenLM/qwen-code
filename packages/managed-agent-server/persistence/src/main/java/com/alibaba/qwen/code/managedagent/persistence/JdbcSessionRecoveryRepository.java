@@ -14,11 +14,16 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
 
     @Override
     public List<HeadRecovery> heads(String tenantId, String sessionId) {
-        return jdbc.query("SELECT recovery_status, recovery_detail_code"
+        return jdbc.query("SELECT recovery_status, recovery_detail_code, state,"
+                        + " activation_phase, activation_head_revision, journal_revision"
                         + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?"
                         + " AND head_kind = 'MANAGED_SESSION'",
                 (row, index) -> new HeadRecovery(row.getString("recovery_status"),
-                        row.getString("recovery_detail_code")), tenantId, sessionId);
+                        row.getString("recovery_detail_code"),
+                        row.getString("state"),
+                        row.getString("activation_phase"),
+                        row.getObject("activation_head_revision", Long.class),
+                        row.getObject("journal_revision", Long.class)), tenantId, sessionId);
     }
 
     @Override

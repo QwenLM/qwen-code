@@ -127,6 +127,26 @@ public class SessionRecoveryService {
         if (active && !recoveryIntent(turn)) {
             return view("recovering", "turn_active", turn, false, false, cancel);
         }
+        // The persistent suspension proof (docs/design/2026-11-18-managed-
+        // suspension-recovery-view.md): a sealed head whose activation
+        // projection is current and released proves the whole teardown
+        // completed — the seal is its last step — so the view follows the
+        // head, never the presence or absence of a Harness cache entry.
+        // An active Turn keeps the existing evidence-driven arms instead.
+        HeadRecovery head = heads.isEmpty() ? null : heads.getFirst();
+        if (!active && head != null && "SEALED".equals(head.journalState())) {
+            boolean projectionCurrent = head.activationHeadRevision() != null
+                    && head.activationHeadRevision().equals(head.journalRevision());
+            if (!projectionCurrent) {
+                return view("awaiting_evidence", "activation_projection_lagging",
+                        turn, false, false, cancel);
+            }
+            if ("released".equals(head.activationPhase())) {
+                return view("ready", "ready", turn, true, false, false);
+            }
+            return view("operator_required", "teardown_sequence_violation",
+                    turn, false, false, cancel);
+        }
         RecoveryStatus evidence = evidence(session, turn);
         if (evidence == null || "recovery_evidence_unavailable".equals(evidence.reasonCode())) {
             return view(active ? "awaiting_evidence" : "operator_required",

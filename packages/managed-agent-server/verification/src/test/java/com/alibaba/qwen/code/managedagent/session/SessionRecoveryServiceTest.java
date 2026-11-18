@@ -51,9 +51,11 @@ class SessionRecoveryServiceTest {
         source.setURL("jdbc:h2:mem:session-recovery-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
         jdbc = new JdbcTemplate(source);
         jdbc.execute("CREATE TABLE ma_session_head (tenant_id VARCHAR, session_id VARCHAR,"
-                + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR)");
-        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?)",
-                "tenant", "session", "MANAGED_SESSION", "READY", null);
+                + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR,"
+                + " state VARCHAR, activation_phase VARCHAR, activation_head_revision BIGINT,"
+                + " journal_revision BIGINT)");
+        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L);
         when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
         when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of());
         service = new SessionRecoveryService(sessions, store, coordinator, harness, new com.alibaba.qwen.code.managedagent.persistence.JdbcSessionRecoveryRepository(jdbc), mock(JdbcManagedSessionStore.class));
@@ -87,6 +89,63 @@ class SessionRecoveryServiceTest {
         assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
         assertThat(recovery.nextTurnAllowed()).isFalse();
         assertThat(recovery.actions().recheck()).isFalse();
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    // The persistent suspension proof (docs/design/2026-11-18-managed-
+    // suspension-recovery-view.md): the view follows the sealed head, never
+    // the presence or absence of a Harness cache entry.
+    @Test
+    void aCleanlySuspendedSessionIsReadyWithoutHarnessEvidence() {
+        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'released',"
+                + " activation_head_revision = 5, journal_revision = 5");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    @Test
+    void aSealedHeadWithALaggingActivationProjectionWaits() {
+        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'released',"
+                + " activation_head_revision = 4, journal_revision = 5");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("awaiting_evidence");
+        assertThat(recovery.reasonCode()).isEqualTo("activation_projection_lagging");
+        assertThat(recovery.nextTurnAllowed()).isFalse();
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    @Test
+    void aSealedHeadWithoutAReleasedActivationNamesTheSequenceViolation() {
+        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'active',"
+                + " activation_head_revision = 5, journal_revision = 5");
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("operator_required");
+        assertThat(recovery.reasonCode()).isEqualTo("teardown_sequence_violation");
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    @Test
+    void aStaleCacheCannotOverrideTheSealedHeadProof() {
+        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'released',"
+                + " activation_head_revision = 5, journal_revision = 5");
+        when(harness.inspectRecovery("tenant", "session", null))
+                .thenReturn(new RecoveryStatus("recovering", "turn_active", null, false, false, false));
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
+        verifyNoInteractions(harness, coordinator);
+    }
+
+    @Test
+    void anActiveTurnOnASealedHeadKeepsTheEvidenceDrivenArms() {
+        jdbc.update("UPDATE ma_session_head SET state = 'SEALED', activation_phase = 'released',"
+                + " activation_head_revision = 5, journal_revision = 5");
+        turn("RUNNING", null);
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("recovering");
+        assertThat(recovery.reasonCode()).isEqualTo("turn_active");
         verifyNoInteractions(harness, coordinator);
     }
 
