@@ -6866,6 +6866,12 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).not.toContain(
       'let that round answer — do not release a live marker or check out under it',
     );
+    // Deferred (round 12): the flow must explicitly compare prepare's named head
+    // with the registered head — a differing head is the moved-head case, not a
+    // transient prepare failure.
+    expect(promptSlice).toContain(
+      'a differing head is the moved-head case below, not a transient failure',
+    );
     // R1-1: the watch prompt's prepare-failure recovery carries the full
     // --release form with --repo (the <headSha> variant; the manual section
     // uses <H>). Removing --repo reds this whole-form pin.
@@ -6923,7 +6929,7 @@ describe('qwen-triage verify hardening round 2', () => {
       'a mistyped `--repo` is recorded at `--start` before prepare can reject it',
     );
     expect(promptSlice).toContain(
-      "the reset is to delete the state file `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree",
+      "is to delete the state file `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree",
     );
     // Deferred (round 8): the reset drops the delivered head's only delivery
     // record, so the contract must say to re-register it (the cursor already
@@ -6933,6 +6939,11 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(promptSlice).toContain(
       "this drops the PR's dedup history and any deferred heads, which no fire will re-deliver",
     );
+    // Deferred (round 12): the reset must not strand a live round — it is only
+    // safe when no round is mid-battery.
+    expect(promptSlice).toContain(
+      "only when no round is mid-battery, since deleting the file strands a live round's in-flight marker",
+    );
     expect(promptSlice).toContain(
       'and then re-register the delivered head — and any deferred head you still want covered — with the correct slug (`--start`)',
     );
@@ -6941,6 +6952,11 @@ describe('qwen-triage verify hardening round 2', () => {
     // to re-create it, since --start --artifact-dir is still accepted.
     expect(flat).toContain(
       're-create such a watch to pick up registration ahead of prepare',
+    );
+    // Deferred (round 12): re-creating is only actionable past the install's
+    // coexistence guard — the old task and claim must be removed first.
+    expect(flat).toContain(
+      'delete its old task and release its claim first, then re-install from step 3',
     );
     // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
     // --release form with --repo (anchored on the watch-only continuation, so

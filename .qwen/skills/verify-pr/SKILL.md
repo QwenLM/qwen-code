@@ -739,7 +739,9 @@ Build the task in this order and stop at the first failure:
    before the register-ahead change (R17-2) keeps the old prepare-then-register
    order until its task is re-created, and `--start --artifact-dir` is still
    accepted, so nothing forces the upgrade — re-create such a watch to pick up
-   registration ahead of prepare.
+   registration ahead of prepare: delete its old task and release its claim
+   first, then re-install from step 3, because the claim guard refuses a second
+   watch for the same PR while the old one's claim stands.
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
@@ -751,8 +753,10 @@ rather than a silently dropped head (the probe cursor already advanced past the
 delivered head). `<r>` is this round's number — pick the next integer and
 **repeat the same value in `--complete`**; the completion is matched by head and
 round. Then run prepare (trusted host metadata); it creates and prints the
-artifact directory `<dir>`, which you record at `--complete`. If prepare fails
-after `--start`, recover with
+artifact directory `<dir>`, which you record at `--complete`. If prepare
+refuses, compare the head it names (the "not PR head …" in its refusal) with
+`<headSha>` — a differing head is the moved-head case below, not a transient
+failure. If prepare fails after `--start`, recover with
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`,
 then start the head again
 (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`)
@@ -812,7 +816,8 @@ Exit 3 has several shapes, each with its own reaction:
   it once the state records a repo. Because registration runs ahead of
   prepare, a mistyped `--repo` is recorded at `--start` before prepare can
   reject it, and every later verb then refuses the correct slug without naming
-  the file; the reset is to delete the state file
+  the file; the reset — only when no round is mid-battery, since deleting the
+  file strands a live round's in-flight marker — is to delete the state file
   `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree
   (this drops the PR's dedup history and any deferred heads, which no fire will
   re-deliver) and then re-register the delivered head — and any deferred head

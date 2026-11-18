@@ -126,7 +126,10 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   规则单独到不了它们）：分支现对任何不同于注册 head 的点名 head 触发——前移或
   force-push；所投递 head 称「实时 head」（`<live>`），逐节 moved-head 钉随措辞迁移，
   本轮恢复的 release 形式传 `--round`（不再可选），重置写明也丢 deferred heads，
-  注册顺序钉改钉 `--start` 命令的位置、而非仅标题。
+  注册顺序钉改钉 `--start` 命令的位置、而非仅标题。第 11 轮补全新轮次的死标记分支
+  （回收死轮标记后再 checkout）与顺序钉的存在性守卫（占位符改拼写不致空转）；第 12
+  轮把重建指引改为可越过安装共存守卫（先删旧任务并释放 claim）、补重置的「无活轮」
+  谨慎、并把 prepare 点名 head 与注册 head 的比对写明。这些 prose 子句均在文本钉套件钉住。
 - `scripts/tests/verify-pr-watch-state.test.js`：新见证走 **CLI**（`run(root, …)`，
   演练本 PR 改动的助手代码——`parseArgs` 要求、`completeRound` 返回字段、`main`
   告警）——`--start` 不带 `--artifact-dir` 注册在飞且目录 `null`（恢复强制要求

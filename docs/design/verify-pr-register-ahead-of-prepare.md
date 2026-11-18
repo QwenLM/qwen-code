@@ -176,7 +176,13 @@ existing dead-round recovery (`--release` for a round that died after
   move with the rewording, the this-round recovery release forms pass `--round`
   (no longer optional), the reset notes it also drops deferred heads, and the
   registration-order pins guard the `--start` command's position, not just the
-  heading.
+  heading. Round 11 adds the fresh-round dead-marker branch (recover a dead
+  round's marker, then check out) and presence guards on the order pins so a
+  placeholder-spelling change cannot make them vacuous; round 12 makes the
+  re-create guidance actionable past the install's coexistence guard (delete the
+  old task and release the claim first), adds the reset's no-live-round caution,
+  and makes the prepare-named-head vs registered-head comparison explicit. These
+  prose clauses are pinned in the text-pin suite.
 - `scripts/tests/verify-pr-watch-state.test.js`: new witnesses driven through
   the **CLI** (`run(root, …)`, exercising the helper code this PR changes — the
   `parseArgs` requirement, `completeRound`'s return field, and `main`'s
