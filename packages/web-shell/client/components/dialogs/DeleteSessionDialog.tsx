@@ -73,6 +73,10 @@ export function DeleteSessionDialog({
     setSelectedIds(new Set());
   });
   const [message, setMessage] = useState<string | null>(null);
+  // An id, not rendered text and not a remembered reason: the refusal is about
+  // a row's live state, so it has to expire with that state, and the reason has
+  // to be re-read from the row instead of frozen at click time.
+  const [refusalId, setRefusalId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -111,21 +115,12 @@ export function DeleteSessionDialog({
       if (blocksDelete(session)) {
         // The danger button is disabled in this state, so this click is the
         // only place the user can be told why the row will not tick.
-        setMessage(
-          session.sessionId === currentSessionId
-            ? t('delete.cannotCurrent')
-            : t('sidebar.deleteRunningDisabled'),
-        );
+        setRefusalId(session.sessionId);
         return;
       }
-      // Clear only a refusal this function set, so a load or delete error in
-      // the same hint survives a successful tick.
-      setMessage((prev) =>
-        prev === t('delete.cannotCurrent') ||
-        prev === t('sidebar.deleteRunningDisabled')
-          ? null
-          : prev,
-      );
+      // A refusal is not an error: clearing it leaves any load or delete error
+      // sharing the hint untouched.
+      setRefusalId(null);
       const sessionId = session.sessionId;
       setSelectedIds((prev) => {
         const next = new Set(prev);
@@ -137,7 +132,7 @@ export function DeleteSessionDialog({
         return next;
       });
     },
-    [blocksDelete, currentSessionId, t],
+    [blocksDelete],
   );
 
   useEffect(() => {
@@ -153,6 +148,15 @@ export function DeleteSessionDialog({
       return pruned.size === prev.size ? prev : pruned;
     });
   }, [blocksDelete, filtered, selectedIds.size]);
+
+  // Expire the refusal with the condition that produced it: once the row
+  // leaves the list or stops being blocked, the hint must stop asserting it
+  // and let the selection count through again.
+  useEffect(() => {
+    if (!refusalId) return;
+    const row = filtered.find((s) => s.sessionId === refusalId);
+    if (!row || !blocksDelete(row)) setRefusalId(null);
+  }, [blocksDelete, filtered, refusalId]);
 
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
@@ -196,6 +200,9 @@ export function DeleteSessionDialog({
 
   const handleDelete = useCallback(() => {
     if (deleting) return;
+    // Confirming supersedes the refusal: the hint now belongs to this delete's
+    // progress and outcome, which must not be shadowed by an older row's rule.
+    setRefusalId(null);
     // Captured before the request: the daemon's terminal `session_closed`
     // frame clears `connection.sessionId` before the delete resolves, so this
     // is the last point where the attachment is still readable (#12619).
@@ -298,6 +305,17 @@ export function DeleteSessionDialog({
     t,
   ]);
 
+  const refusedRow = refusalId
+    ? filtered.find((s) => s.sessionId === refusalId)
+    : undefined;
+  // Re-checked here as well as in the expiry effect: that effect runs after
+  // paint, so without this the hint could assert a rule the row no longer meets.
+  const refusalText =
+    refusedRow && blocksDelete(refusedRow)
+      ? refusedRow.sessionId === currentSessionId
+        ? t('delete.cannotCurrent')
+        : t('sidebar.deleteRunningDisabled')
+      : null;
   const hasSelection = selectedIds.size > 0;
   const canDelete = !deleting && !loading && deletableSelectedIds.length > 0;
 
@@ -325,6 +343,7 @@ export function DeleteSessionDialog({
         />
         <span className={dp('picker-search-hint')}>
           {outageMessage ||
+            refusalText ||
             message ||
             (deleting
               ? t('delete.deleting')

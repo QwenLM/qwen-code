@@ -83,7 +83,11 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   which takes the caller's own notion of "current" rather than deriving it from
   an id: the sidebar compares workspace-qualified identity and lets the
   recent/standalone adapters override it, while the dialog compares session ids.
-  All three delete gates call it, so the rule has one home.
+  The sidebar row, the sidebar eligibility check and the delete dialog call
+  it, so that rule has one home. The Session Overview card gates are a fourth
+  delete path and deliberately stay stricter — they also require an `idle`
+  grade and block live work on every card, not just the attached one — so they
+  keep their own expression; see the pre-existing-difference bullet below.
 - Delete refuses background work on any row, not just the attached one, in
   both the sidebar and the delete dialog: the delete route has no idle guard,
   so confirming would kill work the row advertises, and the Session Overview
@@ -91,7 +95,9 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   names the reason in its hint — the danger button is disabled in that state,
   so the row click is the only place the refusal can reach the user — and only
   the attached row's wording says "the current session".
-  An idle attached session stays deletable (#12619).
+  An idle attached session stays deletable (#12619). The hint tracks live state
+  rather than the click: it names whichever rule blocks the row now, goes away
+  once the row is deletable again, and gives way to the delete's own outcome.
 - Three staleness holes close with it. Selection mode keeps its own copy of
   each ticked session, so its refresh contract now carries the background flag
   too — otherwise bulk Archive would judge a session by the value it had when

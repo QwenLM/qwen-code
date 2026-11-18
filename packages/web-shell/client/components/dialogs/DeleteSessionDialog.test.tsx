@@ -46,8 +46,10 @@ let scopedSessionsError: Error | undefined;
 let scopedSessionsLoading = false;
 const initialSessions = sessions.slice();
 
+let attachedSessionId = 'me';
+
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useConnection: () => ({ sessionId: 'me' }),
+  useConnection: () => ({ sessionId: attachedSessionId }),
 }));
 
 vi.mock('../../hooks/useScopedSessions', () => ({
@@ -162,6 +164,7 @@ beforeEach(() => {
   deleteSessionsMock.mockReset();
   scopedSessionsError = undefined;
   scopedSessionsLoading = false;
+  attachedSessionId = 'me';
 });
 
 afterEach(() => {
@@ -441,6 +444,69 @@ describe('DeleteSessionDialog selection', () => {
     expect(hint()).toContain('1');
   });
 
+  it('drops the refusal once the row stops being blocked', () => {
+    // The refusal describes live state, not a durable error: when the
+    // background command finishes, the hint must stop asserting it even
+    // though no further click happened.
+    const firstRowBusy = (busy: boolean) => {
+      sessions = [
+        {
+          ...initialSessions[0],
+          hasRunningBackgroundTasks: busy,
+          activeWorkState: 'idle',
+        },
+        initialSessions[1],
+        initialSessions[2],
+      ];
+    };
+    firstRowBusy(true);
+    mount();
+    clickRow(1);
+    clickRow(0);
+    expect(hint()).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+    firstRowBusy(false);
+    rerender();
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('background work');
+    // And it must not come back on its own: a later busy tick is not a click.
+    firstRowBusy(true);
+    rerender();
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('background work');
+    // The guard must not latch either: once idle, the row ticks again.
+    firstRowBusy(false);
+    rerender();
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(true);
+  });
+
+  it('re-reads the refusal reason from the row instead of the click', () => {
+    // The row stays refused across an attachment change, but which rule
+    // refuses it does not stay the same.
+    sessions = [
+      initialSessions[0],
+      initialSessions[1],
+      {
+        ...initialSessions[2],
+        hasActivePrompt: true,
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+    ];
+    mount();
+    clickRow(2);
+    expect(hint()).toBe(
+      'Cannot delete the current session while it is running.',
+    );
+    attachedSessionId = 's1';
+    rerender();
+    expect(hint()).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+  });
+
   it('keeps a load error in the hint when a row is ticked', () => {
     // Clearing the refusal must not clobber an unrelated error sharing the hint.
     scopedSessionsError = new Error('load boom');
@@ -534,6 +600,34 @@ describe('DeleteSessionDialog selection', () => {
 
     expect(hint()).toContain('Failed to delete 1 session(s): locked');
     expect(hint()).not.toContain('boom');
+  });
+
+  it('shows a delete outcome ahead of an outstanding refusal', async () => {
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's1', error: 'locked' }],
+    });
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(1);
+    clickRow(0);
+    expect(hint()).toContain('background work');
+
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    expect(hint()).not.toContain('background work');
   });
 
   it('keeps the loading placeholder above a stale load error', () => {
