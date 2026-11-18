@@ -19,6 +19,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
+import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  LoopReason,
+  LoopType,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
 import {
   ToolConfirmationOutcome,
   type Config,
@@ -59,6 +64,12 @@ import {
   useOpenTuiLiveTurn,
 } from './live-turn.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { frameModPrompt } from '../../services/mod-prompt-frame.js';
+import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
+import {
+  framePasteExpansion,
+  REWRITE_CHANGED_PASTE,
+} from '../utils/paste-placeholders.js';
 
 // Stream-layer stub: records what each turn was handed and holds the first
 // turn open until the test releases it, so a second submission lands mid-turn.
@@ -73,6 +84,8 @@ const live = vi.hoisted(() => ({
   script: new Map<number, Array<Record<string, unknown>>>(),
   holds: new Set<number>(),
   errors: new Map<number, Error>(),
+  /** Turns that fail before their request reaches the model client. */
+  unsent: new Map<number, Error>(),
   holdAfterEvents: new Set<number>(),
 }));
 
@@ -87,6 +100,7 @@ vi.mock('./live-session.js', () => ({
     live.signals.push(signal);
     live.turns.push({ prompt, options });
     const turn = live.turns.length;
+    if (live.unsent.has(turn)) throw live.unsent.get(turn);
     (options as LivePromptOptions).onPreparedRequest?.({
       content: prompt as never,
       modelOverride: (options as LivePromptOptions).modelOverride,
@@ -191,6 +205,7 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.unsent.clear();
     live.holdAfterEvents.clear();
   });
 
@@ -1768,6 +1783,29 @@ describe('useOpenTuiLiveTurn submit paths', () => {
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
+  it('does not fire onComplete after a duplicate tool stop without a Mod session', async () => {
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    const onComplete = vi.fn();
+    act(() => result.current.submit('dream prompt', undefined, { onComplete }));
+
+    const options = live.turns[0].options as LivePromptOptions;
+    await act(async () => {
+      options.onPreparedRequest?.(undefined);
+      options.onStreamEvent?.({
+        type: LlmEventType.LoopDetected,
+        value: {
+          loopType: LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          loopReason: LoopReason.PROVIDER_DUPLICATE_ID,
+        },
+      });
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it('does not fire onComplete when the turn ends on an aborted signal (R6-6)', async () => {
     // Esc while a tool batch is out: the generator's abort paths (the
     // all-cancelled batch above them) end with a normal return, so the seq
@@ -2180,6 +2218,7 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.unsent.clear();
     live.holdAfterEvents.clear();
     vi.restoreAllMocks();
   });
@@ -2194,12 +2233,21 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
         _promptId?: string,
       ) => turn,
     );
-    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+    const submitted: ModQueuedPrompt[] = [];
+    const mods = {
       startTurn,
-    } as unknown as ReturnType<
-      typeof interactiveMods.getInteractiveModSession
-    >);
-    return { turn, startTurn };
+      stopSubmittedPrompts: vi.fn(),
+      notePersonPrompt: vi.fn(),
+      returnSubmittedPrompt: vi.fn(),
+      subscribePrompts: (_listener: () => void) => () => {},
+      takeSubmittedPrompt: vi.fn(() => submitted.shift()),
+    };
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+      mods as unknown as ReturnType<
+        typeof interactiveMods.getInteractiveModSession
+      >,
+    );
+    return { turn, startTurn, mods, submitted };
   };
   const options = (turn: number) =>
     live.turns[turn - 1].options as LivePromptOptions;
@@ -2331,7 +2379,7 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
   );
 
   it('hears a retry as a turn with no typed prompt', async () => {
-    const { startTurn } = installMods();
+    const { startTurn, mods } = installMods();
     const { result } = renderHook(() =>
       useOpenTuiLiveTurn({ config: {} as Config }),
     );
@@ -2343,21 +2391,316 @@ describe('useOpenTuiLiveTurn Mod turns', () => {
     });
     options(1).onPromptAdmitted?.();
     await settle(result);
+    expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
     live.holds.add(2);
     await act(async () => result.current.retryLastPrompt());
     expect(options(2).retry).toBeDefined();
     options(2).onPromptAdmitted?.();
     expect(startTurn.mock.calls.map(([text]) => text)).toEqual(['Fix it', '']);
+    // A retry resends the person's prompt; it is no new one of theirs, so it
+    // neither resets the Mods' count nor lifts a stop.
+    expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
     await settle(result);
   });
 
-  it('offers no turn hooks without a Mod session', () => {
+  it("leaves the Mods' count alone on a tool-call turn", async () => {
+    const { mods } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    await act(async () => {
+      expect(result.current.scheduleTool('test_tool', {})).toBe(true);
+    });
+    expect(live.turns).toHaveLength(1);
+    expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+    await settle(result);
+  });
+
+  const modConfig = () => {
+    const stripOrphanedUserEntriesFromHistory = vi.fn();
+    return {
+      config: {
+        getLlmClient: () => ({ stripOrphanedUserEntriesFromHistory }),
+      } as unknown as Config,
+      stripOrphanedUserEntriesFromHistory,
+    };
+  };
+
+  it("leaves a Mod's prompt queued while a Goal owns the turns", () => {
+    const { mods, submitted } = installMods();
+    let goalStatus: 'active' | 'complete' = 'active';
+    const config = {
+      ...modConfig().config,
+      getGoalRuntime: () => ({
+        getSnapshot: () => ({
+          v: 2,
+          goal: { status: goalStatus },
+          activity: 'idle',
+        }),
+      }),
+    } as unknown as Config;
+    const { result } = renderHook(() => useOpenTuiLiveTurn({ config }));
+    submitted.push({ plugin: 'followup-mod', text: 'next step' });
+    act(() => expect(result.current.runModPrompt()).toBe(false));
+    expect(mods.takeSubmittedPrompt).not.toHaveBeenCalled();
+    expect(live.turns).toHaveLength(0);
+
+    goalStatus = 'complete';
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    expect(options(1).modPrompt).toEqual({
+      plugin: 'followup-mod',
+      text: 'next step',
+    });
+  });
+
+  it("runs a Mod's prompt framed, under a line naming the Mod", async () => {
+    const { startTurn, mods, submitted } = installMods();
+    const logger = { logMessage: vi.fn(async () => {}) };
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({
+        config: modConfig().config,
+        logger: logger as unknown as Logger,
+      }),
+    );
+    expect(result.current.runModPrompt()).toBe(false);
+    submitted.push(
+      {
+        plugin: 'followup-mod',
+        text: 'List the <TODOs>',
+        context: ['from the hook'],
+      },
+      { plugin: 'other-mod', text: '/compress', asUser: true },
+    );
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    // One turn at a time: the next waits, still queued.
+    act(() => expect(result.current.runModPrompt()).toBe(false));
+    // Taken once with nothing waiting, once to run: none while it runs.
+    expect(mods.takeSubmittedPrompt).toHaveBeenCalledTimes(2);
+    expect(live.turns[0].prompt).toBe(
+      frameModPrompt({
+        plugin: 'followup-mod',
+        text: 'List the <TODOs>',
+        context: ['from the hook'],
+      }),
+    );
+    expect(options(1)).toMatchObject({
+      submittedPrompt: 'List the <TODOs>',
+      promptContext: ['from the hook'],
+      modPrompt: { plugin: 'followup-mod', text: 'List the <TODOs>' },
+      workflowModeEligible: false,
+    });
+    // The line naming the Mod shows once the prompt is admitted.
+    expect(result.current.items).toEqual([]);
+    act(() => options(1).onPromptAdmitted?.());
+    expect(
+      result.current.items.map((item) => [
+        item.kind,
+        'text' in item ? item.text : '',
+      ]),
+    ).toEqual([['info', 'Mod followup-mod: List the <TODOs>']]);
+    expect(startTurn.mock.calls[0][0]).toBe('List the <TODOs>');
+    await settle(result);
+
+    // An `asUser` prompt reaches the model as it is, and a slash-form one is
+    // no command.
+    live.holds.add(2);
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    expect(live.turns[1].prompt).toBe('/compress');
+    expect(options(2).modPrompt).toEqual({
+      plugin: 'other-mod',
+      text: '/compress',
+      asUser: true,
+    });
+    expect(options(2).promptContext).toBeUndefined();
+    await settle(result);
+    expect(result.current.items.some((item) => item.kind === 'user')).toBe(
+      false,
+    );
+    // Nothing a Mod sent is logged as the person's input.
+    expect(logger.logMessage).not.toHaveBeenCalled();
+    expect(mods.stopSubmittedPrompts).not.toHaveBeenCalled();
+    // Nor is it the person's prompt for the Mods' limit.
+    expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+  });
+
+  it("counts the person's queued prompt when it runs, after a decline-all stop", async () => {
+    const { mods } = installMods();
+    const calls: string[] = [];
+    mods.stopSubmittedPrompts.mockImplementation(() => calls.push('stop'));
+    mods.notePersonPrompt.mockImplementation(() => calls.push('note'));
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+      result.current.submit('queued');
+    });
+    expect(calls).toEqual(['note']);
+    options(1).onPromptAdmitted?.();
+    options(1).onToolsCancelled?.();
+    await act(async () => {
+      for (const wake of live.waiters.splice(0)) wake();
+    });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    expect(live.turns[1].prompt).toBe('queued');
+    // The queued prompt runs after the stop and lets the Mods submit again.
+    expect(calls).toEqual(['note', 'stop', 'note']);
+  });
+
+  it("puts back a Mod's prompt whose turn could not start, until the next turn or prompt", async () => {
+    const { mods, submitted } = installMods();
+    const listeners = new Set<() => void>();
+    Object.assign(mods, {
+      subscribePrompts: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    });
+    mods.returnSubmittedPrompt.mockImplementation((prompt: ModQueuedPrompt) =>
+      submitted.unshift(prompt),
+    );
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: modConfig().config }),
+    );
+    const failBeforeSend = async (turn: number) => {
+      live.unsent.set(turn, new Error('prepare failed'));
+      act(() => expect(result.current.runModPrompt()).toBe(true));
+      await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    };
+    const prompt = { plugin: 'followup-mod', text: 'one' };
+    submitted.push(prompt);
+    await failBeforeSend(1);
+    expect(mods.returnSubmittedPrompt).toHaveBeenCalledExactlyOnceWith(prompt);
+    // No line for a prompt that never ran, and nothing for Ctrl+Y to resend.
+    expect(result.current.items.some((item) => item.kind === 'info')).toBe(
+      false,
+    );
+    act(() => result.current.retryLastPrompt());
+    expect(live.turns).toHaveLength(1);
+    // It waits rather than fail again in a loop on the busy edge...
+    act(() => expect(result.current.runModPrompt()).toBe(false));
+    // ...until a Mod submits again,
+    act(() => listeners.forEach((listener) => listener()));
+    await failBeforeSend(2);
+    expect(mods.returnSubmittedPrompt).toHaveBeenCalledTimes(2);
+    act(() => expect(result.current.runModPrompt()).toBe(false));
+    // or the person's next turn.
+    live.holds.add(3);
+    act(() => result.current.submit('person'));
+    await settle(result);
+    live.holds.add(4);
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    expect(options(4).modPrompt).toBe(prompt);
+    act(() => options(4).onPromptAdmitted?.());
+    await settle(result);
+    expect(mods.returnSubmittedPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets a reset release a Mod's prompt its stale turn puts back", async () => {
+    const { mods, submitted } = installMods();
+    let loaded!: () => void;
+    Object.assign(mods, {
+      starting: true,
+      ready: new Promise<void>((resolve) => {
+        loaded = resolve;
+      }),
+    });
+    mods.returnSubmittedPrompt.mockImplementation((prompt: ModQueuedPrompt) =>
+      submitted.unshift(prompt),
+    );
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: modConfig().config }),
+    );
+    const prompt = { plugin: 'followup-mod', text: 'one' };
+    submitted.push(prompt);
+    // The turn waits for the Mods to load when the transcript resets.
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    await act(async () => {
+      result.current.resetTranscript([]);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mods.returnSubmittedPrompt).toHaveBeenCalledExactlyOnceWith(
+        prompt,
+      ),
+    );
+    expect(live.turns).toHaveLength(0);
+    // The stale turn's put-back does not hold it again.
+    Object.assign(mods, { starting: false });
+    loaded();
+    live.holds.add(1);
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    expect(options(1).modPrompt).toBe(prompt);
+    await settle(result);
+  });
+
+  it("spends a Mod's prompt that reached the model client, as ink does", async () => {
+    const { mods, submitted } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: modConfig().config }),
+    );
+    // A UserPromptSubmit hook that blocks or fails it never admits it.
+    live.errors.set(1, new Error('UserPromptSubmit hook failed'));
+    submitted.push({ plugin: 'followup-mod', text: 'one' });
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    await settle(result);
+    expect(mods.returnSubmittedPrompt).not.toHaveBeenCalled();
+  });
+
+  it("counts the person's steering as their prompt", async () => {
+    const { mods } = installMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => result.current.submit('first'));
+    expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+    act(() => options(1).onAcceptedSteering?.(['also check tests']));
+    expect(mods.notePersonPrompt).toHaveBeenCalledTimes(2);
+    await settle(result);
+  });
+
+  it("stops the Mods' prompts when the person stops a turn, not when a Mod ends it", async () => {
+    const { startTurn, mods, submitted } = installMods();
+    const { config, stripOrphanedUserEntriesFromHistory } = modConfig();
+    const { result } = renderHook(() => useOpenTuiLiveTurn({ config }));
+    submitted.push({ plugin: 'followup-mod', text: 'one' });
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    options(1).onPromptAdmitted?.();
+    act(() => result.current.interrupt());
+    expect(mods.stopSubmittedPrompts).toHaveBeenCalledTimes(1);
+    await settle(result);
+    // The stopped Mod prompt must not stay in front of the next one.
+    expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledWith(true);
+
+    // A Mod's `$.turn.abort` keeps them.
+    live.holds.add(2);
+    submitted.push({ plugin: 'followup-mod', text: 'two' });
+    act(() => expect(result.current.runModPrompt()).toBe(true));
+    options(2).onPromptAdmitted?.();
+    act(() => expect(startTurn.mock.calls[1][2]()).toBe(true));
+    await settle(result);
+    expect(mods.stopSubmittedPrompts).toHaveBeenCalledTimes(1);
+    expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalledTimes(1);
+
+    // Declining every tool stops them as Esc does, once.
+    live.holds.add(3);
+    act(() => result.current.submit('person'));
+    options(3).onPromptAdmitted?.();
+    options(3).onToolsCancelled?.();
+    expect(mods.stopSubmittedPrompts).toHaveBeenCalledTimes(2);
+    await settle(result);
+
+    // Esc with no turn running stops nothing.
+    act(() => result.current.interrupt());
+    expect(mods.stopSubmittedPrompts).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers no Mod admission or cancellation hooks without a Mod session', () => {
     const { result } = renderHook(() =>
       useOpenTuiLiveTurn({ config: {} as Config }),
     );
     act(() => result.current.submit('plain'));
     expect(options(1).onPromptAdmitted).toBeUndefined();
-    expect(options(1).onStreamEvent).toBeUndefined();
     expect(options(1).onToolsCancelled).toBeUndefined();
   });
 });
@@ -2371,6 +2714,7 @@ describe('useOpenTuiLiveTurn streaming counters', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.unsent.clear();
   });
 
   function renderTurn() {
@@ -2473,6 +2817,7 @@ describe('live-turn dual-output ownership', () => {
     live.holds.clear();
     live.declines.clear();
     live.errors.clear();
+    live.unsent.clear();
   });
 
   it.each(['reset', 'unmount'] as const)(
@@ -2588,6 +2933,7 @@ describe('clipboard source queue restoration', () => {
     live.script.clear();
     live.holds.clear();
     live.errors.clear();
+    live.unsent.clear();
     live.holdAfterEvents.clear();
   });
 
@@ -2680,5 +3026,778 @@ describe('clipboard source queue restoration', () => {
     expect(live.turns[1]?.options).toMatchObject({
       humanInput: undefined,
     });
+  });
+});
+
+describe('useOpenTuiLiveTurn prompt.submit', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'opentui-prompt-submit-'));
+  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  beforeEach(() => {
+    live.turns.length = 0;
+    live.waiters.length = 0;
+    live.declines.clear();
+    live.signals.length = 0;
+    live.script.clear();
+    live.holds.clear();
+    live.errors.clear();
+    live.unsent.clear();
+    live.holdAfterEvents.clear();
+    vi.restoreAllMocks();
+  });
+
+  type Answer = { text: string; context?: string[] } | { drop: string };
+  // Each prompt.submit call waits until the test answers it.
+  const installHooks = () => {
+    const answers: Array<(answer: Answer) => void> = [];
+    const submitPrompt = vi.fn(
+      (_text: string, signal: AbortSignal) =>
+        new Promise<Answer>((resolve, reject) => {
+          answers.push(resolve);
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const turn = { id: 'turn-1', saw: vi.fn(), complete: vi.fn() };
+    const startTurn = vi.fn((_text: string) => turn);
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      hearsPrompts: true,
+      submitPrompt,
+      startTurn,
+      stopSubmittedPrompts: vi.fn(),
+      notePersonPrompt: vi.fn(),
+      returnSubmittedPrompt: vi.fn(),
+      subscribePrompts: (_listener: () => void) => () => {},
+    } as unknown as ReturnType<
+      typeof interactiveMods.getInteractiveModSession
+    >);
+    const answer = async (value: Answer) => {
+      await act(async () => answers.shift()!(value));
+    };
+    return { submitPrompt, startTurn, answer };
+  };
+  const options = (turn: number) =>
+    live.turns[turn - 1].options as LivePromptOptions;
+  const logger = () =>
+    ({
+      logMessage: vi.fn(async () => {}),
+      removeLastUserMessage: vi.fn(async () => {}),
+    }) as unknown as Logger & { logMessage: ReturnType<typeof vi.fn> };
+  const rows = (items: readonly unknown[]) =>
+    items.filter(
+      (item) => (item as { kind: string }).kind === 'user',
+    ) as Array<{
+      text: string;
+    }>;
+
+  it('shows, records and sends the rewrite with its context', async () => {
+    const { submitPrompt, startTurn, answer } = installHooks();
+    const log = logger();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, logger: log }),
+    );
+    act(() => {
+      result.current.submit('deploy with key AKIA1', undefined, {
+        submittedPrompt: 'deploy with key AKIA1',
+        displayText: 'deploy with key AKIA1',
+        humanInput: { text: 'deploy with key AKIA1' },
+      });
+    });
+    await vi.waitFor(() =>
+      expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+        'deploy with key AKIA1',
+        expect.any(AbortSignal),
+      ),
+    );
+    // Nothing shows, records or sends the prompt while the hooks hold it.
+    expect(rows(result.current.items)).toEqual([]);
+    expect(log.logMessage).not.toHaveBeenCalled();
+    expect(live.turns).toEqual([]);
+    expect(result.current.streaming).toBe(true);
+
+    await answer({ text: 'deploy with key [redacted]', context: ['ctx'] });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(live.turns[0].prompt).toBe('deploy with key [redacted]');
+    expect(options(1)).toMatchObject({
+      submittedPrompt: 'deploy with key [redacted]',
+      humanInput: { text: 'deploy with key [redacted]' },
+      promptContext: ['ctx'],
+    });
+    expect(rows(result.current.items)).toEqual([
+      expect.objectContaining({ text: 'deploy with key [redacted]' }),
+    ]);
+    expect(log.logMessage).toHaveBeenCalledExactlyOnceWith(
+      'user',
+      'deploy with key [redacted]',
+    );
+    options(1).onPromptAdmitted?.();
+    expect(startTurn).toHaveBeenCalledWith(
+      'deploy with key [redacted]',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    await act(async () => live.waiters.shift()?.());
+  });
+
+  it('keeps a paste the rewrite kept whole collapsed, framed and beside its image', async () => {
+    const { submitPrompt, answer } = installHooks();
+    const path = join(dir, 'shot.png');
+    writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'x'.repeat(1200);
+    const pastes = new Map([[placeholder, body]]);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit(
+        framePasteExpansion(`Look ${placeholder}`, pastes),
+        [path],
+        {
+          submittedPrompt: `Look ${placeholder}`,
+          displayText: `Look ${placeholder}`,
+          humanInput: { text: `Look ${body}` },
+          pasteExpansions: pastes,
+        },
+      );
+    });
+    await vi.waitFor(() =>
+      expect(submitPrompt).toHaveBeenCalledWith(
+        `Look ${body}`,
+        expect.any(AbortSignal),
+      ),
+    );
+    await answer({ text: `Please look at ${body}` });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    const sent = live.turns[0].prompt as Array<{
+      text?: string;
+      inlineData?: unknown;
+    }>;
+    expect(sent[0].text).toBe(
+      framePasteExpansion(`Please look at ${placeholder}`, pastes),
+    );
+    expect(sent.slice(1)).toEqual([
+      expect.objectContaining({ inlineData: expect.anything() }),
+    ]);
+    expect(options(1)).toMatchObject({
+      submittedPrompt: `Please look at ${placeholder}`,
+      humanInput: { text: `Please look at ${body}` },
+    });
+    expect(rows(result.current.items)).toEqual([
+      expect.objectContaining({
+        text: `Please look at ${placeholder}`,
+        recallText: `Please look at ${body}`,
+      }),
+    ]);
+    await act(async () => live.waiters.shift()?.());
+  });
+
+  it('leaves the prompt alone when a hook only changes its outer whitespace', async () => {
+    const { answer } = installHooks();
+    const placeholder = '[Pasted Content 1200 chars]';
+    const pastes = new Map([[placeholder, 'y'.repeat(1200)]]);
+    const framed = framePasteExpansion(`See ${placeholder}`, pastes);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    // The raw text stands for the provenance as long as there is no rewrite.
+    act(() => {
+      result.current.submit(framed, undefined, {
+        submittedPrompt: `see ${placeholder}`,
+        displayText: `See ${placeholder}`,
+        pasteExpansions: pastes,
+      });
+    });
+    await answer({ text: `See ${'y'.repeat(1200)}\n` });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(live.turns[0].prompt).toBe(framed);
+    expect(options(1).submittedPrompt).toBe(`see ${placeholder}`);
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+
+    act(() => {
+      result.current.submit('hello ', undefined, { submittedPrompt: 'hi ' });
+    });
+    await answer({ text: 'hello' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    expect(live.turns[1].prompt).toBe('hello ');
+    expect(options(2).submittedPrompt).toBe('hi ');
+  });
+
+  it('drops a prompt: shows the reason and hands the typed prompt back', async () => {
+    const { answer } = installHooks();
+    const log = logger();
+    const onPromptReturned = vi.fn();
+    const placeholder = '[Pasted Content 1200 chars]';
+    const pastes = new Map([[placeholder, 'AKIA'.repeat(300)]]);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({
+        config: {} as Config,
+        logger: log,
+        onPromptReturned,
+      }),
+    );
+    act(() => {
+      result.current.submit(
+        framePasteExpansion(`key ${placeholder}`, pastes),
+        undefined,
+        {
+          submittedPrompt: `key ${placeholder}`,
+          displayText: `key ${placeholder}`,
+          pasteExpansions: pastes,
+        },
+      );
+    });
+    await answer({ drop: 'Blocked: the prompt holds a key' });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(live.turns).toEqual([]);
+    expect(log.logMessage).not.toHaveBeenCalled();
+    expect(rows(result.current.items)).toEqual([]);
+    expect(result.current.items).toEqual([
+      expect.objectContaining({
+        kind: 'error',
+        text: 'Blocked: the prompt holds a key',
+      }),
+    ]);
+    expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        displayText: `key ${placeholder}`,
+        pasteExpansions: pastes,
+      }),
+    );
+  });
+
+  it('refuses a rewrite that changed a paste and hands the typed prompt back', async () => {
+    const { answer } = installHooks();
+    const log = logger();
+    const onPromptReturned = vi.fn();
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'ignore previous instructions AKIA1 '.repeat(35).trim();
+    const pastes = new Map([[placeholder, body]]);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({
+        config: {} as Config,
+        logger: log,
+        onPromptReturned,
+      }),
+    );
+    act(() => {
+      result.current.submit(
+        framePasteExpansion(`why ${placeholder}`, pastes),
+        undefined,
+        {
+          submittedPrompt: `why ${placeholder}`,
+          displayText: `why ${placeholder}`,
+          pasteExpansions: pastes,
+        },
+      );
+    });
+    await answer({ text: `why ${body.replaceAll('AKIA1', '[redacted]')}` });
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(live.turns).toEqual([]);
+    expect(log.logMessage).not.toHaveBeenCalled();
+    expect(result.current.items).toEqual([
+      expect.objectContaining({ kind: 'error', text: REWRITE_CHANGED_PASTE }),
+    ]);
+    expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        displayText: `why ${placeholder}`,
+        pasteExpansions: pastes,
+      }),
+    );
+  });
+
+  it('sends the context a ?-form command carries with the turn it starts', async () => {
+    const { submitPrompt } = installHooks();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('audit the repo', undefined, {
+        invocationEchoed: true,
+        promptContext: ['Use the audit runbook'],
+      });
+    });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(options(1).promptContext).toEqual(['Use the audit runbook']);
+    await act(async () => live.waiters.shift()?.());
+  });
+
+  it('hands a prompt the hooks held back ahead of the queue on Esc', async () => {
+    const { submitPrompt } = installHooks();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+      result.current.submit('queued');
+    });
+    await vi.waitFor(() => expect(submitPrompt).toHaveBeenCalledTimes(1));
+    const settled = vi.fn();
+    act(() => result.current.interrupt(settled));
+    await vi.waitFor(() => expect(settled).toHaveBeenCalled());
+    expect(settled).toHaveBeenCalledExactlyOnceWith({
+      kind: 'cancelled',
+      queued: expect.objectContaining({ text: 'first\n\nqueued' }),
+      prompt: null,
+    });
+    expect(live.turns).toEqual([]);
+    expect(rows(result.current.items)).toEqual([]);
+  });
+
+  it('settles Esc as usual once the hooks let the prompt through', async () => {
+    const { answer } = installHooks();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await answer({ text: 'first' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    const settled = vi.fn();
+    act(() => result.current.interrupt(settled));
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() => expect(settled).toHaveBeenCalled());
+    expect(settled).toHaveBeenCalledExactlyOnceWith({
+      kind: 'cancelled',
+      queued: null,
+      prompt: expect.objectContaining({ text: 'first' }),
+    });
+  });
+
+  it('settles Esc with the rewrite once the hooks rewrote the prompt', async () => {
+    const { answer } = installHooks();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first AKIA1');
+    });
+    await answer({ text: 'first [redacted]' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    const settled = vi.fn();
+    act(() => result.current.interrupt(settled));
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() => expect(settled).toHaveBeenCalled());
+    expect(settled).toHaveBeenCalledExactlyOnceWith({
+      kind: 'cancelled',
+      queued: null,
+      prompt: expect.objectContaining({
+        text: 'first [redacted]',
+        displayText: 'first [redacted]',
+      }),
+    });
+    expect(JSON.stringify(settled.mock.calls)).not.toContain('AKIA1');
+  });
+
+  it('hands a held prompt back when Esc has no composer to settle with', async () => {
+    const { submitPrompt } = installHooks();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await vi.waitFor(() => expect(submitPrompt).toHaveBeenCalledTimes(1));
+    act(() => result.current.interrupt());
+    await vi.waitFor(() =>
+      expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ text: 'first' }),
+      ),
+    );
+    expect(live.turns).toEqual([]);
+  });
+
+  // A Mod session still loading: `ready` settles when the test says so.
+  const installStartingMods = () => {
+    const startup: {
+      resolve?: () => void;
+      reject?: (error: Error) => void;
+      rejectSession?: (error: Error) => void;
+    } = {};
+    const state = { starting: true, hearsPrompts: false, failed: false };
+    const ready = new Promise<void>((resolve, reject) => {
+      startup.resolve = () => {
+        Object.assign(state, { starting: false, hearsPrompts: true });
+        resolve();
+      };
+      startup.reject = (error) => {
+        Object.assign(state, { starting: false, failed: true });
+        reject(error);
+      };
+      // The session failed to start before it loaded any Mod.
+      startup.rejectSession = (error) => {
+        Object.assign(state, { starting: false });
+        reject(error);
+      };
+    });
+    ready.catch(() => {});
+    const submitPrompt = vi.fn(async (text: string) => ({
+      text: text.replace('AKIA1', '[redacted]'),
+    }));
+    vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue({
+      get starting() {
+        return state.starting;
+      },
+      get hearsPrompts() {
+        return state.hearsPrompts;
+      },
+      get failed() {
+        return state.failed;
+      },
+      stopSubmittedPrompts: vi.fn(),
+      notePersonPrompt: vi.fn(),
+      returnSubmittedPrompt: vi.fn(),
+      subscribePrompts: (_listener: () => void) => () => {},
+      ready,
+      submitPrompt,
+      startTurn: vi.fn(() => ({ id: 't', saw: vi.fn(), complete: vi.fn() })),
+    } as unknown as ReturnType<
+      typeof interactiveMods.getInteractiveModSession
+    >);
+    return { startup, submitPrompt };
+  };
+
+  it('holds a prompt sent while the Mods load until their hooks hear it', async () => {
+    const { startup, submitPrompt } = installStartingMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('deploy with key AKIA1');
+    });
+    await act(async () => {});
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(rows(result.current.items)).toEqual([]);
+    expect(live.turns).toEqual([]);
+    expect(result.current.streaming).toBe(true);
+
+    await act(async () => startup.resolve!());
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+      'deploy with key AKIA1',
+      expect.any(AbortSignal),
+    );
+    expect(live.turns[0].prompt).toBe('deploy with key [redacted]');
+    expect(rows(result.current.items).map((row) => row.text)).toEqual([
+      'deploy with key [redacted]',
+    ]);
+    await act(async () => live.waiters.shift()?.());
+  });
+
+  it('refuses a prompt sent to Mods that fail to load and hands it back', async () => {
+    const { startup, submitPrompt } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await act(async () => startup.reject!(new Error('bad mod')));
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: 'first' }),
+    );
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(live.turns).toEqual([]);
+    expect(rows(result.current.items)).toEqual([]);
+    expect(result.current.items).toContainEqual(
+      expect.objectContaining({
+        kind: 'error',
+        text: expect.stringContaining('Mods failed to initialize'),
+      }),
+    );
+  });
+
+  it('leaves a session that failed to start to report its own error', async () => {
+    const { startup } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await act(async () => startup.rejectSession!(new Error('bad config')));
+    // The send, which surfaces the session's own error, still runs.
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(onPromptReturned).not.toHaveBeenCalled();
+    expect(result.current.items).not.toContainEqual(
+      expect.objectContaining({
+        text: expect.stringContaining('Mods failed to initialize'),
+      }),
+    );
+  });
+
+  it('lets slash-form text past Mods that failed to load, as no Mod hears it', async () => {
+    const { startup } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    await act(async () => startup.reject!(new Error('bad mod')));
+    act(() => {
+      result.current.submit('/unknown thing');
+    });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    expect(live.turns[0].prompt).toBe('/unknown thing');
+    expect(rows(result.current.items)).toEqual([
+      expect.objectContaining({ text: '/unknown thing' }),
+    ]);
+    expect(onPromptReturned).not.toHaveBeenCalled();
+    expect(result.current.items).not.toContainEqual(
+      expect.objectContaining({ kind: 'error' }),
+    );
+  });
+
+  it.each([
+    ['still load', false],
+    ['failed to load', true],
+  ])(
+    'keeps queued prompts out of a slash-form turn as steering while the Mods %s',
+    async (_state, failed) => {
+      const { startup } = installStartingMods();
+      const { result } = renderHook(() =>
+        useOpenTuiLiveTurn({ config: {} as Config }),
+      );
+      if (failed) await act(async () => startup.reject!(new Error('bad mod')));
+      act(() => {
+        result.current.submit('/unknown thing');
+      });
+      await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+      act(() => {
+        result.current.submit('deploy AKIA1');
+      });
+      expect(result.current.messageQueue).toHaveLength(1);
+      let drained: unknown[] = [];
+      act(() => {
+        drained = (live.turns[0].options as LivePromptOptions).drainSteering!();
+      });
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toHaveLength(1);
+    },
+  );
+
+  it('refuses every later prompt once the Mods failed to load, with those queued behind', async () => {
+    const { startup, submitPrompt } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('deploy AKIA1');
+    });
+    act(() => {
+      result.current.submit('key AKIA2');
+    });
+    await act(async () => startup.reject!(new Error('bad mod')));
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: 'deploy AKIA1\n\nkey AKIA2' }),
+    );
+    expect(result.current.messageQueue).toEqual([]);
+
+    onPromptReturned.mockClear();
+    act(() => {
+      result.current.submit('later AKIA3');
+    });
+    await vi.waitFor(() =>
+      expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ text: 'later AKIA3' }),
+      ),
+    );
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(live.turns).toEqual([]);
+    expect(rows(result.current.items)).toEqual([]);
+  });
+
+  it('holds a generated turn until the Mods load, so a queued prompt cannot steer it', async () => {
+    const { startup, submitPrompt } = installStartingMods();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('generated', undefined, { invocationEchoed: true });
+    });
+    act(() => {
+      result.current.submit('secret AKIA1');
+    });
+    await act(async () => {});
+    expect(live.turns).toEqual([]);
+
+    await act(async () => startup.resolve!());
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    const options = live.turns[0].options as LivePromptOptions;
+    expect(options.drainSteering!()).toEqual([]);
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+      'secret AKIA1',
+      expect.any(AbortSignal),
+    );
+    expect(live.turns[1].prompt).toBe('secret [redacted]');
+  });
+
+  it('refuses a generated turn when the Mods fail to load and hands back the prompts queued behind it', async () => {
+    const { startup } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('generated', undefined, { invocationEchoed: true });
+    });
+    act(() => {
+      result.current.submit('secret AKIA1');
+    });
+    await act(async () => startup.reject!(new Error('bad mod')));
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(live.turns).toEqual([]);
+    expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: 'secret AKIA1' }),
+    );
+    expect(result.current.items).toContainEqual(
+      expect.objectContaining({
+        kind: 'error',
+        text: expect.stringContaining('Mods failed to initialize'),
+      }),
+    );
+  });
+
+  it('hands back a prompt cancelled while the Mods load', async () => {
+    const { submitPrompt } = installStartingMods();
+    const onPromptReturned = vi.fn();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config, onPromptReturned }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await act(async () => {});
+    act(() => result.current.interrupt());
+    await vi.waitFor(() =>
+      expect(onPromptReturned).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ text: 'first' }),
+      ),
+    );
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    expect(submitPrompt).not.toHaveBeenCalled();
+    expect(live.turns).toEqual([]);
+  });
+
+  it('holds steering while the hooks hear prompts, then runs it through them', async () => {
+    const { submitPrompt, answer } = installHooks();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await answer({ text: 'first' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    act(() => {
+      result.current.submit('steer AKIA2');
+    });
+    expect(options(1).drainSteering?.()).toEqual([]);
+    expect(result.current.messageQueue).toEqual(['steer AKIA2']);
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() =>
+      expect(submitPrompt).toHaveBeenLastCalledWith(
+        'steer AKIA2',
+        expect.any(AbortSignal),
+      ),
+    );
+    await answer({ text: 'steer [redacted]' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    expect(live.turns[1].prompt).toBe('steer [redacted]');
+    expect(rows(result.current.items).map((row) => row.text)).toEqual([
+      'first',
+      'steer [redacted]',
+    ]);
+  });
+
+  it('lets the hooks hear a queued paste expanded and frames its rewrite again', async () => {
+    const { submitPrompt, answer } = installHooks();
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'C:\\Users\\me\\.aws\\credentials '.repeat(40).trim();
+    const pastes = new Map([[placeholder, body]]);
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('first');
+    });
+    await answer({ text: 'first' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    act(() => {
+      result.current.submit(
+        framePasteExpansion(`check ${placeholder}`, pastes),
+        undefined,
+        {
+          submittedPrompt: `check ${placeholder}`,
+          displayText: `check ${placeholder}`,
+          pasteExpansions: pastes,
+        },
+      );
+    });
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() => expect(submitPrompt).toHaveBeenCalledTimes(2));
+    const heard = submitPrompt.mock.calls[1][0];
+    expect(heard).toBe(`check ${body}`);
+    expect(heard).not.toContain('<clipboard-paste>');
+    await answer({ text: `please check ${body}` });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    expect(live.turns[1].prompt).toBe(
+      framePasteExpansion(`please check ${placeholder}`, pastes),
+    );
+  });
+
+  it('does not hear slash-form text or generated prompts', async () => {
+    const { submitPrompt } = installHooks();
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('/unknown thing');
+    });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    await act(async () => live.waiters.shift()?.());
+    await vi.waitFor(() => expect(result.current.streaming).toBe(false));
+    act(() => {
+      result.current.submit('generated payload', undefined, {
+        onComplete: async () => {},
+      });
+    });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(2));
+    expect(submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('hears slash-form text sent with an image, which goes to the model as a prompt', async () => {
+    const { submitPrompt, answer } = installHooks();
+    const path = join(dir, 'slash.png');
+    writeFileSync(path, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const { result } = renderHook(() =>
+      useOpenTuiLiveTurn({ config: {} as Config }),
+    );
+    act(() => {
+      result.current.submit('/deploy key AKIA1', [path]);
+    });
+    await vi.waitFor(() =>
+      expect(submitPrompt).toHaveBeenCalledExactlyOnceWith(
+        '/deploy key AKIA1',
+        expect.any(AbortSignal),
+      ),
+    );
+    expect(live.turns).toEqual([]);
+    await answer({ text: '/deploy key [redacted]' });
+    await vi.waitFor(() => expect(live.turns).toHaveLength(1));
+    const sent = live.turns[0].prompt as Array<{ text?: string }>;
+    expect(sent[0].text).toBe('/deploy key [redacted]');
   });
 });

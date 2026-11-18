@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -13,6 +14,7 @@ import { createServer, request as httpRequest, type Server } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { inspect } from 'node:util';
+import { prepareManagedExtensionPackage } from '../packages/core/src/extension/managed-package.js';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -34,6 +36,7 @@ interface SavedApprovalOptions {
   createdAt: number;
   expiresAt: number;
   continuationRef: { resourceId: string };
+  inputRef?: { resourceId: string };
 }
 interface SavedApprovalPlan {
   calls: {
@@ -47,6 +50,12 @@ interface SavedApprovalPlan {
   approvalOrdinal?: number;
   stage: string;
   batchId: string;
+  commandStep?: {
+    toolStageId: string;
+    toolName: string;
+    inputRef: { resourceId: string };
+    configRevision: number;
+  };
   runtime: {
     runtimeSessionId: string;
     bindingId: string;
@@ -60,6 +69,7 @@ let originalApprovalPlan: SavedApprovalPlan | undefined;
 // re-decided by the recovery generation.
 let siblingApprovalId: string | undefined;
 let siblingApprovalOptions: SavedApprovalOptions | undefined;
+let siblingCommandStageId: string | undefined;
 // B3: tool B's new Action, detected after Allow A and decided by the runner's
 // second Allow; both earlier Actions must end decided under their original IDs.
 let secondApprovalId: string | undefined;
@@ -88,6 +98,8 @@ let sessionFailover = false;
 let inflightFailover = false;
 let continuationFailover = false;
 let bigOutput = false;
+let loopSkill = false;
+let loopFire = false;
 let harnessOnly = false;
 let freeze = false;
 let modelRoundFailover = false;
@@ -103,6 +115,7 @@ const approvalFaults = [
   'after-result',
   'finished-before-commit',
   'sibling-approval',
+  'command-rewrite',
   'after-earlier-tools',
   'cleanup-failed',
   'decision-reply-lost',
@@ -132,6 +145,10 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     inflightFailover = true;
   } else if (argument === '--big-output') {
     bigOutput = true;
+  } else if (argument === '--loop-skill') {
+    loopSkill = true;
+  } else if (argument === '--loop-fire') {
+    loopFire = true;
   } else if (argument === '--continuation-failover') {
     continuationFailover = true;
   } else if (argument === '--harness-only') {
@@ -150,7 +167,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|after-earlier-tools|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output|--loop-skill|--loop-fire] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|command-rewrite|after-earlier-tools|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -173,6 +190,7 @@ const approvalRecovery =
 const approvalFault = (g3FaultArgument ?? process.env['G3_FAULT']) as
   | ApprovalFault
   | undefined;
+const commandRewriteRecovery = approvalFault === 'command-rewrite';
 if (approvalFault && !approvalFaults.includes(approvalFault)) {
   throw new Error(
     `--g3-fault (or G3_FAULT) must be ${approvalFaults.join(', ')}`,
@@ -183,6 +201,14 @@ if (approvalFault && verificationMode !== 'allow') {
     '--g3-fault requires --g3-verify allow: Deny, Cancel and expiry have no approved execution to crash into',
   );
 }
+if (commandRewriteRecovery && process.platform !== 'linux') {
+  throw new Error('--g3-fault command-rewrite requires Linux cgroup v2');
+}
+const commandRewriteCgroupRoot = commandRewriteRecovery
+  ? requiredCommandRewriteCgroupRoot(
+      process.env['QWEN_E2E_EXTENSION_CGROUP_ROOT'],
+    )
+  : undefined;
 const verificationDirectory = path.resolve(
   root,
   process.env['G3_VERIFY_REPORT_DIR'] ??
@@ -203,6 +229,8 @@ if (
     continuationFailover,
     modelRoundFailover,
     bigOutput,
+    loopSkill,
+    loopFire,
   ].filter(Boolean).length > 1
 ) {
   throw new Error('The deterministic E2E modes are exclusive');
@@ -265,9 +293,6 @@ if (runtimeTakeover && !harnessOnly && process.platform !== 'linux') {
     `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted failover E2E CI job or a Linux container.`,
   );
 }
-// The Stage A acceptance criterion names a 15-second Runtime delay; the
-// real-provider TTFT margin under it is unrecorded (tracked in #12941).
-const modelBeforeRuntimeAssertionDelayMs = 15_000;
 // The frozen-arm teardown wakes the former writer by this registry key, so
 // the start name and the wake-up lookup must share it (a rename drift
 // would leave a stopped child wedged on the runner).
@@ -280,14 +305,11 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const springModule = path.join(root, 'packages', 'managed-agent-server');
 const springTarget = path.join(springModule, 'server', 'target');
-// The pom attaches classified repackage executions alongside the
-// unclassified server jar, so a wildcard over target/ matches several
-// artifacts. Read the project version from the
-// pom and name the unclassified jar exactly — version-independent without
-// assuming it is the only packaged artifact. The <version> immediately
-// following the module's own <artifactId> (not the <parent> block's). The
-// capture itself is whitespace-tolerant, so a formatter wrapping or
-// re-indenting the element cannot flow newlines into the jar path.
+// Name the executable jar exactly by the project version read from the pom,
+// so the path is version-independent. The <version> immediately following the
+// module's own <artifactId> (not the <parent> block's). The capture itself is
+// whitespace-tolerant, so a formatter wrapping or re-indenting the element
+// cannot flow newlines into the jar path.
 const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
 const pomVersion = pomXml.match(
   /<artifactId>qwen-managed-agent-parent<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
@@ -304,7 +326,7 @@ const springJar = path.join(
 for (const required of [
   cliBundle,
   springJar,
-  ...(durableFailover ? [] : [settingsPath]),
+  ...(durableFailover || loopSkill || loopFire ? [] : [settingsPath]),
 ]) {
   if (!existsSync(required)) {
     throw new Error(`Required file is missing: ${required}`);
@@ -366,6 +388,638 @@ const inflightSideEffectContent = 'MANAGED_INFLIGHT_TOOL_EXECUTED\n';
 const siblingSideEffectName = 'managed-sibling-side-effect.txt';
 const siblingSideEffect = path.join(workspaceMount, siblingSideEffectName);
 const siblingSideEffectContent = 'MANAGED_SIBLING_TOOL_EXECUTED\n';
+let commandRewriteExtensionId = 'ext_11111111-1111-4111-8111-111111111111';
+const commandRewriteOriginalFirst =
+  'printf ORIGINAL_FIRST > managed-a3-first.txt';
+const commandRewriteOriginalSecond =
+  'printf ORIGINAL_SECOND > managed-a3-second.txt';
+const commandRewriteRewrittenFirst =
+  'printf REWRITTEN_FIRST > managed-a3-first.txt';
+const commandRewriteRewrittenSecond =
+  'printf REWRITTEN_SECOND > managed-a3-second.txt';
+const commandRewriteFirstEffect = path.join(
+  workspaceMount,
+  'managed-a3-first.txt',
+);
+const commandRewriteSecondEffect = path.join(
+  workspaceMount,
+  'managed-a3-second.txt',
+);
+const commandRewriteHookLog = path.join(temporary, 'managed-a3-hooks.jsonl');
+const commandRewriteExtensionArtifacts = path.join(
+  temporary,
+  'extension-artifacts',
+);
+const commandRewriteExtensionCache = path.join(temporary, 'extension-cache');
+const commandRewriteExtensionSource = path.join(temporary, 'extension-source');
+const commandRewriteExtensionDestination = path.join(
+  temporary,
+  'extension-package',
+);
+
+interface CommandRewriteActionEvidence {
+  id: string;
+  state: string;
+  createdAt: number;
+  expiresAt: number;
+  inputRef: { resourceId: string };
+  command: string;
+  timeout: number;
+}
+interface CommandRewriteStageEvidence {
+  toolStageId: string;
+  stepIndex: number;
+  runState: string;
+  resultRef: { resourceId: string } | null;
+  inputRef: { resourceId: string };
+  command: string;
+  timeout: number;
+}
+interface CommandRewriteHookEvidence {
+  hookExecutionId: string;
+  occurrenceId: string;
+  toolUseId: string;
+  eventName: string;
+  hookId: string;
+  registrationId: string;
+  ordinal: number;
+  runState: string;
+  resultRef: { resourceId: string } | null;
+}
+interface CommandRewritePhysicalHook {
+  hook_event_name: string;
+  tool_use_id: string;
+  tool_input: { command?: string };
+}
+interface CommandRewriteReceipt {
+  operationId: string;
+  fingerprint: string;
+  state: string;
+}
+interface CommandRewriteEvidence {
+  actions: CommandRewriteActionEvidence[];
+  checkpoint: { phase: string; requestId: string };
+  stages: CommandRewriteStageEvidence[];
+  durableHooks: CommandRewriteHookEvidence[];
+  physicalHooks: CommandRewritePhysicalHook[];
+  effects: [string | null, string | null];
+  receipts: CommandRewriteReceipt[];
+  modelRequests?: { initial: number; afterResults: number };
+}
+interface CommandRewriteIdentity {
+  runtimeSessionId: string;
+  harnessSessionId: string;
+  revision: number;
+}
+
+function requiredCommandRewriteCgroupRoot(value: string | undefined): string {
+  if (!value || !path.isAbsolute(value))
+    throw new Error(
+      'QWEN_E2E_EXTENSION_CGROUP_ROOT must name a delegated absolute cgroup v2 root',
+    );
+  if (!existsSync(path.join(value, 'cgroup.kill')))
+    throw new Error(`Delegated cgroup v2 root is not ready: ${value}`);
+  return value;
+}
+
+function commandRewriteSpringEnvironment(
+  cgroupRoot: string,
+  artifactDirectory: string,
+  cacheDirectory: string,
+): Record<string, string> {
+  return {
+    QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED: 'true',
+    QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY: artifactDirectory,
+    QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS: trustedActor,
+    QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_ENABLED: 'true',
+    QWEN_MANAGED_AGENT_EXTENSION_EXECUTION_MODE: 'linux-cgroup',
+    QWEN_MANAGED_AGENT_EXTENSION_CACHE_DIRECTORY: cacheDirectory,
+    QWEN_MANAGED_AGENT_EXTENSION_CGROUP_ROOT: cgroupRoot,
+    QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED: 'true',
+    QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
+    QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED: 'true',
+  };
+}
+
+async function prepareCommandRewriteExtensionPackage(
+  sourceDirectory: string,
+  destination: string,
+  hookLog: string,
+) {
+  mkdirSync(path.join(sourceDirectory, 'commands'), { recursive: true });
+  const hookCommand = [
+    JSON.stringify(process.execPath),
+    '"${extensionPath}/hook.cjs"',
+    JSON.stringify(hookLog),
+  ].join(' ');
+  writeFileSync(
+    path.join(sourceDirectory, 'qwen-extension.json'),
+    JSON.stringify({
+      name: 'a3-recovery',
+      version: '1.0.0',
+      hooks: Object.fromEntries(
+        ['PreToolUse', 'PostToolUse'].map((event) => [
+          event,
+          [
+            {
+              matcher: 'run_shell_command',
+              hooks: [{ type: 'command', command: hookCommand }],
+            },
+          ],
+        ]),
+      ),
+    }),
+  );
+  writeFileSync(
+    path.join(sourceDirectory, 'commands', 'two-step.md'),
+    `---\ndescription: Run two approval-bound commands\n---\n!{${commandRewriteOriginalFirst}}\n!{${commandRewriteOriginalSecond}}\n`,
+  );
+  writeFileSync(
+    path.join(sourceDirectory, 'hook.cjs'),
+    `void (async () => {\n` +
+      `const fs = require('node:fs');\n` +
+      `const originals = ${JSON.stringify([commandRewriteOriginalFirst, commandRewriteOriginalSecond])};\n` +
+      `const rewritten = ${JSON.stringify([commandRewriteRewrittenFirst, commandRewriteRewrittenSecond])};\n` +
+      `let input = '';\n` +
+      `for await (const chunk of process.stdin) input += chunk;\n` +
+      `const value = JSON.parse(input);\n` +
+      `const fd = fs.openSync(process.argv[2], 'a');\n` +
+      `try {\n` +
+      `  fs.writeSync(fd, JSON.stringify({ hook_event_name: value.hook_event_name, tool_use_id: value.tool_use_id, tool_input: value.tool_input }) + '\\n');\n` +
+      `  fs.fsyncSync(fd);\n` +
+      `} finally { fs.closeSync(fd); }\n` +
+      `const index = originals.indexOf(value.tool_input?.command);\n` +
+      `const output = value.hook_event_name === 'PreToolUse' && index >= 0\n` +
+      `  ? { hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput: { command: rewritten[index], timeout: 120000 } } }\n` +
+      `  : {};\n` +
+      `process.stdout.write(JSON.stringify(output));\n` +
+      `})().catch((error) => { console.error(error); process.exitCode = 1; });\n`,
+  );
+  return prepareManagedExtensionPackage(
+    { type: 'local', source: sourceDirectory },
+    { target: { platform: 'linux', arch: 'any' }, destination },
+  );
+}
+
+async function publishPreparedCommandRewriteExtension(
+  springUrl: string,
+  tenant: string,
+  prepared: Awaited<ReturnType<typeof prepareManagedExtensionPackage>>,
+) {
+  const manifest = Buffer.from(JSON.stringify(prepared.manifest)).toString(
+    'base64url',
+  );
+  const response = await fetch(
+    `${springUrl}/v1/agents/workspaces/${boundWorkspaceId}/extensions?packageDigest=${prepared.packageDigest}&manifest=${manifest}`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        'idempotency-key': `a3-extension-${prepared.packageDigest}`,
+        ...tenantHeaders(tenant),
+      },
+      body: readFileSync(prepared.archivePath),
+    },
+  );
+  const operation = (await response.json()) as { extensionId?: unknown };
+  if (![200, 202].includes(response.status))
+    throw new Error(
+      `A3 extension publish returned ${response.status}: ${JSON.stringify(operation)}`,
+    );
+  if (
+    typeof operation.extensionId !== 'string' ||
+    !operation.extensionId.startsWith('ext_')
+  )
+    throw new Error('A3 extension publish returned no extensionId');
+  commandRewriteExtensionId = operation.extensionId;
+  return {
+    extensionId: commandRewriteExtensionId,
+    packageRevision: 1,
+    packageDigest: prepared.packageDigest,
+  };
+}
+
+function commandRewriteCanonicalDigest(value: unknown): string {
+  const canonical = (item: unknown): unknown =>
+    Array.isArray(item)
+      ? item.map(canonical)
+      : item && typeof item === 'object'
+        ? Object.fromEntries(
+            Object.entries(item)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([key, child]) => [key, canonical(child)]),
+          )
+        : item;
+  return createHash('sha256')
+    .update(JSON.stringify(canonical(value)))
+    .digest('hex');
+}
+
+function commandRewriteReceiptFingerprint(
+  identity: CommandRewriteIdentity,
+  stage: CommandRewriteStageEvidence,
+): string {
+  return commandRewriteCanonicalDigest({
+    runtimeSessionId: identity.runtimeSessionId,
+    harnessSessionId: identity.harnessSessionId,
+    operationId: stage.toolStageId,
+    toolName: 'shell',
+    input: { command: stage.command, timeout: stage.timeout },
+    revision: identity.revision,
+    extensionId: commandRewriteExtensionId,
+  });
+}
+
+function commandRewritePhysicalHookCount(
+  hooks: CommandRewritePhysicalHook[],
+  event: string,
+  stageId: string,
+): number {
+  return hooks.filter(
+    (hook) => hook.hook_event_name === event && hook.tool_use_id === stageId,
+  ).length;
+}
+
+function commandRewriteExpectedCommand(stepIndex: number): string {
+  return stepIndex === 0
+    ? commandRewriteRewrittenFirst
+    : commandRewriteRewrittenSecond;
+}
+
+function assertCommandRewriteStages(
+  stages: CommandRewriteStageEvidence[],
+  count: number,
+): void {
+  if (
+    stages.length !== count ||
+    stages.some(
+      (stage, index) =>
+        stage.stepIndex !== index ||
+        stage.runState !== 'settled' ||
+        !stage.resultRef ||
+        stage.command !== commandRewriteExpectedCommand(index) ||
+        stage.timeout !== 120000 ||
+        !stage.inputRef.resourceId,
+    ) ||
+    new Set(stages.map((stage) => stage.toolStageId)).size !== count
+  )
+    throw new Error(
+      `A3 command stage evidence differs: ${JSON.stringify(stages)}`,
+    );
+}
+
+function assertCommandRewriteReceipts(
+  receipts: CommandRewriteReceipt[],
+  stages: CommandRewriteStageEvidence[],
+  identity: CommandRewriteIdentity,
+): void {
+  if (
+    receipts.length !== stages.length ||
+    receipts.some(
+      (receipt) =>
+        receipt.state !== 'settled' ||
+        !stages.some(
+          (stage) =>
+            stage.toolStageId === receipt.operationId &&
+            commandRewriteReceiptFingerprint(identity, stage) ===
+              receipt.fingerprint,
+        ),
+    )
+  )
+    throw new Error(
+      `A3 extension command receipts differ: ${JSON.stringify(receipts)}`,
+    );
+}
+
+function assertCommandRewriteDurableHook(
+  hooks: CommandRewriteHookEvidence[],
+  event: string,
+  stageId: string,
+): void {
+  const matches = hooks.filter(
+    (hook) =>
+      hook.eventName === event &&
+      hook.toolUseId === stageId &&
+      hook.hookId !== '__plan__',
+  );
+  if (
+    matches.length !== 1 ||
+    matches[0].runState !== 'settled' ||
+    !matches[0].resultRef
+  )
+    throw new Error(
+      `A3 durable ${event} Hook evidence differs for ${stageId}: ${JSON.stringify(matches)}`,
+    );
+}
+
+function assertCommandRewriteDecision(
+  decision: {
+    optionId: string;
+    inputRevision: number;
+    policyRevision: string;
+  },
+  options: { inputRevision: number; policyRevision: string },
+  actionId: string,
+): void {
+  if (
+    decision.optionId !== 'allow' ||
+    decision.inputRevision !== options.inputRevision ||
+    decision.policyRevision !== options.policyRevision
+  )
+    throw new Error(
+      `A3 command decision differs from the chosen option: ${JSON.stringify({ actionId, decision })}`,
+    );
+}
+
+function assertCommandRewriteCrashBarrier(
+  evidence: CommandRewriteEvidence,
+  identity: CommandRewriteIdentity,
+): void {
+  const [first, second] = evidence.actions;
+  if (
+    evidence.actions.length !== 2 ||
+    first.id === second.id ||
+    !first.id.startsWith('command_approval_') ||
+    !second.id.startsWith('command_approval_') ||
+    first.state !== 'decided' ||
+    second.state !== 'requested' ||
+    evidence.checkpoint.phase !== 'await_action' ||
+    evidence.checkpoint.requestId !== second.id
+  )
+    throw new Error(
+      `A3 crash did not land between its two command Actions: ${JSON.stringify(evidence.actions)}`,
+    );
+  for (const [index, action] of evidence.actions.entries()) {
+    if (
+      action.command !== commandRewriteExpectedCommand(index) ||
+      action.timeout !== 120000 ||
+      !action.inputRef.resourceId ||
+      !Number.isSafeInteger(action.createdAt) ||
+      !Number.isSafeInteger(action.expiresAt) ||
+      action.expiresAt <= action.createdAt
+    )
+      throw new Error(
+        `A3 crash Action ${index + 1} has the wrong rewritten input: ${JSON.stringify(action)}`,
+      );
+  }
+  assertCommandRewriteStages(evidence.stages, 1);
+  const stageId = evidence.stages[0].toolStageId;
+  assertCommandRewriteDurableHook(evidence.durableHooks, 'PreToolUse', stageId);
+  assertCommandRewriteDurableHook(
+    evidence.durableHooks,
+    'PostToolUse',
+    stageId,
+  );
+  if (
+    commandRewritePhysicalHookCount(
+      evidence.physicalHooks,
+      'PreToolUse',
+      stageId,
+    ) !== 1 ||
+    commandRewritePhysicalHookCount(
+      evidence.physicalHooks,
+      'PostToolUse',
+      stageId,
+    ) !== 1 ||
+    evidence.physicalHooks.filter(
+      (hook) => hook.hook_event_name === 'PostToolUse',
+    ).length !== 1 ||
+    evidence.effects[0] !== 'REWRITTEN_FIRST' ||
+    evidence.effects[1] !== null
+  )
+    throw new Error('A3 crash physical Hook/effect boundary differs');
+  assertCommandRewriteReceipts(evidence.receipts, evidence.stages, identity);
+}
+
+function assertCommandRewriteFinalEvidence(
+  evidence: CommandRewriteEvidence,
+  identity: CommandRewriteIdentity,
+): void {
+  if (
+    evidence.actions.length !== 2 ||
+    evidence.actions[0].id === evidence.actions[1].id ||
+    evidence.actions.some(
+      (action, index) =>
+        action.state !== 'decided' ||
+        action.command !== commandRewriteExpectedCommand(index) ||
+        action.timeout !== 120000 ||
+        !action.inputRef.resourceId,
+    )
+  )
+    throw new Error('A3 final Action identities or rewritten inputs differ');
+  assertCommandRewriteStages(evidence.stages, 2);
+  for (const stage of evidence.stages) {
+    for (const event of ['PreToolUse', 'PostToolUse']) {
+      assertCommandRewriteDurableHook(
+        evidence.durableHooks,
+        event,
+        stage.toolStageId,
+      );
+      if (
+        commandRewritePhysicalHookCount(
+          evidence.physicalHooks,
+          event,
+          stage.toolStageId,
+        ) !== 1
+      )
+        throw new Error(
+          `A3 physical ${event} count differs for ${stage.toolStageId}`,
+        );
+    }
+  }
+  if (
+    evidence.effects[0] !== 'REWRITTEN_FIRST' ||
+    evidence.effects[1] !== 'REWRITTEN_SECOND' ||
+    evidence.modelRequests?.initial !== 1 ||
+    evidence.modelRequests?.afterResults !== 1
+  )
+    throw new Error('A3 final physical effects or model traffic differ');
+  assertCommandRewriteReceipts(evidence.receipts, evidence.stages, identity);
+}
+
+function readCommandRewritePhysicalHooks(
+  logPath: string,
+): CommandRewritePhysicalHook[] {
+  if (!existsSync(logPath)) return [];
+  const text = readFileSync(logPath, 'utf8').trim();
+  return text ? text.split('\n').map((line) => JSON.parse(line)) : [];
+}
+
+function commandRewriteReceiptDirectory(
+  cacheDirectory: string,
+  tenant: string,
+  workspaceId: string,
+  workspaceGeneration: string,
+): string {
+  const key = createHash('sha256')
+    .update(`${tenant}\0${workspaceId}\0${workspaceGeneration}`)
+    .digest('hex');
+  return path.join(cacheDirectory, key, 'command-receipts');
+}
+
+function readCommandRewriteReceipts(
+  directory: string,
+): CommandRewriteReceipt[] {
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory)
+    .filter((name) => name.endsWith('.json'))
+    .sort()
+    .map(
+      (name) =>
+        JSON.parse(
+          readFileSync(path.join(directory, name), 'utf8'),
+        ) as CommandRewriteReceipt,
+    );
+}
+
+function readCommandRewriteDomainRecords(
+  mysqlPort: number,
+  sessionFilter: string,
+  domain: 'tool_stage' | 'hook_execution',
+): Array<Record<string, unknown>> {
+  const rows = runMysql(
+    mysqlPort,
+    `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_session_record sr JOIN qwen_managed_agent.ma_resource r ON r.session_scope_key=sr.session_scope_key AND r.resource_id=sr.record_resource_id WHERE sr.session_scope_key=(SELECT session_scope_key FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}) AND sr.record_kind='DOMAIN' AND sr.domain='${domain}' ORDER BY sr.gmt_create, sr.record_key`,
+  );
+  return rows
+    ? rows
+        .split('\n')
+        .map((row) => JSON.parse(Buffer.from(row, 'hex').toString('utf8')))
+    : [];
+}
+
+function readCommandRewriteResource<T>(
+  mysqlPort: number,
+  sessionFilter: string,
+  ref: { resourceId: string },
+  kind?: 'managed-extension-command-input',
+): T {
+  const hex = runMysql(
+    mysqlPort,
+    `SELECT HEX(inline_bytes) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND resource_id=${sqlString(ref.resourceId)}${kind ? ` AND kind=${sqlString(kind)}` : ''}`,
+  );
+  if (!hex || hex === 'NULL')
+    throw new Error(`A3 resource is unavailable: ${ref.resourceId}`);
+  return JSON.parse(Buffer.from(hex, 'hex').toString('utf8')) as T;
+}
+
+function readCommandRewriteActionEvidence(
+  mysqlPort: number,
+  sessionFilter: string,
+  actionId: string,
+): CommandRewriteActionEvidence {
+  const row = runMysql(
+    mysqlPort,
+    `SELECT state, options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(actionId)}`,
+  );
+  const [state, optionsJson] = row.split('\t');
+  const options = JSON.parse(optionsJson) as SavedApprovalOptions & {
+    inputRef: { resourceId: string };
+  };
+  const input = readCommandRewriteResource<{
+    command: string;
+    timeout: number;
+  }>(
+    mysqlPort,
+    sessionFilter,
+    options.inputRef,
+    'managed-extension-command-input',
+  );
+  return {
+    id: actionId,
+    state,
+    createdAt: options.createdAt,
+    expiresAt: options.expiresAt,
+    inputRef: options.inputRef,
+    command: input.command,
+    timeout: input.timeout,
+  };
+}
+
+function collectCommandRewriteEvidence(
+  mysqlPort: number,
+  sessionFilter: string,
+  actions: CommandRewriteActionEvidence[],
+  checkpoint: { phase: string; requestId: string },
+  receiptDirectory: string,
+  modelRequests?: { initial: number; afterResults: number },
+): CommandRewriteEvidence {
+  const stages = readCommandRewriteDomainRecords(
+    mysqlPort,
+    sessionFilter,
+    'tool_stage',
+  ).map((value) => {
+    const stage = value as unknown as {
+      toolStageId: string;
+      stepIndex: number;
+      run: { state: string };
+      resultRef: { resourceId: string } | null;
+      inputRef: { resourceId: string };
+    };
+    const input = readCommandRewriteResource<{
+      command: string;
+      timeout: number;
+    }>(
+      mysqlPort,
+      sessionFilter,
+      stage.inputRef,
+      'managed-extension-command-input',
+    );
+    return {
+      toolStageId: stage.toolStageId,
+      stepIndex: stage.stepIndex,
+      runState: stage.run.state,
+      resultRef: stage.resultRef,
+      inputRef: stage.inputRef,
+      command: input.command,
+      timeout: input.timeout,
+    };
+  });
+  const durableHooks = readCommandRewriteDomainRecords(
+    mysqlPort,
+    sessionFilter,
+    'hook_execution',
+  ).map((value) => {
+    const hook = value as unknown as CommandRewriteHookEvidence & {
+      run: { state: string };
+      inputRef: { resourceId: string };
+    };
+    const input = readCommandRewriteResource<{ tool_use_id?: unknown }>(
+      mysqlPort,
+      sessionFilter,
+      hook.inputRef,
+    );
+    return {
+      hookExecutionId: hook.hookExecutionId,
+      occurrenceId: hook.occurrenceId,
+      toolUseId: typeof input.tool_use_id === 'string' ? input.tool_use_id : '',
+      eventName: hook.eventName,
+      hookId: hook.hookId,
+      registrationId: hook.registrationId,
+      ordinal: hook.ordinal,
+      runState: hook.run.state,
+      resultRef: hook.resultRef,
+    };
+  });
+  return {
+    actions,
+    checkpoint,
+    stages,
+    durableHooks,
+    physicalHooks: readCommandRewritePhysicalHooks(commandRewriteHookLog),
+    effects: [
+      existsSync(commandRewriteFirstEffect)
+        ? readFileSync(commandRewriteFirstEffect, 'utf8')
+        : null,
+      existsSync(commandRewriteSecondEffect)
+        ? readFileSync(commandRewriteSecondEffect, 'utf8')
+        : null,
+    ],
+    receipts: readCommandRewriteReceipts(receiptDirectory),
+    ...(modelRequests ? { modelRequests } : {}),
+  };
+}
+
 // B3 after-earlier-tools arm: a second, later tool round writes its own file so
 // each earlier round's single execution has its own physical effect. The +Nk
 // budget directive makes the TurnBudget snapshot non-null so its restoration is
@@ -392,6 +1046,9 @@ try {
     workspaceMount,
     path.join(runtimeHome, '.qwen'),
     runtimeState,
+    ...(commandRewriteRecovery
+      ? [commandRewriteExtensionArtifacts, commandRewriteExtensionCache]
+      : []),
     ...(frozenControlPlane ? [replacementRuntimeState] : []),
     mysqlData,
   ]) {
@@ -400,10 +1057,18 @@ try {
     mkdirSync(directory, {
       recursive: true,
       ...(directory === runtimeState && workspaceTurns ? { mode: 0o700 } : {}),
+      ...(commandRewriteRecovery &&
+      [commandRewriteExtensionArtifacts, commandRewriteExtensionCache].includes(
+        directory,
+      )
+        ? { mode: 0o700 }
+        : {}),
     });
   }
-  if (durableFailover) {
-    for (const home of [harnessHome, replacementHarnessHome]) {
+  if (durableFailover || loopSkill || loopFire) {
+    for (const home of durableFailover
+      ? [harnessHome, replacementHarnessHome]
+      : [harnessHome]) {
       writeFileSync(
         path.join(home, '.qwen', 'settings.json'),
         JSON.stringify({ ui: { enableFollowupSuggestions: false } }),
@@ -1358,12 +2023,13 @@ function siblingFinalPlan(
 
 // B3: read the durable round and cost ledger the way recovery restores them.
 // The round comes from the latest hosted-model-request (model.attempt.recoveryRef);
-// the budget snapshot and per-model token metrics are reverse-scanned from the
-// route/usage resources exactly as bindBudget does on a cold load.
+// the budget snapshot and per-model metrics are reverse-scanned from route/usage
+// resources. Diagnostic usage keeps raw charged output separately from metrics.
 interface B3RoundBudget {
   round: number;
   budget: unknown;
   models: unknown;
+  rawOutputTokensTotal?: number;
 }
 function b3RoundAndBudget(port: number, sessionFilter: string): B3RoundBudget {
   const attempts = readJournalManagedEvents(port, sessionFilter)
@@ -1403,17 +2069,36 @@ function b3RoundAndBudget(port: number, sessionFilter: string): B3RoundBudget {
   }
   let budget: unknown;
   let models: unknown;
+  let rawOutputTokensTotal: number | undefined;
   for (let i = attempts.length - 1; i >= 0; i -= 1) {
     for (const field of ['usageRef', 'routeRef']) {
       const saved = readResource(attempts[i].payload[field]);
       if (!saved) continue;
       if (budget === undefined && 'budget' in saved) budget = saved['budget'];
-      if (models === undefined && saved['models']) models = saved['models'];
+      if (models === undefined) {
+        const statistics = saved['statistics'] as
+          | {
+              rawOutputTokensTotal: number;
+              models: Array<{ key: string; metrics: unknown }>;
+            }
+          | undefined;
+        if (statistics) {
+          models = Object.fromEntries(
+            statistics.models.map((model) => [model.key, model.metrics]),
+          );
+          rawOutputTokensTotal = statistics.rawOutputTokensTotal;
+        } else if (saved['models']) models = saved['models'];
+      }
     }
     if (budget !== undefined && models !== undefined) break;
   }
   if (round < 0) throw new Error('B3 window has no saved model-request round');
-  return { round, budget: budget ?? null, models: models ?? null };
+  return {
+    round,
+    budget: budget ?? null,
+    models: models ?? null,
+    ...(rawOutputTokensTotal === undefined ? {} : { rawOutputTokensTotal }),
+  };
 }
 
 // B3: the turn cost snapshot and per-model token ledger must survive the
@@ -1436,6 +2121,19 @@ function assertB3CostContinuity(
     throw new Error(
       `B3 recovery reset the turn budget snapshot: before=${JSON.stringify(before.budget)} after=${JSON.stringify(after.budget)}`,
     );
+  if (before.rawOutputTokensTotal !== undefined) {
+    if (
+      !Number.isFinite(before.rawOutputTokensTotal) ||
+      before.rawOutputTokensTotal <= 0
+    )
+      throw new Error('B3 crash-boundary raw output ledger was not exercised');
+    if (
+      after.rawOutputTokensTotal === undefined ||
+      !Number.isFinite(after.rawOutputTokensTotal) ||
+      after.rawOutputTokensTotal < before.rawOutputTokensTotal
+    )
+      throw new Error('B3 recovery wiped the raw output ledger');
+  }
   const b3ModelsBefore = (before.models ?? {}) as Record<
     string,
     { tokens?: { candidates?: number } }
@@ -1939,6 +2637,76 @@ async function waitForTerminal(
   return { events, lastSequence: cursor };
 }
 
+// Attests the admission replace path bidirectionally. The caller loop import's
+// marker must be gone (the server replaced it with the profile variant), and a
+// separate probe skill's marker must remain (caller skills reached admission and
+// were published). The loop marker's absence alone has two causes — the replace
+// path ran, or caller skills never arrived — so the preserved probe disambiguates.
+// Kept a top-level pure declaration so the meta-test can extract and execute it.
+function assertCallerImportReplaced(
+  messages: unknown,
+  removedMarker: string,
+  preservedMarker: string,
+): void {
+  const text = JSON.stringify(messages);
+  if (text.includes(removedMarker)) {
+    throw new Error(
+      `Caller loop import survived admission; the replace path did not run. firstRound=${text.slice(0, 1500)}`,
+    );
+  }
+  if (!text.includes(preservedMarker)) {
+    throw new Error(
+      `Caller skills never reached admission; the probe skill marker is absent. firstRound=${text.slice(0, 1500)}`,
+    );
+  }
+}
+
+const loopFirePrompt = 'LOOP-FIRE-PROMPT check the deploy';
+const loopFireWakeResponse = 'LOOP_FIRE_OBSERVED';
+
+// Attests a scheduled fire bidirectionally: the ledger must record an
+// occurrence the scanner fired (trigger scheduled, outcome fired — a manual
+// run or a skipped slot must not pass), and the model round that ran must
+// carry that same occurrence's framing: its key verbatim, the minted
+// Automation ID and the scheduled trigger. A fired row alone could ride a
+// turn the model never saw; a framed round alone could be a client prompt in
+// disguise. Kept a top-level pure declaration so the meta-test can extract
+// and execute it.
+function assertScheduledFireWitness(
+  runs: unknown,
+  wakeText: string,
+  scheduleId: string,
+): { occurrenceKey: string } {
+  const rows = (Array.isArray(runs) ? runs : []) as {
+    trigger?: string;
+    outcome?: string;
+    occurrence_key?: string;
+  }[];
+  const fired = rows.find(
+    (row) => row.trigger === 'scheduled' && row.outcome === 'fired',
+  );
+  if (!fired) {
+    throw new Error(
+      `No scheduled occurrence settled fired; the scanner never fired the schedule. runs=${JSON.stringify(rows).slice(0, 1500)}`,
+    );
+  }
+  const occurrenceKey = fired.occurrence_key;
+  if (typeof occurrenceKey !== 'string' || !wakeText.includes(occurrenceKey)) {
+    throw new Error(
+      `The wake round does not name the fired occurrence; ledger and model round are not the same fire. occurrenceKey=${JSON.stringify(occurrenceKey)} wakeText=${wakeText.slice(0, 1500)}`,
+    );
+  }
+  if (
+    !wakeText.includes(`Automation ID: ${scheduleId}`) ||
+    !wakeText.includes('Trigger: scheduled')
+  ) {
+    throw new Error(
+      `The wake round lacks the scheduled framing for ${scheduleId}; it is not the fire's turn. wakeText=${wakeText.slice(0, 1500)}`,
+    );
+  }
+  return { occurrenceKey };
+}
+
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
 const failoverSecondMarker = 'MANAGED_SESSION_FAILOVER_SECOND_TURN';
 const bigOutputSource = 'abcdefghijklmnopqrstu长😀'.repeat(
@@ -2031,7 +2799,11 @@ try {
             ? 'managed-frozen-control-plane-e2e'
             : modelRoundFailover
               ? 'managed-model-round-failover-e2e'
-              : 'real-model-e2e';
+              : loopSkill
+                ? 'managed-loop-skill-e2e'
+                : loopFire
+                  ? 'managed-loop-fire-e2e'
+                  : 'real-model-e2e';
   const springArguments = ['-jar', springJar];
   springArguments.push(
     `--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=${tenant}`,
@@ -2133,6 +2905,17 @@ try {
           };
         }
         if (!serialized.includes('"role":"tool"')) {
+          if (commandRewriteRecovery) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'skill',
+                  { skill: 'a3-recovery:two-step' },
+                  'call_managed_a3_command_rewrite',
+                ),
+              ],
+            };
+          }
           // A3: a two-call batch so the replacement can be crashed in the
           // approval gap between a decided sibling and a pending one.
           if (approvalFault === 'sibling-approval') {
@@ -2229,8 +3012,228 @@ try {
       return { content: 'UNEXPECTED_FAILOVER_PROMPT' };
     });
   }
+  if (loopSkill) {
+    // The /loop skill model-turn arm: the client-initiated skill call loads the
+    // committed loop body before the model's first round, then the model drives
+    // the real cron tools. Branch on the latest user text (create/list/clear);
+    // a cron tool's own call id in the history means it already executed, so the
+    // round after it confirms. The skill tool result alone must not confirm.
+    fake = await startFakeOpenAIServer(({ body }) => {
+      // cron_create's admission classifies the call through a structured side
+      // query delivered as a respond_in_schema synthetic tool. Answer that
+      // query with an allow so cron_create is admitted; without this the
+      // classifier reports unavailable and cron_create is denied unreviewed.
+      const tools = Array.isArray(body['tools']) ? body['tools'] : [];
+      const schemaTool = tools.find(
+        (tool) =>
+          (tool as { function?: { name?: string } }).function?.name ===
+          'respond_in_schema',
+      ) as
+        | {
+            function?: {
+              parameters?: { properties?: Record<string, unknown> };
+            };
+          }
+        | undefined;
+      // Match the block schema, not the tool name: other structured side
+      // queries (title, tool-use summary, next speaker) also emit
+      // respond_in_schema, and a {shouldBlock:false} answer is schema-invalid
+      // for them — it would silently mis-answer a real feature.
+      const blockProperties = schemaTool?.function?.parameters?.properties;
+      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
+        // Answer with the stage's own schema exactly: stage 1 permits only
+        // shouldBlock (additionalProperties is false), stage 2 adds
+        // thinking/reason. Extra keys fail validation and report the
+        // classifier unavailable, denying cron_create unreviewed.
+        const answer: Record<string, unknown> = { shouldBlock: false };
+        if ('thinking' in blockProperties) answer['thinking'] = '';
+        if ('reason' in blockProperties) answer['reason'] = '';
+        return {
+          toolCalls: [
+            fakeToolCall('respond_in_schema', answer, 'loop-classifier'),
+          ],
+        };
+      }
+      if (body['stream'] !== true) return { content: 'fixture' };
+      const messages = Array.isArray(body['messages']) ? body['messages'] : [];
+      // Confirm only when this turn's own cron call has a tool result in the
+      // history, matched by tool_call_id: a prior turn's result must not
+      // confirm this turn, and the delete fixture's 'loop-cron-created'
+      // argument prefixes the create id, so a substring match would lie.
+      // The skill tool result alone never confirms.
+      const hasToolResult = (callId: string) =>
+        messages.some((message) => {
+          const entry = message as { role?: string; tool_call_id?: string };
+          return entry.role === 'tool' && entry.tool_call_id === callId;
+        });
+      let text = '';
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i] as { role?: string; content?: unknown };
+        if (message.role !== 'user') continue;
+        text =
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content ?? '');
+        break;
+      }
+      // Each /loop turn drives one cron tool; only that tool's own call id in
+      // the history means it executed (a prior turn's cron id must not confirm
+      // this turn). The skill tool result alone never confirms.
+      if (/\/loop\s+list/.test(text)) {
+        return hasToolResult('loop-cron-list')
+          ? { content: 'LOOP_DONE' }
+          : { toolCalls: [fakeToolCall('cron_list', {}, 'loop-cron-list')] };
+      }
+      if (/\/loop\s+clear/.test(text)) {
+        if (hasToolResult('loop-cron-delete')) return { content: 'LOOP_DONE' };
+        // The automation store mints the schedule id; reuse the one the
+        // create result printed so the retire targets the live schedule
+        // instead of a fabricated id the store answers 404 for.
+        const createResultText = messages
+          .filter((message) => {
+            const entry = message as {
+              role?: string;
+              tool_call_id?: string;
+            };
+            return (
+              entry.role === 'tool' && entry.tool_call_id === 'loop-cron-create'
+            );
+          })
+          .map((message) => JSON.stringify(message))
+          .join('');
+        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        return {
+          toolCalls: [
+            fakeToolCall(
+              'cron_delete',
+              { id: createdId ?? 'missing-schedule-id' },
+              'loop-cron-delete',
+            ),
+          ],
+        };
+      }
+      return hasToolResult('loop-cron-create')
+        ? { content: 'LOOP_DONE' }
+        : {
+            toolCalls: [
+              fakeToolCall(
+                'cron_create',
+                {
+                  cron: '*/5 * * * *',
+                  prompt: '/loop check the deploy',
+                  recurring: true,
+                  durable: true,
+                },
+                'loop-cron-create',
+              ),
+            ],
+          };
+    });
+  }
+  if (loopFire) {
+    // The /loop scheduled-fire arm: the create turn drives cron_create at
+    // the cron minimum cadence; the scanner then fires the next minute slot
+    // on its own, and the wake pump drives a turn whose latest user text is
+    // the automation framing. Answer that wake round with a terminal marker
+    // and no tools; a /loop clear turn retires the minted schedule.
+    fake = await startFakeOpenAIServer(({ body }) => {
+      // Same block-schema match as the skill arm: cron_create's arm-time
+      // review arrives as a respond_in_schema side query, and only the block
+      // schema may be answered with an allow.
+      const tools = Array.isArray(body['tools']) ? body['tools'] : [];
+      const schemaTool = tools.find(
+        (tool) =>
+          (tool as { function?: { name?: string } }).function?.name ===
+          'respond_in_schema',
+      ) as
+        | {
+            function?: {
+              parameters?: { properties?: Record<string, unknown> };
+            };
+          }
+        | undefined;
+      const blockProperties = schemaTool?.function?.parameters?.properties;
+      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
+        const answer: Record<string, unknown> = { shouldBlock: false };
+        if ('thinking' in blockProperties) answer['thinking'] = '';
+        if ('reason' in blockProperties) answer['reason'] = '';
+        return {
+          toolCalls: [
+            fakeToolCall('respond_in_schema', answer, 'loop-fire-classifier'),
+          ],
+        };
+      }
+      if (body['stream'] !== true) return { content: 'fixture' };
+      const messages = Array.isArray(body['messages']) ? body['messages'] : [];
+      const hasToolResult = (callId: string) =>
+        messages.some((message) => {
+          const entry = message as { role?: string; tool_call_id?: string };
+          return entry.role === 'tool' && entry.tool_call_id === callId;
+        });
+      let text = '';
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i] as { role?: string; content?: unknown };
+        if (message.role !== 'user') continue;
+        text =
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content ?? '');
+        break;
+      }
+      // The wake round is the fire's own turn: its latest user text carries
+      // the automation framing header, never a client /loop input. The
+      // scheduled-trigger discrimination lives in the guard, not here, so a
+      // relayed trigger drift reddens the guard while the turn still runs.
+      if (text.includes('Scheduled automation:')) {
+        return { content: loopFireWakeResponse };
+      }
+      if (/\/loop\s+clear/.test(text)) {
+        if (hasToolResult('loop-fire-delete')) {
+          return { content: 'LOOP_FIRE_DONE' };
+        }
+        const createResultText = messages
+          .filter((message) => {
+            const entry = message as {
+              role?: string;
+              tool_call_id?: string;
+            };
+            return (
+              entry.role === 'tool' && entry.tool_call_id === 'loop-fire-create'
+            );
+          })
+          .map((message) => JSON.stringify(message))
+          .join('');
+        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        return {
+          toolCalls: [
+            fakeToolCall(
+              'cron_delete',
+              { id: createdId ?? 'missing-schedule-id' },
+              'loop-fire-delete',
+            ),
+          ],
+        };
+      }
+      return hasToolResult('loop-fire-create')
+        ? { content: 'LOOP_FIRE_DONE' }
+        : {
+            toolCalls: [
+              fakeToolCall(
+                'cron_create',
+                {
+                  cron: '*/1 * * * *',
+                  prompt: loopFirePrompt,
+                  recurring: true,
+                  durable: true,
+                },
+                'loop-fire-create',
+              ),
+            ],
+          };
+    });
+  }
   const fakeBaseUrl = fake?.baseUrl;
-  if (durableFailover && fakeBaseUrl === undefined) {
+  if ((durableFailover || loopSkill || loopFire) && fakeBaseUrl === undefined) {
     throw new Error('Fake model server did not start');
   }
 
@@ -2350,6 +3353,23 @@ try {
           : {}),
         QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
         QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
+        ...(loopSkill || loopFire
+          ? {
+              QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:
+                'hosted-workspace-files/4',
+            }
+          : {}),
+        // The fire arm waits for a real minute-boundary slot; a 1s scan
+        // delay keeps the tick from adding its default 10s on top. The
+        // cadence itself stays the cron minimum (D2: no clock shortcut).
+        ...(loopFire ? { QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY: '1s' } : {}),
+        ...(commandRewriteRecovery
+          ? commandRewriteSpringEnvironment(
+              commandRewriteCgroupRoot!,
+              commandRewriteExtensionArtifacts,
+              commandRewriteExtensionCache,
+            )
+          : {}),
         ...(runtimeTakeover
           ? {
               QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:
@@ -2451,6 +3471,17 @@ try {
       );
     }
   }
+  const commandRewritePin = commandRewriteRecovery
+    ? await publishPreparedCommandRewriteExtension(
+        springUrl,
+        tenant,
+        await prepareCommandRewriteExtensionPackage(
+          commandRewriteExtensionSource,
+          commandRewriteExtensionDestination,
+          commandRewriteHookLog,
+        ),
+      )
+    : undefined;
   if (inflightFailover) {
     heldStartProxy = await startHeldExecutionStartProxy(
       `http://127.0.0.1:${brokerPort}`,
@@ -2488,7 +3519,7 @@ try {
         QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFolders,
         QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST: capabilityDigest,
         QWEN_SERVER_TOKEN: harnessToken,
-        ...(durableFailover
+        ...(durableFailover || loopSkill || loopFire
           ? {
               OPENAI_API_KEY: 'fake-key',
               OPENAI_BASE_URL: fakeBaseUrl,
@@ -2518,6 +3549,562 @@ try {
     harness,
   );
 
+  if (loopSkill) {
+    // The managed /loop skill model-turn arm. A creator-bearing definition
+    // (files/4) makes the Java admission inject the committed cron loop sidecar
+    // into the Session catalog. The Session-create body carries a caller `loop`
+    // import whose body is the verbatim bundled reference, so admission's
+    // replace path runs as in a real creation: the caller entry is removed and
+    // its invocable flags move onto the variant. The import's description is a
+    // marker the arm asserts is gone, attesting the replace path ran. The
+    // client-initiated skill call loads the variant body before the model's
+    // first round, and the scripted model drives the real cron tools
+    // (create -> list -> clear). The model is fake, but the skill loading and
+    // tool execution run through the full managed pipeline.
+    const contractsDir = path.join(
+      root,
+      'packages/core/src/managed-runtime/contracts',
+    );
+    const readSidecar = (variant: string) =>
+      JSON.parse(
+        readFileSync(
+          path.join(contractsDir, `managed-loop-skill-${variant}.json`),
+          'utf8',
+        ),
+      ) as { description?: string; body: string };
+    const bundledLoopImport = readSidecar('bundled-body');
+    // The caller import's body is the verbatim bundled reference (the exact
+    // bytes isBundledLoop matches, so admission takes the replace path). Its
+    // description carries a marker instead of the bundled prose: the replace
+    // path swaps in the server variant's own description, so the marker leaves
+    // the catalog; a preserve branch would keep the caller entry and its
+    // marker. A second, non-loop probe skill carries another marker the server
+    // does not rewrite: its presence proves caller skills reached admission,
+    // so the loop marker's absence attests the replace path ran rather than
+    // caller skills never arriving. assertCallerImportReplaced checks both.
+    const callerImportMarker = 'CALLER-LOOP-IMPORT-MARKER';
+    const callerProbeMarker = 'CALLER-PROBE-SKILL-MARKER';
+    const definitionResponse = await fetch(`${springUrl}/v1/agents`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `loop-skill-definition-${Date.now()}`,
+        ...tenantHeaders(tenant),
+      },
+      body: JSON.stringify({
+        model: {},
+        instructions: '',
+        tools: [
+          { type: 'hosted_profile', profile: 'hosted-workspace-files/4' },
+        ],
+        permission_policy: {},
+      }),
+    });
+    if (definitionResponse.status !== 202) {
+      throw new Error(
+        `Loop skill definition create returned ${definitionResponse.status}: ${await definitionResponse.text()}`,
+      );
+    }
+    const definition = (await definitionResponse.json()) as { id: string };
+    const loopCreate = await fetch(`${springUrl}/v1/agents/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `loop-skill-create-${Date.now()}`,
+        ...tenantHeaders(tenant),
+      },
+      body: JSON.stringify({
+        agent_id: definition.id,
+        input: [{ type: 'text', text: '/loop 5m check the deploy' }],
+        workspace: { workspace_id: boundWorkspaceId },
+        skills: [
+          {
+            name: 'loop',
+            description: callerImportMarker,
+            body: bundledLoopImport.body,
+            model_invocable: true,
+            user_invocable: true,
+          },
+          {
+            name: 'loopprobe',
+            description: callerProbeMarker,
+            body: 'Probe skill: attests caller skills reached admission.',
+            model_invocable: true,
+            user_invocable: true,
+          },
+        ],
+        metadata: { title: 'Managed /loop skill model-turn E2E' },
+      }),
+    });
+    if (loopCreate.status !== 202) {
+      throw new Error(
+        `Loop skill Session create returned ${loopCreate.status}: ${await loopCreate.text()}`,
+      );
+    }
+    const loopSession = (await loopCreate.json()) as { id: string };
+    const created = await waitForTerminal(
+      springUrl,
+      tenant,
+      loopSession.id,
+      0,
+      harness,
+      120_000,
+    );
+    const sendLoopInput = async (text: string, after: number) => {
+      const response = await fetch(
+        `${springUrl}/v1/agents/sessions/${loopSession.id}/events`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'idempotency-key': `loop-skill-${text.replace(/\W+/g, '-')}-${Date.now()}`,
+            ...tenantHeaders(tenant),
+          },
+          body: JSON.stringify({
+            type: 'agent.session.input.message',
+            input: [{ type: 'text', text }],
+          }),
+        },
+      );
+      if (response.status !== 202) {
+        throw new Error(
+          `Loop skill input returned ${response.status}: ${await response.text()}`,
+        );
+      }
+      return waitForTerminal(
+        springUrl,
+        tenant,
+        loopSession.id,
+        after,
+        harness,
+        120_000,
+      );
+    };
+    const listed = await sendLoopInput('/loop list', created.lastSequence);
+    const cleared = await sendLoopInput('/loop clear', listed.lastSequence);
+
+    // waitForTerminal resolves on any terminal event, turn.failed included;
+    // each /loop turn must settle as exactly one turn.completed, or the arm
+    // would attest a lifecycle for a turn the server recorded as failed.
+    for (const [label, turn] of [
+      ['create', created],
+      ['list', listed],
+      ['clear', cleared],
+    ] as const) {
+      const terminals = turn.events.filter((event) => event.terminal);
+      if (terminals.length !== 1 || terminals[0].type !== 'turn.completed') {
+        throw new Error(
+          `Loop-skill ${label} turn ended with ${JSON.stringify(terminals.map((event) => event.type))}`,
+        );
+      }
+    }
+
+    const loopRequests = (fake?.requests ?? []).filter(
+      (request) => request.body['stream'] === true,
+    );
+    // The skill body must reach the model before its first round, in the
+    // Skill tool result — not merely surface in some later round's history.
+    // Discriminate the cron sidecar from the union one with phrases verified
+    // against the committed assets: 'requires a fixed interval' is cron-only,
+    // 'LoopWakeup' is absent from cron but present in union/wakeup/bundled.
+    const cronOnlyPhrase = 'requires a fixed interval';
+    const unionMarker = 'LoopWakeup';
+    const cronBody = readSidecar('cron').body;
+    const unionBody = readSidecar('union').body;
+    if (
+      !cronBody.includes(cronOnlyPhrase) ||
+      unionBody.includes(cronOnlyPhrase) ||
+      cronBody.includes(unionMarker) ||
+      !unionBody.includes(unionMarker)
+    ) {
+      throw new Error(
+        'Loop sidecar discriminators drifted; update the loop-skill arm',
+      );
+    }
+    const firstRoundMessages = (
+      Array.isArray(loopRequests[0]?.body['messages'])
+        ? loopRequests[0].body['messages']
+        : []
+    ) as { role?: string }[];
+    // Bidirectional replace-path attestation: the loop import's marker must be
+    // gone (replaced by the server variant) while the probe skill's marker
+    // remains (caller skills reached admission). See assertCallerImportReplaced.
+    assertCallerImportReplaced(
+      firstRoundMessages,
+      callerImportMarker,
+      callerProbeMarker,
+    );
+    if (
+      JSON.stringify(firstRoundMessages).includes('defaults to session-only')
+    ) {
+      throw new Error(
+        'Model received the local bundled loop body, not the Managed variant',
+      );
+    }
+    const skillBodyMessage = firstRoundMessages.find(
+      (message) =>
+        message.role === 'tool' &&
+        JSON.stringify(message).includes(cronOnlyPhrase),
+    );
+    if (!skillBodyMessage) {
+      throw new Error(
+        'Managed cron loop body did not reach the model before its first round',
+      );
+    }
+    if (JSON.stringify(skillBodyMessage).includes(unionMarker)) {
+      throw new Error(
+        'Model received the union loop body, not the cron variant',
+      );
+    }
+    // The cron tools are native harness tools (not broker-mediated), so their
+    // execution is witnessed by the tool results reaching the model, not by
+    // ma_tool_execution. Match the structured call ids: 'loop-cron-create' is
+    // a prefix of the delete fixture's 'loop-cron-created' argument, so a
+    // substring match could witness the create from the delete's error text.
+    // The created schedule's prompt must echo back in the cron_list result —
+    // proving create -> list lifecycle, not just that the model emitted calls.
+    const loopToolResults = loopRequests.flatMap((request) =>
+      (Array.isArray(request.body['messages'])
+        ? request.body['messages']
+        : []
+      ).filter((message) => (message as { role?: string }).role === 'tool'),
+    );
+    const toolResultFor = (callId: string) =>
+      loopToolResults.find(
+        (message) =>
+          (message as { tool_call_id?: string }).tool_call_id === callId,
+      );
+    const calledIds = new Set(
+      loopRequests.flatMap((request) =>
+        (Array.isArray(request.body['messages'])
+          ? request.body['messages']
+          : []
+        )
+          .filter(
+            (message) => (message as { role?: string }).role === 'assistant',
+          )
+          .flatMap(
+            (message) =>
+              (message as { tool_calls?: { id?: string }[] }).tool_calls ?? [],
+          )
+          .map((call) => call.id),
+      ),
+    );
+    const cronCallIds = [
+      'loop-cron-create',
+      'loop-cron-list',
+      'loop-cron-delete',
+    ];
+    for (const callId of cronCallIds) {
+      if (!calledIds.has(callId)) {
+        throw new Error(`Cron tool ${callId} was never called`);
+      }
+      if (!toolResultFor(callId)) {
+        throw new Error(`Cron tool ${callId} produced no tool result`);
+      }
+    }
+    const createResult = toolResultFor('loop-cron-create');
+    const listResult = toolResultFor('loop-cron-list');
+    if (!JSON.stringify(listResult ?? {}).includes('/loop check the deploy')) {
+      throw new Error(
+        `cron_list did not echo the created schedule; create -> list lifecycle not witnessed. createResult=${JSON.stringify(createResult ?? {}).slice(0, 800)} listResult=${JSON.stringify(listResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    // The clear leg must retire the schedule the store actually minted:
+    // cron_create prints its id, and a successful retire answers
+    // "Retired cron schedule <id>." — a 404 automation_not_found result would
+    // satisfy a mere presence check while the automation stays live.
+    const createdScheduleId = /asch_[0-9a-f]{32}/.exec(
+      JSON.stringify(createResult ?? {}),
+    )?.[0];
+    if (!createdScheduleId) {
+      throw new Error(
+        `cron_create printed no automation id; createResult=${JSON.stringify(createResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    const deleteResult = toolResultFor('loop-cron-delete');
+    if (
+      !JSON.stringify(deleteResult ?? {}).includes(
+        `Retired cron schedule ${createdScheduleId}.`,
+      )
+    ) {
+      throw new Error(
+        `cron_delete did not retire ${createdScheduleId}; deleteResult=${JSON.stringify(deleteResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    resultJson = JSON.stringify(
+      {
+        mode: 'loop-skill',
+        sessionId: loopSession.id,
+        definitionId: definition.id,
+        modelRounds: loopRequests.length,
+        // The three witnessed calls, not a cumulative tool-message count:
+        // chat-completions bodies repeat every prior result, so the flattened
+        // length grows with the round count instead of the executions.
+        cronToolResults: cronCallIds.filter(
+          (callId) => toolResultFor(callId) !== undefined,
+        ).length,
+        managedSkillBody: true,
+        cronCreate: true,
+        cronList: true,
+        cronDelete: true,
+      },
+      null,
+      2,
+    );
+  }
+
+  if (loopFire) {
+    // The managed /loop scheduled-fire arm. The create turn drives
+    // cron_create at the cron minimum cadence (*/1), then the runner sends
+    // no further input: the Java scanner must claim the armed definition,
+    // fire the next minute slot through the Harness relay, and the wake pump
+    // must drive a model turn whose framing names that occurrence. The
+    // ledger's fired row and the model round are tied to one occurrence by
+    // assertScheduledFireWitness; a /loop clear turn then retires the
+    // schedule so no live every-minute definition survives the arm.
+    const fireDefinitionResponse = await fetch(`${springUrl}/v1/agents`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `loop-fire-definition-${Date.now()}`,
+        ...tenantHeaders(tenant),
+      },
+      body: JSON.stringify({
+        model: {},
+        instructions: '',
+        tools: [
+          { type: 'hosted_profile', profile: 'hosted-workspace-files/4' },
+        ],
+        permission_policy: {},
+      }),
+    });
+    if (fireDefinitionResponse.status !== 202) {
+      throw new Error(
+        `Loop fire definition create returned ${fireDefinitionResponse.status}: ${await fireDefinitionResponse.text()}`,
+      );
+    }
+    const fireDefinition = (await fireDefinitionResponse.json()) as {
+      id: string;
+    };
+    // No caller skills: files/4 admission injects the variant
+    // unconditionally, and the replace path already has its bidirectional
+    // attestation in the skill arm (design D4).
+    const fireCreate = await fetch(`${springUrl}/v1/agents/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `loop-fire-create-${Date.now()}`,
+        ...tenantHeaders(tenant),
+      },
+      body: JSON.stringify({
+        agent_id: fireDefinition.id,
+        input: [{ type: 'text', text: `/loop 1m ${loopFirePrompt}` }],
+        workspace: { workspace_id: boundWorkspaceId },
+        metadata: { title: 'Managed /loop scheduled-fire E2E' },
+      }),
+    });
+    if (fireCreate.status !== 202) {
+      throw new Error(
+        `Loop fire Session create returned ${fireCreate.status}: ${await fireCreate.text()}`,
+      );
+    }
+    const fireSession = (await fireCreate.json()) as { id: string };
+    const fireCreated = await waitForTerminal(
+      springUrl,
+      tenant,
+      fireSession.id,
+      0,
+      harness,
+      120_000,
+    );
+    const sendFireInput = async (text: string, after: number) => {
+      const response = await fetch(
+        `${springUrl}/v1/agents/sessions/${fireSession.id}/events`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'idempotency-key': `loop-fire-${text.replace(/\W+/g, '-')}-${Date.now()}`,
+            ...tenantHeaders(tenant),
+          },
+          body: JSON.stringify({
+            type: 'agent.session.input.message',
+            input: [{ type: 'text', text }],
+          }),
+        },
+      );
+      if (response.status !== 202) {
+        throw new Error(
+          `Loop fire input returned ${response.status}: ${await response.text()}`,
+        );
+      }
+      return waitForTerminal(
+        springUrl,
+        tenant,
+        fireSession.id,
+        after,
+        harness,
+        120_000,
+      );
+    };
+    const streamedRounds = () =>
+      (fake?.requests ?? []).filter(
+        (request) => request.body['stream'] === true,
+      );
+    const latestUserText = (request: { body: Record<string, unknown> }) => {
+      const messages = Array.isArray(request.body['messages'])
+        ? request.body['messages']
+        : [];
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i] as { role?: string; content?: unknown };
+        if (message.role !== 'user') continue;
+        return typeof message.content === 'string'
+          ? message.content
+          : JSON.stringify(message.content ?? '');
+      }
+      return '';
+    };
+    // The create turn's rounds are exactly those whose latest user text is
+    // the /loop input (the wake round's latest user text is the framing, so
+    // it never joins this set — the negative below is race-free). None of
+    // them may carry the automation framing: the fire round must be new.
+    const createRounds = streamedRounds().filter((request) =>
+      latestUserText(request).includes('/loop 1m'),
+    );
+    if (createRounds.length === 0) {
+      throw new Error('No model round ran the /loop create input');
+    }
+    for (const request of createRounds) {
+      if (
+        JSON.stringify(request.body['messages']).includes(
+          'Scheduled automation:',
+        )
+      ) {
+        throw new Error(
+          'A create-turn round already carried the automation framing; the fire round is not new',
+        );
+      }
+    }
+    const fireToolResult = (callId: string) =>
+      streamedRounds()
+        .flatMap((request) =>
+          Array.isArray(request.body['messages'])
+            ? request.body['messages']
+            : [],
+        )
+        .find(
+          (message) =>
+            (message as { role?: string }).role === 'tool' &&
+            (message as { tool_call_id?: string }).tool_call_id === callId,
+        );
+    const fireCreateResult = fireToolResult('loop-fire-create');
+    const fireScheduleId = /asch_[0-9a-f]{32}/.exec(
+      JSON.stringify(fireCreateResult ?? {}),
+    )?.[0];
+    if (!fireScheduleId) {
+      throw new Error(
+        `cron_create printed no automation id; createResult=${JSON.stringify(fireCreateResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    // No client input from here: the scanner's fire must drive a wake turn on
+    // its own. A harness-driven wake turn does not ride the public turn event
+    // stream — that stream is written by the control plane's dispatched-turn
+    // pipeline — so its public lifecycle is the automation run mirror, whose
+    // state settles from the wake turn's own committed result. The wake is
+    // therefore witnessed on the runs route: an occurrence the scanner fired,
+    // settled completed. The budget covers the worst-case minute-boundary
+    // wait plus the 1s tick, the relay and the turn (design D2).
+    let fireRuns: Record<string, unknown>[] = [];
+    let firedRun: Record<string, unknown> | undefined;
+    await waitUntil(
+      'Scheduled fire ledger row',
+      async () => {
+        const page = await fetchJson<PublicList<Record<string, unknown>>>(
+          `${springUrl}/v1/agent-automations/${fireScheduleId}/runs?limit=100`,
+          { headers: tenantHeaders(tenant) },
+        );
+        fireRuns = page.data;
+        firedRun = fireRuns.find(
+          (row) =>
+            row['trigger'] === 'scheduled' &&
+            row['outcome'] === 'fired' &&
+            row['state'] === 'completed',
+        );
+        return firedRun !== undefined;
+      },
+      150_000,
+      harness,
+    );
+    // The fire's prompt must have reached the model in a round whose latest
+    // user text is the automation framing — the wake turn the completed
+    // occurrence settles. The fake model answers that round with the wake
+    // marker and no tools, so the completed run proves the marker answer ran.
+    const wakeRequest = streamedRounds().find((request) =>
+      latestUserText(request).includes('Scheduled automation:'),
+    );
+    if (!wakeRequest) {
+      throw new Error('No model round carried the automation framing');
+    }
+    const wakeFraming = latestUserText(wakeRequest);
+    if (!wakeFraming.includes(loopFirePrompt)) {
+      throw new Error(
+        `The fire's prompt never reached the model; framing=${wakeFraming.slice(0, 1500)}`,
+      );
+    }
+    const { occurrenceKey } = assertScheduledFireWitness(
+      fireRuns,
+      wakeFraming,
+      fireScheduleId,
+    );
+    // The clear leg is a client turn: it rides the public event stream (the
+    // wake turn added none), and its terminal proves the schedule stays
+    // cancellable after a fire.
+    const fireCleared = await sendFireInput(
+      '/loop clear',
+      fireCreated.lastSequence,
+    );
+    for (const [label, turn] of [
+      ['create', fireCreated],
+      ['clear', fireCleared],
+    ] as const) {
+      const terminals = turn.events.filter((event) => event.terminal);
+      if (terminals.length !== 1 || terminals[0].type !== 'turn.completed') {
+        throw new Error(
+          `Loop-fire ${label} turn ended with ${JSON.stringify(terminals.map((event) => event.type))}`,
+        );
+      }
+    }
+    const fireDeleteResult = fireToolResult('loop-fire-delete');
+    if (
+      !JSON.stringify(fireDeleteResult ?? {}).includes(
+        `Retired cron schedule ${fireScheduleId}.`,
+      )
+    ) {
+      throw new Error(
+        `cron_delete did not retire ${fireScheduleId}; deleteResult=${JSON.stringify(fireDeleteResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    resultJson = JSON.stringify(
+      {
+        mode: 'loop-fire',
+        sessionId: fireSession.id,
+        definitionId: fireDefinition.id,
+        scheduleId: fireScheduleId,
+        occurrenceKey,
+        fireTrigger: firedRun?.['trigger'],
+        fireOutcome: firedRun?.['outcome'],
+        fireState: firedRun?.['state'],
+        scheduledFire: true,
+        wakeModelRound: true,
+        cronDelete: true,
+        modelRounds: streamedRounds().length,
+      },
+      null,
+      2,
+    );
+  }
+
   if (durableFailover) {
     const createResponse = await fetch(`${springUrl}/v1/agents/sessions`, {
       method: 'POST',
@@ -2544,9 +4131,10 @@ try {
                     : `${failoverFirstMarker}. Reply exactly ${failoverFirstResponse}.`,
           },
         ],
-        ...(workspaceTurns
+        ...(workspaceTurns || commandRewriteRecovery
           ? { workspace: { workspace_id: boundWorkspaceId } }
           : {}),
+        ...(commandRewritePin ? { extensionPins: [commandRewritePin] } : {}),
         metadata: {
           title: continuationFailover
             ? 'Managed continuation owner failover E2E'
@@ -2639,7 +4227,9 @@ try {
           );
           if (requested.length !== 1) return false;
           originalApprovalId = String(requested[0].id);
-          return originalApprovalId.startsWith('tool_approval_');
+          return originalApprovalId.startsWith(
+            commandRewriteRecovery ? 'command_approval_' : 'tool_approval_',
+          );
         },
         120_000,
         harness,
@@ -2670,16 +4260,30 @@ try {
       );
       const expectedOriginalPlanCalls =
         approvalFault === 'sibling-approval' ? 2 : 1;
+      const originalCommandInput = commandRewriteRecovery
+        ? readCommandRewriteResource<{ command: string; timeout: number }>(
+            mysqlPort,
+            `tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+            originalApprovalOptions.inputRef!,
+            'managed-extension-command-input',
+          )
+        : undefined;
       if (
         !originalApprovalPlan ||
-        originalApprovalPlan.calls?.length !== expectedOriginalPlanCalls ||
         originalApprovalPlan.actionId !== originalApprovalId ||
         originalApprovalPlan.stage !== 'approval' ||
-        (approvalFault === 'sibling-approval' &&
-          originalApprovalPlan.approvalOrdinal !== 0)
+        (commandRewriteRecovery
+          ? originalApprovalPlan.commandStep?.toolName !== 'shell' ||
+            originalApprovalPlan.commandStep.inputRef.resourceId !==
+              originalApprovalOptions.inputRef?.resourceId ||
+            originalCommandInput?.command !== commandRewriteRewrittenFirst ||
+            originalCommandInput?.timeout !== 120000
+          : originalApprovalPlan.calls?.length !== expectedOriginalPlanCalls ||
+            (approvalFault === 'sibling-approval' &&
+              originalApprovalPlan.approvalOrdinal !== 0))
       ) {
         throw new Error(
-          `Original saved approval plan does not identify the original ${expectedOriginalPlanCalls} call(s) at the first approval`,
+          `Original saved approval plan does not identify the original ${commandRewriteRecovery ? 'rewritten command step' : `${expectedOriginalPlanCalls} call(s)`} at the first approval`,
         );
       }
       originalRuntimeSessionId = originalApprovalPlan.runtime.runtimeSessionId;
@@ -2733,7 +4337,7 @@ try {
         ),
       );
       if (
-        privateHead[0] !== '2' ||
+        privateHead[0] !== '4' ||
         checkpoint.continuation?.phase !== 'await_action' ||
         checkpoint.approval?.requestId !== originalApprovalId
       ) {
@@ -2747,7 +4351,13 @@ try {
           'SELECT COUNT(*) FROM qwen_managed_agent.ma_tool_execution',
         ),
       );
-      if (executionCount !== 0 || existsSync(inflightSideEffect))
+      if (
+        executionCount !== 0 ||
+        existsSync(inflightSideEffect) ||
+        (commandRewriteRecovery &&
+          (existsSync(commandRewriteFirstEffect) ||
+            existsSync(commandRewriteSecondEffect)))
+      )
         throw new Error('Tool ran before the original approval');
       saveEvidence('original-approval.json', {
         actionId: originalApprovalId,
@@ -3466,6 +5076,7 @@ try {
         approvalFault === 'after-result' ||
         approvalFault === 'finished-before-commit' ||
         approvalFault === 'sibling-approval' ||
+        commandRewriteRecovery ||
         approvalFault === 'after-earlier-tools' ||
         approvalFault === 'cleanup-failed' ||
         approvalFault === 'terminal-reply-lost' ||
@@ -3636,6 +5247,107 @@ try {
             120_000,
             replacementHarness,
           );
+        } else if (commandRewriteRecovery) {
+          await waitUntil(
+            'Second rewritten command approval requested',
+            () => {
+              const rows = runMysql(
+                mysqlPort,
+                `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
+              );
+              const actions = rows
+                ? rows.split('\n').map((row) => row.split('\t'))
+                : [];
+              return (
+                actions.length === 2 &&
+                actions.some(
+                  ([id, state]) =>
+                    id === originalApprovalId && state === 'decided',
+                ) &&
+                actions.some(
+                  ([id, state]) =>
+                    id !== originalApprovalId && state === 'requested',
+                )
+              );
+            },
+            120_000,
+            replacementHarness,
+          );
+          const pending = runMysql(
+            mysqlPort,
+            `SELECT action_id FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND state='requested'`,
+          );
+          siblingApprovalId = pending;
+          siblingApprovalOptions = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(pending)}`,
+            ),
+          ) as SavedApprovalOptions;
+          const siblingPlan = readCommandRewriteResource<SavedApprovalPlan>(
+            mysqlPort,
+            sessionFilter,
+            siblingApprovalOptions.continuationRef,
+          );
+          if (
+            !siblingApprovalOptions.inputRef ||
+            siblingPlan.commandStep?.inputRef.resourceId !==
+              siblingApprovalOptions.inputRef.resourceId ||
+            siblingPlan.commandStep.toolStageId ===
+              originalApprovalPlan!.commandStep!.toolStageId ||
+            siblingPlan.commandStep.configRevision !==
+              originalApprovalPlan!.commandStep!.configRevision
+          )
+            throw new Error(
+              'A3 second Action changed its commandStep identity or inputRef',
+            );
+          siblingCommandStageId = siblingPlan.commandStep.toolStageId;
+          const checkpointId = runMysql(
+            mysqlPort,
+            `SELECT latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+          );
+          const checkpoint = readCommandRewriteResource<{
+            continuation?: { phase?: string };
+            approval?: { requestId?: string };
+          }>(mysqlPort, sessionFilter, { resourceId: checkpointId });
+          const identity = {
+            runtimeSessionId: originalRuntimeSessionId!,
+            harnessSessionId: session.id,
+            revision: siblingPlan.commandStep.configRevision,
+          };
+          const evidence = collectCommandRewriteEvidence(
+            mysqlPort,
+            sessionFilter,
+            [
+              readCommandRewriteActionEvidence(
+                mysqlPort,
+                sessionFilter,
+                originalApprovalId!,
+              ),
+              readCommandRewriteActionEvidence(
+                mysqlPort,
+                sessionFilter,
+                siblingApprovalId,
+              ),
+            ],
+            {
+              phase: String(checkpoint.continuation?.phase),
+              requestId: String(checkpoint.approval?.requestId),
+            },
+            commandRewriteReceiptDirectory(
+              commandRewriteExtensionCache,
+              tenant,
+              boundWorkspaceId,
+              originalApprovalPlan!.runtime.workspaceGeneration,
+            ),
+          );
+          assertCommandRewriteCrashBarrier(evidence, identity);
+          if (
+            evidence.stages[0].toolStageId !==
+            originalApprovalPlan!.commandStep!.toolStageId
+          )
+            throw new Error('A3 crash replaced the first toolStageId');
+          saveEvidence('command-rewrite-crash-barrier.json', evidence);
         } else if (approvalFault === 'sibling-approval') {
           // A3: the replacement decided sibling[0] (Allow[0]) and now holds
           // the first approval it asks — the pending sibling[1]. The barrier
@@ -3685,7 +5397,7 @@ try {
               mysqlPort,
               `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(siblingApprovalOptions!.continuationRef.resourceId)}`,
             ),
-          );
+          ) as SavedApprovalPlan;
           if (
             siblingPlan.stage !== 'approval' ||
             siblingPlan.approvalOrdinal !== 1 ||
@@ -3695,6 +5407,29 @@ try {
             throw new Error(
               `Sibling-approval crash plan is not the pending second sibling: ${JSON.stringify(siblingPlan)}`,
             );
+          }
+          // The per-call Action ID may be null before the crash, so anchor each
+          // member to the first approval's saved call identities and reject any
+          // Action ID that is already present on the wrong member.
+          const expectedActionIds = [originalApprovalId!, siblingApprovalId!];
+          for (const [
+            ordinal,
+            originalCall,
+          ] of originalApprovalPlan!.calls.entries()) {
+            const siblingCall = siblingPlan.calls[ordinal];
+            if (
+              !siblingCall ||
+              siblingCall.runtimeCallId !== originalCall.runtimeCallId ||
+              siblingCall.partIndex !== originalCall.partIndex ||
+              siblingCall.prepareKey !== originalCall.prepareKey ||
+              siblingCall.requestDigest !== originalCall.requestDigest ||
+              (siblingCall.actionId != null &&
+                siblingCall.actionId !== expectedActionIds[ordinal])
+            ) {
+              throw new Error(
+                `Sibling-approval crash plan changed call/action binding at ordinal ${ordinal}: ${JSON.stringify(siblingCall)} != ${JSON.stringify(originalCall)}`,
+              );
+            }
           }
           saveEvidence('sibling-approval-barrier.json', {
             fault: approvalFault,
@@ -3865,7 +5600,7 @@ try {
           );
         }
       }
-      if (approvalFault === 'sibling-approval') {
+      if (approvalFault === 'sibling-approval' || commandRewriteRecovery) {
         // The recovery generation must re-hang the ORIGINAL pending sibling
         // Action (same ID, same deadline) and still require its own decision:
         // it must not auto-allow sibling[1] from sibling[0]'s earlier Allow,
@@ -3893,11 +5628,24 @@ try {
           `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${siblingApprovalId}`,
           { headers: tenantHeaders(tenant) },
         );
+        const recoveredCommandAction = commandRewriteRecovery
+          ? readCommandRewriteActionEvidence(
+              mysqlPort,
+              sessionFilter,
+              siblingApprovalId!,
+            )
+          : undefined;
         if (
           siblingBefore.id !== siblingApprovalId ||
           siblingBefore.state !== 'requested' ||
           siblingBefore.created_at !== siblingApprovalOptions!.createdAt ||
-          siblingBefore.expires_at !== siblingApprovalOptions!.expiresAt
+          siblingBefore.expires_at !== siblingApprovalOptions!.expiresAt ||
+          (recoveredCommandAction &&
+            (recoveredCommandAction.inputRef.resourceId !==
+              siblingApprovalOptions!.inputRef?.resourceId ||
+              recoveredCommandAction.command !==
+                commandRewriteRewrittenSecond ||
+              recoveredCommandAction.timeout !== 120000))
         ) {
           throw new Error(
             `Recovery did not preserve the pending sibling Action/deadline: ${JSON.stringify(siblingBefore)}`,
@@ -3992,471 +5740,582 @@ try {
             'Result-commit recovery did not reconcile the published prefix before the recovered answer',
           );
       }
-      const rows = runMysql(
-        mysqlPort,
-        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
-      );
-      const executions = rows
-        ? rows.split('\n').map((row) => row.split('\t'))
-        : [];
-      const expectedExecutions =
-        verificationMode === 'allow'
-          ? approvalFault === 'sibling-approval' ||
-            approvalFault === 'after-earlier-tools'
-            ? 2
-            : 1
-          : 0;
-      if (executions.length !== expectedExecutions)
-        throw new Error(
-          `Approval execution count ${executions.length} differs from ${expectedExecutions}`,
-        );
-      // Every approved call keeps its own original prepare key/digest and the
-      // original Runtime identity, settled once. Match by prepare key so the
-      // model's call order is checked, not the SQL row order; the A3 arm has
-      // two siblings and B3 two earlier rounds, every other allow arm has one.
-      if (approvalFault === 'after-earlier-tools') {
-        // B3's two earlier tools live in separate rounds, so the first approval
-        // plan carries only tool A. Assert both executions' Runtime identity and
-        // settled-once directly; the two physical file effects give per-tool
-        // evidence, and a re-run of either earlier tool reds the count above.
-        for (const [ordinal, execution] of executions.entries()) {
-          if (
-            execution[2] !== originalApprovalPlan!.runtime.bindingId ||
-            execution[3] !== originalApprovalPlan!.runtime.generation ||
-            execution[4] !== originalApprovalPlan!.runtime.runtimeSessionId ||
-            execution[5] !== 'SETTLED' ||
-            execution[6] !== '1'
-          ) {
-            throw new Error(
-              `B3 earlier execution ${ordinal} changed its identity or re-ran: ${execution.join(',')}`,
-            );
-          }
-        }
-      } else if (verificationMode === 'allow') {
-        const plan = originalApprovalPlan!;
-        const settledAtByOrdinal: number[] = [];
-        for (const [ordinal, call] of plan.calls.entries()) {
-          const execution = executions.find(
-            (row) => row[1] === call.prepareKey,
-          );
-          if (
-            !execution ||
-            execution[2] !== plan.runtime.bindingId ||
-            execution[3] !== plan.runtime.generation ||
-            execution[4] !== plan.runtime.runtimeSessionId ||
-            execution[5] !== 'SETTLED' ||
-            execution[6] !== '1' ||
-            execution[7] !== call.requestDigest
-          ) {
-            throw new Error(
-              `Replacement changed the original prepared execution identity for call ${ordinal}: ${(execution ?? []).join(',')}`,
-            );
-          }
-          settledAtByOrdinal.push(Number(execution[8]));
-        }
-        // The siblings must SETTLE in plan order, not merely exist with the
-        // right identities: a recovery that dispatches the batch in reverse
-        // keeps every identity assertion green. settled_at is epoch millis;
-        // require it non-decreasing along the plan so a reverse dispatch reds.
-        for (
-          let ordinal = 1;
-          ordinal < settledAtByOrdinal.length;
-          ordinal += 1
-        ) {
-          if (
-            !Number.isFinite(settledAtByOrdinal[ordinal]) ||
-            settledAtByOrdinal[ordinal] < settledAtByOrdinal[ordinal - 1]
-          ) {
-            throw new Error(
-              `Replacement settled the siblings out of plan order: settledAt=${settledAtByOrdinal.join(',')}`,
-            );
-          }
-        }
-      }
-      const bytes = existsSync(inflightSideEffect)
-        ? readFileSync(inflightSideEffect, 'utf8')
-        : '';
-      if (
-        verificationMode === 'allow'
-          ? bytes !== inflightSideEffectContent
-          : existsSync(inflightSideEffect)
-      ) {
-        throw new Error(
-          `Approval physical file assertion failed for ${verificationMode}`,
-        );
-      }
-      if (approvalFault === 'sibling-approval') {
-        const siblingBytes = existsSync(siblingSideEffect)
-          ? readFileSync(siblingSideEffect, 'utf8')
-          : '';
-        if (siblingBytes !== siblingSideEffectContent)
-          throw new Error(
-            `Sibling physical file assertion failed: ${JSON.stringify(siblingBytes)}`,
-          );
-      }
-      if (approvalFault === 'after-earlier-tools') {
-        const b3Bytes = existsSync(b3SecondSideEffect)
-          ? readFileSync(b3SecondSideEffect, 'utf8')
-          : '';
-        if (b3Bytes !== b3SecondSideEffectContent)
-          throw new Error(
-            `B3 second physical file assertion failed: ${JSON.stringify(b3Bytes)}`,
-          );
-        // Round + cost ledger continuity: recovery must resume the saved round
-        // and restore the budget snapshot / token ledger, not restart them.
-        if (!b3Before)
-          throw new Error('B3 crash-boundary round/budget was not captured');
-        const b3After = b3RoundAndBudget(mysqlPort, sessionFilter);
-        saveEvidence('b3-round-budget-after.json', b3After);
-        if (b3After.round !== b3Before.round || b3After.round < 2)
-          throw new Error(
-            `B3 recovery reset the logical round: before=${b3Before.round} after=${b3After.round}`,
-          );
-        assertB3CostContinuity(b3Before, b3After);
-      }
-      const actionRows = runMysql(
-        mysqlPort,
-        `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' ORDER BY action_id`,
-      );
-      const expectedActionState =
-        verificationMode === 'expiry'
-          ? 'expired'
-          : verificationMode === 'cancel'
-            ? 'cancelled'
-            : 'decided';
-      if (approvalFault === 'sibling-approval') {
-        // Both siblings end decided under their ORIGINAL Action IDs: the
-        // decided one was not re-asked, the pending one earned its own Allow.
-        const expectedSiblingActions = [
-          `${originalApprovalId}\t${expectedActionState}`,
-          `${siblingApprovalId}\t${expectedActionState}`,
-        ].sort();
-        if (actionRows !== expectedSiblingActions.join('\n'))
-          throw new Error(
-            `Sibling approval identities/states differ: ${actionRows}`,
-          );
-      } else if (approvalFault === 'after-earlier-tools') {
-        // Both earlier tools end decided under their ORIGINAL Action IDs: A by
-        // the first Allow, B by the runner's second Allow. Recovery must resume
-        // the saved model round, not re-ask either approval.
-        const expectedB3Actions = [
-          `${originalApprovalId}\t${expectedActionState}`,
-          `${secondApprovalId}\t${expectedActionState}`,
-        ].sort();
-        if (actionRows !== expectedB3Actions.join('\n'))
-          throw new Error(
-            `B3 approval identities/states differ: ${actionRows}`,
-          );
-      } else if (
-        actionRows !== `${originalApprovalId}\t${expectedActionState}`
-      ) {
-        throw new Error(
-          `Original approval identity/state differs: ${actionRows}`,
-        );
-      }
-      // State alone proves a decision was committed, not which option won.
-      // Read the committed decision resource back for the browser-facing
-      // intent, and hold it to the revision and policy the browser answered.
-      const decisionOption =
-        verificationMode === 'allow' || verificationMode === 'deny'
-          ? JSON.parse(
-              runMysql(
-                mysqlPort,
-                `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(originalApprovalId!)}) AND r.kind='managed-action-decision'`,
-              ),
-            )
-          : undefined;
-      if (
-        decisionOption &&
-        (decisionOption.optionId !== verificationMode ||
-          decisionOption.inputRevision !==
-            originalApprovalOptions!.inputRevision ||
-          decisionOption.policyRevision !==
-            originalApprovalOptions!.policyRevision)
-      ) {
-        throw new Error(
-          `Stored approval decision differs from the chosen option: ${JSON.stringify(decisionOption)}`,
-        );
-      }
-      if (approvalFault === 'sibling-approval') {
-        // The pending sibling carries its OWN Allow decision bound to its own
-        // revisions — it was not auto-allowed from sibling[0]'s earlier Allow.
-        const siblingDecision = JSON.parse(
+      if (commandRewriteRecovery) {
+        const actionCount = Number(
           runMysql(
             mysqlPort,
-            `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(siblingApprovalId!)}) AND r.kind='managed-action-decision'`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
           ),
         );
-        if (
-          siblingDecision.optionId !== 'allow' ||
-          siblingDecision.inputRevision !==
-            siblingApprovalOptions!.inputRevision ||
-          siblingDecision.policyRevision !==
-            siblingApprovalOptions!.policyRevision
-        ) {
-          throw new Error(
-            `Stored sibling decision differs from the chosen option: ${JSON.stringify(siblingDecision)}`,
-          );
-        }
-        // Clause 2: the recovered final plan preserves the saved sibling
-        // order and identities, and each sibling keeps its original Action
-        // ID. Compare by position so a reordered or dropped sibling reds
-        // here, not only in the execution count.
-        const finalPlan = siblingFinalPlan(
+        if (actionCount !== 2)
+          throw new Error(`A3 recovery created a third Action: ${actionCount}`);
+        const requestBodies = (fake?.requests ?? []).filter((request) =>
+          JSON.stringify(request.body.messages).includes(continuationMarker),
+        );
+        const initialRequests = requestBodies.filter(
+          (request) =>
+            !JSON.stringify(request.body.messages).includes('"role":"tool"'),
+        ).length;
+        const afterResults = requestBodies.filter((request) =>
+          JSON.stringify(request.body.messages).includes('"role":"tool"'),
+        ).length;
+        const checkpointId = runMysql(
+          mysqlPort,
+          `SELECT latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+        );
+        const checkpoint = readCommandRewriteResource<{
+          continuation?: { phase?: string };
+          approval?: { requestId?: string };
+        }>(mysqlPort, sessionFilter, { resourceId: checkpointId });
+        const evidence = collectCommandRewriteEvidence(
           mysqlPort,
           sessionFilter,
-          originalApprovalPlan!.batchId,
+          [
+            readCommandRewriteActionEvidence(
+              mysqlPort,
+              sessionFilter,
+              originalApprovalId!,
+            ),
+            readCommandRewriteActionEvidence(
+              mysqlPort,
+              sessionFilter,
+              siblingApprovalId!,
+            ),
+          ],
+          {
+            phase: String(checkpoint.continuation?.phase),
+            requestId: String(checkpoint.approval?.requestId),
+          },
+          commandRewriteReceiptDirectory(
+            commandRewriteExtensionCache,
+            tenant,
+            boundWorkspaceId,
+            originalApprovalPlan!.runtime.workspaceGeneration,
+          ),
+          { initial: initialRequests, afterResults },
         );
-        const savedCalls = originalApprovalPlan!.calls;
-        if (finalPlan.calls.length !== savedCalls.length)
+        assertCommandRewriteFinalEvidence(evidence, {
+          runtimeSessionId: originalRuntimeSessionId!,
+          harnessSessionId: session.id,
+          revision: originalApprovalPlan!.commandStep!.configRevision,
+        });
+        if (
+          evidence.actions[0].inputRef.resourceId !==
+            originalApprovalOptions!.inputRef?.resourceId ||
+          evidence.actions[1].inputRef.resourceId !==
+            siblingApprovalOptions!.inputRef?.resourceId ||
+          evidence.stages[0].toolStageId !==
+            originalApprovalPlan!.commandStep!.toolStageId ||
+          evidence.stages[1].toolStageId !== siblingCommandStageId
+        )
           throw new Error(
-            `Sibling recovery changed the batch size: ${finalPlan.calls.length} != ${savedCalls.length}`,
+            'A3 recovery changed an Action inputRef or toolStageId',
           );
-        for (const [ordinal, saved] of savedCalls.entries()) {
-          const recovered = finalPlan.calls[ordinal];
+        // State alone proves a decision was committed, not which option won.
+        // Read each command Allow's committed decision back and hold it to the
+        // revisions the browser answered; the generic else-branch read-back is
+        // arm-agnostic and must not be skipped by the command-rewrite split.
+        for (const [actionId, options] of [
+          [originalApprovalId!, originalApprovalOptions!],
+          [siblingApprovalId!, siblingApprovalOptions!],
+        ] as const) {
+          const decisionHex = runMysql(
+            mysqlPort,
+            `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(actionId)}) AND r.kind='managed-action-decision'`,
+          );
+          if (!decisionHex || decisionHex === 'NULL')
+            throw new Error(`A3 command decision is unavailable: ${actionId}`);
+          const decision = JSON.parse(
+            Buffer.from(decisionHex, 'hex').toString('utf8'),
+          ) as {
+            optionId: string;
+            inputRevision: number;
+            policyRevision: string;
+          };
+          assertCommandRewriteDecision(decision, options, actionId);
+        }
+        saveEvidence('command-rewrite-result.json', evidence);
+        approvalResultJson = JSON.stringify(
+          {
+            mode: verificationMode,
+            fault: approvalFault,
+            originalAction: originalApprovalId,
+            recoveredAction: siblingApprovalId,
+            toolStages: evidence.stages.map((stage) => stage.toolStageId),
+            commandReceipts: evidence.receipts.length,
+            terminal: expectedTerminal,
+          },
+          null,
+          2,
+        );
+      } else {
+        const rows = runMysql(
+          mysqlPort,
+          `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
+        );
+        const executions = rows
+          ? rows.split('\n').map((row) => row.split('\t'))
+          : [];
+        const expectedExecutions =
+          verificationMode === 'allow'
+            ? approvalFault === 'sibling-approval' ||
+              approvalFault === 'after-earlier-tools'
+              ? 2
+              : 1
+            : 0;
+        if (executions.length !== expectedExecutions)
+          throw new Error(
+            `Approval execution count ${executions.length} differs from ${expectedExecutions}`,
+          );
+        // Every approved call keeps its own original prepare key/digest and the
+        // original Runtime identity, settled once. Match by prepare key so the
+        // model's call order is checked, not the SQL row order; the A3 arm has
+        // two siblings and B3 two earlier rounds, every other allow arm has one.
+        if (approvalFault === 'after-earlier-tools') {
+          // B3's two earlier tools live in separate rounds, so the first approval
+          // plan carries only tool A. Assert both executions' Runtime identity and
+          // settled-once directly; the two physical file effects give per-tool
+          // evidence, and a re-run of either earlier tool reds the count above.
+          for (const [ordinal, execution] of executions.entries()) {
+            if (
+              execution[2] !== originalApprovalPlan!.runtime.bindingId ||
+              execution[3] !== originalApprovalPlan!.runtime.generation ||
+              execution[4] !== originalApprovalPlan!.runtime.runtimeSessionId ||
+              execution[5] !== 'SETTLED' ||
+              execution[6] !== '1'
+            ) {
+              throw new Error(
+                `B3 earlier execution ${ordinal} changed its identity or re-ran: ${execution.join(',')}`,
+              );
+            }
+          }
+        } else if (verificationMode === 'allow') {
+          const plan = originalApprovalPlan!;
+          const settledAtByOrdinal: number[] = [];
+          for (const [ordinal, call] of plan.calls.entries()) {
+            const execution = executions.find(
+              (row) => row[1] === call.prepareKey,
+            );
+            if (
+              !execution ||
+              execution[2] !== plan.runtime.bindingId ||
+              execution[3] !== plan.runtime.generation ||
+              execution[4] !== plan.runtime.runtimeSessionId ||
+              execution[5] !== 'SETTLED' ||
+              execution[6] !== '1' ||
+              execution[7] !== call.requestDigest
+            ) {
+              throw new Error(
+                `Replacement changed the original prepared execution identity for call ${ordinal}: ${(execution ?? []).join(',')}`,
+              );
+            }
+            settledAtByOrdinal.push(Number(execution[8]));
+          }
+          // The siblings must SETTLE in plan order, not merely exist with the
+          // right identities: a recovery that dispatches the batch in reverse
+          // keeps every identity assertion green. settled_at is epoch millis;
+          // require it non-decreasing along the plan so a reverse dispatch reds.
+          for (
+            let ordinal = 1;
+            ordinal < settledAtByOrdinal.length;
+            ordinal += 1
+          ) {
+            if (
+              !Number.isFinite(settledAtByOrdinal[ordinal]) ||
+              settledAtByOrdinal[ordinal] < settledAtByOrdinal[ordinal - 1]
+            ) {
+              throw new Error(
+                `Replacement settled the siblings out of plan order: settledAt=${settledAtByOrdinal.join(',')}`,
+              );
+            }
+          }
+        }
+        const bytes = existsSync(inflightSideEffect)
+          ? readFileSync(inflightSideEffect, 'utf8')
+          : '';
+        if (
+          verificationMode === 'allow'
+            ? bytes !== inflightSideEffectContent
+            : existsSync(inflightSideEffect)
+        ) {
+          throw new Error(
+            `Approval physical file assertion failed for ${verificationMode}`,
+          );
+        }
+        if (approvalFault === 'sibling-approval') {
+          const siblingBytes = existsSync(siblingSideEffect)
+            ? readFileSync(siblingSideEffect, 'utf8')
+            : '';
+          if (siblingBytes !== siblingSideEffectContent)
+            throw new Error(
+              `Sibling physical file assertion failed: ${JSON.stringify(siblingBytes)}`,
+            );
+        }
+        if (approvalFault === 'after-earlier-tools') {
+          const b3Bytes = existsSync(b3SecondSideEffect)
+            ? readFileSync(b3SecondSideEffect, 'utf8')
+            : '';
+          if (b3Bytes !== b3SecondSideEffectContent)
+            throw new Error(
+              `B3 second physical file assertion failed: ${JSON.stringify(b3Bytes)}`,
+            );
+          // Round + cost ledger continuity: recovery must resume the saved round
+          // and restore the budget snapshot / token ledger, not restart them.
+          if (!b3Before)
+            throw new Error('B3 crash-boundary round/budget was not captured');
+          const b3After = b3RoundAndBudget(mysqlPort, sessionFilter);
+          saveEvidence('b3-round-budget-after.json', b3After);
+          if (b3After.round !== b3Before.round || b3After.round < 2)
+            throw new Error(
+              `B3 recovery reset the logical round: before=${b3Before.round} after=${b3After.round}`,
+            );
+          assertB3CostContinuity(b3Before, b3After);
+        }
+        const actionRows = runMysql(
+          mysqlPort,
+          `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' ORDER BY action_id`,
+        );
+        const expectedActionState =
+          verificationMode === 'expiry'
+            ? 'expired'
+            : verificationMode === 'cancel'
+              ? 'cancelled'
+              : 'decided';
+        if (approvalFault === 'sibling-approval') {
+          // Both siblings end decided under their ORIGINAL Action IDs: the
+          // decided one was not re-asked, the pending one earned its own Allow.
+          const expectedSiblingActions = [
+            `${originalApprovalId}\t${expectedActionState}`,
+            `${siblingApprovalId}\t${expectedActionState}`,
+          ].sort();
+          if (actionRows !== expectedSiblingActions.join('\n'))
+            throw new Error(
+              `Sibling approval identities/states differ: ${actionRows}`,
+            );
+        } else if (approvalFault === 'after-earlier-tools') {
+          // Both earlier tools end decided under their ORIGINAL Action IDs: A by
+          // the first Allow, B by the runner's second Allow. Recovery must resume
+          // the saved model round, not re-ask either approval.
+          const expectedB3Actions = [
+            `${originalApprovalId}\t${expectedActionState}`,
+            `${secondApprovalId}\t${expectedActionState}`,
+          ].sort();
+          if (actionRows !== expectedB3Actions.join('\n'))
+            throw new Error(
+              `B3 approval identities/states differ: ${actionRows}`,
+            );
+        } else if (
+          actionRows !== `${originalApprovalId}\t${expectedActionState}`
+        ) {
+          throw new Error(
+            `Original approval identity/state differs: ${actionRows}`,
+          );
+        }
+        // State alone proves a decision was committed, not which option won.
+        // Read the committed decision resource back for the browser-facing
+        // intent, and hold it to the revision and policy the browser answered.
+        const decisionOption =
+          verificationMode === 'allow' || verificationMode === 'deny'
+            ? JSON.parse(
+                runMysql(
+                  mysqlPort,
+                  `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(originalApprovalId!)}) AND r.kind='managed-action-decision'`,
+                ),
+              )
+            : undefined;
+        if (
+          decisionOption &&
+          (decisionOption.optionId !== verificationMode ||
+            decisionOption.inputRevision !==
+              originalApprovalOptions!.inputRevision ||
+            decisionOption.policyRevision !==
+              originalApprovalOptions!.policyRevision)
+        ) {
+          throw new Error(
+            `Stored approval decision differs from the chosen option: ${JSON.stringify(decisionOption)}`,
+          );
+        }
+        if (approvalFault === 'sibling-approval') {
+          // The pending sibling carries its OWN Allow decision bound to its own
+          // revisions — it was not auto-allowed from sibling[0]'s earlier Allow.
+          const siblingDecision = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(siblingApprovalId!)}) AND r.kind='managed-action-decision'`,
+            ),
+          );
           if (
-            recovered.runtimeCallId !== saved.runtimeCallId ||
-            recovered.partIndex !== saved.partIndex ||
-            recovered.prepareKey !== saved.prepareKey ||
-            recovered.requestDigest !== saved.requestDigest
+            siblingDecision.optionId !== 'allow' ||
+            siblingDecision.inputRevision !==
+              siblingApprovalOptions!.inputRevision ||
+            siblingDecision.policyRevision !==
+              siblingApprovalOptions!.policyRevision
           ) {
             throw new Error(
-              `Sibling recovery reordered or rewrote call ${ordinal}: ${JSON.stringify(recovered)} != ${JSON.stringify(saved)}`,
+              `Stored sibling decision differs from the chosen option: ${JSON.stringify(siblingDecision)}`,
+            );
+          }
+          // Clause 2: the recovered final plan preserves the saved sibling
+          // order and identities, and each sibling keeps its original Action
+          // ID. Compare by position so a reordered or dropped sibling reds
+          // here, not only in the execution count.
+          const finalPlan = siblingFinalPlan(
+            mysqlPort,
+            sessionFilter,
+            originalApprovalPlan!.batchId,
+          );
+          const savedCalls = originalApprovalPlan!.calls;
+          if (finalPlan.calls.length !== savedCalls.length)
+            throw new Error(
+              `Sibling recovery changed the batch size: ${finalPlan.calls.length} != ${savedCalls.length}`,
+            );
+          for (const [ordinal, saved] of savedCalls.entries()) {
+            const recovered = finalPlan.calls[ordinal];
+            if (
+              recovered.runtimeCallId !== saved.runtimeCallId ||
+              recovered.partIndex !== saved.partIndex ||
+              recovered.prepareKey !== saved.prepareKey ||
+              recovered.requestDigest !== saved.requestDigest
+            ) {
+              throw new Error(
+                `Sibling recovery reordered or rewrote call ${ordinal}: ${JSON.stringify(recovered)} != ${JSON.stringify(saved)}`,
+              );
+            }
+          }
+          if (
+            finalPlan.calls[0].actionId !== originalApprovalId ||
+            finalPlan.calls[1].actionId !== siblingApprovalId
+          ) {
+            throw new Error(
+              `Sibling recovery changed the original Action IDs: ${JSON.stringify(finalPlan.calls.map((call) => call.actionId))}`,
             );
           }
         }
+        // Expiry may only close the wait at or after the deadline it was
+        // given; an early terminal would mean the replacement invented one.
+        const expiryTerminalAt =
+          verificationMode === 'expiry'
+            ? Number(
+                runMysql(
+                  mysqlPort,
+                  `SELECT gmt_create FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE ORDER BY sequence_id DESC LIMIT 1`,
+                ),
+              )
+            : undefined;
         if (
-          finalPlan.calls[0].actionId !== originalApprovalId ||
-          finalPlan.calls[1].actionId !== siblingApprovalId
+          expiryTerminalAt !== undefined &&
+          (!Number.isSafeInteger(expiryTerminalAt) ||
+            expiryTerminalAt < originalApprovalOptions!.expiresAt)
         ) {
           throw new Error(
-            `Sibling recovery changed the original Action IDs: ${JSON.stringify(finalPlan.calls.map((call) => call.actionId))}`,
+            `Expiry closed before the original deadline: terminalAt=${expiryTerminalAt} expiresAt=${originalApprovalOptions!.expiresAt}`,
           );
         }
-      }
-      // Expiry may only close the wait at or after the deadline it was
-      // given; an early terminal would mean the replacement invented one.
-      const expiryTerminalAt =
-        verificationMode === 'expiry'
-          ? Number(
-              runMysql(
-                mysqlPort,
-                `SELECT gmt_create FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE ORDER BY sequence_id DESC LIMIT 1`,
-              ),
-            )
-          : undefined;
-      if (
-        expiryTerminalAt !== undefined &&
-        (!Number.isSafeInteger(expiryTerminalAt) ||
-          expiryTerminalAt < originalApprovalOptions!.expiresAt)
-      ) {
-        throw new Error(
-          `Expiry closed before the original deadline: terminalAt=${expiryTerminalAt} expiresAt=${originalApprovalOptions!.expiresAt}`,
+        const requestBodies = (fake?.requests ?? []).filter((request) =>
+          JSON.stringify(request.body.messages).includes(continuationMarker),
         );
-      }
-      const requestBodies = (fake?.requests ?? []).filter((request) =>
-        JSON.stringify(request.body.messages).includes(continuationMarker),
-      );
-      const initialRequests = requestBodies.filter(
-        (request) =>
-          !JSON.stringify(request.body.messages).includes('"role":"tool"'),
-      );
-      const modelAfterResults = requestBodies.filter((request) =>
-        JSON.stringify(request.body.messages).includes('"role":"tool"'),
-      );
-      const expectedModelsAfterResults =
-        approvalFault === 'after-earlier-tools'
-          ? 3
-          : approvalFault === 'after-result' ||
-              approvalFault === 'finished-before-commit'
-            ? 2
-            : ['allow', 'deny'].includes(verificationMode)
-              ? 1
-              : 0;
-      if (
-        initialRequests.length !== 1 ||
-        modelAfterResults.length !== expectedModelsAfterResults
-      )
-        throw new Error(
-          `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
+        const initialRequests = requestBodies.filter(
+          (request) =>
+            !JSON.stringify(request.body.messages).includes('"role":"tool"'),
         );
-      if (
-        approvalFault === 'after-result' ||
-        approvalFault === 'finished-before-commit'
-      ) {
-        const parity = isDeepStrictEqual(
-          modelAfterResults[0]?.body,
-          modelAfterResults[1]?.body,
+        const modelAfterResults = requestBodies.filter((request) =>
+          JSON.stringify(request.body.messages).includes('"role":"tool"'),
         );
-        saveEvidence('model-request-parity.json', {
-          requests: modelAfterResults.map((request) => request.body),
-          equal: parity,
-        });
-        if (!parity)
+        const expectedModelsAfterResults =
+          approvalFault === 'after-earlier-tools'
+            ? 3
+            : approvalFault === 'after-result' ||
+                approvalFault === 'finished-before-commit'
+              ? 2
+              : ['allow', 'deny'].includes(verificationMode)
+                ? 1
+                : 0;
+        if (
+          initialRequests.length !== 1 ||
+          modelAfterResults.length !== expectedModelsAfterResults
+        )
           throw new Error(
-            'Result-commit recovery changed the saved model request',
+            `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
           );
-      }
-      if (approvalFault === 'after-earlier-tools') {
-        // The held round-2 request (index 1) must be reissued deep-equal by the
-        // recovery generation (index 2); index 0 is the earlier round-1 request.
-        const parity = isDeepStrictEqual(
-          modelAfterResults[1]?.body,
-          modelAfterResults[2]?.body,
-        );
-        saveEvidence('model-request-parity.json', {
-          requests: modelAfterResults.map((request) => request.body),
-          equal: parity,
-        });
-        if (!parity)
-          throw new Error(
-            'B3 recovery changed the saved later-round model request',
+        if (
+          approvalFault === 'after-result' ||
+          approvalFault === 'finished-before-commit'
+        ) {
+          const parity = isDeepStrictEqual(
+            modelAfterResults[0]?.body,
+            modelAfterResults[1]?.body,
           );
-      }
-      if (responseOperation) {
-        await waitUntil(
-          'Approval response command completion',
-          async () => {
-            const operation = await fetchJson<Record<string, unknown>>(
-              `${replacementSpringUrl}/v1/agents/sessions/${session.id}/operations/${responseOperation!.id}`,
-              { headers: tenantHeaders(tenant) },
+          saveEvidence('model-request-parity.json', {
+            requests: modelAfterResults.map((request) => request.body),
+            equal: parity,
+          });
+          if (!parity)
+            throw new Error(
+              'Result-commit recovery changed the saved model request',
             );
-            if (operation.status === 'failed')
-              throw new Error(
-                `Approval response operation failed: ${JSON.stringify(operation)}`,
+        }
+        if (approvalFault === 'after-earlier-tools') {
+          // The held round-2 request (index 1) must be reissued deep-equal by the
+          // recovery generation (index 2); index 0 is the earlier round-1 request.
+          const parity = isDeepStrictEqual(
+            modelAfterResults[1]?.body,
+            modelAfterResults[2]?.body,
+          );
+          saveEvidence('model-request-parity.json', {
+            requests: modelAfterResults.map((request) => request.body),
+            equal: parity,
+          });
+          if (!parity)
+            throw new Error(
+              'B3 recovery changed the saved later-round model request',
+            );
+        }
+        if (responseOperation) {
+          await waitUntil(
+            'Approval response command completion',
+            async () => {
+              const operation = await fetchJson<Record<string, unknown>>(
+                `${replacementSpringUrl}/v1/agents/sessions/${session.id}/operations/${responseOperation!.id}`,
+                { headers: tenantHeaders(tenant) },
               );
-            return operation.status === 'completed';
+              if (operation.status === 'failed')
+                throw new Error(
+                  `Approval response operation failed: ${JSON.stringify(operation)}`,
+                );
+              return operation.status === 'completed';
+            },
+            30_000,
+            replacementSpring,
+          );
+        }
+        await waitUntil(
+          'Original Runtime cleanup confirmed',
+          () => {
+            const state = runMysql(
+              mysqlPort,
+              `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+            );
+            const confirmed = runMysql(
+              mysqlPort,
+              `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+            );
+            return state === 'RELEASED' && confirmed === '1';
           },
           30_000,
-          replacementSpring,
+          replacementHarness,
         );
-      }
-      await waitUntil(
-        'Original Runtime cleanup confirmed',
-        () => {
-          const state = runMysql(
-            mysqlPort,
-            `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
-          );
-          const confirmed = runMysql(
-            mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
-          );
-          return state === 'RELEASED' && confirmed === '1';
-        },
-        30_000,
-        replacementHarness,
-      );
-      const runtimeAfter = runMysql(
-        mysqlPort,
-        `SELECT binding_id, runtime_generation, workspace_generation, session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
-      ).split('\t');
-      const cleanupConfirmed = Number(
-        runMysql(
+        const runtimeAfter = runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
-        ),
-      );
-      if (
-        runtimeAfter[0] !== originalApprovalPlan!.runtime.bindingId ||
-        runtimeAfter[1] !== originalApprovalPlan!.runtime.generation ||
-        runtimeAfter[2] !== originalApprovalPlan!.runtime.workspaceGeneration ||
-        runtimeAfter[3] !== 'RELEASED' ||
-        cleanupConfirmed !== 1
-      )
-        throw new Error(
-          `Original cleanup did not release the original Runtime: state=${runtimeAfter.join(',')} confirmed=${cleanupConfirmed}`,
-        );
-      if (approvalFault === 'terminal-reply-lost') {
-        if (
-          storeFaultProxy?.terminalFaulted() !== true ||
-          terminalAcceptsAtBarrier < 1
-        )
-          throw new Error(
-            `Terminal reply loss did not commit the terminal before recovery: barrierAccepts=${terminalAcceptsAtBarrier} observations=${storeFaultProxy?.observations().join(' | ')}`,
-          );
-      }
-      if (approvalFault === 'terminal-write-failed') {
-        if (
-          (storeFaultProxy?.terminalRejectCount() ?? 0) < 1 ||
-          (storeFaultProxy?.terminalAcceptCount() ?? 0) < 1
-        )
-          throw new Error(
-            `Terminal write fault was not compensated: reject=${storeFaultProxy?.terminalRejectCount()} accept=${storeFaultProxy?.terminalAcceptCount()} observations=${storeFaultProxy?.observations().join(' | ')}`,
-          );
-      }
-      if (approvalFault === 'cleanup-failed') {
-        const failures = replacementBrokerProxy?.releaseFailureCount() ?? 0;
-        const successes = replacementBrokerProxy?.releaseSuccessCount() ?? 0;
-        // The debt projection is the scan's input; a confirmed cleanup
-        // removes it. A surviving row here means only the Turn's own driver
-        // (or an operator) could still pay it — exactly the gap this arm
-        // exists to keep closed.
-        const debt = Number(
+          `SELECT binding_id, runtime_generation, workspace_generation, session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+        ).split('\t');
+        const cleanupConfirmed = Number(
           runMysql(
             mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource_ref WHERE ${sessionFilter} AND owner_kind='HOSTED_CLEANUP'`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
           ),
         );
-        if (failures < 1 || successes < 1 || debt !== 0)
+        if (
+          runtimeAfter[0] !== originalApprovalPlan!.runtime.bindingId ||
+          runtimeAfter[1] !== originalApprovalPlan!.runtime.generation ||
+          runtimeAfter[2] !==
+            originalApprovalPlan!.runtime.workspaceGeneration ||
+          runtimeAfter[3] !== 'RELEASED' ||
+          cleanupConfirmed !== 1
+        )
           throw new Error(
-            `Cleanup fault was not retried after the replacement: failures=${failures} successes=${successes} debt=${debt}`,
+            `Original cleanup did not release the original Runtime: state=${runtimeAfter.join(',')} confirmed=${cleanupConfirmed}`,
           );
-      }
-      const faultObservations = {
-        releaseFailures: replacementBrokerProxy?.releaseFailureCount() ?? 0,
-        releaseSuccesses: replacementBrokerProxy?.releaseSuccessCount() ?? 0,
-        terminalRejects: storeFaultProxy?.terminalRejectCount() ?? 0,
-        terminalAccepts: storeFaultProxy?.terminalAcceptCount() ?? 0,
-        terminalAcceptsAtBarrier,
-        postCrashTerminalAccepts: Math.max(
-          0,
-          (storeFaultProxy?.terminalAcceptCount() ?? 0) -
-            terminalAcceptsAtBarrier,
-        ),
-      };
-      originalFaultObservations = faultObservations;
-      saveEvidence('approval-result.json', {
-        mode: verificationMode,
-        fault: approvalFault ?? null,
-        faultObservations,
-        sessionId: session.id,
-        actionId: originalApprovalId,
-        replacementActionBeforeResponse: actionBeforeResponse,
-        chosenOption: decisionOption?.optionId,
-        savedDeadline: {
-          createdAt: originalApprovalOptions!.createdAt,
-          expiresAt: originalApprovalOptions!.expiresAt,
-        },
-        recoveredDeadline: {
-          createdAt: optionsAfterReplacement.createdAt,
-          expiresAt: optionsAfterReplacement.expiresAt,
-        },
-        expiryTerminalAt: expiryTerminalAt ?? null,
-        expectedTerminal,
-        terminalCount: terminals.length,
-        executions,
-        physicalFileExists: existsSync(inflightSideEffect),
-        physicalFileBytes: bytes,
-        modelRequests: initialRequests.length + modelAfterResults.length,
-        initialRequests: initialRequests.length,
-        modelAfterResults: modelAfterResults.length,
-        runtimeAfter,
-        cleanupConfirmed,
-      });
-      approvalResultJson = JSON.stringify(
-        {
+        if (approvalFault === 'terminal-reply-lost') {
+          if (
+            storeFaultProxy?.terminalFaulted() !== true ||
+            terminalAcceptsAtBarrier < 1
+          )
+            throw new Error(
+              `Terminal reply loss did not commit the terminal before recovery: barrierAccepts=${terminalAcceptsAtBarrier} observations=${storeFaultProxy?.observations().join(' | ')}`,
+            );
+        }
+        if (approvalFault === 'terminal-write-failed') {
+          if (
+            (storeFaultProxy?.terminalRejectCount() ?? 0) < 1 ||
+            (storeFaultProxy?.terminalAcceptCount() ?? 0) < 1
+          )
+            throw new Error(
+              `Terminal write fault was not compensated: reject=${storeFaultProxy?.terminalRejectCount()} accept=${storeFaultProxy?.terminalAcceptCount()} observations=${storeFaultProxy?.observations().join(' | ')}`,
+            );
+        }
+        if (approvalFault === 'cleanup-failed') {
+          const failures = replacementBrokerProxy?.releaseFailureCount() ?? 0;
+          const successes = replacementBrokerProxy?.releaseSuccessCount() ?? 0;
+          // The debt projection is the scan's input; a confirmed cleanup
+          // removes it. A surviving row here means only the Turn's own driver
+          // (or an operator) could still pay it — exactly the gap this arm
+          // exists to keep closed.
+          const debt = Number(
+            runMysql(
+              mysqlPort,
+              `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource_ref WHERE ${sessionFilter} AND owner_kind='HOSTED_CLEANUP'`,
+            ),
+          );
+          if (failures < 1 || successes < 1 || debt !== 0)
+            throw new Error(
+              `Cleanup fault was not retried after the replacement: failures=${failures} successes=${successes} debt=${debt}`,
+            );
+        }
+        const faultObservations = {
+          releaseFailures: replacementBrokerProxy?.releaseFailureCount() ?? 0,
+          releaseSuccesses: replacementBrokerProxy?.releaseSuccessCount() ?? 0,
+          terminalRejects: storeFaultProxy?.terminalRejectCount() ?? 0,
+          terminalAccepts: storeFaultProxy?.terminalAcceptCount() ?? 0,
+          terminalAcceptsAtBarrier,
+          postCrashTerminalAccepts: Math.max(
+            0,
+            (storeFaultProxy?.terminalAcceptCount() ?? 0) -
+              terminalAcceptsAtBarrier,
+          ),
+        };
+        originalFaultObservations = faultObservations;
+        saveEvidence('approval-result.json', {
           mode: verificationMode,
-          originalAction: originalApprovalId,
-          originalBatch: originalApprovalPlan!.batchId,
-          originalBinding: originalApprovalPlan!.runtime.bindingId,
-          executions: executions.length,
-          terminal: expectedTerminal,
+          fault: approvalFault ?? null,
+          faultObservations,
+          sessionId: session.id,
+          actionId: originalApprovalId,
+          replacementActionBeforeResponse: actionBeforeResponse,
+          chosenOption: decisionOption?.optionId,
+          savedDeadline: {
+            createdAt: originalApprovalOptions!.createdAt,
+            expiresAt: originalApprovalOptions!.expiresAt,
+          },
+          recoveredDeadline: {
+            createdAt: optionsAfterReplacement.createdAt,
+            expiresAt: optionsAfterReplacement.expiresAt,
+          },
+          expiryTerminalAt: expiryTerminalAt ?? null,
+          expectedTerminal,
+          terminalCount: terminals.length,
+          executions,
+          physicalFileExists: existsSync(inflightSideEffect),
+          physicalFileBytes: bytes,
+          modelRequests: initialRequests.length + modelAfterResults.length,
+          initialRequests: initialRequests.length,
+          modelAfterResults: modelAfterResults.length,
+          runtimeAfter,
           cleanupConfirmed,
-        },
-        null,
-        2,
-      );
+        });
+        approvalResultJson = JSON.stringify(
+          {
+            mode: verificationMode,
+            originalAction: originalApprovalId,
+            originalBatch: originalApprovalPlan!.batchId,
+            originalBinding: originalApprovalPlan!.runtime.bindingId,
+            executions: executions.length,
+            terminal: expectedTerminal,
+            cleanupConfirmed,
+          },
+          null,
+          2,
+        );
+      }
     } else if (inflightFailover) {
       const recoveredTurn = await waitForTerminal(
         replacementSpringUrl,
@@ -4492,7 +6351,7 @@ try {
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       const requests = (fake?.requests ?? []).filter(({ body }) =>
@@ -4606,7 +6465,7 @@ try {
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       const requests = (fake?.requests ?? []).filter(({ body }) =>
@@ -4799,7 +6658,7 @@ try {
         const awakeTerminalCount = Number(
           runMysql(
             mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
           ),
         );
         if (
@@ -4830,7 +6689,7 @@ try {
         Number(
           runMysql(
             mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
           ),
         );
       const currentBoot = () =>
@@ -5088,14 +6947,14 @@ try {
             ),
             turns: runMysql(
               mysqlPort,
-              `SELECT turn_id, status, version, dispatch_owner, dispatch_lease_until, retry_count, submission_attempted, harness_event_epoch, harness_last_event_id, error_code FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY turn_id`,
+              `SELECT turn_id, status, version, dispatch_owner, dispatch_lease_until, retry_count, is_submission_attempted, harness_event_epoch, harness_last_event_id, error_code FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY turn_id`,
               probeMs,
             ),
             // Row by row: a retraction rewrites delta payloads and identities
             // in place, which no count or maximum would notice.
             events: runMysql(
               mysqlPort,
-              `SELECT stream_kind, HEX(stream_id), sequence_id, event_type, terminal, HEX(source_key), SHA2(data_json, 256), HEX(item_id), HEX(content_part_id), SHA2(text, 256), state FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} ORDER BY stream_kind, stream_id, sequence_id`,
+              `SELECT stream_kind, HEX(stream_id), sequence_id, event_type, is_terminal, HEX(source_key), SHA2(data_json, 256), HEX(item_id), HEX(content_part_id), SHA2(text, 256), state FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} ORDER BY stream_kind, stream_id, sequence_id`,
               probeMs,
             ),
             // Every Spring also sweeps expired operation claims on a timer, so
@@ -5508,7 +7367,7 @@ try {
       const terminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       if (
@@ -5551,22 +7410,26 @@ try {
     }
     if (verificationMode) {
       // These assertions run after every A/B primary gate, never in place of it.
-      await waitUntil(
-        'Runtime cleanup before next Turn',
-        () => {
-          const state = runMysql(
-            mysqlPort,
-            `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
-          );
-          const confirmed = runMysql(
-            mysqlPort,
-            `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
-          );
-          return state === 'RELEASED' && confirmed === '1';
-        },
-        30_000,
-        replacementHarness,
-      );
+      // Hook Sessions keep their component Runtime mounted between Turns; the
+      // native hosted-cleanup receipt is not their release contract. The relief
+      // Turn below still proves that the Session accepts more work.
+      if (!commandRewriteRecovery)
+        await waitUntil(
+          'Runtime cleanup before next Turn',
+          () => {
+            const state = runMysql(
+              mysqlPort,
+              `SELECT session_state FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+            );
+            const confirmed = runMysql(
+              mysqlPort,
+              `SELECT COUNT(*) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} AND command_id=${sqlString(`hosted-cleanup:${originalRuntimeSessionId}:${originalRuntimeSessionId}:confirmed`)}`,
+            );
+            return state === 'RELEASED' && confirmed === '1';
+          },
+          30_000,
+          replacementHarness,
+        );
       const originalPage = await fetchJson<PublicList<PublicEvent>>(
         `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events?after=0&limit=100`,
         { headers: tenantHeaders(tenant) },
@@ -5654,7 +7517,7 @@ try {
       const finalTerminalCount = Number(
         runMysql(
           mysqlPort,
-          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND terminal=TRUE`,
+          `SELECT COUNT(*) FROM qwen_managed_agent.ma_public_event WHERE ${sessionFilter} AND stream_kind='SESSION' AND stream_id=X'' AND is_terminal=TRUE`,
         ),
       );
       if (finalTerminalCount !== 2)
@@ -5697,7 +7560,16 @@ try {
         },
         60_000,
         replacementSpring,
-      );
+      ).catch((cause: unknown) => {
+        const runtime = runMysql(
+          mysqlPort,
+          `SELECT runtime_session_id, session_state, binding_id, runtime_generation FROM qwen_managed_agent.ma_runtime_session WHERE runtime_session_id=${sqlString(originalRuntimeSessionId!)}`,
+        );
+        throw new Error(
+          `Reliable close operation completion failed; runtime sessions: ${runtime}`,
+          { cause },
+        );
+      });
       const closedSession = await fetchJson<Record<string, unknown>>(
         `${replacementSpringUrl}/v1/agents/sessions/${session.id}`,
         { headers: tenantHeaders(tenant) },
@@ -5731,7 +7603,7 @@ try {
       saveEvidence('summary.json', summary);
       g3SummaryJson = JSON.stringify(summary, null, 2);
     }
-  } else {
+  } else if (!loopSkill && !loopFire) {
     const idempotencyKey = `create-${Date.now()}`;
     const prompt = [
       'Before using any tool, emit the visible text MODEL_READY.',
@@ -5807,12 +7679,9 @@ try {
     if (terminal.event.type !== 'turn.completed') {
       throw new Error(`Managed Turn ended with ${terminal.event.type}`);
     }
-    if (
-      runtimeDelayMs >= modelBeforeRuntimeAssertionDelayMs &&
-      firstModel.event.sequence >= runtimeReady.event.sequence
-    ) {
+    if (runtimeReady.event.sequence >= firstModel.event.sequence) {
       throw new Error(
-        'First model event did not precede Runtime readiness ' +
+        'Runtime readiness did not precede the first model event ' +
           `(firstModelSequence=${firstModel.event.sequence}, ` +
           `runtimeReadySequence=${runtimeReady.event.sequence}, ` +
           `firstModelEventMs=${firstModel.observedAt - requestStartedAt}, ` +
@@ -5877,7 +7746,7 @@ try {
     }
     const durable = runMysql(
       mysqlPort,
-      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(terminal) FROM qwen_managed_agent.ma_public_event WHERE tenant_id='${tenant}' AND session_id='${session.id}' AND stream_kind='SESSION' AND stream_id=X''`,
+      `SELECT COUNT(*), COUNT(DISTINCT sequence_id), SUM(is_terminal) FROM qwen_managed_agent.ma_public_event WHERE tenant_id='${tenant}' AND session_id='${session.id}' AND stream_kind='SESSION' AND stream_id=X''`,
     ).split('\t');
     if (
       durable.length !== 3 ||
@@ -5912,7 +7781,7 @@ try {
   if (dumpPort !== undefined) {
     try {
       console.error(
-        `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.ma_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT stream_kind, HEX(stream_id), sequence_id, turn_id, event_type, terminal, source_key FROM qwen_managed_agent.ma_public_event ORDER BY stream_kind, stream_id, sequence_id')}\nsessions:\n${runMysql(dumpPort, 'SELECT session_id, harness_boot_id, harness_event_epoch, harness_last_event_id FROM qwen_managed_agent.ma_session')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head')}`,
+        `\n--- Durable state ---\nturns:\n${runMysql(dumpPort, 'SELECT turn_id, status, error_code, is_submission_attempted, harness_event_epoch, dispatch_owner, dispatch_lease_until FROM qwen_managed_agent.ma_turn')}\nevents:\n${runMysql(dumpPort, 'SELECT stream_kind, HEX(stream_id), sequence_id, turn_id, event_type, is_terminal, source_key FROM qwen_managed_agent.ma_public_event ORDER BY stream_kind, stream_id, sequence_id')}\nsessions:\n${runMysql(dumpPort, 'SELECT session_id, harness_boot_id, harness_event_epoch, harness_last_event_id FROM qwen_managed_agent.ma_session')}\nexecutions:\n${runMysql(dumpPort, 'SELECT execution_call_id, execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution')}\njournal:\n${runMysql(dumpPort, 'SELECT session_id, state, writer_generation, journal_revision, committed_sequence FROM qwen_managed_agent.ma_session_head')}`,
       );
     } catch (dumpError) {
       console.error(`Durable state dump failed: ${String(dumpError)}`);

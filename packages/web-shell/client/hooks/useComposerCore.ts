@@ -52,15 +52,14 @@ import {
 } from './useIsTouchComposer';
 import type { CommandInfo } from '../adapters/types';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
-import {
-  useOptionalWorkspace,
-  type UseDaemonFollowupSuggestionReturn,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalComposerWorkspace } from './useComposerWorkspace.js';
 import {
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
   getSlashCommandCompletionResult,
   type SkillInfo,
+  type SlashArgumentCompleter,
   type SlashCommandCompletionResult,
 } from '../completions/slashCompletion';
 import {
@@ -82,7 +81,7 @@ import {
   inputHighlight,
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
-import { isEditableTarget } from '../utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   createInputAnnotationsFromComposerTags,
@@ -1186,11 +1185,22 @@ export interface UseComposerCoreOptions {
     commitAccepted?: ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  /**
+   * Awaited before a user-initiated submit (Send button or Enter) reads the
+   * draft, so the host can finalize pending input first — e.g. stop voice
+   * dictation and insert its final transcript. Submits stay synchronous when
+   * it is absent. While it runs, further user submits are ignored and
+   * `submitPreparing` is true; a session switch, unmount, or a rejecting
+   * finalizer cancels the submit.
+   */
+  prepareSubmit?: () => Promise<void>;
   onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
   cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
+  /** Keep the editor editable while rejecting every submit path. */
+  submitDisabled?: boolean;
   /**
    * Whether the composer may react to FILE drags at all (drag highlight and
    * drop ingestion on the inline image/text lane). `false` leaves paste
@@ -1201,6 +1211,8 @@ export interface UseComposerCoreOptions {
   commands: CommandInfo[];
   skills?: SkillInfo[];
   allowEmptySlashMenu?: boolean;
+  /** Completes arguments the static subcommand trees cannot (`/send`). */
+  slashArgumentCompleter?: SlashArgumentCompleter;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
@@ -1457,27 +1469,39 @@ function shallowEqualSlashMenu(
 
 type MultilineHistoryBoundary = 'editor' | 'handled' | 'history';
 
+// Arrow paging needs both the browse flag (cleared on edits) and an armed index.
 function handleMultilineHistoryBoundary(
   view: EditorView,
   direction: 'up' | 'down',
+  isPagingHistory: boolean,
 ): MultilineHistoryBoundary {
   const doc = view.state.doc;
-  if (doc.lines <= 1) return 'history';
-
   const selection = view.state.selection.main;
   if (!selection.empty) return 'editor';
+  if (isPagingHistory && doc.lines === 1) return 'history';
 
   const head = selection.head;
-  const line = doc.lineAt(head);
+  const caret = view.coordsAtPos(head, selection.assoc < 0 ? -1 : 1);
+  // Bidi visual sides may lie inside the logical line; compare vertical rows.
+  const sharesRowWith = (edge: number) => {
+    if (!caret) return doc.lineAt(head).number === doc.lineAt(edge).number;
+    const bounds = view.coordsAtPos(edge);
+    return (
+      bounds !== null && caret.top < bounds.bottom && bounds.top < caret.bottom
+    );
+  };
+  const onFirstRow = sharesRowWith(0);
+  const onLastRow = sharesRowWith(doc.length);
+  if (doc.lines === 1 && onFirstRow && onLastRow) return 'history';
 
-  // Let CodeMirror handle normal multi-line cursor movement first. Once the
-  // cursor is on the edge line, one more arrow key snaps to the true edge;
+  // Let CodeMirror move between visual rows, including soft wraps. Once the
+  // cursor is on the edge row, one more arrow key snaps to the true edge;
   // the next press can browse prompt history instead of feeling stuck.
   if (direction === 'up') {
-    if (line.number > 1) return 'editor';
-    if (head > line.from) {
+    if (!onFirstRow) return 'editor';
+    if (head > 0) {
       view.dispatch({
-        selection: { anchor: line.from },
+        selection: { anchor: 0 },
         scrollIntoView: true,
       });
       return 'handled';
@@ -1485,10 +1509,10 @@ function handleMultilineHistoryBoundary(
     return 'history';
   }
 
-  if (line.number < doc.lines) return 'editor';
-  if (head < line.to) {
+  if (!onLastRow) return 'editor';
+  if (head < doc.length) {
     view.dispatch({
-      selection: { anchor: line.to },
+      selection: { anchor: doc.length },
       scrollIntoView: true,
     });
     return 'handled';
@@ -1549,6 +1573,15 @@ export interface UseComposerCoreReturn {
   hasAttachments: boolean;
   hasContent: boolean;
   canSubmit: boolean;
+  /**
+   * The content-independent submit guards (disabled, submitDisabled, draft
+   * restore, pending attachment batches, workspace upload). `canSubmit` is
+   * `!submitBlocked && hasContent`; render sites that relax the content term
+   * must keep these guards.
+   */
+  submitBlocked: boolean;
+  /** True while `prepareSubmit` is running ahead of a user-initiated submit. */
+  submitPreparing: boolean;
   pendingImageBatchCount: number;
   imageDragActive: boolean;
   clearImageDragState: () => void;
@@ -1604,16 +1637,19 @@ export function useComposerCore(
 ): UseComposerCoreReturn {
   const {
     onSubmit,
+    prepareSubmit,
     onInputTextChange,
     onCycleMode,
     cycleModeOnTab = false,
     onToggleShortcuts,
     disabled = false,
+    submitDisabled = false,
     fileDragEnabled = true,
     placeholderText = 'Type a message...',
     commands,
     skills = [],
     allowEmptySlashMenu = false,
+    slashArgumentCompleter,
     slashCommandCategoryOrder,
     autoSubmitSlashCommands = false,
     queuedMessages = [],
@@ -1652,7 +1688,7 @@ export function useComposerCore(
 
   const persistFileReferencesRef = useRef(persistFileReferences);
   persistFileReferencesRef.current = persistFileReferences;
-  const workspace = useOptionalWorkspace();
+  const workspace = useOptionalComposerWorkspace();
   const { language, t } = useI18n();
   const portalRoot = useWebShellPortalRoot();
   const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
@@ -1760,6 +1796,8 @@ export function useComposerCore(
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const submitDisabledRef = useRef(submitDisabled);
+  submitDisabledRef.current = submitDisabled;
   const fileDragEnabledRef = useRef(fileDragEnabled);
   fileDragEnabledRef.current = fileDragEnabled;
   const attachmentsEnabledRef = useRef(attachmentsEnabled);
@@ -1770,6 +1808,8 @@ export function useComposerCore(
   commandsRef.current = commands;
   const allowEmptySlashMenuRef = useRef(allowEmptySlashMenu);
   allowEmptySlashMenuRef.current = allowEmptySlashMenu;
+  const slashArgumentCompleterRef = useRef(slashArgumentCompleter);
+  slashArgumentCompleterRef.current = slashArgumentCompleter;
   const skillsRef = useRef(skills);
   skillsRef.current = skills;
   const slashCommandCategoryOrderRef = useRef(slashCommandCategoryOrder);
@@ -2393,13 +2433,38 @@ export function useComposerCore(
       onPasteCapture: (event) => {
         const pastedText = event.clipboardData.getData('text/plain');
         if (pastedText) {
+          const isEditorPaste =
+            pastedInEditor(event.target) ||
+            (event.target === event.currentTarget &&
+              event.currentTarget instanceof HTMLTextAreaElement);
+          if (
+            isEditorPaste &&
+            !disabledRef.current &&
+            !shellModeRef.current &&
+            attachmentsEnabledRef.current &&
+            /^https?:\/\/\S+$/iu.test(pastedText.trim())
+          ) {
+            const draft =
+              viewRef.current?.state.doc.toString() ?? mobileTextRef.current;
+            if (/^[!/]/.test(draft.trimStart())) return;
+            const transfer = extractFileTransfer(event.clipboardData, 'paste');
+            // A copied image can carry its source URL alongside the bitmap.
+            if (
+              transfer.imageCandidates.length === 1 &&
+              transfer.fileCandidates.length === 0 &&
+              transfer.rejected.length === 0 &&
+              enqueueExtractedTransfer(transfer)
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+          }
           // These handlers live on the composer surface, which also contains
           // controls that take text of their own (the history search box), so
           // only a paste aimed at the editor may be folded.
           if (
-            (pastedInEditor(event.target) ||
-              (event.target === event.currentTarget &&
-                event.currentTarget instanceof HTMLTextAreaElement)) &&
+            isEditorPaste &&
             foldPastedTextIntoCard(
               pastedText,
               event.target instanceof HTMLTextAreaElement
@@ -2474,6 +2539,7 @@ export function useComposerCore(
     }),
     [
       clearImageDragState,
+      enqueueExtractedTransfer,
       enqueueImageTransfer,
       foldPastedTextIntoCard,
       isTouchComposer,
@@ -2651,6 +2717,11 @@ export function useComposerCore(
       // flag and re-arms persistence (handleMobileChange or a programmatic
       // write on touch, the CodeMirror update listener on desktop).
       historyBrowseActiveRef.current = true;
+      (shellModeRef.current
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current
+      ).reset();
+      if (!shellModeRef.current) clearPromptHistoryDraftTags();
       if (!view) {
         if (isTouchComposer) {
           // Plain-text restore: inline tag chips are not recreated on the
@@ -2661,7 +2732,12 @@ export function useComposerCore(
       }
       restoreHistoryEntry(view, text);
     },
-    [isTouchComposer, restoreHistoryEntry, setMobileText],
+    [
+      clearPromptHistoryDraftTags,
+      isTouchComposer,
+      restoreHistoryEntry,
+      setMobileText,
+    ],
   );
   const composerInputRef = useRef(composerInput);
   composerInputRef.current = composerInput;
@@ -2673,9 +2749,61 @@ export function useComposerCore(
       suppressFollowupCompletion?: boolean,
     ) => boolean
   >(() => true);
+  const prepareSubmitRef = useRef(prepareSubmit);
+  prepareSubmitRef.current = prepareSubmit;
+  const submitPreparingRef = useRef(false);
+  const [submitPreparing, setSubmitPreparing] = useState(false);
+  // Runs the host's pre-submit finalization once at a time; a second user
+  // submit while it is in flight is dropped, not queued.
+  const prepareForSubmit = useCallback(async (): Promise<boolean> => {
+    if (submitPreparingRef.current) return false;
+    const prepare = prepareSubmitRef.current;
+    if (!prepare) return true;
+    submitPreparingRef.current = true;
+    setSubmitPreparing(true);
+    try {
+      await prepare();
+    } catch {
+      // A failed finalization cancels the submit, like a session switch or
+      // unmount would; the fire-and-forget callers must not see a rejection.
+      return false;
+    } finally {
+      submitPreparingRef.current = false;
+      setSubmitPreparing(false);
+    }
+    return true;
+  }, []);
+  // The draft read after the await must still belong to the composer the
+  // user submitted from: a session switch during finalization swaps the doc.
+  const submitIdentityMatches = useCallback(
+    (identity: typeof composerIdentityRef.current) => {
+      const current = composerIdentityRef.current;
+      return (
+        current.sessionId === identity.sessionId &&
+        current.draftStorageKey === identity.draftStorageKey &&
+        current.promptHistoryStorageKey === identity.promptHistoryStorageKey
+      );
+    },
+    [],
+  );
+  // The same predicate submitComposerText enforces, exposed so the submit
+  // entrances can refuse BEFORE arming the finalizer — a refused submit must
+  // not tear down a live capture — and so render sites can relax only the
+  // content term of canSubmit without discarding these guards.
+  const submitGuardsBlock = useCallback(
+    () =>
+      disabledRef.current ||
+      submitDisabledRef.current ||
+      activeDraftAttachmentRestoreRef.current !== null ||
+      (sharedDraftRef.current?.session.pendingBatches ??
+        imageIngestionLaneRef.current.pendingBatches) > 0 ||
+      workspaceUploadBusyRef.current,
+    [],
+  );
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
   const [slashMenu, setSlashMenuState] = useState<SlashMenuState | null>(null);
   const slashMenuRef = useRef<SlashMenuState | null>(null);
+  const dismissedSlashMenuRef = useRef<EditorState['doc'] | null>(null);
 
   // True while the user is paging through input history with the arrow keys
   // and has not typed since. Unlike history.isNavigating() (which stays set
@@ -2821,8 +2949,10 @@ export function useComposerCore(
       tRef.current,
       slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
       allowEmptySlashMenuRef.current,
+      slashArgumentCompleterRef.current,
     );
     if (!result) return false;
+    dismissedSlashMenuRef.current = null;
     setSlashMenu({
       ...result,
       selectedIndex: 0,
@@ -2873,6 +3003,7 @@ export function useComposerCore(
         (key) => tRef.current(key),
         slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
         allowEmptySlashMenuRef.current,
+        slashArgumentCompleterRef.current,
       );
       if (!relativeResult) {
         setSlashMenu(null);
@@ -2895,7 +3026,25 @@ export function useComposerCore(
     [closeAtMenu, setSlashMenu],
   );
 
+  // New argument data (a workspace's sessions arrived): recompute the menu
+  // for a command being typed.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (
+      !view?.hasFocus ||
+      !slashArgumentCompleter ||
+      dismissedSlashMenuRef.current === view.state.doc
+    )
+      return;
+    const { head } = view.state.selection.main;
+    const line = view.state.doc.lineAt(head);
+    if (slashArgumentCompleter(line.text.slice(0, head - line.from))) {
+      refreshSlashMenuForView(view);
+    }
+  }, [refreshSlashMenuForView, slashArgumentCompleter]);
+
   const closeSlashMenu = useCallback(() => {
+    dismissedSlashMenuRef.current = viewRef.current?.state.doc ?? null;
     setSlashMenu(null);
   }, [setSlashMenu]);
 
@@ -3217,13 +3366,13 @@ export function useComposerCore(
     tagsOverride?: readonly WebShellComposerTag[],
     suppressFollowupCompletion = false,
   ) => {
-    if (
-      disabledRef.current ||
-      activeDraftAttachmentRestoreRef.current !== null ||
-      (sharedDraftRef.current?.session.pendingBatches ??
-        imageIngestionLaneRef.current.pendingBatches) > 0 ||
-      workspaceUploadBusyRef.current
-    ) {
+    // A programmatic submit landing inside the finalization window is
+    // dropped like any other reentrant submit; otherwise the flush
+    // continuation would submit a second time after it.
+    if (submitPreparingRef.current) {
+      return true;
+    }
+    if (submitGuardsBlock()) {
       return true;
     }
     const inlineTags =
@@ -3693,19 +3842,45 @@ export function useComposerCore(
             });
             return true;
           }
-          const followup = followupStateRef.current;
-          const hasInlineTags = hasInlineComposerTags(view);
-          const followupCompletion = hasInlineTags
-            ? null
-            : getFollowupCompletion(
-                view.state.doc.toString(),
-                followup?.suggestion,
-              );
-          if (followup?.isVisible && followupCompletion) {
-            onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
-            return submitText(view, followupCompletion);
+          const submitDraft = (target: EditorView) => {
+            const followup = followupStateRef.current;
+            const hasInlineTags = hasInlineComposerTags(target);
+            const followupCompletion = hasInlineTags
+              ? null
+              : getFollowupCompletion(
+                  target.state.doc.toString(),
+                  followup?.suggestion,
+                );
+            if (followup?.isVisible && followupCompletion) {
+              onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+              return submitText(target, followupCompletion);
+            }
+            return submitText(target);
+          };
+          // Refuse before arming the finalizer: a submit the guards would
+          // reject must leave a live capture recording, as it did before
+          // finalization existed.
+          if (!prepareSubmitRef.current || submitGuardsBlock()) {
+            return submitDraft(view);
           }
-          return submitText(view);
+          const identity = composerIdentityRef.current;
+          // CodeMirror commands are synchronous; the finalization runs in the
+          // background and the key is consumed so no newline is inserted.
+          void (async () => {
+            if (!(await prepareForSubmit())) return;
+            const currentView = viewRef.current;
+            if (
+              !composerMountedRef.current ||
+              !currentView ||
+              !submitIdentityMatches(identity)
+            ) {
+              return;
+            }
+            // Finalization may have inserted text (e.g. a voice transcript),
+            // so the follow-up completion is recomputed from the new draft.
+            submitDraft(currentView);
+          })();
+          return true;
         },
       },
       {
@@ -3783,7 +3958,11 @@ export function useComposerCore(
             closeSlashMenu();
             closeAtMenu();
           }
-          const multilineBoundary = handleMultilineHistoryBoundary(view, 'up');
+          const multilineBoundary = handleMultilineHistoryBoundary(
+            view,
+            'up',
+            isBrowsingHistory && history.isNavigating(),
+          );
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
@@ -3841,6 +4020,7 @@ export function useComposerCore(
           const multilineBoundary = handleMultilineHistoryBoundary(
             view,
             'down',
+            isBrowsingHistory && history.isNavigating(),
           );
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
@@ -3853,6 +4033,7 @@ export function useComposerCore(
           }
           const next = history.navigateDown();
           if (next === null) {
+            if (isBrowsingHistory) return true;
             return onFocusFooterRef.current?.() ?? false;
           }
           const returningToPromptDraft = !history.isNavigating();
@@ -4539,10 +4720,24 @@ export function useComposerCore(
       if (disabledRef.current || searchMode || dialogOpen) return;
       if (event.defaultPrevented) return;
       // Only capture keystrokes if the target is within the web-shell container
-      // or if no specific element has focus (document.body is active)
+      // or if no specific element has focus (document.body is active). A
+      // marked focus region (the managed page's non-interactive tabindex=-1
+      // wrapper) parks focus without intent to interact, so it counts as
+      // body focus too — otherwise clicking the pane silences "type anywhere".
       const target = event.target as Node;
       const isWithinContainer = containerRef.current?.contains(target);
-      const isBodyFocused = document.activeElement === document.body;
+      // The focused element must be read from the container's own root: in a
+      // shadow-root mount `document.activeElement` and `event.target` both
+      // retarget to the host, which would make a parked focus region look
+      // unfocused and silence "type anywhere". The region must also wrap this
+      // composer: two managed shells can share one shadow root, and their
+      // parked wrappers are then siblings, so the attribute alone would let
+      // one shell capture the keystrokes aimed at the other.
+      const activeRegion = getShadowAwareActiveElement(containerRef.current);
+      const isBodyFocused =
+        document.activeElement === document.body ||
+        (activeRegion?.hasAttribute('data-web-shell-focus-region') === true &&
+          activeRegion.contains(containerRef.current));
       if (!isWithinContainer && !isBodyFocused) return;
       const view = viewRef.current;
       const followup = followupStateRef.current;
@@ -5022,6 +5217,7 @@ export function useComposerCore(
   const retryLast = useCallback(() => {
     if (
       disabledRef.current ||
+      submitDisabledRef.current ||
       activeDraftAttachmentRestoreRef.current !== null ||
       (sharedDraftRef.current?.session.pendingBatches ??
         imageIngestionLaneRef.current.pendingBatches) > 0 ||
@@ -5227,6 +5423,7 @@ export function useComposerCore(
     (match: string) => {
       if (
         disabledRef.current ||
+        submitDisabledRef.current ||
         activeDraftAttachmentRestoreRef.current !== null ||
         (sharedDraftRef.current?.session.pendingBatches ??
           imageIngestionLaneRef.current.pendingBatches) > 0 ||
@@ -5382,12 +5579,17 @@ export function useComposerCore(
 
   // ---- Computed ----
 
-  const canSubmit =
-    !disabled &&
-    !draftAttachmentsRestoring &&
-    pendingImageBatchCount === 0 &&
-    !workspaceUploadBusy &&
-    hasContent;
+  // The content-independent submit guards, mirroring submitGuardsBlock (the
+  // ref-based predicate the submit path enforces). Render sites use this to
+  // relax only the content term of canSubmit — e.g. an active dictation —
+  // without discarding the guards themselves.
+  const submitBlocked =
+    disabled ||
+    submitDisabled ||
+    draftAttachmentsRestoring ||
+    pendingImageBatchCount > 0 ||
+    workspaceUploadBusy;
+  const canSubmit = !submitBlocked && hasContent;
   const showShortcutHints =
     !shellMode &&
     !searchMode &&
@@ -5499,8 +5701,29 @@ export function useComposerCore(
     submitText: useCallback(() => {
       const view = viewRef.current;
       if (!view && !isTouchComposer) return;
-      submitTextRef.current(view);
-    }, [isTouchComposer]),
+      if (!prepareSubmitRef.current || submitGuardsBlock()) {
+        submitTextRef.current(view);
+        return;
+      }
+      const identity = composerIdentityRef.current;
+      void (async () => {
+        if (!(await prepareForSubmit())) return;
+        const currentView = viewRef.current;
+        if (
+          !composerMountedRef.current ||
+          !submitIdentityMatches(identity) ||
+          (!currentView && !isTouchComposer)
+        ) {
+          return;
+        }
+        submitTextRef.current(currentView);
+      })();
+    }, [
+      isTouchComposer,
+      prepareForSubmit,
+      submitGuardsBlock,
+      submitIdentityMatches,
+    ]),
     clearText,
     getText,
     hasInput,
@@ -5511,6 +5734,8 @@ export function useComposerCore(
       pastedFiles.length > 0,
     hasContent,
     canSubmit,
+    submitBlocked,
+    submitPreparing,
     pendingImageBatchCount,
     imageDragActive,
     clearImageDragState,

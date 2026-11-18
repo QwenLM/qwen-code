@@ -28,6 +28,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { isTieredEffortQwenPrefix } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
@@ -86,6 +87,20 @@ const MODEL_CONFIGURATIONS: Readonly<
       thinking: true,
       efforts: ['low', 'medium', 'xhigh'],
       defaultEffort: 'xhigh',
+    },
+  },
+  'qwen3.8-flash': {
+    reasoning: {
+      thinking: true,
+      efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
+    },
+  },
+  'qwen4-max': {
+    reasoning: {
+      thinking: true,
+      efforts: ['low', 'high', 'xhigh'],
+      defaultEffort: 'high',
     },
   },
 };
@@ -320,9 +335,24 @@ export function getModelConfiguration(
       : modelId
         ? (MODEL_CONFIGURATIONS[modelId] ??
           (isTieredEffortQwenPrefix(modelId)
-            ? MODEL_CONFIGURATIONS['qwen3.8-max']
+            ? tieredQwenManifest(modelId)
             : undefined))
         : undefined;
+}
+
+/**
+ * Prefix fallback for tiered Qwen ids without an exact manifest row (dated
+ * snapshots, `-latest` aliases). Only qwen4-max takes the qwen4-max ladder
+ * (low/high/xhigh, default high); other qwen4* routes and the invitation-only
+ * latest-series previews keep the stable qwen3.8-max ladder, so existing models
+ * retain their shipped effort controls.
+ */
+function tieredQwenManifest(
+  modelId: string,
+): { readonly reasoning?: ModelReasoningConfiguration } | undefined {
+  return modelId.toLowerCase().startsWith('qwen4-max')
+    ? MODEL_CONFIGURATIONS['qwen4-max']
+    : MODEL_CONFIGURATIONS['qwen3.8-max'];
 }
 
 /**
@@ -374,10 +404,12 @@ export function getReasoningEffortsForConfig(
   config: Config,
 ): readonly ReasoningEffort[] {
   const modelId = config.getModel?.();
-  // One tier rule for `/effort` and a workflow agent's per-call effort: this
-  // site keeps its own capability lookup and delegates only the rule.
+  // One tier rule for `/effort` and a workflow agent's per-call effort, but the
+  // lookup must include the built-in tables like the model dialog's controls
+  // do: skipping them offered the whole ladder for models whose tiers are
+  // already known, and persisted a tier the wire then re-tiered (#17411).
   return reasoningEffortsForCapability(
-    getConfiguredModelReasoning(config, modelId, false),
+    getConfiguredModelReasoning(config, modelId),
   );
 }
 
@@ -686,11 +718,6 @@ export function buildModelReasoningRoutePreview(
   const model = getRequestModel(generation);
   const thinkingMandatory =
     model === generation.model && generation.thinkingMandatory === true;
-  // The new tiered Qwen families resolve no core capability without a
-  // declaration; on routed (opaque) selectors the manifest fallback is their
-  // known contract, so the controls must survive the route guard. The same
-  // holds for the stable tiered family the new prefixes inherit from. Both
-  // only ever map to tiered (non-toggle) manifest entries.
   const qwenManifest =
     reasoning === undefined && hasTieredManifestReasoning(model)
       ? (getModelConfiguration(model)?.reasoning as
@@ -700,6 +727,7 @@ export function buildModelReasoningRoutePreview(
   const routeReasoning = reasoning ?? qwenManifest;
   if (
     opaqueRoute &&
+    generation.authType !== AuthType.QWEN_SUBSCRIPTION &&
     !routeReasoning?.profile &&
     !qwenManifest &&
     !getDeepSeekReasoningState(generation, routeReasoning)

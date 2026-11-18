@@ -21,6 +21,7 @@ import {
   parseManagedCsiBoot,
   type ManagedCsiPodIdentity,
 } from './managed-csi-envelope.js';
+import { CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 
 const fixture = JSON.parse(
   readFileSync(
@@ -45,6 +46,27 @@ const fixture = JSON.parse(
 };
 
 describe('closed CSI file construction contract', () => {
+  it('accepts the independently pinned diagnostics profile and refuses mixed identity', () => {
+    const boot = parseManagedCsiFileBoot(fixture.finalizationBoot6);
+    const next = {
+      ...boot,
+      identity: {
+        ...boot.identity,
+        profile: 'csi-files-retirement/2',
+        capabilityDigest: CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+      },
+      context: {
+        ...boot.context,
+        capabilityDigest: CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+      },
+    };
+    expect(parseManagedCsiFileBoot(next).identity.profile).toBe(
+      'csi-files-retirement/2',
+    );
+    expect(() =>
+      parseManagedCsiFileBoot({ ...next, context: boot.context }),
+    ).toThrow();
+  });
   it('requires the fixed boot6 finalization pin without upgrading boot4 or boot5', () => {
     const boot = parseManagedCsiFileBoot(fixture.finalizationBoot6);
     expect(boot.version).toBe(6);

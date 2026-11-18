@@ -70,6 +70,49 @@ describe('JavaManagedAgentClient', () => {
     });
   });
 
+  it('mints a terminal ticket through the authenticated WebShell POST', async () => {
+    const result = { ticket: 'eyJ_abc-123', expiresInSeconds: 30 };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(result));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer scoped' }),
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    expect(await client.terminalTicket('s1', 't1', signal)).toEqual(result);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/gateway/api/agent/web-shell/v1/sessions/terminal-ticket',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('include');
+    expect(init?.signal).toBe(signal);
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      sessionId: 's1',
+      terminalId: 't1',
+    });
+  });
+
+  it('builds terminal WebSocket URLs with the Session path, terminal ID and replay', () => {
+    const secure = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+    });
+    expect(secure.terminalWebSocketUrl('s-1', 't-1')).toBe(
+      'wss://product.example/gateway/api/agent/web-shell/v1/sessions/s-1/terminal?terminalId=t-1&replay=1',
+    );
+    const insecure = new JavaManagedAgentClient({
+      baseUrl: 'http://localhost:8080',
+    });
+    expect(insecure.terminalWebSocketUrl('s-1', 't-1')).toBe(
+      'ws://localhost:8080/api/agent/web-shell/v1/sessions/s-1/terminal?terminalId=t-1&replay=1',
+    );
+  });
+
   it('uploads raw bytes to the authenticated Workspace route and queries the same upload ID', async () => {
     const result = {
       scopeRevision: 'scope',
@@ -1224,6 +1267,7 @@ describe('JavaManagedAgentClient', () => {
             error: {
               code: 'agent_api_idempotency_conflict',
               message: 'conflict',
+              request_id: 'request-409',
             },
           },
           409,
@@ -1243,6 +1287,7 @@ describe('JavaManagedAgentClient', () => {
         status: 409,
         code: 'agent_api_idempotency_conflict',
         message: 'conflict',
+        requestId: 'request-409',
       }),
     );
   });
@@ -1396,7 +1441,10 @@ describe('JavaManagedAgentClient', () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       new Response('<html>bad gateway</html>', {
         status: 502,
-        headers: { 'content-type': 'text/html' },
+        headers: {
+          'content-type': 'text/html',
+          'x-request-id': 'gateway-request-502',
+        },
       }),
     );
     const client = new JavaManagedAgentClient({
@@ -1409,6 +1457,7 @@ describe('JavaManagedAgentClient', () => {
       expect.objectContaining<Partial<JavaManagedAgentHttpError>>({
         status: 502,
         code: 'http_502',
+        requestId: 'gateway-request-502',
       }),
     );
   });

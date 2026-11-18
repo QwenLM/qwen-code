@@ -306,7 +306,7 @@ export class ManagedExternalPublication
         READ_BYTES,
         Math.max(0, stream.byteLength - offset),
       );
-      let bytes = Buffer.alloc(0);
+      let bytes: Buffer = Buffer.alloc(0);
       if (length) {
         const result = await channel.store.readRange({
           manifestRef: manifest.ref,
@@ -420,7 +420,7 @@ export class ManagedExternalPublication
   register(app: Application, executor: ManagedToolExecutor): void {
     for (const route of EXTERNAL_PUBLICATION_ROUTES) {
       app.post(
-        route.path,
+        route.path.replace(':', '\\:'),
         managedRuntimeNoStore,
         authorizeManagedRuntime(this.boot),
         managedRuntimeJsonBody(route.requestBodyLimitBytes),

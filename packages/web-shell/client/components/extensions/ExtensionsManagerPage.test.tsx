@@ -888,3 +888,34 @@ describe('ExtensionsManagerPage lazy details', () => {
     );
   });
 });
+
+describe('ExtensionsManagerPage embedded navigation', () => {
+  it('renders the detail back control when embedded.onBack is provided', async () => {
+    const onBack = vi.fn();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <ExtensionsManagerPage
+            onClose={vi.fn()}
+            embedded={{ onRoot: vi.fn(), onDetailChange: vi.fn(), onBack }}
+          />
+        </I18nProvider>,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector('[aria-label="Demo"]')).not.toBeNull();
+    });
+
+    const card = container.querySelector<HTMLElement>('[aria-label="Demo"]')!;
+    await act(async () => {
+      card.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const back = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="back"]',
+    );
+    expect(back).not.toBeNull();
+    await act(async () => back!.click());
+    expect(onBack).toHaveBeenCalledTimes(1);
+  });
+});

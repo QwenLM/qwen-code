@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /** InnoDB lock-wait and deadlock observations shared by the MySQL witnesses (#13800). */
@@ -19,6 +20,37 @@ public final class MySqlLockProbe {
                 + " JOIN information_schema.PROCESSLIST p ON p.ID = t.trx_mysql_thread_id"
                 + " WHERE t.trx_state = 'LOCK WAIT' AND p.DB = ?", Integer.class, schema);
         return waits == null ? 0 : waits;
+    }
+
+    /** Capture before releasing test holders so a failed witness retains its lock graph. */
+    public static String describeLockWaits(JdbcTemplate jdbc, String schema) {
+        try {
+            return "InnoDB lock waits for " + schema + ": " + jdbc.queryForList(
+                    "SELECT requested.ENGINE_TRANSACTION_ID AS waiting_transaction,"
+                            + " waiting_trx.trx_query AS waiting_sql,"
+                            + " held.ENGINE_TRANSACTION_ID AS blocking_transaction,"
+                            + " blocking_trx.trx_query AS blocking_sql,"
+                            + " requested.OBJECT_NAME AS table_name,"
+                            + " requested.INDEX_NAME AS requested_index,"
+                            + " requested.LOCK_TYPE AS requested_type,"
+                            + " requested.LOCK_MODE AS requested_mode,"
+                            + " requested.LOCK_DATA AS requested_data,"
+                            + " held.INDEX_NAME AS blocking_index, held.LOCK_TYPE AS blocking_type,"
+                            + " held.LOCK_MODE AS blocking_mode, held.LOCK_DATA AS blocking_data"
+                            + " FROM performance_schema.data_lock_waits waits"
+                            + " JOIN performance_schema.data_locks requested ON requested.ENGINE = waits.ENGINE"
+                            + " AND requested.ENGINE_LOCK_ID = waits.REQUESTING_ENGINE_LOCK_ID"
+                            + " JOIN performance_schema.data_locks held ON held.ENGINE = waits.ENGINE"
+                            + " AND held.ENGINE_LOCK_ID = waits.BLOCKING_ENGINE_LOCK_ID"
+                            + " LEFT JOIN information_schema.INNODB_TRX waiting_trx"
+                            + " ON waiting_trx.trx_id = waits.REQUESTING_ENGINE_TRANSACTION_ID"
+                            + " LEFT JOIN information_schema.INNODB_TRX blocking_trx"
+                            + " ON blocking_trx.trx_id = waits.BLOCKING_ENGINE_TRANSACTION_ID"
+                            + " WHERE requested.OBJECT_SCHEMA = ? AND held.OBJECT_SCHEMA = ?",
+                    schema, schema);
+        } catch (DataAccessException error) {
+            return "InnoDB lock snapshot unavailable for " + schema + ": " + error;
+        }
     }
 
     /** Waits up to ~9 s until at least {@code expected} transactions of {@code schema} queue. */

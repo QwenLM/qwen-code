@@ -42,23 +42,27 @@ capability or option. A failed write leaves the published mode unchanged.
 
 ## Web Shell and VS Code
 
-The composer in Web Shell, split panes, and the modern VS Code chat includes
-an independent **Workflow** control for supported sessions. The switch shows
-the saved preference, not whether the mode can currently take effect. If the
-preference is on but the tools are unavailable, it stays checked and can still
-be turned off. Click the Workflow label or focus and activate it to open its status details;
-the same details are available by tapping on touch devices.
+The composer in Web Shell, split panes, and the modern VS Code chat lists
+**Workflow** in its **+** menu for supported sessions. The check mark shows the
+saved preference, not whether the mode can currently take effect; on wider
+screens a second line summarizes what the mode does or its current state. While
+the preference is on, the toolbar shows a **Workflow** chip; its tooltip carries
+the status details, and clicking it turns the mode off. If the preference is on
+but the tools are unavailable, the entry stays checked, the chip is shown in the
+warning color, and both can still turn the mode off.
 
 Before a session is created or restored, the control shows an availability
 placeholder. It does not create a session or save a future preference. Hosts
-that do not advertise support, including older servers, hide the mode switch.
+that do not advertise support, including older servers, hide the entry. Hosts
+that hide the **+** menu show neither the entry nor the chip.
 
 Changes from another client update the same session's control automatically.
 During a write or reconnection, the last confirmed value remains visible and
-the switch is disabled until state is confirmed. A timeout is an unconfirmed
-outcome, not a successful change; the client reads the current state instead
-of automatically repeating the write. An active response does not disable the
-switch: the change applies to the next fresh turn and leaves effort unchanged.
+the entry and chip are disabled until state is confirmed. A timeout is an
+unconfirmed outcome, not a successful change; the client reads the current
+state instead of automatically repeating the write. An active response does
+not disable the entry or chip: the change applies to the next fresh turn and
+leaves effort unchanged.
 
 ## Reminder and input behavior
 

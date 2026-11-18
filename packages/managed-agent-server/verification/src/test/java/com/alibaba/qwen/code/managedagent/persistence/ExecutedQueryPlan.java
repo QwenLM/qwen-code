@@ -66,7 +66,7 @@ final class ExecutedQueryPlan {
                 counts.add(0d);
                 JsonNode pages = node.path("r_engine_stats").path("pages_accessed");
                 if ("const".equals(node.path("access_type").asText())
-                        && "PRIMARY".equals(node.path("key").asText())
+                        && node.path("key").isTextual() && !node.path("key").asText().isBlank()
                         && pages.isIntegralNumber() && pages.canConvertToLong() && pages.asLong() > 0) {
                     preExecutionPages.add(pages.asLong());
                 }

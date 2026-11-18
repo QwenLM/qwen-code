@@ -201,11 +201,10 @@ describe('memory index omission diagnostics', () => {
       [...lines, 'x'.repeat(25_003)].join('\n'),
     );
     for (const line of lines.slice(0, 200)) expect(prompt).toContain(line);
-    expect(prompt).toContain(
-      'No candidate entry exceeds the 150-unit line limit',
-    );
+    expect(prompt).toContain('Shortening entries cannot reduce the line count');
     expect(prompt).not.toContain('Keep index entries to one line at most');
-    expect(prompt).toContain('shortening entries cannot help');
+    expect(prompt).toContain('prune or merge entries');
+    expect(prompt).not.toContain('also exceed the character budget');
   });
 
   it('does not blame a long entry already excluded by the line cap', () => {

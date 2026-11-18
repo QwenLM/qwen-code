@@ -183,6 +183,7 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor' | 'workflow';
   }>;
   readonly goalClearCalls: string[];
+  readonly goalControlCalls: Array<{ sessionId: string; request: unknown }>;
   readonly continueCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
@@ -516,6 +517,7 @@ function makeBridge(
   const sendMidTurnNowCalls: FakeBridge['sendMidTurnNowCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
+  const goalControlCalls: FakeBridge['goalControlCalls'] = [];
   const continueCalls: FakeBridge['continueCalls'] = [];
   const languageCalls: FakeBridge['languageCalls'] = [];
   const addArtifactCalls: FakeBridge['addArtifactCalls'] = [];
@@ -557,6 +559,7 @@ function makeBridge(
     sendMidTurnNowCalls,
     taskCancelCalls,
     goalClearCalls,
+    goalControlCalls,
     continueCalls,
     languageCalls,
     addArtifactCalls,
@@ -597,6 +600,7 @@ function makeBridge(
           maxSessions: 20,
           maxPendingPromptsPerSession: 5,
           eventRingSize: 8_000,
+          eventRingMaxBytes: 8 * 1024 * 1024,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
@@ -621,6 +625,11 @@ function makeBridge(
           pendingPermissionCount: 0,
           hasActivePrompt: summary.hasActivePrompt,
           lastEventId: 0,
+          eventRingCount: 0,
+          eventRingBytes: 0,
+          eventRingEvictedEvents: 0,
+          eventRingEvictedBytes: 0,
+          availableCommandsSnapshotBytes: 0,
           maxJournalEvents: 10_000,
           maxJournalBytes: 8 * 1024 * 1024,
         })),
@@ -847,6 +856,12 @@ function makeBridge(
       return {
         cleared: workspaceCwd === SECONDARY_CWD,
         condition: workspaceCwd,
+      };
+    },
+    async controlSessionGoal(sessionId: string, request: unknown) {
+      goalControlCalls.push({ sessionId, request });
+      return {
+        snapshot: { v: 2 as const, activity: 'idle' as const, goal: null },
       };
     },
     async continueSession(
@@ -1324,6 +1339,7 @@ describe('multi-workspace session dispatch', () => {
       },
     ]);
     expect(res.body.runtime.sessions.active).toBe(2);
+    expect(res.body.limits.eventRingMaxBytes).toBe(8 * 1024 * 1024);
     expect(res.body.runtime.channel.live).toBe(true);
 
     const full = await request(app)
@@ -1338,6 +1354,16 @@ describe('multi-workspace session dispatch', () => {
       '11111111-1111-4111-a111-111111111111',
       '22222222-2222-4222-a222-222222222222',
     ]);
+    for (const session of full.body.full.sessions) {
+      expect(session).toMatchObject({
+        eventRingCount: 0,
+        eventRingBytes: 0,
+        eventRingEvictedEvents: 0,
+        eventRingEvictedBytes: 0,
+        availableCommandsSnapshotBytes: 0,
+      });
+      expect(session).not.toHaveProperty('eventRingEarliestEventId');
+    }
   });
 
   it('rolls up secondary runtime channel issues in daemon status', async () => {
@@ -2167,6 +2193,100 @@ describe('multi-workspace session dispatch', () => {
       },
     ]);
     expect(secondaryBridge.cwdChangeCalls).toEqual([]);
+  });
+
+  it('fires the PR-watch resume hook only after a restore succeeded', async () => {
+    // The serve root installs this local and the route's onSessionRestored
+    // reads it at call time, so setting it here exercises the real route seam
+    // rather than a stub of it. The drain itself is switched off in production;
+    // what this pins is that a user's resume reaches the seam at all.
+    const { app } = makeHarness();
+    const drainNow = vi.fn();
+    (
+      app.locals as { prWatchDrainNow?: (workspaceCwd: string) => void }
+    ).prWatchDrainNow = drainNow;
+
+    const ok = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(ok.status).toBe(200);
+    expect(drainNow).toHaveBeenCalledTimes(1);
+    // The session id rides along so the drain can clear a stale Gone mark for
+    // the session that was just restored.
+    expect(drainNow).toHaveBeenCalledWith(
+      SECONDARY_CWD,
+      '22222222-2222-4222-a222-222222222222',
+    );
+
+    // A restore that is attempted and then fails must not schedule a drain.
+    // The failure has to come from the restore itself: an earlier refusal (an
+    // untrusted workspace, say) is rejected long before the hook, so it would
+    // stay green even with the hook moved above restoreSessionCore.
+    const failing = makeHarness();
+    const failingDrain = vi.fn();
+    (
+      failing.app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = failingDrain;
+    vi.spyOn(failing.secondaryBridge, 'resumeSession').mockRejectedValue(
+      new Error('bridge restore failed'),
+    );
+    const failed = await request(failing.app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(failed.status).not.toBe(200);
+    // Proves the core reached the bridge, so the absence below is about the
+    // hook's placement rather than an earlier exit. Asserted on the spy: the
+    // rejection replaces the implementation, so the bridge's own restoreCalls
+    // log is no longer written.
+    expect(failing.secondaryBridge.resumeSession).toHaveBeenCalled();
+    expect(failingDrain).not.toHaveBeenCalled();
+  });
+
+  it('answers a resume without waiting for the drain it scheduled', async () => {
+    // §2 forbids awaiting the hook: the watch's per-PR lock is not re-entrant,
+    // so a restore the drain dispatched would deadlock against its own drain.
+    // A local that never settles is the witness — an awaited hook would hang
+    // this request instead of answering it.
+    const { app } = makeHarness();
+    let scheduled = false;
+    (
+      app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = () => {
+      scheduled = true;
+      return new Promise<void>(() => {});
+    };
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(res.status).toBe(200);
+    expect(scheduled).toBe(true);
+  });
+
+  it('still answers the resume when the scheduled drain throws', async () => {
+    // The hook fires after the response was written, so an escaping throw
+    // would reach sendBridgeError with headers already sent. The inner
+    // try/catch is what keeps a broken drain from corrupting the answer.
+    const { app } = makeHarness();
+    (
+      app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = () => {
+      throw new Error('drain local blew up');
+    };
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe('22222222-2222-4222-a222-222222222222');
   });
 
   it('restores cold Live load and resume sessions into their server-derived conversation directories', async () => {
@@ -3194,9 +3314,11 @@ describe('multi-workspace session dispatch', () => {
       .set('Host', host())
       .send({ cwd: UNKNOWN_CWD });
 
-    expect(unknownRes.status).toBe(400);
-    expect(unknownRes.body.code).toBe('workspace_mismatch');
-    expect(unknownRes.body.workspaceCount).toBe(2);
+    // An explicit cwd with no registry entry is a permanent absence: 404
+    // workspace_not_found (the channel wake path keys Gone on it), not the
+    // reversible-state 400 workspace_mismatch.
+    expect(unknownRes.status).toBe(404);
+    expect(unknownRes.body.code).toBe('workspace_not_found');
     expect(unknownRes.body.boundWorkspace).toBe(PRIMARY_CWD);
     expect(unknownRes.body.requestedWorkspace).toBe(UNKNOWN_CWD);
     expect(unknown.primaryBridge.restoreCalls).toEqual([]);
@@ -3972,6 +4094,39 @@ describe('multi-workspace session dispatch', () => {
     }
   });
 
+  it('routes goal lifecycle controls to the owning non-primary workspace bridge', async () => {
+    // The Goals page pauses/resumes/edits secondary-workspace goals through
+    // the same per-session control route as clear; narrowing the owner
+    // resolution to the primary would break every secondary goal control.
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/goal')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({
+        action: 'pause',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 1,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.snapshot).toEqual({ v: 2, activity: 'idle', goal: null });
+    expect(secondaryBridge.goalControlCalls).toEqual([
+      {
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        request: {
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 1,
+        },
+      },
+    ]);
+    expect(primaryBridge.goalControlCalls).toEqual([]);
+  });
+
   it('persists a cross-workspace pr sidecar in the OWNING workspace chats dir', async () => {
     // A primary-route metadata PATCH against a secondary-owned session must
     // write the sidecar under the SECONDARY runtime — landing it under the
@@ -4001,7 +4156,7 @@ describe('multi-workspace session dispatch', () => {
         .set('X-Qwen-Client-Id', 'secondary-client')
         .send({ pr });
       expect(res.status).toBe(200);
-      expect(res.body.prs).toEqual([pr]);
+      expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
       expect(secondaryBridge.metadataCalls[0]?.metadata).toEqual({ pr });
 
       const persisted = await readSessionPrs(secondaryPath);
@@ -5812,6 +5967,119 @@ describe('multi-workspace session dispatch', () => {
     });
   });
 
+  it.each([false, true])('reads scoped hook pages (SSH=%s)', async (ssh) => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440283';
+      const promptId = `${sessionId}########1`;
+      for (const cwd of [PRIMARY_CWD, SECONDARY_CWD]) {
+        await writeStoredSession({
+          sessionId,
+          cwd,
+          timestamp: '2026-07-08T00:00:00.000Z',
+          prompt: 'hook turn',
+          mtime: new Date('2026-07-08'),
+        });
+        const file = path.join(
+          new Storage(cwd).getProjectDir(),
+          'chats',
+          `${sessionId}.jsonl`,
+        );
+        await fsp.appendFile(
+          file,
+          JSON.stringify({
+            uuid: `${sessionId}-hook`,
+            parentUuid: `${sessionId}-user-1`,
+            sessionId,
+            cwd,
+            timestamp: '2026-07-08T00:00:01.000Z',
+            type: 'system',
+            subtype: 'ui_telemetry',
+            systemPayload: {
+              uiEvent: {
+                'event.name': 'hook_lifecycle',
+                v: 1,
+                kind: 'hook',
+                executionId: 'exec',
+                runtimeId: cwd,
+                sessionId,
+                promptId,
+                agentId: null,
+                eventName: 'Stop',
+                hookType: 'command',
+                name: cwd === PRIMARY_CWD ? 'primary hook' : 'secondary hook',
+                source: 'project',
+                startedAt: 100,
+                phase: 'ended',
+                endedAt: 110,
+                durationMs: 10,
+                outcome: 'success',
+              },
+            },
+          }) + '\n',
+        );
+      }
+      const { app, registry, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryTrusted: false,
+      });
+      if (ssh) {
+        Object.defineProperty(
+          registry.getEntryByWorkspaceId('secondary-id')!.current!.runtime
+            .routeFileSystemFactory,
+          'sshWorkspace',
+          { value: { host: 'fixture-host', directory: '/remote/project' } },
+        );
+      }
+      const suffix = `/session/${sessionId}/turns/${encodeURIComponent(promptId)}/hooks`;
+      const secondary = await request(app)
+        .get('/workspaces/secondary-id' + suffix)
+        .set('Host', host())
+        .expect(200);
+      expect(secondary.body).toMatchObject({
+        totalExecutions: 1,
+        coverage: 'recorded',
+        executions: [{ event: { name: 'secondary hook' } }],
+      });
+      expect(JSON.stringify(secondary.body)).not.toContain('primary hook');
+      const primary = await request(app)
+        .get('/workspaces/primary-id' + suffix)
+        .set('Host', host())
+        .expect(200);
+      expect(primary.body.executions[0].event.name).toBe('primary hook');
+      await request(app)
+        .get(
+          '/workspaces/primary-id' +
+            suffix +
+            '?snapshot=' +
+            encodeURIComponent(secondary.body.snapshot),
+        )
+        .set('Host', host())
+        .expect(400);
+      await request(app)
+        .get('/workspaces/secondary-id' + suffix + '?start=1')
+        .set('Host', host())
+        .expect(400);
+      await request(app)
+        .get(
+          `/workspaces/secondary-id/session/${sessionId}/turns/missing/hooks`,
+        )
+        .set('Host', host())
+        .expect(404);
+      if (ssh) {
+        await request(app)
+          .post('/workspaces/secondary-id' + suffix)
+          .set('Host', host())
+          .expect(501);
+        await request(app)
+          .get(`/workspaces/secondary-id/session/${sessionId}/turns/turn/other`)
+          .set('Host', host())
+          .expect(501);
+      }
+      expect(primaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+      expect(secondaryBridge.restoreCalls).toEqual([]);
+    });
+  });
+
   it('serves workspace-qualified turn index and anchored transcript without starting the bridge', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440282';
@@ -6456,6 +6724,96 @@ describe('multi-workspace session dispatch', () => {
       ).toEqual([sessionIds[0]]);
       expect(second.body.nextCursor).toBeUndefined();
       expect(secondaryBridge.listCalls).toEqual([]);
+    });
+  });
+
+  it('lists live sessions when closed channel history fills the persisted page', async () => {
+    await withRuntimeDir(async () => {
+      const liveSessionId = '550e8400-e29b-41d4-a716-4466554401a0';
+      await writeStoredSession({
+        sessionId: liveSessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-01T00:00:00.000Z',
+        prompt: 'still live',
+        mtime: new Date('2026-07-01T00:00:00.000Z'),
+      });
+      for (let index = 0; index < 20; index += 1) {
+        const timestamp = `2026-07-08T00:${String(index).padStart(2, '0')}:00.000Z`;
+        await writeStoredSession({
+          sessionId: `550e8400-e29b-41d4-a716-4466554402${index
+            .toString(16)
+            .padStart(2, '0')}`,
+          cwd: SECONDARY_CWD,
+          timestamp,
+          prompt: `closed channel ${index}`,
+          mtime: new Date(timestamp),
+          sourceType: 'channel',
+        });
+      }
+      const { app } = makeHarness({
+        secondarySummaries: [
+          makeSummary(liveSessionId, SECONDARY_CWD, {
+            clientCount: 1,
+            updatedAt: '2026-07-01T00:01:00.000Z',
+          }),
+        ],
+      });
+
+      const persistedPage = await request(app)
+        .get('/workspaces/secondary-id/sessions?size=20')
+        .set('Host', host())
+        .expect(200);
+      expect(persistedPage.body.sessions).toHaveLength(20);
+      expect(
+        persistedPage.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).not.toContain(liveSessionId);
+
+      const livePage = await request(app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=1')
+        .set('Host', host())
+        .expect(200);
+      expect(
+        livePage.body.sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual([liveSessionId]);
+      expect(livePage.body.sessions[0]).toMatchObject({
+        clientCount: 1,
+        displayName: liveSessionId,
+      });
+    });
+  });
+
+  it('rejects liveOnly combined with persisted-only filters or untrusted workspaces', async () => {
+    await withRuntimeDir(async () => {
+      const trusted = makeHarness();
+      const filtered = await request(trusted.app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=1&view=organized')
+        .set('Host', host())
+        .expect(400);
+      expect(filtered.body.code).toBe('invalid_session_live_only_filter');
+
+      const questionSorted = await request(trusted.app)
+        .get(
+          '/workspaces/secondary-id/sessions?liveOnly=1&sortBy=lastUserPromptAt',
+        )
+        .set('Host', host())
+        .expect(400);
+      expect(questionSorted.body.code).toBe('invalid_session_live_only_filter');
+
+      const invalid = await request(trusted.app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=0')
+        .set('Host', host())
+        .expect(400);
+      expect(invalid.body.code).toBe('invalid_session_live_only');
+
+      const untrusted = makeHarness({ secondaryTrusted: false });
+      await request(untrusted.app)
+        .get('/workspaces/secondary-id/sessions?liveOnly=1')
+        .set('Host', host())
+        .expect(403);
     });
   });
 
@@ -8452,9 +8810,8 @@ describe('workspace session live-state route', () => {
       generation: expect.any(String),
       revision: expect.any(Number),
     });
-    // Exactly the volatile overlay plus the activity watermark — the static
-    // catalog field (displayName) and the deliberately excluded volatile
-    // extras (pendingInteractionCount, hasTurnError) all stay out.
+    // The overlay includes turn errors but excludes static catalog fields
+    // and interaction details.
     expect(res.body.sessions).toEqual([
       {
         sessionId: '11111111-1111-4111-a111-111111111111',
@@ -8462,6 +8819,7 @@ describe('workspace session live-state route', () => {
         hasActivePrompt: true,
         isWaitingForPermission: true,
         isWaitingForUserQuestion: false,
+        hasTurnError: true,
         updatedAt: '2026-07-08T00:02:00.000Z',
       },
     ]);
@@ -8563,8 +8921,8 @@ describe('workspace session live-state route', () => {
     expect(res.body.sessions[0]).not.toHaveProperty('updatedAt');
   });
 
-  it('defaults both wait flags to false when the bridge omits them', async () => {
-    // BridgeSessionSummary types both wait flags optional; a bridge that omits
+  it('defaults wait and error flags to false when the bridge omits them', async () => {
+    // BridgeSessionSummary types these flags optional; a bridge that omits
     // them must not serialize a missing key where the SDK snapshot promises a
     // boolean.
     const { app } = makeHarness({
@@ -8585,6 +8943,7 @@ describe('workspace session live-state route', () => {
         hasActivePrompt: false,
         isWaitingForPermission: false,
         isWaitingForUserQuestion: false,
+        hasTurnError: false,
         updatedAt: '2026-07-08T00:01:00.000Z',
       },
     ]);

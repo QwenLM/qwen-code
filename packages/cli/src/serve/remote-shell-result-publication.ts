@@ -172,11 +172,10 @@ class PublicationClient {
         'X-Qwen-Tenant-Id': String(this.key['tenantId']),
         'X-Qwen-Tool-Publication-Token': this.installed.publicationToken,
         'X-Qwen-Tool-Publication-Operation': operationId,
-        'X-Qwen-Tool-Publication-Async': '1',
         'Cache-Control': 'no-store',
         ...headers,
       },
-      ...(body ? { body } : {}),
+      ...(body ? { body: body as BodyInit } : {}),
       redirect: 'error',
       signal: AbortSignal.timeout(30_000),
     });
@@ -276,8 +275,8 @@ class PublicationClient {
           continue;
         }
       }
-      if (initial['state'] === undefined) return initial;
       let status = initial;
+      let pollDelay = 25;
       while (Date.now() < deadline) {
         if (status['state'] === 'SUCCEEDED') return record(status['receipt']);
         if (status['state'] === 'FAILED') {
@@ -323,7 +322,8 @@ class PublicationClient {
           throw new Error(
             `Publication operation ended as ${String(status['state'])}.`,
           );
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, pollDelay));
+        pollDelay = Math.min(pollDelay * 2, 250);
         const current = await observe();
         if (current === null)
           throw new Error(

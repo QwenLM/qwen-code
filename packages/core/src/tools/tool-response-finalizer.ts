@@ -492,7 +492,9 @@ export async function finalizeToolResponses(
   includeTopLevelText = true,
   budgetSource: ToolOutputBudgetSource = 'batch',
   logResultSize = true,
+  isFinished?: () => boolean,
 ): Promise<ToolResponseBudgetEntry[]> {
+  if (isFinished?.()) return entries;
   const shouldAssociateBoundary = observeBoundary && associateBoundary;
   const associatedEntryIndexes = observeBoundary
     ? consumeAssociatedFinalizerEntries(entries)
@@ -665,6 +667,7 @@ export async function finalizeToolResponses(
         persistedOutputFiles: [],
       };
     }
+    if (isFinished?.()) return entries;
   }
 
   const finalized = replaceTextSlots(withPersistence, slots, allocations);

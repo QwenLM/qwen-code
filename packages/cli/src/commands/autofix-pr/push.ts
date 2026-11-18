@@ -41,6 +41,7 @@ import {
   remoteRef,
   requireWorktree,
 } from './worktree.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 /**
  * Pre-push hooks may run a test suite; the 2-minute git default is short.
@@ -251,7 +252,8 @@ function pushLocked(
       ? (checkoutHoldsWork(worktree) ?? true)
       : hasUncommittedChanges(worktree);
   if (dirty) {
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'worktree_dirty',
       `${worktree} has uncommitted changes; commit them, or discard what should not be pushed, before pushing.`,
     );
   }
@@ -342,7 +344,8 @@ function pushLocked(
       };
     }
     const detail = (result.stderr || result.stdout).trim().split('\n');
-    throw new Error(
+    throw new AutofixPrRefusal(
+      'push_failed',
       `git push to ${state.headRefName} failed:\n${detail.slice(-20).join('\n')}`,
     );
   }

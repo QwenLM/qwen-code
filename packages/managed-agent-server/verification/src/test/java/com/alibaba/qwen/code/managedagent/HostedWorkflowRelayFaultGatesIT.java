@@ -44,7 +44,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -75,6 +74,7 @@ import java.util.stream.Collectors;
 import java.util.stream.LongStream;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -804,10 +804,9 @@ class HostedWorkflowRelayFaultGatesIT {
         return attempts == null ? 0 : attempts;
     }
 
-    /** The lead's record settled and its delivery consumed, and the
-     * relay classified its ledger row — the record's consumed revision
-     * lands before the row's classification: the whole walk ran, through
-     * the wake Turn's read. */
+    /** Wait for the lead's consuming revision and the relay ledger's
+     * matching terminal state. Classification can precede consumption;
+     * the consuming revision corrects that mirror in its own commit. */
     private void awaitConsumed(String lead) {
         waiting().atMost(Duration.ofSeconds(150))
                 .pollInterval(Duration.ofSeconds(1)).untilAsserted(() -> {
@@ -818,8 +817,8 @@ class HostedWorkflowRelayFaultGatesIT {
                             .isEqualTo("settled");
                     assertThat(record.path("run").path("delivery")
                             .path("state").asText()).isEqualTo("consumed");
-                    assertThat(childResultRows()).isNotEmpty()
-                            .allMatch(row -> row.endsWith("/consumed"));
+                    assertThat(childResultRows())
+                            .containsExactly("delivered/accepted/consumed");
                 });
     }
 
@@ -1127,7 +1126,7 @@ class HostedWorkflowRelayFaultGatesIT {
                         + " CAST(turn_id AS CHAR) AS turn_id,"
                         + " CAST(item_id AS CHAR) AS item_id,"
                         + " CAST(content_part_id AS CHAR) AS content_part_id,"
-                        + " event_type, gmt_create, data_json, terminal"
+                        + " event_type, gmt_create, data_json, is_terminal"
                         + " FROM ma_public_event WHERE tenant_id = ? AND"
                         + " session_id = ? AND stream_kind = 'SESSION' AND"
                         + " stream_id = X'' ORDER BY sequence_id",
@@ -1153,7 +1152,7 @@ class HostedWorkflowRelayFaultGatesIT {
         fields.put("type", row.get("event_type"));
         fields.put("created_at", web ? created : created / 1000);
         fields.put("data", json.readTree(row.get("data_json").toString()));
-        Object terminal = row.get("terminal");
+        Object terminal = row.get("is_terminal");
         fields.put("terminal", terminal instanceof Boolean flag ? flag
                 : ((Number) terminal).intValue() != 0);
         ObjectNode node = json.createObjectNode();
@@ -1172,7 +1171,7 @@ class HostedWorkflowRelayFaultGatesIT {
                                 "SELECT COUNT(*) FROM ma_public_event"
                                         + " WHERE tenant_id = ? AND"
                                         + " session_id = ? AND turn_id = ?"
-                                        + " AND terminal",
+                                        + " AND is_terminal",
                                 Integer.class, tenant, session, turn))
                                 .isEqualTo(1));
     }
@@ -1393,7 +1392,7 @@ class HostedWorkflowRelayFaultGatesIT {
         // Spring and the embedded broker bind ephemeral ports read back
         // after boot; the Harness port is picked ahead because Spring's
         // connector is configured with it.
-        harnessPort = freePort();
+        harnessPort = reservePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelThreads = Executors.newCachedThreadPool();
         model.setExecutor(modelThreads);
@@ -1802,12 +1801,6 @@ class HostedWorkflowRelayFaultGatesIT {
         choice.put("finish_reason", calls.isEmpty() ? "stop" : "tool_calls");
         return (first + "data: " + json.writeValueAsString(chunk)
                 + "\n\ndata: [DONE]\n\n").getBytes(StandardCharsets.UTF_8);
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            return socket.getLocalPort();
-        }
     }
 
     private static void deleteRecursively(Path root) throws IOException {

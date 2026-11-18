@@ -11,6 +11,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type ComponentProps,
   type ComponentRef,
   type ReactElement,
 } from 'react';
@@ -35,14 +36,19 @@ const CLOSE_DELAY_MS = 150;
 export function UnavailableModelTooltip({
   model,
   mount,
+  enabled = true,
+  side = 'right',
   children,
 }: {
   model: WebShellUnavailableModel;
   mount?: WebShellUnavailableModelTooltipMount;
+  enabled?: boolean;
+  side?: ComponentProps<typeof PopoverContent>['side'];
   children: ReactElement;
 }) {
-  const canOpen = Boolean(mount || model.tooltip);
+  const canOpen = enabled && Boolean(mount || model.tooltip);
   const [open, setOpen] = useState(false);
+  const isOpen = open && canOpen;
   const id = useId();
   const anchorRef = useRef<ComponentRef<typeof PopoverAnchor>>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -114,7 +120,7 @@ export function UnavailableModelTooltip({
   }, []);
 
   useLayoutEffect(() => {
-    if (!open) {
+    if (!isOpen) {
       disposeHost();
       return;
     }
@@ -153,26 +159,25 @@ export function UnavailableModelTooltip({
       disposeHost();
       setFallbackText(model.tooltip ?? null);
     }
-  }, [disposeHost, hostEl, mount, model, open]);
+  }, [disposeHost, hostEl, mount, model, isOpen]);
 
   useLayoutEffect(() => disposeHost, [disposeHost]);
-
-  if (!canOpen) return children;
 
   const showFallback = fallbackText != null && fallbackText !== '';
 
   return (
     <Popover
-      open={open}
-      onOpenChange={(next) => (next ? setOpen(true) : close())}
+      open={isOpen}
+      onOpenChange={(next) => (next && canOpen ? setOpen(true) : close())}
     >
       <PopoverAnchor
         asChild
         ref={anchorRef}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-controls={open ? id : undefined}
+        aria-haspopup={canOpen ? 'dialog' : undefined}
+        aria-expanded={canOpen ? isOpen : undefined}
+        aria-controls={isOpen ? id : undefined}
         onPointerMove={(event) => {
+          if (!canOpen) return;
           if (event.pointerType === 'touch') return;
           cancelClose();
           if (event.buttons !== 0 || open || openTimer.current !== undefined)
@@ -183,7 +188,14 @@ export function UnavailableModelTooltip({
           }, OPEN_DELAY_MS);
         }}
         onPointerLeave={closeAfterDelay}
+        onClickCapture={() => {
+          if (!canOpen) return;
+          cancelOpen();
+          cancelClose();
+          setOpen(true);
+        }}
         onFocus={() => {
+          if (!canOpen) return;
           cancelOpen();
           cancelClose();
           setOpen(true);
@@ -197,7 +209,7 @@ export function UnavailableModelTooltip({
       <PopoverContent
         id={id}
         ref={contentRef}
-        side="right"
+        side={side}
         align="start"
         sideOffset={10}
         collisionPadding={8}
@@ -206,6 +218,11 @@ export function UnavailableModelTooltip({
         data-web-shell-toolbar-popover=""
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
+        onFocusOutside={(event) => {
+          // A PopoverAnchor has no trigger for Radix to exempt, so WebKit
+          // re-focusing the tapped row would dismiss the hint as focus-outside.
+          if (containsFocus(event.target)) event.preventDefault();
+        }}
         onPointerEnter={cancelClose}
         onPointerLeave={closeAfterDelay}
         onFocus={cancelClose}

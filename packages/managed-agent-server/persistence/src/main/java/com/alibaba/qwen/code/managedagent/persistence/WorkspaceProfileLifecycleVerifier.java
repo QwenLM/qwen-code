@@ -3,9 +3,12 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -26,14 +29,14 @@ import java.util.stream.Collectors;
 public class WorkspaceProfileLifecycleVerifier {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
-    private final ManagedExtensionRecordStore records;
+    private final JdbcManagedExtensionRecordStore records;
     private final org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications;
-    private final org.springframework.beans.factory.ObjectProvider<ManagedToolResultStore> results;
+    private final org.springframework.beans.factory.ObjectProvider<JdbcManagedToolResultStore> results;
 
     public WorkspaceProfileLifecycleVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore> publications,
-            org.springframework.beans.factory.ObjectProvider<ManagedToolResultStore> results) {
+            org.springframework.beans.factory.ObjectProvider<JdbcManagedToolResultStore> results) {
         this.jdbc = jdbc;
-        this.records = new ManagedExtensionRecordStore(jdbc);
+        this.records = new JdbcManagedExtensionRecordStore(jdbc);
         this.publications = publications;
         this.results = results;
     }
@@ -41,7 +44,7 @@ public class WorkspaceProfileLifecycleVerifier {
     void verifyExecutions(OperationRecord operation) {
         for (ToolExecutionRecord execution : executions(operation)) {
             if (!hold(execution) && !execution.isSettled()) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_close_execution_unsettled");
+                throw WorkspaceLifecycleStore.blocked("workspace_close_execution_unsettled");
             }
         }
     }
@@ -85,7 +88,7 @@ public class WorkspaceProfileLifecycleVerifier {
         if (WorkspaceToolProfiles.MCP.equals(profile)) {
             return;
         }
-        if (!WorkspaceToolProfiles.SHELL.equals(profile)) {
+        if (!WorkspaceToolProfiles.isPublicShell(profile)) {
             unsettled();
         }
         verifyShellResources(operation);
@@ -104,7 +107,7 @@ public class WorkspaceProfileLifecycleVerifier {
             try {
                 generation = Long.parseLong(runtime.path("generation").asText());
             } catch (NumberFormatException invalid) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+                throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
             }
             if (binding == null || generation < 1 || generation > binding.getGeneration()) {
                 unsettled();
@@ -130,8 +133,8 @@ public class WorkspaceProfileLifecycleVerifier {
         var backgroundCalls = backgroundCalls(operation);
         var sourcesByCall = jdbc.queryForList("SELECT request_json FROM ma_operation"
                 + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND session_scope_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()), operation.tenantId(), operation.sessionId()).stream().map(this::source)
-                .collect(Collectors.groupingBy(ManagedToolResultStore.Source::executionCallId));
+                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()), operation.tenantId(), operation.sessionId()).stream().map(this::source)
+                .collect(Collectors.groupingBy(JdbcManagedToolResultStore.Source::executionCallId));
         var inlineInputs = nativeInlineInputs(operation);
         for (ToolExecutionRecord execution : executions.values()) {
             if (!execution.isSettled()) {
@@ -160,11 +163,11 @@ public class WorkspaceProfileLifecycleVerifier {
                     verifyNotStartedPublication(operation, execution);
                 } else {
                     var rows = jdbc.queryForList("SELECT producer_phase, admission_resource_id, receipt_sequence, receipt_revision,"
-                            + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined FROM ma_output_capture"
+                            + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined FROM ma_output_capture"
                             + " WHERE tenant_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
                             operation.tenantId(), operation.sessionId(), execution.getReference().get("publicationId"));
                     if (rows.size() != 1 || !"REFERENCED".equals(rows.getFirst().get("producer_phase"))
-                            || ((Number) rows.getFirst().get("quarantined")).intValue() != 0
+                            || ((Number) rows.getFirst().get("is_quarantined")).intValue() != 0
                             || !source.outcomeRef().path("resourceId").asText().equals(rows.getFirst().get("admission_resource_id"))
                             || source.receiptSequence() != ((Number) rows.getFirst().get("receipt_sequence")).longValue()
                             || source.journalRevision() != ((Number) rows.getFirst().get("receipt_revision")).longValue()) {
@@ -280,7 +283,7 @@ public class WorkspaceProfileLifecycleVerifier {
         var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
                 + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
                 + " AND kind = ? AND state = 'REFERENCED' FOR UPDATE",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), "managed-tool-input");
         for (var row : refs) {
             var ref = JSON.createObjectNode().put("resourceId", row.get("resource_id").toString())
@@ -313,12 +316,12 @@ public class WorkspaceProfileLifecycleVerifier {
 
     private void verifyNotStartedPublication(OperationRecord operation, ToolExecutionRecord execution) {
         var rows = jdbc.queryForList("SELECT state, producer_phase, terminal_resource_id, binding_json, binding_digest,"
-                + " CASE WHEN quarantined THEN 1 ELSE 0 END AS quarantined"
+                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
                 + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ? AND publication_id = ? FOR UPDATE",
                 operation.tenantId(), operation.sessionId(), execution.getReference().get("publicationId"));
         if (rows.size() != 1 || !"NOT_STARTED".equals(rows.getFirst().get("state"))
                 || !"OPEN".equals(rows.getFirst().get("producer_phase"))
-                || ((Number) rows.getFirst().get("quarantined")).intValue() != 0
+                || ((Number) rows.getFirst().get("is_quarantined")).intValue() != 0
                 || rows.getFirst().get("terminal_resource_id") != null) {
             unsettled();
         }
@@ -336,17 +339,17 @@ public class WorkspaceProfileLifecycleVerifier {
         }
     }
 
-    private ManagedToolResultStore.Source source(String text) {
+    private JdbcManagedToolResultStore.Source source(String text) {
         try {
-            return JSON.readValue(text, ManagedToolResultStore.Source.class);
+            return JSON.readValue(text, JdbcManagedToolResultStore.Source.class);
         } catch (java.io.IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
         }
     }
 
     private static boolean hold(ToolExecutionRecord execution) {
-        Object mode = execution.getReference().get("dispatchMode");
-        return "background_v3_process".equals(mode) || "background_v3_monitor".equals(mode);
+        return ManagedHoldFamily.ofDispatchMode(
+                execution.getReference().get("dispatchMode")) != null;
     }
 
     private static void known(JsonNode record) {
@@ -449,7 +452,7 @@ public class WorkspaceProfileLifecycleVerifier {
     private byte[] readContent(OperationRecord operation, String id, JsonNode expected) {
         var rows = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
                 + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
-                + " AND resource_id = ? FOR UPDATE", com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                + " AND resource_id = ? FOR UPDATE", ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), id);
         if (rows.size() != 1) {
             unsettled();
@@ -490,6 +493,6 @@ public class WorkspaceProfileLifecycleVerifier {
     }
 
     private static void unsettled() {
-        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
+        throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_resources_unsettled");
     }
 }

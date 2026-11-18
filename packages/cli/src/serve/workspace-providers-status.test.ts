@@ -420,25 +420,24 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, false);
     const models = result.providers.flatMap((entry) => entry.models);
-    for (const name of [
-      'Qwen4 A',
-      'Qwen4 B',
-      'Invite A',
-      'Invite B',
-      'Stable A',
-      'Stable B',
-    ]) {
+    // Only qwen4-max takes the qwen4-max ladder; other qwen4* routes (the
+    // qwen4-plus fixtures here), the invitation-only previews, and the stable
+    // family all keep the qwen3.8-max ladder (low/medium/xhigh).
+    const expectedLadders: Record<string, string[]> = {
+      'Qwen4 A': ['none', 'low', 'medium', 'xhigh'],
+      'Qwen4 B': ['none', 'low', 'medium', 'xhigh'],
+      'Invite A': ['none', 'low', 'medium', 'xhigh'],
+      'Invite B': ['none', 'low', 'medium', 'xhigh'],
+      'Stable A': ['none', 'low', 'medium', 'xhigh'],
+      'Stable B': ['none', 'low', 'medium', 'xhigh'],
+    };
+    for (const [name, ladder] of Object.entries(expectedLadders)) {
       const entry = models.find((model) => model.name === name);
       expect(entry?.modelId).toMatch(/^qwen-route:v1:/);
       expect(entry?.configOptions).toMatchObject([
         {
           currentValue: 'low',
-          options: [
-            { value: 'none' },
-            { value: 'low' },
-            { value: 'medium' },
-            { value: 'xhigh' },
-          ],
+          options: ladder.map((value) => ({ value })),
         },
       ]);
     }
@@ -501,6 +500,61 @@ describe('createWorkspaceProvidersStatusProvider', () => {
       expect(model?.configOptions).toMatchObject([{ currentValue }]);
     },
   );
+
+  it('previews the auth fallback for a missing saved model without rewriting settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      $version: 4,
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max-preview',
+            name: '[Token Plan] preview',
+            baseUrl: 'https://token-plan.example/v1',
+            envKey: 'REPRO_PLAN_KEY',
+          },
+        ],
+      },
+    });
+    const before = await fs.readFile(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+    const result = await provider(workspace, false);
+    expect(result.current).toMatchObject({
+      authType: 'openai',
+      modelId: 'qwen3.8-max-preview(openai)',
+      baseUrl: 'https://token-plan.example/v1',
+    });
+    expect(
+      result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.isCurrent)?.baseModelId,
+    ).toBe('qwen3.8-max-preview');
+    expect(
+      await fs.readFile(path.join(qwenHome, 'settings.json'), 'utf8'),
+    ).toBe(before);
+  });
+
+  it('preserves a missing model backed by explicit connection settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: {
+        auth: {
+          selectedType: 'openai',
+          apiKey: 'manual-key',
+          baseUrl: 'https://manual.example/v1',
+        },
+      },
+      model: { name: 'manual-model' },
+      modelProviders: { openai: [{ id: 'other-model' }] },
+    });
+    expect((await provider(workspace, false)).current?.modelId).toBe(
+      'manual-model',
+    );
+  });
 
   it('reads fresh default model settings on every request', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -31,9 +32,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
 import java.net.BindException;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -62,6 +61,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -777,22 +777,17 @@ class HostedTeamLeadMySqlIT {
         model.setExecutor(modelThreads);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        // Sockets open at the same instant get distinct ports, but they are
-        // released before their consumers bind, so a contended runner can
-        // hand one out again; retry the whole attempt with fresh ports when
-        // it does. The harness moves to the next port instead of failing, so
-        // startHarness reports that move too. A retry re-runs storage
-        // registration, which only replays idempotently for a stable
-        // operationId.
+        // A reserved number can still be taken before its consumer binds it
+        // (see HostedGateTestSupport#bootWithFreshPorts); retry the whole
+        // attempt with fresh ports when one is. The Harness exits on a taken
+        // port instead of moving, so startHarness reports that exit as the
+        // same conflict. A retry re-runs storage registration, which only
+        // replays idempotently for a stable operationId.
         String storageOperation = UUID.randomUUID().toString();
         for (int attempt = 0; ; attempt++) {
-            try (ServerSocket springSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                    ServerSocket harnessSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"));
-                    ServerSocket brokerSocket = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
-                port = springSocket.getLocalPort();
-                harnessPort = harnessSocket.getLocalPort();
-                brokerPort = brokerSocket.getLocalPort();
-            }
+            port = reservePort();
+            harnessPort = reservePort();
+            brokerPort = reservePort();
             try {
                 startSpring(cli, node, decoy, workspace, harnessPort, brokerPort, storageOperation);
                 jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
@@ -818,7 +813,7 @@ class HostedTeamLeadMySqlIT {
     }
 
     private void startSpring(Path cli, String node, Path decoy, Path workspace, int harnessPort, int brokerPort,
-            String storageOperation) {
+            String storageOperation) throws IOException {
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
                 "--spring.datasource.url=" + System.getProperty("mysql.url"),
                 "--spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver",
@@ -863,6 +858,7 @@ class HostedTeamLeadMySqlIT {
         .run(arguments.toArray(String[]::new));
         jdbc = spring.getBean(JdbcTemplate.class);
         if ("Linux".equals(System.getProperty("os.name"))) {
+            WorkspaceTestStorage.prepareNativeRoot(workspace);
             spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class)
                     .register(tenant, "storage-0", storageOperation);
         }
@@ -899,13 +895,16 @@ class HostedTeamLeadMySqlIT {
             environment.put(name, temporary.resolve(name + ".json").toString());
         }
         harness = builder.start();
-        Pattern moved = Pattern.compile("port " + harnessPort + " is in use, trying");
+        // --profile hosted-harness prints this and exits rather than moving.
+        Pattern taken = Pattern.compile("port " + harnessPort + " is in use; ");
         waiting().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
-            if (!harness.isAlive()) {
-                throw new IllegalStateException("Hosted Harness exited: " + Files.readString(log));
-            }
-            if (moved.matcher(Files.readString(log)).find()) {
+            boolean alive = harness.isAlive();
+            String output = Files.readString(log);
+            if (taken.matcher(output).find()) {
                 throw new HarnessPortConflict("Hosted Harness lost the port race on " + harnessPort);
+            }
+            if (!alive) {
+                throw new IllegalStateException("Hosted Harness exited: " + output);
             }
             int status;
             try {
@@ -1000,12 +999,18 @@ class HostedTeamLeadMySqlIT {
             harness = null;
             try {
                 if (jdbc != null) {
-                    settleTenantWork();
+                    try {
+                        settleTenantWork();
+                    } catch (RuntimeException unsettled) {
+                        // The rows below must still go before the next attempt.
+                        System.out.println("boot cleanup could not settle tenant work: " + unsettled);
+                    }
                     jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", tenant);
                     jdbc.update("DELETE FROM ma_workspace WHERE tenant_id = ?", tenant);
                 }
-            } catch (RuntimeException ignored) {
+            } catch (RuntimeException cleanup) {
                 // The next attempt re-creates the rows; keep the boot error.
+                System.out.println("boot cleanup could not delete the attempt's rows: " + cleanup);
             }
             try {
                 stopSpringAndWorkers();

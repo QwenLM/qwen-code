@@ -6,6 +6,7 @@
 
 import type { PartListUnion } from '@google/genai';
 import {
+  MAX_STACKED_SKILLS,
   parseSlashCommand,
   parseStackedSlashCommands,
 } from './ui/commands/commands.js';
@@ -100,6 +101,12 @@ export type NonInteractiveSlashCommandResult = (
       /** Per-turn model id (e.g. inline `/model <id> <prompt>`); no session change. */
       modelOverride?: string;
       refreshContextFilesOnWrite?: boolean;
+      /**
+       * Warning text when more `/skill` tokens were stacked than
+       * MAX_STACKED_SKILLS. The prompt still runs; consumers surface this as a
+       * warning, never as an error.
+       */
+      stackedSkillOverflow?: string;
     }
   | {
       type: 'message';
@@ -621,6 +628,11 @@ export const handleSlashCommand = async (
             onComplete: async () => {
               for (const cb of onCompleteCallbacks) await cb();
             },
+          }
+        : {}),
+      ...(stackedResult.exceededMax
+        ? {
+            stackedSkillOverflow: `Only the first ${MAX_STACKED_SKILLS} skills were loaded. Additional /skill tokens were treated as prompt text.`,
           }
         : {}),
     };

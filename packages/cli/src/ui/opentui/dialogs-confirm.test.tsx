@@ -109,8 +109,15 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   buildConfirmationPrompt,
+  OpenTuiProjectHooksApprovalDialog,
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
+import {
+  layoutProjectHooksLines,
+  PROJECT_HOOKS_DIALOG_DESCRIPTION,
+  PROJECT_HOOKS_DIALOG_TITLE,
+  ProjectHooksApprovalChoice,
+} from '../components/hooks/ProjectHooksApprovalDialog.js';
 
 const onConfirmNoop = async () => {};
 
@@ -1550,5 +1557,61 @@ describe('OpenTuiToolConfirmation', () => {
     press({ name: 's', ctrl: true });
     expect(container.textContent).toContain('OVERFLOW_LINE_00');
     expect(container.textContent).toContain('lines hidden');
+  });
+});
+
+describe('OpenTuiProjectHooksApprovalDialog', () => {
+  const lines = Array.from({ length: 30 }, (_, i) => `Stop  hook-${i}.sh`);
+
+  beforeEach(() => {
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.dimensions = { width: 110, height: 40 };
+  });
+
+  it.each([
+    ['escape', [{ name: 'escape' }], ProjectHooksApprovalChoice.DISMISS],
+    [
+      'enter',
+      [{ name: 'return', sequence: '\r' }],
+      ProjectHooksApprovalChoice.APPROVE,
+    ],
+    [
+      'down + enter',
+      [{ name: 'down' }, { name: 'return', sequence: '\r' }],
+      ProjectHooksApprovalChoice.REJECT,
+    ],
+  ])('maps %s to its choice', (_name, keys, expected) => {
+    const onSelect = vi.fn();
+    render(
+      <OpenTuiProjectHooksApprovalDialog lines={lines} onSelect={onSelect} />,
+    );
+    for (const key of keys) {
+      act(() => {
+        for (const handler of mocks.state.keyboardHandlers) handler(key);
+      });
+    }
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith(expected);
+  });
+
+  it('budgets the list by the dialog region, not the terminal height', () => {
+    const view = render(
+      <OpenTuiProjectHooksApprovalDialog
+        lines={lines}
+        availableTerminalHeight={20}
+        onSelect={vi.fn()}
+      />,
+    );
+    const header = [
+      PROJECT_HOOKS_DIALOG_TITLE,
+      PROJECT_HOOKS_DIALOG_DESCRIPTION,
+    ];
+    const rows = (height: number) =>
+      layoutProjectHooksLines(lines, header, 110, height);
+    expect(rows(20)).not.toEqual(rows(40));
+    const rendered = Array.from(view.container.querySelectorAll('span'))
+      .map((span) => span.textContent ?? '')
+      .filter((text) => text.startsWith('  '))
+      .map((text) => text.slice(2));
+    expect(rendered).toEqual(rows(20));
   });
 });

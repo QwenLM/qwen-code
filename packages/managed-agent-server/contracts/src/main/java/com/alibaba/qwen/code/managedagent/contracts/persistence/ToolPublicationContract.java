@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
 import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.StreamReadFeature;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -19,6 +20,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.text.Normalizer;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Set;
 
@@ -239,8 +241,8 @@ public final class ToolPublicationContract {
     public static String tokenHash(String token) {
         require(token != null && token.matches("[A-Za-z0-9_-]{43}"),
                 "Invalid publication token");
-        byte[] bytes = java.util.Base64.getUrlDecoder().decode(token);
-        require(bytes.length == 32 && java.util.Base64.getUrlEncoder()
+        byte[] bytes = Base64.getUrlDecoder().decode(token);
+        require(bytes.length == 32 && Base64.getUrlEncoder()
                 .withoutPadding().encodeToString(bytes).equals(token),
                 "Publication token must encode 256 bits");
         return sha256(token.getBytes(StandardCharsets.UTF_8));
@@ -256,7 +258,7 @@ public final class ToolPublicationContract {
                     .onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT)
                     .decode(ByteBuffer.wrap(bytes, offset, length)).toString();
-            return JSON.reader().with(com.fasterxml.jackson.databind.DeserializationFeature
+            return JSON.reader().with(DeserializationFeature
                     .FAIL_ON_TRAILING_TOKENS).readTree(text);
         } catch (IOException error) {
             throw new ContractViolationException("Invalid publication JSON", error);

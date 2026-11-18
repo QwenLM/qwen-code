@@ -51,6 +51,7 @@ vi.mock('./config/daemon', () => ({
   getAllowedDaemonOrigin: (value: string) => value,
   confirmDaemonTarget: vi.fn(),
   isKnownDaemonTarget: () => false,
+  isDaemonMixedContent: () => false,
   // No token in the URL, so boot blocks on the postMessage handshake — the
   // window in which the watchdog's grace period can expire.
   getDaemonToken: () => testState.storedToken,

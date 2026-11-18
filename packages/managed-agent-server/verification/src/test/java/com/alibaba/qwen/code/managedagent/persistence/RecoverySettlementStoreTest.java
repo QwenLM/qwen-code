@@ -206,7 +206,7 @@ class RecoverySettlementStoreTest {
     }
 
     private ManagedAgentStore newStore() {
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), clock, events -> {},
-                mock(ManagedWorkspaceRegistry.class), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock, events -> {},
+                mock(JdbcManagedWorkspaceRegistry.class), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 }

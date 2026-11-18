@@ -176,6 +176,15 @@ describe('configCommand', () => {
       },
     );
 
+    it('turns the unset unified agent loop setting on', async () => {
+      const { ctx, setValuesMock } = createMockContext({});
+      await configCommand.action!(ctx, 'experimental.unifiedAgentLoop');
+
+      expect(setValuesMock).toHaveBeenCalledWith([
+        { scope: 'User', key: 'experimental.unifiedAgentLoop', value: true },
+      ]);
+    });
+
     it('turns an unset tri-state web search setting off', async () => {
       const { ctx, setValuesMock } = createMockContext({});
       const result = await configCommand.action!(

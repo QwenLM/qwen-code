@@ -813,8 +813,12 @@ is a refusal, unless `--take-over` first moves the watch to this session, as
 `prepare --take-over` does: `/autofix-pr stop <n>` passes it, so a watch
 another session left behind can be stopped without discarding its work.
 `--force` overrides these checks and also discards an
-unreadable state file. A branch that cannot be deleted is an error, and the
-state file stays. Running `cleanup` from inside the worktree it would remove
+unreadable state file. A branch another checkout has (`git worktree list`)
+cannot be deleted, `--force` or not: all three are kept and the watch ends
+as above, and the report names that checkout (`heldBy`) and says how to
+free it, before anything is removed — removing the worktree first would
+leave the watch with its state file and branch and no worktree. Any other
+branch that cannot be deleted is an error, and the state file stays. Running `cleanup` from inside the worktree it would remove
 is a refusal. The gate cursor is not removed: it belongs to the scheduled
 task, which outlives a watch, and without it the next fire would report
 everything again. Delete the task to stop the gate. The report names the
@@ -1163,7 +1167,7 @@ the PR.
   lock, waits for none, and a call cancelled while it waits returns at once;
   the helpers' lock covers other processes.
 - The result is the helper's JSON line. A non-zero exit is the helper's
-  refusal, returned with its message.
+  refusal, returned with its coded line first (Section 6.16).
 - `snapshot --gate` and `cleanup --force` are not offered: the gate runs
   outside the model, and only the user discards a worktree's work.
 - Only the main session has it: subagents, forks, teammates and workspace
@@ -1490,9 +1494,8 @@ that attempt only and prints the snapshot the attempt took, its brief and
 the head it started from; the tool adds how the agent ended, its report and
 the watch's options, from memory, which the turn uses whatever the
 follow-up said. A refusal of the helper leaves the attempt to claim again; one that says
-the round's snapshot is gone drops it, to go stale. The tool reads a
-helper's refusal from the line of the CLI's error that names it, not from
-the stack printed after it.
+the round's snapshot is gone drops it, to go stale. The tool passes a
+helper's coded refusal on verbatim (Section 6.16).
 The brief lists, besides the agent's items, the round's own — the re-runs
 and the items needing a human that the round decided before the fix — so
 the turn answers them too. Then it goes on with Section 7's re-runs, push
@@ -1588,6 +1591,63 @@ or `resume <n>` in a session of its workspace, which the page names.
 **Refresh.** The page and the cards read the watches again every 15
 seconds while shown. The cards read them only while a watch's task is
 listed, and only from a daemon advertising the tag.
+
+### 6.16 Refusals
+
+A helper that refuses exits 1 and prints, as its last line on stderr, one
+JSON object: `{"refused": "<code>", "next": "<step>", "message": "<why>"}`.
+No stack follows it: the CLI's handler of an unexpected error, which prints
+one, never sees a helper's refusal. Whatever else fails in a helper — git or
+`gh` failing, a file that cannot be read — is a refusal too, with the code
+`failed`. The skill acts on `next`, never on the wording of `message`, which
+says why, for the report.
+
+| Code                                             | Raised by                                                                                                                                                                                                                                | `next`                                                                                                                                                                   |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `busy`                                           | every helper that takes the watch's lock, when another holds it                                                                                                                                                                          | `retry`                                                                                                                                                                  |
+| `partial`                                        | `snapshot`: a round's eight minutes spent asking GitHub about bot threads it did not know yet, the answers kept                                                                                                                          | `retry`                                                                                                                                                                  |
+| `pr_closed`                                      | `prepare`, `sync`, `reply`, `rerun`: the PR was merged or closed                                                                                                                                                                         | `stop`; `report` from `prepare`                                                                                                                                          |
+| `not_prepared`, `watch_stopped`, `task_replaced` | the watch checks every helper runs                                                                                                                                                                                                       | `end_task` from a round's helper (`sync`, `snapshot`, `ci-log`, `push`, `reply`, `rerun`), `report` from the others                                                      |
+| `watched_elsewhere`                              | the same                                                                                                                                                                                                                                 | as above, but `take_over` from `prepare`                                                                                                                                 |
+| `fix_in_flight`                                  | a fix agent works in the worktree, or `fix-start` finds an attempt in flight                                                                                                                                                             | `report`                                                                                                                                                                 |
+| `worktree_dirty`                                 | `sync`, `push`, and every helper that checks the worktree's branch: uncommitted changes, or another branch (a switch back `sync --discard` asked for and git refused is no refusal: `sync` answers `synced: false`, and the round stops) | `discard` from `sync`, `needs_human` from `push`, `report` from the others                                                                                               |
+| `no_failed_job`                                  | `ci-log`: no finished job of the run failed or timed out                                                                                                                                                                                 | `rerun`                                                                                                                                                                  |
+| `no_background_fix`                              | `fix-start`: no round's snapshot to fix from, an in-place watch, or no task                                                                                                                                                              | `foreground`                                                                                                                                                             |
+| `rerun_failed`                                   | `rerun`: GitHub refused the re-run, or its answer was lost                                                                                                                                                                               | `needs_human`                                                                                                                                                            |
+| `push_failed`                                    | `push`: git refused the push (a pre-push hook, the remote)                                                                                                                                                                               | `needs_human`                                                                                                                                                            |
+| `plan_invalid`                                   | `reply`: the plan cannot be read, is no JSON, is not shaped as a plan, names what the round may not answer, or posts under `--no-reply`                                                                                                  | `fix_plan`                                                                                                                                                               |
+| `failed`                                         | anything else                                                                                                                                                                                                                            | `needs_human` from `push` and `rerun`, `retry` from `reply` (a post that failed is still owed, and the second run skips what the first posted), `report` from the others |
+
+The steps are the skill's (Section "Refusals" there): `retry` runs the call
+again, once — `busy` after the other helper, `partial` up to three times a
+round; `stop` stops the watch; `end_task` deletes the task that woke the
+round and ends it; `take_over` asks whether this session takes the watch
+over; `discard` runs `sync --discard` in its place; `foreground` runs the
+fix in the foreground; `rerun` answers the run's checks with a re-run;
+`needs_human` answers the call's items as needing a person; `fix_plan`
+corrects the reply plan; `report` reports the message and ends the start or
+the round. The step depends on the helper as well as the code, so that one
+code can mean what the step that called the helper needs. The `autofix_pr`
+tool returns a coded refusal with that line first, verbatim —
+`autofix-pr <command> refused: {…}` — followed by the rest of what the
+helper printed (git's or `gh`'s output). It takes the line only from a
+helper that exited 1, and only the last coded line with nothing but Node's
+warnings after it: a line a hook printed before the helper crashed is not
+its refusal. The tool runs its helpers with Node's warnings off
+(`NODE_NO_WARNINGS=1`), so a warning Node flushes after the line, which may
+run over several lines, cannot hide it. A message carries at most 8,000 characters as JSON, its head
+and its tail, with terminal controls dropped, so the line fits the 16 KiB
+of stderr the tool keeps. A refusal without the line — one of the tool's own, which
+says why in words, arguments yargs refused, or a CLI older than the codes
+— keeps the form the tool gave every refusal before the codes: the result
+starts `autofix-pr <command> refused (exit <n>).`, followed by the whole of
+the helper's stderr and what it printed on stdout, and a background fix's
+launch reads it as the last stderr line that names an error (`Error: …`,
+prefix stripped), or the last line. The skill handles it as the calling
+step says, and otherwise reports it. A defect in a helper rather than a
+refusal (an error that is no `AutofixPrRefusal`) prints its stack frames
+before the coded line, so where it happened is kept and the line stays
+last.
 
 ## 7. One check (`tick`)
 
@@ -1832,10 +1892,20 @@ Validation:
   rollup paging; the reviewer probe's events, filters and cursor pruning.
 - Push guard tests against a local bare repository: non-fast-forward refusal,
   default-branch refusal, lease rejection after an external push.
-- An integration test with a fake `gh` on `PATH` that drives `prepare` →
-  `snapshot` → `push` → `reply` → `cleanup` — not written yet; each helper
-  is tested on its own against real git with a bare remote and a stubbed
-  `gh`.
+- An integration test with a fake `gh` on `PATH`
+  (`autofix-pr/chain.integration.test.ts`) that runs the helpers in the
+  order a watch runs them — `prepare` and `schedule`; a round's `sync`,
+  `snapshot`, `ci-log`, `rerun`, `push` and `reply`; the gate exactly as
+  `schedule` printed it; `status` and `cleanup` — against real git with a
+  bare remote, the test making the fix agent's commits. Its cases: a watch
+  from start to merge, including a reply whose answer was lost; a push by
+  someone else during a round; a re-run spent, then refused; a job that
+  timed out re-run once, a re-run whose answer was lost counted; a check
+  left for a person after three pushes, one head's result asked of GitHub
+  by commit; a conflict left for a person once per head, a head the watch
+  pushed before GitHub computed it included; and whether the PR's author
+  can push, asked of GitHub. Each helper is also tested on its own, with
+  `gh` stubbed in-process.
 - Manual end-to-end on a sandbox repository: a failing test is fixed and
   pushed; a collaborator comment is fixed and answered; a stranger's comment is
   ignored; merging the PR ends the loop and removes the worktree.

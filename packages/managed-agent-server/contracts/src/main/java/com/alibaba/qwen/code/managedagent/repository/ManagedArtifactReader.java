@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.repository;
 
+import com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Artifact;
 
 import java.io.InputStream;
@@ -17,14 +18,14 @@ public interface ManagedArtifactReader {
 
     public InputStream open(Artifact artifact, Runnable guard);
 
-    public InputStream open(Artifact artifact, com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard);
+    public InputStream open(Artifact artifact, ArtifactReadLease lease, Runnable guard);
 
     public byte[] readRange(Artifact artifact, long offset, int length);
 
     public byte[] readRange(Artifact artifact, long offset, int length, Runnable guard);
 
     public byte[] readRange(Artifact artifact, long offset, int length,
-            com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease, Runnable guard);
+            ArtifactReadLease lease, Runnable guard);
 
-    public com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease lease(Artifact artifact);
+    public ArtifactReadLease lease(Artifact artifact);
 }

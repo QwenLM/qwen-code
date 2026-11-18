@@ -31,6 +31,8 @@ let latest: UseComposerCoreReturn | null = null;
 function Harness({
   composerInput,
   onSubmit,
+  prepareSubmit,
+  submitDisabled,
   renderComposerTag,
   renderComposerTagTooltip,
   onFileTagClick,
@@ -55,6 +57,8 @@ function Harness({
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
+  prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
+  submitDisabled?: UseComposerCoreOptions['submitDisabled'];
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
@@ -83,6 +87,8 @@ function Harness({
 }) {
   const composer = useComposerCore({
     onSubmit,
+    prepareSubmit,
+    submitDisabled,
     commands: commands ?? [],
     allowEmptySlashMenu,
     cycleModeOnTab,
@@ -121,6 +127,8 @@ function Harness({
 async function mount({
   composerInput,
   onSubmit = vi.fn(),
+  prepareSubmit,
+  submitDisabled,
   renderComposerTag,
   renderComposerTagTooltip,
   onFileTagClick,
@@ -145,6 +153,8 @@ async function mount({
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
+  prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
+  submitDisabled?: UseComposerCoreOptions['submitDisabled'];
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
@@ -189,6 +199,8 @@ async function mount({
           <Harness
             composerInput={composerInput}
             onSubmit={onSubmit}
+            prepareSubmit={prepareSubmit}
+            submitDisabled={submitDisabled}
             renderComposerTag={renderComposerTag}
             renderComposerTagTooltip={renderComposerTagTooltip}
             onFileTagClick={onFileTagClick}
@@ -342,6 +354,128 @@ describe('useComposerCore tooltip portal', () => {
 });
 
 describe('useComposerCore history and drafts', () => {
+  it.each([
+    ['panel', 'ArrowUp', false],
+    ['panel', 'ArrowDown', false],
+    ['search', 'ArrowUp', false],
+    ['search', 'ArrowDown', false],
+    ['panel', 'ArrowUp', true],
+    ['panel', 'ArrowDown', true],
+    ['search', 'ArrowUp', true],
+    ['search', 'ArrowDown', true],
+  ] as const)(
+    'keeps caret control after a wrapped %s recall followed by %s (paged: %s)',
+    async (recall, key, paged) => {
+      const entry = 'line one line two line three';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'middle prompt', 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
+      act(() => latest!.searchState.openHistorySearch());
+      if (recall === 'panel') {
+        act(() => latest!.searchState.restoreSearchMatch!(entry));
+        act(() => latest!.searchState.closeSearch(false));
+      } else {
+        act(() =>
+          latest!.searchState.handleSearchInput({
+            target: { value: 'line two' },
+            nativeEvent: { isComposing: false },
+          } as unknown as React.ChangeEvent<HTMLInputElement>),
+        );
+        act(() =>
+          latest!.searchState.handleSearchKeyDown({
+            key: 'Tab',
+            nativeEvent: { isComposing: false },
+            preventDefault: vi.fn(),
+          } as unknown as React.KeyboardEvent<HTMLInputElement>),
+        );
+      }
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      vi.spyOn(view, 'coordsAtPos').mockImplementation((position) => {
+        const top =
+          position === 0 ? 0 : position === view.state.doc.length ? 44 : 22;
+        return { left: 0, right: 1, top, bottom: top + 22 };
+      });
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'keeps ArrowDown in a short panel recall until paging returns to its draft (paged: %s)',
+    async (paged) => {
+      const entry = 'short entry';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
+      act(() => latest!.searchState.restoreSearchMatch!(entry));
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe('newest prompt');
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(onFocusFooter).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps a selected history entry when pressing %s',
+    async (key) => {
+      const entry = 'recalled entry';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 2, head: 8 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps hard-newline history text while %s moves inside it',
+    async (key) => {
+      const entry = 'line one\nline two\nline three';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => latest!.setText('unsent draft'));
+      act(() => pressHistoryKey('ArrowUp'));
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
   it('places the caret after a draft restored on initial mount', async () => {
     localStorage.setItem(
       getSessionDraftKey('restored-session'),
@@ -1268,6 +1402,131 @@ describe('useComposerCore history and drafts', () => {
 });
 
 describe('useComposerCore paste', () => {
+  it.each([
+    { text: 'https://example.com/image.png', images: 1, attach: true },
+    { text: ' http://example.com/image.png ', images: 1, attach: true },
+    {
+      text: 'PPT text with https://example.com/image.png',
+      images: 1,
+      attach: false,
+    },
+    {
+      text: 'https://example.com/image.png\ncaption',
+      images: 1,
+      attach: false,
+    },
+    { text: 'https://example.com/image.png', images: 0, attach: false },
+    { text: 'https://example.com/image.png', images: 2, attach: false },
+  ])(
+    'distinguishes image URLs from editable text: $text / $images images',
+    async ({ text, images, attach }) => {
+      const onImageIngestionNotice = vi.fn();
+      await mount({ onImageIngestionNotice });
+      const files = Array.from(
+        { length: images },
+        () => new File(['png'], 'image.png', { type: 'image/png' }),
+      );
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files,
+          items: [],
+          types: images ? ['Files', 'text/plain'] : ['text/plain'],
+          getData: (type: string) => (type === 'text/plain' ? text : ''),
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      await waitForImageIngestion();
+
+      expect(latest!.getText()).toBe(attach ? '' : text);
+      expect(latest!.pastedImages).toHaveLength(attach ? 1 : 0);
+      expect(onImageIngestionNotice).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['/fork ', '  /extensions install ', '!curl '])(
+    'keeps image URL arguments inline in command drafts: %s',
+    async (draft) => {
+      const { onSubmit } = await mount();
+      act(() => {
+        latest!.setText(draft);
+        latest!.viewRef.current!.dispatch({
+          selection: { anchor: draft.length },
+        });
+      });
+      const text = 'https://example.com/image.png';
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => text,
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+      await waitForImageIngestion();
+      expect(latest!.getText()).toBe(draft + text);
+      expect(latest!.pastedImages).toEqual([]);
+      act(() => latest!.submitText());
+      expect(onSubmit.mock.calls[0]![0]).toBe((draft + text).trim());
+      expect(onSubmit.mock.calls[0]![1]).toBeUndefined();
+    },
+  );
+
+  it.each(['disabled', 'shell', 'attachments-disabled', 'other-control'])(
+    'keeps URL text editable for %s',
+    async (mode) => {
+      await mount({
+        disabled: mode === 'disabled',
+        attachmentsEnabled: mode !== 'attachments-disabled',
+      });
+      if (mode === 'shell') act(() => latest!.toggleShellMode());
+      const text = 'https://example.com/image.png';
+      const image = new File(['png'], 'image.png', { type: 'image/png' });
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [image],
+          items: [],
+          types: ['Files', 'text/plain'],
+          getData: () => text,
+        },
+      });
+      const target = container!.querySelector(
+        mode === 'other-control'
+          ? '[data-testid="composer-surface-input"]'
+          : '.cm-content',
+      )!;
+      act(() => target.dispatchEvent(event));
+      await waitForImageIngestion();
+      expect(latest!.pastedImages).toEqual([]);
+      expect(latest!.pendingImageBatchCount).toBe(0);
+      if (mode === 'shell' || mode === 'attachments-disabled') {
+        expect(latest!.getText()).toBe(text);
+      }
+      if (mode === 'other-control') expect(event.defaultPrevented).toBe(false);
+    },
+  );
+
+  it('warns when a paste advertises files without exposing any file', async () => {
+    const onImageIngestionNotice = vi.fn();
+    await mount({ onImageIngestionNotice });
+    const event = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clipboardData', {
+      value: { files: [], items: [], types: ['Files'], getData: () => '' },
+    });
+    act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    await waitForImageIngestion();
+    expect(latest!.pastedImages).toEqual([]);
+    expect(onImageIngestionNotice).toHaveBeenCalledOnce();
+    expect(onImageIngestionNotice).toHaveBeenCalledWith(
+      'warning',
+      '1 file(s) were unavailable and skipped.',
+    );
+  });
+
   it('pastes editable text when PPT clipboard also includes an image', async () => {
     const { onSubmit } = await mount();
     const text = '第一季度收入增长 20%\n请改写这段文字。';
@@ -1606,6 +1865,112 @@ describe('useComposerCore paste', () => {
     });
     expect(latest!.shellMode).toBe(false);
     expect(latest!.getText()).toBe('!');
+  });
+
+  it('captures type-anywhere keystrokes when focus parks on a marked focus region', async () => {
+    await mount();
+    // The managed page wrapper is a non-interactive tabindex=-1 parking spot
+    // for discard/task-panel focus, and it wraps the composer; typing there
+    // must still reach the editor.
+    const region = document.createElement('div');
+    region.tabIndex = -1;
+    region.setAttribute('data-web-shell-focus-region', '');
+    region.appendChild(container!);
+    document.body.appendChild(region);
+    try {
+      act(() => region.focus());
+      expect(document.activeElement).toBe(region);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => region.dispatchEvent(event));
+      expect(latest!.getText()).toBe('a');
+    } finally {
+      region.remove();
+    }
+  });
+
+  it('captures type-anywhere keystrokes when a shadow mount parks focus on a focus region', async () => {
+    await mount();
+    // A shadow-root mount retargets document.activeElement and event.target to
+    // the host, so the parked wrapper has to be read from the container root.
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.appendChild(host);
+    const region = document.createElement('div');
+    region.tabIndex = -1;
+    region.setAttribute('data-web-shell-focus-region', '');
+    region.appendChild(container!);
+    shadow.appendChild(region);
+    try {
+      act(() => region.focus());
+      expect(document.activeElement).toBe(host);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      act(() => region.dispatchEvent(event));
+      expect(latest!.getText()).toBe('a');
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('leaves keystrokes to the shell that owns the parked focus region', async () => {
+    await mount();
+    // Two managed shells can share one shadow root and park focus on sibling
+    // wrappers; only the shell whose wrapper contains this composer may take
+    // the keystroke, otherwise it lands in the wrong conversation.
+    const host = document.createElement('div');
+    const shadow = host.attachShadow({ mode: 'open' });
+    document.body.appendChild(host);
+    const ownRegion = document.createElement('div');
+    ownRegion.tabIndex = -1;
+    ownRegion.setAttribute('data-web-shell-focus-region', '');
+    ownRegion.appendChild(container!);
+    const foreignRegion = document.createElement('div');
+    foreignRegion.tabIndex = -1;
+    foreignRegion.setAttribute('data-web-shell-focus-region', '');
+    shadow.appendChild(foreignRegion);
+    shadow.appendChild(ownRegion);
+    try {
+      act(() => foreignRegion.focus());
+      expect(shadow.activeElement).toBe(foreignRegion);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      });
+      act(() => foreignRegion.dispatchEvent(event));
+      expect(latest!.getText()).toBe('');
+    } finally {
+      host.remove();
+    }
+  });
+
+  it('leaves keystrokes alone when focus parks on an unmarked focusable element', async () => {
+    await mount();
+    const outside = document.createElement('div');
+    outside.tabIndex = -1;
+    document.body.appendChild(outside);
+    try {
+      act(() => outside.focus());
+      expect(document.activeElement).toBe(outside);
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => outside.dispatchEvent(event));
+      expect(latest!.getText()).toBe('');
+    } finally {
+      outside.remove();
+    }
   });
 
   it('leaves a long paste inline in shell mode', async () => {
@@ -3102,6 +3467,24 @@ describe('useComposerCore tags', () => {
     expect(latest!.composerTags).toEqual([draftTag]);
   });
 
+  it('does not restore old draft tags after paging from a panel recall', async () => {
+    await mount();
+    act(() => {
+      latest!.setText('previous prompt');
+      latest!.submitText();
+      latest!.setText('draft prompt');
+      latest!.addTags([
+        { id: 'file:draft.txt', value: 'draft.txt', serialized: '@draft.txt' },
+      ]);
+    });
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => latest!.searchState.restoreSearchMatch!('selected prompt'));
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => pressHistoryKey('ArrowDown'));
+    expect(latest!.getText()).toBe('selected prompt');
+    expect(latest!.composerTags).toEqual([]);
+  });
+
   it('restores tags when Tab or a search-result selection recalls history', async () => {
     const serialized = '<context id="search-orders">orders</context>';
     const prompt = `inspect ${serialized} now`;
@@ -4525,5 +4908,287 @@ describe('composer draft attachment races', () => {
       images: [image],
       files: [],
     });
+  });
+});
+
+describe('useComposerCore prepareSubmit gate', () => {
+  function pressEnter() {
+    container!.querySelector('.cm-content')!.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        code: 'Enter',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+
+  function deferredPrepare() {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const prepareSubmit = vi.fn(() => gate);
+    return { prepareSubmit, release };
+  }
+
+  it('submitText waits for prepareSubmit and sends text inserted during it', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(true);
+
+    await act(async () => {
+      latest!.insertText(' dictated');
+      release();
+    });
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed dictated');
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('');
+  });
+
+  it('Enter waits for prepareSubmit before submitting', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => pressEnter());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(true);
+
+    await act(async () => {
+      latest!.insertText(' dictated');
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed dictated');
+  });
+
+  it('drops reentrant submits while preparation is in flight', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('once'));
+
+    act(() => latest!.submitText());
+    act(() => latest!.submitText());
+    act(() => pressEnter());
+    await act(async () => {
+      release();
+    });
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('once');
+  });
+
+  it('cancels the submit when the session switches during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    // The incoming draft must have content: an empty one would be rejected
+    // by the submit itself, letting a missing identity guard pass unnoticed.
+    localStorage.setItem(getSessionDraftKey('session-b'), 'draft b');
+    const { onSubmit, switchSession } = await mount({
+      prepareSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => latest!.setText('draft a'));
+
+    act(() => latest!.submitText());
+    switchSession('session-b', '/workspace/b');
+    expect(latest!.getText()).toBe('draft b');
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('cancels the submit when the composer unmounts during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('draft'));
+
+    act(() => latest!.submitText());
+    act(() => root?.unmount());
+    root = null;
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('recomputes the follow-up completion after preparation inserts text', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { onSubmit } = await mount({
+      prepareSubmit: async () => {
+        await gate;
+        latest!.insertText('dictated');
+      },
+      followupState: {
+        isVisible: true,
+        shownAt: 0,
+        suggestion: 'suggested prompt',
+      },
+    });
+
+    act(() => pressEnter());
+    expect(onSubmit).not.toHaveBeenCalled();
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('dictated');
+  });
+
+  it('cancels the submit when the workspace switches without a session', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    // Both drafts are session-less: only the workspace-derived identity
+    // fields change, so a sessionId-only guard would let this submit through.
+    localStorage.setItem(getPendingTaskDraftKey('/workspace/b'), 'draft b');
+    const { onSubmit, switchSession } = await mount({
+      prepareSubmit,
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => latest!.setText('draft a'));
+
+    act(() => latest!.submitText());
+    switchSession(undefined, '/workspace/b');
+    expect(latest!.getText()).toBe('draft b');
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('cancels an Enter submit when the session switches during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    localStorage.setItem(getSessionDraftKey('session-b'), 'draft b');
+    const { onSubmit, switchSession } = await mount({
+      prepareSubmit,
+      sessionId: 'session-a',
+      atWorkspaceCwd: '/workspace/a',
+    });
+    act(() => latest!.setText('draft a'));
+
+    act(() => pressEnter());
+    switchSession('session-b', '/workspace/b');
+    expect(latest!.getText()).toBe('draft b');
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('does not submit or throw when an Enter submit unmounts during preparation', async () => {
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('draft'));
+
+    // After unmount the view ref is null: without the Enter-path guards the
+    // continuation throws on the dead view instead of submitting, so the
+    // witness is "no unhandled rejection", not just "no submit".
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      act(() => pressEnter());
+      act(() => root?.unmount());
+      root = null;
+      await act(async () => {
+        release();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('keeps submits synchronous and never preparing without a finalizer', async () => {
+    const { onSubmit } = await mount();
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed');
+    expect(latest!.submitPreparing).toBe(false);
+  });
+
+  it('refuses a guarded Enter submit before arming the finalizer', async () => {
+    const prepareSubmit = vi.fn(async () => {});
+    const { onSubmit } = await mount({ prepareSubmit, submitDisabled: true });
+    act(() => latest!.setText('typed'));
+
+    act(() => pressEnter());
+    expect(prepareSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('typed');
+  });
+
+  it('refuses a guarded submitText before arming the finalizer', async () => {
+    const prepareSubmit = vi.fn(async () => {});
+    const { onSubmit } = await mount({ prepareSubmit, submitDisabled: true });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(prepareSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('typed');
+  });
+
+  it('drops a programmatic submit landing inside the finalization window', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['earlier prompt']),
+    );
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(latest!.submitPreparing).toBe(true);
+    // History-search Enter submits programmatically while the flush is in
+    // flight; it must be dropped, not race the flush continuation.
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.submitSearchMatch('earlier prompt'));
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
+  it('cancels the submit without an unhandled rejection when prepareSubmit rejects', async () => {
+    const prepareSubmit = vi.fn(async () => {
+      throw new Error('prepare failed');
+    });
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await act(async () => {
+        latest!.submitText();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(latest!.submitPreparing).toBe(false);
+      expect(latest!.getText()).toBe('typed');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 });

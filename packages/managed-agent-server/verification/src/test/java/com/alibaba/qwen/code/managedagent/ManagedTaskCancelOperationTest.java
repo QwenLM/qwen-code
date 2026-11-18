@@ -12,14 +12,15 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
-import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -91,8 +92,8 @@ class ManagedTaskCancelOperationTest {
         };
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, new ObjectMapper(), clock,
-                ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
+                ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION", "create", "digest", "qwen-code",
                 null, null, List.of(), null).sessionId();
         task(RUNNING_CHILD, "child_run", "child_agent", "running");
@@ -309,8 +310,8 @@ class ManagedTaskCancelOperationTest {
         settle(admitted, TaskCancelOutcome.completed());
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?,"
                 + " 'storage-1', ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, "storage-1"), JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                JdbcRuntimeBindingRepository.storageFenceKey("storage-1"),
+                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage-1"), RuntimeAdmissionFences.storageFenceKey(TENANT),
+                RuntimeAdmissionFences.storageFenceKey("storage-1"),
                 TENANT, UUID.randomUUID().toString());
         assertThat(begin("key-1", "digest-1", RUNNING_CHILD).replayed())
                 .isTrue();
@@ -484,7 +485,7 @@ class ManagedTaskCancelOperationTest {
                     + " VALUES (?, ?, ?, ?, '[]', 'digest', ?, 0, 0)", TENANT,
                     sessionId, turn[0], UUID.randomUUID().toString(), turn[1]);
         }
-        ChildResultRelayStore relay = new ChildResultRelayStore(jdbc);
+        JdbcChildResultRelayStore relay = new JdbcChildResultRelayStore(jdbc);
         String liveKey = "child-stop sha256:" + "1".repeat(64);
         String endedKey = "child-stop sha256:" + "2".repeat(64);
         assertThat(store.insertCancelCommand(TENANT, "CANCEL_TURN", liveKey,
@@ -509,7 +510,7 @@ class ManagedTaskCancelOperationTest {
     void theStopStateReadsTheCommittedBody() {
         String recordKey = ManagedExtensionProjection.recordKey(sessionId,
                 "child_run", "run-stop");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         jdbc.update("INSERT INTO ma_session_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
@@ -523,9 +524,9 @@ class ManagedTaskCancelOperationTest {
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, 'resource-stop', 'managed-child-run', 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSchemaKeys.key(scope, "resource-stop"), scope, TENANT, sessionId, body.length, "c".repeat(64), body);
-        ChildResultRelayStore relay = new ChildResultRelayStore(jdbc);
+        JdbcChildResultRelayStore relay = new JdbcChildResultRelayStore(jdbc);
         assertThat(relay.stopState(TENANT, sessionId, "run-stop"))
-                .isEqualTo(new ChildResultRelayStore.StopState(true, false));
+                .isEqualTo(new JdbcChildResultRelayStore.StopState(true, false));
         assertThat(relay.stopState(TENANT, sessionId, "run-missing"))
                 .isNull();
     }
@@ -540,7 +541,7 @@ class ManagedTaskCancelOperationTest {
                         + " task_kind, task_state, gmt_create)"
                         + " VALUES (?, ?, ?, 'workspace', ?, ?, ?, ?, 1, ?,"
                         + " ?, ?, 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
                 recordKey, TENANT, sessionId, domain, "record-" + recordKey,
                 recordKey, "resource-" + recordKey, kind, state);
     }

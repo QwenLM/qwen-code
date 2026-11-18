@@ -10,6 +10,9 @@ import { render } from 'ink-testing-library';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { MarkdownDisplay } from '../utils/MarkdownDisplay.js';
+import { useKeypress, type Key } from '../hooks/useKeypress.js';
+
+vi.mock('../hooks/useKeypress.js', () => ({ useKeypress: vi.fn() }));
 
 vi.mock('./shared/RadioButtonSelect.js', () => ({
   RadioButtonSelect: vi.fn(() => null),
@@ -28,6 +31,22 @@ describe('ConsentPrompt', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('declines on Escape when the owning dialog enables it', () => {
+    render(
+      <ConsentPrompt
+        prompt="Move?"
+        onConfirm={onConfirm}
+        terminalWidth={terminalWidth}
+        dismissOnEscape
+      />,
+    );
+
+    const [handleKeypress, options] = vi.mocked(useKeypress).mock.lastCall!;
+    expect(options.isActive).toBe(true);
+    handleKeypress({ name: 'escape' } as Key);
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(false);
   });
 
   it('renders a string prompt with MarkdownDisplay', () => {

@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -66,7 +65,7 @@ final class HookAdmissionHistory {
                 inTransaction(
                         () ->
                                 new ExtensionRecordJournal(
-                                                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc)),
+                                                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc),
                                                 tenantId,
                                                 workspaceId,
                                                 sessionId)

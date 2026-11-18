@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -58,9 +59,9 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
             var winner = claims.getFirst();
             org.assertj.core.api.Assertions.assertThat(winner.claimGeneration()).isGreaterThan(first.claimGeneration());
             org.assertj.core.api.Assertions.assertThat(f.bindings.requireHarnessRecovery(f.scope(), f.session,
-                    com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(winner))).isTrue();
+                    WorkspaceLifecycleStore.authority(winner))).isTrue();
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> f.bindings.requireHarnessRecovery(f.scope(), f.session,
-                    com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(first))).hasMessageContaining("closed");
+                    WorkspaceLifecycleStore.authority(first))).hasMessageContaining("closed");
             f.transactions.executeWithoutResult(ignored -> f.lifecycle.verifyResources(winner));
         }
     }
@@ -68,7 +69,7 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
     @org.junit.jupiter.api.Test
     void expiredWriterRenewalAndColdAcquireCannotBothOwnTheHead() throws Exception {
         var f = fixture();
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(f.jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(f.jdbc);
         var writer = f.transactions.execute(ignored -> journal.acquireWriter("tenant", f.session, "w".repeat(32),
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "resident", 60_000L)));
         var operation = admit(f, WorkspaceToolProfiles.SHELL, StoreModels.OperationKind.DELETE);
@@ -83,10 +84,10 @@ class WorkspaceProfileLifecycleMySqlIT extends WorkspaceProfileLifecycleTest {
                     return f.transactions.execute(ignored -> index == 0
                             ? journal.renewWriter("tenant", f.session, "w".repeat(32),
                                     new ManagedSessionStoreModels.RenewWriterRequest("workspace", "resident", writer.writerGeneration(), 60_000L),
-                                    com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation))
+                                    WorkspaceLifecycleStore.authority(operation))
                             : journal.acquireWriter("tenant", f.session, "r".repeat(32),
                                     new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "recovery", 60_000L),
-                                    com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore.authority(operation)));
+                                    WorkspaceLifecycleStore.authority(operation)));
                 } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException conflict) {
                     org.assertj.core.api.Assertions.assertThat(conflict.getCode()).isEqualTo("managed_session_writer_conflict");
                     return null;

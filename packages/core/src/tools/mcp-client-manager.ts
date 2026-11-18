@@ -1789,6 +1789,7 @@ export class McpClientManager {
     }
     // Same settled-registry report as the per-session bulk pass (#12435).
     warnOnUnmatchedEagerToolEntries(cliConfig);
+    warnOnUnmatchedDisabledToolEntries(cliConfig);
   }
 
   private releaseAllPooledConnections(): void {
@@ -2408,6 +2409,8 @@ export class McpClientManager {
     // MCP hot-reload reconcile both land here, so this is where a misspelt
     // `tools.eager` entry becomes visible (#12435).
     warnOnUnmatchedEagerToolEntries(cliConfig);
+    // Repeated discovery is deduplicated by the helper's per-Config ledger.
+    warnOnUnmatchedDisabledToolEntries(cliConfig);
   }
 
   /**

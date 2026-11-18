@@ -44,6 +44,11 @@ import {
   writeState,
   type AutofixPrState,
 } from './state.js';
+import type { RefusalCode } from './refusal.js';
+
+/** A refusal with its code: what the skill acts on. */
+const refused = (code: RefusalCode, message: RegExp) =>
+  expect.objectContaining({ code, message: expect.stringMatching(message) });
 
 describe('runPush (real git, bare remote)', () => {
   let base: string;
@@ -184,7 +189,9 @@ describe('runPush (real git, bare remote)', () => {
   it('refuses uncommitted changes, untracked files included', () => {
     commitIn(paths.worktreePath, 'fix.txt');
     writeFileSync(join(paths.worktreePath, 'stray.txt'), 'x');
-    expect(() => runPush(7)).toThrow(/uncommitted changes/);
+    expect(() => runPush(7)).toThrow(
+      refused('worktree_dirty', /uncommitted changes/),
+    );
     expect(remoteFeat()).toBe(featSha);
   });
 
@@ -305,7 +312,7 @@ describe('runPush (real git, bare remote)', () => {
     writeFileSync(hook, '#!/bin/sh\necho "hook says no" >&2\nexit 1\n');
     chmodSync(hook, 0o755);
     commitIn(paths.worktreePath, 'fix.txt');
-    expect(() => runPush(7)).toThrow(/hook says no/);
+    expect(() => runPush(7)).toThrow(refused('push_failed', /hook says no/));
     expect(remoteFeat()).toBe(featSha);
     expect(state().pushCount).toBeUndefined();
   });
@@ -372,7 +379,10 @@ describe('runPush (real git, bare remote)', () => {
     run(paths.worktreePath, 'switch', '-q', 'mine');
     commitIn(paths.worktreePath, 'user-work.txt');
     expect(() => runPush(7)).toThrow(
-      /branch mine checked out, not qwen-autofix\/pr-7/,
+      refused(
+        'worktree_dirty',
+        /branch mine checked out, not qwen-autofix\/pr-7/,
+      ),
     );
     expect(remoteFeat()).toBe(featSha);
 

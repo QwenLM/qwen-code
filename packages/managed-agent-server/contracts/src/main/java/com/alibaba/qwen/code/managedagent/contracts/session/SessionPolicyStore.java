@@ -41,6 +41,17 @@ public interface SessionPolicyStore {
 
     public default boolean hasMcpServers(SessionRecord session) { return false; }
 
+    /**
+     * Resolved tool profile of a prospective workspace creation, or null when
+     * the Workspace can never admit extension pins (external storage).
+     * Read-only: takes no Workspace locks, so an omitted default selection
+     * keeps its tenant-scan lock order until admission.
+     */
+    public default String creationToolProfile(String tenantId, String actorId,
+            String agentId, String requestedRevision, String workspaceId) {
+        return null;
+    }
+
     public default SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
         throw new UnsupportedOperationException("MCP management is unavailable");
     }
@@ -52,6 +63,8 @@ public interface SessionPolicyStore {
     public default SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
         throw new UnsupportedOperationException("Extension management is unavailable");
     }
+
+    public default boolean canApplyExtensions(SessionRecord session) { return false; }
 
     public default void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
         throw new UnsupportedOperationException("Extension management is unavailable");

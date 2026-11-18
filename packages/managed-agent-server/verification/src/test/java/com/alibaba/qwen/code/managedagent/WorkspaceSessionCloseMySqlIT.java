@@ -8,11 +8,11 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
@@ -78,7 +79,7 @@ class WorkspaceSessionCloseMySqlIT {
     }
 
     private void seedAction(String tenant, String session, String action, String state, String options) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,record_kind,"
                         + "domain,record_id,action_id,revision,action_version,state,options_json,gmt_create,first_sequence)"
                         + " VALUES (?,?,?,?,'ACTION','action',?,?,1,1,?,?,0,1)",
@@ -111,7 +112,7 @@ class WorkspaceSessionCloseMySqlIT {
     void closeSerializesNewWriterAndPreservesAnAlreadyAcquiredWriter() throws Exception {
         var first = store(Clock.systemUTC());
         var second = store(Clock.systemUTC());
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
         var tenant = "mysql-close-writer-" + UUID.randomUUID();
         var session = create(first, tenant);
         try (var pool = Executors.newSingleThreadExecutor()) {
@@ -147,15 +148,17 @@ class WorkspaceSessionCloseMySqlIT {
 
     @Test
     void closeCommitsBeforeQueuedTurnAndActionAdmissionsCanInspectTheSession() throws Exception {
+        transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         var first = store(Clock.systemUTC());
         var second = store(Clock.systemUTC());
-        var actions = new ManagedActionStore(jdbc, second);
+        var actions = new JdbcManagedActionStore(jdbc, second);
         var tenant = "mysql-close-admission-" + UUID.randomUUID();
         var session = create(first, tenant);
         String action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
         seedAction(tenant, session, action, "cancelled", "{}");
         try (var pool = Executors.newFixedThreadPool(2)) {
             var started = new CountDownLatch(2);
+            var actionSnapshot = new CountDownLatch(1);
             var turns = new java.util.concurrent.atomic.AtomicReference<Future<Object>>();
             var responses = new java.util.concurrent.atomic.AtomicReference<Future<Object>>();
             transaction(() -> {
@@ -167,11 +170,16 @@ class WorkspaceSessionCloseMySqlIT {
                 }));
                 responses.set(pool.submit(() -> {
                     started.countDown();
-                    return outcome(() -> transaction(() -> actions.admit(tenant, session, OWNER, ACTOR_DIGEST,
-                            "answer", "answer-digest", action, mapper.createObjectNode(), System.currentTimeMillis())));
+                    return outcome(() -> transaction(() -> {
+                        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                                String.class, tenant, session)).isEqualTo("ACTIVE");
+                        actionSnapshot.countDown();
+                        return actions.admit(tenant, session, OWNER, ACTOR_DIGEST,
+                                "answer", "answer-digest", action, mapper.createObjectNode(), System.currentTimeMillis());
+                    }));
                 }));
                 awaitBlocked(started, turns.get());
-                assertThrows(TimeoutException.class, () -> responses.get().get(100, TimeUnit.MILLISECONDS));
+                awaitBlocked(actionSnapshot, responses.get());
                 return close;
             });
             // With Workspace files enabled, a bound Session admits later Turns (#13112), so
@@ -182,6 +190,51 @@ class WorkspaceSessionCloseMySqlIT {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ?", Integer.class, tenant)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND operation_kind = 'ACTION_RESPONSE'",
                 Integer.class, tenant)).isZero();
+    }
+
+    @Test
+    void failedActionReplayUsesTheLockedSessionStatusAfterAnOlderSnapshot() throws Exception {
+        transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        var store = store(Clock.systemUTC());
+        var actions = new JdbcManagedActionStore(jdbc, store);
+        var tenant = "mysql-close-replay-" + UUID.randomUUID();
+        var session = create(store, tenant);
+        var action = "tool_approval_" + UUID.randomUUID().toString().replace("-", "");
+        long now = System.currentTimeMillis();
+        seedAction(tenant, session, action, "requested", "{\"inputRevision\":1,"
+                + "\"policyRevision\":\"hosted-tool-approval/1\",\"expiresAt\":" + (now + 86_400_000) + "}");
+        var body = mapper.createObjectNode().put("optionId", "allow").put("inputRevision", 1)
+                .put("policyRevision", "hosted-tool-approval/1");
+        String operationId = transaction(() -> actions.admit(tenant, session, OWNER, ACTOR_DIGEST,
+                "answer", "answer-digest", action, body, now)).operation().operationId();
+        jdbc.update("UPDATE ma_operation SET state = 'FAILED', phase = 'FAILED', delivery_state = 'CONFIRMED',"
+                        + " admission_stage = 'JAVA_DURABLE', session_status_before = 'ACTIVE', receipt_id = 'rcpt-1',"
+                        + " attempt_count = 10, budget_exempt_attempt = 0, available_at = 0, completed_at = 0,"
+                        + " failure_code = 'action_response_delivery_failed' WHERE tenant_id = ? AND session_id = ? AND operation_id = ?",
+                tenant, session, operationId);
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var snapshotRead = new CountDownLatch(1);
+            Future<OperationAdmission> queued = transaction(() -> {
+                jdbc.update("UPDATE ma_session SET status = 'CLOSING' WHERE tenant_id = ? AND session_id = ?", tenant, session);
+                Future<OperationAdmission> response = pool.submit(() -> transaction(() -> {
+                    assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                            String.class, tenant, session)).isEqualTo("ACTIVE");
+                    snapshotRead.countDown();
+                    return actions.admit(tenant, session, OWNER, ACTOR_DIGEST,
+                            "answer", "answer-digest", action, body, now + 1);
+                }));
+                awaitBlocked(snapshotRead, response);
+                return response;
+            });
+            var replay = queued.get(5, TimeUnit.SECONDS);
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.operation().operationId()).isEqualTo(operationId);
+            assertThat(replay.operation().state()).isEqualTo("FAILED");
+            assertThat(replay.operation().failureCode()).isEqualTo("action_response_delivery_failed");
+            assertThat(jdbc.queryForObject("SELECT attempt_count FROM ma_operation WHERE tenant_id = ? AND operation_id = ?",
+                    Integer.class, tenant, operationId)).isEqualTo(10);
+            assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+        }
     }
 
     @Test
@@ -212,8 +265,8 @@ class WorkspaceSessionCloseMySqlIT {
     @Test
     void closeWriterCheckWaitsForAnUncommittedRenewalBeforeEvaluatingExpiry() throws Exception {
         var first = store(Clock.systemUTC());
-        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
-        var otherJournal = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(new ManagedSchemaJdbcTemplate(source)));
+        var journal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
+        var otherJournal = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(new ManagedSchemaJdbcTemplate(source));
         var tenant = "mysql-close-renew-" + UUID.randomUUID();
         var session = create(first, tenant);
         long generation = transaction(() -> journal.acquireWriter(tenant, session, TOKEN,
@@ -272,7 +325,7 @@ class WorkspaceSessionCloseMySqlIT {
         ManagedSchema.initialize(source);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(jdbc, mapper, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules()));
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, clock, ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private String create(ManagedAgentStore store, String tenant) {
@@ -293,7 +346,7 @@ class WorkspaceSessionCloseMySqlIT {
                 .build())).sessionId();
     }
 
-    private static void awaitBlocked(CountDownLatch started, Future<Object> queued) {
+    private static void awaitBlocked(CountDownLatch started, Future<?> queued) {
         try {
             assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
             assertThrows(TimeoutException.class, () -> queued.get(100, TimeUnit.MILLISECONDS));

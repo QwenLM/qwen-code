@@ -2,6 +2,8 @@
 
 [English](2026-10-21-managed-workspace-concurrency.md) | [简体中文](2026-10-21-managed-workspace-concurrency.zh-CN.md)
 
+The exclusive rewind behavior below is superseded by [rewind without directory exclusion](2026-11-05-managed-rewind-concurrency.md). Shared execution membership and physical-maintenance protection remain in place.
+
 ## Status and scope
 
 This change permits ordinary Managed Sessions on LOCAL and SSH_LOCAL storage to execute concurrently in the same directory. It covers both Session-isolated and Workspace-isolated workers. A Session still runs one Turn at a time. Resident and private CSI profiles retain their current admission, reservation, and retirement rules. Existing Agent/Workflow child-admission restrictions are outside this slice.

@@ -66,6 +66,7 @@ import {
   getAcpMemoryArgs,
   scrubChildEnv,
 } from './spawnChannel.js';
+import { DAEMON_ACP_NDJSON_LIMITS as LEAF_DAEMON_ACP_NDJSON_LIMITS } from './ndJsonStream.js';
 
 function createFakeChildProcess(): ChildProcess {
   const child = Object.assign(new EventEmitter(), {
@@ -595,6 +596,13 @@ describe('createSpawnChannelFactory env policy', () => {
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
     });
+  });
+
+  it('re-exports the daemon limits that Managed Runtime workers read from the leaf module', () => {
+    // Workers import the limits from ndJsonStream so they do not load this
+    // module; both names must stay one object.
+    expect(DAEMON_ACP_NDJSON_LIMITS).toBe(LEAF_DAEMON_ACP_NDJSON_LIMITS);
+    expect(Object.isFrozen(LEAF_DAEMON_ACP_NDJSON_LIMITS)).toBe(true);
   });
 
   it('keeps the default factory unbounded and validates opt-in limits early', () => {

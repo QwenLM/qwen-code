@@ -56,6 +56,42 @@ function cleanup(container: HTMLDivElement) {
   container.remove();
 }
 
+describe('Markdown math', () => {
+  it('renders inline and display math with accessible annotations', () => {
+    const view = renderMd('Inline $x^2$.\n\n$$\ny = x + 1\n$$');
+    try {
+      expect(view.querySelectorAll('.katex')).toHaveLength(2);
+      expect(view.querySelectorAll('.katex-display')).toHaveLength(1);
+      expect(
+        [...view.querySelectorAll('annotation')].map(
+          (node) => node.textContent,
+        ),
+      ).toEqual(['x^2', 'y = x + 1']);
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('does not inherit a polluted KaTeX trust option', () => {
+    const previous = Object.getOwnPropertyDescriptor(Object.prototype, 'trust');
+    Object.defineProperty(Object.prototype, 'trust', {
+      value: true,
+      configurable: true,
+      writable: true,
+    });
+    let view: HTMLDivElement | undefined;
+    try {
+      view = renderMd('$\\href{https://example.com/untrusted}{click}$');
+      expect(view.querySelector('.katex')).not.toBeNull();
+      expect(view.querySelector('a')).toBeNull();
+    } finally {
+      if (previous) Object.defineProperty(Object.prototype, 'trust', previous);
+      else Reflect.deleteProperty(Object.prototype, 'trust');
+      if (view) cleanup(view);
+    }
+  });
+});
+
 describe('isSafeHref', () => {
   it('allows https URLs', () => {
     expect(isSafeHref('https://example.com')).toBe(true);
@@ -214,18 +250,28 @@ describe('qwen-session:// links', () => {
     c.remove();
   });
 
-  it('dispatches qwen:open-session with the session id on click', () => {
+  it.each([
+    { target: 'abc12345-full-id', detail: 'abc12345-full-id' },
+    {
+      target: 'abc12345-full-id?workspace=%2Fwork%2Fproject+%28copy%29',
+      detail: {
+        sessionId: 'abc12345-full-id',
+        workspaceCwd: '/work/project (copy)',
+        source: 'session-link',
+      },
+    },
+  ])('dispatches a session event for $target', ({ target, detail }) => {
     const seen: unknown[] = [];
     const handler = (e: Event) => seen.push((e as CustomEvent).detail);
     window.addEventListener('qwen:open-session', handler);
-    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    const c = renderMd(`[🧵 abc12345](qwen-session://${target})`);
     act(() => {
       c.querySelector('a')!.dispatchEvent(
         new MouseEvent('click', { bubbles: true, cancelable: true }),
       );
     });
     window.removeEventListener('qwen:open-session', handler);
-    expect(seen).toEqual(['abc12345-full-id']);
+    expect(seen).toEqual([detail]);
     // The scheme is never written to the DOM: the anchor is a plain '#'.
     expect(c.querySelector('a')!.getAttribute('href')).toBe('#');
     (c as HTMLDivElement & { __unmount: () => void }).__unmount();

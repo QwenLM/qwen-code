@@ -4,7 +4,7 @@ Qwen Code allows you to configure multiple model providers through the `modelPro
 
 ## Overview
 
-Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
+Use `modelProviders` to declare models per provider id that the `/model` picker can switch between. Each key is a provider id and its value is **an array of model definitions** (`ModelConfig[]`). For built-in providers the key must be a valid auth type (`openai`, `anthropic`, `gemini`, `vertex-ai`); a custom provider id (e.g. `idealab`) is allowed as long as you map it to a protocol via the top-level [`providerProtocol`](#custom-provider-ids-providerprotocol) setting. Each model entry requires an `id`; `envKey` is **optional and recommended** (when omitted, it falls back to the auth type's default env key, e.g. `OPENAI_API_KEY` for `openai`), with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Legacy free Qwen OAuth models remain hard-coded and cannot be overridden.
 
 > [!note]
 >
@@ -12,7 +12,7 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 
 > [!note]
 >
-> Only the `/model` command exposes non-default auth types. Anthropic, Gemini, etc., must be defined via `modelProviders`. The `/auth` command lists four top-level options: **QwenCloud** (with Token Plan and Standard API Key in its sub-menu), **Alibaba ModelStudio** (with Coding Plan, Token Plan, and Standard API Key in its sub-menu), **Third-party Providers**, and **Custom Provider**. (Qwen OAuth is no longer a selectable dialog entry; its free tier was discontinued on 2026-04-15.)
+> Configure API-key providers through `modelProviders`, then select them with `/model`. For Qwen account sign-in, choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) in `/auth`; no API key or manual `modelProviders` configuration is needed. Use `/model` to choose from the models available with your subscription. See [Authentication](./auth.md) for sign-in instructions.
 
 > [!note]
 >
@@ -68,6 +68,9 @@ The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
 `envKey`. Image generation uses the same endpoint and credential as the route;
 if chat and image generation require different endpoints or credentials,
 configure two routes instead.
+
+See [Image Generation](../features/image-generation.md) for selecting the
+image model and generating images in the terminal or Web Shell.
 
 ### Live Voice routes
 
@@ -130,6 +133,9 @@ converted to `wss://<host>/api-ws/v1/realtime` when a call starts; the host must
 be a DashScope or `*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new
 endpoint is checked with a Realtime handshake before it is saved.
 
+See [Qwen Live](../features/qwen-live.md) for enabling and using Live Voice in
+the Web Shell.
+
 ## Override reasoning capabilities
 
 Set `capabilities.reasoning` on a model entry to override its reasoning format,
@@ -186,7 +192,6 @@ Use one of the built-in provider ids below, or map a custom id with `providerPro
 | `openai`           | OpenAI-compatible APIs. Defaults to Chat Completions; set a model's `wireApi` to `responses` for the Responses API.                             |
 | `anthropic`        | Anthropic Claude API                                                                                                                            |
 | `gemini`           | Google Gemini API                                                                                                                               |
-| `qwen-oauth`       | Qwen OAuth (hard-coded, cannot be overridden in `modelProviders`)                                                                               |
 | `vertex-ai`        | Google Vertex AI (uses the `gemini` protocol and the `@google/genai` SDK in Vertex AI mode; selecting it sets `GOOGLE_GENAI_USE_VERTEXAI=true`) |
 
 > [!note]
@@ -351,6 +356,140 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 
 When pointing an entry at a hosted OpenAI-compatible gateway, set `baseUrl` to the API's `/v1` root (for example, `https://gateway.example.com/v1`) rather than the full `/v1/chat/completions` path — the SDK appends the request path itself.
 
+### Oracle Cloud Infrastructure (OCI) Generative AI
+
+OCI Generative AI exposes an OpenAI-compatible endpoint per region and authenticates with an OCI Generative AI API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Model ids carry the publisher as a prefix (`openai.gpt-5.5`, `xai.grok-4.3`, `openai.gpt-oss-120b`).
+
+Two base URLs matter:
+
+- Chat Completions: `https://inference.generativeai.<region>.oci.oraclecloud.com/openai/v1`
+- Responses: `https://inference.generativeai.<region>.oci.oraclecloud.com/v1` with `wireApi: "responses"`
+
+With an API key, the OpenAI-compatible endpoints are available in `us-chicago-1`, `us-ashburn-1`, `us-phoenix-1`, `eu-frankfurt-1`, `ap-hyderabad-1` and `ap-osaka-1`; see [OCI OpenAI-Compatible Endpoints](https://docs.oracle.com/en-us/iaas/Content/generative-ai/openai-compatible-api.htm) and [API Keys](https://docs.oracle.com/en-us/iaas/Content/generative-ai/api-keys.htm) for the current region list and the models API keys cover.
+
+```json
+{
+  "env": {
+    "OCI_GENAI_API_KEY": "<your OCI Generative AI API key>"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "xai.grok-4.3",
+        "name": "Grok 4.3 (OCI)",
+        "envKey": "OCI_GENAI_API_KEY",
+        "baseUrl": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/openai/v1",
+        "generationConfig": { "contextWindowSize": 1000000 }
+      },
+      {
+        "id": "openai.gpt-oss-120b",
+        "name": "gpt-oss-120b (OCI)",
+        "envKey": "OCI_GENAI_API_KEY",
+        "baseUrl": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/openai/v1",
+        "generationConfig": { "contextWindowSize": 131072 }
+      },
+      {
+        "id": "openai.gpt-5.5",
+        "name": "GPT-5.5 (OCI, Responses)",
+        "wireApi": "responses",
+        "envKey": "OCI_GENAI_API_KEY",
+        "baseUrl": "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/v1",
+        "generationConfig": { "contextWindowSize": 400000 }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "openai.gpt-5.5" }
+}
+```
+
+Things to know about this endpoint:
+
+- **Pin `contextWindowSize`.** The dotted publisher prefix is not stripped by the built-in model lookup, so an entry without it gets the generic defaults.
+- **No `GET /models`.** Model discovery is not available; list the models you want explicitly.
+- **GPT-5 and o-series on Chat Completions need `max_completion_tokens`.** Those families reject `max_tokens`. Until that key is chosen automatically, either use the Responses wire as above or add `"samplingParams": { "max_completion_tokens": 32000 }` to the entry's `generationConfig`.
+- **gpt-5.6 and GPT-6 families with tools: use the Responses wire.** On Chat Completions these models refuse function tools unless `reasoning_effort` is `none`, and some of them (for example `gpt-6-astra`) do not accept `none` at all. On Responses they work without any extra configuration.
+- **gpt-oss stays on Chat Completions.** Its Responses route rejects function tools.
+- **Error bodies arrive compressed.** A rejected request can show as `400 status code (no body)`; the message is readable with `Accept-Encoding: identity` in a direct call.
+- **Imported models on a dedicated AI cluster** (for example Qwen models imported from Hugging Face) are addressed by the endpoint OCID as the model id on the Responses wire. Treat that as an advanced, per-tenancy setup.
+
+### Wally (RunAnywhere)
+
+[Wally](https://www.runwally.com) by RunAnywhere serves open-weight models through an OpenAI-compatible endpoint at `https://inference.runanywhere.ai/v1` and authenticates with an API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Create a key in the [RunAnywhere console](https://console.runanywhere.ai). The current model ids, context windows and input modalities are listed in the public catalog at `https://inference.runanywhere.ai/v1/models`.
+
+```json
+{
+  "env": {
+    "WALLY_API_KEY": "<your Wally API key>"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "deepseek-v4.1-flash",
+        "name": "DeepSeek V4.1 Flash (Wally)",
+        "envKey": "WALLY_API_KEY",
+        "baseUrl": "https://inference.runanywhere.ai/v1",
+        "generationConfig": { "modalities": { "image": true } }
+      },
+      {
+        "id": "glm-5.3-flash",
+        "name": "GLM-5.3 Flash (Wally)",
+        "envKey": "WALLY_API_KEY",
+        "baseUrl": "https://inference.runanywhere.ai/v1",
+        "generationConfig": { "modalities": {} }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "deepseek-v4.1-flash" }
+}
+```
+
+Things to know about this endpoint:
+
+- **Set `modalities` from the catalog, not the model family.** On Wally, `deepseek-v4.1-flash` reads images while the built-in model lookup records it as text-only, and `glm-5.3-flash` is text-only (a request with an image part fails with `400 glm-5.3-flash does not take image, audio, video or file input`) while the lookup marks it as image-capable. The example sets both explicitly; for any other id, use its `input_modalities` from the catalog.
+- **No `contextWindowSize` needed for these two.** Both ids resolve in the built-in model lookup to a window no larger than the 1,048,576 tokens Wally serves, and the default output request stays below their output limits. If you add an id whose catalog `context_length` is smaller than what the lookup assumes, pin `contextWindowSize` to the catalog value.
+
+### Wiro AI
+
+[Wiro AI](https://wiro.ai/llm) serves models from several vendors through an OpenAI-compatible endpoint at `https://llm.wiro.ai/v1` and authenticates with an API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Create a [Wiro AI project](https://wiro.ai/panel/project/new) to get a key. Model ids are lowercase `owner/model`. The catalog at `GET https://llm.wiro.ai/v1/models`, called with the same key, returns the current ids with each model's `context_length` and input modalities, and the [models page](https://wiro.ai/models?categories=llm-tool-call) shows the models that support tool calls. The [gateway docs](https://wiro.ai/docs/completions-api) describe the endpoint in full.
+
+```json
+{
+  "env": {
+    "WIRO_API_KEY": "<your Wiro AI API key>"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "openai/gpt-5-4-nano",
+        "name": "GPT-5.4 Nano (Wiro AI)",
+        "envKey": "WIRO_API_KEY",
+        "baseUrl": "https://llm.wiro.ai/v1"
+      },
+      {
+        "id": "claude/sonnet-5",
+        "name": "Claude Sonnet 5 (Wiro AI)",
+        "envKey": "WIRO_API_KEY",
+        "baseUrl": "https://llm.wiro.ai/v1",
+        "generationConfig": {
+          "contextWindowSize": 1000000,
+          "modalities": { "image": true }
+        }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "openai/gpt-5-4-nano" }
+}
+```
+
+Things to know about this endpoint:
+
+- **The built-in model lookup sees only the segment after the last `/`.** An id whose last segment is a name the lookup knows resolves on its own. Any other id inherits nothing and needs its fields set from the catalog.
+- **Nothing to set for `openai/gpt-5-4-nano`.** Its last segment, `gpt-5-4-nano`, is in the lookup, which gives it image input and a window no larger than the 400,000 tokens the catalog reports.
+- **Set `contextWindowSize` and `modalities` for `claude/sonnet-5`.** Its last segment, `sonnet-5`, is not a name the lookup knows (the lookup has `claude-sonnet-5`), so without them the entry gets the generic 200K window and is treated as text-only. The example sets the 1,000,000-token `context_length` and the image input the catalog reports. The default output request stays below the output limit of both models.
+
 ### OpenAI Responses API (`openai-responses`)
 
 Use `openai` with `wireApi: "responses"` to target OpenAI's `/v1/responses` endpoint. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
@@ -388,6 +527,14 @@ Use `openai` with `wireApi: "responses"` to target OpenAI's `/v1/responses` endp
 > `extra_body` on this wire is fill-only: a key is written to the request body only when the generated request has no value for it, so it cannot override a field the pipeline already set (`model`, `input`, `reasoning`, `temperature`, `max_output_tokens`, ...). The legacy `enable_thinking` key is the one exception to even that — it is removed rather than forwarded (it isn't a Responses API field), and translated into `reasoning.effort: "medium"` when no explicit `reasoning` is set. Set `reasoning.effort` directly instead of `extra_body.enable_thinking` for this provider.
 
 ### Anthropic (`anthropic`)
+
+Claude Opus 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1 reject forced
+tool selection. For structured side queries, Qwen Code uses automatic tool
+selection with an explicit schema-response instruction on these models. Models
+that support forced selection retain it. Automatic selection does not guarantee
+a tool call; JSON side queries can also read a raw JSON object from the response text,
+without Markdown fences or surrounding prose.
+See [Anthropic's tool-choice restrictions](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools#forcing-tool-use).
 
 ```json
 {
@@ -580,6 +727,36 @@ export VLLM_API_KEY="not-needed"
 >
 > Each provider example includes an `env` field to illustrate how the API key should be configured.
 
+#### Qwen3.x served under a custom model name
+
+Thinking control and the context window are inferred from the model id. If a
+vLLM or SGLang server exposes a Qwen3.x model under an id that does not start
+with `qwen` (for example `--served-model-name chat`), neither applies: side
+requests such as the auto-mode permission classifier keep thinking on, and the
+context window falls back to the 200K default. Declare both on the model entry,
+as described in [Override reasoning capabilities](#override-reasoning-capabilities):
+
+```json
+{
+  "id": "chat",
+  "name": "Qwen3.6 35B A3B (vLLM)",
+  "envKey": "VLLM_API_KEY",
+  "baseUrl": "http://localhost:8000/v1",
+  "capabilities": { "reasoning": { "profile": "qwen-chat-template" } },
+  "generationConfig": { "contextWindowSize": 262144 }
+}
+```
+
+`qwen-chat-template` sends `chat_template_kwargs.enable_thinking`, which these
+servers pass to the Qwen chat template; a top-level `enable_thinking` field is
+not read by them. Set `contextWindowSize` to the server's maximum model length
+(vLLM reports it as `max_model_len` in `/v1/models`). Qwen Code sends tool
+definitions on every request, so the server also needs tool calling and a
+reasoning parser enabled; on vLLM that is `--enable-auto-tool-choice`, a
+`--tool-call-parser` for the model (for example `qwen3_xml`) and
+`--reasoning-parser qwen3`. Parser names change between server releases, so
+check your server's documentation.
+
 ## Alibaba Cloud Coding Plan
 
 Alibaba Cloud Coding Plan provides a pre-configured set of Qwen models optimized for coding tasks. This feature is available for users with Alibaba Cloud Coding Plan API access and offers a simplified setup experience with automatic model configuration updates.
@@ -696,7 +873,7 @@ The effective auth/model/credential values are chosen per field using the follow
 | Settings (`settings.json`) | `security.auth.selectedType`        | `model.name`                                    | `security.auth.apiKey`                            | `security.auth.baseUrl`                            | —                      | —                                 |
 | Default / computed         | Falls back to `AuthType.QWEN_OAUTH` | Built-in default (OpenAI ⇒ `qwen3.5-plus`)      | —                                                 | —                                                  | —                      | `Config.getProxy()` if configured |
 
-\*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. Qwen OAuth and OpenAI are the only auth types surfaced without extra configuration.
+\*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. See [Authentication](./auth.md) for sign-in options. The legacy free Qwen OAuth provider is separate from [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli).
 
 > [!note]
 >
@@ -886,6 +1063,43 @@ The optional `reasoning` field under `generationConfig` controls how aggressivel
 | **Anthropic** (real `api.anthropic.com`)      | `output_config: { effort }` plus the `effort-2025-11-24` beta header                     | Real Anthropic accepts `'low'`/`'medium'`/`'high'` only. `'max'` is **clamped to `'high'`** with a `debugLogger.warn` line (once per generator); if you want max effort, switch the baseURL to a DeepSeek-compatible endpoint that supports it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | **Anthropic** (`api.deepseek.com/anthropic`)  | Same `output_config: { effort }` + beta header                                           | `'low'`, `'high'` and `'max'` pass through unchanged; `'medium'`/`'xhigh'` are mapped to `'high'`, matching DeepSeek's server-side mapping.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Gemini** (`@google/genai`)                  | `thinkingConfig: { includeThoughts: true, thinkingLevel }`                               | `'low'` → `LOW`, `'high'`/`'max'` → `HIGH`, others → `THINKING_LEVEL_UNSPECIFIED` (Gemini has no `MAX` tier).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+
+### qwen4-max specifics
+
+`qwen4-max` (ModelStudio Standard, Token Plan, QwenCloud Standard, and Qwen
+Subscription) speaks the tiered `reasoning_effort` contract with its own native
+ladder and defaults. These behaviors are scoped to `qwen4-max` (and its dated /
+`-latest` aliases); other `qwen4*` routes and the invitation-only
+`qwen-latest-series-invite-*` previews keep the qwen3.8-max ladder and their
+shipped output limits.
+
+- **Effort ladder:** `low` / `high` / `xhigh`, **default `high`** (qwen3.8-max
+  defaults to `xhigh`). A configured `medium` is raised to `high` and `max` is
+  clamped to `xhigh` (matching the server's own mapping); `none` disables
+  thinking.
+- **Output budget:** `max_tokens` equals `max_completion_tokens` and caps
+  **thinking + answer together** (262,144 in thinking mode, 131,072 without).
+  The automatic output request is sized for that total rather than the flat 64K
+  ceiling, still bounded by the context window; with thinking disabled it is
+  clamped to the 131,072 non-thinking cap on both the DashScope channels and
+  Qwen Subscription.
+- **Media:** image and video input are accepted. On the DashScope-based
+  channels (ModelStudio Standard, Token Plan, QwenCloud Standard),
+  `generationConfig.imageDetail` (`low` / `high` / `auto`) stamps the OpenAI
+  `detail` field on each image part; unset leaves the server default (`high`,
+  ~16K image tokens). Set `low` to trade resolution for tokens (~2.5K). The
+  Qwen Subscription channel does not forward this setting.
+- **Cache TTL:** on the DashScope-based channels,
+  `generationConfig.cacheRetention: '1h'` stamps `ttl: '1h'` on the qwen4
+  cache breakpoints (2x input write cost); the default omits `ttl` (the
+  5-minute spec default). The Qwen Subscription provider injects no
+  `cache_control` breakpoints, so this setting has no effect there.
+- **Subscription wire shape:** the Qwen Subscription gateway maps the selected
+  effort to `thinking_budget` (`low → 4096`, `high → 131072`, `xhigh → 262144`)
+  plus `enable_thinking`, instead of a top-level `reasoning_effort`.
+
+CoT summary (`thinking_display`) and programmatic tool calling (ptc) are not yet
+wired up.
 
 ### `reasoning: false`
 

@@ -50,6 +50,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_recording_degraded',
   'artifact_changed',
   'source_changed',
+  'sub_session_task_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
@@ -270,6 +271,7 @@ export interface DaemonPermissionForbiddenData {
 export interface DaemonModelSwitchedData {
   sessionId: string;
   modelId: string;
+  subscriptionSignedOut?: boolean;
   [key: string]: unknown;
 }
 
@@ -323,6 +325,16 @@ export type DaemonSourceChangedEvent = DaemonEventEnvelope<
 export interface DaemonArtifactChangedData {
   sessionId: string;
   change: DaemonSessionArtifactChange;
+  [key: string]: unknown;
+}
+
+/**
+ * A `sent` launch the daemon reports back to `sessionId` started or settled.
+ * A hint: re-read `GET /session/:id/tasks?includeSubSessions=true`. Fanned
+ * out to every session in the caller's workspace, so filter by `sessionId`.
+ */
+export interface DaemonSubSessionTaskChangedData {
+  sessionId: string;
   [key: string]: unknown;
 }
 
@@ -1046,6 +1058,10 @@ export type DaemonArtifactChangedEvent = DaemonEventEnvelope<
   'artifact_changed',
   DaemonArtifactChangedData
 >;
+export type DaemonSubSessionTaskChangedEvent = DaemonEventEnvelope<
+  'sub_session_task_changed',
+  DaemonSubSessionTaskChangedData
+>;
 export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
   typeof MID_TURN_MESSAGE_INJECTED_EVENT,
   DaemonMidTurnMessageInjectedData
@@ -1245,6 +1261,7 @@ export type DaemonSessionEvent =
   | DaemonSessionMetadataUpdatedEvent
   | DaemonSessionRecordingDegradedEvent
   | DaemonArtifactChangedEvent
+  | DaemonSubSessionTaskChangedEvent
   | DaemonMidTurnMessageInjectedEvent
   | DaemonPendingPromptEvent
   | DaemonChannelDeliveryResultEvent
@@ -1731,6 +1748,10 @@ export function asKnownDaemonEvent(
       return isArtifactChangedData(event.data)
         ? (event as DaemonArtifactChangedEvent)
         : undefined;
+    case 'sub_session_task_changed':
+      return isRecord(event.data) && isNonEmptyString(event.data['sessionId'])
+        ? (event as DaemonSubSessionTaskChangedEvent)
+        : undefined;
     case MID_TURN_MESSAGE_INJECTED_EVENT: {
       const data = asMidTurnMessageInjectedData(event.data);
       return data
@@ -2079,7 +2100,7 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         sessionId: event.data.sessionId,
-        currentModelId: event.data.modelId,
+        currentModelId: event.data.modelId || undefined,
         lastModelSwitchFailure: undefined,
       };
     case 'model_switch_failed':
@@ -2305,6 +2326,7 @@ export function reduceDaemonSessionEvent(
     case 'extensions_changed':
     case 'artifact_changed':
     case 'source_changed':
+    case 'sub_session_task_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:
@@ -2712,7 +2734,8 @@ function isModelSwitchedData(value: unknown): value is DaemonModelSwitchedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
-    isNonEmptyString(value['modelId'])
+    (isNonEmptyString(value['modelId']) ||
+      (value['modelId'] === '' && value['subscriptionSignedOut'] === true))
   );
 }
 

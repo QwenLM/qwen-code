@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -44,8 +45,8 @@ class ManagedMessageSnapshotRemovalTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         transaction = new TransactionTemplate(manager);
-        store = VerificationFixtures.configure(new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules()));
+        store = VerificationFixtures.managedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {},
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
         session = transaction.execute(status -> store.insertSessionCommand(TENANT, "actor",
                 "CREATE_SESSION", "create", "digest", "qwen-code", null, "title", List.of(), null))
                 .sessionId();
@@ -112,9 +113,9 @@ class ManagedMessageSnapshotRemovalTest {
         assertThat(jdbc.queryForObject("SELECT retention_until FROM ma_resource WHERE resource_key = ?",
                 Long.class, oldBody)).isNotNull().isLessThanOrEqualTo(ToolPublicationRetentionStore.now(jdbc));
 
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, session);
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, session);
         String nativeId = "native-snapshot-manifest";
-        String nativeKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, nativeId);
+        String nativeKey = ManagedSessionStore.resourceKey(scope, nativeId);
         byte[] nativeBytes = {123, 125};
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id,"
                         + " resource_id, kind, schema_version, byte_length, sha256, storage_kind,"

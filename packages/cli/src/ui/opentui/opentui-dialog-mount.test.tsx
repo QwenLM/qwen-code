@@ -315,6 +315,18 @@ const REQUESTS: Array<[string, OpenTuiDialogRequest]> = [
 ];
 
 describe('OpenTuiDialogMount routing', () => {
+  it('preserves subscription success metadata in history', () => {
+    const ui = mount({ dialog: 'auth' });
+    dialogProp('auth', 'notify')('new member login', 'subscription-success');
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'new member login',
+        presentation: 'subscription-success',
+      }),
+      expect.any(Number),
+    );
+    ui.unmount();
+  });
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.dialogProps = {};
@@ -382,6 +394,15 @@ describe('OpenTuiDialogMount routing', () => {
       });
     },
   );
+
+  it('binds Memory actions to the actual selected Config/settings host', () => {
+    mount({ dialog: 'memory' });
+    expect(mocks.state.dialogProps['memory']).toMatchObject({
+      config: CONFIG,
+      settings: SETTINGS,
+      host: HOST,
+    });
+  });
 
   it('routes every dialog request to its own component', () => {
     expect(REQUESTS).toHaveLength(25);
@@ -822,6 +843,16 @@ describe('OpenTuiDialogMount routing', () => {
     expect(addItem).not.toHaveBeenCalled();
     expect(recordSlashCommand).not.toHaveBeenCalled();
   });
+
+  it.each([true, undefined])(
+    'passes the auth command origin %s to the dialog',
+    (openedViaCommand) => {
+      mount({ dialog: 'auth', openedViaCommand });
+      expect(mocks.state.dialogProps['auth']?.['openedViaCommand']).toBe(
+        openedViaCommand,
+      );
+    },
+  );
 
   it('throws for an unhandled dialog kind', () => {
     const bad = { dialog: 'nope' } as unknown as OpenTuiDialogRequest;

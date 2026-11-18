@@ -29,7 +29,6 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.HttpURLConnection;
-import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
@@ -55,6 +54,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.reservePort;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedHarnessMySqlIT {
@@ -152,6 +152,8 @@ class HostedHarnessMySqlIT {
             List<JsonNode> events = awaitTurn(client, session, receipt);
             assertCompleted(events, "MYSQL_REPLY_1");
             assertThat(modelRequests.size()).isEqualTo(1);
+            JsonNode initialStatistics = modelStatistics();
+            assertThat(initialStatistics.at("/totals/requests/total").asLong()).isEqualTo(1);
 
             PromptReceipt replay = client.submitTurn(first);
             assertThat(replay.getPromptId()).isEqualTo(receipt.getPromptId());
@@ -162,6 +164,7 @@ class HostedHarnessMySqlIT {
                     receipt.getEventEpoch(), events.size() - 1))
                     .isEqualTo(events.subList(1, events.size()));
             assertThat(modelRequests.size()).isEqualTo(1);
+            assertThat(modelStatistics()).isEqualTo(initialStatistics);
 
             client.closeSession(session);
             assertWriter("SEALED", 1);
@@ -169,6 +172,7 @@ class HostedHarnessMySqlIT {
             assertThat(loaded.getHarnessClientId()).isNotEqualTo(session.getHarnessClientId());
             assertWriter("ACTIVE", 2);
             assertTranscriptPrefix(events, transcript(client, loaded, receipt.getLastEventId()));
+            assertThat(modelStatistics()).isEqualTo(initialStatistics);
 
             PromptReceipt cancelled = client.submitTurn(prompt(loaded, "MYSQL_CANCEL"));
             assertThat(cancellationRequested.await(15, TimeUnit.SECONDS))
@@ -189,6 +193,10 @@ class HostedHarnessMySqlIT {
             assertCompleted(awaitTurn(client, loaded,
                     client.submitTurn(prompt(loaded, "MYSQL_NEXT"))), "MYSQL_REPLY_4");
             assertThat(modelRequests.size()).isEqualTo(4);
+            JsonNode finalStatistics = modelStatistics();
+            assertThat(finalStatistics.at("/totals/requests/total").asLong()).isEqualTo(4);
+            assertThat(finalStatistics.at("/totals/requests/success").asLong()).isEqualTo(3);
+            assertThat(finalStatistics.at("/totals/requests/cancelled").asLong()).isEqualTo(1);
             assertHistory(2, "MYSQL_FIRST", "MYSQL_REPLY_1", "MYSQL_AFTER_CANCEL");
             assertHistory(3, "MYSQL_FIRST", "MYSQL_REPLY_1", "MYSQL_AFTER_CANCEL",
                     "MYSQL_REPLY_3", "MYSQL_NEXT");
@@ -205,6 +213,7 @@ class HostedHarnessMySqlIT {
             assertTranscriptPrefix(committed, transcript(client, reattached, 0));
             client.closeSession(reattached);
             assertWriter("SEALED", 3);
+            assertThat(modelStatistics()).isEqualTo(finalStatistics);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx"
                     + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, sessionId))
                     .isGreaterThan(4);
@@ -213,6 +222,25 @@ class HostedHarnessMySqlIT {
             System.err.println("HOSTED_MYSQL_HARNESS_LOG\n" + logs());
             throw failure;
         }
+    }
+
+    private JsonNode modelStatistics() {
+        var snapshots = jdbc.query("SELECT DISTINCT u.inline_bytes FROM ma_resource u JOIN ma_resource_ref r"
+                        + " ON r.session_scope_key = u.session_scope_key AND r.resource_id = u.resource_id"
+                        + " WHERE u.tenant_id = ? AND u.session_id = ? AND r.owner_kind = 'JOURNAL'"
+                        + " AND u.kind IN ('managed-hosted-model-usage-v2', 'managed-hook-model-usage-v2', 'managed-session-model-stats')",
+                (row, index) -> {
+                    try {
+                        return json.readTree(row.getBytes(1)).get("statistics");
+                    } catch (IOException error) {
+                        throw new UncheckedIOException(error);
+                    }
+                }, tenant, sessionId);
+        assertThat(snapshots).as("Committed diagnostic resources from the packaged Harness").isNotEmpty();
+        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head"
+                        + " WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                Integer.class, tenant, sessionId)).isEqualTo(4);
+        return snapshots.stream().max(java.util.Comparator.comparingLong(value -> value.path("snapshotRevision").asLong())).orElseThrow();
     }
 
     @Test
@@ -226,9 +254,7 @@ class HostedHarnessMySqlIT {
         startHarness(cli);
         // The Harness writes to the Store through Spring, so Spring's address
         // must be known before it starts.
-        try (ServerSocket socket = new ServerSocket(0, 0, InetAddress.getLoopbackAddress())) {
-            springPort = socket.getLocalPort();
-        }
+        springPort = reservePort();
         spring = (ServletWebServerApplicationContext) new SpringApplicationBuilder(
                 ManagedAgentServerApplication.class).run(
                 "--server.address=127.0.0.1", "--server.port=" + springPort,

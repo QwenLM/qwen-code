@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { parseQwenAgentMessageMeta } from '../../src/daemon/session-agents.js';
 import {
   appendLocalUserTranscriptMessage,
   createDaemonToolPreview,
@@ -17,6 +18,7 @@ import {
   estimateDaemonTranscriptBlockBytes,
   extractTranscriptTiming,
   getOutputText,
+  isDaemonRewindUserBlock,
   isDaemonUiSensitiveKey,
   normalizeDaemonEvent,
   reduceDaemonTranscriptEvents,
@@ -31,6 +33,22 @@ import type {
 } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
+  it('names the caller whose sent sub-session task changed', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 7,
+        v: 1,
+        type: 'sub_session_task_changed',
+        data: { sessionId: 'caller-1' },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'session.sub_session_task.changed',
+        sessionId: 'caller-1',
+      }),
+    ]);
+  });
+
   it('treats config option updates as state metadata rather than chat or progress', () => {
     expect(
       normalizeDaemonEvent({
@@ -607,6 +625,77 @@ describe('daemon UI normalizer and transcript reducer', () => {
       kind: 'user',
       meta: { inputAnnotations },
     });
+  });
+
+  it('separates sender metadata from the SDK reference annotations', () => {
+    const reference = {
+      type: 'reference',
+      start: 0,
+      end: 7,
+      text: '@file/a',
+      reference: { id: 'file:@file/a' },
+    };
+    const source = {
+      type: 'source',
+      sessionId: 'caller',
+      workspaceCwd: '/work/a',
+      title: 'Caller',
+    };
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: '@file/a' },
+          _meta: {
+            inputAnnotations: [
+              { type: 'source', sessionId: 3 },
+              reference,
+              source,
+            ],
+          },
+        },
+      },
+    });
+
+    const [message] = events;
+    if (message?.type !== 'user.text.delta')
+      throw new Error('Missing user message');
+    expect(
+      message.meta?.inputAnnotations?.map((item) => item.reference.id),
+    ).toEqual(['file:@file/a']);
+    expect(message.meta?.sourceAnnotation).toEqual(source);
+    expect(
+      reduceDaemonTranscriptEvents(createDaemonTranscriptState(), events)
+        .blocks[0],
+    ).toMatchObject({
+      meta: { inputAnnotations: [reference], sourceAnnotation: source },
+    });
+  });
+
+  it('excludes outgoing send records from rewindable user turns', () => {
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'user.text.delta', text: 'A prompt', promptId: 'real-prompt' },
+      {
+        type: 'user.text.delta',
+        text: 'An outgoing message',
+        segmentId: 'mention:outgoing',
+        meta: {
+          source: 'agent_mention',
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: {
+            kind: 'agent_mention',
+            sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+          },
+        },
+      },
+    ]);
+
+    expect(state.blocks).toHaveLength(2);
+    expect(state.blocks.filter(isDaemonRewindUserBlock)).toMatchObject([
+      { kind: 'user', promptId: 'real-prompt' },
+    ]);
   });
 
   it('preserves assistant message metadata on transcript blocks', () => {
@@ -2695,6 +2784,19 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(event).not.toHaveProperty('errorKind');
   });
 
+  it.each(['', 'bailian'])(
+    'keeps automatic logout model changes silent (%s)',
+    (modelId) => {
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'model_switched',
+          data: { sessionId: 'session', modelId, subscriptionSignedOut: true },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('normalizes daemon lifecycle and control events', () => {
     expect(
       normalizeDaemonEvent({
@@ -3369,6 +3471,17 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).toContain('ok');
     expect(output).not.toContain('bad');
     expect(output).not.toContain('\x00');
+  });
+
+  it('renders nothing for a lifecycle name-only tool event', () => {
+    expect(
+      daemonUiEventToTerminalText({
+        type: 'tool.update',
+        toolCallId: 'c',
+        toolName: 'read_file',
+        nameOnly: true,
+      }),
+    ).toBe('');
   });
 
   it('renders managed memory events without a source fallback leak', () => {
@@ -11432,5 +11545,30 @@ describe('daemonBlockToPlainText sanitizes tool preview content', () => {
     const plain = daemonBlockToPlainText(block, { maxFieldLength: 80 });
     expect(plain).not.toContain('[truncated]');
     expect(plain).toContain('B'.repeat(40));
+  });
+});
+
+describe('parseQwenAgentMessageMeta', () => {
+  it('keeps where a /send message went and drops a malformed target', () => {
+    expect(
+      parseQwenAgentMessageMeta({
+        kind: 'agent_mention',
+        sentTo: {
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          title: 'Kid',
+          extra: 1,
+        },
+      }),
+    ).toEqual({
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'kid', workspaceCwd: '/work/b', title: 'Kid' },
+    });
+    expect(
+      parseQwenAgentMessageMeta({
+        kind: 'agent_mention',
+        sentTo: { sessionId: 'kid' },
+      }),
+    ).toEqual({ kind: 'agent_mention' });
   });
 });
