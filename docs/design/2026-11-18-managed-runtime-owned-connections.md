@@ -2,7 +2,7 @@
 
 [English](2026-11-18-managed-runtime-owned-connections.md) | [简体中文](2026-11-18-managed-runtime-owned-connections.zh-CN.md)
 
-Status: investigation + detailed design proposal, not implemented. Date: 2026-11-18. This is the pre-implementation design for Phase 2 of the [Stateless Hosted Harness design](2026-11-16-managed-stateless-harness.md) (#17527), checked against `main` at `5381294538`, which contains the merged Phase 1 PR #17690 (merge `7150c58a01`). The parent design's Phase 2 "defines the boundary only; a separate design precedes implementation"; this document carries that boundary forward into a proposal, cost model, Phase 1 interaction, measurement plan, and feasibility conclusion. The cost share in the conclusion is a **code-level analytical estimate, not yet measured**; measurement is an implementation gate (parent design: "its share must be measured").
+Status: investigation + detailed design, implementation in progress on this PR; parking stays off by default (`qwen.managed-agent.runtime-broker.mcp-parking.enabled`) until the §7 measurement gate passes. Date: 2026-11-18. This is the pre-implementation design for Phase 2 of the [Stateless Hosted Harness design](2026-11-16-managed-stateless-harness.md) (#17527), checked against `main` at `5381294538`, which contains the merged Phase 1 PR #17690 (merge `7150c58a01`). The parent design's Phase 2 "defines the boundary only; a separate design precedes implementation"; this document carries that boundary forward into a proposal, cost model, Phase 1 interaction, measurement plan, and feasibility conclusion. The cost share in the conclusion is a **code-level analytical estimate, not yet measured**; measurement is an implementation gate (parent design: "its share must be measured").
 
 ## 1. Problem and current state
 
@@ -128,14 +128,14 @@ A cold open constructs `HostedMcpSession` (same durable owner), and the first pr
 1. **Acquire first.** The reuse branch calls `acquireOwner()` before its `mcp-status` lookup. `lookup` reports every failure as `outcome_unknown`, which `install()` turns into recovery-required; acquiring first lets a retryable `workspace_busy` or Broker rejection surface as itself, as it does on the fresh-install path.
 2. **Look up and verify.** `mcp-status` returns the original configure result, which is checked against the saved catalog digest. No reconnect.
 3. **Revalidate before advertising tools.** The first `refresh()` of a reopened Session sends `mcp-discover` with a new optional `revalidate: true`. For remote transports the worker sends an MCP `ping` under a short timeout; a JSON-RPC `-32601` reply counts as alive. On any other failure the worker closes the connection and answers `managed_mcp_retiring`. Stdio connections skip the ping, because process exit already closes them.
-4. **Retire and replace unusable connections.** On `managed_mcp_binding_conflict` or `managed_mcp_retiring`, `refresh()` first retires the old row through the existing `drainConfigurations` (the `mcp-release` of a closed connection settles immediately), then configures a replacement through the existing path. If that release does not settle cleanly, the Session stays recovery-required.
+4. **Replace unusable connections, then retire their rows.** On `managed_mcp_binding_conflict`, or on `managed_mcp_retiring` from a revalidating discover, `refresh()` first configures a replacement through the existing path, then retires the old row through the existing `drainConfigurations` (the `mcp-release` of a closed connection settles immediately). A refused replacement leaves the old row `active`, so the Session is not recovery-blocked and the next load tries again. If the release does not settle cleanly after a successful replacement, the Session stays recovery-required.
 
-| Connection state at reopen                   | Detected by                     | Outcome                                                                         |
-| -------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
-| Alive and accepted by the server             | Revalidation passes             | Reuse; no `mcp-configure`                                                       |
-| Remote session expired or credential refused | `ping` fails                    | Retire and reconfigure; a refused credential fails before the model turn starts |
-| Closed by reclamation, eviction, or exit     | `managed_mcp_binding_conflict`  | Retire and reconfigure                                                          |
-| Worker lost (Runtime generation changed)     | `acquireOwner` generation check | Recovery-required, unchanged (§5.7)                                             |
+| Connection state at reopen                   | Detected by                     | Outcome                                                                           |
+| -------------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------- |
+| Alive and accepted by the server             | Revalidation passes             | Reuse; no `mcp-configure`                                                         |
+| Remote session expired or credential refused | `ping` fails                    | Reconfigure, then retire; a refused credential fails before the model turn starts |
+| Closed by reclamation, eviction, or exit     | `managed_mcp_binding_conflict`  | Reconfigure, then retire                                                          |
+| Worker lost (Runtime generation changed)     | `acquireOwner` generation check | Recovery-required, unchanged (§5.7)                                               |
 
 **Why revalidation is required**: without it, a remote session that expired during the park stays invisible until the first tool call. That `send` fails, the worker records `outcome_unknown`, and the Session becomes `recovery_blocked` over a call the server never executed. Phase 1 avoids this by reconnecting on every wake.
 
@@ -150,8 +150,8 @@ The Broker reclaims parked owners with a scheduled job of the same shape as `Run
 
 A resident Session has an `ACTIVE` head and is never eligible. A later head update, such as a wake projection, only pushes the deadline back. For each eligible owner:
 
-1. **Adopt.** If the binding is not live in this Broker process, adopt it through the existing trusted `recoverBinding` path.
-2. **Close connections.** The Broker sends a new Broker-only `mcp-reclaim` control. The worker refuses it while `hasPendingWork` is true; otherwise it runs the existing `drainSession`. A refusal changes nothing and is retried on the next tick. The Harness control route rejects this kind.
+1. **Require a live binding.** The job handles only bindings live in this Broker process and skips every other owner without adopting it. The existing `RuntimeRecoveryCoordinator` restores saved bindings after a restart, and a later tick then reclaims their owners.
+2. **Close connections.** The Broker calls a new Broker-only worker route, `/internal/managed-runtime/v3/mcp/reclaim`. The worker refuses while `hasPendingWork` is true; otherwise it runs the existing `drainSession`. A refusal changes nothing and is retried on the next tick. The Harness control route cannot reach this worker route.
 3. **Hand back the membership.** Under the Session lock, the Broker re-checks that the head is still `SEALED`, reads the current mount claim, and calls the existing `releaseMountAfterSweep` guard, which refuses a superseded claim, active control, or a live or unproven background execution.
 
 Connections close before the membership is handed back, so a stdio server cannot write to storage it no longer holds. Reclamation is **non-terminal**: a full release would leave a RELEASED tombstone under the id the next load recomputes and wedge the durable owner. Journal rows do not change; the successor Harness replaces the connection through §4.3.
@@ -200,7 +200,7 @@ The mount is a Broker-side claim, not a Harness resource. Holding it during park
 
 ### 5.6 Broker-advertised parking is the rollout control
 
-The parent design records that suspension has no kill switch. `mcpParkable` gives Phase 2 one: while the Broker does not advertise parking, every Session keeps the Phase 1 drain. It also guarantees that parking is never enabled on a deployment without reclamation.
+The parent design records that suspension has no kill switch. `mcpParkable` gives Phase 2 one: while the Broker does not advertise parking, every Session keeps the Phase 1 drain. The Broker advertises it only when `qwen.managed-agent.runtime-broker.mcp-parking.enabled` is true, which is off by default. It also guarantees that parking is never enabled on a deployment without reclamation.
 
 ### 5.7 Worker loss stays recovery-required
 
@@ -263,8 +263,8 @@ Add an IT in the verification module, building the stack like `HostedMcpRestartF
 
 - **Maintenance delayed by parked members** (§5.4): physical maintenance on `LOCAL` storage waits for on-demand reclamation of parked members.
 - **Stale remote connections**: a remote session can expire during the park. Revalidation (§4.3) covers the reopen; a failure after the probe behaves as it does for a resident Session.
-- **Replacement correctness**: a reclaimed connection's journal row is still active. The load must retire that row before replacing it, and must not resend original operations. Worker loss (recovery-required) and connection loss (replace) must each be verified.
-- **Reclamation races**: `mcp-reclaim` and the membership handback must stay safe against a concurrent reopen, a Broker restart between the two steps, and adoption after a restart.
+- **Replacement correctness**: a reclaimed connection's journal row is still active. The load must replace the connection before retiring that row, and must not resend original operations. Worker loss (recovery-required) and connection loss (replace) must each be verified.
+- **Reclamation races**: the reclaim route and the membership handback must stay safe against a concurrent reopen and a Broker restart between the two steps.
 - **Quota pressure**: eviction can close an idle connection of a resident Session; its next tool call fails cleanly and its next refresh replaces the connection.
 - **Long-lived stdio process resources**: a parked stdio server is a long-lived process in the worker, holding memory/FDs. Idle reclamation bounds it; H1's deployment constraints ("stdio HOME/USERPROFILE is the Workspace", etc.) carry over.
 - **Coupling with the detach path**: suspension reuses part of detach's close path; Phase 2's park change must pin every line of the "close-path review" with tests (a parent-design risk item).
@@ -274,11 +274,11 @@ Add an IT in the verification module, building the stack like `HostedMcpRestartF
 
 - **Reuse witness**: after a parked Session reopens, the `mcp.start` count does not increase (no reconnect); catalog and connectionGeneration pins unchanged; grant renewed to the new writer.
 - **Revalidation**: a remote session expired during the park is replaced before tools are advertised and never produces `outcome_unknown`; a credential revoked during the park fails the turn before the model runs; an unchanged remote server is reused without `mcp-configure`; a stdio server receives no `ping`.
-- **Reclamation**: after idle reclamation the load retires the old row and reconfigures; original operations are not resent; retired rows do not accumulate across repeated cycles.
+- **Reclamation**: after idle reclamation the load reconfigures and then retires the old row; original operations are not resent; retired rows do not accumulate across repeated cycles.
 - **Worker loss**: a worker killed while parked takes recovery-required, mints no fresh owner, and starts no second server (the `workerKillWhileIdleNeverMintsAFreshOwnerOnMySql` contract).
 - **Error classification**: a retryable `workspace_busy` during reopen surfaces as itself, not as recovery-required.
 - **Suspension correctness**: after park the writer is sealed, activation released, resident dropped, renewal stopped; the recovery view reports ready; the #8 bounded-recovery proof still holds.
-- **Pending-work blocking**: a Session with a pending MCP operation does not park, and the worker refuses `mcp-reclaim` while work is pending.
+- **Pending-work blocking**: a Session with a pending MCP operation does not park, and the worker refuses reclamation while work is pending.
 - **Quota**: at the connection quota, an idle parked connection of another Session is evicted and the new configure succeeds; with no evictable connection the quota error is unchanged.
 - **Mount semantics**: on `LOCAL` / `SSH_LOCAL`, other Sessions run on the same storage during the park; on `LOCAL`, maintenance proceeds after on-demand reclamation; a concurrent reopen keeps its membership; `EXTERNAL` storage and deployments without `mcpParkable` keep the Phase 1 drain.
 - **Hooks**: a Hook-only Session still hands its mount back on suspension.
@@ -289,11 +289,10 @@ Add an IT in the verification module, building the stack like `HostedMcpRestartF
 ## 10. Open questions
 
 1. The idle duration, reclamation scan delay, and revalidation timeout (chosen by measurement), and whether revalidation runs concurrently across servers.
-2. The wire shape of `mcpParkable`, `revalidate`, and `mcp-reclaim`, and their relationship to the existing `managed-runtime-provider/1` control endpoint.
-3. Whether `EXTERNAL` storage should park later, which would require preempting a parked holder when a rival acquires.
-4. Whether an owner proven settled may reinstall automatically after worker loss, which would require revisiting the fault gate in §5.7.
-5. Whether reclamation should also cover a crashed Harness (`ACTIVE` head with an expired writer lease). The first increment covers sealed heads only.
-6. Whether storage-ownership decoupling is needed once maintenance delay is measured (§5.4 later increment).
+2. Whether `EXTERNAL` storage should park later, which would require preempting a parked holder when a rival acquires.
+3. Whether an owner proven settled may reinstall automatically after worker loss, which would require revisiting the fault gate in §5.7.
+4. Whether reclamation should also cover a crashed Harness (`ACTIVE` head with an expired writer lease). The first increment covers sealed heads only.
+5. Whether storage-ownership decoupling is needed once maintenance delay is measured (§5.4 later increment).
 
 ## 11. Feasibility conclusion
 

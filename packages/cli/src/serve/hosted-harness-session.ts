@@ -5069,7 +5069,7 @@ export function registerHostedHarnessSessionRoutes(
           }
           if (!done.owners) {
             await session.hooks?.close({ terminal: false });
-            await session.mcp?.close({ terminal: false });
+            await session.mcp?.suspend();
             done.owners = true;
           }
           if (!done.lease) {

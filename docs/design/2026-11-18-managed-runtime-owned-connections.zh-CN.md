@@ -2,7 +2,7 @@
 
 [English](2026-11-18-managed-runtime-owned-connections.md) | [简体中文](2026-11-18-managed-runtime-owned-connections.zh-CN.md)
 
-状态：调研 + 详细设计提案，未实现。日期：2026-11-18。本文是[无状态 Hosted Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)（#17527）第二阶段的实现前设计，基于 `main` 的 `5381294538` 核实，该提交已包含合并的第一阶段 PR #17690（merge `7150c58a01`）。父设计第二阶段"只定义边界；实现前另写设计"，本文承接该边界并给出方案、成本模型、与第一阶段的交互、测量计划与可行性结论。结论中的成本占比是**代码级解析估算，尚未实测**；实测是实现门槛（父设计："其占比必须测量"）。
+状态：调研 + 详细设计，正在本 PR 上实现；在 §7 测量门槛通过前，park 默认关闭（`qwen.managed-agent.runtime-broker.mcp-parking.enabled`）。日期：2026-11-18。本文是[无状态 Hosted Harness 设计](2026-11-16-managed-stateless-harness.zh-CN.md)（#17527）第二阶段的实现前设计，基于 `main` 的 `5381294538` 核实，该提交已包含合并的第一阶段 PR #17690（merge `7150c58a01`）。父设计第二阶段"只定义边界；实现前另写设计"，本文承接该边界并给出方案、成本模型、与第一阶段的交互、测量计划与可行性结论。结论中的成本占比是**代码级解析估算，尚未实测**；实测是实现门槛（父设计："其占比必须测量"）。
 
 ## 1. 问题与现状
 
@@ -128,14 +128,14 @@ Hook 不变（§1.3）。teardown 第 3 步 `releaseLeaseNow` 不变：对 MCP-o
 1. **先 acquire。** 复用分支在 `mcp-status` 查询之前调用 `acquireOwner()`。`lookup` 会把所有失败都报告为 `outcome_unknown`，`install()` 再把它变成 recovery-required；先 acquire 能让可重试的 `workspace_busy` 或 Broker 拒绝按原样暴露，与全新安装路径一致。
 2. **查询并校验。** `mcp-status` 返回原 configure 结果，再用已存 catalog 的 digest 校验。不重连。
 3. **声明工具前重新校验。** 重开后的首次 `refresh()` 发送带新可选字段 `revalidate: true` 的 `mcp-discover`。对远程 transport，worker 在较短超时内发送 MCP `ping`；JSON-RPC `-32601` 回复视为存活。其他任何失败都由 worker 关闭连接并应答 `managed_mcp_retiring`。stdio 连接跳过 ping，因为进程退出本身就会关闭连接。
-4. **退役并替换不可用连接。** 遇到 `managed_mcp_binding_conflict` 或 `managed_mcp_retiring` 时，`refresh()` 先通过既有 `drainConfigurations` 退役旧行（已关闭连接的 `mcp-release` 会立即结算），再走既有路径配置替换连接。若该 release 未能干净结算，Session 保持 recovery-required。
+4. **先替换不可用连接，再退役旧行。** 遇到 `managed_mcp_binding_conflict`，或重新校验的 discover 返回 `managed_mcp_retiring` 时，`refresh()` 先走既有路径配置替换连接，再通过既有 `drainConfigurations` 退役旧行（已关闭连接的 `mcp-release` 会立即结算）。替换被拒时旧行保持 `active`，Session 不会进入 recovery-blocked，下一次 load 会重试。若替换成功后该 release 未能干净结算，Session 保持 recovery-required。
 
-| 重开时的连接状态                       | 检测方式                          | 结果                                         |
-| -------------------------------------- | --------------------------------- | -------------------------------------------- |
-| 存活且被 server 接受                   | 重新校验通过                      | 复用；不发 `mcp-configure`                   |
-| 远程会话过期或凭据被拒                 | `ping` 失败                       | 退役并重配；凭据被拒会在模型 turn 开始前失败 |
-| 已被回收、驱逐或进程退出               | `managed_mcp_binding_conflict`    | 退役并重配                                   |
-| worker 丢失（Runtime generation 变化） | `acquireOwner` 的 generation 检查 | recovery-required，不变（§5.7）              |
+| 重开时的连接状态                       | 检测方式                          | 结果                                           |
+| -------------------------------------- | --------------------------------- | ---------------------------------------------- |
+| 存活且被 server 接受                   | 重新校验通过                      | 复用；不发 `mcp-configure`                     |
+| 远程会话过期或凭据被拒                 | `ping` 失败                       | 先重配再退役；凭据被拒会在模型 turn 开始前失败 |
+| 已被回收、驱逐或进程退出               | `managed_mcp_binding_conflict`    | 先重配再退役                                   |
+| worker 丢失（Runtime generation 变化） | `acquireOwner` 的 generation 检查 | recovery-required，不变（§5.7）                |
 
 **为什么必须重新校验**：否则 park 期间过期的远程会话要到第一次工具调用才暴露。此时 `send` 失败，worker 记录 `outcome_unknown`，Session 因一次 server 根本没有执行的调用而进入 `recovery_blocked`。第一阶段每次 wake 都重连，所以不会遇到这个问题。
 
@@ -150,8 +150,8 @@ Broker 用一个与 `RuntimeRetentionJob` 同形的定时任务回收 parked own
 
 resident Session 的 head 是 `ACTIVE`，永远不符合资格。之后的 head 更新（例如 wake 投影）只会推迟截止时间。对每个符合资格的 owner：
 
-1. **接管。** 若 binding 在当前 Broker 进程中不是活的，通过既有的受信 `recoverBinding` 路径接管。
-2. **关闭连接。** Broker 发送新的 Broker 专用 `mcp-reclaim` control。`hasPendingWork` 为 true 时 worker 拒绝；否则执行既有 `drainSession`。拒绝不改变任何状态，下一轮重试。Harness 的 control 路由拒绝这个 kind。
+1. **要求活 binding。** 任务只处理当前 Broker 进程持有的活 binding，其他 owner 一律跳过，不做接管。重启后由既有的 `RuntimeRecoveryCoordinator` 恢复已保存的 binding，之后的某一轮再回收其 owner。
+2. **关闭连接。** Broker 调用新的 Broker 专用 worker 路由 `/internal/managed-runtime/v3/mcp/reclaim`。`hasPendingWork` 为 true 时 worker 拒绝；否则执行既有 `drainSession`。拒绝不改变任何状态，下一轮重试。Harness 的 control 路由无法到达这个 worker 路由。
 3. **交还成员资格。** Broker 在 Session 锁内复查 head 仍为 `SEALED`，读取当前 mount claim，并调用既有的 `releaseMountAfterSweep` 守卫；该守卫会拒绝已被取代的 claim、活跃 control，以及存活或未证实结束的后台执行。
 
 连接先于成员资格交还而关闭，所以 stdio server 不可能写入已不再持有的存储。回收是**非终态**的：完整 release 会在下一次 load 重算出的 id 下留下 RELEASED tombstone，从而卡死 durable owner。journal 行不变；后继 Harness 通过 §4.3 替换连接。
@@ -200,7 +200,7 @@ mount 是 Broker 侧 claim，不是 Harness 资源。park 保持 mount 不妨碍
 
 ### 5.6 由 Broker 声明 park 作为发布控制
 
-父设计记录了挂起没有 kill switch。`mcpParkable` 为第二阶段提供了一个：只要 Broker 不声明支持 park，所有 Session 都保持第一阶段的 drain。它也保证了没有回收能力的部署永远不会启用 park。
+父设计记录了挂起没有 kill switch。`mcpParkable` 为第二阶段提供了一个：只要 Broker 不声明支持 park，所有 Session 都保持第一阶段的 drain。Broker 仅在 `qwen.managed-agent.runtime-broker.mcp-parking.enabled` 为 true 时声明，该配置默认关闭。它也保证了没有回收能力的部署永远不会启用 park。
 
 ### 5.7 worker 丢失仍为 recovery-required
 
@@ -263,8 +263,8 @@ WP3 rig 是本地脚本（MySQL8.4 + Spring exec jar + hosted-harness bundle + f
 
 - **parked 成员延迟维护**（§5.4）：`LOCAL` 存储上的物理维护要等 parked 成员被按需回收。
 - **远程连接过期**：远程会话可能在 park 期间过期。重新校验（§4.3）覆盖重开时刻；探测之后的失败与 resident Session 的行为相同。
-- **替换正确性**：被回收连接的 journal 行仍为 active。load 必须先退役该行再替换，且不得重发原操作。worker 丢失（recovery-required）与连接丢失（替换）两条路径都须分别验证。
-- **回收竞争**：`mcp-reclaim` 与成员资格交还必须在并发重开、两步之间 Broker 重启、重启后接管这些情况下保持安全。
+- **替换正确性**：被回收连接的 journal 行仍为 active。load 必须先替换连接再退役该行，且不得重发原操作。worker 丢失（recovery-required）与连接丢失（替换）两条路径都须分别验证。
+- **回收竞争**：回收路由与成员资格交还必须在并发重开、两步之间 Broker 重启这些情况下保持安全。
 - **配额压力**：驱逐可能关闭 resident Session 的空闲连接；其下一次工具调用会干净地失败，下一次 refresh 会替换连接。
 - **stdio 长存进程的资源**：parked stdio server 是 worker 里的长存进程，占内存/FD。空闲回收 bound；H1 已列"stdio HOME/USERPROFILE 为 Workspace"等部署约束沿用。
 - **与 detach 路径耦合**：挂起复用 detach 的 close 路径一部分；第二阶段改 park 须用测试固定"close 路径审查"每一行（父设计风险项）。
@@ -274,11 +274,11 @@ WP3 rig 是本地脚本（MySQL8.4 + Spring exec jar + hosted-harness bundle + f
 
 - **复用见证**：parked Session 重开后 `mcp.start` 计数不增（连接未重连）；catalog 与 connectionGeneration pin 不变；grant 续租给新写者。
 - **重新校验**：park 期间过期的远程会话在声明工具前被替换，且绝不产生 `outcome_unknown`；park 期间被吊销的凭据使 turn 在模型运行前失败；未变化的远程 server 不发 `mcp-configure` 即被复用；stdio server 不收到 `ping`。
-- **回收**：空闲回收后 load 退役旧行并重配；原 operation 不重发；多次循环后已退役的行不累积。
+- **回收**：空闲回收后 load 先重配再退役旧行；原 operation 不重发；多次循环后已退役的行不累积。
 - **worker 丢失**：park 期间被杀的 worker 走 recovery-required，不产生新 owner，不启动第二个 server（`workerKillWhileIdleNeverMintsAFreshOwnerOnMySql` 契约）。
 - **错误分类**：重开期间可重试的 `workspace_busy` 按原样暴露，而不是变成 recovery-required。
 - **挂起正确性**：park 后写者 seal、activation 释放、resident drop、续约停；恢复视图判 ready；#8 有界恢复证明仍成立。
-- **未决工作拦截**：有未决 MCP operation 的 Session 不 park，且有未决工作时 worker 拒绝 `mcp-reclaim`。
+- **未决工作拦截**：有未决 MCP operation 的 Session 不 park，且有未决工作时 worker 拒绝回收。
 - **配额**：达到连接配额时，其他 Session 的空闲 parked 连接被驱逐，新的 configure 成功；没有可驱逐连接时配额错误不变。
 - **mount 语义**：`LOCAL` / `SSH_LOCAL` 上，park 期间其他 Session 可运行在同一 storage；`LOCAL` 上按需回收后维护得以继续；并发重开保留其成员资格；`EXTERNAL` 存储与未声明 `mcpParkable` 的部署保持第一阶段 drain。
 - **Hook**：只有 Hook 的 Session 挂起时仍交还 mount。
@@ -289,11 +289,10 @@ WP3 rig 是本地脚本（MySQL8.4 + Spring exec jar + hosted-harness bundle + f
 ## 10. 待解决问题
 
 1. 空闲时长、回收扫描间隔与重新校验超时（测量选定），以及重新校验是否跨 server 并发执行。
-2. `mcpParkable`、`revalidate`、`mcp-reclaim` 的线上形态，及其与既有 `managed-runtime-provider/1` 控制端点的关系。
-3. `EXTERNAL` 存储后续是否 park；这需要在竞争方 acquire 时抢占 parked 持有者。
-4. 已证明 settled 的 owner 在 worker 丢失后能否自动重装；这需要重新审视 §5.7 的故障门禁。
-5. 回收是否也应覆盖崩溃的 Harness（head 为 `ACTIVE` 且写者租约已过期）。第一增量只覆盖已 seal 的 head。
-6. 实测维护延迟后，是否需要存储所有权解耦（§5.4 后续增量）。
+2. `EXTERNAL` 存储后续是否 park；这需要在竞争方 acquire 时抢占 parked 持有者。
+3. 已证明 settled 的 owner 在 worker 丢失后能否自动重装；这需要重新审视 §5.7 的故障门禁。
+4. 回收是否也应覆盖崩溃的 Harness（head 为 `ACTIVE` 且写者租约已过期）。第一增量只覆盖已 seal 的 head。
+5. 实测维护延迟后，是否需要存储所有权解耦（§5.4 后续增量）。
 
 ## 11. 可行性结论
 

@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   openManagedSession,
   type ManagedSession,
@@ -2428,3 +2428,174 @@ it.each(['landed', 'absent'] as const)(
     }
   },
 );
+
+describe('idle suspension', () => {
+  const rows = () =>
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => parseMcpConfiguration(entry.record));
+  const reopen = () =>
+    new HostedMcpSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      [pin],
+    );
+  const advertiseParking = () =>
+    vi
+      .mocked(HostedWorkspaceBroker.prototype.acquire)
+      .mockImplementation(async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+        this.mcpParkable = true;
+      });
+  const answerDiscover = (code: string) => {
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) => {
+      if (operation.kind !== 'mcp-discover') return original(operation);
+      requests.push(operation);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code },
+      };
+    });
+    return () => control.mockImplementation(original);
+  };
+  const kinds = () => requests.map((request) => request.kind);
+
+  beforeEach(() => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'mcp-claim',
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockResolvedValue();
+  });
+
+  it('parks settled connections and reuses them after revalidating once', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+    expect(rows().map((row) => row.releaseState)).toEqual(['active']);
+    expect(kinds()).not.toContain('mcp-release');
+    expect(HostedWorkspaceBroker.prototype.releaseMount).not.toHaveBeenCalled();
+
+    requests = [];
+    const reopened = reopen();
+    await reopened.refresh();
+    expect(kinds()).not.toContain('mcp-configure');
+    const discover = requests.find((r) => r.kind === 'mcp-discover');
+    expect(discover).toMatchObject({ revalidate: true });
+
+    requests = [];
+    await reopened.refresh();
+    expect(requests.find((r) => r.kind === 'mcp-discover')).not.toHaveProperty(
+      'revalidate',
+    );
+  });
+
+  it('drains as before when the Broker does not advertise parking', async () => {
+    await mcp.refresh();
+    await mcp.suspend();
+    expect(rows().map((row) => row.releaseState)).toEqual(['drained']);
+    expect(kinds()).toContain('mcp-release');
+    expect(HostedWorkspaceBroker.prototype.releaseMount).toHaveBeenCalledOnce();
+  });
+
+  it('retires superseded rows and keeps only the latest active when parking', async () => {
+    advertiseParking();
+    await mcp.ensureReady();
+    await mcp.configure(randomUUID(), pin, 1);
+    await mcp.suspend();
+    expect(
+      rows()
+        .sort((a, b) => a.configRevision - b.configRevision)
+        .map((row) => row.releaseState),
+    ).toEqual(['released', 'active']);
+  });
+
+  it('replaces a reclaimed connection and retires its row', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+    const parked = rows()[0]!.configurationId;
+
+    answerDiscover('managed_mcp_binding_conflict');
+    requests = [];
+    await reopen().refresh();
+    expect(kinds()).toContain('mcp-configure');
+    expect(
+      rows().find((row) => row.configurationId === parked)?.releaseState,
+    ).toBe('released');
+    expect(rows().filter((row) => row.releaseState === 'active')).toHaveLength(
+      1,
+    );
+  });
+
+  it('replaces a connection whose revalidation failed', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+    const parked = rows()[0]!.configurationId;
+
+    answerDiscover('managed_mcp_retiring');
+    await reopen().refresh();
+    expect(
+      rows().find((row) => row.configurationId === parked)?.releaseState,
+    ).toBe('released');
+  });
+
+  it('keeps a retiring resident connection active until its work settles', async () => {
+    await mcp.refresh();
+    const resident = rows()[0]!.configurationId;
+
+    answerDiscover('managed_mcp_retiring');
+    await mcp.refresh();
+    expect(
+      rows().find((row) => row.configurationId === resident)?.releaseState,
+    ).toBe('active');
+  });
+
+  it('keeps the parked row active and retryable when its replacement is refused', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+    const parked = rows()[0]!.configurationId;
+
+    answerDiscover('managed_mcp_binding_conflict');
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) =>
+      operation.kind === 'mcp-configure'
+        ? {
+            operationId: operation.operationId,
+            state: 'settled',
+            error: { code: 'managed_mcp_connection_failed' },
+          }
+        : original(operation),
+    );
+    const reopened = reopen();
+    await expect(reopened.refresh()).rejects.toThrow(
+      'Runtime MCP configuration failed.',
+    );
+    expect(
+      rows().find((row) => row.configurationId === parked)?.releaseState,
+    ).toBe('active');
+    expect(reopened.recoveryBlocked).toBe(false);
+  });
+
+  it('surfaces a retryable Broker refusal on reopen as itself', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+
+    const busy = new HostedWorkspaceBrokerRejection(409, 'workspace_busy');
+    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValue(busy);
+    await expect(reopen().ensureReady()).rejects.toBe(busy);
+  });
+});

@@ -25,6 +25,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
     HarnessConfiguration.class,
     RuntimeBrokerConfiguration.class,
     RuntimeRetentionConfiguration.class,
+    ParkedMcpReclamationConfiguration.class,
     ManagedArtifactConfiguration.class,
     ToolPublicationConfiguration.class,
     EventTransportConfiguration.class,

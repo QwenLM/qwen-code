@@ -381,6 +381,93 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void reclaimsAParkedOwnerBeforeHandingBackItsMount() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            CompletableFuture<Void> closing = new CompletableFuture<>();
+            fixture.transport.reclaimMcpResult = closing;
+            CompletionStage<Boolean> reclaim = fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration(), "holder", () -> true);
+            assertEquals(1, fixture.transport.reclaimMcpCalls.get());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            closing.complete(null);
+            assertTrue(join(reclaim));
+            assertEquals(1, fixture.transport.releaseMountCalls.get());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder").getState());
+        }
+    }
+
+    @Test
+    void reclamationLeavesAReopenedSessionItsMountAndClaim() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            AtomicInteger checks = new AtomicInteger();
+            assertFalse(join(fixture.service.reclaimParkedMcp(saved.getBindingId(), saved.getRuntimeGeneration(),
+                    "holder", () -> checks.incrementAndGet() == 1)));
+            assertEquals(1, fixture.transport.reclaimMcpCalls.get());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            assertTrue(join(fixture.service.releaseMount("holder", "holder", MOUNT_CLAIM, null)));
+        }
+    }
+
+    @Test
+    void reclamationYieldsToASuccessorThatAcquiresWhileConnectionsClose() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            CompletableFuture<Void> closing = new CompletableFuture<>();
+            fixture.transport.reclaimMcpResult = closing;
+            CompletionStage<Boolean> reclaim = fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration(), "holder", () -> true);
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, "successor"));
+            closing.complete(null);
+            assertEquals("runtime_session_conflict", failure(reclaim).getCode());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            assertTrue(join(fixture.service.releaseMount("holder", "holder", "successor", null)));
+        }
+    }
+
+    @Test
+    void reclamationKeepsTheMountWhileTheWorkerRefusesForPendingWork() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            fixture.transport.reclaimMcpResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "managed_mcp_drain_unknown", "pending", false));
+            assertEquals("managed_mcp_drain_unknown", failure(fixture.service.reclaimParkedMcp(
+                    saved.getBindingId(), saved.getRuntimeGeneration(), "holder", () -> true)).getCode());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            assertTrue(join(fixture.service.releaseMount("holder", "holder", MOUNT_CLAIM, null)));
+        }
+    }
+
+    @Test
+    void reclamationSkipsAnOwnerOfAnotherGeneration() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            assertFalse(join(fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration() + 1, "holder", () -> true)));
+            assertEquals(0, fixture.transport.reclaimMcpCalls.get());
+        }
+    }
+
+    @Test
+    void advertisesParkingOnlyOnceEnabledAndOnlyForManagedStorage() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            assertFalse(fixture.service.mcpParkable(saved));
+            fixture.service.enableMcpParking();
+            assertFalse(fixture.service.mcpParkable(saved));
+        }
+    }
+
+    @Test
     void mountReleaseRefusesAClaimALaterAcquireSuperseded() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
@@ -8011,6 +8098,8 @@ class RuntimeBrokerServiceTest {
                 CompletableFuture.completedFuture(true);
         final AtomicInteger releaseMountCalls = new AtomicInteger();
         final AtomicInteger reclaimMountCalls = new AtomicInteger();
+        final AtomicInteger reclaimMcpCalls = new AtomicInteger();
+        volatile CompletableFuture<Void> reclaimMcpResult = CompletableFuture.completedFuture(null);
         volatile CompletableFuture<Boolean> releaseMountResult =
                 CompletableFuture.completedFuture(true);
         volatile CompletableFuture<List<Map<String, Object>>> mcpDefinitionsResult =
@@ -8166,6 +8255,12 @@ class RuntimeBrokerServiceTest {
                 RuntimeSession session) {
             reclaimMountCalls.incrementAndGet();
             return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Void> reclaimMcp(RuntimeLease lease, RuntimeSession session) {
+            reclaimMcpCalls.incrementAndGet();
+            return reclaimMcpResult;
         }
 
         @Override

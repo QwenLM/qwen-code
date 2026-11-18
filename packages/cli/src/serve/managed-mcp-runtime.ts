@@ -71,6 +71,7 @@ interface Connection {
   readonly configurationOperationId: string;
   readonly generation: number;
   readonly catalogChanges: Record<'tools' | 'resources' | 'prompts', number>;
+  lastUsedAt: number;
   retiring: boolean;
   closed: boolean;
   catalog?: ManagedMcpCatalog;
@@ -102,6 +103,9 @@ const MAX_RESULT_BYTES = 60 * 1024;
 const MAX_CATALOG_CATEGORY_BYTES = 16 * 1024;
 const MAX_CATALOG_PAGES = 64;
 const TIMEOUT_MS = 25_000;
+const REVALIDATE_TIMEOUT_MS = 5_000;
+// One grant lease: a connection idle this long has no live writer relying on it.
+const EVICTION_IDLE_MS = 300_000;
 const REQUEST_TIMEOUT_MS = 600_000;
 const identifier = /^[A-Za-z0-9._:-]{1,128}$/u;
 
@@ -222,6 +226,10 @@ export function parseManagedMcpControl(value: unknown): ManagedMcpControl {
         if (request['kind'] === 'prompt_get' && !strings(request['arguments']))
           throw new ManagedMcpError('managed_mcp_invalid');
       } else throw new ManagedMcpError('managed_mcp_invalid');
+    } else if (control['kind'] === 'mcp-discover') {
+      closed(control, [...server, 'connectionGeneration', 'revalidate']);
+      if (control['revalidate'] !== undefined && control['revalidate'] !== true)
+        throw new ManagedMcpError('managed_mcp_invalid');
     } else closed(control, [...server, 'connectionGeneration']);
   }
   try {
@@ -843,7 +851,42 @@ export class ManagedMcpRuntime {
       control.grant.operationId !== connection.configurationOperationId
     )
       throw new ManagedMcpError('managed_mcp_grant_invalid');
+    connection.lastUsedAt = Date.now();
     return connection;
+  }
+
+  // Synchronous so that a configure under quota registers its connection
+  // before any concurrent configure can pass the same check.
+  private quotaVictim(runtimeSessionId: string): Connection | undefined {
+    const live = [...this.connections.values()].filter(
+      (entry) => !entry.closed,
+    );
+    if (live.length < MANAGED_MCP_MAX_CONNECTIONS) return undefined;
+    const idleBefore = Date.now() - EVICTION_IDLE_MS;
+    const victim = live
+      .filter(
+        (entry) =>
+          entry.runtimeSessionId !== runtimeSessionId &&
+          entry.pending.size === 0 &&
+          entry.lastUsedAt <= idleBefore,
+      )
+      .sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+    if (!victim) throw new ManagedMcpError('managed_mcp_connection_quota');
+    return victim;
+  }
+
+  // Stdio needs no probe: a dead process has already closed its connection.
+  private async revalidate(connection: Connection): Promise<void> {
+    if (connection.definition.transport === 'stdio') return;
+    try {
+      await connection.client.ping({ timeout: REVALIDATE_TIMEOUT_MS });
+    } catch (error) {
+      if (objectOrUndefined(error)?.['code'] === -32601) return;
+      connection.retiring = true;
+      if (connection.pending.size === 0)
+        await this.closeConnection(connection).catch(() => undefined);
+      throw new ManagedMcpError('managed_mcp_retiring');
+    }
   }
 
   private async configureOrMaintain(
@@ -880,11 +923,14 @@ export class ManagedMcpRuntime {
         )
       )
         throw new ManagedMcpError('managed_mcp_revision_conflict');
-      if (
-        [...this.connections.values()].filter((entry) => !entry.closed)
-          .length >= MANAGED_MCP_MAX_CONNECTIONS
+      for (
+        let victim = this.quotaVictim(operation.runtimeSessionId);
+        victim;
+        victim = this.quotaVictim(operation.runtimeSessionId)
       )
-        throw new ManagedMcpError('managed_mcp_connection_quota');
+        await this.closeConnection(victim).catch(() => {
+          throw new ManagedMcpError('managed_mcp_connection_quota');
+        });
       const transport =
         definition.transport === 'stdio'
           ? this.extensionProcesses
@@ -974,6 +1020,7 @@ export class ManagedMcpRuntime {
         configurationOperationId: control.grant.operationId,
         generation: ++this.generation,
         catalogChanges: { tools: 0, resources: 0, prompts: 0 },
+        lastUsedAt: Date.now(),
         retiring: false,
         closed: false,
       };
@@ -1057,6 +1104,7 @@ export class ManagedMcpRuntime {
       const connection = this.connection(operation, control);
       if (connection.retiring)
         throw new ManagedMcpError('managed_mcp_retiring');
+      if (control.revalidate) await this.revalidate(connection);
       if (
         !connection.catalog ||
         Object.values(connection.catalog.discovery).some(
