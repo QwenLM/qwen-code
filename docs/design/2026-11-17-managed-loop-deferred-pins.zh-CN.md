@@ -166,6 +166,8 @@
 
 Java 侧见证是在合并后的 Java 文本上**重测**的，而非引用早先 head 的结论：对调两个路由 key 使映射红，删 `SHELL_V3` 分支使映射红，点名已匹配 profile 的死分支保持 **33/33 绿**（first-match），拼写 `key = "wakeup";` 的注释保持绿。每次还原都字节相等。
 
+core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/bundled/loop` 共 **87 文件 / 4167 测试绿**，覆盖 sidecar 消费方与 caveat 所派生的槽编译器。
+
 一条本地假红属环境而非回归：`serve-ab-workflow` 的 `worktreeConfig` split-config 用例失败，因为本机设了系统级 `core.hooksPath`；以 `GIT_CONFIG_SYSTEM=/dev/null` 跑该文件是 24/24，且测试与 wipe 脚本都未改动。
 
 残留在种类上不变。本轮在全文件范围关闭了直接伪造路线；它并未终结拼写 evasion 家族，后者的持久修复——每臂执行整个分类器判定——与其余四项一并留在 #17673。

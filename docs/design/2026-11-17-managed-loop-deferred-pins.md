@@ -166,6 +166,8 @@ What this closes is the **direct**-fabrication route, and the limit is measured 
 
 The Java-side witnesses were re-measured on the merged Java text rather than cited from the earlier head: swapping two routing keys reddens the mapping, deleting the `SHELL_V3` branch reddens it, a dead branch naming an already-matched profile stays **33/33 green** (first-match), and a comment spelling `key = "wakeup";` stays green. Every restore is byte-equal.
 
+The neighbouring core surface was run whole rather than sampled: `src/managed-runtime` plus `src/skills/bundled/loop` is **87 files / 4167 tests green**, covering the sidecar consumers and the slot compiler the caveat derives from.
+
 One local false red is environmental, not a regression: `serve-ab-workflow`'s `worktreeConfig` split-config case fails because this machine sets a system-level `core.hooksPath`; with `GIT_CONFIG_SYSTEM=/dev/null` the file is 24/24, and neither the test nor the wipe script changed.
 
 The residual is unchanged in kind. This round closes the direct-fabrication route file-wide; it does not end the spelling-evasion family, whose durable fix — executing the whole classifier decision per arm — stays in #17673 with the other four items.
