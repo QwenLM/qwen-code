@@ -423,14 +423,20 @@ function OpenTuiEntryApp({
       modsEnabled ? { config, sessionId: transcriptSessionId } : undefined,
     [config, modsEnabled, transcriptSessionId],
   );
-  const renderMain = useCallback(
-    (shell?: { owner: ForegroundShellOwner | null; focused: boolean }) => (
+  // The quit summary shares this seam: the screen-reader reseed matches
+  // spoken rows by rendered text, so divergent display options would
+  // re-announce the whole window before exit.
+  const renderTranscript = useCallback(
+    (
+      items: readonly LiveHistoryItem[],
+      shell?: { owner: ForegroundShellOwner | null; focused: boolean },
+    ) => (
       <box id="screen-reader-history" flexDirection="column">
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
           screenReader={Boolean(screenReaderPresentation)}
-          items={live.items}
+          items={items}
           modRows={modRows}
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
@@ -448,7 +454,6 @@ function OpenTuiEntryApp({
       </box>
     ),
     [
-      live.items,
       live.waitingCalls,
       width,
       height,
@@ -457,6 +462,11 @@ function OpenTuiEntryApp({
       modRows,
       screenReaderPresentation,
     ],
+  );
+  const renderMain = useCallback(
+    (shell?: { owner: ForegroundShellOwner | null; focused: boolean }) =>
+      renderTranscript(live.items, shell),
+    [renderTranscript, live.items],
   );
 
   const handleRenderError = useCallback(
@@ -547,16 +557,7 @@ function OpenTuiEntryApp({
   }, [config, quittingItems]);
 
   if (quittingItems !== null) {
-    return (
-      <box id="screen-reader-history" flexDirection="column">
-        <OpenTuiTranscriptView
-          screenReader={Boolean(screenReaderPresentation)}
-          items={quittingItems}
-          availableWidth={Math.max(0, width - 4)}
-          availableTerminalHeight={height}
-        />
-      </box>
-    );
+    return renderTranscript(quittingItems);
   }
 
   return (

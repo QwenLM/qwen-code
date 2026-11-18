@@ -76,10 +76,12 @@ const mocks = vi.hoisted(() => {
         ctrl: boolean;
         shift?: boolean;
         eventType?: string;
+        preventDefault?: () => void;
       }) => void
     >,
     items: [] as LiveHistoryItem[],
     renderedQuitItems: null as readonly LiveHistoryItem[] | null,
+    transcriptViewProps: null as Record<string, unknown> | null,
     applyEvent:
       vi.fn<(event: OpenTuiStreamEvent) => readonly LiveHistoryItem[] | void>(),
     isCurrentHistory: vi.fn(),
@@ -199,6 +201,7 @@ vi.mock('@opentui/react', () => ({
       ctrl: boolean;
       shift?: boolean;
       eventType?: string;
+      preventDefault?: () => void;
     }) => void,
   ) => {
     mocks.state.keyboard.push(handler);
@@ -236,9 +239,12 @@ vi.mock('./opentui-app-shell.js', async () => {
   };
 });
 vi.mock('./transcript-view.js', () => ({
-  OpenTuiTranscriptView: ({ items }: { items: readonly LiveHistoryItem[] }) => {
-    mocks.state.renderedQuitItems = items;
-    return items.map((item) => ('text' in item ? item.text : '')).join('\n');
+  OpenTuiTranscriptView: (props: { items: readonly LiveHistoryItem[] }) => {
+    mocks.state.renderedQuitItems = props.items;
+    mocks.state.transcriptViewProps = props;
+    return props.items
+      .map((item) => ('text' in item ? item.text : ''))
+      .join('\n');
   },
 }));
 vi.mock('./live-turn.js', async (importOriginal) => ({
@@ -362,6 +368,7 @@ describe('startOpenTuiUI fallback contract', () => {
     mocks.state.streaming = false;
     mocks.state.items = [];
     mocks.state.renderedQuitItems = null;
+    mocks.state.transcriptViewProps = null;
     mocks.state.renderer.root = null;
     mocks.state.applyEvent.mockReset().mockImplementation((event) => {
       mocks.state.replayOrder.push(event.type);
@@ -404,6 +411,7 @@ describe('startOpenTuiUI fallback contract', () => {
   async function withEntryApp(
     check: (rerender: () => void) => void | Promise<void>,
     config = buildConfig(),
+    entrySettings: LoadedSettings = settings,
   ) {
     const write = vi
       .spyOn(process.stdout, 'write')
@@ -412,7 +420,7 @@ describe('startOpenTuiUI fallback contract', () => {
     try {
       await startOpenTuiUI(
         config,
-        settings,
+        entrySettings,
         [],
         '/tmp/project',
         {} as InitializationResult,
@@ -962,6 +970,57 @@ describe('startOpenTuiUI fallback contract', () => {
         ).toHaveLength(1);
         expect(stripAnsi(output()).match(/^user: \/quit$/gm)).toHaveLength(1);
       }, config);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The reseed matches spoken rows by rendered text, so the closing summary
+  // must carry the live view's display options or every row that embeds them
+  // is re-announced during the quit window.
+  it('renders the closing summary with the live transcript display options', async () => {
+    const config = buildConfig();
+    config.getScreenReader = () => true;
+    mocks.state.waitingCalls = [{ callId: 'q1' }];
+    vi.useFakeTimers();
+    try {
+      await withEntryApp(
+        () => {
+          act(() =>
+            mocks.state.keyboard.at(-2)!({
+              name: 'o',
+              ctrl: true,
+              preventDefault: () => {},
+            }),
+          );
+          const live = (
+            mocks.state.appProps!.renderMain!() as {
+              props?: { children?: { props?: Record<string, unknown> } };
+            }
+          ).props!.children!.props!;
+          act(() =>
+            mocks.state.appProps!.onQuit!([
+              { type: 'user', text: '/quit', id: 401 },
+              { type: 'quit', duration: '1s', id: 402 },
+            ]),
+          );
+          const closing = mocks.state.transcriptViewProps!;
+          expect(closing).toEqual({ ...live, items: closing['items'] });
+        },
+        config,
+        {
+          merged: {
+            ui: {
+              hideWindowTitle: true,
+              showToolCallArgs: true,
+              showToolCallDetails: false,
+              mouseTracking: false,
+            },
+            output: { showTimestamps: true },
+            experimental: { mods: true },
+          },
+        } as unknown as LoadedSettings,
+      );
     } finally {
       vi.useRealTimers();
     }

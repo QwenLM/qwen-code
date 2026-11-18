@@ -155,7 +155,7 @@ export interface TranscriptViewProps {
   /**
    * The main transcript's Mod rows: the config whose Mods may rewrite a
    * complete reply block, and the session the items belong to. Left out by
-   * the session preview and the quit screen.
+   * the session preview.
    */
   modRows?: { config: Config; sessionId: string };
 }
