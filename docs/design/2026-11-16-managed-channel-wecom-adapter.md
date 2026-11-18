@@ -148,10 +148,15 @@ available whenever the adapter is connected.
 
 ### Outbound delivery and receipt discipline
 
-The outbound protocol is the DingTalk one unchanged: guard the claim phase,
-send each segment in order, persist the outbound entry before the send and the
-receipt after it, report the receipt, and only then drop the entry. A receipt
-that cannot be reported re-drives on the next tick — never the send. A
+The outbound protocol is the DingTalk one unchanged, persist guards included:
+guard the claim phase, send each segment in order, persist the outbound entry
+before the send and the receipt after it, report the receipt, and only then drop
+the entry. The claim guard has one WeCom-specific addition: replies ride the
+live authenticated WebSocket (DingTalk's per-session webhooks need no live
+connection), so claims pause while the socket is disconnected or not yet
+authenticated — an outage must not claim batches it could only settle
+`unknown`. A receipt that cannot be reported re-drives on the next tick — never
+the send. A
 persisted receipt replays on restart; a segment whose send never produced an
 outcome settles `unknown`. One delivery's unreportable receipt never aborts
 the claimed batch.
@@ -191,6 +196,12 @@ The production deps wrap the SDK client:
   a bad credential must not report a healthy start that is permanently deaf.
   SDK error text is sanitized before logging (it can carry credential
   material), as the Legacy channel does.
+- Readiness tracks **authentication**, not the socket reaching `OPEN`: the SDK
+  marks `isConnected` at `OPEN`, before the subscribe acknowledgement, so the
+  claim phase consults an authentication flag the deps restore on every
+  `authenticated` event and clear on every `disconnected` event. Claiming in the
+  open-but-unauthenticated window would send on a socket that may still fail
+  authentication.
 - The client is configured with infinite reconnect and infinite auth-failure
   retry (`maxReconnectAttempts: -1`, `maxAuthFailureAttempts: -1`): a transient
   disconnect or a mid-session credential rotation heals by retry, mirroring
@@ -221,9 +232,16 @@ version, account generation, the instance-refusal streak, the pending claims
 shared `MANAGED_OUTBOUND_LIMIT`), and the settled dedupe window (cap 256). One
 directory per configured entry (channel name + botId) per workspace scope
 (`~/.qwen/channels/<workspace-scope>/wecom-<hash>`), the same name+account key
-shape the DingTalk store uses; a `0600` state file inside a `0700` directory,
-atomic write + fsync + rename, and a validator that refuses an unreadable or
-invalid state rather than silently resetting it. The directory lock
+shape the DingTalk store uses. The directory is the connection lock's key, so
+two instances of the same entry contend for one lock even when they target
+different control-plane destinations (WeCom admits one connection per bot and
+kicks the other). The ledger file beneath it is keyed separately by the full
+registration identity (control plane + tenant + channel + actor + workspace +
+cwd-relative), so a pending ledger staged under one registration is never
+loaded or replayed under another registration of the same entry. Each ledger is
+a `0600` file inside the `0700` directory, atomic write + fsync + rename, and a
+validator refuses an unreadable or invalid state rather than silently resetting
+it. The directory lock
 (`proper-lockfile`, a new dependency of the WeCom package) serializes concurrent
 managed instances of the entry; two entries sharing a botId get separate
 directories and locks (the SDK then admits one connection and kicks the other),
@@ -237,7 +255,8 @@ webhooks.
 ## Files affected
 
 - `packages/channels/base/src/managed-channel.ts` — the adapter union widens to
-  four providers; exported shape otherwise unchanged.
+  four providers; the control-plane interface gains an optional `destinationKey`
+  (the full registration identity a persisting adapter keys its ledger by).
 - `packages/core/src/managed-runtime/managed-session-records.ts` — enablement
   list gains `'wecom'`; `managed-channel-record.test.ts` updates its pin.
 - `packages/channels/wecom/src/managed-wecom-adapter.ts`,
@@ -249,6 +268,10 @@ webhooks.
   `proper-lockfile` (and its types as a dev dependency).
 - `packages/cli/src/commands/channel/managed-channel-command.ts` — the
   `adapterType` union widens.
+- `packages/cli/src/commands/channel/managed-channel-client.ts` — the HTTP
+  control plane exposes `destinationKey`, binding the full registration identity
+  (base URL + tenant + channel + actor + workspace + cwd-relative) the WeCom
+  ledger is keyed by; `managed-channel-client.test.ts` pins each ownership field.
 - `packages/cli/src/commands/channel/managed-wecom.ts` (new) — the command.
 - `packages/cli/src/commands/channel.ts` — register the command;
   `channel.test.ts` and `managed-channel-command.test.ts` pin the registration.

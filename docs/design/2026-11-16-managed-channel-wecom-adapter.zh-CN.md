@@ -112,9 +112,12 @@ DingTalk 适配器同款钳制收敛到线上界：至多 32,000 UTF-16 单元�
 
 ### 出站投递与回执纪律
 
-出站协议沿用 DingTalk 不变：守卫认领阶段，按序发送每段，发送前持久化出站条目、
-发送后持久化回执，报告回执，然后才移除条目。无法报告的回执在下一 tick 重驱动
-——绝不重发。持久化的回执在重启时重放；发送从未产生结果的段落落定 `unknown`。
+出站协议沿用 DingTalk 不变，含持久化守卫：守卫认领阶段，按序发送每段，发送前
+持久化出站条目、发送后持久化回执，报告回执，然后才移除条目。认领守卫有一处
+WeCom 特有增补：回复走活认证 WebSocket（DingTalk 的逐会话 webhook 不需要活
+连接），故 socket 断连或尚未认证时暂停认领——断连期间不能认领只能落定
+`unknown` 的批次。无法报告的回执在下一 tick 重驱动——绝不重发。持久化的回执在
+重启时重放；发送从未产生结果的段落落定 `unknown`。
 单条投递无法报告的回执绝不中止已认领的批次。
 
 两个 WeCom 特有决策：
@@ -143,6 +146,10 @@ DingTalk 适配器同款钳制收敛到线上界：至多 32,000 UTF-16 单元�
   渠道的界）；认证前的认证错误或被踢 reject。首次失败必须暴露给运维——错误凭据
   不能报告一个永久失聪的健康启动。SDK 错误文本先脱敏再记日志（可能携带凭据
   材料），与 Legacy 渠道一致。
+- 就绪态跟踪**认证**而非 socket 到达 `OPEN`：SDK 在 `OPEN`（subscribe ack 之前）
+  即标记 `isConnected`，故认领阶段查的是 deps 在每次 `authenticated` 事件恢复、
+  每次 `disconnected` 事件清除的认证标志。在 open-但未认证窗口认领会把回复发上
+  可能仍认证失败的 socket。
 - 客户端配置为无限重连与无限认证失败重试（`maxReconnectAttempts: -1`、
   `maxAuthFailureAttempts: -1`）：瞬态断连或会话中凭据轮换靠重试自愈，镜像
   DingTalk deps 的永久重试纪律。SDK 的心跳与 missed-pong 检测驱动重连。
@@ -164,7 +171,11 @@ DingTalk 适配器同款钳制收敛到线上界：至多 32,000 UTF-16 单元�
 共享 `MANAGED_OUTBOUND_LIMIT`）、已落定排重窗口（上限 256）。每个配置条目
 （渠道 name + botId）每个工作区范围一个目录
 （`~/.qwen/channels/<workspace-scope>/wecom-<hash>`），与 DingTalk 存储相同的
-name+account key 形状；`0700` 目录内 `0600` 状态文件，原子写 + fsync + rename，
+name+account key 形状。目录是连接锁的键，故同一条目的两个实例即便目标控制面
+目的地不同也争同一把锁（WeCom 每个 bot 只允许一个连接并踢掉另一个）。目录下的
+账本文件另按完整注册身份（控制面 + tenant + channel + actor + workspace +
+cwd-relative）键控，故一个注册下暂存的 pending 账本绝不会被同一条目的另一注册
+加载或重放。每个账本是 `0700` 目录内的 `0600` 文件，原子写 + fsync + rename，
 校验器拒绝不可读或非法状态而非静默重置。目录锁（`proper-lockfile`，WeCom 包的
 新依赖）串行化该条目的并发托管实例；共用同一 botId 的两个条目得到不同目录与不同
 锁（SDK 随即只允许一个连接并踢掉另一个），因此复制或改名条目是运维配置问题，
@@ -175,7 +186,7 @@ name+account key 形状；`0700` 目录内 `0600` 状态文件，原子写 + fsy
 ## 涉及文件
 
 - `packages/channels/base/src/managed-channel.ts` —— 适配器联合放宽为四个提供方；
-  导出形状其余不变。
+  控制面接口增加可选 `destinationKey`（持久化适配器据以键控账本的完整注册身份）。
 - `packages/core/src/managed-runtime/managed-session-records.ts` —— 启用列表增加
   `'wecom'`；`managed-channel-record.test.ts` 更新其钉死断言。
 - `packages/channels/wecom/src/managed-wecom-adapter.ts`、
@@ -187,6 +198,10 @@ name+account key 形状；`0700` 目录内 `0600` 状态文件，原子写 + fsy
   `proper-lockfile`（类型作为 dev 依赖）。
 - `packages/cli/src/commands/channel/managed-channel-command.ts` —— `adapterType`
   联合放宽。
+- `packages/cli/src/commands/channel/managed-channel-client.ts` —— HTTP 控制面
+  暴露 `destinationKey`，绑定 WeCom 账本据以键控的完整注册身份（base URL +
+  tenant + channel + actor + workspace + cwd-relative）；
+  `managed-channel-client.test.ts` 逐 ownership 字段钉死。
 - `packages/cli/src/commands/channel/managed-wecom.ts`（新增）—— 命令。
 - `packages/cli/src/commands/channel.ts` —— 注册命令；`channel.test.ts` 与
   `managed-channel-command.test.ts` 钉死注册。

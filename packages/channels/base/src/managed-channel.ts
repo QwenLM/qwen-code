@@ -104,11 +104,14 @@ export function validManagedReceipt(value: unknown): boolean {
 /** The trusted control-plane surface the adapter talks to. */
 export interface ManagedChannelControlPlane {
   /**
-   * A stable key of the destination this client talks to (control-plane base
-   * URL, tenant, channel). An adapter that persists pending work keys its state
-   * by it so a ledger staged for one destination is never replayed into another
-   * when the same configured entry is restarted against a different tenant or
-   * channel. Optional so test doubles that do not persist may omit it.
+   * A stable key of the registration this client talks to — the control-plane
+   * base URL, tenant, channel, and the owning actor, workspace and cwd-relative.
+   * An adapter that persists pending work keys its state by it so a ledger
+   * staged for one registration is never replayed into another when the same
+   * configured entry is restarted against a different destination or owner.
+   * Binding only the tenant/channel is not enough: a new actor/workspace of the
+   * same tenant/channel must not inherit the prior owner's pending. Optional so
+   * test doubles that do not persist may omit it.
    */
   readonly destinationKey?: string;
   register(request: {
