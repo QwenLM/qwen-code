@@ -1015,6 +1015,44 @@ describe('background continuation', () => {
     act(() => container.querySelectorAll('button')[1]!.click());
     expect(details).toHaveBeenCalledWith(expect.objectContaining(turn));
   });
+  it('names a reply from another session and opens that session', () => {
+    const details = vi.fn();
+    const openSession = vi.fn();
+    const container = render(
+      <SubagentDetailsProvider
+        onOpen={vi.fn()}
+        onOpenBackground={details}
+        onOpenSession={openSession}
+      >
+        <SystemMessage
+          content="projB · Kid"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{
+            turnId: 'turn-1',
+            taskId: 'kid',
+            kind: 'agent',
+            startedAt: 100,
+            label: 'projB · Kid',
+            backgroundTask: {
+              status: 'completed',
+              fromSession: { sessionId: 'kid', workspaceCwd: '/w/b' },
+            },
+          }}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain(
+      'Cross-session message·projB · Kid',
+    );
+    act(() => container.querySelector('button')!.click());
+    expect(openSession).toHaveBeenCalledWith({
+      sessionId: 'kid',
+      workspaceCwd: '/w/b',
+      title: 'projB · Kid',
+    });
+    expect(details).not.toHaveBeenCalled();
+  });
   it('names a cross-session message and offers no details to open', () => {
     const details = vi.fn();
     const container = render(
