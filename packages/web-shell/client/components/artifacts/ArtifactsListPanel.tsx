@@ -69,7 +69,7 @@ export function ArtifactsListPanel({
                 className={styles.fileIcon}
                 aria-hidden
               />
-              <span className={styles.fileName}>{displayName}</span>
+              <span className={styles.artifactFileName}>{displayName}</span>
             </button>
           </li>
         );

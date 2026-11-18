@@ -315,6 +315,17 @@ describe('ChatContextHeader', () => {
     expect(view.querySelector('[data-web-shell-artifacts-entry]')).toBeNull();
   });
 
+  it('keeps the artifacts entry as the close affordance while the panel is open with zero artifacts', () => {
+    const view = mount({
+      artifactCount: 0,
+      onOpenArtifacts: vi.fn(),
+      rightPanelOpen: true,
+    });
+    const entry = view.querySelector('[data-web-shell-artifacts-entry]');
+    expect(entry).not.toBeNull();
+    expect(entry!.getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('hides the artifacts entry when the count is omitted', () => {
     const view = mount({ onOpenArtifacts: vi.fn() });
     expect(view.querySelector('[data-web-shell-artifacts-entry]')).toBeNull();

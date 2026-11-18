@@ -4446,7 +4446,8 @@ describe('task activity key', () => {
     ).toBeNull();
     expect(entry()!.getAttribute('aria-pressed')).toBe('false');
 
-    // A third click reopens through the upsert branch (the tab already exists).
+    // A third click reopens through the upsert branch (the tab already exists):
+    // exactly one artifacts tab, not a second appended duplicate.
     await act(async () => {
       entry()!.click();
     });
@@ -4455,6 +4456,9 @@ describe('task activity key', () => {
       container.querySelector('[data-testid="artifacts-list"]'),
     ).not.toBeNull();
     expect(entry()!.getAttribute('aria-pressed')).toBe('true');
+    expect(
+      container.querySelectorAll('[role="tab"][title="Artifacts"]'),
+    ).toHaveLength(1);
   });
 
   it('opens an artifact preview tab when a row in the artifacts list is clicked', async () => {
@@ -4565,7 +4569,24 @@ describe('task activity key', () => {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
     };
-    mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    // A non-empty list: if the guard were absent the restored tab would render
+    // artifacts-list, so asserting every list state absent pins the guard.
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
     window.localStorage.setItem(
       'qwen-code-web-shell-right-panel-state',
       JSON.stringify({
@@ -4584,15 +4605,22 @@ describe('task activity key', () => {
       }),
     );
     const { container } = renderApp({
-      chatHeader: { items: ['title', 'environment', 'rightPanel'] },
+      header: { items: ['title', 'environment', 'rightPanel'] },
     });
     await flush();
     await flush();
     expect(
       container.querySelector('[data-web-shell-artifacts-entry]'),
     ).toBeNull();
+    for (const testId of [
+      'artifacts-list',
+      'artifacts-list-empty',
+      'artifacts-list-skeleton',
+    ]) {
+      expect(container.querySelector(`[data-testid="${testId}"]`)).toBeNull();
+    }
     expect(
-      container.querySelector('[data-testid="artifacts-list"]'),
+      container.querySelector('[role="tab"][title="Artifacts"]'),
     ).toBeNull();
   });
 
