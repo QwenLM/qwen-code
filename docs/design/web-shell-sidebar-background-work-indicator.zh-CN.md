@@ -43,21 +43,30 @@
   跑。shell 注册表是纯内存的，因此客户端根本拿不到
   `hasRunningBackgroundTasks`。证据：远端某会话的 shell pid 已存活约 26 小时，
   但它不在 live-state 里，目录行也没有后台字段。
-- 侧栏行与其详情浮层之外的其他界面。
+- 侧栏行与其详情浮层之外的其他界面。Session Overview 面板仍把「仅后台」会话判为
+  `idle`；它是展示面而非动作闸门，因此留作后续，不在本次一并放宽。
 
 ## 方案
 
 复用既有的右侧忙标记，不新增指示器：
 
-- 渲染条件改为 `running || backgroundTasks`，把 bg-only 行的忙标记放回来。
-  `backgroundTasks` 是不受 prompt 门控的事实；只靠 `running` 不够，因为 monitor
-  不占任何 active-work 类别，会把行判成 idle。
-- 只要有后台任务在跑，就用与状态圆点相同的琥珀色（`--warning-color`）着色，
+- 用一个共享判据 `hasLiveWork`（位于 `client/session-catalog/`）回答「关掉这个
+  会话会不会中断它正在做的工作」：回合、其他活跃工作，**或**后台任务。行内忙标记
+  按它渲染，于是 bg-only 行拿回了标记 —— 包括 monitor 形态：它不占任何 active-work
+  类别，会把行判成 idle。
+- 同一判据替换动作侧其余全部副本：侧栏的归档与删除资格判断、standalone 归档
+  处理器、recent 行的归档闸门，以及删除弹窗对「当前会话」的拦截。一行既然说自己
+  在忙，就不该同时给出会结束这份工作的操作；两个删除入口也不该互相矛盾。
+- 只要有后台任务在跑，就用与状态圆点相同的琥珀色（`--warning-color`）给标记着色，
   通过 `.sessionLoadingBackground` 实现。
-- 后台任务在跑且没有回合时，标签用 `background.running`；否则保留既有的
-  `sidebar.running` / `sidebar.activeWork` 标签，并在其 `title` 后追加后台文案。
-- `SessionDetailsTooltip` 中，回合与后台任务并存时状态文案组合为
-  `sidebar.running · background.running`。
+- 只在标记是唯一载体时给它命名。bg-only 形态下状态圆点已经承载
+  `background.running`，因此标记不命名、也不带 `title`；回合进行中时它保留既有的
+  `sidebar.running` / `sidebar.activeWork` 名字，并新增一个组合两种状态的 `title`。
+  live 启动中的行会把圆点换成它自己的 spinner，此时标记要把名字接回来，而不是让
+  这一格无人命名。
+- `SessionDetailsTooltip` 中，只要有后台任务在跑，就给「等待审批」「等待回答」
+  「回合进行中」三支追加 ` · background.running`。「仅后台」那一支已经命名过，
+  保持原样；等待态的优先级不变。
 
 状态圆点的优先级不变：回合在跑为绿色，仅后台任务为琥珀色，其他活跃工作为蓝色。
 
@@ -67,8 +76,17 @@
   目标的最小改动，也保持 meta 槽的标记词汇不变。
 - **保留受 prompt 门控的圆点。** 既有端到端契约钉住「回合在跑时琥珀点缺席」以及
   「该形态下行内忙标记的可访问名是 `Running`」。两者都仍然成立。
-- **颜色绝不是唯一载体。** 标记的 `aria-label`/`title` 与详情状态都用文字说出后台
-  任务，因此不依赖识别颜色也能获知该状态。
+- **颜色绝不是唯一载体。** 状态圆点的名字、回合进行中时标记的名字、以及详情状态，
+  都用文字说出后台任务，因此不依赖识别颜色也能获知该状态。
+- **一行只播报一次，不是两次。** 该行是 `role="button"`，其可访问名由子节点拼接
+  而成，所以给圆点和标记取同一个名字，会让每个 bg-only 行把同一串文案念两遍。
+- **`title` 只放在能补充信息的地方。** 悬停标记会把它隐藏，且在带操作按钮的行上
+  露出的浮层会盖住它，因此原生 tooltip 不是可靠载体。组合 `title` 在回合进行中的
+  形态保留为次级描述；两种状态真正可达的载体是详情浮层。
+- **闸门要跟着「宣称在忙」走。** 只放宽行内视觉，会留下一行说着「在忙」却仍提供
+  归档 —— 归档会在 daemon 侧关闭该 live 会话并杀掉后台工作。另有两处问法相近的
+  **轮询节奏**聚合量刻意不动：它们只在没有 live-state 的 daemon 上决定目录轮询走
+  快档还是空闲档，而那条通路的覆盖与它们无关。
 - **bg-only 行露出操作按钮时让忙标记让位。** 这种行不是 `.runningSession`，悬停
   行内任意位置都会露出操作浮层；把
   `.sessionRow:hover:not(.runningSession) .sessionLoading` 并入既有的标记隐藏
@@ -90,11 +108,10 @@
 
 单元测试（`packages/web-shell`）：
 
-- `client/components/sidebar/WebShellSidebar.collapse-persist.test.tsx` —— 85
-  通过，含扩展后的状态矩阵与新增的 `activeWorkState: 'idle'` 仅后台用例。
-- `client/components/sidebar/SessionDetailsTooltip.test.tsx` —— 20 通过。
-- `client/components/sidebar/WebShellSidebar.css.test.ts` 与
-  `client/visual-capture-contracts.test.ts` —— 16 通过。
+- 整个 `client/session-catalog/`、`client/components/dialogs/`、
+  `client/components/sidebar/` 三个目录，加
+  `client/visual-capture-contracts.test.ts` —— 79 个文件、1761 通过。跑整目录而不是
+  只跑改过的文件，才能抓到被放宽的闸门可能撞坏的旧契约。
 - 改动文件的 `npm run typecheck`、ESLint、Prettier 均干净。
 
 既有端到端契约（`npx playwright test`，mock daemon）：
@@ -102,28 +119,36 @@
 `client/e2e/web-shell.composer-usage.spec.ts` —— 8 通过，含「keeps the background
 task sidebar indicator visible on hover and prioritizes the prompt spinner」。
 
-变异见证（每个都打在被验树上、跑完即还原）：把门控回退成
-`running && !backgroundRunning`、去掉 `|| backgroundTasks` 这一支、去掉琥珀
-类名、去掉组合 `title`、回退浮层文案组合 —— 五个全部被杀（5/5）。
+变异见证（每个都是对被验树的一行改动，对着已提交的测试跑，跑完即还原）——
+十二个全部被杀，且各自死在负责它的那条断言上：去掉 `hasLiveWork` 里的后台项
+（分别由判据自己的测试与侧栏套件裁定）；把删除弹窗恢复成它自己的两项判据；
+在圆点已命名时仍给标记命名；判断命名载体时忽略 live 启动中的替换；
+去掉「等待审批」支的后缀；去掉「等待回答」支的后缀；
+在 bg-only 行保留冗余 `title`；把琥珀 token 换成 muted 色；整条删除琥珀规则；
+无条件组合后缀；去掉琥珀类名。
 
 浏览器（从本 worktree 起 dev server 代理到真实 daemon，真实会话，不拦截响应）：
 
 | 形态        | 忙标记                                                                                                              | 左侧圆点                                    |
 | ----------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | 回合 + 后台 | `aria-label="Running"`、`title="Running · Background tasks running"`、`border-top-color: rgb(236, 201, 75)`、旋转中 | `data-web-shell-session-running`            |
-| 仅后台      | `aria-label="Background tasks running"`、同琥珀色、旋转中                                                           | `data-web-shell-session-background-running` |
+| 仅后台      | 不命名、无 `title`（名字由圆点承载一次）、同琥珀色、旋转中                                                          | `data-web-shell-session-background-running` |
 
 悬停 bg-only 行：忙标记 opacity `0`，操作按钮 opacity `1`。回合 + 后台行的详情
-浮层读到 `Running · Background tasks running`。无页面错误。
+浮层读到 `Running · Background tasks running`；等待审批或等待回答时，同一浮层
+也会说出后台任务。bg-only 行的归档为禁用。无页面错误。
 
 ## 验收标准
 
-1. bg-only 行显示右侧忙标记，琥珀色，标签为 `background.running`。
+1. bg-only 行显示右侧琥珀忙标记，且整行只播报 `background.running` 一次。
 2. 回合进行中且有后台任务的行显示琥珀标记，可访问名为 `Running`，`title` 为组合
    文案。
-3. 两种状态并存时详情浮层同时说出两者。
-4. 圆点优先级、触屏布局、既有悬停契约均不变。
-5. 上述每条断言在对应变异下都会失败。
+3. 两种状态并存时详情浮层都同时说出两者，包括在等待审批或等待回答之后，且不重排
+   等待态的优先级。
+4. 唯一活动是后台工作的会话，在项目行、recent 行上都不提供归档与删除；删除弹窗
+   对本客户端所连接的那个会话也同样拦截。
+5. 圆点优先级、触屏布局、既有悬停契约均不变。
+6. 上述每条断言在对应变异下都会失败。
 
 ## 待决问题 / 后续
 

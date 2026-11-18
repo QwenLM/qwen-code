@@ -10,6 +10,7 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
+import { hasLiveWork } from '../../session-catalog/session-live-work';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
 
@@ -95,13 +96,11 @@ export function DeleteSessionDialog({
   );
 
   // The current session is deletable (issue #12619), but deleting the session
-  // the client is attached to tears its runtime down — match the Session
-  // Overview's idle-only policy for that case.
+  // the client is attached to tears its runtime down, so it is only offered
+  // once nothing is running — the same predicate the sidebar row reads.
   const blocksCurrentDelete = useCallback(
     (session: DaemonSessionSummary) =>
-      session.sessionId === currentSessionId &&
-      (Boolean(session.hasActivePrompt) ||
-        session.activeWorkState === 'active'),
+      session.sessionId === currentSessionId && hasLiveWork(session),
     [currentSessionId],
   );
 

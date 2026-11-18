@@ -50,24 +50,36 @@ Out of scope (recorded as follow-ups, not silently dropped):
   Evidence: a remote session whose shell pid had been alive ~26h was absent
   from live-state and carried no background field in the catalog.
 - Surfacing background work in surfaces other than the sidebar row and its
-  details tooltip.
+  details tooltip. The Session Overview panel still grades a background-only
+  session `idle`; it is a display surface, not an action gate, so it is left
+  for a follow-up rather than widened here.
 
 ## Solution
 
 Reuse the existing trailing busy marker instead of adding a new indicator:
 
-- Render it when `running || backgroundTasks`, so background-only rows get it
-  back. `backgroundTasks` is the unprompt-gated fact; `running` alone is not
-  enough because a monitor holds no active-work category and grades the row
-  idle.
-- Tint it with the same amber as the status dot (`--warning-color`) whenever
-  background tasks are running, via `.sessionLoadingBackground`.
-- Label it `background.running` when background work runs without a turn;
-  otherwise keep the existing `sidebar.running` / `sidebar.activeWork` label and
-  append the background text to its `title`.
-- In `SessionDetailsTooltip`, compose the status as
-  `sidebar.running · background.running` when a turn and background work
-  coexist.
+- One shared predicate, `hasLiveWork` in `client/session-catalog/`, answers
+  "would closing this session end work it is still doing": a turn, other active
+  work, **or** background tasks. The row's busy marker renders on it, so
+  background-only rows get the marker back — including the monitor shape, which
+  holds no active-work category and grades the row idle.
+- The same predicate replaces every other copy of that question on the action
+  side: the sidebar's archive and delete eligibility checks, its standalone
+  archive handler, the recent rows' archive gate, and the delete dialog's
+  current-session block. A row that says it is busy must not offer the action
+  that ends the work, and the two delete entry points must not disagree.
+- Tint the marker with the same amber as the status dot (`--warning-color`)
+  whenever background tasks are running, via `.sessionLoadingBackground`.
+- Name the marker only where it is the sole carrier. In the background-only
+  shape the status dot already carries `background.running`, so the marker
+  stays unnamed and carries no `title`; during a turn it keeps the existing
+  `sidebar.running` / `sidebar.activeWork` name and adds a `title` composing
+  both states. A live-starting row swaps the dot for its own spinner, so the
+  marker takes the name back there rather than leaving the state unnamed.
+- In `SessionDetailsTooltip`, append ` · background.running` to the approval,
+  question and running arms whenever background tasks are running. The
+  background-only arm already names it and is left alone, and blocked-state
+  precedence is unchanged.
 
 The status dot precedence is unchanged: green while a turn runs, amber for
 background-only, blue for other active work.
@@ -80,9 +92,23 @@ background-only, blue for other active work.
 - **Keep the prompt-gated dot.** An existing end-to-end contract pins that the
   amber dot is absent while a turn runs and that the row's busy marker is
   labeled `Running` in that shape. Both still hold.
-- **Color is never the only carrier.** The marker's `aria-label`/`title` and the
-  details status name the background work in text, so the state is reachable
-  without perceiving the tint.
+- **Color is never the only carrier.** The status dot's name, the marker's name
+  during a turn, and the details status all name the background work in text,
+  so the state is reachable without perceiving the tint.
+- **One name per row, not two.** The row is a `role="button"` whose accessible
+  name is assembled from its children, so naming both the dot and the marker
+  with the same string made every background-only row announce it twice.
+- **A `title` only where it adds information.** Hovering the marker hides it
+  and, on rows with actions, the revealed overlay covers it, so a native
+  tooltip is not a dependable carrier. The composed `title` is kept for the
+  turn-in-flight shape as a secondary description; the reachable carrier for
+  both states is the details popover.
+- **Guards follow the advertisement.** Widening only the row's visual would
+  leave a row that says "busy" offering Archive, which closes the live session
+  daemon-side and kills the background work. The two poll-cadence aggregates
+  that ask a similar question are deliberately untouched: they only choose
+  between fast and idle catalog polling on daemons without live-state, where
+  coverage is independent of them.
 - **Hide the marker when a background-only row reveals its actions.** Such a
   row is not `.runningSession`, so hovering anywhere on the row reveals the
   action overlay; `.sessionRow:hover:not(.runningSession) .sessionLoading` joins
@@ -106,12 +132,11 @@ background-only, blue for other active work.
 
 Unit (`packages/web-shell`):
 
-- `client/components/sidebar/WebShellSidebar.collapse-persist.test.tsx` — 85
-  passed, including the extended state matrix and a new background-only case
-  with `activeWorkState: 'idle'`.
-- `client/components/sidebar/SessionDetailsTooltip.test.tsx` — 20 passed.
-- `client/components/sidebar/WebShellSidebar.css.test.ts` and
-  `client/visual-capture-contracts.test.ts` — 16 passed.
+- The whole `client/session-catalog/`, `client/components/dialogs/` and
+  `client/components/sidebar/` directories plus
+  `client/visual-capture-contracts.test.ts` — 79 files, 1761 passed. Running the
+  directories rather than only the touched files is what catches an older
+  contract that the widened guards could have broken.
 - `npm run typecheck`, ESLint and Prettier clean on the changed files.
 
 Existing end-to-end contracts (`npx playwright test`, mock daemon):
@@ -120,10 +145,16 @@ Existing end-to-end contracts (`npx playwright test`, mock daemon):
 background task sidebar indicator visible on hover and prioritizes the prompt
 spinner".
 
-Mutation witnesses (each applied to the reviewed tree, run, then reverted):
-reverting the gate to `running && !backgroundRunning`, dropping the
-`|| backgroundTasks` arm, dropping the amber class, dropping the composed
-`title`, and reverting the tooltip composition — all five killed (5/5).
+Mutation witnesses (each a one-line edit to the reviewed tree, run against the
+committed tests, then reverted) — twelve killed, each by the assertion that
+owns it: dropping the background term from `hasLiveWork`, judged by both the
+predicate's own test and the sidebar suites; restoring the delete dialog's own
+two-term predicate; naming the marker even when the dot already does; ignoring
+the live-starting swap when deciding the carrier; dropping
+the suffix from the approval arm and from the question arm; keeping the
+redundant `title` on background-only rows; swapping the amber token for the
+muted one; deleting the amber rule outright; composing the suffix
+unconditionally; and dropping the amber class.
 
 Browser (dev server from this worktree proxied to a live daemon, real sessions,
 no response interception):
@@ -131,22 +162,29 @@ no response interception):
 | Shape             | Busy marker                                                                                                           | Left dot                                    |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
 | Turn + background | `aria-label="Running"`, `title="Running · Background tasks running"`, `border-top-color: rgb(236, 201, 75)`, spinning | `data-web-shell-session-running`            |
-| Background only   | `aria-label="Background tasks running"`, same amber, spinning                                                         | `data-web-shell-session-background-running` |
+| Background only   | unnamed and no `title` (the dot carries the name once), same amber, spinning                                          | `data-web-shell-session-background-running` |
 
 Hovering the background-only row: busy marker opacity `0`, actions opacity `1`.
-The details tooltip on the turn + background row reads
-`Running · Background tasks running`. No page errors.
+The details popover on the turn + background row reads
+`Running · Background tasks running`, and the same popover names the background
+work behind an approval or a question. Archive is disabled on a background-only
+row. No page errors.
 
 ## Acceptance criteria
 
-1. A background-only row shows the trailing busy marker, amber, labeled
-   `background.running`.
+1. A background-only row shows the trailing amber busy marker, and the row
+   announces `background.running` exactly once.
 2. A row with a turn in flight and background work shows the amber marker with
    `Running` as its accessible name and the composed `title`.
-3. The details tooltip names both states when they coexist.
-4. Dot precedence, the touch layout, and the existing hover contracts are
+3. The details popover names both states whenever they coexist, including
+   behind an approval or a question, without reordering blocked-state
+   precedence.
+4. Archive and delete are not offered for a session whose only activity is
+   background work — on the project rows, the recent rows, and in the delete
+   dialog for the session this client is attached to.
+5. Dot precedence, the touch layout, and the existing hover contracts are
    unchanged.
-5. Every assertion above dies under the corresponding mutation.
+6. Every assertion above dies under the corresponding mutation.
 
 ## Open questions / follow-ups
 

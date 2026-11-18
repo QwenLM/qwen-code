@@ -287,6 +287,25 @@ describe('DeleteSessionDialog selection', () => {
     expect(dangerButton().disabled).toBe(true);
   });
 
+  it('keeps the current session row unselectable while only background work runs', () => {
+    // The sidebar refuses to delete this row; the dialog must agree, or the
+    // two entry points disagree about what "still working" means.
+    sessions = [
+      initialSessions[0],
+      initialSessions[1],
+      {
+        ...initialSessions[2],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+    ];
+    mount();
+
+    clickRow(2);
+    expect(isChecked(rows()[2])).toBe(false);
+    expect(dangerButton().disabled).toBe(true);
+  });
+
   it('clears checked rows and disarms delete when the filter changes', () => {
     mount();
 

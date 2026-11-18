@@ -133,6 +133,20 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     );
   });
 
+  it('keeps the background busy marker on the warning token', () => {
+    // The amber is what makes a background-only row read as busy rather than
+    // merely spinning, and the component test can only see the class name.
+    // Swapping the token for the muted one would keep every suite green, so
+    // pin the declaration itself. Prettier wraps the color-mix across lines,
+    // so the body must not be assumed to sit on one line.
+    expect(sidebarCss).toMatch(
+      /\.sessionLoadingBackground\s*\{[^}]*border-top-color:\s*var\(--warning-color/,
+    );
+    expect(sidebarCss).toMatch(
+      /\.sessionLoadingBackground\s*\{[^}]*border-color:\s*color-mix\([^)]*var\(--warning-color/,
+    );
+  });
+
   it('hides the trailing markers whenever the overlay is revealed', () => {
     for (const marker of [
       'sessionGitIcon',

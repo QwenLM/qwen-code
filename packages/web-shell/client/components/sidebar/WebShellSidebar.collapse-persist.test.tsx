@@ -4,6 +4,7 @@ import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
 import sidebarStyles from './WebShellSidebar.module.css';
+import { setLivePresence } from '../../live/live-presence';
 import {
   clickSidebarElement as click,
   createSidebarMocks,
@@ -566,9 +567,15 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(
       container.querySelector('[data-web-shell-session-active-work]'),
     ).toBeNull();
-    expect(busyMarker()?.getAttribute('aria-label')).toBe(
-      'Background tasks running',
-    );
+    // The dot is the named carrier in this shape, so the marker must stay
+    // unnamed and carry no title: the row would otherwise announce the same
+    // string twice, and the title only repeats it.
+    expect(busyMarker()?.getAttribute('aria-label')).toBeNull();
+    expect(busyMarker()?.getAttribute('title')).toBeNull();
+    expect(
+      container.querySelectorAll('[aria-label="Background tasks running"]')
+        .length,
+    ).toBe(1);
     expect(isBackgroundBusy()).toBe(true);
     await update(false, false);
     expect(
@@ -585,8 +592,19 @@ describe('WebShellSidebar collapsed session group persistence', () => {
 
   it('keeps the busy marker when background work is the only activity', async () => {
     // A monitor holds no active-work category, so the daemon grades the row
-    // idle while background tasks are running. Gating the marker on `running`
-    // alone would drop it here and leave the row looking finished.
+    // idle while background tasks are running. Reading only the turn and
+    // active-work terms would drop the marker here and leave the row looking
+    // finished — and would leave Archive enabled on a row that says it is busy.
+    const capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: [
+        'session_organization',
+        'session_archive',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    connection.capabilities = capabilities;
+    workspace.capabilities = capabilities;
     active.sessions = [
       makeSession('monitor-only', {
         hasActivePrompt: false,
@@ -598,13 +616,69 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     renderSidebar(false);
     await flushSidebar();
     const marker = container.querySelector(`.${sidebarStyles.sessionLoading}`);
-    expect(marker?.getAttribute('aria-label')).toBe('Background tasks running');
+    expect(marker).not.toBeNull();
+    expect(marker?.getAttribute('aria-label')).toBeNull();
     expect(
       marker?.classList.contains(sidebarStyles.sessionLoadingBackground),
     ).toBe(true);
     expect(
       container.querySelector('[data-web-shell-session-active-work]'),
     ).toBeNull();
+
+    const row = [
+      ...container.querySelectorAll<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      ),
+    ].find((element) => element.textContent?.includes('monitor-only'))!;
+    const trigger = row.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    );
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await flushSidebar();
+    const archiveItem = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent?.includes('Archive'));
+    expect(archiveItem).toBeDefined();
+    expect(archiveItem!.hasAttribute('data-disabled')).toBe(true);
+  });
+
+  it('names background work on the marker when a live-starting row hides the dot', async () => {
+    // A live-starting row swaps the status dot for its own spinner, so the
+    // marker becomes the only carrier and must take the name back.
+    active.sessions = [
+      makeSession('live-bg', {
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      }),
+    ];
+    active.data = active.sessions;
+    setLivePresence(workspace.client, {
+      state: 'starting',
+      coordinator: { workspaceCwd: '/tmp/project', sessionId: 'live-bg' },
+    });
+    try {
+      renderSidebar(false);
+      await flushSidebar();
+      expect(
+        container.querySelector('[data-web-shell-session-background-running]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-live-starting-session]'),
+      ).not.toBeNull();
+      const marker = container.querySelector(
+        `.${sidebarStyles.sessionLoading}`,
+      );
+      expect(marker?.getAttribute('aria-label')).toBe(
+        'Background tasks running',
+      );
+    } finally {
+      setLivePresence(workspace.client, undefined);
+    }
   });
 
   it('shows completion from a secondary workspace on the collapsed icon', async () => {
@@ -3233,5 +3307,35 @@ describe('Recent sessions shared rows', () => {
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
       'API review',
     );
+  });
+
+  it('disables archive for a background-only recent row but not for an idle one', async () => {
+    enableRecentSessions();
+    connection.sessionId = 'some-other-session';
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        makeSession('idle-recent', { displayName: 'Idle recent' }),
+        makeSession('background-recent', {
+          displayName: 'Background recent',
+          hasRunningBackgroundTasks: true,
+          activeWorkState: 'idle',
+        }),
+      ],
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const archiveFor = (label: string) =>
+      [
+        ...recent.querySelectorAll<HTMLElement>(
+          `div.${sidebarStyles.sessionRow}`,
+        ),
+      ]
+        .find((row) => row.textContent?.includes(label))!
+        .querySelector<HTMLButtonElement>('[aria-label="Archive"]')!;
+    // The idle control keeps this from passing merely because every archive
+    // button in the list happens to be disabled.
+    expect(archiveFor('Idle recent').disabled).toBe(false);
+    expect(archiveFor('Background recent').disabled).toBe(true);
   });
 });

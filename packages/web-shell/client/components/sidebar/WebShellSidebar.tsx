@@ -198,6 +198,7 @@ import {
   useWebShellSessions,
 } from '../../session-catalog/session-catalog-hooks';
 import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
+import { hasLiveWork } from '../../session-catalog/session-live-work';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
 import { RecentSessions } from './RecentSessions';
@@ -2958,10 +2959,9 @@ export function WebShellSidebar({
   const canDeleteSession = useCallback(
     (session: DaemonSessionSummary) =>
       // The current session is deletable too (issue #12619), but deleting the
-      // session the client is attached to tears its runtime down — match the
-      // Session Overview's idle-only policy for that case.
-      (!isCurrentSession(session) ||
-        (!session.hasActivePrompt && session.activeWorkState !== 'active')) &&
+      // session the client is attached to tears its runtime down, so it is
+      // only offered once nothing is running — background work included.
+      (!isCurrentSession(session) || !hasLiveWork(session)) &&
       canShowDeleteSession(session),
     [canShowDeleteSession, isCurrentSession],
   );
@@ -3055,8 +3055,7 @@ export function WebShellSidebar({
       session.sourceType !== 'qwen-live' &&
       sessionActionItems.has('archive') &&
       !isCurrentSession(session) &&
-      !session.hasActivePrompt &&
-      session.activeWorkState !== 'active' &&
+      !hasLiveWork(session) &&
       canMutateSessionArchive(session),
     [canMutateSessionArchive, isCurrentSession, sessionActionItems],
   );
@@ -5772,7 +5771,7 @@ export function WebShellSidebar({
         !session.hasActivePrompt && session.activeWorkState === 'active';
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
-      const running = Boolean(session.hasActivePrompt || sessionWorkActive);
+      const running = hasLiveWork(session);
       const backgroundRunning =
         !session.hasActivePrompt && session.hasRunningBackgroundTasks;
       // The status dot is prompt-gated, so a turn in flight hides the background
@@ -5784,10 +5783,6 @@ export function WebShellSidebar({
         : sessionWorkActive
           ? t('sidebar.activeWork')
           : t('sidebar.running');
-      const busyTitle =
-        backgroundTasks && !backgroundRunning
-          ? `${busyLabel} · ${t('background.running')}`
-          : busyLabel;
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attention = session.isWaitingForPermission
@@ -6049,14 +6044,24 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
-                {running || backgroundTasks ? (
+                {running ? (
                   <span
                     className={cx(
                       styles.sessionLoading,
                       backgroundTasks && styles.sessionLoadingBackground,
                     )}
-                    aria-label={busyLabel}
-                    title={backgroundTasks ? busyTitle : undefined}
+                    // Stay unnamed only while the status dot is actually
+                    // rendered to carry the name: repeating it would make the
+                    // row announce it twice, and a live-starting row swaps the
+                    // dot for its own spinner, leaving this as the carrier.
+                    aria-label={
+                      backgroundRunning && !liveStarting ? undefined : busyLabel
+                    }
+                    title={
+                      backgroundTasks && !backgroundRunning
+                        ? `${busyLabel} · ${t('background.running')}`
+                        : undefined
+                    }
                   />
                 ) : !attention && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
@@ -6648,8 +6653,7 @@ export function WebShellSidebar({
       if (
         !sessionActionItems.has('archive') ||
         session.sessionId === connection.sessionId ||
-        session.hasActivePrompt ||
-        session.activeWorkState === 'active' ||
+        hasLiveWork(session) ||
         busySessionIdsRef.current.has(getIdentityForSession(session))
       )
         return;
@@ -9139,10 +9143,7 @@ export function WebShellSidebar({
                       const busy = busySessionIds.has(
                         getIdentityForSession(session),
                       );
-                      const running = Boolean(
-                        session.hasActivePrompt ||
-                          session.activeWorkState === 'active',
-                      );
+                      const running = hasLiveWork(session);
                       const pinLabel = session.isPinned
                         ? t('sidebar.unpin')
                         : t('sidebar.pin');
