@@ -16,6 +16,11 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Retires MCP connections of Sessions suspended for the configured idle period. */
 public final class ParkedMcpReclamationJob {
     private static final Logger LOG = LoggerFactory.getLogger(ParkedMcpReclamationJob.class);
+
+    /** What one tick found among the owners it examined. */
+    public record Sweep(int scanned, int parked, int reclaimed) {
+    }
+
     private final ParkedMcpOwners owners;
     private final RuntimeBrokerOperations broker;
     private final ManagedAgentSettings.RuntimeBroker.McpParking settings;
@@ -38,25 +43,32 @@ public final class ParkedMcpReclamationJob {
             fixedDelayString = "${qwen.managed-agent.runtime-broker.mcp-parking.scan-delay:1m}")
     public void tick() {
         try {
-            runOnce();
+            Sweep sweep = runOnce();
+            LOG.info("parked_mcp_reclamation scanned={} parked={} reclaimed={}",
+                    sweep.scanned(), sweep.parked(), sweep.reclaimed());
         } catch (RuntimeException error) {
             LOG.warn("Parked MCP reclamation failed; retrying on the next scheduled tick", error);
         }
     }
 
-    public synchronized int runOnce() {
+    public synchronized Sweep runOnce() {
         var candidates = owners.candidates(cursor, settings.getBatchSize());
         cursor = candidates.size() < settings.getBatchSize() ? 0 : candidates.getLast().id();
         Set<String> urgent = new HashSet<>(expedited);
         expedited.removeAll(urgent);
+        int parked = 0;
         int reclaimed = 0;
         for (var owner : candidates) {
-            Duration idle = urgent.contains(owner.storageKey()) ? Duration.ZERO : settings.getIdleDuration();
-            if (owners.parked(owner, idle) && reclaim(owner)) {
+            if (!owners.parked(owner, Duration.ZERO)) {
+                continue;
+            }
+            parked++;
+            boolean due = urgent.contains(owner.storageKey()) || owners.parked(owner, settings.getIdleDuration());
+            if (due && reclaim(owner)) {
                 reclaimed++;
             }
         }
-        return reclaimed;
+        return new Sweep(candidates.size(), parked, reclaimed);
     }
 
     private boolean reclaim(ParkedMcpOwners.Owner owner) {

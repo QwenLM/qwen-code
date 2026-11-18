@@ -68,7 +68,7 @@ class ParkedMcpReclamationJobTest {
         owner(1, "idle", IDLE);
         owner(2, "recent", Duration.ofMinutes(1));
         owner(3, "resident", null);
-        assertEquals(1, job(10).runOnce());
+        assertEquals(new ParkedMcpReclamationJob.Sweep(3, 2, 1), job(10).runOnce());
         assertEquals(List.of("idle"), reclaimed);
     }
 
@@ -87,10 +87,10 @@ class ParkedMcpReclamationJobTest {
         owner(2, "other", Duration.ofMinutes(1));
         ParkedMcpReclamationJob job = job(10);
         job.expedite("storage-waited-on");
-        assertEquals(1, job.runOnce());
+        assertEquals(1, job.runOnce().reclaimed());
         assertEquals(List.of("waited-on"), reclaimed);
         reclaimed.clear();
-        assertEquals(0, job.runOnce());
+        assertEquals(0, job.runOnce().reclaimed());
         assertEquals(List.of(), reclaimed);
     }
 
@@ -99,7 +99,7 @@ class ParkedMcpReclamationJobTest {
         owner(1, "refused", IDLE);
         owner(2, "next", IDLE);
         outcome = CompletableFuture.failedFuture(new IllegalStateException("pending work"));
-        assertEquals(0, job(10).runOnce());
+        assertEquals(0, job(10).runOnce().reclaimed());
         assertEquals(List.of("refused", "next"), reclaimed);
     }
 

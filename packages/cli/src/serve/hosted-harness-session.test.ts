@@ -809,6 +809,7 @@ async function mcpApp(
   serverIds = ['demo'],
   toolProfile = 'hosted-workspace-mcp/1',
   extra: Record<string, unknown> = {},
+  suspensionOptions?: Parameters<typeof app>[3],
 ) {
   const requests: ManagedMcpControl[] = [];
   const replies = new Map<string, ManagedMcpOperationView>();
@@ -876,7 +877,7 @@ async function mcpApp(
       );
     },
   );
-  const server = await app(true);
+  const server = await app(true, undefined, true, suspensionOptions);
   const created = await headers(supertest(server).post('/session')).send({
     sessionId: SESSION_ID,
     sessionScope: 'thread',
@@ -46218,6 +46219,71 @@ describe('idle suspension', () => {
     expect(load.status).toBe(200);
     expect((await statusOf(server, load.body.clientId)).status).toBe(200);
     expect(statsOf(server).cleanSuspensions).toBe(1);
+  });
+
+  it.each([
+    ['parks the MCP owner when the Broker advertises parking', true],
+    ['drains the MCP owner when the Broker does not', false],
+  ])('%s', async (_name, parkable) => {
+    const { server, authorize, requests } = await mcpApp(
+      false,
+      ['demo'],
+      'hosted-workspace-mcp/1',
+      {},
+      { idleSuspendMs: 2000 },
+    );
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    const original = acquire.getMockImplementation()!;
+    acquire.mockImplementation(async function (this: HostedWorkspaceBroker) {
+      await original.call(this);
+      this.mcpParkable = parkable;
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'idle-claim',
+    );
+    const releaseMount = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+      .mockResolvedValue();
+    const operation = () => ({
+      operationId: randomUUID(),
+      serverId: 'demo',
+      request: { kind: 'resource_read', uri: 'memory://note' },
+    });
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+    )
+      .send(operation())
+      .expect(202);
+    await vi.waitFor(() => expect(statsOf(server).cleanSuspensions).toBe(1), {
+      timeout: 10_000,
+    });
+    const released = requests.filter((r) => r.kind === 'mcp-release');
+    expect(released).toHaveLength(parkable ? 0 : 1);
+    expect(releaseMount).toHaveBeenCalledTimes(parkable ? 0 : 1);
+    expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
+
+    requests.length = 0;
+    const load = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-mcp/1',
+      mcpServers: [
+        {
+          serverId: 'demo',
+          serverRevision: 1,
+          definitionDigest: 'a'.repeat(64),
+        },
+      ],
+    });
+    expect(load.status).toBe(200);
+    await headers(
+      supertest(server).post(`/session/${SESSION_ID}/mcp/operations`),
+    )
+      .set('X-Qwen-Client-Id', load.body.clientId as string)
+      .send(operation())
+      .expect(202);
+    expect(requests.some((r) => r.kind === 'mcp-configure')).toBe(!parkable);
   });
 
   it('an admitted mutation resets the idle timer', async () => {

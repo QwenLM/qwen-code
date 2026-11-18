@@ -225,7 +225,7 @@ The recovery view ([supplement](2026-11-18-managed-suspension-recovery-view.md))
 - Contract wording: "reinstall the owner" → "reuse or reinstall the parked owner".
 - "No unsettled work" must still hold (no pending `mcp_operation`) — guaranteed by reconcile before park.
 - A reclaimed-but-journal-active connection: the view may stay ready; the load replaces it (§4.3).
-- Optional: parked-owner count in observability.
+- Observability: each reclamation tick logs how many owners it scanned, found parked, and reclaimed.
 
 ### 6.4 Cleanup debt
 

@@ -225,7 +225,7 @@ teardown 顺序：wake → owners（第 2 步）→ lease（第 3 步）→ publ
 - 契约措辞："重新安装 owner" → "复用或重新安装 parked owner"。
 - "无未结算工作"仍须成立（无未决 `mcp_operation`）——park 前 reconcile 保证。
 - 被回收但 journal 仍 active 的连接：视图可保持 ready，load 负责替换（§4.3）。
-- 可选：parked owner 计数纳入可观测性。
+- 可观测性：每轮回收记录扫描到、处于 parked 以及已回收的 owner 数量。
 
 ### 6.4 cleanup debt
 

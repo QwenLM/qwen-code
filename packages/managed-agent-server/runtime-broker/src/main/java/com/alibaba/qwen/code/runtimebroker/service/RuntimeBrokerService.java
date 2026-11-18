@@ -565,7 +565,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         }
         var adopted = CompletableFuture.completedFuture(new SessionContext(saved.getSession(), binding, live.lease()));
         var existing = bindingRegistry.registerSession(runtimeSessionId, adopted);
-        return (existing == null ? adopted : existing).thenCompose(context -> reclaimParkedMcp(context, parked));
+        return (existing == null ? adopted : existing).thenCompose(context -> context.binding().sameIdentity(binding)
+                ? reclaimParkedMcp(context, parked) : CompletableFuture.completedFuture(false));
     }
 
     // Connections close before the mount is handed back, so a stdio server

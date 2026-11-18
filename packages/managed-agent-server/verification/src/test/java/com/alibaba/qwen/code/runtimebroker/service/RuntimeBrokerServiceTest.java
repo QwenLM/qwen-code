@@ -468,6 +468,26 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void advertisesParkingForManagedLocalStorageButNeverExternalStorage() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.service.enableMcpParking();
+            RuntimeScope scope = new RuntimeScope("tenant-m", "workspace-m", "1", "/workspace",
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+            RuntimeBindingRecord local = fixture.bindingRepository.findOrCreate(
+                    new RuntimeProvisionRequest(scope, "harness-1", "test-supervisor", "storage-a"));
+            RuntimeBindingRecord external = fixture.bindingRepository.findOrCreate(new RuntimeProvisionRequest(scope,
+                    "harness-2", com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                    scope.getWorkspaceId()));
+            for (RuntimeBindingRecord binding : List.of(local, external)) {
+                RuntimeSessionRecord record = new RuntimeSessionRecord(
+                        new RuntimeSession("harness", "runtime", "bootstrap", scope), binding.getBindingId(),
+                        binding.getGeneration(), RuntimeSessionRecord.State.READY, 0, START);
+                assertEquals(binding == local, fixture.service.mcpParkable(record));
+            }
+        }
+    }
+
+    @Test
     void mountReleaseRefusesAClaimALaterAcquireSuperseded() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
