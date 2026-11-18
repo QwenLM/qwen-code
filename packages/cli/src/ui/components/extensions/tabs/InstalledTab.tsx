@@ -348,9 +348,12 @@ export const InstalledTab = ({
   }, []);
 
   const { rows: terminalRows, isDialog } = useDialogSize();
-  // One line per display row; reserve space for the dialog border, tab bar,
-  // scroll hints, status line (which may wrap) and footer around this tab.
-  const visibleCount = Math.max(isDialog ? 1 : 6, (terminalRows || 24) - 12);
+  // One line per display row. Dialog bounds already exclude the parent
+  // chrome, leaving only this tab's scroll hints to reserve.
+  const visibleCount = Math.max(
+    isDialog ? 1 : 6,
+    (terminalRows || 24) - (isDialog ? 2 : 12),
+  );
   const [scrollOffset, setScrollOffset] = useState(0);
 
   // Flatten the grouped list into display rows (headers, items, gaps) so the
@@ -391,7 +394,10 @@ export const InstalledTab = ({
       (r) => r.type === 'item' && r.item.key === selectedItem?.key,
     );
     if (idx < 0) return;
-    const top = displayRows[idx - 1]?.type === 'header' ? idx - 1 : idx;
+    const top =
+      visibleCount > 1 && displayRows[idx - 1]?.type === 'header'
+        ? idx - 1
+        : idx;
     if (top < scrollOffset) {
       setScrollOffset(top);
     } else if (idx >= scrollOffset + visibleCount) {

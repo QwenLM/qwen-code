@@ -5,7 +5,7 @@
  */
 
 import { render } from 'ink-testing-library';
-import { act } from 'react';
+import { act, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AgentStatus,
@@ -264,8 +264,21 @@ describe('AgentComposer', () => {
   );
 
   it('keeps its draft while inactive and pauses cancellation and approval shortcuts', () => {
+    let initializeCount = 0;
+    let typeDraft!: (text: string) => void;
+    vi.mocked(useTextBuffer).mockImplementation(() => {
+      const [text, setText] = useState(() => `fresh-${++initializeCount}`);
+      typeDraft = setText;
+      return {
+        text,
+        allVisualLines: [text],
+        visualCursor: [0, text.length],
+        setText,
+      } as never;
+    });
     const { rerender } = render(<AgentComposer agentId="agent-1" />);
-    expect(setAgentInputBufferText).toHaveBeenCalledWith('draft');
+    act(() => typeDraft('draft typed by user'));
+    expect(setAgentInputBufferText).toHaveBeenCalledWith('draft typed by user');
     capturedKeypressOptions.length = 0;
     setAgentInputBufferText.mockClear();
     rerender(<AgentComposer agentId="agent-1" active={false} />);
@@ -275,9 +288,29 @@ describe('AgentComposer', () => {
     expect(setAgentInputBufferText).not.toHaveBeenCalled();
     rerender(<AgentComposer agentId="agent-1" />);
     expect(vi.mocked(useTextBuffer).mock.results.at(-1)?.value.text).toBe(
-      'draft',
+      'draft typed by user',
     );
+    expect(initializeCount).toBe(1);
   });
+
+  it.each([true, false])(
+    'PR17541 R1-14 hides the approval shortcut hint while the agent shell has focus (viewport=%s)',
+    (viewport) => {
+      vi.mocked(useAgentViewState).mockReturnValue({
+        ...vi.mocked(useAgentViewState)(),
+        agentShellFocused: true,
+        agentApprovalModes: new Map([['agent-1', ApprovalMode.YOLO]]),
+      });
+      const view = render(
+        <VirtualViewportContext.Provider value={viewport}>
+          <AgentComposer agentId="agent-1" />
+        </VirtualViewportContext.Provider>,
+      );
+      expect(baseTextInputProps.bottomRightLabel).toBeUndefined();
+      expect(agentFooterProps.showApprovalMode).toBe(false);
+      view.unmount();
+    },
+  );
 
   describe('footer context window', () => {
     it("uses the window the registry declares for the agent's model", () => {

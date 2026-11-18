@@ -84,6 +84,16 @@ describe('getBuiltInOpenTuiThemes', () => {
 });
 
 describe('palette parity (semantic tokens → opentui palette)', () => {
+  it.each([
+    ['Qwen Dark', '#92929b'],
+    ['Qwen Light', '#71717a'],
+  ])(
+    'PR17541 R1-15 keeps %s symbols on its own readable dim palette',
+    (name, color) => {
+      expect(getOpenTuiTheme(name)!.palette.symbol).toBe(color);
+    },
+  );
+
   it('maps Qwen Dark through its semantic tokens with the hljs default text', () => {
     const definition = getOpenTuiTheme('Qwen Dark');
     expect(definition).toBeDefined();

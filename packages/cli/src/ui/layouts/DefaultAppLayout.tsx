@@ -170,7 +170,21 @@ export const DefaultAppLayout: React.FC = () => {
               agentId={activeView}
               active={!uiState.dialogsVisible}
             />
-            {floatingDialog && inactiveComposer}
+            {uiState.dialogsVisible && !floatingDialog && (
+              <Box
+                marginX={2}
+                flexDirection="column"
+                width={uiState.mainAreaWidth}
+                height={dialogHeight}
+                overflow={constrainDialogHeight ? 'hidden' : undefined}
+              >
+                <DialogManager
+                  terminalWidth={uiState.terminalWidth}
+                  addItem={uiState.historyManager.addItem}
+                />
+              </Box>
+            )}
+            {uiState.dialogsVisible && inactiveComposer}
             <ExitWarning />
           </Box>
         </>

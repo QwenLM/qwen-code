@@ -30,6 +30,7 @@ import {
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { createUntil } from './wait.js';
+import { composerValue } from './composer-screen.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -499,6 +500,14 @@ it('search-tab-enter-and-escape', () =>
           'live prompt history must reach search',
         );
         await press(sequence);
+        if (sequence === '\x1b[1;2A' || sequence === '\x1b[1;2B') {
+          // Shift+arrows scroll the transcript; resume following before
+          // requiring the submitted answer to be visible in the viewport.
+          expect(await frame('search-after-transcript-scroll')).toContain(
+            '(r:)',
+          );
+          await press('\x1b[1;5F');
+        }
         await submit('SEARCH_BETA');
       }
       await type('ALPHA');
@@ -732,18 +741,19 @@ for (const key of ['c', 'd'] as const) {
           await press('\x03', false);
         } else {
           await until(
-            async () => /^> CANCEL_ORIGINAL\s*$/m.test(await frame('restored')),
+            async () =>
+              composerValue(await frame('restored')) === 'CANCEL_ORIGINAL',
             'cancelled prompt returns to composer',
           );
           release();
           await press('\x04');
           expect(session.exitResult()).toBeUndefined();
-          expect(await frame('restored-d-noop')).toMatch(
-            /^> CANCEL_ORIGINAL\s*$/m,
+          expect(composerValue(await frame('restored-d-noop'))).toBe(
+            'CANCEL_ORIGINAL',
           );
           await press('\x7f'.repeat('CANCEL_ORIGINAL'.length));
           await until(
-            async () => /^>\s+Type your message/m.test(await frame('empty')),
+            async () => composerValue(await frame('empty')) === '',
             'explicitly clear restored prompt',
           );
           const armed = Date.now();

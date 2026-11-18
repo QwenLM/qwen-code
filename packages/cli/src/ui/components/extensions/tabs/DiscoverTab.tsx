@@ -90,10 +90,11 @@ export const DiscoverTab = ({
   const { columns, rows, isDialog } = useDialogSize();
   const availableWidth = Math.max(24, columns - 8);
   // Each item renders as 3 lines (title, description, gap). Reserve rows for
-  // the tab bar, header, search box, scroll hints, status and footer.
+  // the header, search box, gap and scroll hints. The dialog provider already
+  // reserves the parent tab bar, border and footer.
   const visibleCount = Math.max(
     isDialog ? 1 : 3,
-    Math.min(6, Math.floor(((rows || 24) - 13) / 3)),
+    Math.min(6, Math.floor(((rows || 24) - (isDialog ? 7 : 13)) / 3)),
   );
 
   const extensionManager = config.getExtensionManager();

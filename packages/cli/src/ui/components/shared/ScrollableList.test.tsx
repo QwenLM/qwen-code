@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { createRef } from 'react';
+import { createRef, useState } from 'react';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { cleanup, render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
@@ -382,6 +382,48 @@ describe('<ScrollableList /> mouse scrolling', () => {
 
     // The press pinned the top; the canceled wheel must not have scrolled away.
     expect(lastFrame()).toContain('item-0');
+  });
+
+  it('PR17541 R1-6 clears a scrollbar drag across focus loss before hover', async () => {
+    let setFocused!: (value: boolean) => void;
+    function Wrapper() {
+      const [focused, updateFocused] = useState(true);
+      setFocused = updateFocused;
+      return (
+        <ScrollableList<Item>
+          hasFocus={focused}
+          data={makeItems(50)}
+          renderItem={({ item }) => <Text>{item.label}</Text>}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={0}
+          containerHeight={5}
+          width={40}
+          showScrollbar
+        />
+      );
+    }
+    const view = render(withKeypress(<Wrapper />));
+    view.rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    await act(async () => {
+      view.stdin.write(leftPress(40, 1));
+    });
+    await act(async () => {
+      setFocused(false);
+    });
+    await flushScrollFrame();
+    await act(async () => {
+      setFocused(true);
+    });
+    await flushScrollFrame();
+    const beforeHover = view.lastFrame();
+    await act(async () => {
+      view.stdin.write(`${ESC}[<35;5;5M`);
+    });
+    await flushScrollFrame();
+    expect(view.lastFrame()).toBe(beforeHover);
+    expect(view.lastFrame()).toContain('item-0');
   });
 
   it('a focus loss cancels a still-pending wheel flush', async () => {

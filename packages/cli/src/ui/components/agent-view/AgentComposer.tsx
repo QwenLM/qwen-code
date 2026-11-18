@@ -447,7 +447,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
           prefixWidth={prefixWidth}
           borderColor={inputBorderColor}
           bottomRightLabel={
-            approvalModeInInput
+            approvalModeInInput && !agentShellFocused
               ? `${getApprovalModeLabel(agentApprovalMode)} ${getApprovalModeCycleHint()}`
               : undefined
           }
@@ -460,7 +460,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
         {/* Footer: approval mode + context usage */}
         <AgentFooter
           approvalMode={agentApprovalMode}
-          showApprovalMode={!approvalModeInInput}
+          showApprovalMode={!approvalModeInInput && !agentShellFocused}
           promptTokenCount={lastPromptTokenCount}
           contextWindowSize={getAgentContextWindowSize(
             config,

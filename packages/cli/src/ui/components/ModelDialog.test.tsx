@@ -670,6 +670,27 @@ describe('<ModelDialog />', () => {
     expect(props.maxItemsToShow).toBe(1);
   });
 
+  it('PR17541 R1-7 keeps model details at the standard terminal dialog budget', () => {
+    const { queryByText } = renderComponent(
+      { availableTerminalHeight: 19 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'model-1',
+            label: 'Model 1',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://example.test/v1',
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls.at(-1)![0];
+    act(() => select.onHighlight?.(select.items[0].value));
+    expect(queryByText(/Base URL/)).not.toBeNull();
+  });
+
   it('keeps model selection and shortcuts while omitting details on short screens', () => {
     const { queryByText, getByText } = renderComponent(
       { availableTerminalHeight: 11 },
@@ -791,6 +812,35 @@ describe('<ModelDialog />', () => {
     // (3 lines) -> errorMessageRows = 2 + 3 = 5 ->
     // max(1, floor((20 - 14 - 5) / 1)) = 1.
     expect(propsAfterError.maxItemsToShow).toBe(1);
+  });
+
+  it('compacts a standard-height model picker when a failed switch needs error rows', async () => {
+    const { getByText, queryByText } = renderComponent(
+      { availableTerminalHeight: 19 },
+      {
+        getModel: vi.fn(() => 'model-1'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel: vi.fn().mockRejectedValue(new Error('network down')),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'model-1',
+            label: 'Model 1',
+            description: '',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://example.test/v1',
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls.at(-1)![0];
+    act(() => select.onHighlight?.(select.items[0].value));
+    expect(queryByText(/Base URL/)).not.toBeNull();
+    await act(async () => select.onSelect(select.items[0].value));
+    expect(getByText(/network down/)).toBeDefined();
+    expect(queryByText(/Base URL/)).toBeNull();
+    expect(
+      getByText('Enter to select, ↑↓ to navigate, Esc to close'),
+    ).toBeDefined();
   });
 
   it('shows every discovered subscription model in the selector', async () => {

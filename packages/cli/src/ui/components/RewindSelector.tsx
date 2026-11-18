@@ -176,11 +176,11 @@ export function RewindSelector({
   const maxVisibleItems = Math.min(
     MAX_VISIBLE_ITEMS,
     userTurns.length,
-    isDialog ? Math.max(1, Math.floor((height - 7) / 3)) : MAX_VISIBLE_ITEMS,
+    isDialog ? Math.max(1, Math.floor((height - 6) / 2)) : MAX_VISIBLE_ITEMS,
   );
   const boxHeight = Math.max(
     1,
-    isDialog ? Math.min(height, maxVisibleItems * 3 + 7) : height - 1,
+    isDialog ? Math.min(height, maxVisibleItems * 2 + 6) : height - 1,
   );
 
   const scrollOffset = useMemo(() => {

@@ -61,6 +61,7 @@ const mockedUseLaunchEditor = vi.mocked(useLaunchEditor);
 
 import { SkillReviewDialog } from './SkillReviewDialog.js';
 import type { SkillReviewDialogProps } from './SkillReviewDialog.js';
+import { DialogSizeProvider } from '../contexts/DialogSizeContext.js';
 
 // Track every render so afterEach can unmount it. The dialog installs a
 // process.stdout resize listener via useTerminalSize on mount; without
@@ -293,6 +294,30 @@ describe('SkillReviewDialog', () => {
   it('renders the current staged SKILL.md content inline', async () => {
     const { lastFrame } = renderDialog(skills);
     await vi.waitFor(() => expect(lastFrame()).toContain('ALPHA_BODY_MARKER'));
+  });
+
+  it('PR17541 R1-16 wraps previews at the dialog inner width with two slack columns', async () => {
+    const stagedManifestPath = await writeSkill(
+      'sizing-skill',
+      `${'X'.repeat(54)}\nTAIL\n`,
+    );
+    const { lastFrame } = render(
+      <DialogSizeProvider value={{ columns: 60, rows: 30 }}>
+        <Box width={60}>
+          <SkillReviewDialog
+            skills={[
+              { name: 'sizing-skill', description: '', stagedManifestPath },
+            ]}
+            onAccept={vi.fn()}
+            onReject={vi.fn()}
+            onClose={vi.fn()}
+            onDismiss={vi.fn()}
+          />
+        </Box>
+      </DialogSizeProvider>,
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain('TAIL'));
+    expect(stripAnsi(lastFrame() ?? '')).toContain('X'.repeat(54));
   });
 
   it('shows a fallback when the staged file cannot be read', async () => {

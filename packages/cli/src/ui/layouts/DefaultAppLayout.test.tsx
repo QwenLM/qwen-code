@@ -68,7 +68,8 @@ vi.mock('../components/agent-view/AgentChatView.js', () => ({
 }));
 
 vi.mock('../components/agent-view/AgentComposer.js', () => ({
-  AgentComposer: () => <Text>AgentComposer</Text>,
+  AgentComposer: ({ active }: { active: boolean }) =>
+    active ? <Text>AgentComposer</Text> : null,
 }));
 
 vi.mock('../hooks/useTerminalSize.js', () => ({
@@ -132,6 +133,20 @@ function frameHeight(frame: string): number {
 describe('DefaultAppLayout', () => {
   beforeEach(() => {
     dialogManagerMockState.lineCount = 1;
+  });
+
+  it('PR17541 R1-4 keeps a composer or placeholder on an agent tab outside VP mode', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'agent-1',
+      agents: new Map([['agent-1', {}]]),
+    });
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      useTerminalBuffer: false,
+      dialogsVisible: true,
+    });
+    expect(lastFrame()).toMatch(/AgentComposer|❯/);
+    expect(lastFrame()).toContain('DialogManager');
   });
 
   it('renders sticky todo list before the composer in the main view', () => {

@@ -579,7 +579,9 @@ export function ModelDialog({
     ? 2 + errorMessage.split('\n').length
     : 0;
   const compactDialog =
-    availableTerminalHeight !== undefined && availableTerminalHeight < 20;
+    availableTerminalHeight !== undefined &&
+    availableTerminalHeight <
+      MODEL_DIALOG_FIXED_ROWS + modelOptionRowHeight + errorMessageRows;
   // Short views omit two padding rows and the six-row model detail panel.
   const fixedRows = MODEL_DIALOG_FIXED_ROWS - (compactDialog ? 8 : 0);
   const maxModelItemsToShow =

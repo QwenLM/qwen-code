@@ -153,6 +153,7 @@ export const QwenLight: Theme = new Theme(
     ui: {
       ...lightSemanticColors.ui,
       comment: qwenLightColors.Comment,
+      symbol: qwenLightColors.Gray,
       gradient: qwenLightColors.GradientColors,
     },
   },

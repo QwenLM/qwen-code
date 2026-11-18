@@ -157,7 +157,7 @@ export function PermissionsDialog({
   const columns = Math.min(width ?? terminalColumns, terminalColumns);
   const maxListItems = Math.max(
     1,
-    Math.min(15, Math.floor(((availableTerminalHeight ?? 40) - 10) / 2)),
+    Math.min(15, (availableTerminalHeight ?? 40) - 12),
   );
   const config = useConfig();
   const settings = useSettings();
@@ -789,7 +789,7 @@ export function PermissionsDialog({
           onSelect={handleDirListSelect}
           isFocused={view === 'ws-dir-list'}
           showNumbers={true}
-          showScrollArrows={false}
+          showScrollArrows={true}
           maxItemsToShow={maxListItems}
         />
         <FooterHint view={view} />
@@ -958,7 +958,7 @@ export function PermissionsDialog({
         onSelect={handleListSelect}
         isFocused={view === 'rule-list'}
         showNumbers={true}
-        showScrollArrows={false}
+        showScrollArrows={true}
         maxItemsToShow={maxListItems}
       />
       <FooterHint view={view} />

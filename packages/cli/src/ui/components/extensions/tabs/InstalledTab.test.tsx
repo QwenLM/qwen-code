@@ -12,6 +12,7 @@ import { waitFor } from '@testing-library/react';
 import type { Config, Extension } from '@qwen-code/qwen-code-core';
 import { InstalledTab } from './InstalledTab.js';
 import type { StatusMessage } from '../ExtensionsManagerDialog.js';
+import { DialogSizeProvider } from '../../../contexts/DialogSizeContext.js';
 
 const mockUseKeypress = vi.hoisted(() => vi.fn());
 
@@ -57,6 +58,46 @@ describe('InstalledTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
+
+  it.each([3, 11])(
+    'PR17541 R1-2 keeps arrow-key selection visible with %i dialog rows',
+    async (rows) => {
+      const manager = createManager();
+      manager.getLoadedExtensions.mockReturnValue([
+        extension,
+        { ...extension, id: 'second-id', name: 'second-extension' },
+      ]);
+      const config = {
+        getExtensionManager: () => manager,
+        getMcpServers: () => ({}),
+        getToolRegistry: () => undefined,
+      } as unknown as Config;
+      const { lastFrame } = render(
+        <DialogSizeProvider value={{ columns: 60, rows }}>
+          <InstalledTab
+            config={config}
+            isActive
+            onLockChange={vi.fn()}
+            onStatus={vi.fn()}
+            extensionsUpdateState={new Map()}
+            reloadSignal={0}
+          />
+        </DialogSizeProvider>,
+      );
+      await waitFor(() => expect(manager.refreshCache).toHaveBeenCalledOnce());
+      await waitFor(() => expect(lastFrame()).toContain('demo'));
+      const navigate = async (name: string) => {
+        const handler = mockUseKeypress.mock.calls
+          .filter((call) => call[1]?.isActive === true)
+          .at(-1)?.[0] as (key: { name: string; sequence: string }) => void;
+        await act(async () => handler({ name, sequence: '' }));
+      };
+      await navigate('down');
+      await waitFor(() => expect(lastFrame()).toMatch(/●.*second-extension/));
+      await navigate('up');
+      await waitFor(() => expect(lastFrame()).toMatch(/●.*demo/));
+    },
+  );
 
   it('surfaces activation warnings and reloads the installed list', async () => {
     const manager = createManager();

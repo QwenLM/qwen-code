@@ -12,6 +12,7 @@ import { waitFor } from '@testing-library/react';
 import type { Config, DiscoveredPlugin } from '@qwen-code/qwen-code-core';
 import type { Key } from '../../../hooks/useKeypress.js';
 import { DiscoverTab } from './DiscoverTab.js';
+import { DialogSizeProvider } from '../../../contexts/DialogSizeContext.js';
 
 const mockUseKeypress = vi.hoisted(() => vi.fn());
 const mockRadioButtonSelect = vi.hoisted(() =>
@@ -53,6 +54,31 @@ function activeKeypress(): (key: Key) => void {
 describe('DiscoverTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('PR17541 R1-9 uses the available dialog rows for two complete plugins', async () => {
+    const plugins = Array.from({ length: 5 }, (_, i) => ({
+      name: `sizing-plugin-${i}`,
+      marketplaceName: 'market',
+      installSource: `owner/plugin-${i}`,
+      installed: false,
+    })) as DiscoveredPlugin[];
+    const manager = { discoverPlugins: vi.fn().mockResolvedValue(plugins) };
+    const { lastFrame } = render(
+      <DialogSizeProvider value={{ columns: 60, rows: 15 }}>
+        <DiscoverTab
+          config={{ getExtensionManager: () => manager } as unknown as Config}
+          isActive
+          onLockChange={vi.fn()}
+          onStatus={vi.fn()}
+          onInstalled={vi.fn()}
+          reloadSignal={0}
+        />
+      </DialogSizeProvider>,
+    );
+    await waitFor(() => expect(lastFrame()).toContain('sizing-plugin-0'));
+    expect(lastFrame()).toContain('sizing-plugin-1');
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(15);
   });
 
   it('installs the selected extension with workspace activation', async () => {

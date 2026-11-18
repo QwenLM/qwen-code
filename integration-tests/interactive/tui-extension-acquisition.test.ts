@@ -30,18 +30,21 @@ const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
 const until = createUntil(15_000);
 /**
- * The framed Sources input row at this session's pinned cols: 120. The value
- * and its padding own 95 columns inside the border, caret cell included, and
- * both renderers pad to that same width — ink trims the row tail, OpenTUI pads
- * it to the terminal, so only the whitespace outside the frame stays tolerant.
+ * Measure the Sources dialog's border after layout, since Ink constrains the
+ * dialog width independently of the terminal. Both renderers keep input padding
+ * column-exact inside that border; only whitespace outside it stays tolerant.
  * The value arm must be column-exact: a `[ \t]*` there absorbs the phantom
  * column an unguarded empty caret segment mounts. Reverting the guards shifts
  * `source-undo` from `bZ` to ` bZ` — a leading empty `before` node costs a
  * column, while a trailing empty `after` node collapses to zero. Values are
  * the plain ASCII this scenario types.
  */
-const sourceRow = (value: string) =>
-  new RegExp(`^[ \\t]*│ > ${value} {${95 - value.length}}│[ \\t]*$`, 'm');
+const sourceRow = (value: string, frame: string) => {
+  const border = /^[ \t]*┌(─+)┐[ \t]*$/m.exec(frame);
+  expect(border, 'Sources dialog border must be visible').not.toBeNull();
+  const padding = border![1].length - 3 - value.length;
+  return new RegExp(`^[ \\t]*│ > ${value} {${padding}}│[ \\t]*$`, 'm');
+};
 type Policy = {
   name: string;
   defaultActivation: string;
@@ -281,16 +284,20 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       await key(sequence);
     await session!.idle(150, 2000);
     await screen('source-kill-right', ['Add Marketplace', 'abZ']);
-    expect(frames['source-kill-right']).toMatch(sourceRow('abZ'));
+    expect(frames['source-kill-right']).toMatch(
+      sourceRow('abZ', frames['source-kill-right']),
+    );
     for (const sequence of ['\x01', '\x1b[C', '\x15', 'Q']) await key(sequence);
     await session!.idle(150, 2000);
     await screen('source-kill-left', ['Add Marketplace', 'QbZ']);
-    expect(frames['source-kill-left']).toMatch(sourceRow('QbZ'));
+    expect(frames['source-kill-left']).toMatch(
+      sourceRow('QbZ', frames['source-kill-left']),
+    );
     for (const [label, sequence, expected] of [
-      ['source-undo', '\x1a', sourceRow('bZ')],
-      ['source-redo', '\x1b[27;6;122~', sourceRow('QbZ')],
-      ['source-history-branch', '\x1aR', sourceRow('RbZ')],
-      ['source-no-stale-redo', '\x1b[27;6;122~', sourceRow('RbZ')],
+      ['source-undo', '\x1a', 'bZ'],
+      ['source-redo', '\x1b[27;6;122~', 'QbZ'],
+      ['source-history-branch', '\x1aR', 'RbZ'],
+      ['source-no-stale-redo', '\x1b[27;6;122~', 'RbZ'],
     ] as const) {
       await key(sequence);
       await session!.idle(150, 2000);
@@ -298,7 +305,7 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
         frames[label] = await session!.viewport();
         return (
           frames[label].includes('Add Marketplace') &&
-          expected.test(frames[label])
+          sourceRow(expected, frames[label]).test(frames[label])
         );
       }, label);
       expect(server!.requests).toHaveLength(0);
@@ -309,7 +316,9 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       return (
         frames['source-clear-empty'].includes('Add Marketplace') &&
         frames['source-clear-empty'].includes('Press Ctrl+C again to exit.') &&
-        sourceRow('').test(frames['source-clear-empty'])
+        sourceRow('', frames['source-clear-empty']).test(
+          frames['source-clear-empty'],
+        )
       );
     }, 'source-clear-empty');
     expect(session!.exitResult()).toBeUndefined();
@@ -319,7 +328,9 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       frames['source-clear-undo'] = await session!.viewport();
       return (
         frames['source-clear-undo'].includes('Add Marketplace') &&
-        sourceRow('RbZ').test(frames['source-clear-undo'])
+        sourceRow('RbZ', frames['source-clear-undo']).test(
+          frames['source-clear-undo'],
+        )
       );
     }, 'source-clear-undo');
     expect(session!.exitResult()).toBeUndefined();
