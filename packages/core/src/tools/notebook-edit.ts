@@ -799,7 +799,7 @@ export class NotebookEditTool
           },
           cell_id: {
             description:
-              'Use the cell ID shown by read_file. If the cell has a missing or empty ID, read_file shows cell-N, where N is its zero-based index. Required for replace and delete. For insert, the new cell is inserted after this cell; if omitted, inserted at the beginning.',
+              'Use the ID from read_file (cell-N for a missing or empty ID, where N is the zero-based index). Required for replace and delete. Insert adds a cell after this ID, or at the beginning if omitted.',
             type: 'string',
           },
           new_source: {
