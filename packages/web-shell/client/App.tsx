@@ -116,6 +116,7 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionSubSessionTaskStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionArtifact,
   DaemonSessionSummary,
@@ -150,6 +151,7 @@ import {
   SESSION_LIVE_STATE_FEATURE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_SIDE_TASK_FEATURE,
+  SESSION_SUB_SESSION_SEND_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
   WEB_SHELL_SESSION_SOURCE_TYPE,
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
@@ -173,7 +175,12 @@ import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { createToolRevealStore, ToolRevealProvider } from './toolRevealContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import { isComposerTask } from './utils/composerTasks';
+import {
+  buildTaskExplainQuestion,
+  explainDisplayLabel,
+  isComposerTask,
+  type ComposerChipTask,
+} from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -190,11 +197,13 @@ import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings'
 import {
   useSessionCatalogController,
   useDaemonSessionActivityBridge,
+  useSessionCatalogQuery,
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
   peekSessionCatalogDisplayName,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
+  type SessionCatalogQuery,
 } from './session-catalog/session-catalog-store';
 import {
   useContextUsageControls,
@@ -470,6 +479,15 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
+import { useSubSessionTasks } from './hooks/useSubSessionTasks';
+import { extractErrorDetail } from './utils/errorDetail';
+import {
+  getSendWorkspace,
+  parseSendCommand,
+  resolveSendWorkspace,
+  type SendCommand,
+} from './utils/sendCommand';
+import { createSendArgumentCompleter } from './completions/sendCompletion';
 import {
   getSubagentDetailsUnavailableReason,
   toolContainsCallId,
@@ -2663,6 +2681,9 @@ function serializeArtifactPanelTabs(
             sessionId: tab.sessionId,
           },
         ];
+      case 'session':
+        // A live view of another session; nothing to restore.
+        return [];
       case 'side_task':
         return tab.sessionId
           ? [
@@ -3627,6 +3648,9 @@ function isSameGitStatus(
     current.workspaceCwd === next.workspaceCwd &&
     current.branch === next.branch &&
     current.detached === next.detached &&
+    // ?? true: the field is optional on the wire; a one-sided absence is
+    // not a change, but the first-commit false → true transition must be.
+    (current.hasHead ?? true) === (next.hasHead ?? true) &&
     current.staged === next.staged &&
     current.unstaged === next.unstaged &&
     current.untracked === next.untracked &&
@@ -4776,6 +4800,14 @@ export function App({
   useEffect(() => {
     gitModeIntentRef.current = gitModeIntent;
   }, [gitModeIntent]);
+  // True once the user explicitly picked a git mode for the current draft;
+  // the worktree default must not overwrite an explicit choice. Cleared at
+  // draft boundaries (session created/opened, workspace switched).
+  const gitModeIntentTouchedRef = useRef(false);
+  // Bumped on every fresh draft so the worktree-default effect re-arms even
+  // when sessionId and workspace stay unchanged ("New chat" from an empty
+  // draft produces no rising edge on the eligibility deps alone).
+  const [gitDraftGeneration, setGitDraftGeneration] = useState(0);
 
   useEffect(() => {
     if (
@@ -5887,6 +5919,11 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const sendCommandAvailable =
+    workspaceContextActive &&
+    connection.capabilities?.features.includes(
+      SESSION_SUB_SESSION_SEND_FEATURE,
+    ) === true;
   const sideTaskRestoreAvailable =
     sideTasksAvailable &&
     connection.capabilities?.features.includes('session_archive') === true;
@@ -6825,6 +6862,35 @@ export function App({
       setArtifactPanelOpen(true);
     },
     [getDefaultReviewPanelWidth],
+  );
+  const openSessionPanel = useCallback(
+    (
+      task: Pick<
+        DaemonSessionSubSessionTaskStatus,
+        'sessionId' | 'workspaceCwd' | 'label'
+      >,
+    ) => {
+      if (lockedWorkspaceCwd && task.workspaceCwd !== lockedWorkspaceCwd) {
+        pushToast('error', t('send.workspaceLocked'));
+        return;
+      }
+      const tab: ArtifactPanelTab = {
+        id: `session:${task.sessionId}`,
+        kind: 'session',
+        title: task.label || task.sessionId.slice(0, 8),
+        sessionId: task.sessionId,
+        workspaceCwd: task.workspaceCwd,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, lockedWorkspaceCwd, pushToast, t],
   );
   const openImagePanel = useCallback(
     (src: string, alt?: string, source?: ImageTabSource) => {
@@ -9233,6 +9299,24 @@ export function App({
     backgroundTasksRefreshTrigger,
     workflowsEnabled,
   );
+  // Bumped after a `/send` so its chip shows without waiting for the event.
+  const [subSessionTasksRefresh, setSubSessionTasksRefresh] = useState(0);
+  const subSessionTasks = useSubSessionTasks(
+    connection.sessionId,
+    connection.status === 'connected' &&
+      connection.capabilities?.features.includes(
+        SESSION_SUB_SESSION_SEND_FEATURE,
+      ) === true,
+    subSessionTasksRefresh,
+  );
+  const composerChipTasks = useMemo<ComposerChipTask[]>(() => {
+    const visible = lockedWorkspaceCwd
+      ? subSessionTasks.filter(
+          (task) => task.workspaceCwd === lockedWorkspaceCwd,
+        )
+      : subSessionTasks;
+    return visible.length > 0 ? [...sessionTasks, ...visible] : sessionTasks;
+  }, [lockedWorkspaceCwd, sessionTasks, subSessionTasks]);
   const [sessionAgentInventory, setSessionAgentInventory] = useState<{
     sessionKey: string;
     tasks: DaemonSessionAgentTaskStatus[];
@@ -11798,6 +11882,207 @@ export function App({
       splitSessionIds,
     ],
   );
+  // `/send` targets: trusted workspaces, which are the ones that can run.
+  // Kept by content so an equivalent list refresh keeps the composer props.
+  const sendWorkspacesRef = useRef<DaemonWorkspaceCapability[]>([]);
+  const nextSendWorkspaces = ordinaryWorkspaces.filter(
+    (entry) => entry.trusted,
+  );
+  if (
+    nextSendWorkspaces.length !== sendWorkspacesRef.current.length ||
+    nextSendWorkspaces.some((next, index) => {
+      const current = sendWorkspacesRef.current[index]!;
+      return (
+        current.id !== next.id ||
+        current.cwd !== next.cwd ||
+        workspaceLabel(current) !== workspaceLabel(next)
+      );
+    })
+  ) {
+    sendWorkspacesRef.current = nextSendWorkspaces;
+  }
+  const sendWorkspaces = sendWorkspacesRef.current;
+  // The workspace a `/send` being typed targets, so its sessions can be
+  // offered for `--session-id`.
+  const [sendCompletionCwd, setSendCompletionCwd] = useState<string>();
+  const sendSessionsQuery = useMemo<SessionCatalogQuery | undefined>(
+    () =>
+      sendCompletionCwd
+        ? {
+            routeKind: 'qualified',
+            workspaceCwd: sendCompletionCwd,
+            options: { archiveState: 'active' },
+          }
+        : undefined,
+    [sendCompletionCwd],
+  );
+  const { page: sendCompletionPage } = useSessionCatalogQuery(
+    workspace.client,
+    sendSessionsQuery,
+    { autoLoad: true },
+  );
+  const sendCompletionSessions = sendCompletionPage?.sessions;
+  const sendArgumentCompleter = useMemo(() => {
+    const callerCwd = connection.workspaceCwd;
+    if (!sendCommandAvailable || !callerCwd) return undefined;
+    const visible = lockedWorkspaceCwd
+      ? sendWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+      : sendWorkspaces;
+    const workspaces = disambiguateWorkspaceLabels(
+      visible.map((entry) => ({
+        cwd: entry.cwd,
+        label: workspaceLabel(entry),
+      })),
+    ).map((entry, index) => {
+      const workspace = visible[index]!;
+      const name = workspaceLabel(workspace);
+      return {
+        cwd: entry.cwd,
+        label: entry.label,
+        detail: entry.cwd,
+        value:
+          !/["']/.test(name) &&
+          resolveSendWorkspace(sendWorkspaces, name) === entry.cwd
+            ? name
+            : workspace.id,
+      };
+    });
+    const callerSessionId = connection.sessionId;
+    return createSendArgumentCompleter({
+      workspaces,
+      currentWorkspaceCwd: callerCwd,
+      resolveWorkspace: (value) => resolveSendWorkspace(sendWorkspaces, value),
+      sessionsFor: (cwd) =>
+        cwd === sendCompletionCwd
+          ? sendCompletionSessions
+              ?.filter((session) => session.sessionId !== callerSessionId)
+              .map((session) => ({
+                value: session.sessionId,
+                label:
+                  session.displayName?.trim() || session.sessionId.slice(0, 8),
+                detail: session.sessionId.slice(0, 8),
+              }))
+          : undefined,
+      optionDetail: (option) =>
+        t(
+          option === '--workspace'
+            ? 'send.option.workspace'
+            : 'send.option.sessionId',
+        ),
+    });
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    lockedWorkspaceCwd,
+    sendCommandAvailable,
+    sendCompletionCwd,
+    sendCompletionSessions,
+    sendWorkspaces,
+    t,
+  ]);
+  const trackSendCompletionTarget = useCallback(
+    (text: string) => {
+      let next: string | undefined;
+      if (sendCommandAvailable && /^\/send\s/.test(text)) {
+        const named = getSendWorkspace(text.slice('/send'.length));
+        const cwd = named
+          ? resolveSendWorkspace(sendWorkspaces, named)
+          : connection.workspaceCwd;
+        // Only a workspace it knows; a half-typed name lists nothing.
+        next =
+          (!lockedWorkspaceCwd || cwd === lockedWorkspaceCwd) &&
+          (cwd === connection.workspaceCwd ||
+            sendWorkspaces.some((entry) => entry.cwd === cwd))
+            ? (cwd ?? undefined)
+            : undefined;
+      }
+      setSendCompletionCwd((current) => (current === next ? current : next));
+    },
+    [
+      connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      sendCommandAvailable,
+      sendWorkspaces,
+    ],
+  );
+  const sendsInFlight = useRef(new Set<string>());
+  const runSendCommand = useCallback(
+    async (
+      command: SendCommand,
+      commitAccepted?: ComposerSubmitCommit,
+      isCurrentDraft?: ComposerSubmitMetadata['isCurrentDraft'],
+    ) => {
+      const callerSessionId = connection.sessionId;
+      const callerCwd = connection.workspaceCwd;
+      if (!callerSessionId || !callerCwd) return;
+      const workspaceCwd =
+        command.workspace === undefined
+          ? callerCwd
+          : resolveSendWorkspace(sendWorkspaces, command.workspace);
+      if (lockedWorkspaceCwd && workspaceCwd !== lockedWorkspaceCwd) {
+        pushToast('error', t('send.workspaceLocked'));
+        return;
+      }
+      const owner = sessionOwnerGuard.capture();
+      const key = JSON.stringify([callerCwd, callerSessionId]);
+      if (sendsInFlight.current.has(key)) return;
+      sendsInFlight.current.add(key);
+      try {
+        if (onSubmitBefore) {
+          await onSubmitBefore({
+            sessionId: callerSessionId,
+            prompt: command.message,
+          });
+          const currentLock = lockedWorkspaceCwdRef.current;
+          if (
+            !appMountedRef.current ||
+            !owner.isCurrent() ||
+            sessionWriteBlockedRef.current ||
+            isCurrentDraft?.() === false ||
+            (currentLock && workspaceCwd !== currentLock)
+          )
+            return;
+        }
+        const result = await workspace.client.sendToSubSession(
+          callerSessionId,
+          {
+            prompt: command.message,
+            ...(workspaceCwd !== callerCwd ? { workspace: workspaceCwd } : {}),
+            ...(command.sessionId
+              ? { targetSessionId: command.sessionId }
+              : {}),
+          },
+          connection.clientId,
+        );
+        commitAccepted?.();
+        sessionCatalogController.sessionCreated(
+          result.workspaceCwd ?? callerCwd,
+          result.sessionId,
+        );
+        if (owner.isCurrent()) {
+          setSubSessionTasksRefresh((value) => value + 1);
+        }
+      } catch (error) {
+        if (appMountedRef.current)
+          pushToast('error', extractErrorDetail(error));
+      } finally {
+        sendsInFlight.current.delete(key);
+      }
+    },
+    [
+      connection.clientId,
+      connection.sessionId,
+      connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      onSubmitBefore,
+      pushToast,
+      sendWorkspaces,
+      sessionCatalogController,
+      sessionOwnerGuard,
+      t,
+      workspace.client,
+    ],
+  );
   const notifyControlledSplitClose = useCallback(() => {
     if (externalSplitControlled) {
       onSplitSessionIdsChangeRef.current?.([]);
@@ -12119,7 +12404,6 @@ export function App({
   useEffect(() => {
     if (!modelManagementPolicy.allowAdd) setShowAuthDialog(false);
   }, [modelManagementPolicy.allowAdd, showAuthDialog]);
-  const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
     useState(0);
@@ -13753,7 +14037,14 @@ export function App({
   const gitModeEligible = Boolean(
     !connection.sessionId &&
       activeWorkspaceTrusted &&
-      selectedWorkspaceGitStatus?.branch,
+      // A detached-HEAD workspace (tag/SHA checkout) reports branch:null
+      // with detached:true; it is exactly the shared-checkout shape the
+      // worktree default exists to isolate.
+      (selectedWorkspaceGitStatus?.branch ||
+        selectedWorkspaceGitStatus?.detached) &&
+      // An unborn HEAD (no commits yet) has no worktree base; the create
+      // path would refuse. Keep the composer on the current branch.
+      selectedWorkspaceGitStatus?.hasHead !== false,
   );
   const branchWorktreeEligible = Boolean(
     connection.sessionId &&
@@ -13829,6 +14120,32 @@ export function App({
       view: 'log',
     });
   }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
+  // "Create branch here": the daemon branches the detached checkout in
+  // place; only the local branch metadata changes.
+  const handleCreateWorktreeBranch = useCallback(
+    async (name: string) => {
+      const sessionIdAtCall = connection.sessionId;
+      const result = await sessionActions.createWorktreeBranch(name);
+      // The user may have switched sessions while the request was in
+      // flight; never apply the response to a different session's state.
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
+      setSessionWorktree((current) =>
+        current ? { ...current, branch: result.worktree.branch } : current,
+      );
+    },
+    [sessionActions, connection.sessionId],
+  );
+  // "Hand off": the daemon moves the session between checkouts; the local
+  // worktree association follows the response (null => back on local).
+  const handleHandoff = useCallback(
+    async (to: 'local' | 'worktree') => {
+      const sessionIdAtCall = connection.sessionId;
+      const result = await sessionActions.handoffWorktree(to);
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
+      setSessionWorktree(result.worktree ?? undefined);
+    },
+    [sessionActions, connection.sessionId],
+  );
   // Every modal the shell itself tracks, plus host-registered interaction
   // blocks. View navigation hotkeys gate on this rather than dialogOpen,
   // because dialogOpen also counts activePanel and the Session Overview is
@@ -14594,7 +14911,10 @@ export function App({
   ]);
 
   const runVisibleBtw = useCallback(
-    (rawQuestion: string) => {
+    // displayQuestion overrides what the panel echoes; the model still
+    // receives the full question. Typed /btw keeps echoing the user's words.
+    // taskId marks a task explanation so the detail panel can mirror it.
+    (rawQuestion: string, displayQuestion?: string, taskId?: string) => {
       if (sessionWriteBlocked) return;
       const question = rawQuestion.trim();
       if (!question) {
@@ -14603,6 +14923,7 @@ export function App({
       }
       if (!requireActiveSessionForLocalCommand()) return;
 
+      const display = displayQuestion ?? question;
       const messageId = `local-btw-${nextBtwMessageIdRef.current++}`;
       const sessionId = connection.sessionId;
       const workspaceCwd = connection.workspaceCwd;
@@ -14612,9 +14933,10 @@ export function App({
       setBtwMessage({
         id: messageId,
         role: 'btw',
-        question,
+        question: display,
         answer: '',
         isPending: true,
+        ...(taskId ? { taskId } : {}),
       });
 
       void (async () => {
@@ -14632,9 +14954,10 @@ export function App({
             setBtwMessage({
               id: messageId,
               role: 'btw',
-              question,
+              question: display,
               answer: event.answer || (done ? t('btw.emptyAnswer') : ''),
               isPending: !done,
+              ...(taskId ? { taskId } : {}),
             });
             if (done) btwAbortControllerRef.current = null;
           }
@@ -14715,6 +15038,66 @@ export function App({
         !e.shiftKey &&
         (key === 'c' || key === 'd');
 
+      // Surfaces that own the keyboard yield the keys they actually consume.
+      // Dialogs/drawers (including component-local confirms portaled into the
+      // shell root) own Escape only — Enter/Space on their body still dismiss
+      // a settled explanation, and on a control still activate it. The waiting
+      // minigame (Space pauses, Enter restarts) and keyboard-scoped status
+      // cards (Enter/Space open/close detail and server actions) consume
+      // Enter/Space as well as Escape, so yield those keys to them too. The
+      // cancel chords are never owned by these surfaces, except Ctrl+C's copy
+      // role on a real text surface under a guard: Ctrl+D never copies, and a
+      // keyboard scope is not itself a text surface (a button inside a status
+      // card still cancels).
+      const inKeyboardScope =
+        target instanceof Element &&
+        target.closest('[data-keyboard-scope]') !== null;
+      const guardApplies =
+        hasOpenModalSurface(portalRoot) ||
+        waitingMinigameOpen ||
+        inKeyboardScope;
+      const guardOwnsActivation =
+        (waitingMinigameOpen || inKeyboardScope) &&
+        (e.key === 'Enter' || e.key === ' ');
+      const textCopy =
+        guardApplies &&
+        isCtrlCancel &&
+        key === 'c' &&
+        target instanceof Element &&
+        target.closest(
+          'input, textarea, select, [contenteditable]:not([contenteditable="false"]), .cm-editor',
+        ) !== null;
+      if (
+        textCopy ||
+        (guardApplies && e.key === 'Escape') ||
+        guardOwnsActivation
+      )
+        return;
+
+      // Enter/Space activate a control — button, link, field, menu item,
+      // tab, grid/tree row, and the like — and Escape inside the chip row or
+      // an open menu/listbox belongs to that widget. Every other key —
+      // Escape anywhere else, Ctrl+C/Ctrl+D — must reach the dismiss/cancel
+      // path below, which is what the panel's key hints advertise. The
+      // composer editor is never exempted: it is the dismiss shortcut's home
+      // surface. Grids and trees activate rows on Enter/Space but do not
+      // universally own Escape (the trajectory grid claims it only with a
+      // row selection), so they appear only in the activation list —
+      // exempting their Escape would leave the key unconsumed and let the
+      // app-level handler arm a surprise turn-cancel behind the panel.
+      if (
+        target instanceof Element &&
+        !target.closest('[data-web-shell-composer-editor]') &&
+        (((e.key === 'Enter' || e.key === ' ') &&
+          target.closest(
+            'button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="switch"], [role="checkbox"], [role="radio"], [role="grid"], [role="tree"], summary, [contenteditable], input, select, textarea',
+          )) ||
+          (e.key === 'Escape' &&
+            (target.closest('[data-web-shell-composer-task-chips]') ||
+              target.closest('[role="menu"], [role="listbox"]'))))
+      )
+        return;
+
       if (message.isPending) {
         if (!isPlainEscape && !isCtrlCancel) return;
       } else {
@@ -14736,7 +15119,14 @@ export function App({
 
     window.addEventListener('keydown', onBtwShortcut, true);
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
-  }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
+  }, [
+    interactionBlocked,
+    btwMessage,
+    dismissBtwMessage,
+    pendingApproval,
+    portalRoot,
+    waitingMinigameOpen,
+  ]);
 
   // Echo a local command into the transcript, or suppress it while a turn is
   // streaming so the injected user row can't split the active turn (see
@@ -14904,6 +15294,39 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
     )?.values.effective !== false;
+  const defaultWorktreeForNewSessions =
+    workspaceSettings.find(
+      (setting) => setting.key === 'worktree.defaultForNewSessions',
+    )?.values.effective === true;
+  const handleGitModeIntentChange = useCallback((intent: SessionGitIntent) => {
+    gitModeIntentTouchedRef.current = true;
+    gitModeIntentRef.current = intent;
+    setGitModeIntent(intent);
+  }, []);
+  // An explicit choice belongs to one draft: reset the touched flag at
+  // draft boundaries (session created/opened, workspace switched), not on
+  // transient eligibility drops — a git-status blip must not let the
+  // default overwrite an explicit current-branch choice.
+  useEffect(() => {
+    gitModeIntentTouchedRef.current = false;
+  }, [connection.sessionId, activeWorkspaceCwd]);
+  // Apply the worktree default on the rising edge of eligibility + setting
+  // (settings load asynchronously, so the default may land after the chip
+  // first renders). An explicit selection wins.
+  const gitModeDefaultConditionRef = useRef(false);
+  useEffect(() => {
+    const condition = gitModeEligible && defaultWorktreeForNewSessions;
+    if (
+      condition &&
+      !gitModeDefaultConditionRef.current &&
+      !gitModeIntentTouchedRef.current &&
+      gitModeIntentRef.current.mode === 'current'
+    ) {
+      gitModeIntentRef.current = { mode: 'worktree' };
+      setGitModeIntent({ mode: 'worktree' });
+    }
+    gitModeDefaultConditionRef.current = condition;
+  }, [gitModeEligible, defaultWorktreeForNewSessions, gitDraftGeneration]);
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -16875,6 +17298,14 @@ export function App({
           : { mode: 'current' };
       gitModeIntentRef.current = nextGitIntent;
       setGitModeIntent(nextGitIntent);
+      // A fresh draft is a new explicit-choice boundary: re-arm the
+      // worktree default. Without the generation bump the rising-edge
+      // effect never re-fires when "New chat" leaves sessionId and
+      // workspace unchanged, silently dropping the enabled default. A
+      // caller-supplied intent counts as an explicit choice and wins.
+      gitModeIntentTouchedRef.current = opts?.gitIntent !== undefined;
+      gitModeDefaultConditionRef.current = false;
+      setGitDraftGeneration((generation) => generation + 1);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -17587,8 +18018,9 @@ export function App({
     (text: string) => {
       composerTextRef.current = text;
       updateNewSessionSuggestionInput(text);
+      trackSendCompletionTarget(text);
     },
-    [updateNewSessionSuggestionInput],
+    [trackSendCompletionTarget, updateNewSessionSuggestionInput],
   );
 
   const flushPendingNewSessionSuggestionSubmit = useCallback(
@@ -18843,8 +19275,11 @@ export function App({
     [messages, openTasksPanel, toolRevealStore],
   );
   const openComposerTask = useCallback(
-    (task: DaemonSessionTaskWithWorkflowStatus) => {
+    (task: ComposerChipTask) => {
       switch (task.kind) {
+        case 'session':
+          openSessionPanel(task);
+          return;
         case 'workflow':
           locateWorkflowTask(task);
           return;
@@ -18875,9 +19310,56 @@ export function App({
       handleOpenShellDetails,
       locateWorkflowTask,
       messages,
+      openSessionPanel,
       openSubagentPanelForSession,
     ],
   );
+
+  const explainComposerTask = useCallback(
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
+      runVisibleBtw(
+        buildTaskExplainQuestion(task, t),
+        t('tasks.explain.display', { label: explainDisplayLabel(task.label) }),
+        task.id,
+      );
+    },
+    [runVisibleBtw, t],
+  );
+
+  // The detail panel's "?" explains the task shown in the active tab. Shell
+  // and monitor tabs carry their snapshot; a subagent tab resolves through
+  // the registry by its spawning tool call. Workflow tabs name no run.
+  const activeExplainTask = useMemo(() => {
+    const tab = artifactPanelTabs.find(
+      (item) => item.id === activeArtifactPanelTabId,
+    );
+    if (!tab) return null;
+    if (tab.kind === 'shell' || tab.kind === 'monitor') return tab.task;
+    if (tab.kind === 'subagent') {
+      // The open path registers the tab under toolUseId ?? id
+      // (agentTaskAsToolCall), so accept both id domains here.
+      return (
+        sessionTasks.find(
+          (task) =>
+            task.kind === 'agent' &&
+            (task.toolUseId === tab.rootToolCallId ||
+              task.id === tab.rootToolCallId),
+        ) ?? null
+      );
+    }
+    return null;
+  }, [artifactPanelTabs, activeArtifactPanelTabId, sessionTasks]);
+
+  const taskExplanation =
+    btwMessage?.role === 'btw' && btwMessage.taskId
+      ? {
+          messageId: btwMessage.id,
+          taskId: btwMessage.taskId,
+          question: btwMessage.question,
+          answer: btwMessage.answer,
+          isPending: btwMessage.isPending,
+        }
+      : null;
 
   const refreshGoal = useCallback(async () => {
     const owner = sessionOwnerGuard.capture();
@@ -19047,7 +19529,10 @@ export function App({
       }));
       if (!trimmed && !images?.length && !files?.length) return false;
       const inputAnnotations = mapRestoredInputAnnotationsAfterTextChange(
-        original.meta?.inputAnnotations ?? [],
+        // Only reference chips follow the text; who sent it does not.
+        (original.meta?.inputAnnotations ?? []).filter(
+          (annotation) => annotation?.type === 'reference',
+        ),
         original.text,
         trimmed,
       );
@@ -20233,9 +20718,7 @@ export function App({
           }
           if (cmd === 'memory') {
             const memoryArg = text.slice(match[0].length).trim().toLowerCase();
-            if (memoryArg === 'refresh') {
-              setMemoryRefreshSignal((signal) => signal + 1);
-            } else if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
+            if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
               const addTarget = memoryArg.slice('add'.length).trim();
               setMemoryAddScope(
                 addTarget === 'user' || addTarget === 'global'
@@ -20497,6 +20980,33 @@ export function App({
           if (cmd === 'recap') {
             runVisibleRecap();
             return true;
+          }
+          if (cmd === 'send' && sendCommandAvailable) {
+            if (!requireActiveSessionForLocalCommand()) return false;
+            if (images?.length || files?.length) {
+              pushToast('error', t('send.noAttachments'));
+              return false;
+            }
+            const parsed = parseSendCommand(text.slice(match[0].length));
+            if (!parsed.ok) {
+              pushToast(
+                'error',
+                parsed.error === 'missing-message'
+                  ? t('send.missingMessage')
+                  : parsed.error === 'missing-value'
+                    ? t('send.missingValue', { option: parsed.option ?? '' })
+                    : t('send.duplicateOption', {
+                        option: parsed.option ?? '',
+                      }),
+              );
+              return false;
+            }
+            void runSendCommand(
+              parsed,
+              commitComposerAccepted,
+              metadata?.isCurrentDraft,
+            );
+            return false;
           }
           if (cmd === 'btw') {
             const rawQuestion = text.slice(match[0].length).trim();
@@ -20882,6 +21392,8 @@ export function App({
       reportError,
       runVisibleRecap,
       runVisibleBtw,
+      runSendCommand,
+      sendCommandAvailable,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
       selectedLanguage,
@@ -21713,6 +22225,18 @@ export function App({
       // behind it, or a second Escape would stop the turn by surprise.
       if (live.waitingMinigameOpen) return;
 
+      // A keyboard-scoped surface (Tasks/Mcp status cards) owns Escape too:
+      // its own delayed window listener collapses the card, and that listener
+      // bails on defaultPrevented. Arming the two-press stream cancel here
+      // would both swallow the card's Escape and stop the turn on a second
+      // press, so yield before deciding the escape intent.
+      const escScopeTarget = e.composedPath()[0] ?? e.target;
+      if (
+        escScopeTarget instanceof Element &&
+        escScopeTarget.closest('[data-keyboard-scope]')
+      )
+        return;
+
       // Streaming takes priority over clearing text (queued prompts stay intact
       // and drain after the turn settles); see decideEscapeIntent for the rules.
       const intent = decideEscapeIntent({
@@ -22486,6 +23010,7 @@ export function App({
         getLocalCommands(t, {
           sideTaskAvailable: sideTasksAvailable,
           subscriptionAvailable,
+          sendAvailable: sendCommandAvailable,
         }),
         [...additionalSlashCommands],
       ),
@@ -22532,6 +23057,7 @@ export function App({
     hiddenCommands,
     loadedSkills,
     pendingSessionContext,
+    sendCommandAvailable,
     sideTasksAvailable,
     t,
     useWorkspaceSkillSnapshot,
@@ -22749,6 +23275,24 @@ export function App({
       openPanel('agents');
     },
   });
+  const submitAgentChat = agentChatEntry.submit;
+  const submitComposerInput = useCallback(
+    (...args: Parameters<typeof handleEditorSubmit>) => {
+      if (
+        !collaborationAvailable ||
+        (sendCommandAvailable && /^\/send(?:\s|$)/i.test(args[0]))
+      ) {
+        return handleEditorSubmit(...args);
+      }
+      return submitAgentChat(...args);
+    },
+    [
+      collaborationAvailable,
+      handleEditorSubmit,
+      sendCommandAvailable,
+      submitAgentChat,
+    ],
+  );
   const sessionAgentTail = useMemo(
     () =>
       sessionAgentRuns.runs.length > 0 ||
@@ -22831,7 +23375,11 @@ export function App({
     ? getDefaultChatWidthMode()
     : chatWidthMode;
   const activeGitBranch = sessionWorktree
-    ? (selectedWorkspaceGitStatus?.branch ?? sessionWorktree.branch)
+    ? // A detached managed worktree has no branch (live status reports
+      // null, creation metadata ''); show its slug instead.
+      selectedWorkspaceGitStatus?.branch ||
+      sessionWorktree.branch ||
+      sessionWorktree.slug
     : sessionBranch
       ? (selectedWorkspaceGitStatus?.branch ?? sessionBranch.name)
       : connection.sessionId
@@ -23363,7 +23911,12 @@ export function App({
   const artifactPanelSharedProps = {
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
-    tabs: artifactPanelTabs,
+    tabs: lockedWorkspaceCwd
+      ? artifactPanelTabs.filter(
+          (tab) =>
+            tab.kind !== 'session' || tab.workspaceCwd === lockedWorkspaceCwd,
+        )
+      : artifactPanelTabs,
     contextUsageControls,
     activeTabId: activeArtifactPanelTabId,
     reviewChanges,
@@ -23440,6 +23993,9 @@ export function App({
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onOpenNestedSubagent: openSubagentPanelForSession,
     agentTasks: tracedEnvironmentAgentTasks,
+    explainTask: activeExplainTask,
+    onExplainTask: explainComposerTask,
+    taskExplanation,
     agentTraceLoading: agentTraceInitialLoading,
     agentTraceError: agentTraceFailed ? t('workflow.loadFailed') : undefined,
     onOpenWorkflowAgent: openEnvironmentAgent,
@@ -23718,7 +24274,6 @@ export function App({
               onClose={() => setShowMemoryDialog(false)}
             >
               <MemoryMessage
-                refreshSignal={memoryRefreshSignal}
                 addSignal={memoryAddSignal}
                 addScope={memoryAddScope}
                 onMessage={(text, type = 'status') => {
@@ -25884,6 +26439,19 @@ export function App({
                                     workspaceCwd: connection.workspaceCwd,
                                   });
                                 }}
+                                onOpenSession={(request) => {
+                                  // Without a workspace in the link, the
+                                  // session runs beside this one.
+                                  const workspaceCwd =
+                                    request.workspaceCwd ??
+                                    connection.workspaceCwd;
+                                  if (!workspaceCwd) return;
+                                  openSessionPanel({
+                                    sessionId: request.sessionId,
+                                    workspaceCwd,
+                                    label: request.title,
+                                  });
+                                }}
                               >
                                 {messageListWithWorkflowDetails}
                               </SubagentDetailsProvider>
@@ -25907,6 +26475,7 @@ export function App({
                                     question={btwMessage.question}
                                     answer={btwMessage.answer}
                                     isPending={btwMessage.isPending}
+                                    hidePrefix={Boolean(btwMessage.taskId)}
                                   />
                                 </div>
                               ) : null;
@@ -26350,12 +26919,13 @@ export function App({
                         {!CustomFooter && (
                           <ComposerTaskChips
                             ref={composerTaskChipsRef}
-                            tasks={sessionTasks}
+                            tasks={composerChipTasks}
                             // Headerless embeds have no environment panel to
                             // list background agents, and keep them out of
                             // their task surfaces.
                             includeAgents={environmentTasksReplacementEnabled}
                             onSelectTask={openComposerTask}
+                            onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
                           />
                         )}
@@ -26444,12 +27014,9 @@ export function App({
                             liveVoiceSlot ?? liveVoicePageSlot
                           }
                           compactOverlays={compactComposerOverlays}
-                          onSubmit={
-                            collaborationAvailable
-                              ? agentChatEntry.submit
-                              : handleEditorSubmit
-                          }
+                          onSubmit={submitComposerInput}
                           onInputTextChange={handleComposerTextChange}
+                          slashArgumentCompleter={sendArgumentCompleter}
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
                           }
@@ -26545,7 +27112,7 @@ export function App({
                               : undefined
                           }
                           gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
-                          onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
+                          onGitModeIntentChange={gitModeEligible ? handleGitModeIntentChange : undefined}
                           gitStatus={
                             workspaceContextActive
                               ? selectedWorkspaceGitStatus
@@ -26569,6 +27136,24 @@ export function App({
                           onOpenLog={
                             gitDiffWorkspaceCwd
                               ? handleOpenLog
+                              : undefined
+                          }
+                          onCreateWorktreeBranch={
+                            sessionWorktree &&
+                            !sessionWorktree.branch &&
+                            workspace.capabilities?.features?.includes(
+                              'session_worktree_branch_v1',
+                            )
+                              ? handleCreateWorktreeBranch
+                              : undefined
+                          }
+                          onHandoff={
+                            connection.sessionId &&
+                            workspaceContextActive &&
+                            workspace.capabilities?.features?.includes(
+                              'session_worktree_handoff_v1',
+                            )
+                              ? handleHandoff
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}

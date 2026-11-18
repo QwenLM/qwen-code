@@ -48,7 +48,10 @@ import { MonitorDetailsProvider } from '../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../workflowDetailsContext';
 import { useI18n } from '../i18n';
 import { getWorkflowModeMessages } from './workflow-mode-messages';
-import { McpAppVisibilityContext } from '../mcpAppHostContext';
+import {
+  McpAppReadOnlyContext,
+  McpAppVisibilityContext,
+} from '../mcpAppHostContext';
 import { getSubagentDetailsUnavailableReason } from './messages/toolFormatting';
 import { useWebShellCustomization } from '../customization';
 import {
@@ -282,6 +285,8 @@ export interface ChatPaneProps {
   messageTurnOutputs?: readonly TurnOutputKind[];
   /** Render inside a parent surface that already provides its own frame. */
   embedded?: boolean;
+  /** Show the session without a composer; approvals still render. */
+  readOnly?: boolean;
   onFirstPromptAdmitted?: (text: string) => void;
   /** Whether this pane owns Session Catalog turn-completion reconciliation. */
   reportCatalogTurnCompletion?: boolean;
@@ -329,6 +334,7 @@ export function ChatPane({
   onOpenContextUsage,
   messageTurnOutputs,
   embedded = false,
+  readOnly = false,
   onFirstPromptAdmitted,
   reportCatalogTurnCompletion = true,
   hidden = false,
@@ -790,7 +796,7 @@ export function ChatPane({
         ? t('settings.models.addDisabled')
         : undefined,
     connected: connection.status === 'connected',
-    writeBlocked: connection.runtimeStopped,
+    writeBlocked: readOnly || connection.runtimeStopped,
     runtimeStopped: connection.runtimeStopped,
     sessionId: connection.sessionId,
     workspaceCwd: connection.workspaceCwd,
@@ -824,7 +830,9 @@ export function ChatPane({
     if (!isResponding) return undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i];
-      if (message?.role === 'user') return message.timestamp;
+      if (message?.role === 'user' && !message.agentMessage?.sentTo) {
+        return message.timestamp;
+      }
     }
     return undefined;
   }, [
@@ -1782,7 +1790,7 @@ export function ChatPane({
     [embedded, showWorkspaceChip, planControlVisible],
   );
   const headerActions =
-    connection.sessionId && renderHeaderActions
+    !readOnly && connection.sessionId && renderHeaderActions
       ? renderHeaderActions({
           sessionId: connection.sessionId,
           workspaceCwd: paneWorkspaceCwd || undefined,
@@ -1805,6 +1813,8 @@ export function ChatPane({
   const workspaceAccentClass = workspaceAccent
     ? accentStyles[workspaceAccent]
     : undefined;
+  const showComposerStatus =
+    !readOnly && (queuedPrompts.length > 0 || liveGoalSnapshot?.goal);
 
   return (
     <section
@@ -1822,7 +1832,7 @@ export function ChatPane({
         hydrated={hydrated}
         refresh={refresh}
       />
-      {goalEditOpen && connection.goalState?.goal && (
+      {!readOnly && goalEditOpen && connection.goalState?.goal && (
         <GoalEditDialog
           objective={connection.goalState.goal.objective}
           saving={goalControlBusy}
@@ -1985,55 +1995,57 @@ export function ChatPane({
             <McpAppVisibilityContext.Provider
               value={parentSurfaceVisible && !hidden}
             >
-              <WorkflowDetailsProvider tasks={sessionTasks}>
-                <TranscriptViewport
-                  ref={transcriptViewportRef}
-                  messages={messages}
-                  sourceSessionId={connection.sessionId}
-                  pendingApproval={pendingToolApproval}
-                  loadingTranscript={connection.loadingTranscript}
-                  catchingUp={connection.catchingUp}
-                  hasOlderHistory={transcriptHistory.hasMore}
-                  loadingOlderHistory={transcriptHistory.loading}
-                  historyCapacityReached={transcriptHistory.capacityReached}
-                  historyPaginationError={transcriptHistory.paginationError}
-                  onLoadOlderHistory={transcriptHistory.loadMore}
-                  transcriptBlockCount={blocks.length}
-                  transcriptActivity={store}
-                  onReloadTranscript={
-                    transcriptReloadSupported ? reloadTranscript : undefined
-                  }
-                  isResponding={isResponding}
-                  workspaceCwd={connection.workspaceCwd || ''}
-                  hideSessionTimeline
-                  turnFileChanges={
-                    visibleTurnOutputKinds.has('file')
-                      ? fileChangesByTurn
-                      : undefined
-                  }
-                  turnArtifacts={
-                    visibleTurnOutputKinds.has('artifact')
-                      ? artifactsByTurn
-                      : undefined
-                  }
-                  turnScheduledTasks={
-                    visibleTurnOutputKinds.has('scheduled_task')
-                      ? scheduledTasksByTurn
-                      : undefined
-                  }
-                  onTurnOutputOpen={handleRightPanelOpen}
-                  onImagePreview={handleImagePreview}
-                  onAttachmentPreview={handleAttachmentPreview}
-                  onError={reportError}
-                  generateContent={
-                    connection.capabilities?.features.includes(
-                      'session_generation',
-                    )
-                      ? actions.generateSessionContent
-                      : undefined
-                  }
-                />
-              </WorkflowDetailsProvider>
+              <McpAppReadOnlyContext.Provider value={readOnly}>
+                <WorkflowDetailsProvider tasks={sessionTasks}>
+                  <TranscriptViewport
+                    ref={transcriptViewportRef}
+                    messages={messages}
+                    sourceSessionId={connection.sessionId}
+                    pendingApproval={pendingToolApproval}
+                    loadingTranscript={connection.loadingTranscript}
+                    catchingUp={connection.catchingUp}
+                    hasOlderHistory={transcriptHistory.hasMore}
+                    loadingOlderHistory={transcriptHistory.loading}
+                    historyCapacityReached={transcriptHistory.capacityReached}
+                    historyPaginationError={transcriptHistory.paginationError}
+                    onLoadOlderHistory={transcriptHistory.loadMore}
+                    transcriptBlockCount={blocks.length}
+                    transcriptActivity={store}
+                    onReloadTranscript={
+                      transcriptReloadSupported ? reloadTranscript : undefined
+                    }
+                    isResponding={isResponding}
+                    workspaceCwd={connection.workspaceCwd || ''}
+                    hideSessionTimeline
+                    turnFileChanges={
+                      visibleTurnOutputKinds.has('file')
+                        ? fileChangesByTurn
+                        : undefined
+                    }
+                    turnArtifacts={
+                      visibleTurnOutputKinds.has('artifact')
+                        ? artifactsByTurn
+                        : undefined
+                    }
+                    turnScheduledTasks={
+                      visibleTurnOutputKinds.has('scheduled_task')
+                        ? scheduledTasksByTurn
+                        : undefined
+                    }
+                    onTurnOutputOpen={handleRightPanelOpen}
+                    onImagePreview={handleImagePreview}
+                    onAttachmentPreview={handleAttachmentPreview}
+                    onError={reportError}
+                    generateContent={
+                      connection.capabilities?.features.includes(
+                        'session_generation',
+                      )
+                        ? actions.generateSessionContent
+                        : undefined
+                    }
+                  />
+                </WorkflowDetailsProvider>
+              </McpAppReadOnlyContext.Provider>
             </McpAppVisibilityContext.Provider>
           </SubagentDetailsProvider>
         </OptionalMonitorDetailsProvider>
@@ -2075,7 +2087,7 @@ export function ChatPane({
             />
           </div>
         )}
-        {capacityRecovery.intent && (
+        {!readOnly && capacityRecovery.intent && (
           <CapacityRecoveryDialog
             intent={capacityRecovery.intent}
             onClose={capacityRecovery.dismiss}
@@ -2090,21 +2102,23 @@ export function ChatPane({
                   ? t('capacityChoice.persistenceUnconfirmed')
                   : ''}
               </span>
-              <button
-                type="button"
-                onClick={() => {
-                  if (connection.sessionId)
-                    void actions
-                      .loadSession(connection.sessionId, {
-                        sessionContext: connection.sessionContext,
-                      })
-                      .catch((error: unknown) =>
-                        reportError(error, 'Failed to resume session'),
-                      );
-                }}
-              >
-                {t('capacityChoice.resume')}
-              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (connection.sessionId)
+                      void actions
+                        .loadSession(connection.sessionId, {
+                          sessionContext: connection.sessionContext,
+                        })
+                        .catch((error: unknown) =>
+                          reportError(error, 'Failed to resume session'),
+                        );
+                  }}
+                >
+                  {t('capacityChoice.resume')}
+                </button>
+              )}
             </div>
           )}
           {/* Panes keep the composer status compact: spinner + elapsed time +
@@ -2122,7 +2136,7 @@ export function ChatPane({
               connection.backgroundTurn?.kind
             }
           />
-          {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
+          {showComposerStatus && (
             <div
               className={composerStatusStyles.root}
               data-testid="composer-status-stack"
@@ -2165,7 +2179,7 @@ export function ChatPane({
               data-testid="pane-prompt-admission-unknown"
             >
               <span>{t('queue.admissionUnknown')}</span>
-              {unknownPromptAdmission.payloadAvailable && (
+              {!readOnly && unknownPromptAdmission.payloadAvailable && (
                 <span className={styles.admissionUnknownActions}>
                   <button type="button" onClick={continueEditingUnknownPrompt}>
                     {t('queue.continueEditing')}
@@ -2179,82 +2193,87 @@ export function ChatPane({
           )}
           <SessionRecoveryBanner
             blocked={
-              approvalActive || admissionPayloadLocked || sessionHasActivePrompt
+              readOnly ||
+              approvalActive ||
+              admissionPayloadLocked ||
+              sessionHasActivePrompt
             }
           />
-          <ChatEditor
-            ref={editorRef}
-            onSubmit={handleSubmit}
-            onCancel={handleCancel}
-            isRunning={isResponding || sessionHasActivePrompt}
-            commands={commands}
-            skills={skills}
-            queuedMessages={queuedTexts}
-            onPopQueuedMessages={editLastQueuedPrompt}
-            onClearQueuedMessages={clearQueuedPrompts}
-            visibleToolbarActions={paneToolbarActions}
-            tokenCount={
-              contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
-            }
-            contextWindow={
-              contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
-            }
-            onShowContextUsage={
-              contextUsageAvailable ? handleShowContextUsage : undefined
-            }
-            contextUsageControls={
-              onOpenContextUsage ? contextUsageControls : undefined
-            }
-            onOpenContextUsage={
-              contextUsageAvailable && onOpenContextUsage
-                ? handleOpenContextUsage
-                : undefined
-            }
-            workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
-            workspaceTitle={paneWorkspaceCwd}
-            workspaceColor={workspaceAccent}
-            currentMode={executionMode}
-            availableModes={availableApprovalModes}
-            onCycleMode={handleCycleMode}
-            modeControlsDisabled={modeControlsBusy}
-            planMode={planMode}
-            onTogglePlan={handleTogglePlan}
-            sessionWorkflowEnabled={sessionWorkflowEnabled}
-            currentModel={connection.currentModel ?? ''}
-            modelRefresh={modelRefresh}
-            availableModels={availableModels}
-            modelPickerScope={modelPickerScope}
-            unavailableModels={unavailableModels}
-            mountUnavailableModelTooltip={mountUnavailableModelTooltip}
-            onSelectMode={handleSelectMode}
-            onSelectModel={handleSelectModel}
-            workflowMode={connection.workflowMode}
-            workflowModeStatus={
-              connection.loadingTranscript ||
-              connection.catchingUp ||
-              connection.status !== 'connected'
-                ? 'syncing'
-                : (connection.workflowModeStatus ?? 'unknown')
-            }
-            workflowModePending={connection.workflowModePending}
-            onWorkflowModeChange={handleWorkflowModeChange}
-            reasoning={connection.reasoning}
-            onSelectReasoningEffort={handleSelectReasoningEffort}
-            dialogOpen={approvalActive}
-            disabled={approvalActive || admissionPayloadLocked}
-            voiceTarget={hidden ? undefined : voiceTarget}
-            voiceStatusRevision={voiceStatusRevision}
-            followupState={followupState}
-            onAcceptFollowup={onAcceptFollowup}
-            onDismissFollowup={onDismissFollowup}
-            onImageIngestionNotice={onImageIngestionNotice}
-            sessionId={connection.sessionId}
-            onImagePreview={handleImagePreview}
-            onAttachmentPreview={handleAttachmentPreview}
-            atWorkspaceCwd={paneWorkspaceCwd}
-            placeholderText={t('splitView.composerPlaceholder')}
-          />
-          {CustomComposerFooter && (
+          {!readOnly && (
+            <ChatEditor
+              ref={editorRef}
+              onSubmit={handleSubmit}
+              onCancel={handleCancel}
+              isRunning={isResponding || sessionHasActivePrompt}
+              commands={commands}
+              skills={skills}
+              queuedMessages={queuedTexts}
+              onPopQueuedMessages={editLastQueuedPrompt}
+              onClearQueuedMessages={clearQueuedPrompts}
+              visibleToolbarActions={paneToolbarActions}
+              tokenCount={
+                contextUsageAvailable ? (connection.tokenCount ?? 0) : 0
+              }
+              contextWindow={
+                contextUsageAvailable ? (connection.contextWindow ?? 0) : 0
+              }
+              onShowContextUsage={
+                contextUsageAvailable ? handleShowContextUsage : undefined
+              }
+              contextUsageControls={
+                onOpenContextUsage ? contextUsageControls : undefined
+              }
+              onOpenContextUsage={
+                contextUsageAvailable && onOpenContextUsage
+                  ? handleOpenContextUsage
+                  : undefined
+              }
+              workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
+              workspaceTitle={paneWorkspaceCwd}
+              workspaceColor={workspaceAccent}
+              currentMode={executionMode}
+              availableModes={availableApprovalModes}
+              onCycleMode={handleCycleMode}
+              modeControlsDisabled={modeControlsBusy}
+              planMode={planMode}
+              onTogglePlan={handleTogglePlan}
+              sessionWorkflowEnabled={sessionWorkflowEnabled}
+              currentModel={connection.currentModel ?? ''}
+              modelRefresh={modelRefresh}
+              availableModels={availableModels}
+              modelPickerScope={modelPickerScope}
+              unavailableModels={unavailableModels}
+              mountUnavailableModelTooltip={mountUnavailableModelTooltip}
+              onSelectMode={handleSelectMode}
+              onSelectModel={handleSelectModel}
+              workflowMode={connection.workflowMode}
+              workflowModeStatus={
+                connection.loadingTranscript ||
+                connection.catchingUp ||
+                connection.status !== 'connected'
+                  ? 'syncing'
+                  : (connection.workflowModeStatus ?? 'unknown')
+              }
+              workflowModePending={connection.workflowModePending}
+              onWorkflowModeChange={handleWorkflowModeChange}
+              reasoning={connection.reasoning}
+              onSelectReasoningEffort={handleSelectReasoningEffort}
+              dialogOpen={approvalActive}
+              disabled={approvalActive || admissionPayloadLocked}
+              voiceTarget={hidden ? undefined : voiceTarget}
+              voiceStatusRevision={voiceStatusRevision}
+              followupState={followupState}
+              onAcceptFollowup={onAcceptFollowup}
+              onDismissFollowup={onDismissFollowup}
+              onImageIngestionNotice={onImageIngestionNotice}
+              sessionId={connection.sessionId}
+              onImagePreview={handleImagePreview}
+              onAttachmentPreview={handleAttachmentPreview}
+              atWorkspaceCwd={paneWorkspaceCwd}
+              placeholderText={t('splitView.composerPlaceholder')}
+            />
+          )}
+          {!readOnly && CustomComposerFooter && (
             <CustomComposerFooter
               disabled={approvalActive || admissionPayloadLocked}
               isRunning={isResponding || sessionHasActivePrompt}

@@ -172,6 +172,7 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -181,6 +182,7 @@ import {
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_UPDATES,
@@ -1675,6 +1677,7 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'session_metadata_updated',
   'session_cwd_changed',
   'artifact_changed',
+  'sub_session_task_changed',
   'source_changed',
   'settings_changed',
   'extensions_changed',
@@ -1736,9 +1739,25 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   const meta = updateRecord['_meta'];
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
   const metaRecord = meta as Record<string, unknown>;
-  return (
+  if (
     metaRecord['source'] === 'user-shell' ||
     metaRecord['hookLifecycle'] !== undefined
+  ) {
+    return true;
+  }
+  // A /send receipt records a message without starting a new turn here.
+  // Ordinary agent mentions still count as turn content.
+  if (subtype !== 'user_message_chunk') return false;
+  const agentMessage = metaRecord['qwenAgentMessage'];
+  if (!agentMessage || typeof agentMessage !== 'object') return false;
+  const { kind, sentTo } = agentMessage as Record<string, unknown>;
+  if (kind !== 'agent_mention' || !sentTo || typeof sentTo !== 'object') {
+    return false;
+  }
+  const target = sentTo as Record<string, unknown>;
+  return (
+    typeof target['sessionId'] === 'string' &&
+    typeof target['workspaceCwd'] === 'string'
   );
 }
 
@@ -4564,6 +4583,7 @@ export function createSessionControlPlane(
       ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
       clientCount: entry.clientIds.size,
       hasActivePrompt: hasInFlightPromptActivity(entry),
+      pendingPromptCount: entry.pendingPromptCount,
       activeWorkState: entryActiveWorkState(entry),
       hasRunningBackgroundTasks: entry.hasRunningBackgroundTasks,
       ...(entry.backgroundTurn ? { backgroundTurn: entry.backgroundTurn } : {}),
@@ -9297,6 +9317,11 @@ export function createSessionControlPlane(
                         [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                       }
                     : {}),
+                  ...(req.deferAutomaticWorkUntilCwdRestore
+                    ? {
+                        [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
+                      }
+                    : {}),
                 },
               });
               return await restoreChannel.connection.loadSession(request);
@@ -9324,6 +9349,11 @@ export function createSessionControlPlane(
                 ...(req.suppressWorktreeContextRestore
                   ? {
                       [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+                    }
+                  : {}),
+                ...(req.deferAutomaticWorkUntilCwdRestore
+                  ? {
+                      [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
                     }
                   : {}),
               },
@@ -11724,33 +11754,52 @@ export function createSessionControlPlane(
         deadlineTimer = setTimeout(onDeadline, deadlineMs);
         deadlineTimer.unref();
       }
+      const releaseGuardWaitWithoutSuccessor = () => {
+        const ownerPromptId =
+          entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+        if (!ownerPromptId) return;
+        const hasSuccessor = entry.pendingPromptList.some(
+          (candidate) =>
+            candidate.promptId !== ownerPromptId &&
+            !candidate.terminalPublished &&
+            !candidate.abortController.signal.aborted,
+        );
+        if (hasSuccessor) return;
+        delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+        void entry.connection
+          .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, {
+            sessionId,
+            promptId: ownerPromptId,
+          })
+          .catch((error) => {
+            writeStderrLine(
+              `qwen serve: Todo Stop Guard queued-prompt release failed for ` +
+                `${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+      };
+      const publishPromptFailure = (err: unknown) => {
+        publishPromptTerminal(
+          entry,
+          pendingEntry,
+          err instanceof DOMException && err.name === 'AbortError'
+            ? { kind: 'cancelled' }
+            : { kind: 'error', err },
+        );
+      };
+      const onQueuedDispatchAbort = () => {
+        if (pendingEntry.state === 'queued') {
+          pendingAbort.abort(dispatchSignal?.reason);
+          publishPromptFailure(dispatchSignal?.reason);
+        }
+      };
       if (isQueued) {
         pendingAbort.signal.addEventListener(
           'abort',
           () => {
-            if (pendingEntry.state !== 'queued') return;
-            const waitingOwnerPromptId =
-              entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
-            if (!waitingOwnerPromptId) return;
-            const hasAnotherQueuedPrompt = entry.pendingPromptList.some(
-              (candidate) =>
-                candidate !== pendingEntry &&
-                candidate.state === 'queued' &&
-                !candidate.abortController.signal.aborted,
-            );
-            if (hasAnotherQueuedPrompt) return;
-            delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
-            void entry.connection
-              .extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, {
-                sessionId,
-                promptId: waitingOwnerPromptId,
-              })
-              .catch((error) => {
-                writeStderrLine(
-                  `qwen serve: Todo Stop Guard queued-prompt release failed for ` +
-                    `${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
-                );
-              });
+            if (pendingEntry.state === 'queued') {
+              releaseGuardWaitWithoutSuccessor();
+            }
           },
           { once: true },
         );
@@ -11765,10 +11814,15 @@ export function createSessionControlPlane(
           },
           ...(originatorClientId ? { originatorClientId } : {}),
         });
+        dispatchSignal?.addEventListener('abort', onQueuedDispatchAbort, {
+          once: true,
+        });
+        if (dispatchSignal?.aborted) onQueuedDispatchAbort();
       }
       // Force the body's sessionId to match the routing id — a client that
       // sent a stale id in the body would otherwise be dispatched to the
       // wrong agent process.
+      let handoffOwnerPromptId: string | undefined;
       const result = entry.promptQueue.then(() =>
         telemetry.runWithContext(capturedContext, async () => {
           const queueWaitMs = Date.now() - queuedAt;
@@ -11806,7 +11860,9 @@ export function createSessionControlPlane(
           // mid-turn message has no client-side row to render.
           if (pendingEntry.state === 'queued' || isPromotedMidTurn) {
             if (pendingEntry.state === 'queued') {
-              delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+              // Promotion can still fail before the child receives the prompt.
+              handoffOwnerPromptId =
+                entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
               pendingEntry.state = 'running';
             }
             entry.events.publish({
@@ -11925,6 +11981,7 @@ export function createSessionControlPlane(
                   }
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
                   delete meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+                  delete meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
                   delete meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
                   // Channel classification is authenticated channel-worker
                   // metadata; the daemon prompt route validates the worker
@@ -11969,6 +12026,10 @@ export function createSessionControlPlane(
                   if (context?.expectedApprovalMode !== undefined) {
                     meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY] =
                       context.expectedApprovalMode;
+                  }
+                  if (context?.approvalModeBeforeStart !== undefined) {
+                    meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY] =
+                      context.approvalModeBeforeStart;
                   }
                   const attachmentReferences = dispatchBlocks.filter(
                     isSessionAttachmentReference,
@@ -12296,18 +12357,19 @@ export function createSessionControlPlane(
             kind: 'complete',
             result: promptResult,
           });
+          if (promptResult.stopReason === 'cancelled') {
+            releaseGuardWaitWithoutSuccessor();
+          } else if (
+            handoffOwnerPromptId !== undefined &&
+            entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId ===
+              handoffOwnerPromptId
+          ) {
+            delete entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId;
+          }
         },
         (err) => {
-          if (err instanceof DOMException && err.name === 'AbortError') {
-            // An aborted prompt (queued removal, caller socket close,
-            // deadline…) still owes its formal terminal — fall back to a
-            // `cancelled` turn_complete. Paths that already published one
-            // (removePendingPrompt, onDeadline, flush) are deduped by the
-            // per-prompt latch inside `publishPromptTerminal`.
-            publishPromptTerminal(entry, pendingEntry, { kind: 'cancelled' });
-            return;
-          }
-          publishPromptTerminal(entry, pendingEntry, { kind: 'error', err });
+          publishPromptFailure(err);
+          releaseGuardWaitWithoutSuccessor();
         },
       );
       // Tail swallows failures so subsequent prompts still run. The caller
@@ -12327,6 +12389,7 @@ export function createSessionControlPlane(
       result
         .finally(() => {
           signal?.removeEventListener('abort', onCallerAbort);
+          dispatchSignal?.removeEventListener('abort', onQueuedDispatchAbort);
           if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
           // Remove this prompt from the pending list and publish a
           // completed event so SSE subscribers can update their queue view.
@@ -12572,6 +12635,12 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.lastEventId;
+    },
+
+    getSessionPendingPermissionIds(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return [...entry.pendingPermissionIds];
     },
 
     getSessionEventEpoch(sessionId) {
@@ -13129,9 +13198,13 @@ export function createSessionControlPlane(
       );
 
       // Relocation moves the session's cwd — including into a subdir of the
-      // checkout the transfer is moving. The route relocates the *replacement*
-      // (never armed), so the superseded id fails closed here.
-      assertSessionResetNotPending(sessionId);
+      // checkout the transfer is moving. The reset route relocates the
+      // *replacement* (never armed), so the superseded id fails closed here.
+      // The handoff route arms the barrier on the session it is moving and
+      // owns it for the whole transfer; it alone may pass the exemption.
+      if (!req.allowWhileResetPending) {
+        assertSessionResetNotPending(sessionId);
+      }
 
       // Chain onto promptQueue and update tail — ensures:
       // 1. cd waits for any in-flight prompt to complete

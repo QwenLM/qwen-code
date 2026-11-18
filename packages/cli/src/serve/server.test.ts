@@ -8,6 +8,7 @@ import { existsSync, realpathSync, promises as fsp } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { createServer, type ServerResponse } from 'node:http';
+import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import {
@@ -41,6 +42,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import type { SubSessionLauncher } from './create-sub-session.js';
 import * as toolCallsReader from './session-tool-calls.js';
 import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
@@ -243,6 +245,8 @@ import {
 } from './live/types.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
+import { EventBus } from '@qwen-code/acp-bridge/eventBus';
+import { TEST_TLS_CERT, TEST_TLS_KEY } from './test-tls-cert.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
@@ -258,7 +262,7 @@ const execFileAsync = promisify(execFile);
 // the class with a controllable mock; each worktree test sets
 // `mockWt.impl` to control instance behaviour.
 const mockWt = vi.hoisted(() => ({
-  impl: undefined as (() => Record<string, unknown>) | undefined,
+  impl: undefined as ((cwd?: string) => Record<string, unknown>) | undefined,
   createMarker: undefined as
     | ((...args: unknown[]) => Promise<unknown>)
     | undefined,
@@ -337,9 +341,9 @@ vi.mock(
         static validateUserWorktreeSlug =
           original.GitWorktreeService.validateUserWorktreeSlug;
         static generateAutoSlug = original.GitWorktreeService.generateAutoSlug;
-        constructor() {
+        constructor(cwd?: string) {
           if (mockWt.impl) {
-            Object.assign(this, mockWt.impl());
+            Object.assign(this, mockWt.impl(cwd));
           }
         }
       },
@@ -422,7 +426,7 @@ vi.mock('./server/git-branch-ops.js', () => ({
   getHeadCommit: () =>
     mockBranchOps.getHeadCommit
       ? mockBranchOps.getHeadCommit()
-      : Promise.resolve(undefined),
+      : Promise.resolve('a'.repeat(40)),
   createBranch: () =>
     mockBranchOps.createBranch
       ? mockBranchOps.createBranch()
@@ -697,6 +701,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_info',
   'session_source_metadata',
   'session_side_task',
+  'session_sub_session_send',
   'session_prompt',
   'session_turn_status',
   'session_attachments',
@@ -845,6 +850,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_branch_v1',
+  'session_worktree_handoff_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -959,6 +966,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
+      f !== 'session_worktree_branch_v1' &&
+      f !== 'session_worktree_handoff_v1' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice' &&
       f !== 'realtime_voice_web',
@@ -1042,6 +1051,8 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_branch_v1',
+  'session_worktree_handoff_v1',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -4795,6 +4806,7 @@ describe('createServeApp', () => {
       '/channel-events',
       '/live',
       '/scheduled-tasks',
+      '/pr-watches',
       '/goals',
       '/settings',
     ])(
@@ -15764,11 +15776,13 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
+      // Mirror the real detached contract: createUserWorktree returns
+      // branch:'' when detached, never the slug-derived name.
       const mockCreate = vi.fn().mockResolvedValue({
         success: true,
         worktree: {
           path: worktreePath,
-          branch: 'worktree-my-task',
+          branch: '',
         },
       });
       mockWt.impl = () => ({
@@ -15779,6 +15793,8 @@ describe('createServeApp', () => {
       mockWt.realpath = (p) => p;
       mockWt.createMarker = createMarker;
       mockWt.writeSidecar = writeSidecar;
+      const baseCommit = 'b'.repeat(40);
+      mockBranchOps.getHeadCommit = () => Promise.resolve(baseCommit);
 
       try {
         const res = await request(app)
@@ -15790,7 +15806,7 @@ describe('createServeApp', () => {
         expect(res.body.worktree).toEqual({
           slug: 'my-task',
           path: worktreePath,
-          branch: 'worktree-my-task',
+          branch: '',
         });
         expect(res.body.worktreeState).toBe('persisted-v1');
         expect(bridge.calls[0]?.sessionScope).toBe('thread');
@@ -15799,24 +15815,132 @@ describe('createServeApp', () => {
         expect(bridge.changeSessionCwdCalls[0]?.allowedRoots).toEqual([
           path.join(WS_BOUND, '.qwen', 'worktrees'),
         ]);
-        expect(mockCreate).toHaveBeenCalledWith('my-task', 'main');
+        expect(mockCreate).toHaveBeenCalledWith('my-task', 'main', {
+          carryDirtyState: true,
+          detached: true,
+        });
         expect(createMarker).toHaveBeenCalledWith(worktreePath, 'fake-0');
+        // The sidecar must record the base the worktree starts from:
+        // handoff back to local promotes a branch only when HEAD moved
+        // past originalHeadCommit, so an empty base would silently skip
+        // the promotion and leave the agent's commits in the worktree.
         expect(writeSidecar).toHaveBeenCalledWith(
           expect.stringMatching(/fake-0\.worktree\.json$/),
           {
             slug: 'my-task',
             worktreePath,
-            worktreeBranch: 'worktree-my-task',
+            worktreeBranch: '',
             originalCwd: WS_BOUND,
             workspaceCwd: WS_BOUND,
-            originalBranch: '',
-            originalHeadCommit: '',
+            originalBranch: 'main',
+            originalHeadCommit: baseCommit,
+            worktreeBase: baseCommit,
           },
         );
       } finally {
+        mockBranchOps.getHeadCommit = undefined;
         mockWt.createMarker = undefined;
         mockWt.writeSidecar = undefined;
         mockWt.realpath = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('409 when the workspace has no commits to base a worktree on', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve(undefined);
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('worktree_base_unavailable');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('409 when the workspace has an in-progress merge (R12-1)', async () => {
+      // An unmerged index makes the dirty carry refuse with a typed code;
+      // the route must surface a readable 409, not a 500 daemon fault.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: () =>
+          Promise.resolve({
+            success: false,
+            code: 'worktree_merge_in_progress',
+            error: 'The workspace has an in-progress merge or rebase',
+          }),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('b'.repeat(40));
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('worktree_merge_in_progress');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+        mockWt.impl = undefined;
+      }
+    });
+
+    it('500 when worktree creation fails without a typed code (R12-1)', async () => {
+      // A genuine environment fault carries no code and stays a 500: the
+      // merge-state 409 must not swallow real daemon failures.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+        createUserWorktree: () =>
+          Promise.resolve({
+            success: false,
+            error: "Failed to capture the source checkout's dirty state: boom",
+          }),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('b'.repeat(40));
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug: 'my-task' } });
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('worktree_create_failed');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
         mockWt.impl = undefined;
       }
     });
@@ -19298,7 +19422,7 @@ describe('createServeApp', () => {
       }
     });
 
-    it('keeps a fired non-Channel restore prompt unattested instead of killing the session', async () => {
+    it('keeps a fired non-Channel restore prompt compatible on an older bridge', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
@@ -19310,8 +19434,9 @@ describe('createServeApp', () => {
           hasActivePrompt: true,
         }),
       });
-      // No persisted source and none requested, so this is not a Channel
-      // restore and the route asks the bridge for no deferral. With
+      delete (bridge as Partial<AcpSessionBridge>)
+        .fireDeferredRestoreAskUserQuestionPrompt;
+      // Without deferred admission the route keeps its older behavior. With
       // `restoreAskUserQuestion` enabled the bridge then FIRES the re-hung
       // question during the cold restore, and that response reports an
       // active prompt while carrying no `currentCwd` at all.
@@ -19549,78 +19674,88 @@ describe('createServeApp', () => {
       }
     });
 
-    it('relocates a cold Channel restore before firing its deferred question', async () => {
-      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
-      let relocated = false;
-      const bridge = fakeBridge({
-        loadImpl: async (req) => ({
-          sessionId: req.sessionId,
-          workspaceCwd: req.workspaceCwd,
-          attached: false,
-          clientId: 'client-load',
-          state: {},
-          hasActivePrompt: false,
-        }),
-        changeSessionCwdImpl: async (sessionId, req) => {
-          relocated = true;
-          return {
-            sessionId,
-            previousCwd: WS_BOUND,
-            newCwd: req.path,
-            warnings: [],
-          };
-        },
-        fireDeferredRestoreAskUserQuestionPromptImpl: () => {
-          expect(relocated).toBe(true);
-          return true;
-        },
-      });
-      const readCreationMetadata = vi
-        .spyOn(SessionService.prototype, 'readCreationMetadata')
-        .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
-      const app = createServeApp(
-        { ...baseOpts, workspace: WS_BOUND },
-        undefined,
-        { bridge },
-      );
-      mockWt.realpath = (p) => p;
-      mockWt.readMarker = () =>
-        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
-      mockWt.readSidecar = () =>
-        Promise.resolve({
-          slug: 'my-task',
-          worktreePath,
-          worktreeBranch: 'worktree-my-task',
-          originalCwd: WS_BOUND,
-          workspaceCwd: WS_BOUND,
-          originalBranch: 'main',
-          originalHeadCommit: 'abc123',
+    it.each([true, false])(
+      'relocates a cold restore before its question (Channel=%s)',
+      async (channel) => {
+        const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+        let relocated = false;
+        const bridge = fakeBridge({
+          loadImpl: async (req) => ({
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-load',
+            state: {},
+            hasActivePrompt: false,
+          }),
+          changeSessionCwdImpl: async (sessionId, req) => {
+            relocated = true;
+            return {
+              sessionId,
+              previousCwd: WS_BOUND,
+              newCwd: req.path,
+              warnings: [],
+            };
+          },
+          fireDeferredRestoreAskUserQuestionPromptImpl: () => {
+            expect(relocated).toBe(true);
+            return true;
+          },
         });
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue(
+            channel ? { sourceType: 'channel', sourceId: 'telegram' } : {},
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        mockWt.realpath = (p) => p;
+        mockWt.readMarker = () =>
+          Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+        mockWt.readSidecar = () =>
+          Promise.resolve({
+            slug: 'my-task',
+            worktreePath,
+            worktreeBranch: 'worktree-my-task',
+            originalCwd: WS_BOUND,
+            workspaceCwd: WS_BOUND,
+            originalBranch: 'main',
+            originalHeadCommit: 'abc123',
+          });
 
-      try {
-        const res = await request(app)
-          .post('/session/wt-session/load')
-          .set('Host', `127.0.0.1:${baseOpts.port}`)
-          .send({ cwd: WS_BOUND });
+        try {
+          const res = await request(app)
+            .post('/session/wt-session/load')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ cwd: WS_BOUND });
 
-        expect(res.status).toBe(200);
-        expect(res.body.hasActivePrompt).toBe(true);
-        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
-        expect(bridge.fireDeferredRestoreAskUserQuestionPromptCalls).toEqual([
-          { sessionId: 'wt-session', clientId: 'client-load' },
-        ]);
-        expect(bridge.killCalls).toHaveLength(0);
-        expect(bridge.loadCalls[0]).toMatchObject({
-          suppressWorktreeContextRestore: true,
-          deferRestoreAskUserQuestionPrompt: true,
-        });
-      } finally {
-        mockWt.readSidecar = undefined;
-        mockWt.readMarker = undefined;
-        mockWt.realpath = undefined;
-        readCreationMetadata.mockRestore();
-      }
-    });
+          expect(res.status).toBe(200);
+          expect(res.body.hasActivePrompt).toBe(true);
+          expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+          expect(bridge.fireDeferredRestoreAskUserQuestionPromptCalls).toEqual([
+            { sessionId: 'wt-session', clientId: 'client-load' },
+          ]);
+          expect(bridge.killCalls).toHaveLength(0);
+          expect(bridge.loadCalls[0]).toMatchObject({
+            deferRestoreAskUserQuestionPrompt: true,
+            deferAutomaticWorkUntilCwdRestore: true,
+          });
+          // Non-Channel restores keep the child's worktree restore (marker
+          // heal + resumed notice); only Channel restores suppress it.
+          expect(bridge.loadCalls[0].suppressWorktreeContextRestore).toBe(
+            channel ? true : undefined,
+          );
+        } finally {
+          mockWt.readSidecar = undefined;
+          mockWt.readMarker = undefined;
+          mockWt.realpath = undefined;
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
 
     it('serializes concurrent Channel worktree restores through integrity admission', async () => {
       const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
@@ -29639,7 +29774,6 @@ describe('createServeApp', () => {
       );
       const slug = 'branch-test';
       const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
-      const worktreeBranch = `worktree-${slug}`;
       try {
         await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
         await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
@@ -29670,28 +29804,25 @@ describe('createServeApp', () => {
         });
         const baseCommit = stdout.trim();
         mockBranchOps.getHeadCommit = async () => baseCommit;
+        const createWorktreeCalls: unknown[][] = [];
         mockWt.impl = () => ({
           isGitRepository: async () => true,
           getRepoTopLevel: async () => repo,
           getCurrentBranch: async () => 'main',
           getUserWorktreePath: () => worktreePath,
-          createUserWorktree: async () => {
+          // Mirror the real detached contract: createUserWorktree returns
+          // branch:'' when detached, never the slug-derived name.
+          createUserWorktree: async (...args: unknown[]) => {
+            createWorktreeCalls.push(args);
             await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
             await execFileAsync(
               'git',
-              [
-                'worktree',
-                'add',
-                '-b',
-                worktreeBranch,
-                worktreePath,
-                baseCommit,
-              ],
+              ['worktree', 'add', '--detach', worktreePath, baseCommit],
               { cwd: repo },
             );
             return {
               success: true,
-              worktree: { slug, path: worktreePath, branch: worktreeBranch },
+              worktree: { slug, path: worktreePath, branch: '' },
             };
           },
         });
@@ -29779,8 +29910,25 @@ describe('createServeApp', () => {
           sessionId: expect.any(String),
           workspaceCwd: repo,
           currentCwd: worktreePath,
-          worktree: { slug, path: worktreePath, branch: worktreeBranch },
+          worktree: { slug, path: worktreePath, branch: '' },
         });
+        // The dirty capture must target the session's own checkout, not
+        // the placement root; dropping dirtyStateSource silently captures
+        // the main checkout's edits for a session living elsewhere. The
+        // route realpaths the field, so mirror that here (macOS tmpdir is
+        // symlinked: /var → /private/var).
+        expect(createWorktreeCalls[0]).toEqual([
+          slug,
+          baseCommit,
+          expect.objectContaining({
+            carryDirtyState: true,
+            detached: true,
+            dirtyStateSource: realpathSync(repo),
+            // The branch route persists carriedPaths in the journal, so it
+            // bounds the carry (CARRIED_PATHS_MAX_BYTES = 32 KiB).
+            maxCarriedPathsBytes: 32 * 1024,
+          }),
+        ]);
         expect(res.body.sourceWarnings).toEqual([
           'Session sources could not be copied.',
         ]);
@@ -29808,9 +29956,18 @@ describe('createServeApp', () => {
           `${res.body.sessionId}.worktree.json`,
         );
         expect(existsSync(sidecarPath)).toBe(true);
+        // The detached convention: the sidecar must record '', not the
+        // slug-derived branch — a named record would surface much later as
+        // a permanent 409 worktree_branch_mismatch on handoff. worktreeBase
+        // records the creation base (here equal to the repo top's HEAD).
         expect(
           JSON.parse(await fsp.readFile(sidecarPath, 'utf8')),
-        ).toMatchObject({ workspaceCwd: repo });
+        ).toMatchObject({
+          workspaceCwd: repo,
+          worktreeBranch: '',
+          originalHeadCommit: baseCommit,
+          worktreeBase: baseCommit,
+        });
         expect(
           existsSync(
             path.join(chatsDir, `.branch-worktree-${res.body.sessionId}.json`),
@@ -29831,6 +29988,549 @@ describe('createServeApp', () => {
             entry.startsWith('.branch-worktree-'),
           ),
         ).toEqual([]);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('records the source checkout HEAD as worktreeBase when it diverges from the repo top (R5-4)', async () => {
+      // Canonicalize: on macOS the default TMPDIR is a symlinked path
+      // (/var -> /private/var) and the route records the realpath, so the
+      // raw mkdtemp path would not match sidecar.originalCwd (R5-4).
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-branch-diverge-repo-')),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-diverge-runtime-'),
+      );
+      const slug = 'branch-diverge';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      const siblingPath = path.join(repo, '.qwen', 'worktrees', 'sibling');
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await execFileAsync(
+          'git',
+          ['config', 'core.hooksPath', path.join(repo, '.git', 'empty-hooks')],
+          { cwd: repo },
+        );
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const rootHead = stdout.trim();
+        // The source session lives in a sibling managed worktree that
+        // committed ahead of the repo top. The branch worktree is created
+        // at the SIBLING's HEAD, while originalHeadCommit must keep
+        // describing the repo top for the handoff's local_head_moved gate.
+        await execFileAsync(
+          'git',
+          ['worktree', 'add', '--detach', siblingPath, rootHead],
+          { cwd: repo },
+        );
+        await fsp.writeFile(path.join(siblingPath, 'ahead.txt'), 'ahead\n');
+        await execFileAsync('git', ['add', 'ahead.txt'], { cwd: siblingPath });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'sibling work',
+          ],
+          { cwd: siblingPath },
+        );
+        const { stdout: siblingStdout } = await execFileAsync(
+          'git',
+          ['rev-parse', 'HEAD'],
+          { cwd: siblingPath },
+        );
+        const siblingHead = siblingStdout.trim();
+        expect(siblingHead).not.toBe(rootHead);
+        await fsp.writeFile(
+          path.join(siblingPath, '.qwen-session'),
+          'source-session',
+          'utf8',
+        );
+        const chatsDir = path.join(
+          new Storage(repo, runtimeDir).getProjectDir(),
+          'chats',
+        );
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.writeFile(
+          path.join(chatsDir, 'source-session.worktree.json'),
+          JSON.stringify({
+            slug: 'sibling',
+            worktreePath: siblingPath,
+            worktreeBranch: '',
+            originalCwd: repo,
+            workspaceCwd: repo,
+            originalBranch: 'main',
+            originalHeadCommit: rootHead,
+          }),
+          'utf8',
+        );
+        // The repo-top HEAD read (the handoff gate base) stays the root's.
+        mockBranchOps.getHeadCommit = async () => rootHead;
+        mockWt.readSidecar = async (filePath: unknown) => {
+          try {
+            return JSON.parse(await fsp.readFile(String(filePath), 'utf8'));
+          } catch {
+            return null;
+          }
+        };
+        const createWorktreeCalls: unknown[][] = [];
+        mockWt.impl = (cwd?: string) => ({
+          isGitRepository: async () => true,
+          // The mock must distinguish the two checkouts: flattening them
+          // would hide the very divergence under test. Compare canonical
+          // paths on both sides — macOS's default TMPDIR is a /var ->
+          // /private/var symlink, so the raw mkdtemp siblingPath would
+          // never equal the realpath'd cwd there.
+          getRepoTopLevel: async () =>
+            cwd !== undefined && realpathSync(cwd) === realpathSync(siblingPath)
+              ? siblingPath
+              : repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree: async (...args: unknown[]) => {
+            createWorktreeCalls.push(args);
+            await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
+            await execFileAsync(
+              'git',
+              ['worktree', 'add', '--detach', worktreePath, String(args[1])],
+              { cwd: repo },
+            );
+            return {
+              success: true,
+              worktree: { slug, path: worktreePath, branch: '' },
+            };
+          },
+        });
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: siblingPath,
+          worktree: { slug: 'sibling', path: siblingPath, branch: '' },
+        });
+        bridge.branchSession = vi.fn(
+          async (
+            _sourceSessionId: string,
+            branchRequest: { targetSessionId?: string },
+          ) => ({
+            sessionId: branchRequest.targetSessionId!,
+            displayName: 'Worktree branch',
+            forkedFrom: {
+              sessionId: 'source-session',
+              displayName: 'Source',
+            },
+            sourceWarnings: [],
+          }),
+        );
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-worktree-primary',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(201);
+        // The worktree was created at the source checkout's HEAD.
+        expect(createWorktreeCalls[0]?.[1]).toBe(siblingHead);
+        const { stdout: wtHead } = await execFileAsync(
+          'git',
+          ['rev-parse', 'HEAD'],
+          { cwd: worktreePath },
+        );
+        expect(wtHead.trim()).toBe(siblingHead);
+        const sidecar = JSON.parse(
+          await fsp.readFile(
+            path.join(chatsDir, `${res.body.sessionId}.worktree.json`),
+            'utf8',
+          ),
+        );
+        // originalHeadCommit keeps describing originalCwd's checkout (the
+        // repo top); worktreeBase records the creation base. Swapping the
+        // two re-breaks the return handoff, exit_worktree and the reaper.
+        expect(sidecar.originalHeadCommit).toBe(rootHead);
+        expect(sidecar.worktreeBase).toBe(siblingHead);
+        expect(sidecar.originalCwd).toBe(repo);
+      } finally {
+        mockWt.impl = undefined;
+        mockWt.readSidecar = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('forwards the carried overlay to the rollback when the bridge fails', async () => {
+      const repo = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-carry-repo-'),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-carry-runtime-'),
+      );
+      const slug = 'branch-carry';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        // The source checkout is dirty; the overlay the creation reports
+        // must reach the rollback through the journal, or the rollback
+        // refuses its own carried files and strands the worktree.
+        await fsp.writeFile(path.join(repo, 'dirty.txt'), 'dirty\n', 'utf8');
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const baseCommit = stdout.trim();
+        mockBranchOps.getHeadCommit = async () => baseCommit;
+        const removeCalls: unknown[][] = [];
+        mockWt.impl = () => ({
+          isGitRepository: async () => true,
+          getRepoTopLevel: async () => repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree: async () => {
+            await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
+            await execFileAsync(
+              'git',
+              ['worktree', 'add', '--detach', worktreePath, baseCommit],
+              { cwd: repo },
+            );
+            return {
+              success: true,
+              worktree: { slug, path: worktreePath, branch: '' },
+              carriedPaths: ['dirty.txt'],
+            };
+          },
+          removePreparedUserWorktree: async (...args: unknown[]) => {
+            removeCalls.push(args);
+            // Honor the journal-advance callback, then reap the checkout.
+            await (args[3] as () => Promise<void>)();
+            await fsp.rm(worktreePath, { recursive: true, force: true });
+            return { success: true };
+          },
+        });
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: repo,
+        });
+        // A settled pre-commit refusal: after mutation dispatch, only
+        // settled failures run the prepared-worktree cleanup (a generic
+        // error could mean the branch exists on the bridge).
+        bridge.branchSession = vi
+          .fn()
+          .mockRejectedValue(new SessionBusyError('source-session'));
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-worktree-primary',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('session_busy');
+        expect(removeCalls).toHaveLength(1);
+        // (slug, owner, base, onRemoved, branchOwned, carriedPaths): the
+        // overlay must be forwarded, and the detached preparation owns no
+        // branch.
+        expect(removeCalls[0][0]).toBe(slug);
+        expect(removeCalls[0][2]).toBe(baseCommit);
+        expect(removeCalls[0][4]).toBe(false);
+        expect(removeCalls[0][5]).toEqual(['dirty.txt']);
+        expect(existsSync(worktreePath)).toBe(false);
+        const chatsDir = path.join(
+          new Storage(repo, runtimeDir).getProjectDir(),
+          'chats',
+        );
+        expect(
+          (await fsp.readdir(chatsDir)).filter((entry) =>
+            entry.startsWith('.branch-worktree-'),
+          ),
+        ).toEqual([]);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('maps an in-progress merge to 409 on the branch-worktree route (R13-2)', async () => {
+      const repo = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-merge-repo-'),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-merge-runtime-'),
+      );
+      const slug = 'branch-merge';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const baseCommit = stdout.trim();
+        mockBranchOps.getHeadCommit = async () => baseCommit;
+        mockWt.impl = () => ({
+          isGitRepository: async () => true,
+          getRepoTopLevel: async () => repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree: async () => ({
+            success: false,
+            code: 'worktree_merge_in_progress',
+            error:
+              'The workspace has an in-progress merge or rebase (unmerged files).',
+          }),
+          removePreparedUserWorktree: async (...args: unknown[]) => {
+            await (args[3] as () => Promise<void>)();
+            return { success: true };
+          },
+        });
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: repo,
+        });
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-worktree-primary',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('worktree_merge_in_progress');
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('forwards the service refusal text on a 500 branch-worktree failure (round-9 M5)', async () => {
+      const repo = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-500-repo-'),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-500-runtime-'),
+      );
+      const slug = 'branch-500';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const baseCommit = stdout.trim();
+        mockBranchOps.getHeadCommit = async () => baseCommit;
+        // An uncoded environment fault: the route must forward the service's
+        // refusal text, not a generic message (M5 pins the forwarding).
+        const serviceError = 'disk full: cannot write object store';
+        mockWt.impl = () => ({
+          isGitRepository: async () => true,
+          getRepoTopLevel: async () => repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree: async () => ({
+            success: false,
+            error: serviceError,
+          }),
+          removePreparedUserWorktree: async (...args: unknown[]) => {
+            await (args[3] as () => Promise<void>)();
+            return { success: true };
+          },
+        });
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: repo,
+        });
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-worktree-primary',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('worktree_create_failed');
+        expect(res.body.error).toBe(serviceError);
       } finally {
         mockWt.impl = undefined;
         mockBranchOps.getHeadCommit = undefined;
@@ -30516,6 +31216,172 @@ describe('createServeApp', () => {
         sessionId: 'session-A',
       });
       expect(res.headers['retry-after']).toBe('5');
+    });
+  });
+
+  describe('GET /session/:id/tasks?includeSubSessions=true', () => {
+    const appWithOutgoing = (
+      listOutgoing: SubSessionLauncher['listOutgoing'],
+    ) => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge({
+          sessionTasksImpl: async (sessionId) => ({
+            v: 1,
+            sessionId,
+            now: 5_000,
+            tasks: [],
+          }),
+        }),
+      });
+      (
+        app.locals as {
+          subSessionLauncherFor?: () => Partial<SubSessionLauncher> | undefined;
+        }
+      ).subSessionLauncherFor = () => ({ listOutgoing });
+      return app;
+    };
+    const get = (app: ReturnType<typeof createServeApp>, query = '') =>
+      request(app)
+        .get(`/session/session-A/tasks${query}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    it('lists the sends the daemon reports back beside the child tasks', async () => {
+      const listOutgoing = vi.fn(() => [
+        {
+          id: 'kid',
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          label: 'look',
+          status: 'running' as const,
+          startTime: 1_000,
+          byPerson: true,
+        },
+        {
+          id: 'kid:p2',
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          label: 'again',
+          status: 'completed' as const,
+          startTime: 2_000,
+          endTime: 2_500,
+          byPerson: false,
+        },
+      ]);
+      const res = await get(
+        appWithOutgoing(listOutgoing),
+        '?includeSubSessions=true',
+      );
+      expect(res.status).toBe(200);
+      expect(listOutgoing).toHaveBeenCalledWith('session-A');
+      expect(res.body.tasks).toEqual([]);
+      expect(res.body.subSessions).toEqual([
+        expect.objectContaining({
+          kind: 'session',
+          id: 'kid',
+          runtimeMs: 4_000,
+        }),
+        expect.objectContaining({ id: 'kid:p2', runtimeMs: 500 }),
+      ]);
+    });
+
+    it('leaves them out unless asked', async () => {
+      const listOutgoing = vi.fn(() => []);
+      const res = await get(appWithOutgoing(listOutgoing));
+      expect(res.status).toBe(200);
+      expect(res.body).not.toHaveProperty('subSessions');
+      expect(listOutgoing).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /session/:id/sub-sessions', () => {
+    const appWithLauncher = (
+      launchForPerson: SubSessionLauncher['launchForPerson'] | undefined,
+    ) => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+      });
+      (
+        app.locals as {
+          subSessionLauncherFor?: () => Partial<SubSessionLauncher> | undefined;
+        }
+      ).subSessionLauncherFor = () =>
+        launchForPerson ? { launchForPerson } : undefined;
+      return app;
+    };
+    const post = (app: ReturnType<typeof createServeApp>, body: object) =>
+      request(app)
+        .post('/session/session-A/sub-sessions')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(body);
+
+    it('202 runs the send on the caller launcher with the open session as caller', async () => {
+      const launchForPerson = vi.fn(async () => ({
+        sessionId: 'kid',
+        workspaceCwd: '/work/b',
+        taskId: 'kid:p1',
+        result: 'not returned',
+      }));
+      const res = await post(appWithLauncher(launchForPerson), {
+        prompt: '  look  ',
+        workspace: '/work/b',
+        targetSessionId: 'kid',
+      });
+      expect(res.status).toBe(202);
+      expect(res.body).toEqual({
+        sessionId: 'kid',
+        workspaceCwd: '/work/b',
+        taskId: 'kid:p1',
+      });
+      expect(launchForPerson).toHaveBeenCalledWith({
+        callerSessionId: 'session-A',
+        prompt: 'look',
+        workspace: '/work/b',
+        sessionId: 'kid',
+      });
+    });
+
+    it.each([
+      [{}, 'invalid_sub_session_prompt'],
+      [{ prompt: '   ' }, 'invalid_sub_session_prompt'],
+      [{ prompt: 'p', workspace: 'a\nb' }, 'invalid_sub_session_workspace'],
+      [{ prompt: 'p', workspace: 7 }, 'invalid_sub_session_workspace'],
+      [{ prompt: 'p', targetSessionId: '' }, 'invalid_sub_session_target'],
+    ])('400 for %j', async (body, code) => {
+      const launchForPerson = vi.fn();
+      const res = await post(appWithLauncher(launchForPerson), body);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe(code);
+      expect(launchForPerson).not.toHaveBeenCalled();
+    });
+
+    it("409 carries the launcher's refusal", async () => {
+      const res = await post(
+        appWithLauncher(async () => {
+          throw new Error('Workspace /work/b is not trusted.');
+        }),
+        { prompt: 'p', workspace: '/work/b' },
+      );
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({
+        code: 'sub_session_send_refused',
+        error: 'Workspace /work/b is not trusted.',
+      });
+    });
+
+    it('keeps the usual status for typed errors', async () => {
+      const res = await post(
+        appWithLauncher(async () => {
+          throw new SessionNotFoundError('session-A');
+        }),
+        { prompt: 'p' },
+      );
+      expect(res.status).toBe(404);
+    });
+
+    it('501 when the runtime has no launcher', async () => {
+      const res = await post(appWithLauncher(undefined), { prompt: 'p' });
+      expect(res.status).toBe(501);
+      expect(res.body.code).toBe('sub_session_send_unavailable');
     });
   });
 
@@ -45860,19 +46726,199 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     }
   });
 
-  it('evicts an idle SSE writer with a terminal client_evicted frame', async () => {
-    // Bridge yields nothing, ever — simulating an idle stream where
-    // the only writes the timer would observe are the SSE handshake
-    // (`retry: 3000`) and (eventually) the 15s heartbeat. With a
-    // 200ms idle deadline the timer must fire well before the
-    // heartbeat refreshes `lastWriteAt`. Expected terminal frame:
-    // `client_evicted` with the new `reason: 'writer_idle_timeout'`.
+  it('evicts a writer stalled on drain with a terminal client_evicted frame', async () => {
+    // The consumer stopped reading: force `res.write` to return false on
+    // the first event frame and swallow the chunk so no natural `drain`
+    // can ever fire. The unresolved-stall stamp set in the backpressure
+    // branch must trip the reaper after the budget. Expected terminal
+    // frame: `client_evicted` with `reason: 'writer_idle_timeout'`.
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        // Swallow the frame AND report backpressure: the kernel buffer
+        // stays empty, so the reader below cannot provoke a natural
+        // `drain` — the stall is permanent, exactly like a frozen peer.
+        forcedStall = true;
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    try {
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+
+      const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+      expect(res.status).toBe(200);
+
+      // Read until we see the eviction frame OR the stream closes. The
+      // 1500ms budget is well below the 15s heartbeat so a regression
+      // that disables the idle timer would still fail loudly here.
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let evictedData: unknown;
+      const deadline = Date.now() + 1_500;
+      while (Date.now() < deadline) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf('\n\n')) !== -1) {
+          const raw = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
+          // Parse the frame; look for event: client_evicted.
+          let eventName = '';
+          let dataLine = '';
+          for (const line of raw.split('\n')) {
+            if (line.startsWith('event: ')) eventName = line.slice(7);
+            else if (line.startsWith('data: ')) dataLine = line.slice(6);
+          }
+          if (eventName === 'client_evicted') {
+            evictedData = JSON.parse(dataLine);
+            break;
+          }
+        }
+        if (evictedData !== undefined) break;
+      }
+      await reader.cancel().catch(() => undefined);
+
+      // Pin the precondition: the eviction must come from a REAL
+      // backpressure stall, not from the healthy-idle path.
+      expect(forcedStall).toBe(true);
+      expect(evictedData).toBeDefined();
+      expect(evictedData).toMatchObject({
+        v: 1,
+        type: 'client_evicted',
+        data: {
+          reason: 'writer_idle_timeout',
+          errorKind: 'writer_idle_timeout',
+          timeoutMs: 200,
+        },
+      });
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('RSTs the socket and frees the slot when the eviction frame write throws', async () => {
+    // When the terminal frame cannot be queued at all (write THROWS —
+    // e.g. the socket already errored), the eviction must RST the socket
+    // via resetAndDestroy() so the slot is freed; a graceful end would
+    // queue a FIN a stalled peer never ACKs (FIN-WAIT-1 linger). The
+    // buffered-frame case (write returns false) is covered by the
+    // paused-resume regression below.
+    const http = await import('node:http');
+    const net = await import('node:net');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall) {
+        // The terminal frame cannot be queued at all: the write throws
+        // (socket already errored). That is the immediate-RST branch.
+        if (text.includes('event: client_evicted')) {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        }
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    try {
+      const beforeActive = getActiveSseCount();
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+      expect(res.status).toBe(200);
+      expect(getActiveSseCount()).toBe(beforeActive + 1);
+
+      // Past the 200ms budget + the 250ms polling floor.
+      await new Promise((r) => setTimeout(r, 800));
+
+      expect(forcedStall).toBe(true);
+      expect(resetSpy).toHaveBeenCalled();
+      expect(getActiveSseCount()).toBe(beforeActive);
+      await res.body!.cancel().catch(() => undefined);
+    } finally {
+      writeSpy.mockRestore();
+      resetSpy.mockRestore();
+    }
+  });
+
+  it('does NOT evict a healthy idle stream even with a small explicit budget', async () => {
+    // Discriminating pin for the stall-based semantics: the reaper keys
+    // on an unresolved `drain` stall, NOT on the last successful flush.
+    // A healthy idle stream (event delivered, heartbeats flushing) must
+    // survive a 200ms budget — the pre-fix "no successful write for n ms"
+    // semantics evicted it here, which is exactly the footgun that made
+    // operators leave the flag off and let stalled writers accumulate.
     const bridge = fakeBridge({
-      // eslint-disable-next-line require-yield
       async *subscribeImpl(_sessionId, _opts) {
-        // Park forever; the test triggers eviction via the timer.
-        // No yield: the test asserts that the daemon's idle-timeout
-        // path fires even when the bridge produces zero frames.
+        yield { id: 1, v: 1, type: 'session_update', data: { ok: true } };
         await new Promise(() => {});
       },
     });
@@ -45889,57 +46935,48 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
 
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
-
-    // Read until we see the eviction frame OR the stream closes. The
-    // 1500ms budget is well below the 15s heartbeat so a regression
-    // that disables the idle timer would still fail loudly here.
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buf = '';
-    let evictedData: unknown;
-    const deadline = Date.now() + 1_500;
+    let sawFirstEvent = false;
+    let sawEviction = false;
+    const deadline = Date.now() + 700;
     while (Date.now() < deadline) {
-      const { value, done } = await reader.read();
+      const readPromise = reader.read();
+      const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
+        setTimeout(
+          () => r({ value: undefined, done: false }),
+          Math.max(0, deadline - Date.now() + 10),
+        );
+      });
+      const { value, done } = (await Promise.race([readPromise, wakeup])) as {
+        value: Uint8Array | undefined;
+        done: boolean;
+      };
       if (done) break;
+      if (value === undefined) break;
       buf += decoder.decode(value, { stream: true });
       let idx: number;
       while ((idx = buf.indexOf('\n\n')) !== -1) {
         const raw = buf.slice(0, idx);
         buf = buf.slice(idx + 2);
         if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
-        // Parse the frame; look for event: client_evicted.
-        let eventName = '';
-        let dataLine = '';
         for (const line of raw.split('\n')) {
-          if (line.startsWith('event: ')) eventName = line.slice(7);
-          else if (line.startsWith('data: ')) dataLine = line.slice(6);
-        }
-        if (eventName === 'client_evicted') {
-          evictedData = JSON.parse(dataLine);
-          break;
+          if (line.startsWith('event: session_update')) sawFirstEvent = true;
+          if (line.startsWith('event: client_evicted')) sawEviction = true;
         }
       }
-      if (evictedData !== undefined) break;
     }
     await reader.cancel().catch(() => undefined);
 
-    expect(evictedData).toBeDefined();
-    expect(evictedData).toMatchObject({
-      v: 1,
-      type: 'client_evicted',
-      data: {
-        reason: 'writer_idle_timeout',
-        errorKind: 'writer_idle_timeout',
-        timeoutMs: 200,
-      },
-    });
+    expect(sawFirstEvent).toBe(true);
+    expect(sawEviction).toBe(false);
   });
 
-  it('does not evict when the writer idle timeout is unset (legacy contract)', async () => {
-    // Without `writerIdleTimeoutMs`, the existing 15s-heartbeat-only
-    // behavior must be preserved bit-for-bit. We open a stream, read
-    // a real event, then wait ~600ms — no client_evicted frame may
-    // appear in that window.
+  it('does not evict a healthy stream when the flag is unset (default reaper targets stalls only)', async () => {
+    // With the default-on reaper (60s stall budget), a healthy stream
+    // must be unaffected: we open a stream, read a real event, then wait
+    // ~600ms — no client_evicted frame may appear in that window.
     const bridge = fakeBridge({
       async *subscribeImpl(_sessionId, _opts) {
         yield { id: 1, v: 1, type: 'session_update', data: { ok: true } };
@@ -45994,13 +47031,13 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     expect(sawEviction).toBe(false);
   });
 
-  it('does NOT evict when active writes keep refreshing lastWriteAt (#4514 T2.9 wenshao review)', async () => {
-    // wenshao flagged that the existing "fires when idle" + "doesn't
-    // fire when unset" tests don't cover the case where REAL writes
-    // (event yields, not just heartbeats) refresh `lastWriteAt`
-    // inside `doWrite`. With idle timeout = 300ms and an event every
-    // 100ms, the timer should keep deferring — the connection stays
-    // alive even past several timeout cycles.
+  it('does NOT evict while real writes keep flushing without backpressure (#4514 T2.9 wenshao review)', async () => {
+    // wenshao flagged that the "fires when stalled" + "doesn't fire
+    // when unset" tests don't cover an ACTIVE stream. With a 300ms
+    // stall budget and an event every 100ms, every write flushes
+    // synchronously (no unresolved drain stall), so the reaper must
+    // keep deferring — the connection stays alive even past several
+    // budget cycles.
     const bridge = fakeBridge({
       async *subscribeImpl(_sessionId, _opts) {
         // Yield 5 events at ~100ms intervals — well below the 300ms
@@ -46031,10 +47068,9 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
 
-    // Read for ~700ms — long enough that an IDLE writer would have
-    // been evicted twice over (300ms timeout, polled every ~250ms),
-    // but the per-100ms event stream refreshes lastWriteAt before the
-    // check fires.
+    // Read for ~700ms — several 300ms budget cycles. Every per-100ms
+    // event write flushes synchronously, so no unresolved drain stall
+    // ever exists and the reaper must not fire.
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let buf = '';
@@ -49178,3 +50214,909 @@ it.each(['patch', 'delete', 'delete-workspace'] as const)(
     }
   },
 );
+
+describe('SSE listener-slot exhaustion guard (daemon stability)', () => {
+  let handle: RunHandle | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+  });
+
+  function parkedBridge() {
+    return fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        // Park forever: the stream stays open until the client cancels,
+        // occupying one listener slot exactly like a production SSE client.
+        await new Promise(() => {});
+      },
+    });
+  }
+
+  async function openStream(port: number, sessionId: string) {
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/${sessionId}/events`,
+    );
+    expect(res.status).toBe(200);
+    return res;
+  }
+
+  it('rejects SSE overflow with 503 + Retry-After while /health stays reachable', async () => {
+    // Listener cap 10 ⇒ derived SSE cap floor(10 × 0.8) = 8. Eight parked
+    // streams saturate the SSE quota; the ninth must get an explicit 503
+    // (not a silent accept-time socket close), and short requests must
+    // still be served through the reserved listener headroom.
+    const beforeActive = getActiveSseCount();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const streams: Response[] = [];
+    for (let i = 0; i < 8; i++) {
+      streams.push(await openStream(port, `sess-cap-${i}`));
+    }
+    expect(getActiveSseCount()).toBe(beforeActive + 8);
+
+    const overflow = await fetch(
+      `http://127.0.0.1:${port}/session/sess-overflow/events`,
+    );
+    expect(overflow.status).toBe(503);
+    expect(overflow.headers.get('retry-after')).toBe('5');
+    const overflowBody = (await overflow.json()) as {
+      code: string;
+      limit: number;
+      active: number;
+    };
+    expect(overflowBody.code).toBe('sse_connection_limit_exceeded');
+    expect(overflowBody.limit).toBe(8);
+    expect(overflowBody.active).toBe(8);
+
+    // The whole point of the cap: the diagnostic surface stays alive
+    // while the SSE fleet is saturated.
+    const health = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(health.status).toBe(200);
+    const caps = await fetch(`http://127.0.0.1:${port}/capabilities`);
+    expect(caps.status).toBe(200);
+
+    // Freeing one slot readmits the next stream.
+    await streams[0]!.body!.cancel();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(getActiveSseCount()).toBe(beforeActive + 7);
+    const readmitted = await openStream(port, 'sess-readmitted');
+    await readmitted.body!.cancel();
+    for (const stream of streams.slice(1)) {
+      await stream.body!.cancel();
+    }
+  });
+
+  it('reports the derived SSE cap and live occupancy in daemon status', async () => {
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const statusRes = await fetch(
+      `http://127.0.0.1:${port}/daemon/status?detail=full`,
+    );
+    expect(statusRes.status).toBe(200);
+    const status = (await statusRes.json()) as {
+      limits: { listenerMaxConnections: number; maxSseConnections: number };
+      runtime: { transport: { restSseActive: number } };
+    };
+    expect(status.limits.listenerMaxConnections).toBe(256);
+    expect(status.limits.maxSseConnections).toBe(204);
+    const beforeActive = status.runtime.transport.restSseActive;
+
+    const stream = await openStream(port, 'sess-status');
+    const afterRes = await fetch(
+      `http://127.0.0.1:${port}/daemon/status?detail=full`,
+    );
+    const after = (await afterRes.json()) as {
+      runtime: { transport: { restSseActive: number } };
+    };
+    expect(after.runtime.transport.restSseActive).toBe(beforeActive + 1);
+    await stream.body!.cancel();
+  });
+
+  it('honors an explicit maxSseConnections override and the disabled sentinels', async () => {
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+        maxSseConnections: 5,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const status = (await (
+      await fetch(`http://127.0.0.1:${port}/daemon/status?detail=full`)
+    ).json()) as { limits: { maxSseConnections: number | null } };
+    expect(status.limits.maxSseConnections).toBe(5);
+    await handle.close();
+    handle = undefined;
+
+    // Listener cap disabled ⇒ SSE cap disabled too (operator opted out of
+    // connection bounding entirely).
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 0,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port2 = (handle.server.address() as { port: number }).port;
+    const status2 = (await (
+      await fetch(`http://127.0.0.1:${port2}/daemon/status?detail=full`)
+    ).json()) as { limits: { maxSseConnections: number | null } };
+    expect(status2.limits.maxSseConnections).toBeNull();
+  });
+
+  it('reports SSE occupancy and cap on the deep health probe', async () => {
+    const beforeActive = getActiveSseCount();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const stream = await openStream(port, 'sess-health');
+    const deep = (await (
+      await fetch(`http://127.0.0.1:${port}/health?deep=1`)
+    ).json()) as {
+      connectedClients: number;
+      connectedClientsMax: number | null;
+    };
+    expect(deep.connectedClients).toBe(beforeActive + 1);
+    expect(deep.connectedClientsMax).toBe(8);
+    await stream.body!.cancel();
+  });
+
+  it.each([-1, Number.NaN])(
+    'rejects invalid maxSseConnections (%s) at boot',
+    async (value) => {
+      await expect(
+        runQwenServe(
+          {
+            hostname: '127.0.0.1',
+            port: 0,
+            mode: 'http-bridge',
+            maxSseConnections: value,
+          },
+          { bridge: parkedBridge() },
+        ),
+      ).rejects.toThrow(/maxSseConnections/);
+    },
+  );
+
+  it('enables TCP keepalive on accepted sockets', async () => {
+    const net = await import('node:net');
+    const spy = vi.spyOn(net.Socket.prototype, 'setKeepAlive');
+    try {
+      handle = await runQwenServe(
+        { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+        { bridge: fakeBridge() },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/health`);
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalledWith(true, 30_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('HTTPS SSE eviction force-close (TLS regression)', () => {
+  // TLSSocket inherits net.Socket.resetAndDestroy, but its TLSWrap handle
+  // rejects the call with ERR_INVALID_HANDLE_TYPE WITHOUT closing anything.
+  // A force-close helper that only tries resetAndDestroy() therefore leaks
+  // the TLS connection (and its listener/SSE slot) on every eviction path.
+  // These regressions drive REAL HTTPS servers with paused clients and
+  // assert the socket closes and both connection counts return to baseline.
+  let handle: RunHandle | undefined;
+  let tlsDir: string | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+    if (tlsDir) {
+      await fsp.rm(tlsDir, { recursive: true, force: true });
+      tlsDir = undefined;
+    }
+  });
+
+  async function startTlsServe(
+    opts: Partial<ServeOptions>,
+    bridge: ReturnType<typeof fakeBridge>,
+  ) {
+    tlsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qws-tls-sse-'));
+    const tlsCert = path.join(tlsDir, 'cert.pem');
+    const tlsKey = path.join(tlsDir, 'key.pem');
+    await fsp.writeFile(tlsCert, TEST_TLS_CERT);
+    await fsp.writeFile(tlsKey, TEST_TLS_KEY);
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        tlsCert,
+        tlsKey,
+        ...opts,
+      },
+      { bridge },
+    );
+    return (handle.server.address() as { port: number }).port;
+  }
+
+  function openPausedHttpsStream(
+    port: number,
+    path_: string,
+    deadlineMs = 2500,
+  ) {
+    // Resolves with the first close/abort/error signal the client sees;
+    // 'timeout' means the server never closed the connection. The client
+    // stays paused for the whole call (it never resumes), so it holds a
+    // zero receive window; callers that must outlast the 5s force-close
+    // fallback pass a larger deadlineMs.
+    return new Promise<string>((resolve) => {
+      const req = https.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: path_,
+          rejectUnauthorized: false,
+          agent: false,
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            resolve(`status:${res.statusCode}`);
+            res.resume();
+            return;
+          }
+          res.pause();
+          res.on('close', () => resolve('res-close'));
+          res.on('aborted', () => resolve('res-aborted'));
+          res.on('error', (e) => resolve(`res-error:${e.code}`));
+        },
+      );
+      req.on('error', (e) => resolve(`req-error:${e.code}`));
+      req.end();
+      setTimeout(() => resolve('timeout'), deadlineMs).unref();
+    });
+  }
+
+  async function serverConnectionCount(): Promise<number> {
+    return new Promise((resolve) => {
+      handle!.server.getConnections((_err, count) => resolve(count));
+    });
+  }
+
+  async function expectCountsReleased(beforeActive: number): Promise<void> {
+    // The client sees the RST before the server-side TLSSocket 'close'
+    // propagates to finalize(), so poll for convergence instead of
+    // asserting synchronously. A leaked slot never converges and the
+    // final expectations fail with the actual counts.
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline) {
+      if (
+        getActiveSseCount() === beforeActive &&
+        (await serverConnectionCount()) === 0
+      ) {
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(getActiveSseCount()).toBe(beforeActive);
+    expect(await serverConnectionCount()).toBe(0);
+  }
+
+  it('writer-timeout eviction closes the TLS socket and frees the slot', async () => {
+    // Write-throw simulation: after the first stalled write, the reaper's
+    // terminal-frame write THROWS (socket already errored), so eviction
+    // takes the immediate force-close branch — the exact path that threw
+    // ERR_INVALID_HANDLE_TYPE on TLSSocket. The buffered-frame case (write
+    // returning false) takes the graceful branch and is covered by the
+    // paused-resume regression below.
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall) {
+        // Terminal frame write throws → immediate-RST branch on TLS.
+        if (text.includes('event: client_evicted')) {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        }
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    try {
+      const beforeActive = getActiveSseCount();
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+          await new Promise(() => {});
+        },
+      });
+      const port = await startTlsServe({ writerIdleTimeoutMs: 200 }, bridge);
+      const outcome = await openPausedHttpsStream(
+        port,
+        '/session/sess-A/events',
+      );
+      expect(forcedStall).toBe(true);
+      expect(outcome).not.toBe('timeout');
+      expect(outcome).not.toMatch(/^status:/);
+      await expectCountsReleased(beforeActive);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('EventBus overflow eviction closes the TLS socket and frees the slot', async () => {
+    // Real EventBus, real queue overflow: a paused HTTPS client with
+    // maxQueued=16 while 1MiB frames are published. The overflow
+    // diagnostic drives the route's client_evicted + force-close path.
+    const bus = new EventBus();
+    const bridge = fakeBridge();
+    (bridge as unknown as { subscribeEvents: unknown }).subscribeEvents = (
+      _sessionId: string,
+      opts: Parameters<EventBus['subscribe']>[0],
+    ) => bus.subscribe(opts);
+    try {
+      const beforeActive = getActiveSseCount();
+      const port = await startTlsServe({}, bridge);
+      const outcomePromise = openPausedHttpsStream(
+        port,
+        '/session/sess-A/events?maxQueued=16',
+      );
+      // Wait for the subscription to attach before publishing.
+      const attachDeadline = Date.now() + 2000;
+      while (bus.subscriberCount === 0 && Date.now() < attachDeadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(bus.subscriberCount).toBe(1);
+      const payload = 'x'.repeat(1024 * 1024);
+      for (let i = 0; i < 40; i++) {
+        bus.publish({ type: 'session_update', data: { i, payload } });
+      }
+      const outcome = await outcomePromise;
+      expect(outcome).not.toBe('timeout');
+      expect(outcome).not.toMatch(/^status:/);
+      await expectCountsReleased(beforeActive);
+    } finally {
+      bus.close();
+    }
+  });
+
+  it('RSTs the underlying TCP socket (_parent) on TLS eviction via the fallback', async () => {
+    // Pins the TLS _parent RST fallback specifically (verify-pr F1 / M7).
+    // Real kernel backpressure (8MiB replay) + a client that stays paused
+    // (never resumes), so eviction takes the graceful branch and the 5s
+    // forceCloseSseResponse fallback is the only thing that can close the
+    // zero-window peer. On TLS the helper's own resetAndDestroy() throws
+    // (ERR_INVALID_HANDLE_TYPE); the RST must land on the underlying TCP
+    // socket (_parent.resetAndDestroy). Deleting the _parent fallback (M7)
+    // leaves only TLSSocket.destroy(), so no plain net.Socket is reset —
+    // this assertion turns red. (The client-side error code does NOT
+    // discriminate: TLSSocket.destroy() also surfaces ECONNRESET; the
+    // property pinned here is the server-side parent RST.)
+    //
+    // The peer is kept paused and we POLL the spy for the parent reset
+    // instead of resuming on a fixed timer (review R4-1): a fixed resume
+    // races the 5s fallback — if a loaded runner delays the reaper tick, the
+    // resume drains the replay first and the graceful close cancels the
+    // fallback, failing correct code. Polling observes the actual RST.
+    const net = await import('node:net');
+    const tls = await import('node:tls');
+    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
+    try {
+      const beforeActive = getActiveSseCount();
+      const blob = 'x'.repeat(8 * 1024 * 1024);
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { blob } };
+          await new Promise(() => {});
+        },
+      });
+      const port = await startTlsServe({ writerIdleTimeoutMs: 200 }, bridge);
+      // Shared paused-client handshake (review R4-2); it stays paused, and
+      // the deadline sits comfortably past the 5s fallback even if the
+      // reaper tick is delayed on a loaded runner. The client is kept paused
+      // for the whole test (backpressure); afterEach handle.close() reaps it.
+      const outcomePromise = openPausedHttpsStream(
+        port,
+        '/session/sess-A/events',
+        13_000,
+      );
+      const parentReset = () =>
+        resetSpy.mock.instances.some((s) => !(s instanceof tls.TLSSocket));
+      const deadline = Date.now() + 12_000;
+      while (!parentReset() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // The fallback must have RST'd the underlying TCP socket: at least one
+      // resetAndDestroy call whose receiver is a plain net.Socket (the
+      // _parent), not the TLSSocket whose own call throws. This server-side
+      // spy is the authoritative signal — a truly paused zero-window client
+      // does not process the RST until it resumes, so its close/error is not
+      // asserted here.
+      expect(parentReset()).toBe(true);
+      await expectCountsReleased(beforeActive);
+      // Let the paused client settle so it does not leak into the next test.
+      await outcomePromise;
+    } finally {
+      resetSpy.mockRestore();
+    }
+  }, 25_000);
+});
+
+describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () => {
+  let handle: RunHandle | undefined;
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+    vi.restoreAllMocks();
+  });
+
+  async function expectCountReleased(beforeActive: number): Promise<void> {
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      if (getActiveSseCount() === beforeActive) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(getActiveSseCount()).toBe(beforeActive);
+  }
+
+  it('delivers the terminal eviction frame to a client that pauses then resumes', async () => {
+    // Real kernel backpressure: an 8MiB event fills the send buffer while
+    // the client pauses. res.write() returning false means the chunk WAS
+    // buffered — the reaper must end gracefully (bounded RST fallback) so
+    // a consumer that resumes reads event: client_evicted before EOF,
+    // not ECONNRESET (review R1-7).
+    const beforeActive = getActiveSseCount();
+    const blob = 'x'.repeat(8 * 1024 * 1024);
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: { blob } };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 200,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const http = await import('node:http');
+    const outcome = await new Promise<{
+      sawEvicted: boolean;
+      done: boolean;
+      error?: string;
+    }>((resolve) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/session/sess-A/events',
+          agent: false,
+        },
+        (res) => {
+          if (res.statusCode !== 200) {
+            resolve({
+              sawEvicted: false,
+              done: false,
+              error: `status:${res.statusCode}`,
+            });
+            res.resume();
+            return;
+          }
+          let buf = '';
+          let sawEvicted = false;
+          let resumed = false;
+          res.pause();
+          setTimeout(() => {
+            resumed = true;
+            res.resume();
+          }, 600).unref();
+          res.on('data', (c) => {
+            if (!resumed) return;
+            buf += c.toString();
+            if (
+              buf.includes('event: client_evicted') &&
+              buf.includes('writer_idle_timeout')
+            ) {
+              sawEvicted = true;
+            }
+          });
+          res.on('end', () => resolve({ sawEvicted, done: true }));
+          res.on('error', (e) =>
+            resolve({ sawEvicted, done: false, error: e.code }),
+          );
+        },
+      );
+      req.on('error', (e) =>
+        resolve({ sawEvicted: false, done: false, error: e.code }),
+      );
+      req.end();
+      setTimeout(
+        () => resolve({ sawEvicted: false, done: false, error: 'timeout' }),
+        5000,
+      ).unref();
+    });
+    expect(outcome.error).toBeUndefined();
+    expect(outcome.done).toBe(true);
+    expect(outcome.sawEvicted).toBe(true);
+    await expectCountReleased(beforeActive);
+  });
+
+  it('frees the slot via the 5s RST fallback when a buffered-frame eviction peer never resumes', async () => {
+    // Graceful branch (review R2-1), driven by REAL kernel backpressure: an
+    // 8MiB replay fills the send buffer while the client pauses and NEVER
+    // resumes. The terminal frame write returns false naturally (buffered,
+    // not thrown), so the route ends gracefully and arms the 5s
+    // forceCloseSseResponse fallback. The zero-window peer never ACKs the
+    // FIN queued behind the unsent replay, 'close' never fires on its own,
+    // and that timer is the only path that RSTs the socket so
+    // 'close' -> finalize -> activeSseCount-- releases the listener slot.
+    // Deleting the setTimeout(..., 5_000) fallback must turn this red (the
+    // FIN-WAIT-1 leak this PR exists to fix would otherwise ship green).
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    // Observing spy only (calls through to the real write): pins that the
+    // terminal frame was BUFFERED (write returned false), i.e. the graceful
+    // branch was taken — not the write-throw immediate-RST branch.
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let evictionFrameBuffered = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const wrote =
+        typeof encodingOrCb === 'function'
+          ? originalWrite.call(this, chunk, encodingOrCb)
+          : originalWrite.call(this, chunk, encodingOrCb, cb);
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (text.includes('event: client_evicted') && wrote === false) {
+        evictionFrameBuffered = true;
+      }
+      return wrote;
+    });
+    try {
+      const beforeActive = getActiveSseCount();
+      const blob = 'x'.repeat(8 * 1024 * 1024);
+      const bridge = fakeBridge({
+        async *subscribeImpl(_sessionId, _opts) {
+          yield { id: 1, v: 1, type: 'session_update', data: { blob } };
+          await new Promise(() => {});
+        },
+      });
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          writerIdleTimeoutMs: 200,
+        },
+        { bridge },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      // Paused client that NEVER resumes; the fallback RST (~5s after the
+      // ~250ms eviction) is what closes it. 8s ceiling > 5s fallback.
+      const outcome = await new Promise<string>((resolve) => {
+        const req = http.request(
+          {
+            hostname: '127.0.0.1',
+            port,
+            path: '/session/sess-A/events',
+            agent: false,
+          },
+          (res) => {
+            if (res.statusCode !== 200) {
+              resolve(`status:${res.statusCode}`);
+              res.resume();
+              return;
+            }
+            res.pause();
+            res.on('close', () => resolve('res-close'));
+            res.on('error', (e) => resolve(`res-error:${e.code}`));
+          },
+        );
+        req.on('error', (e) => resolve(`req-error:${e.code}`));
+        req.end();
+        setTimeout(() => resolve('timeout'), 8000).unref();
+      });
+      expect(evictionFrameBuffered).toBe(true);
+      // The paused client never resumes, so it does not process the RST
+      // until resume (known measurement artifact) — its outcome may be
+      // 'timeout'. The SERVER-side counters are authoritative: the 8s wait
+      // above outlasts the 5s fallback, which must have RST'd and freed the
+      // slot. Removing the fallback leaves the socket in FIN-WAIT-1 and
+      // these counts held (red).
+      expect(outcome).not.toMatch(/^status:/);
+      await expectCountReleased(beforeActive);
+      await expect(
+        new Promise<number>((resolve) =>
+          handle!.server.getConnections((_err, count) => resolve(count)),
+        ),
+      ).resolves.toBe(0);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  }, 15_000);
+
+  it('arms the reaper at the default budget when no flag is set', async () => {
+    // Pins default-on ARMING behaviorally: opening a stream with no
+    // explicit budget must register the reaper's polling interval
+    // (60000/4 = 5000ms), and ticking it under a permanent stall must
+    // evict. Reverting the arm gate to explicit-flag-only ships green
+    // without this test (review R1-6 revert 1).
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.includes('event: session_update')) {
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall && !text.includes('event: client_evicted')) {
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const beforeActive = getActiveSseCount();
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const baseline5k = intervalSpy.mock.calls.filter(
+      (c) => c[1] === 5000,
+    ).length;
+    const idxBeforeOpen = intervalSpy.mock.calls.length;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    const stallDeadline = Date.now() + 2000;
+    while (!forcedStall && Date.now() < stallDeadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(forcedStall).toBe(true);
+
+    const new5k = intervalSpy.mock.calls
+      .slice(idxBeforeOpen)
+      .filter((c) => c[1] === 5000);
+    // The default 60s budget polls at 5000ms; arming must add exactly
+    // one such interval for this stream.
+    expect(new5k.length).toBe(1);
+    expect(intervalSpy.mock.calls.filter((c) => c[1] === 5000).length).toBe(
+      baseline5k + 1,
+    );
+
+    // Advance the reaper's clock past the default budget and tick the
+    // newly armed callback manually (no 60s real-time wait).
+    const nowSpy = vi
+      .spyOn(performance, 'now')
+      .mockReturnValue(performance.now() + 70_000);
+    try {
+      (new5k[0][0] as () => void)();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    let sawEvicted = false;
+    const readDeadline = Date.now() + 2000;
+    let buf = '';
+    const WAKE = Symbol('wake');
+    while (Date.now() < readDeadline && !sawEvicted) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<typeof WAKE>((r) => setTimeout(() => r(WAKE), 200)),
+      ]);
+      if (chunk === WAKE) continue;
+      if (chunk.done) break;
+      buf += new TextDecoder().decode(chunk.value);
+      if (buf.includes('event: client_evicted')) sawEvicted = true;
+    }
+    await reader.cancel().catch(() => undefined);
+    expect(sawEvicted).toBe(true);
+    await expectCountReleased(beforeActive);
+  });
+
+  it('evicts a heartbeat-only stall when no events are ever yielded', async () => {
+    // For a phantom client that yields no events, the 15s heartbeat is
+    // the only write that can ever observe the stall. Routing the
+    // heartbeat through a plain write that bypasses backpressure would
+    // ship green without this test (review R1-6 revert 2).
+    const http = await import('node:http');
+    type WriteCallback = (error?: Error | null) => void;
+    const originalWrite = http.ServerResponse.prototype.write as unknown as (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ) => boolean;
+    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
+    let forcedStall = false;
+    writeSpy.mockImplementation(function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encodingOrCb?: BufferEncoding | WriteCallback,
+      cb?: WriteCallback,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      if (!forcedStall && text.startsWith(': heartbeat')) {
+        // Heartbeat reports backpressure and is swallowed: the stall
+        // stamp must be set by the heartbeat itself.
+        forcedStall = true;
+        return false;
+      }
+      if (forcedStall && !text.includes('event: client_evicted')) {
+        return false;
+      }
+      return typeof encodingOrCb === 'function'
+        ? originalWrite.call(this, chunk, encodingOrCb)
+        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    });
+    const beforeActive = getActiveSseCount();
+    const bridge = fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 200,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    let sawEvicted = false;
+    let streamEnded = false;
+    let buf = '';
+    // First heartbeat at 15s; eviction within the next poll window.
+    const deadline = Date.now() + 18_000;
+    const WAKE = Symbol('wake');
+    while (Date.now() < deadline && !sawEvicted) {
+      const chunk = await Promise.race([
+        reader.read(),
+        new Promise<typeof WAKE>((r) => setTimeout(() => r(WAKE), 500)),
+      ]);
+      if (chunk === WAKE) continue;
+      if (chunk.done) {
+        streamEnded = true;
+        break;
+      }
+      buf += new TextDecoder().decode(chunk.value);
+      if (
+        buf.includes('event: client_evicted') &&
+        buf.includes('writer_idle_timeout')
+      ) {
+        sawEvicted = true;
+      }
+    }
+    await reader.cancel().catch(() => undefined);
+    // The heartbeat stall must trigger the reaper: the stream closes
+    // (frame delivery to a reading client is pinned by the
+    // paused-resume regression) and the SSE slot is released.
+    expect(forcedStall).toBe(true);
+    expect(sawEvicted || streamEnded).toBe(true);
+    await expectCountReleased(beforeActive);
+  }, 25_000);
+
+  it('honors maxSseConnections: 0 as unlimited', async () => {
+    // The documented opt-out must not start enforcing a cap of 1
+    // (review R1-6 revert 3).
+    const beforeActive = getActiveSseCount();
+    const bridge = fakeBridge({
+      // eslint-disable-next-line require-yield
+      async *subscribeImpl(_sessionId, _opts) {
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxSseConnections: 0,
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const status = (await (
+      await fetch(`http://127.0.0.1:${port}/daemon/status?detail=full`)
+    ).json()) as { limits: { maxSseConnections: number | null } };
+    expect(status.limits.maxSseConnections).toBeNull();
+    const first = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(first.status).toBe(200);
+    const second = await fetch(
+      `http://127.0.0.1:${port}/session/sess-B/events`,
+    );
+    expect(second.status).toBe(200);
+    expect(getActiveSseCount()).toBe(beforeActive + 2);
+    await first.body!.cancel();
+    await second.body!.cancel();
+  });
+});
