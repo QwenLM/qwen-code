@@ -117,6 +117,8 @@
 - **别名携带同一个值。** `const propsAlias = blockProperties; propsAlias['shouldBlock'] = …` 不动任何库存，因为写入以两个绑定名为键。被跟踪集合现随别名声明增长，故经决策或其输入的别名写入都会入账，按源码顺序支持任意长度链。
 - **计算名的手搭 tool call 不可见。** 手搭覆盖原依赖 `respond_in_schema` 字面量计数，故不经 `fakeToolCall`、且名字为计算值的元素不动任何库存。现记录 `toolCalls` 数组中每个非 `fakeToolCall` 元素及其回调，loop 钉要求为零。
 
+写入者查找用 `Map` 而非对象字面量：普通对象会把名为 `constructor` 或 `toString` 的接收者解析到原型函数，并在可选 `.has` 调用上抛错。控制用例携带了这种接收者，回退为对象字面量即以 `IN_PLACE_WRITERS[...]?.has is not a function` 失败。
+
 每种形态都进入被执行的敌意控制（故无库存空转），并注入真实 fire 回调实测：`Reflect.set`、`Object.defineProperties`、计算名手搭调用、别名写入各使钉红（1 失败 / 87 通过）；此前全部形态仍红——第二绑定、换 call id、拼写名字的手搭调用、`let` + 内联 allow、`??=`、伪造来源、usage 行 `??`、计算工具名、门改宽、成员写入、模板字面量 sibling、`Object.assign`、短 `fakeToolCall`——而提到绑定名的注释保持绿。全部字节级还原。
 
 **为何反复出现、什么能终结它。** 这些兄弟形状都是「写同一个值或发同一个答案，但不按扫描器寻找的拼写来写」。扫描器是对内联判定的拼写级守卫，故 evasion 面无界。打包 `--loop-fire` 臂端到端驱动 fake 的真实回答，因而是行为级守卫，而这些结构钉是快速层的尽力近似；「该臂在每个具体兄弟形状下会失败」是从变异对 fake 的作用推断的，此处未单独实测。持久修复是把接缝画在整个判定之外——schema 查找、收窄、门、answer——每臂执行一个纯函数并退役库存。该重构、`CronSlots.java` fixture 绑定、与形态无关的 Java 路由断言、唯一导出的 Parsing 语法，以及派生退化阈值，均记于 #17673。
