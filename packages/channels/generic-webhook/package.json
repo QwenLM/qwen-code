@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/channel-generic-webhook",
   "private": true,
-  "version": "0.28.0",
+  "version": "0.28.0-nightly.20261118.d9ac287c9f",
   "description": "Generic outbound webhook channel for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
@@ -21,7 +21,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.28.0",
+    "@qwen-code/channel-base": "0.28.0-nightly.20261118.d9ac287c9f",
     "@qwen-code/network-policy": "0.28.0",
     "undici": "^7.30.2"
   },
