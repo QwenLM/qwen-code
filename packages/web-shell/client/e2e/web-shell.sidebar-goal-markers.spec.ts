@@ -163,7 +163,10 @@ test('a goal-changed catalog bump repaints the marker without a reload @smoke', 
   // the sidecar in the child and bumps the catalog version, and the
   // polling client must refetch and repaint the marker on its own.
   const scenario = createWebShellDaemonScenario({
-    sessions: goalSessions,
+    // The factory keeps overrides.sessions by reference, so a case that
+    // mutates a session must own its copy or it edits the shared fixture for
+    // every later test in this worker.
+    sessions: structuredClone(goalSessions),
     capabilities: {
       sessionLiveStatePollIntervalMs: 250,
       features: [
@@ -227,7 +230,9 @@ test('a goal-changed catalog bump removes the marker when the goal is cleared @s
   // mutation plus a revision bump — because a reload would assert the load
   // path instead of the notification path this covers.
   const scenario = createWebShellDaemonScenario({
-    sessions: goalSessions,
+    // Own copy: the factory keeps overrides.sessions by reference, so clearing
+    // a goal here would otherwise strip it from the shared fixture.
+    sessions: structuredClone(goalSessions),
     capabilities: {
       sessionLiveStatePollIntervalMs: 250,
       features: [
@@ -248,10 +253,11 @@ test('a goal-changed catalog bump removes the marker when the goal is cleared @s
   const activeMarker = row(page, 'E2E Harness Session').getByTestId(
     'session-goal-marker',
   );
-  // Assert presence, not a tone: goalSessions is a module-level fixture the
-  // repaint case above mutates by reference, so the starting status depends
-  // on test order. This case is about the marker disappearing, not its tone.
-  await expect(activeMarker).toHaveCount(1, { timeout: 30000 });
+  await expect(activeMarker.locator('svg')).toHaveAttribute(
+    'data-status',
+    'running',
+    { timeout: 30000 },
+  );
 
   const target = scenario.sessions.find(
     (item) => item.sessionId === 'web-shell-e2e-session',
@@ -263,4 +269,10 @@ test('a goal-changed catalog bump removes the marker when the goal is cleared @s
   };
 
   await expect(activeMarker).toHaveCount(0, { timeout: 30000 });
+  // activeMarker is a descendant of an ancestor-filtered row locator, so a
+  // count of 0 is also satisfied when the row itself unmounts. Pin the
+  // survivors: the session must stay listed, and the other goal-bearing row
+  // must keep its marker (2 before the clear, 1 after).
+  await expect(row(page, 'E2E Harness Session')).toHaveCount(1);
+  await expect(page.getByTestId('session-goal-marker')).toHaveCount(1);
 });
