@@ -5,6 +5,7 @@ import {
 } from './composerTag';
 import {
   QUOTE_REFERENCE_MAX_CHARS,
+  breakQuoteFenceFollowup,
   buildQuoteReferenceTag,
   findQuoteFenceRanges,
   flattenQuoteText,
@@ -211,5 +212,43 @@ describe('quote tag through the composer annotations', () => {
         serialized: '<quoted-message>first line second line</quoted-message>',
       },
     });
+  });
+});
+
+describe('breakQuoteFenceFollowup', () => {
+  it('breaks a follow-up glued to the closing tag', () => {
+    expect(
+      breakQuoteFenceFollowup(
+        '<quoted-message>Alpha</quoted-message>explain this',
+      ),
+    ).toBe('<quoted-message>Alpha</quoted-message>\nexplain this');
+  });
+
+  it('drops the spaces between the closing tag and the follow-up', () => {
+    expect(
+      breakQuoteFenceFollowup('<quoted-message>Alpha</quoted-message>  echo'),
+    ).toBe('<quoted-message>Alpha</quoted-message>\necho');
+  });
+
+  it('leaves a follow-up that is already on its own line alone', () => {
+    expect(
+      breakQuoteFenceFollowup('<quoted-message>Alpha</quoted-message>\necho'),
+    ).toBe('<quoted-message>Alpha</quoted-message>\necho');
+  });
+
+  it('leaves a fence with no follow-up alone', () => {
+    expect(
+      breakQuoteFenceFollowup('<quoted-message>Alpha</quoted-message>'),
+    ).toBe('<quoted-message>Alpha</quoted-message>');
+  });
+
+  it('breaks every glued fence in the draft', () => {
+    expect(
+      breakQuoteFenceFollowup(
+        '<quoted-message>A</quoted-message>one<quoted-message>B</quoted-message>two',
+      ),
+    ).toBe(
+      '<quoted-message>A</quoted-message>\none<quoted-message>B</quoted-message>\ntwo',
+    );
   });
 });

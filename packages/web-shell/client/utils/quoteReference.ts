@@ -82,6 +82,14 @@ export function quoteReferenceInsertText(flattened: string): string {
   return `${QUOTE_FENCE_OPEN}${flattened}</quoted-message>`;
 }
 
+// A click in the composer places the caret before the chip's trailing break,
+// so a follow-up typed on the fence's line glues to the closing tag once the
+// trailing break is trimmed at submit; re-break such a glued follow-up where
+// every send path converges, so it always starts on its own line.
+export function breakQuoteFenceFollowup(text: string): string {
+  return text.replace(/<\/quoted-message>[ \t]*(?=\S)/g, '</quoted-message>\n');
+}
+
 function hashQuoteText(text: string): string {
   // FNV-1a (32-bit): a short id stem without carrying the full fragment in
   // the id, which travels in the reference annotation.

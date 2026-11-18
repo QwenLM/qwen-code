@@ -3275,6 +3275,35 @@ describe('useComposerCore tags', () => {
       );
     });
 
+    it('sends the follow-up on its own line after a click back onto the fence line', async () => {
+      const onSubmit = vi.fn();
+      await mount({ onSubmit });
+      const view = latest!.viewRef.current!;
+
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+      // A click in the composer lands at the end of the chip's line —
+      // before the trailing break, not after it.
+      act(() => {
+        view.dispatch({ selection: { anchor: view.state.doc.length - 1 } });
+      });
+      act(() => {
+        view.dispatch(view.state.replaceSelection('explain this'));
+      });
+      // The draft keeps the typed text where the caret put it...
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>explain this\n',
+      );
+      // ...but the sent prompt breaks the follow-up onto its own line.
+      act(() => {
+        latest!.submitText();
+      });
+      expect(onSubmit.mock.calls[0]?.[0]).toBe(
+        '<quoted-message>fragment</quoted-message>\nexplain this',
+      );
+    });
+
     it('starts the quote on its own line after an existing draft', async () => {
       await mount();
       act(() => {

@@ -87,6 +87,7 @@ import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   QUOTE_FENCE_OPEN,
+  breakQuoteFenceFollowup,
   buildQuoteReferenceTag,
   findQuoteFenceRanges,
 } from '../utils/quoteReference';
@@ -3478,11 +3479,11 @@ export function useComposerCore(
     ) {
       return true;
     }
-    const textWithInlineTags =
+    const text = breakQuoteFenceFollowup(
       tagsOverride === undefined
         ? replaceInlineTagPlacements(rawText, normalizedInlineTags)
-        : rawText;
-    const text = textWithInlineTags;
+        : rawText,
+    );
     const prompt = buildComposerPrompt(text, tags);
     const isShellMode = shellModeRef.current;
     const promptText = isShellMode && prompt ? `!${prompt}` : prompt;

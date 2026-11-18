@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -981,6 +983,29 @@ describe('UserMessage', () => {
     expect(chip).not.toBeNull();
     expect(chip.className).toContain('messageTagQuote');
     expect(chip.textContent).toContain(quoted);
+  });
+
+  // jsdom applies no stylesheets, so the class assertion above cannot see the
+  // rule itself; pin the CSS source so the fragment keeps wrapping instead of
+  // truncating at the chip's 32ch value width.
+  it('pins the quote chip CSS that keeps the full fragment visible', () => {
+    const css = readFileSync(
+      resolve(__dirname, 'UserMessage.module.css'),
+      'utf8',
+    );
+    const chipRule = /\.messageTagQuote\s*{([^}]*)}/.exec(css)?.[1] ?? '';
+    expect(chipRule).toContain('max-width: 100%');
+    const valueRule =
+      /\.messageTagQuote\s+\.messageTagValue\s*{([^}]*)}/.exec(css)?.[1] ?? '';
+    for (const declaration of [
+      'max-width: none',
+      'white-space: normal',
+      'overflow: visible',
+      'text-overflow: clip',
+      'word-break: break-word',
+    ]) {
+      expect(valueRule).toContain(declaration);
+    }
   });
 
   it('renders images when provided', () => {
