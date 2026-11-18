@@ -417,8 +417,11 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         var guarded = mvc(new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
                 fixture.policy(), fixture.properties(), registry));
-        // Available rows only: the single admission check admits the page.
+        // Available rows only: the single admission check admits the page,
+        // and no re-check fires — an unconditional re-check would consume a
+        // second stub value here and fail this count.
         guarded.perform(query("reader", body(null, null))).andExpect(status().isOk());
+        verify(registry, times(1)).canRead(TENANT, "reader", WORKSPACE);
         seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
         // An unavailable row triggers the re-check, which now refuses.
         guarded.perform(query("reader", body(null, null)))
