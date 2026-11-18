@@ -83,6 +83,60 @@ describe('parseSseStream', () => {
     expect(await collect(parseSseStream(body, controller.signal))).toEqual([]);
   });
 
+  it.each(['\n\n', '\r\n\r\n'])(
+    'stops a batch from an already-closed stream after abort (%j)',
+    async (separator) => {
+      const controller = new AbortController();
+      const body = bodyFromString(
+        [1, 2, 3]
+          .map((id) => `data: ${JSON.stringify({ id, v: 1, type: 'x' })}`)
+          .join(separator) + separator,
+      );
+      const events: number[] = [];
+      for await (const event of parseSseStream(body, controller.signal)) {
+        events.push(event.id!);
+        controller.abort();
+      }
+      expect(events).toEqual([1]);
+    },
+  );
+
+  it('does not flush a buffered tail after abort settles a parked read', async () => {
+    const controller = new AbortController();
+    let pulls = 0;
+    let cancelled = false;
+    let onParkedRead!: () => void;
+    const parkedRead = new Promise<void>((resolve) => {
+      onParkedRead = resolve;
+    });
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(stream) {
+          if (++pulls === 1) {
+            stream.enqueue(
+              new TextEncoder().encode('data: {"id":7,"v":1,"type":"x"}'),
+            );
+          } else {
+            onParkedRead();
+          }
+        },
+        cancel() {
+          cancelled = true;
+        },
+      },
+      // Avoid prefetch: the second pull must be the parser's next read,
+      // after it has retained the unterminated frame in its buffer.
+      { highWaterMark: 0 },
+    );
+    const pending = collect(parseSseStream(body, controller.signal));
+    await parkedRead;
+    controller.abort();
+
+    await expect(pending).resolves.toEqual([]);
+    expect(cancelled).toBe(true);
+    expect(pulls).toBe(2);
+  });
+
   it('completes cleanly when an oversized read settles during cancellation', async () => {
     const controller = new AbortController();
     let source!: ReadableStreamDefaultController<Uint8Array>;
