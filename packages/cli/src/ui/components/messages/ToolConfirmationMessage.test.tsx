@@ -2340,10 +2340,12 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('No, suggest changes (esc)');
     });
 
-    it('keeps one MCP identity row when the body budget is a single row', async () => {
+    it('keeps both MCP identity halves on the single row the budget leaves', async () => {
       // Compact chrome is one question row plus two option rows, so a
       // four-row terminal leaves the body exactly one row: the budget under
-      // which the sizing box cannot answer the ask at all.
+      // which the sizing box cannot answer the ask at all. The compact question
+      // is the generic one, so that row is the only place the server and the
+      // tool appear, and it shows a head of each rather than one whole label.
       const availableTerminalHeight = 4;
       const { lastFrame } = render(
         <OverflowProvider>
@@ -2381,12 +2383,56 @@ describe('ToolConfirmationMessage', () => {
       // footer, so it cannot answer a one-row budget with one row. At that point
       // the identity rows are replaced by a pinned single row instead of letting
       // the box render past the cap and take the options with it.
+      expect(frame).toContain('MCP Server: srv');
       expect(frame).toContain('Tool: tool-');
-      expect(frame).not.toContain('MCP Server:');
-      // The row is truncated, so it shows that a longer name exists, and it
-      // registers the overflow that makes ctrl-s offer the whole name.
+      // The long label is cut inside itself, so the row says a longer name
+      // exists and registers the overflow that makes ctrl-s offer it.
       expect(frame).toContain('…');
       expect(frame).not.toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+    });
+
+    it('keeps the MCP tool name when the server name is the long one', async () => {
+      // The other side of the same row: the long label has to give columns to
+      // the short one whichever of the two it is, or the row hides the very
+      // tool being authorised while looking complete.
+      const availableTerminalHeight = 4;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'mcp',
+                title: 'Confirm MCP tool',
+                serverName: 'server-'.repeat(20),
+                toolName: 'read',
+                toolDisplayName: 'read',
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+              compactMode={true}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toContain('Tool: read');
+        expect(frame).toMatch(/overflowing:[1-9]/);
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('MCP Server: server-');
+      expect(frame).toContain('…');
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      expect(frame).toContain('Do you want to proceed?');
       expect(frame).toContain('Yes, allow once');
       expect(frame).toContain('No');
     });

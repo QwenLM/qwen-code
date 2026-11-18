@@ -75,11 +75,17 @@ const OverflowNotice: React.FC<{
    * when the truncation actually cut characters off.
    */
   width?: number;
-}> = ({ message, color = theme.text.secondary, tail, width }) => {
+  /**
+   * Set when the caller already cut the text to fit this row. What the row
+   * renders fits, so the width alone cannot see that what it replaced did not.
+   */
+  hidden?: boolean;
+}> = ({ message, color = theme.text.secondary, tail, width, hidden }) => {
   const id = useId();
   const actions = useOverflowActions();
   const clipped =
-    width === undefined || stringWidth(`${message}${tail ?? ''}`) > width;
+    hidden ??
+    (width === undefined || stringWidth(`${message}${tail ?? ''}`) > width);
   useEffect(() => {
     if (!actions || !clipped) return;
     actions.addOverflowingId(id);
@@ -1081,18 +1087,30 @@ export const ToolConfirmationMessage: React.FC<
     // Sized after the options exist because availableBodyContentHeight()
     // charges the option list.
     bodyBudget = compactClamp(availableBodyContentHeight());
+    const serverLabel = t('MCP Server: {{server}}', {
+      server: mcpProps.serverName,
+    });
+    const toolLabel = t('Tool: {{tool}}', { tool: mcpProps.toolName });
+    // One row cannot hold both labels, and neither half is dispensable: the
+    // server says where the call goes, the tool says what it does. So each is
+    // cut to its own head, which keeps both visible and puts the ellipsis
+    // inside the label that ran out of room.
+    const identityShare = Math.floor((warningContentWidth - 1) / 2);
+    const identityLine = `${truncateToWidth(serverLabel, identityShare)} ${truncateToWidth(toolLabel, identityShare)}`;
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
         {bodyBudget !== undefined && bodyBudget < MINIMUM_MAX_HEIGHT ? (
           // MaxSizedBox floors its ceiling at MINIMUM_MAX_HEIGHT and spends one
           // of those rows on its footer, so under a one-row budget it renders
-          // more than the cap and the outer clip takes the footer away. Pin the
-          // row that names the tool being authorised instead, truncated so the
-          // row shows a cue, and registered so ctrl-s offers the whole name.
+          // more than the cap and the outer clip takes the footer away. Pin one
+          // row instead, carrying both halves of the identity, registered so
+          // ctrl-s offers the whole labels.
           <OverflowNotice
             color={theme.text.link}
-            width={warningContentWidth}
-            message={t('Tool: {{tool}}', { tool: mcpProps.toolName })}
+            hidden={
+              stringWidth(`${serverLabel} ${toolLabel}`) > warningContentWidth
+            }
+            message={identityLine}
           />
         ) : (
           <MaxSizedBox
@@ -1102,12 +1120,12 @@ export const ToolConfirmationMessage: React.FC<
           >
             <Box>
               <Text color={theme.text.link} wrap="wrap">
-                {t('MCP Server: {{server}}', { server: mcpProps.serverName })}
+                {serverLabel}
               </Text>
             </Box>
             <Box>
               <Text color={theme.text.link} wrap="wrap">
-                {t('Tool: {{tool}}', { tool: mcpProps.toolName })}
+                {toolLabel}
               </Text>
             </Box>
           </MaxSizedBox>
