@@ -2024,9 +2024,9 @@ inconclusive.
   example: a readiness check sent no bearer token to a server that
   requires auth, so it never saw 200 and always ran to its timeout; that
   timeout was reported as a "~40 s restart" of a server that listens
-  within about a second. Decide "the model replied" or "the turn finished"
-  from backend events or usage records, never from page text that may
-  echo the prompt. Match wait conditions only against lines produced in
+  within about a second. Confirm turn completion from the backend terminal
+  state for the prompt, never from page text that may echo the prompt.
+  Per-round usage can corroborate the model used. Match wait conditions only against lines produced in
   the current phase. Bound every call to the system under test in time
   and record a timeout as "no answer within N s": one commit turned a
   refusal after 0.1 s into a start that never answered while the worker

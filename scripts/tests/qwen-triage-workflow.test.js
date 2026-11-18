@@ -6418,7 +6418,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(webShellRef).toContain("page.route('**/capabilities'");
     expect(webShellRef).toContain('keyConfigured');
     expect(webShellRef).toContain('qwen serve --channel my-plugin-test');
-    expect(webShellRef).toContain('token-usage record');
+    expect(webShellRef).toContain(
+      'Require a backend turn status of `completed` for that prompt in that session.',
+    );
+    expect(webShellRef).toContain('`context.sessionId` and `request.model`');
 
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
