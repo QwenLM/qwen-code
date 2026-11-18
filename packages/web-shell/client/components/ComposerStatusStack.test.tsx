@@ -7,6 +7,15 @@ import { WebShellCustomizationProvider } from '../customization';
 import { I18nProvider, getTranslator } from '../i18n';
 import { ComposerStatusStack } from './ComposerStatusStack';
 import type { QueuedPrompt } from './QueuedPromptDisplay';
+import styles from './ComposerStatusStack.module.css';
+
+// Stub the goal strip with an unconditional element so the no-goal cases
+// observe this component's own gate, not GoalStatusStrip's internal `!goal`
+// guard (which would otherwise mask a widened gate). The strip's own rendering
+// and complete-goal guard stay pinned by GoalStatusStrip.test.tsx.
+vi.mock('./GoalStatusStrip', () => ({
+  GoalStatusStrip: () => <div data-web-shell-goal-status="" />,
+}));
 
 const t = getTranslator('zh-CN');
 
@@ -73,29 +82,40 @@ describe('ComposerStatusStack', () => {
     });
   }
 
-  it('wraps the queue and the goal strip in the shared status root', () => {
-    render({ queued: queuedProps, goal: goalProps });
-    const stack = container.querySelector(
+  function stack(): HTMLElement {
+    const node = container.querySelector<HTMLElement>(
       '[data-testid="composer-status-stack"]',
     );
-    expect(stack).not.toBeNull();
-    expect(
-      stack?.querySelector('[data-web-shell-queued-prompts]'),
-    ).not.toBeNull();
-    expect(stack?.querySelector('[data-web-shell-goal-status]')).not.toBeNull();
+    if (!node) throw new Error('composer status stack was not rendered');
+    return node;
+  }
+
+  it('wraps the queue and the goal strip in the shared status root', () => {
+    render({ queued: queuedProps, goal: goalProps });
+    const node = stack();
+    // The root class is the only source of the border/width/radius; assert the
+    // imported class name so a CSS-module rename cannot make this meaningless.
+    expect(node.className).toContain(styles.root);
     expect(container.textContent).toContain('排队消息一');
-    expect(container.textContent).toContain('ship every surface');
+    // Both children stay direct and in this order: the stylesheet selects
+    // `.root > [queued] + [goal]`, so a wrapper or a swap must fail here.
+    expect(node.children).toHaveLength(2);
+    expect(node.children[0].hasAttribute('data-web-shell-queued-prompts')).toBe(
+      true,
+    );
+    expect(node.children[1].hasAttribute('data-web-shell-goal-status')).toBe(
+      true,
+    );
   });
 
   it('omits the goal strip when no goal controller is supplied', () => {
     render({ queued: queuedProps });
-    expect(
-      container.querySelector('[data-testid="composer-status-stack"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-web-shell-queued-prompts]'),
-    ).not.toBeNull();
-    expect(container.querySelector('[data-web-shell-goal-status]')).toBeNull();
+    const node = stack();
+    expect(node.children).toHaveLength(1);
+    expect(node.children[0].hasAttribute('data-web-shell-queued-prompts')).toBe(
+      true,
+    );
+    expect(node.querySelector('[data-web-shell-goal-status]')).toBeNull();
   });
 
   it('omits the goal strip when the snapshot carries no goal', () => {
@@ -103,19 +123,21 @@ describe('ComposerStatusStack', () => {
       queued: queuedProps,
       goal: { ...goalProps, snapshot: { v: 2, activity: 'idle', goal: null } },
     });
-    expect(container.querySelector('[data-web-shell-goal-status]')).toBeNull();
+    const node = stack();
+    expect(node.querySelector('[data-web-shell-goal-status]')).toBeNull();
     expect(
-      container.querySelector('[data-web-shell-queued-prompts]'),
+      node.querySelector('[data-web-shell-queued-prompts]'),
     ).not.toBeNull();
   });
 
   it('still renders the root for a goal-only stack with an empty queue', () => {
     render({ queued: { ...queuedProps, prompts: [] }, goal: goalProps });
-    const stack = container.querySelector(
-      '[data-testid="composer-status-stack"]',
+    const node = stack();
+    expect(node.className).toContain(styles.root);
+    expect(node.children).toHaveLength(1);
+    expect(node.children[0].hasAttribute('data-web-shell-goal-status')).toBe(
+      true,
     );
-    expect(stack).not.toBeNull();
-    expect(stack?.querySelector('[data-web-shell-queued-prompts]')).toBeNull();
-    expect(stack?.querySelector('[data-web-shell-goal-status]')).not.toBeNull();
+    expect(node.querySelector('[data-web-shell-queued-prompts]')).toBeNull();
   });
 });
