@@ -122,28 +122,31 @@ function renderTable(
   );
 }
 
-function renderWideTable(): HTMLElement {
-  return renderTableContent([
-    <thead key="head">
-      <tr>
-        <th>Team</th>
-        <th>Region</th>
-        <th>Score</th>
-      </tr>
-    </thead>,
-    <tbody key="body">
-      <tr>
-        <td>Alpha</td>
-        <td>US</td>
-        <td>10</td>
-      </tr>
-      <tr>
-        <td>Beta</td>
-        <td>EMEA</td>
-        <td>2</td>
-      </tr>
-    </tbody>,
-  ]);
+function renderWideTable(language: WebShellLanguage = 'en'): HTMLElement {
+  return renderTableContent(
+    [
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+          <th>Region</th>
+          <th>Score</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>US</td>
+          <td>10</td>
+        </tr>
+        <tr>
+          <td>Beta</td>
+          <td>EMEA</td>
+          <td>2</td>
+        </tr>
+      </tbody>,
+    ],
+    language,
+  );
 }
 
 function click(el: Element): void {
@@ -2491,6 +2494,90 @@ describe('EnhancedMarkdownTable', () => {
       container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
         ?.style.left,
     ).toBe('280px');
+  });
+
+  it('positions the RTL frozen shadow outside the left edge of the frozen column', () => {
+    const container = renderWideTable('ar');
+    const shell = container.querySelector<HTMLElement>(
+      '[class*="tableShell"]',
+    )!;
+    const header = container.querySelectorAll('thead th')[1];
+    Object.defineProperty(shell, 'clientLeft', {
+      configurable: true,
+      value: 1,
+    });
+    Object.defineProperty(shell, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 20, right: 421 }) as DOMRect,
+    });
+    Object.defineProperty(header, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 261, right: 381 }) as DOMRect,
+    });
+    openColumnMenu(container, 'Team');
+    click(
+      textButton(
+        container,
+        getTranslator('ar')('markdownTable.freezeFirstColumn'),
+      ),
+    );
+    expect(
+      container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+        ?.style.left,
+    ).toBe('226px');
+  });
+
+  it('repositions the frozen shadow when the language changes to RTL', () => {
+    const children = [
+      <thead key="head">
+        <tr>
+          <th>Team</th>
+          <th>Score</th>
+        </tr>
+      </thead>,
+      <tbody key="body">
+        <tr>
+          <td>Alpha</td>
+          <td>10</td>
+        </tr>
+      </tbody>,
+    ];
+    const container = renderTableContent(children);
+    const { root, portalRoot } = mounted[mounted.length - 1];
+    const shell = container.querySelector<HTMLElement>(
+      '[class*="tableShell"]',
+    )!;
+    const header = container.querySelectorAll('thead th')[1];
+    Object.defineProperty(shell, 'clientLeft', {
+      configurable: true,
+      value: 1,
+    });
+    Object.defineProperty(shell, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 20, right: 421 }) as DOMRect,
+    });
+    Object.defineProperty(header, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 261, right: 381 }) as DOMRect,
+    });
+    freezeFirstColumn(container);
+    expect(
+      container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+        ?.style.left,
+    ).toBe('360px');
+    act(() =>
+      root.render(
+        <WebShellPortalRootContext.Provider value={portalRoot!}>
+          <I18nProvider language="ar">
+            <EnhancedMarkdownTable>{children}</EnhancedMarkdownTable>
+          </I18nProvider>
+        </WebShellPortalRootContext.Provider>,
+      ),
+    );
+    expect(
+      container.querySelector<HTMLElement>('[class*="frozenColumnShadow"]')
+        ?.style.left,
+    ).toBe('226px');
   });
 
   it('repositions the frozen shadow when the ResizeObserver fires', () => {

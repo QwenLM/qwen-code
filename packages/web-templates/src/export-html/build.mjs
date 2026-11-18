@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_191_500;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_196_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -103,12 +103,26 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_191_500;
 // The local-files usability copy (#17198: change-directory/reconnect notices,
 // the insecure-context tunnel instruction with its local-port branch, and the
 // deferred-change notice, across two locales) measures 2,136,115 bytes on
-// head 6286c8cb11 in CI, 115 above the previous 2,136,000 ceiling.
+// head 6286c8cb11 in CI, 115 above the previous 2,136,000 ceiling. The warning
+// sits 885 above that measurement and the ceiling 1,885 above it.
 // The composer task-explain side question (#17398: the explain display line,
 // the "?" aria label and tooltip, and the panel copy, across two locales, plus
 // the transcript-reachable explain wiring) adds 904 bytes: main d41eda5123
 // measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
-// d5f6a103a6 measures 2,138,797 in CI, 797 above it.
+// d5f6a103a6 measures 2,138,797 in CI, 797 above it. The warning sits 203 above
+// that measurement and the ceiling 1,203 above it.
+// The document runtime measured 2,138,044 bytes on head 2ef7af8e69, 44 above
+// the previous 2,138,000 ceiling. SessionGoalMarker is NOT reachable from the
+// document entry (it is imported only by WebShellSidebar) and the RU catalog
+// is stubbed in transcript mode, so the sidebar goal marker feature (#17515)
+// contributes only its EN/ZH `sidebar.sessionGoal` label strings (~151 bytes)
+// to this bundle. This PR's deliberate budget raise was folded into main's
+// larger `/send` ceilings below when merging, so the CURRENT caps apply: the
+// warning sits 7,056 above that measurement and the ceiling 8,056 above it.
+// Those two figures price THIS feature against the caps, not the remaining
+// headroom: after merging main the same tree measures 2,145,649 locally,
+// already over the warning and 451 below the ceiling. Size new copy against
+// that 451, and re-measure in CI before trusting it.
 // The `/send` command, its composer chip and session tab copy (ten keys
 // across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
 // 039ed577fb without and with the change. Recording the exchange in the
@@ -117,18 +131,22 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_191_500;
 // across two locales) adds 1,497 more. Merged with the explain side question
 // above, the branch measured 2,141,606 locally on main 5fc5a98ecc; marking a
 // turn another session's reply starts (its card label, keeping the card in a
-// folded turn, and opening that session from it) brings it to 2,142,326.
-// Adding Arabic transcript strings (ar-transcript.ts, with interactive-only
-// Arabic copy stubbed via ar-interactive.transcript-stub.ts) and RTL direction
-// wiring across exported transcript views measured 2,183,235 bytes locally on
-// head b022a6ab7c (+47,120 over the 2,136,115 it was measured against); merged
-// with main's composer task-explain copy, head df7879d72a measured 2,187,632
-// bytes locally.
-// Merging main's /send exchange above with the Arabic head measures
-// 2,191,098 bytes locally on the merge of head df7879d72a with main
-// b9da38c7bd (Node 22.23.2), so both increases are budgeted here. The
-// warning sits 402 above that measurement and the ceiling 1,402 above it.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_192_500;
+// folded turn, and opening that session from it) brings it to 2,142,326. The
+// warning sits 774 above that measurement and the ceiling 1,774 above it.
+// Generic Webhook copy (#17405: ten keys across two locales) adds 2,154:
+// the same tree with main 7a9b270d's dictionary measures 2,142,233 bytes,
+// against 2,144,387 with the new copy. CSS and third-party inputs are unchanged,
+// and the forbidden-input guard passes. Leave 713 bytes to the warning and
+// 1,713 to the ceiling.
+// Arabic transcript strings and RTL runtime wiring are retained in the
+// document bundle; interactive-only Arabic and Traditional Chinese are stubbed.
+// With the same installed dependencies on Node 24.22.3, main d83fa2154e
+// measures 2,146,529 JS bytes and Arabic head 15d3a19824 measures 2,191,830.
+// Their merge plus the RTL fixes measures 2,195,499 (+48,970 over main,
+// +3,669 over the Arabic head). Third-party input bytes are unchanged and
+// the forbidden-input guard passes for all three. The warning sits 501
+// bytes above the merged measurement and the ceiling 1,501 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_197_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

@@ -2555,7 +2555,12 @@ export function EnhancedTable({
       const shellRect = shell.getBoundingClientRect();
       const headerRect = frozenHeader.getBoundingClientRect();
       setFrozenColumnShadowLeft(
-        Math.max(0, headerRect.right - shellRect.left - shell.clientLeft),
+        Math.max(
+          0,
+          (isRtl ? headerRect.left - 14 : headerRect.right) -
+            shellRect.left -
+            shell.clientLeft,
+        ),
       );
     };
     updateShadowPosition();
@@ -2572,6 +2577,7 @@ export function EnhancedTable({
     density,
     freezeFirstColumn,
     frozenColumnIndex,
+    isRtl,
     orderedVisibleColumnIndexes,
     shell,
   ]);

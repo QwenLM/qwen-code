@@ -109,6 +109,43 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
   ],
 };
 
+const SUBCOMMAND_TREE_ZH_TW: Record<string, SubcommandNode[]> = {
+  agents: [
+    { name: 'manage', description: '管理現有 subagents' },
+    { name: 'create', description: '建立新的 subagent' },
+  ],
+  theme: [
+    { name: 'light', description: '切換到淺色主題' },
+    { name: 'dark', description: '切換到深色主題' },
+  ],
+  export: [
+    { name: 'md', description: '將會話匯出為 Markdown 檔案' },
+    { name: 'html', description: '將會話匯出為 HTML 檔案' },
+    { name: 'json', description: '將會話匯出為 JSON 檔案' },
+    { name: 'jsonl', description: '將會話匯出為 JSONL 檔案（每行一條訊息）' },
+  ],
+  language: [
+    {
+      name: 'ui',
+      description: '設定 UI 語言',
+      children: LANGUAGE_OPTIONS,
+    },
+    {
+      name: 'output',
+      description: '設定 LLM 輸出語言',
+      argumentHint: '<語言>',
+    },
+  ],
+  extensions: [
+    { name: 'manage', description: '管理擴充' },
+    {
+      name: 'install',
+      description: '安裝擴充',
+      argumentHint: '<來源>',
+    },
+  ],
+};
+
 const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
   agents: [
     { name: 'manage', description: 'Manage existing subagents' },
@@ -167,6 +204,30 @@ const IMPLICIT_SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
     { name: 'show', description: '查看 memory 文件' },
     { name: 'add', description: '新增 memory' },
     { name: 'refresh', description: '刷新 memory 文件列表' },
+  ],
+};
+
+const IMPLICIT_SUBCOMMAND_TREE_ZH_TW: Record<string, SubcommandNode[]> = {
+  context: [{ name: 'detail', description: '顯示詳細上下文資訊' }],
+  copy: [
+    { name: 'code', description: '複製程式碼塊' },
+    { name: 'latex', description: '複製 LaTeX 公式' },
+    { name: 'inline-latex', description: '複製行內 LaTeX 公式' },
+  ],
+  tools: [{ name: 'desc', description: '顯示工具詳細描述' }],
+  stats: [
+    { name: 'model', description: '顯示各模型使用統計' },
+    { name: 'tools', description: '顯示工具使用統計' },
+  ],
+  mcp: [
+    { name: 'desc', description: '顯示 MCP server 和工具描述' },
+    { name: 'nodesc', description: '隱藏 MCP server 和工具描述' },
+    { name: 'schema', description: '顯示工具參數 schema' },
+  ],
+  memory: [
+    { name: 'show', description: '檢視 memory 檔案' },
+    { name: 'add', description: '新增 memory' },
+    { name: 'refresh', description: '重新整理 memory 檔案列表' },
   ],
 };
 
@@ -256,12 +317,14 @@ const IMPLICIT_SUBCOMMAND_TREE_AR: Record<string, SubcommandNode[]> = {
 };
 
 function getSubcommandTree(language: WebShellLanguage) {
+  if (language === 'zh-TW') return SUBCOMMAND_TREE_ZH_TW;
   if (language === 'zh-CN') return SUBCOMMAND_TREE_ZH;
   if (language === 'ar') return SUBCOMMAND_TREE_AR;
   return SUBCOMMAND_TREE_EN;
 }
 
 function getImplicitSubcommandTree(language: WebShellLanguage) {
+  if (language === 'zh-TW') return IMPLICIT_SUBCOMMAND_TREE_ZH_TW;
   if (language === 'zh-CN') return IMPLICIT_SUBCOMMAND_TREE_ZH;
   if (language === 'ar') return IMPLICIT_SUBCOMMAND_TREE_AR;
   return IMPLICIT_SUBCOMMAND_TREE_EN;

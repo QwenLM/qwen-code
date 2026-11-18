@@ -647,6 +647,18 @@ it('renders Arabic RTL copy for an invalid token', async () => {
   expect(container.textContent).not.toContain('Invalid or expired');
 });
 
+it('renders the zh-TW copy for an invalid token', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount('wrong', 'zh-TW');
+  expect(container.textContent).toContain('連線到 Qwen Code');
+  expect(container.textContent).toContain('令牌無效或已過期');
+  expect(container.textContent).not.toContain('Invalid or expired');
+  expect(container.textContent).toContain('完整訪問權限');
+});
+
 it('probes the daemon capabilities endpoint', async () => {
   const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
   vi.stubGlobal('fetch', fetch);

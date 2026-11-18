@@ -1,5 +1,5 @@
 import type { CommandInfo } from '../adapters/types';
-import type { useI18n } from '../i18n';
+import { WEB_SHELL_LANGUAGES, type useI18n } from '../i18n';
 
 type Translate = ReturnType<typeof useI18n>['t'];
 
@@ -29,7 +29,7 @@ export function getLocalCommands(
     {
       name: 'language',
       description: t('local.language'),
-      argumentHint: 'ui [en|zh-CN|ru|ar] | output <language>',
+      argumentHint: `ui [${WEB_SHELL_LANGUAGES.join('|')}] | output <language>`,
       subcommands: ['ui', 'output'],
     },
     {

@@ -31,6 +31,7 @@ import {
   type ActivityPreferences,
 } from './activity-model';
 import { SidebarSectionHeader } from './SidebarSectionHeader';
+import { hasLiveWork } from '../../session-catalog/session-live-work';
 import sidebarStyles from './WebShellSidebar.module.css';
 
 const PREFERENCES_KEY = 'qwen-code-activity-options-v1';
@@ -534,24 +535,16 @@ export function ActivityView({
             <p>
               {t('activity.archiveDescription', { count: confirmation.length })}
             </p>
-            {confirmation.some(
-              (entry) =>
-                entry.session.hasActivePrompt ||
-                entry.session.activeWorkState === 'active' ||
-                entry.session.hasRunningBackgroundTasks,
-            ) && <p>{t('activity.archiveRunning')}</p>}
+            {confirmation.some((entry) => hasLiveWork(entry.session)) && (
+              <p>{t('activity.archiveRunning')}</p>
+            )}
             <div className={sidebarStyles.confirmActions}>
               <Button variant="outline" onClick={() => setConfirmation(null)}>
                 {t('activity.cancel')}
               </Button>
               <Button onClick={archive}>
                 {t(
-                  confirmation.some(
-                    (entry) =>
-                      entry.session.hasActivePrompt ||
-                      entry.session.activeWorkState === 'active' ||
-                      entry.session.hasRunningBackgroundTasks,
-                  )
+                  confirmation.some((entry) => hasLiveWork(entry.session))
                     ? 'activity.confirmStopArchive'
                     : 'activity.confirmArchive',
                 )}

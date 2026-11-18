@@ -241,6 +241,11 @@
   background: linear-gradient(90deg, rgb(0 0 0 / 8%), rgb(0 0 0 / 0));
 }
 
+:global([dir='rtl']) .frozenColumnShadow {
+  transform: translateX(1px);
+  background: linear-gradient(270deg, rgb(0 0 0 / 8%), rgb(0 0 0 / 0));
+}
+
 .table {
   --action-column-width: 40px;
 

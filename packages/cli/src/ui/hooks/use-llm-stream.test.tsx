@@ -14130,6 +14130,40 @@ describe('useLlmStream', () => {
           (item) => item.type === 'gemini' || item.type === 'gemini_content',
         );
 
+    it.each(
+      ['```', '~~~'].flatMap((fence) =>
+        ['\n', '\r\n', '\r\r\n'].map((eol) => ({ fence, eol })),
+      ),
+    )(
+      'commits a closed $fence block before a pending table under $eol line endings',
+      async ({ fence, eol }) => {
+        vi.useFakeTimers();
+        const markdown = await vi.importActual<
+          typeof import('../utils/markdown-utilities.js')
+        >('../utils/markdown-utilities.js');
+        vi.mocked(findLastSafeSplitPoint).mockImplementation(
+          markdown.findLastSafeSplitPoint,
+        );
+        const code = [`${fence}ts`, 'code', `${fence} \t`, '', ''].join(eol);
+        const table = ['| A | B |', '| - | - |', '| 1 | 2 |', '| 3 | 4 |'].join(
+          eol,
+        );
+        // The code fits within eight rows, but the following table does not.
+        const { result } = renderTestHook([], undefined, { current: 13 });
+        const releaseStream = await streamContent(result, code + table);
+
+        try {
+          expect(llmContentItems().map((item) => item.text)).toEqual([code]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(table);
+        } finally {
+          act(() => result.current.cancelOngoingRequest());
+          await act(async () => {
+            releaseStream();
+          });
+        }
+      },
+    );
+
     it('breaks the commit loop when no safe split point exists (no hang)', async () => {
       vi.useFakeTimers();
       // findLastSafeSplitPoint returning 0 (e.g. content entirely inside an

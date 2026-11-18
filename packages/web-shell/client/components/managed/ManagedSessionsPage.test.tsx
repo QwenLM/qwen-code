@@ -375,7 +375,7 @@ describe('ManagedSessionsPage', () => {
 
   async function render(
     sessionId?: string,
-    language: 'en' | 'zh-CN' | 'ar' = 'en',
+    language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' | 'ar' = 'en',
     managedAgentProvider: ManagedAgentProvider | null = provider,
     navigationTarget?: HTMLElement | null,
     interactive = true,
@@ -471,9 +471,14 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.client.cancel).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])(
-    'opens diagnostics in a read-only Session and closes them on owner change (home: %s)',
-    async (home) => {
+  it.each([
+    { home: false, language: 'en', title: 'Session diagnostics' },
+    { home: true, language: 'zh-CN', title: '会话诊断' },
+    { home: false, language: 'zh-TW', title: '會話診斷' },
+    { home: true, language: 'ru', title: 'Диагностика сессии' },
+  ] as const)(
+    'opens $language diagnostics in a read-only Session and closes them on owner change (home: $home)',
+    async ({ home, language, title }) => {
       const getContextUsage = vi.fn().mockResolvedValue(diagnosticContext);
       provider = {
         ...provider,
@@ -491,10 +496,10 @@ describe('ManagedSessionsPage', () => {
         }),
       );
       const navigation = home ? null : undefined;
-      await render('s1', 'en', provider, navigation, false);
+      await render('s1', language, provider, navigation, false);
       expect(getContextUsage).not.toHaveBeenCalled();
       const button = [...container.querySelectorAll('button')].find(
-        (item) => item.textContent === 'Session diagnostics',
+        (item) => item.textContent === title,
       );
       expect(button).toBeDefined();
       await act(async () => button!.click());
@@ -502,10 +507,10 @@ describe('ManagedSessionsPage', () => {
         'model-a',
       );
       const signal = getContextUsage.mock.calls[0][1].signal as AbortSignal;
-      await render('s2', 'en', provider, navigation, false);
+      await render('s2', language, provider, navigation, false);
       expect(signal.aborted).toBe(true);
       expect(document.querySelector('[role="dialog"]')).toBeNull();
-      await render('s1', 'en', provider, navigation, false);
+      await render('s1', language, provider, navigation, false);
       expect(document.querySelector('[role="dialog"]')).toBeNull();
       expect(getContextUsage).toHaveBeenCalledTimes(1);
       expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
@@ -1516,23 +1521,31 @@ describe('ManagedSessionsPage', () => {
   });
 
   it.each([
-    ['en', 'billing'],
-    ['zh-CN', '余额'],
-    ['ar', 'رصيد'],
+    ['en', 'model_payment_required', 'HTTP 402', 'billing'],
+    ['zh-CN', 'model_payment_required', 'HTTP 402', '余额'],
+    ['zh-TW', 'model_payment_required', 'HTTP 402', '餘額'],
+    ['ru', 'model_payment_required', 'HTTP 402', 'баланс'],
+    ['zh-CN', 'model_authentication_failed', 'HTTP 401', '鉴权'],
+    ['zh-TW', 'model_authentication_failed', 'HTTP 401', '鑑權'],
+    ['zh-TW', 'model_access_denied', 'HTTP 403', '拒絕訪問'],
+    ['zh-TW', 'model_request_timeout', '模型介面', '請求超時'],
+    ['zh-TW', 'model_rate_limited', 'HTTP 429', '觸發限流'],
+    ['zh-TW', 'model_request_rejected', '模型介面', '拒絕了請求'],
+    ['zh-TW', 'model_service_unavailable', '模型介面', '服務暫不可用'],
+    ['zh-TW', 'model_request_failed', '模型介面', '檢查服務日誌'],
+    ['zh-TW', 'hosted_turn_failed', '本輪執行失敗', '定位具體原因'],
+    ['ar', 'model_payment_required', 'HTTP 402', 'رصيد'],
   ] as const)(
-    'explains a payment failure in %s without submitting another prompt',
-    async (language, guidance) => {
+    '%s: explains a %s failure without submitting another prompt',
+    async (language, code, status, guidance) => {
       mocks.client.getSession.mockResolvedValue(
         summary('s1', {
           phase: 'failed',
-          failure: {
-            code: 'model_payment_required',
-            message: 'model_payment_required',
-          },
+          failure: { code, message: code },
         }),
       );
       await render('s1', language);
-      expect(container.textContent).toContain('HTTP 402');
+      expect(container.textContent).toContain(status);
       expect(container.textContent).toContain(guidance);
       expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     },

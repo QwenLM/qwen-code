@@ -1479,6 +1479,17 @@ button.livePendingSession:hover {
   animation: sidebarSpin 0.8s linear infinite;
 }
 
+/* Same amber as the background status dot, so the two markers read as one
+   state whether or not a turn is also in flight. */
+.sessionLoadingBackground {
+  border-color: color-mix(
+    in srgb,
+    var(--warning-color, #d29922) 28%,
+    transparent
+  );
+  border-top-color: var(--warning-color, #d29922);
+}
+
 .sessionActions {
   position: absolute;
   inset: 0;
@@ -1536,6 +1547,9 @@ button.livePendingSession:hover {
 
   .sessionRow:hover:not(.runningSession) .sessionGitIcon,
   .sessionRow:hover:not(.runningSession) .sessionAttention,
+  /* A background-only row is not .runningSession, so a row hover reveals the
+     actions over the busy marker; hide it like the other markers. */
+  .sessionRow:hover:not(.runningSession) .sessionLoading,
   .sessionMetaSlot:hover .sessionGitIcon,
   .sessionMetaSlot:hover .sessionLoading,
   .sessionMetaSlot:hover .sessionAttention {

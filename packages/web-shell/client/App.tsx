@@ -232,10 +232,9 @@ import {
   type ComposerTaskChipsHandle,
 } from './components/ComposerTaskChips';
 import { ComposerUsageStats } from './components/ComposerUsageStats';
-import { GoalStatusStrip } from './components/GoalStatusStrip';
+import { ComposerStatusStack } from './components/ComposerStatusStack';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import { SessionLimitBanner } from './components/SessionLimitBanner';
-import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
@@ -543,7 +542,6 @@ import {
   resolveFastModelForPicker,
 } from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
-import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
 import {
@@ -1524,7 +1522,23 @@ export interface WebShellProps {
    */
   onThemeResolved?: (theme: WebShellTheme) => void;
   /** UI language for the web-shell. Defaults to `?language=` or browser language. */
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru' | 'ar' | 'ar-sa';
+  language?:
+    | 'en'
+    | 'zh-CN'
+    | 'zh'
+    | 'zh-cn'
+    | 'zh-TW'
+    | 'zh-tw'
+    | 'zh-HK'
+    | 'zh-hk'
+    | 'zh-Hant'
+    | 'zh-hant'
+    | 'zh-MO'
+    | 'zh-mo'
+    | 'ru'
+    | 'ru-ru'
+    | 'ar'
+    | 'ar-sa';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
   /**
@@ -5307,6 +5321,7 @@ export function App({
     error: artifactsError,
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
+    artifactCountHint,
   } = useSessionArtifacts();
   const sourcesState = useSessionSources();
   const refreshSources = sourcesState.refresh;
@@ -12399,7 +12414,6 @@ export function App({
   useEffect(() => {
     if (!modelManagementPolicy.allowAdd) setShowAuthDialog(false);
   }, [modelManagementPolicy.allowAdd, showAuthDialog]);
-  const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
     useState(0);
@@ -18292,6 +18306,7 @@ export function App({
       sessionId: string,
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
+      artifactCountHint?: number,
     ) => {
       setManagedHome(false);
       pendingManualTitleRef.current = undefined;
@@ -18338,6 +18353,7 @@ export function App({
                 ? undefined
                 : workspaceCwd,
           sessionContext: targetContext,
+          artifactCountHint,
         });
         if (
           sessionOpenInvocationRef.current === invocation &&
@@ -20654,9 +20670,7 @@ export function App({
           }
           if (cmd === 'memory') {
             const memoryArg = text.slice(match[0].length).trim().toLowerCase();
-            if (memoryArg === 'refresh') {
-              setMemoryRefreshSignal((signal) => signal + 1);
-            } else if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
+            if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
               const addTarget = memoryArg.slice('add'.length).trim();
               setMemoryAddScope(
                 addTarget === 'user' || addTarget === 'global'
@@ -23469,7 +23483,11 @@ export function App({
     environmentPanelItems.includes('artifacts') &&
     connection.sessionId
       ? {
-          artifactCount: artifacts.length,
+          // The live list wins once present; before it lands, the click-time
+          // hint from the session-list summary shows the count early. The
+          // hook retires the hint when authoritative data arrives.
+          artifactCount:
+            artifacts.length > 0 ? artifacts.length : (artifactCountHint ?? 0),
           onOpenArtifacts: () => {
             handleEnvironmentPanelOpenChange(true);
             setArtifactsExpandSignal((value) => value + 1);
@@ -24214,7 +24232,6 @@ export function App({
               onClose={() => setShowMemoryDialog(false)}
             >
               <MemoryMessage
-                refreshSignal={memoryRefreshSignal}
                 addSignal={memoryAddSignal}
                 addScope={memoryAddScope}
                 onMessage={(text, type = 'status') => {
@@ -24725,9 +24742,14 @@ export function App({
                     createNewSession({ kind: 'global' })
                   }
                   standaloneSessionsReloadToken={standaloneSessionsReloadToken}
-                  onLoadSession={(sessionId, workspaceCwd) => {
+                  onLoadSession={(sessionId, workspaceCwd, artifactCount) => {
                     showChat();
-                    return loadSidebarSession(sessionId, workspaceCwd);
+                    return loadSidebarSession(
+                      sessionId,
+                      workspaceCwd,
+                      undefined,
+                      artifactCount,
+                    );
                   }}
                   onOpenHostSession={handleOpenHostSession}
                   onLoadStandaloneSession={(sessionId, displayName) => {
@@ -26869,45 +26891,41 @@ export function App({
                         )}
                         {(queuedPrompts.length > 0 ||
                           liveGoalSnapshot?.goal) && (
-                          <div
-                            className={composerStatusStyles.root}
-                            data-testid="composer-status-stack"
-                          >
-                            <QueuedPromptDisplay
-                              prompts={queuedPrompts}
-                              t={t}
-                              canMutateMidTurn={canMutateMidTurn}
-                              canInsertMidTurn={
+                          <ComposerStatusStack
+                            queued={{
+                              prompts: queuedPrompts,
+                              t,
+                              canMutateMidTurn,
+                              canInsertMidTurn:
                                 streamingState !== 'idle' ||
-                                sessionHasActivePrompt
-                              }
-                              onDelete={removeQueuedPrompt}
-                              canSendMidTurnNow={canSendMidTurnNow}
-                              onInsert={insertQueuedPrompt}
-                              onSendNow={sendQueuedPromptNow}
-                              onEdit={editQueuedPrompt}
-                              onImagePreview={openImagePanel}
-                              onAttachmentPreview={openAttachmentPanel}
-                            />
-                            {liveGoalSnapshot?.goal && (
-                              <GoalStatusStrip
-                                snapshot={liveGoalSnapshot}
-                                busy={goalControlBusy}
-                                onEdit={() => {
-                                  setGoalEditError(null);
-                                  setGoalEditOpen(true);
-                                }}
-                                onPause={() => runGoalControl('pause')}
-                                onResume={() => runGoalControl('resume')}
-                                onClear={() => runGoalControl('clear')}
-                                onOpenGoals={
-                                  projectFeaturesAvailable
-                                    ? openGoals
-                                    : undefined
-                                }
-                              />
-                            )}
-                          </div>
+                                sessionHasActivePrompt,
+                              onDelete: removeQueuedPrompt,
+                              canSendMidTurnNow,
+                              onInsert: insertQueuedPrompt,
+                              onSendNow: sendQueuedPromptNow,
+                              onEdit: editQueuedPrompt,
+                              onImagePreview: openImagePanel,
+                              onAttachmentPreview: openAttachmentPanel,
+                            }}
+                            goal={
+                              liveGoalSnapshot?.goal
+                                ? {
+                                    snapshot: liveGoalSnapshot,
+                                    busy: goalControlBusy,
+                                    onEdit: () => {
+                                      setGoalEditError(null);
+                                      setGoalEditOpen(true);
+                                    },
+                                    onPause: () => runGoalControl('pause'),
+                                    onResume: () => runGoalControl('resume'),
+                                    onClear: () => runGoalControl('clear'),
+                                    onOpenGoals: projectFeaturesAvailable
+                                      ? openGoals
+                                      : undefined,
+                                  }
+                                : undefined
+                            }
+                          />
                         )}
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>

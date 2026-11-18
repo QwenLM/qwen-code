@@ -2,8 +2,12 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { I18nProvider } from '../i18n';
-import { buildWaitingActivity } from '../utils/waitingActivity';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
+import {
+  buildWaitingActivity,
+  WAITING_ACTIVITY_DAYS,
+  WAITING_ACTIVITY_WEEKS,
+} from '../utils/waitingActivity';
 import {
   WaitingMinigame,
   WaitingMinigameButton,
@@ -61,14 +65,17 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function render(props: Partial<WaitingMinigameProps> = {}): Rendered {
+function render(
+  props: Partial<WaitingMinigameProps> = {},
+  language: WebShellLanguage = 'en',
+): Rendered {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   const rerender = (next: Partial<WaitingMinigameProps>) => {
     act(() => {
       root.render(
-        <I18nProvider language="en">
+        <I18nProvider language={language}>
           <WaitingMinigame
             open={next.open ?? true}
             onClose={next.onClose ?? vi.fn()}
@@ -164,6 +171,13 @@ describe('WaitingMinigame', () => {
     expect(container.textContent).not.toContain('Score 0');
   });
 
+  it('formats the heatmap calendar in Traditional Chinese for zh-TW', () => {
+    const { container } = render({}, 'zh-TW');
+    expect(container.textContent).toContain('問答熱度');
+    expect(container.textContent).toContain('11月');
+    expect(container.textContent).not.toContain('Nov');
+  });
+
   it('keeps the game entry hidden when games are disabled', () => {
     const { container } = render({ gamesEnabled: false });
     expect(container.textContent).toContain('Q&A activity');
@@ -257,6 +271,32 @@ describe('WaitingMinigame', () => {
     expect(container.querySelector('[data-intro="true"]')).toBeNull();
     expect(container.textContent).toContain('Arrows / WASD turn');
   });
+
+  it.each([
+    { column: 0, align: 'end', left: '' },
+    {
+      column: 10,
+      align: 'center',
+      left: `${((WAITING_ACTIVITY_WEEKS - 10 - 0.5) / WAITING_ACTIVITY_WEEKS) * 100}%`,
+    },
+    { column: WAITING_ACTIVITY_WEEKS - 1, align: 'start', left: '' },
+  ])(
+    'anchors the RTL activity tooltip to physical column $column',
+    ({ column, align, left }) => {
+      const { container } = render({}, 'ar');
+      const cell = container.querySelector<HTMLElement>(
+        `[data-day="${column * WAITING_ACTIVITY_DAYS}"]`,
+      );
+      expect(cell).not.toBeNull();
+      act(() => {
+        cell!.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      });
+      const tooltip = container.querySelector<HTMLElement>('[role="tooltip"]');
+      expect(tooltip).not.toBeNull();
+      expect(tooltip!.dataset.align).toBe(align);
+      expect(tooltip!.style.left).toBe(left);
+    },
+  );
 
   it('shows day details on hover and locates the clicked day', () => {
     const onSelectActivity = vi.fn();

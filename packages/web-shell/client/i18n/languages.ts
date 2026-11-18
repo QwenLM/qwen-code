@@ -1,4 +1,10 @@
-export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru', 'ar'] as const;
+export const WEB_SHELL_LANGUAGES = [
+  'en',
+  'zh-CN',
+  'zh-TW',
+  'ru',
+  'ar',
+] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 

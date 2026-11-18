@@ -154,13 +154,15 @@ export function ManagedStandaloneApp({
         lang={language}
         dir={language === 'ar' ? 'rtl' : 'ltr'}
       >
-        {language === 'zh-CN'
-          ? '正在连接…'
-          : language === 'ru'
-            ? 'Подключение…'
-            : language === 'ar'
-              ? 'جارٍ الاتصال…'
-              : 'Connecting…'}
+        {language === 'zh-TW'
+          ? '正在連線…'
+          : language === 'zh-CN'
+            ? '正在连接…'
+            : language === 'ru'
+              ? 'Подключение…'
+              : language === 'ar'
+                ? 'جارٍ الاتصال…'
+                : 'Connecting…'}
       </div>
     );
   }

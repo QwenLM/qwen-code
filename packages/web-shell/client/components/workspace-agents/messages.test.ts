@@ -75,21 +75,23 @@ describe('the join notices', () => {
   const en = COLLAB_MESSAGES_EN['collab.runtime.notSavedHere'];
   const zh = COLLAB_MESSAGES_ZH['collab.runtime.notSavedHere'];
   const ar = COLLAB_MESSAGES_AR['collab.runtime.notSavedHere'];
+  const tw = getTranslator('zh-TW');
 
   it('advises a rerun only when the credential recorded the join', () => {
     // An older daemon sends no `recorded`: absent means unknown, and the
     // rerun it would be advised to make can be refused.
     const cases = [
-      [undefined, '', '', ''],
-      ['false', '', '', ''],
+      [undefined, '', '', '', ''],
+      ['false', '', '', '', ''],
       [
         'true',
         ' Run the same join command again to save it.',
         '再运行一次同样的加入命令即可保存。',
         ' أعد تشغيل أمر الانضمام نفسه لحفظه.',
+        '再執行一次同樣的加入命令即可儲存。',
       ],
     ] as const;
-    for (const [recorded, remedyEn, remedyZh, remedyAr] of cases) {
+    for (const [recorded, remedyEn, remedyZh, remedyAr, remedyTw] of cases) {
       expect(
         typeof en === 'function' ? en({ error: 'disk full', recorded }) : en,
       ).toBe(
@@ -104,6 +106,11 @@ describe('the join notices', () => {
         typeof ar === 'function' ? ar({ error: 'disk full', recorded }) : ar,
       ).toBe(
         `انضم هذا الحاسوب، لكن تعذر حفظ الاتصال، ولن يعيد الاتصال تلقائياً بعد إعادة التشغيل أو إعادة تحميل مساحة العمل: disk full.${remedyAr}`,
+      );
+      expect(
+        tw('collab.runtime.notSavedHere', { error: 'disk full', recorded }),
+      ).toBe(
+        `這臺電腦已加入，但沒能儲存這次連線，重啟或重新載入工作區後不會自動重連：disk full。${remedyTw}`,
       );
     }
   });
@@ -126,5 +133,11 @@ describe('the join notices', () => {
     expect(enText).not.toContain('picks up what this attempt did');
     expect(zhText).toContain('若守护进程记录了本次加入的令牌');
     expect(zhText).not.toContain('会接着这次尝试已完成的部分继续');
+    const twText = tw('collab.runtime.joinTimedOut', {});
+    expect(twText).toContain('若守護程序已記錄本次加入的令牌');
+    expect(twText).toContain('沿用');
+    expect(tw('collab.runtime.joinTimedOut', { error: 'boom' })).toContain(
+      '（boom）',
+    );
   });
 });

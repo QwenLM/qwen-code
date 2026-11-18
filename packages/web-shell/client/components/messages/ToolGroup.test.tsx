@@ -216,7 +216,7 @@ function renderToolGroup(
     | boolean = 'interactive',
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
-  language: 'en' | 'zh-CN' = 'en',
+  language: 'en' | 'zh-CN' | 'zh-TW' = 'en',
   generateContent?: SessionContentGenerator,
   mcpAppHostUrl?: string,
   documentExpanded = true,
@@ -3056,6 +3056,53 @@ describe('thinking rows in the compact summary', () => {
     expect(container.textContent).not.toContain(
       'private thought for translation',
     );
+  });
+
+  it('offers the zh-TW thought translation and asks for Traditional Chinese', async () => {
+    const prompts: string[] = [];
+    const generateContent: SessionContentGenerator = async function* (prompt) {
+      prompts.push(prompt);
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'r1',
+        seq: 0,
+        text: '譯文',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'r1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 1,
+        outputTokens: 1,
+      };
+    };
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'zh-TW group thought to translate' }],
+      false,
+      undefined,
+      undefined,
+      'zh-TW',
+      generateContent,
+    );
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const button =
+      container.querySelector<HTMLButtonElement>('button[title="翻譯"]');
+    expect(button).not.toBeNull();
+    await act(async () => button?.click());
+    expect(prompts[0]).toContain('into Traditional Chinese');
   });
 
   it('keeps the single tool compact when thinking is folded in', () => {

@@ -1272,6 +1272,21 @@ function DaemonStatusDialogInner({
               label={t('daemon.transport.restSse')}
               value={runtime.transport.restSseActive}
             />
+            {/* The admission cap pairs with the aggregate stream occupancy
+                (every surface, issue #17554), not with the REST-only counter
+                above. Daemons predating the cap omit the field entirely;
+                daemons with the cap but no occupancy breakdown show the cap
+                alone. */}
+            {limits.maxSseConnections !== undefined && (
+              <Row
+                label={t('daemon.transport.sseAdmission')}
+                value={
+                  runtime.transport.streamOccupancy
+                    ? `${runtime.transport.streamOccupancy.total} / ${limitValue(limits.maxSseConnections)}`
+                    : limitValue(limits.maxSseConnections)
+                }
+              />
+            )}
             {acp.enabled ? (
               <>
                 <Row

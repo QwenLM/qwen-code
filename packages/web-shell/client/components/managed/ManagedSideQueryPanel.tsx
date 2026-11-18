@@ -16,85 +16,98 @@ import { isManagedSideQueryActive } from './managed-side-query-types';
 import type { useManagedSideQueries } from './use-managed-side-queries';
 
 const messages = {
-  btw: ['BTW', 'BTW 追问', 'BTW'],
-  recap: ['Session recap', '会话回顾', 'Обзор сессии'],
+  btw: ['BTW', 'BTW 追问', 'BTW 追問', 'BTW'],
+  recap: ['Session recap', '会话回顾', '會話回顧', 'Обзор сессии'],
   private: [
     'Saved privately for your account. The main task keeps running.',
     '记录仅当前账号可见，主任务继续执行。',
+    '記錄僅當前帳號可見，主任務繼續執行。',
     'Сохранено только для вашей учётной записи. Основная задача продолжает выполняться.',
   ],
   empty: [
     'No saved answers yet.',
     '暂无已保存的回答。',
+    '暫無已儲存的回答。',
     'Пока нет сохранённых ответов.',
   ],
-  older: ['Older answers', '更早的回答', 'Более ранние ответы'],
+  older: ['Older answers', '更早的回答', '更早的回答', 'Более ранние ответы'],
   question: [
     'Ask a follow-up question',
     '继续追问',
+    '繼續追問',
     'Задать уточняющий вопрос',
   ],
-  send: ['Ask', '提问', 'Спросить'],
-  generate: ['Generate recap', '生成回顾', 'Сгенерировать обзор'],
-  stop: ['Stop', '停止', 'Остановить'],
-  retry: ['Retry', '重试', 'Повторить'],
+  send: ['Ask', '提问', '提問', 'Спросить'],
+  generate: ['Generate recap', '生成回顾', '生成回顧', 'Сгенерировать обзор'],
+  stop: ['Stop', '停止', '停止', 'Остановить'],
+  retry: ['Retry', '重试', '重試', 'Повторить'],
   confirm: [
     'Confirm original submission',
     '确认原提交结果',
+    '確認原提交結果',
     'Подтвердить исходную отправку',
   ],
   unconfirmed: [
     'The submission is not confirmed. Confirm it using the original request.',
     '提交结果尚未确认，可使用原请求再次确认。',
+    '提交結果尚未確認，可使用原請求再次確認。',
     'Отправка не подтверждена. Подтвердите её исходным запросом.',
   ],
-  preparing: ['Preparing', '准备中', 'Подготовка'],
-  running: ['Answering', '回答中', 'Отвечает'],
-  completed: ['Completed', '已完成', 'Завершено'],
-  failed: ['Failed', '失败', 'Ошибка'],
-  cancelled: ['Stopped', '已停止', 'Остановлено'],
-  interrupted: ['Interrupted', '已中断', 'Прервано'],
+  preparing: ['Preparing', '准备中', '準備中', 'Подготовка'],
+  running: ['Answering', '回答中', '回答中', 'Отвечает'],
+  completed: ['Completed', '已完成', '已完成', 'Завершено'],
+  failed: ['Failed', '失败', '失敗', 'Ошибка'],
+  cancelled: ['Stopped', '已停止', '已停止', 'Остановлено'],
+  interrupted: ['Interrupted', '已中断', '已中斷', 'Прервано'],
   insufficient: [
     'There is not enough completed conversation to recap.',
     '已完成的对话不足，暂时无法生成回顾。',
+    '已完成的對話不足，暫時無法生成回顧。',
     'Недостаточно завершённого разговора для обзора.',
   ],
   partial: [
     'This answer is incomplete.',
+    '此回答不完整。',
     '此回答不完整。',
     'Этот ответ неполный.',
   ],
   unavailable: [
     'Generation is unavailable for this session.',
     '此会话暂不支持生成。',
+    '此會話暫不支援生成。',
     'Генерация недоступна для этой сессии.',
   ],
   storage: [
     'Browser storage is unavailable. The question was not submitted.',
     '浏览器存储不可用，问题尚未提交。',
+    '瀏覽器儲存不可用，問題尚未提交。',
     'Хранилище браузера недоступно. Вопрос не был отправлен.',
   ],
   automatic: [
     'Recap after I am away for five minutes',
     '离开五分钟后自动回顾',
+    '離開五分鐘後自動回顧',
     'Обзор, если меня нет пять минут',
   ],
   automaticHint: [
     'Off by default. Runs after the main task and queue are idle.',
     '默认关闭，主任务与队列空闲后生成。',
+    '預設關閉，主任務與佇列空閒後生成。',
     'По умолчанию выключено. Запускается, когда основная задача и очередь простаивают.',
   ],
   source: [
     'Completed user turns',
     '已完成的用户轮次',
+    '已完成的使用者輪次',
     'Завершённые ходы пользователя',
   ],
   boundary: [
     'Source message boundary',
     '来源消息边界',
+    '來源訊息邊界',
     'Граница исходного сообщения',
   ],
-} as const satisfies Record<string, readonly [string, string, string]>;
+} as const satisfies Record<string, readonly [string, string, string, string]>;
 
 const AR_MESSAGES: Record<keyof typeof messages, string> = {
   btw: 'سؤال جانبي',
@@ -135,13 +148,17 @@ export function ManagedSideQueryPanel({
 }) {
   const { language } = useI18n();
   const t = (key: keyof typeof messages) =>
-    language === 'zh-CN'
-      ? messages[key][1]
-      : language === 'ru'
-        ? messages[key][2]
-        : language === 'ar'
-          ? AR_MESSAGES[key]
-          : messages[key][0];
+    language === 'ar'
+      ? AR_MESSAGES[key]
+      : messages[key][
+          language === 'zh-TW'
+            ? 2
+            : language === 'zh-CN'
+              ? 1
+              : language === 'ru'
+                ? 3
+                : 0
+        ];
   const kind = sideQueries.open;
   const [question, setQuestion] = useState('');
   useEffect(() => setQuestion(''), [sideQueries.identity]);
