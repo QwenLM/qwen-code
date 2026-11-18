@@ -36,4 +36,11 @@ class HarnessConflictCodesTest {
         assertThat(HarnessConflictCodes.bodyCode(null)).isNull();
         assertThat(HarnessConflictCodes.bodyCode("{\"message\":\"no code\"}")).isNull();
     }
+
+    @Test
+    void suspensionWaitsAreTransientButAWedgedTeardownIsNot() {
+        assertThat(HarnessConflictCodes.isTransient("hosted_session_closing")).isTrue();
+        assertThat(HarnessConflictCodes.isTransient("hosted_session_open_busy")).isTrue();
+        assertThat(HarnessConflictCodes.isTransient("hosted_session_teardown_blocked")).isFalse();
+    }
 }

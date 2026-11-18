@@ -104,6 +104,7 @@ import {
   MANAGED_MCP_MESSAGES_RU,
   MANAGED_MCP_MESSAGES_ZH,
 } from './components/managed/managed-mcp-messages.js';
+import { ZH_TW } from './i18n-zh-tw.js';
 // The Russian catalog is split so `--mode transcript` can stub these
 // modules (see vite.lib.config.ts). Exported HTML would otherwise ship a
 // third full UI dictionary to every reader.
@@ -115,7 +116,7 @@ import { RU_PART5 } from './i18n-ru-part5.js';
 import { RU_PART6 } from './i18n-ru-part6.js';
 import { RU_REMAINDER } from './i18n-ru-remainder.js';
 
-export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
+export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'zh-TW', 'ru'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
@@ -1351,6 +1352,16 @@ const EN: Messages = {
   'composerAdd.btw.label': 'Ask a side question',
   'composerAdd.btw.description': 'Keep the main task running',
   'composerAdd.btw.textOnly': 'Remove attachments first',
+  'local.send': 'Send a message to another session',
+  'send.noAttachments': '/send takes text only; remove the attachments first',
+  'send.workspaceLocked':
+    'This view can only send to and open sessions in its workspace.',
+  'send.missingMessage':
+    'Add the message after the options: /send [--workspace <name>] [--session-id <id>] <message>',
+  'send.missingValue': (v) => `${v?.option ?? ''} needs a value`,
+  'send.duplicateOption': (v) => `${v?.option ?? ''} is given twice`,
+  'send.option.workspace': 'Workspace to send to (default: this one)',
+  'send.option.sessionId': 'Session to send to (default: a new one)',
   'at.category.mcpResources': 'MCP resources',
   'at.category.mcpResources.description': 'Reference MCP server resources',
   'at.menu': 'Reference menu',
@@ -1359,6 +1370,7 @@ const EN: Messages = {
   'common.add': 'add',
   'common.cancel': 'cancel',
   'common.close': 'close',
+  'common.done': 'Done',
   'common.fullscreen': 'Fullscreen',
   'common.exitFullscreen': 'Exit fullscreen',
   'common.continue': 'continue',
@@ -1752,6 +1764,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'daemon.runtime.memory': 'Memory (RSS / heap)',
   'daemon.transport.title': 'Transport',
   'daemon.transport.restSse': 'REST SSE streams',
+  'daemon.transport.sseAdmission': 'SSE admission (used / cap)',
   'daemon.transport.acpDisabled': 'ACP transport disabled',
   'daemon.transport.acpConnections': 'ACP connections',
   'daemon.transport.acpStreams': 'ACP streams (session/SSE/WS)',
@@ -2216,6 +2229,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.delivery.channel': 'Delivery Channel',
   'scheduledTasks.delivery.configuredGroupHint':
     'Messages are sent to the group configured for this Channel.',
+  'scheduledTasks.delivery.configuredEndpointHint':
+    'Messages are sent to the endpoint configured for this Channel.',
+  'scheduledTasks.delivery.endpoint': 'Endpoint',
   'scheduledTasks.delivery.configuredHint':
     'Messages are sent to the destination configured for this Channel.',
   'scheduledTasks.delivery.useConfiguredDestination':
@@ -2728,6 +2744,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     `Voice sessions: ${v?.count ?? 0}`,
   'sidebar.noSessions': 'No sessions.',
   'sidebar.untitledSession': 'Untitled session',
+  'user.sentFrom': (v) => `From ${v?.workspace ?? ''} · ${v?.session ?? ''}`,
+  'user.sentTo': (v) => `To ${v?.workspace ?? ''} · ${v?.session ?? ''}`,
   'sidebar.projectFallback': 'Workspace',
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
@@ -2782,6 +2800,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
     'A running session cannot be archived; archiving would stop its work',
+  'sidebar.deleteRunningDisabled':
+    'A session with background work cannot be deleted; deleting would stop it',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
@@ -2812,6 +2832,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
+  'sidebar.sessionGoal': (v) =>
+    `Goal: ${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.sessionPrStateMerged': 'Merged',
   'sidebar.sessionPrStateClosed': 'Closed',
   'sidebar.sessionIssue': (v) => `Issue #${v?.number ?? ''}`,
@@ -3740,6 +3762,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'memory.refresh': 'Refresh',
   'memory.refresh.desc': 'Reload memory file information',
   'memory.refreshed': 'Memory refreshed.',
+  'memory.refreshFailed': 'Could not refresh memory. Please try again.',
+  'memory.refreshSuperseded':
+    'Memory changed while refreshing. Please try again.',
   'memory.save': 'Save Memory',
   'memory.savedIn': (v) => `Saved in ${v?.path ?? ''}`,
   'memory.saved': (v) =>
@@ -4551,12 +4576,23 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'tasks.action.confirmHint': 'This will end the blocking turn.',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} local agent`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} local agents`,
+  'tasks.pill.session': (v) => `${v?.count ?? 0} other session`,
+  'tasks.pill.sessions': (v) => `${v?.count ?? 0} other sessions`,
+  'tasks.pill.sessionWaiting': (v) =>
+    `${v?.count ?? 0} ${v?.count === 1 ? 'session needs' : 'sessions need'} your answer`,
+  'tasks.waitingForInput': 'Needs your answer',
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} monitor`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} monitors`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} shell`,
   'tasks.pill.shells': (v) => `${v?.count ?? 0} shells`,
   'tasks.pill.workflow': (v) => `${v?.count ?? 0} workflow`,
   'tasks.pill.workflows': (v) => `${v?.count ?? 0} workflows`,
+  'tasks.explain.tooltip': 'Explain what this task is doing',
+  'tasks.explain.aria': (v) => `Explain task: ${v?.label ?? ''}`,
+  'tasks.explain.display': (v) =>
+    `Explain what this task is doing: ${v?.label ?? ''}`,
+  'tasks.explain.question': (v) =>
+    `This session has a background task. Using the conversation context and the task facts below, explain what this task is doing and why it was started. Answer concisely in 2-4 sentences.\n\nTask facts:\n${v?.facts ?? ''}`,
   'tasks.confirmStop': 'x again to confirm stop · ends the blocking turn',
   'tasks.shortcut.select': '↑/↓ select',
   'tasks.shortcut.view': 'Enter view',
@@ -4817,6 +4853,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.name.dingtalk': 'DingTalk',
   'channels.platform.name.feishu': 'Feishu',
   'channels.platform.name.wecom': 'WeCom',
+  'channels.platform.name.generic-webhook': 'Generic Webhook',
   'channels.method.title': (v) =>
     `Choose a ${v?.platform ?? 'Channel'} connection`,
   'channels.method.description': (v) =>
@@ -4944,6 +4981,18 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.editor.field.webhook.signingSecret': 'Signing secret',
   'channels.editor.field.webhook.signingSecret.description':
     'Required if signature verification is enabled for the custom bot.',
+  'channels.editor.field.genericWebhook.webhookUrl': 'Webhook URL',
+  'channels.editor.field.genericWebhook.webhookUrl.description':
+    'Your receiver’s HTTPS endpoint. Local or private endpoints require the advanced setting below.',
+  'channels.editor.field.genericWebhook.bearerToken': 'Bearer token',
+  'channels.editor.field.genericWebhook.bearerToken.description':
+    'Optional token sent in the Authorization header. Leave empty if your receiver does not require it.',
+  'channels.editor.field.genericWebhook.allowPrivateNetwork':
+    'Allow local and private endpoints',
+  'channels.editor.field.genericWebhook.networkDescription':
+    'Network access for this endpoint.',
+  'channels.editor.field.genericWebhook.allowPrivateNetwork.description':
+    'Allow this endpoint to use local or private addresses, including HTTP. Localhost refers to the Qwen Code daemon host or container. Public endpoints still require HTTPS.',
   'channels.editor.field.weixin.groupPolicy': 'Group policy',
   'channels.editor.field.weixin.groupPolicy.description':
     'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
@@ -6700,6 +6749,15 @@ const ZH: Messages = {
   'composerAdd.btw.label': '顺带一问',
   'composerAdd.btw.description': '临时提问，不打断任务',
   'composerAdd.btw.textOnly': '请先移除附件',
+  'local.send': '发送消息到另一个会话',
+  'send.noAttachments': '/send 只能发送文字，请先移除附件',
+  'send.workspaceLocked': '此视图只能向当前工作区发送消息并打开其中的会话。',
+  'send.missingMessage':
+    '请在选项后写上消息：/send [--workspace <名称>] [--session-id <id>] <消息>',
+  'send.missingValue': (v) => `${v?.option ?? ''} 缺少值`,
+  'send.duplicateOption': (v) => `${v?.option ?? ''} 重复了`,
+  'send.option.workspace': '发送到哪个 workspace（默认当前）',
+  'send.option.sessionId': '发送到哪个会话（默认新建）',
   'at.category.mcpResources': 'MCP 资源',
   'at.category.mcpResources.description': '引用 MCP server 资源',
   'at.menu': '引用菜单',
@@ -6708,6 +6766,7 @@ const ZH: Messages = {
   'common.add': '添加',
   'common.cancel': '取消',
   'common.close': '关闭',
+  'common.done': '完成',
   'common.fullscreen': '全屏',
   'common.exitFullscreen': '退出全屏',
   'common.continue': '继续',
@@ -7064,6 +7123,7 @@ const ZH: Messages = {
   'daemon.runtime.memory': '内存 (RSS / 堆)',
   'daemon.transport.title': '传输',
   'daemon.transport.restSse': 'REST SSE 流',
+  'daemon.transport.sseAdmission': 'SSE 准入（占用 / 上限）',
   'daemon.transport.acpDisabled': 'ACP 传输未启用',
   'daemon.transport.acpConnections': 'ACP 连接',
   'daemon.transport.acpStreams': 'ACP 流 (会话/SSE/WS)',
@@ -7491,6 +7551,9 @@ const ZH: Messages = {
   'scheduledTasks.routing.loading': '正在加载模型和分组…',
   'scheduledTasks.delivery.channel': '投递频道',
   'scheduledTasks.delivery.configuredGroupHint': '消息会发送到此频道配置的群。',
+  'scheduledTasks.delivery.configuredEndpointHint':
+    '消息会发送到此频道配置的端点。',
+  'scheduledTasks.delivery.endpoint': '端点',
   'scheduledTasks.delivery.configuredHint': '消息会发送到此频道配置的目标。',
   'scheduledTasks.delivery.useConfiguredDestination': '使用已配置的目标',
   'scheduledTasks.delivery.differentConfiguredDestination':
@@ -7961,6 +8024,8 @@ const ZH: Messages = {
   'sidebar.removeWorkspaceVoiceSessions': (v) => `语音会话：${v?.count ?? 0}`,
   'sidebar.noSessions': '暂无会话',
   'sidebar.untitledSession': '未命名会话',
+  'user.sentFrom': (v) => `来自 ${v?.workspace ?? ''} · ${v?.session ?? ''}`,
+  'user.sentTo': (v) => `发给 ${v?.workspace ?? ''} · ${v?.session ?? ''}`,
   'sidebar.projectFallback': '工作区',
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
@@ -8011,6 +8076,8 @@ const ZH: Messages = {
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archiveRunningDisabled':
     '不能归档运行中的会话，归档会终止其正在执行的工作',
+  'sidebar.deleteRunningDisabled':
+    '不能删除有后台工作的会话，删除会终止这份工作',
   'sidebar.archivedTitle': '已归档',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',
@@ -8039,6 +8106,8 @@ const ZH: Messages = {
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
+  'sidebar.sessionGoal': (v) =>
+    `目标：${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.sessionPrStateMerged': '已合入',
   'sidebar.sessionPrStateClosed': '已关闭',
   'sidebar.sessionIssue': (v) => `议题 #${v?.number ?? ''}`,
@@ -8885,6 +8954,8 @@ const ZH: Messages = {
   'memory.refresh': '刷新',
   'memory.refresh.desc': '重新加载 memory 文件信息',
   'memory.refreshed': 'Memory 已刷新。',
+  'memory.refreshFailed': '无法刷新 Memory，请重试。',
+  'memory.refreshSuperseded': '刷新期间 Memory 已发生变化，请重试。',
   'memory.save': '保存 Memory',
   'memory.savedIn': (v) => `Saved in ${v?.path ?? ''}`,
   'memory.saved': (v) =>
@@ -9629,12 +9700,21 @@ const ZH: Messages = {
   'tasks.action.confirmHint': '这会终结当前阻塞轮次。',
   'tasks.pill.agent': (v) => `${v?.count ?? 0} 个本地智能体`,
   'tasks.pill.agents': (v) => `${v?.count ?? 0} 个本地智能体`,
+  'tasks.pill.session': (v) => `${v?.count ?? 0} 个其他会话`,
+  'tasks.pill.sessions': (v) => `${v?.count ?? 0} 个其他会话`,
+  'tasks.pill.sessionWaiting': (v) => `${v?.count ?? 0} 个会话等你回答`,
+  'tasks.waitingForInput': '等你回答',
   'tasks.pill.monitor': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.monitors': (v) => `${v?.count ?? 0} 个监控`,
   'tasks.pill.shell': (v) => `${v?.count ?? 0} 个 shell`,
   'tasks.pill.shells': (v) => `${v?.count ?? 0} 个 shell`,
   'tasks.pill.workflow': (v) => `${v?.count ?? 0} 个工作流`,
   'tasks.pill.workflows': (v) => `${v?.count ?? 0} 个工作流`,
+  'tasks.explain.tooltip': '解释这个任务在做什么',
+  'tasks.explain.aria': (v) => `解释任务：${v?.label ?? ''}`,
+  'tasks.explain.display': (v) => `解释这个任务在做什么：${v?.label ?? ''}`,
+  'tasks.explain.question': (v) =>
+    `这个会话有一个后台任务。请结合对话上下文和下面的任务信息，解释这个任务在做什么、为什么启动它。用 2-4 句话简要回答。\n\n任务信息：\n${v?.facts ?? ''}`,
   'tasks.confirmStop': '再按 x 确认停止 · 会终结当前阻塞轮次',
   'tasks.shortcut.select': '↑/↓ 选择',
   'tasks.shortcut.view': 'Enter 查看',
@@ -9882,6 +9962,7 @@ const ZH: Messages = {
   'channels.platform.name.dingtalk': '钉钉',
   'channels.platform.name.feishu': '飞书',
   'channels.platform.name.wecom': '企业微信',
+  'channels.platform.name.generic-webhook': '通用 Webhook',
   'channels.method.title': (v) => `选择${v?.platform ?? '此频道'}的连接方式`,
   'channels.method.description': (v) =>
     `选择此频道连接${v?.platform ?? '平台'}的方式。`,
@@ -9995,6 +10076,18 @@ const ZH: Messages = {
   'channels.editor.field.webhook.signingSecret': '加签密钥',
   'channels.editor.field.webhook.signingSecret.description':
     '自定义机器人启用加签验证时需填写。',
+  'channels.editor.field.genericWebhook.webhookUrl': 'Webhook 地址',
+  'channels.editor.field.genericWebhook.webhookUrl.description':
+    '接收服务的 HTTPS 端点。本地或私网端点需要开启下方的高级设置。',
+  'channels.editor.field.genericWebhook.bearerToken': 'Bearer 令牌',
+  'channels.editor.field.genericWebhook.bearerToken.description':
+    '可选，通过 Authorization 请求头发送。接收服务不需要认证时可留空。',
+  'channels.editor.field.genericWebhook.allowPrivateNetwork':
+    '允许本地和私网端点',
+  'channels.editor.field.genericWebhook.networkDescription':
+    '此端点的网络访问设置。',
+  'channels.editor.field.genericWebhook.allowPrivateNetwork.description':
+    '允许此端点使用本地或私网地址，包括 HTTP。localhost 指 Qwen Code daemon 所在的主机或容器。公网端点仍需使用 HTTPS。',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
   'channels.editor.field.weixin.groupPolicy': '群聊策略',
@@ -10477,12 +10570,14 @@ const RU: Messages = {
 const MESSAGES: Record<WebShellLanguage, Messages> = {
   en: EN,
   'zh-CN': ZH,
+  'zh-TW': ZH_TW,
   ru: RU,
 };
 
 const LANGUAGE_LABELS: Record<WebShellLanguage, string> = {
   en: 'English [en]',
   'zh-CN': '中文 [zh-CN]',
+  'zh-TW': '繁體中文 [zh-TW]',
   ru: 'Русский [ru]',
 };
 
@@ -10494,14 +10589,39 @@ const Context = createContext<{
   t: (key) => key,
 });
 
+function isTraditionalChineseTag(normalized: string): boolean {
+  return (
+    normalized === 'zh-tw' ||
+    normalized.startsWith('zh-tw-') ||
+    normalized === 'zh-hant' ||
+    normalized.startsWith('zh-hant-') ||
+    normalized === 'zh-hk' ||
+    normalized.startsWith('zh-hk-') ||
+    normalized === 'zh-mo' ||
+    normalized.startsWith('zh-mo-')
+  );
+}
+
+function isSimplifiedChineseTag(normalized: string): boolean {
+  return (
+    normalized === 'zh' ||
+    normalized === 'zh-cn' ||
+    normalized.startsWith('zh-cn-') ||
+    normalized === 'zh-hans' ||
+    normalized.startsWith('zh-hans-') ||
+    normalized === 'zh-sg' ||
+    normalized.startsWith('zh-sg-')
+  );
+}
+
 export function normalizeLanguage(
   value: string | undefined | null,
 ): WebShellLanguage {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.trim().toLowerCase().replace(/_/g, '-');
   if (!normalized) return 'en';
-  if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh_cn') {
-    return 'zh-CN';
-  }
+  // zh-TW is a full catalog. Do not fold it into zh-CN or English.
+  if (isTraditionalChineseTag(normalized)) return 'zh-TW';
+  if (isSimplifiedChineseTag(normalized)) return 'zh-CN';
   // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
   // underscore form all resolve to ru — region-qualified Russian speakers
   // must not fall through to en.
@@ -10523,8 +10643,14 @@ export function languageSettingToWebShellLanguage(
     );
   }
   if (
-    normalized === 'zh' ||
-    normalized === 'zh-cn' ||
+    isTraditionalChineseTag(normalized) ||
+    normalized === '繁體中文' ||
+    normalized === '繁体中文'
+  ) {
+    return 'zh-TW';
+  }
+  if (
+    isSimplifiedChineseTag(normalized) ||
     normalized === 'chinese' ||
     normalized === '中文'
   ) {

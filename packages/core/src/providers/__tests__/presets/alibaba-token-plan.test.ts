@@ -40,6 +40,7 @@ describe('token plan provider', () => {
       'qwen3.7-plus',
       'qwen3.6-plus',
       'qwen3.7-max',
+      'qwen4-max',
       'qwen3.8-max',
       'qwen3.6-flash',
       'deepseek-v4-pro',
@@ -90,6 +91,18 @@ describe('token plan provider', () => {
       efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'xhigh',
       disableField: 'reasoning_effort',
+    });
+    // qwen4-max takes the native three-tier ladder with default high.
+    const qwen4Max = template.find((model) => model.id === 'qwen4-max');
+    expect(qwen4Max?.capabilities?.reasoning).toEqual({
+      thinking: true,
+      efforts: ['low', 'high', 'xhigh'],
+      defaultEffort: 'high',
+      disableField: 'reasoning_effort',
+    });
+    expect(qwen4Max?.generationConfig).toEqual({
+      contextWindowSize: 1000000,
+      modalities: { image: true, video: true },
     });
     expect(
       template.find((model) => model.id === 'deepseek-v4.1-flash')
