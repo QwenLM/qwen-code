@@ -2490,6 +2490,10 @@ describe('MemoryManager', () => {
       const release = holdNextExtract((params) =>
         engagedNoop(params.sessionId, params.history.length),
       );
+      // Control the clock: the 1ms race timer can fire before a wall-clock
+      // millisecond elapses (ms-granular loop clock), letting the post-release
+      // deadline check read now < deadline and skip the loss report.
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000);
       const direct = turn(mgr, 6);
       await vi.waitFor(() =>
         expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
@@ -2499,9 +2503,11 @@ describe('MemoryManager', () => {
       // The slot is held past the flush's 1ms budget, so the run that finally
       // takes it finds its own deadline already expired.
       await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      clock.mockReturnValue(1_002);
       release();
       await direct;
       await mgr.drain();
+      clock.mockRestore();
 
       await vi.waitFor(() =>
         expect(debugWarn).toHaveBeenCalledWith(
