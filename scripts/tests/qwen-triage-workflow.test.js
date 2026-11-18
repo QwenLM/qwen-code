@@ -6940,23 +6940,25 @@ describe('qwen-triage verify hardening round 2', () => {
       "this drops the PR's dedup history and any deferred heads, which no fire will re-deliver",
     );
     // Deferred (round 12): the reset must not strand a live round — it is only
-    // safe when no round is mid-battery.
+    // safe when no round is live (no in-flight marker), not merely not mid-battery.
     expect(promptSlice).toContain(
-      "only when no round is mid-battery, since deleting the file strands a live round's in-flight marker",
+      "only when no round is live (the state has no in-flight marker), since deleting the file strands a live round's marker",
     );
     expect(promptSlice).toContain(
       'and then re-register the delivered head — and any deferred head you still want covered — with the correct slug (`--start`)',
     );
-    // Deferred (round 11): a watch created before register-ahead keeps the old
-    // prepare-then-register prompt (a persisted snapshot); the contract must say
-    // to re-create it, since --start --artifact-dir is still accepted.
+    // Deferred (round 12): a pre-register-ahead watch keeps the old prompt (a
+    // persisted snapshot); re-creating it through the standard install does not
+    // work (the probe cursor blocks step 3 and --release clears only the claim),
+    // and another session's live watch must not be deleted to make room.
     expect(flat).toContain(
-      're-create such a watch to pick up registration ahead of prepare',
+      'Re-creating it through the standard install does not work',
     );
-    // Deferred (round 12): re-creating is only actionable past the install's
-    // coexistence guard — the old task and claim must be removed first.
     expect(flat).toContain(
-      'delete its old task and release its claim first, then re-install from step 3',
+      'blocked by the probe cursor as well as the claim, and `--release` clears only the claim',
+    );
+    expect(flat).toContain(
+      "Do not delete another session's live watch to make room; the claim guard forbids it",
     );
     // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
     // --release form with --repo (anchored on the watch-only continuation, so

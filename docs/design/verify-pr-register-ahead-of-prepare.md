@@ -179,10 +179,14 @@ existing dead-round recovery (`--release` for a round that died after
   heading. Round 11 adds the fresh-round dead-marker branch (recover a dead
   round's marker, then check out) and presence guards on the order pins so a
   placeholder-spelling change cannot make them vacuous; round 12 makes the
-  re-create guidance actionable past the install's coexistence guard (delete the
-  old task and release the claim first), adds the reset's no-live-round caution,
-  and makes the prepare-named-head vs registered-head comparison explicit. These
-  prose clauses are pinned in the text-pin suite.
+  prepare-named-head vs registered-head comparison explicit and gates the reset
+  on no live round (no in-flight marker, not merely not mid-battery); round 13
+  corrects the re-create guidance — re-creating a pre-register-ahead watch
+  through the standard install does not work, because step 3 is blocked by the
+  probe cursor as well as the claim and `--release` clears only the claim, so
+  such a watch keeps the old order until manually migrated (a residual), and
+  another session's live watch must not be deleted to make room. These prose
+  clauses are pinned in the text-pin suite.
 - `scripts/tests/verify-pr-watch-state.test.js`: new witnesses driven through
   the **CLI** (`run(root, …)`, exercising the helper code this PR changes — the
   `parseArgs` requirement, `completeRound`'s return field, and `main`'s

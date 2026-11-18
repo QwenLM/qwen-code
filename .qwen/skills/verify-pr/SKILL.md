@@ -737,11 +737,12 @@ Build the task in this order and stop at the first failure:
    (the gate is capped at 2048 characters). The prompt is the contract below.
    The prompt is a **persisted snapshot** of that contract: a watch created
    before the register-ahead change (R17-2) keeps the old prepare-then-register
-   order until its task is re-created, and `--start --artifact-dir` is still
-   accepted, so nothing forces the upgrade — re-create such a watch to pick up
-   registration ahead of prepare: delete its old task and release its claim
-   first, then re-install from step 3, because the claim guard refuses a second
-   watch for the same PR while the old one's claim stands.
+   order, and `--start --artifact-dir` is still accepted, so nothing forces the
+   upgrade. Re-creating it through the standard install does not work: step 3 is
+   blocked by the probe cursor as well as the claim, and `--release` clears only
+   the claim — so such a watch keeps the old order until it is manually migrated
+   (a residual tracked in #17371). Do not delete another session's live watch to
+   make room; the claim guard forbids it.
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
@@ -816,9 +817,9 @@ Exit 3 has several shapes, each with its own reaction:
   it once the state records a repo. Because registration runs ahead of
   prepare, a mistyped `--repo` is recorded at `--start` before prepare can
   reject it, and every later verb then refuses the correct slug without naming
-  the file; the reset — only when no round is mid-battery, since deleting the
-  file strands a live round's in-flight marker — is to delete the state file
-  `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree
+  the file; the reset — only when no round is live (the state has no in-flight
+  marker), since deleting the file strands a live round's marker — is to delete
+  the state file `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree
   (this drops the PR's dedup history and any deferred heads, which no fire will
   re-deliver) and then re-register the delivered head — and any deferred head
   you still want covered — with the correct slug (`--start`); the probe cursor

@@ -128,8 +128,11 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   本轮恢复的 release 形式传 `--round`（不再可选），重置写明也丢 deferred heads，
   注册顺序钉改钉 `--start` 命令的位置、而非仅标题。第 11 轮补全新轮次的死标记分支
   （回收死轮标记后再 checkout）与顺序钉的存在性守卫（占位符改拼写不致空转）；第 12
-  轮把重建指引改为可越过安装共存守卫（先删旧任务并释放 claim）、补重置的「无活轮」
-  谨慎、并把 prepare 点名 head 与注册 head 的比对写明。这些 prose 子句均在文本钉套件钉住。
+  轮把 prepare 点名 head 与注册 head 的比对写明、并把重置限定为无活轮（无在飞标记，
+  而非仅未跑电池）；第 13 轮修正重建指引——register-ahead 之前的 watch 无法经标准安装
+  重建，因步骤 3 被探针游标与 claim 共同阻挡、而 `--release` 只清 claim，故此类 watch
+  保留旧顺序直至手动迁移（残余），且不得删另一会话的活 watch 腾位。这些 prose 子句均在
+  文本钉套件钉住。
 - `scripts/tests/verify-pr-watch-state.test.js`：新见证走 **CLI**（`run(root, …)`，
   演练本 PR 改动的助手代码——`parseArgs` 要求、`completeRound` 返回字段、`main`
   告警）——`--start` 不带 `--artifact-dir` 注册在飞且目录 `null`（恢复强制要求
