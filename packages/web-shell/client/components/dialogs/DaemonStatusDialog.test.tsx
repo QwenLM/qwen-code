@@ -1411,7 +1411,11 @@ describe('DaemonStatusDialog', () => {
               acpSse: 2,
               acpWs: 1,
             },
-            byListener: { primary: 6, 'local-control': 0, 'remote-access': 0 },
+            // A non-primary distribution the daemon really produces (streams
+            // parked on the pairing listeners): total 6 ≠ primary 3, so the
+            // paired assertion below reds if the row reads byListener.primary
+            // instead of total (review R1-2).
+            byListener: { primary: 3, 'local-control': 2, 'remote-access': 1 },
           },
         },
       },
@@ -1421,7 +1425,8 @@ describe('DaemonStatusDialog', () => {
     mount();
     const text = container!.textContent ?? '';
     expect(text).toContain('SSE admission (used / cap)');
-    // The aggregate occupancy pairs with the cap — not the REST-only 3.
+    // The aggregate occupancy pairs with the cap — not the REST-only 3 and
+    // not the primary listener's share (3).
     expect(text).toContain('6 / 204');
   });
 
@@ -1434,9 +1439,13 @@ describe('DaemonStatusDialog', () => {
     fullState = { report: undefined, loading: true, error: undefined };
     mount();
     const text = container!.textContent ?? '';
-    expect(text).toContain('SSE admission (used / cap)');
-    expect(text).toContain('204');
-    expect(text).not.toContain('6 / 204');
+    // Row renders the label and value as adjacent spans with no separator.
+    // The cap-only branch must show the bare cap: pairing restSseActive (1
+    // in this fixture) into the fallback would render '1 / 204' — the exact
+    // misreading the row comment warns about — and both asserts below red
+    // (review R1-1).
+    expect(text).toContain('SSE admission (used / cap)204');
+    expect(text).not.toContain('/ 204');
   });
 
   it('shows unlimited when the SSE admission cap is disabled', () => {
