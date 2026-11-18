@@ -299,7 +299,7 @@ interface SessionStatsContextValue {
   startNewPrompt: () => void;
   recordUserPrompt: () => void;
   getPromptCount: () => number;
-  seedPromptCount: (count: number) => void;
+  seedPromptCount: (count: number, userPromptCountSeed?: number) => void;
 }
 
 function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
@@ -496,13 +496,21 @@ export const SessionStatsProvider: React.FC<{
     [stats.promptCount],
   );
 
-  const seedPromptCount = useCallback((count: number) => {
-    setStats((prevState) => ({
-      ...prevState,
-      promptCount: Math.max(prevState.promptCount, count),
-      userPromptCount: Math.max(prevState.userPromptCount, count),
-    }));
-  }, []);
+  const seedPromptCount = useCallback(
+    (count: number, userPromptCountSeed?: number) => {
+      setStats((prevState) => ({
+        ...prevState,
+        promptCount: Math.max(prevState.promptCount, count),
+        // The visible Prompts statistic resumes from the user-turn count, not
+        // the mint counter seed (which background mints can push higher).
+        userPromptCount: Math.max(
+          prevState.userPromptCount,
+          userPromptCountSeed ?? count,
+        ),
+      }));
+    },
+    [],
+  );
 
   const value = useMemo(
     () => ({

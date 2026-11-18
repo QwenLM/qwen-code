@@ -398,6 +398,27 @@ describe('SessionStatsContext', () => {
     unmount();
   });
 
+  it('seeds the visible Prompts statistic from the user-turn count on resume (S1)', () => {
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    // The mint-counter seed (10) can exceed the user-turn count (3) when
+    // background mints claimed higher ids; the visible statistic must resume
+    // from the user-turn count, not the mint seed.
+    act(() => {
+      result.current.seedPromptCount(10, 3);
+    });
+    expect(result.current.stats.promptCount).toBe(10);
+    expect(result.current.stats.userPromptCount).toBe(3);
+    // Without an explicit user seed the legacy single-seed behavior holds.
+    act(() => {
+      result.current.seedPromptCount(12);
+    });
+    expect(result.current.stats.promptCount).toBe(12);
+    expect(result.current.stats.userPromptCount).toBe(12);
+    unmount();
+  });
+
   it('should throw an error when useSessionStats is used outside of a provider', () => {
     // Suppress console.error for this test since we expect an error
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

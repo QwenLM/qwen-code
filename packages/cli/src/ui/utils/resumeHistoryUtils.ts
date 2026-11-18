@@ -791,22 +791,28 @@ export function stripSuppressOnRestore<T extends Pick<HistoryItem, 'display'>>(
   };
 }
 
-/** Seeds a resumed prompt counter past both recorded turns and claimed ids. */
-export function computeResumedPromptCountSeed(
+/** Counts the resumed user turns that the visible Prompts statistic tracks. */
+export function computeResumedUserTurnCount(
   records: readonly ChatRecord[],
-  sessionId: string,
 ): number {
-  const userTurnCount = records.filter(
+  return records.filter(
     (m) =>
       m.type === 'user' &&
       m.subtype !== 'mid_turn_user_message' &&
       m.subtype !== 'realtime_message',
   ).length;
+}
+
+/** Seeds a resumed prompt counter past both recorded turns and claimed ids. */
+export function computeResumedPromptCountSeed(
+  records: readonly ChatRecord[],
+  sessionId: string,
+): number {
   if (records.length === 0) {
     return 0;
   }
   return Math.max(
-    userTurnCount,
+    computeResumedUserTurnCount(records),
     computeInitialTurnFromHistory(records, sessionId) + 1,
   );
 }

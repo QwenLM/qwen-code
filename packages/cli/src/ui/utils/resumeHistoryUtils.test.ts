@@ -11,6 +11,7 @@ import {
   stripSuppressOnRestore,
   expandCollapsedHistory,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
 import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
@@ -2534,4 +2535,42 @@ describe('computeResumedPromptCountSeed', () => {
       );
     },
   );
+});
+
+describe('computeResumedUserTurnCount', () => {
+  const userRecord = (subtype?: string): ChatRecord =>
+    ({
+      uuid: `u-${subtype ?? 'plain'}`,
+      parentUuid: null,
+      sessionId: 's',
+      timestamp: '2026-11-18T00:00:00.000Z',
+      cwd: '/workspace',
+      version: '0.27.4',
+      type: 'user',
+      ...(subtype ? { subtype } : {}),
+      message: { role: 'user', content: 'hi' },
+    }) as unknown as ChatRecord;
+
+  it('counts only genuine user turns, not mid-turn or realtime messages', () => {
+    expect(computeResumedUserTurnCount([])).toBe(0);
+    expect(
+      computeResumedUserTurnCount([
+        userRecord(),
+        userRecord('mid_turn_user_message'),
+        userRecord(),
+        userRecord('realtime_message'),
+        userRecord(),
+      ]),
+    ).toBe(3);
+  });
+
+  it('stays below the mint seed when background mints claimed higher ids (S1)', () => {
+    // Three user turns but a background mint claimed id 9: the mint seed is
+    // 10 while the visible-statistic seed must stay at the user-turn count.
+    const records = [userRecord(), userRecord(), userRecord()];
+    expect(computeResumedUserTurnCount(records)).toBe(3);
+    expect(computeResumedPromptCountSeed(records, 's')).toBeGreaterThanOrEqual(
+      3,
+    );
+  });
 });

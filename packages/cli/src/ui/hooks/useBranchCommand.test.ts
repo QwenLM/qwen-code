@@ -352,7 +352,9 @@ describe('useBranchCommand', () => {
       await result.current.handleBranch('seeded');
     });
 
-    expect(seedPromptCount).toHaveBeenCalledWith(2);
+    // Mint seed 2 (highest claimed id + 1); the visible Prompts statistic seeds
+    // from the user-turn count (2 here), not the mint seed (S1).
+    expect(seedPromptCount).toHaveBeenCalledWith(2, 2);
     expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
       seedPromptCount.mock.invocationCallOrder[0]!,
     );
