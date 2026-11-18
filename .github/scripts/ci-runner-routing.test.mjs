@@ -218,6 +218,8 @@ function runPickRunnerOutputs({
     lintRunner,
     prTestRunner: prTest.slice('pr_test_runner='.length),
     inputsLine,
+    stdout: result.stdout,
+    outputs,
   };
 }
 
@@ -667,13 +669,13 @@ describe('ci.yml pick_runner canonical-repo guard', () => {
     assert.equal(pickRunner.env.REPO_NAME, '${{ github.repository }}');
   });
 
-  it('logs every routing input on one line, without reusing a parsed prefix', () => {
+  it('logs every routing input on one line, with each parsed prefix matching exactly once', () => {
     // R1-1 (#17231 review): the selection echoes alone cannot tell a
     // silent fallback apart from an ordinary fork run. The inputs line
     // must carry every input that decides the selection — including the
     // dispatch input, which is the one the canonical-repo conjunction can
-    // drop — and must not reuse a prefix the harness parses, since the
-    // harness takes the FIRST line per prefix.
+    // drop — and each prefix the harness parses must match exactly one
+    // line, since the harness takes the FIRST.
     // R2-3: the presence assertion lives here, in the test that owns the
     // line, not in runPickRunnerOutputs — asserting in the shared helper
     // reds every caller when the line goes missing.
@@ -718,10 +720,7 @@ describe('ci.yml pick_runner canonical-repo guard', () => {
       fleet: 'arm64',
       repoName: 'QwenLM/qwen-code',
     });
-    assert.ok(
-      prOut.inputsLine,
-      'no routing-inputs line in pick_runner output',
-    );
+    assert.ok(prOut.inputsLine, 'no routing-inputs line in pick_runner output');
     for (const fragment of [
       'AUTHOR_ASSOCIATION=OWNER',
       'REPO_NAME=QwenLM/qwen-code',
@@ -766,14 +765,62 @@ describe('ci.yml pick_runner canonical-repo guard', () => {
         `inputs line must carry ${fragment}: ${forkOut.inputsLine}`,
       );
     }
-    for (const prefix of [
-      'Selected Linux runner: ',
-      'Selected lint runner: ',
-      'pr_test_runner=',
+    // R5-2 (#17231 review, round 5): the blocks above never split
+    // canonical_repo from trusted_author — the canonical runs pin both
+    // true and the fork run pins both false, so a swapped or hardcoded
+    // echo stayed green. The state the line exists to diagnose is a
+    // fork PR into the canonical repo: canonical true, author untrusted.
+    const forkPrOut = runPickRunnerOutputs({
+      ecsDisabled: false,
+      sameRepo: false,
+      assoc: 'CONTRIBUTOR',
+      eventName: 'pull_request',
+      fleet: 'arm64',
+      repoName: 'QwenLM/qwen-code',
+    });
+    assert.ok(
+      forkPrOut.inputsLine,
+      'no routing-inputs line in pick_runner output',
+    );
+    for (const fragment of [
+      'REPO_NAME=QwenLM/qwen-code',
+      'canonical_repo=true',
+      'SAME_REPO=false',
+      'AUTHOR_ASSOCIATION=CONTRIBUTOR',
+      'trusted_author=false',
+      'EVENT_NAME=pull_request',
+      'ECS_DISABLED= LINUX_RUNNER_FLEET=arm64',
     ]) {
       assert.ok(
-        !out.inputsLine.startsWith(prefix),
-        `inputs line must not reuse the parsed prefix ${prefix}`,
+        forkPrOut.inputsLine.includes(fragment),
+        `inputs line must carry ${fragment}: ${forkPrOut.inputsLine}`,
+      );
+    }
+    // The split state is also the one that routes the PR test and lint
+    // jobs to the disposable pool — canonical repo, same-repo false,
+    // author untrusted — while the Linux job itself stays hosted.
+    assert.equal(forkPrOut.ubuntuRunner, HOSTED);
+    assert.equal(
+      forkPrOut.prTestRunner,
+      '["self-hosted", "ecs-qwen-ephemeral"]',
+    );
+    assert.equal(forkPrOut.lintRunner, '["self-hosted", "ecs-qwen-ephemeral"]');
+    // R5-3 (#17231 review, round 5): the loop below could never fail —
+    // inputsLine was found by its own 'Runner routing inputs: ' prefix
+    // and already asserted present, so it could not start with a parsed
+    // prefix. What the harness actually depends on is that each prefix
+    // it parses matches exactly one line (it takes the FIRST): a
+    // duplicate echo would silently shadow the real selection. Pin
+    // that instead.
+    for (const [source, prefix] of [
+      [out.stdout, 'Selected Linux runner: '],
+      [out.stdout, 'Selected lint runner: '],
+      [out.outputs, 'pr_test_runner='],
+    ]) {
+      assert.equal(
+        source.split('\n').filter((line) => line.startsWith(prefix)).length,
+        1,
+        `exactly one line must match ${prefix}`,
       );
     }
   });
