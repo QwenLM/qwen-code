@@ -2314,6 +2314,10 @@ type PersistedArtifactPanelTab =
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'artifacts' }>,
+      'id' | 'kind' | 'title' | 'sessionId'
     >;
 
 function parsePersistedArtifactPanelTab(
@@ -2543,6 +2547,12 @@ function parsePersistedArtifactPanelTab(
         kind: 'workflow',
         sessionId: tab['sessionId'],
       } as PersistedArtifactPanelTab;
+    case 'artifacts':
+      return {
+        ...common,
+        kind: 'artifacts',
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     default:
       return;
   }
@@ -2705,6 +2715,8 @@ function serializeArtifactPanelTabs(
             ]
           : [];
       case 'workflow':
+        return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
+      case 'artifacts':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'change_overview':
         // Persist the identity like the neighbouring trajectory/workflow arms;
@@ -6988,6 +7000,27 @@ export function App({
       openContextUsagePanel(sessionId, actions, true),
     [openContextUsagePanel],
   );
+  const openArtifactsListPanel = useCallback(
+    (sourceSessionId: string) => {
+      const tab: ArtifactPanelTab = {
+        id: `artifacts:${sourceSessionId}`,
+        kind: 'artifacts',
+        title: t('environment.artifacts'),
+        sessionId: sourceSessionId,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
@@ -8195,6 +8228,9 @@ export function App({
                       sessionAgentTraceSupported)
                     ? tab
                     : undefined;
+                case 'artifacts':
+                  // Identity only; the list reads the live artifacts prop.
+                  return tab;
                 case 'change_overview':
                   // A stored tab outlives the host's opt-in, so a host that
                   // has stopped listing the item must not get the panel back
@@ -23114,10 +23150,6 @@ export function App({
     sessionWorktree,
     gitStatusTarget,
   ]);
-  // Bumped when the header artifact entry opens the panel, so the panel
-  // expands its artifacts section even if the user had collapsed it (the
-  // panel hides rather than unmounts, so its local section state persists).
-  const [artifactsExpandSignal, setArtifactsExpandSignal] = useState(0);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
       persistEnvironmentPanelOpen(open);
@@ -23134,16 +23166,20 @@ export function App({
   // The count and the opener are derived from one gate so an embedder never
   // receives a count it cannot act on: the built-in header additionally
   // requires both props, but the custom renderChatHeader contract does not.
+  // The entry toggles the right panel's artifacts list tab, independent of the
+  // environment panel.
   const artifactsHeaderEntry =
     artifactsHeaderItemVisible &&
     mainView === 'chat' &&
-    environmentPanelItems.includes('artifacts') &&
     connection.sessionId
       ? {
           artifactCount: artifacts.length,
           onOpenArtifacts: () => {
-            handleEnvironmentPanelOpenChange(true);
-            setArtifactsExpandSignal((value) => value + 1);
+            if (artifactPanelOpen) {
+              closeArtifactPanel();
+            } else {
+              openArtifactsListPanel(connection.sessionId!);
+            }
           },
         }
       : {};
@@ -23520,6 +23556,7 @@ export function App({
   const artifactPanelSharedProps = {
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
+    onOpenArtifact: openArtifactPanel,
     tabs: artifactPanelTabs,
     contextUsageControls,
     activeTabId: activeArtifactPanelTabId,
@@ -27062,7 +27099,6 @@ export function App({
                 }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
-                artifactsExpandSignal={artifactsExpandSignal}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   workspaceContextActive && gitDiffWorkspaceCwd

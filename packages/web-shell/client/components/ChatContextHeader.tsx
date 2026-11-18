@@ -51,7 +51,7 @@ interface ChatContextHeaderProps {
   onOpenContextUsage?: () => void;
   /** Session artifact count; the artifact entry shows when greater than 0. */
   artifactCount?: number;
-  /** Opens the environment panel's artifacts section; hidden when omitted. */
+  /** Toggles the right panel's artifacts list tab; hidden when omitted. */
   onOpenArtifacts?: () => void;
   /** Shows the Local Control QR entry; hidden when omitted. */
   onOpenLocalControlSettings?: () => void;
@@ -192,6 +192,7 @@ export function ChatContextHeader({
             type="button"
             className={`${styles.action} ${styles.artifactAction}`}
             data-web-shell-artifacts-entry
+            aria-pressed={rightPanelOpen}
             aria-label={t('chatHeader.openArtifacts', { count: artifactCount })}
             title={t('chatHeader.openArtifacts', { count: artifactCount })}
             onClick={onOpenArtifacts}

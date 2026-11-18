@@ -578,6 +578,79 @@ describe('ArtifactPanel context usage tabs', () => {
   });
 });
 
+describe('ArtifactPanel artifacts list tab', () => {
+  function renderPanel(props: {
+    artifacts: readonly DaemonSessionArtifact[];
+    onOpenArtifact?: (artifactId: string) => void;
+    loading?: boolean;
+  }) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={props.artifacts}
+            onOpenArtifact={props.onOpenArtifact}
+            loading={props.loading}
+            tabs={[
+              {
+                id: 'artifacts:s1',
+                kind: 'artifacts',
+                title: 'Artifacts',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="artifacts:s1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  const artifact = {
+    id: 'a1',
+    kind: 'document',
+    title: 'Quarterly report',
+    workspacePath: 'reports/report.md',
+  } as unknown as DaemonSessionArtifact;
+
+  it('renders the session artifact list and opens a clicked artifact', () => {
+    const onOpenArtifact = vi.fn();
+    const container = renderPanel({ artifacts: [artifact], onOpenArtifact });
+
+    const list = container.querySelector('[data-testid="artifacts-list"]');
+    expect(list).not.toBeNull();
+    expect(container.textContent).toContain('report.md');
+    const row = list!.querySelector<HTMLButtonElement>('button');
+    act(() => row?.click());
+    expect(onOpenArtifact).toHaveBeenCalledWith('a1');
+  });
+
+  it('shows the empty state when the session has no artifacts', () => {
+    const container = renderPanel({ artifacts: [] });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-empty"]'),
+    ).not.toBeNull();
+  });
+
+  it('shows a skeleton while artifacts load', () => {
+    const container = renderPanel({ artifacts: [artifact], loading: true });
+    expect(
+      container.querySelector('[data-testid="artifacts-list-skeleton"]'),
+    ).not.toBeNull();
+  });
+});
+
 describe('ArtifactPanel terminal tabs', () => {
   const renderPanel = (activeTabId: string, restoring = false) => (
     <I18nProvider language="en">

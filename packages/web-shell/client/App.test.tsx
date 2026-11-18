@@ -4496,20 +4496,52 @@ describe('task activity key', () => {
         onOpenArtifacts: expect.any(Function),
       }),
     );
-    await act(async () => {
+    const openEntry = () =>
       Array.from(container.querySelectorAll('button'))
         .find((button) => button.textContent === 'Custom artifacts 1')!
         .click();
+    await act(async () => {
+      openEntry();
     });
-    await flush();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[data-testid="artifacts-list"]'),
+      ).not.toBeNull();
+    });
+    // The entry targets the right panel's artifacts list tab, not the
+    // environment panel.
     expect(
       container.querySelector(
         '[data-testid="environment-panel"]:not([hidden])',
       ),
-    ).not.toBeNull();
+    ).toBeNull();
+
+    // The artifacts tab serializes into the persisted right-panel state.
+    await vi.waitFor(async () => {
+      await flush();
+      const rawState = JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      ) as Record<string, { tabs?: Array<{ kind?: string }> }>;
+      expect(
+        Object.values(rawState).some((entry) =>
+          entry.tabs?.some((tab) => tab.kind === 'artifacts'),
+        ),
+      ).toBe(true);
+    });
+
+    // A second click toggles the right panel closed.
+    await act(async () => {
+      openEntry();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-list"]'),
+    ).toBeNull();
   });
 
-  it('withholds the artifact count from a custom header when the panel has no artifacts section', async () => {
+  it('publishes the artifact count independent of the environment panel artifacts section', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
@@ -4537,11 +4569,11 @@ describe('task activity key', () => {
     });
     await flush();
 
-    // The count and the opener share one gate: with no artifacts section in
-    // the panel there is nothing to open, so no count may be published either.
+    // The entry opens the right panel's artifacts list tab, so the count is
+    // published even when the environment panel has no artifacts section.
     const info = renderChatHeader.mock.lastCall?.[0];
-    expect(info?.artifactCount).toBeUndefined();
-    expect(info?.onOpenArtifacts).toBeUndefined();
+    expect(info?.artifactCount).toBe(1);
+    expect(info?.onOpenArtifacts).toEqual(expect.any(Function));
   });
 
   it('persists the environment panel open state across reloads', async () => {

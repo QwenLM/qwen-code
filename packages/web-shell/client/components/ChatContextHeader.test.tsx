@@ -286,6 +286,30 @@ describe('ChatContextHeader', () => {
     expect(onOpenArtifacts).toHaveBeenCalledOnce();
   });
 
+  it('reflects the right panel open state on the artifacts entry', () => {
+    const closed = mount({
+      artifactCount: 3,
+      onOpenArtifacts: vi.fn(),
+      rightPanelOpen: false,
+    });
+    expect(
+      closed
+        .querySelector('[data-web-shell-artifacts-entry]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('false');
+
+    const open = mount({
+      artifactCount: 3,
+      onOpenArtifacts: vi.fn(),
+      rightPanelOpen: true,
+    });
+    expect(
+      open
+        .querySelector('[data-web-shell-artifacts-entry]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+  });
+
   it('hides the artifacts entry when the count is zero', () => {
     const view = mount({ artifactCount: 0, onOpenArtifacts: vi.fn() });
     expect(view.querySelector('[data-web-shell-artifacts-entry]')).toBeNull();

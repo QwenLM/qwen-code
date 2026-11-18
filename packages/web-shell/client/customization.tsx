@@ -268,11 +268,14 @@ export interface ChatHeaderRenderInfo {
   onOpenContextUsage?: () => void;
   /**
    * Number of session artifacts. Published together with `onOpenArtifacts`
-   * only when the artifacts section can actually be opened, so a count never
+   * only when the artifacts list tab can actually be opened, so a count never
    * appears without a way to act on it.
    */
   artifactCount?: number;
-  /** Opens the environment panel's artifacts section, when available. */
+  /**
+   * Toggles the right panel's artifacts list tab, when available. Opening
+   * reveals the session's artifacts; clicking again closes the right panel.
+   */
   onOpenArtifacts?: () => void;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
