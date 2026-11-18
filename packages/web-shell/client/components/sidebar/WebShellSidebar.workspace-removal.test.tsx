@@ -8352,10 +8352,10 @@ describe('WebShellSidebar goal markers', () => {
         '[data-testid="session-goal-marker"]',
       ),
     ).toBeNull();
-    // The component already filters `complete`, so the arm that ALSO drives
-    // width reservation gets pinned only here: a completed goal must not
-    // reserve the hover-actions slot either (dropping the arm would shift
-    // every completed row's meta icons left with no red anywhere).
+    // The goal-only reservation above already pins the || hasGoalMarker arm
+    // (a goal without a PR badge forces the reservation). This case adds the
+    // completed-specific arm: dropping status !== 'complete' would reserve
+    // the hover-actions slot on every completed row, shifting its icons left.
     for (const name of ['Goal session', 'Plain session']) {
       expect(
         rowFor(name)!.querySelector('[class*="sessionMetaSlotReserved"]'),

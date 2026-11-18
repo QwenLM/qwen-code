@@ -208,6 +208,39 @@ describe('session-goal-sidecar', () => {
     await expect(deleteSessionGoalSidecar(file)).resolves.toBeUndefined();
   });
 
+  it('propagates non-ENOENT read failures (unreadable is not absent)', async () => {
+    const file = path.join(dir, 's1.goal.json');
+    // A directory at the sidecar path fails the read with EISDIR, and must
+    // not be downgraded to a silent "no goal".
+    await fs.mkdir(file);
+    await expect(readSessionGoalSidecar(file)).rejects.toMatchObject({
+      code: 'EISDIR',
+    });
+  });
+
+  it('propagates non-ENOENT failures from deleteSessionGoalSidecar', async () => {
+    const file = path.join(dir, 's1.goal.json');
+    await writeSessionGoalSidecar(file, projection);
+    unlinkControl.failWith = Object.assign(new Error('permission denied'), {
+      code: 'EACCES',
+    });
+    await expect(deleteSessionGoalSidecar(file)).rejects.toMatchObject({
+      code: 'EACCES',
+    });
+  });
+
+  it('propagates non-ENOENT failures from moveSessionGoalSidecar', async () => {
+    const from = path.join(dir, 'active', 's1.goal.json');
+    const to = path.join(dir, 'archived');
+    await writeSessionGoalSidecar(from, projection);
+    // A projection renamed onto an existing DIRECTORY is not ENOENT, and the
+    // catch must not swallow it (the exact error code is platform-specific).
+    await fs.mkdir(to);
+    await expect(moveSessionGoalSidecar(from, to)).rejects.toMatchObject({
+      code: expect.not.stringMatching('ENOENT'),
+    });
+  });
+
   it('move carries the projection and tolerates an absent source', async () => {
     const from = path.join(dir, 'active', 's1.goal.json');
     const to = path.join(dir, 'archived', 's1.goal.json');

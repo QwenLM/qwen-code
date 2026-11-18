@@ -116,9 +116,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_143_100;
 // document entry (it is imported only by WebShellSidebar) and the RU catalog
 // is stubbed in transcript mode, so the sidebar goal marker feature (#17515)
 // contributes only its EN/ZH `sidebar.sessionGoal` label strings (~151 bytes)
-// to this bundle; the budget is raised deliberately to make room for that
-// payload and future growth: the warning sits 956 above that measurement and
-// the ceiling 1,956 above it.
+// to this bundle. This PR's deliberate budget raise was folded into main's
+// larger `/send` ceilings below when merging, so the CURRENT caps apply: the
+// warning sits 5,056 above that measurement and the ceiling 6,056 above it.
 // The `/send` command, its composer chip and session tab copy (ten keys
 // across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
 // 039ed577fb without and with the change. Recording the exchange in the
