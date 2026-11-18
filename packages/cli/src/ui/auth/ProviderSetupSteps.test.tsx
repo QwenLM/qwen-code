@@ -525,7 +525,78 @@ describe('ProviderSetupSteps', () => {
       apiKey: 'secret-key',
       staticModels: flow.state.provider?.models,
       signal: expect.any(AbortSignal),
+      protocol: 'openai',
     });
+    unmount();
+  });
+
+  it.each([
+    [AuthType.USE_OPENAI, 'chat-completions', 'openai'],
+    [AuthType.USE_OPENAI, 'responses', 'openai-responses'],
+    [AuthType.USE_ANTHROPIC, 'chat-completions', 'anthropic'],
+  ] as const)(
+    'discovers custom %s %s models',
+    (protocol, wireApi, expected) => {
+      discoverProviderModelsMock.mockReturnValue(new Promise(() => {}));
+      const flow = createCustomModelIdsFlow();
+      flow.state.provider = customProvider;
+      flow.state.protocol = protocol;
+      flow.state.wireApi = wireApi;
+      const { lastFrame, unmount } = renderWithProviders(
+        <ProviderSetupSteps flow={flow} />,
+      );
+      expect(lastFrame()).toContain('Loading models from provider…');
+      expect(discoverProviderModelsMock).toHaveBeenCalledWith(
+        expect.objectContaining({ protocol: expected, maxRedirects: 0 }),
+      );
+      unmount();
+    },
+  );
+
+  it('restores saved custom selections in the discovered candidate rows', async () => {
+    discoverProviderModelsMock.mockResolvedValue([
+      { id: 'model-a' },
+      { id: 'new-model' },
+    ]);
+    const submitModelIds = vi.fn();
+    const flow = createCustomModelIdsFlow({
+      modelIds: 'model-a, unlisted',
+      submitModelIds,
+    });
+    flow.state.provider = customProvider;
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+    await act(async () => {});
+    expect(lastFrame()).toMatch(/◉\uFE0E\s+model-a/);
+    expect(lastFrame()).toMatch(/○\uFE0E\s+new-model/);
+    expect(lastFrame()).toContain('unlisted');
+    await act(async () => {
+      pressLatestKey('tab', '\t');
+    });
+    await act(async () => {
+      pressLatestKey('tab', '\t');
+    });
+    await act(async () => {
+      pressLatestKey('space', ' ');
+    });
+    expect(lastFrame()).toMatch(/○\uFE0E\s+model-a/);
+    pressKey('return', '\r');
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['unlisted'],
+    });
+    unmount();
+  });
+
+  it('keeps custom Gemini model entry manual', () => {
+    const flow = createCustomModelIdsFlow();
+    flow.state.provider = customProvider;
+    flow.state.protocol = AuthType.USE_GEMINI;
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+    expect(lastFrame()).toContain('Enter model IDs separated by commas.');
+    expect(discoverProviderModelsMock).not.toHaveBeenCalled();
     unmount();
   });
 

@@ -42,6 +42,7 @@ import type {
   ProviderConfig,
   ProviderSetupInputs,
   ModelWireApi,
+  ModelSpec,
 } from '@qwen-code/qwen-code-core';
 import {
   QWENCLOUD_PROVIDERS,
@@ -53,6 +54,7 @@ import {
   buildInstallPlan,
   getModelsForProviderProtocol,
   customProvider,
+  discoverProviderModels,
   findExistingProviderModels,
   findProviderById,
   getErrorMessage,
@@ -707,6 +709,68 @@ function uniqueIds(ids: string[]): string[] {
   return [...new Set(ids)];
 }
 
+function DiscoveringModelsStep(props: {
+  provider: ProviderConfig;
+  flow: ProviderSetupFlow;
+  retrySeq: number;
+  window: StepWindow;
+}) {
+  const { provider, flow } = props;
+  const [snapshot, setSnapshot] = useState<{
+    models: ModelSpec[];
+    source: 'provider' | 'fallback';
+  } | null>(null);
+  const { baseUrl, apiKey, protocol, wireApi } = flow.state;
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    const models = provider.models ?? [];
+    void discoverProviderModels({
+      baseUrl,
+      apiKey,
+      staticModels: models,
+      protocol:
+        protocol === AuthType.USE_ANTHROPIC
+          ? 'anthropic'
+          : wireApi === 'responses'
+            ? 'openai-responses'
+            : 'openai',
+      ...(provider.uiGroup === 'custom' ? { maxRedirects: 0 } : {}),
+      signal: controller.signal,
+    }).then((discovered) => {
+      if (active) {
+        setSnapshot({
+          models: discovered ?? models,
+          source: discovered ? 'provider' : 'fallback',
+        });
+      }
+    });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [apiKey, baseUrl, protocol, wireApi, provider.models, provider.uiGroup]);
+  useKeyboard(() => {});
+  if (!snapshot) {
+    return (
+      <box flexDirection="column" marginTop={1}>
+        <text fg={C.dim}>{t('Loading models from provider…')}</text>
+        <box marginTop={1}>
+          <text fg={C.dim}>{t('Esc to go back')}</text>
+        </box>
+      </box>
+    );
+  }
+  return (
+    <ModelsStep
+      {...props}
+      models={snapshot.models}
+      recommendationSource={snapshot.source}
+      syncChangesToFlow={false}
+    />
+  );
+}
+
 /**
  * Model IDs step. Custom IDs and the recommended multi-select both feed the
  * shared flow.state.modelIds, exactly like the ink ModelIdsStep this mirrors.
@@ -716,11 +780,17 @@ function ModelsStep({
   flow,
   retrySeq,
   window,
+  models = provider.models ?? [],
+  recommendationSource,
+  syncChangesToFlow = true,
 }: {
   provider: ProviderConfig;
   flow: ProviderSetupFlow;
   retrySeq: number;
   window: StepWindow;
+  models?: ModelSpec[];
+  recommendationSource?: 'provider' | 'fallback';
+  syncChangesToFlow?: boolean;
 }) {
   // ink ModelIdsStep parity: rows carry the formatted label (id padded to the
   // description column plus context/thinking/modality details), the list is a
@@ -728,12 +798,12 @@ function ModelsStep({
   // colour alone — ink draws no cursor glyph here.
   const modelOptions = useMemo<ModelOption[]>(
     () =>
-      provider.models?.map((model) => ({
+      models.map((model) => ({
         key: model.id,
         value: model.id,
         label: formatModelOptionLabel(model),
-      })) ?? [],
-    [provider.models],
+      })),
+    [models],
   );
   const hasSelectableModels = modelOptions.length > 0;
   const selectedModelIds = useMemo(
@@ -753,7 +823,15 @@ function ModelsStep({
     setCursor: setFocus,
   } = useBatchSafeCursor(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
   const [customText, setCustomText] = useState(() =>
-    selectedModelIds.filter((id) => !recommendedIds.has(id)).join(', '),
+    selectedModelIds
+      .filter(
+        (id) =>
+          !recommendedIds.has(id) &&
+          (recommendationSource !== 'provider' ||
+            !provider.models?.some((model) => model.id === id) ||
+            flow.state.explicitModelIds.includes(id)),
+      )
+      .join(', '),
   );
   // Keystrokes of one burst are handled against the render that registered the
   // handler, whose `checked` set is already stale by the second Space. The
@@ -769,11 +847,15 @@ function ModelsStep({
 
   const syncModelIds = useCallback(
     (custom: string, keys: ReadonlySet<string>) => {
+      if (!syncChangesToFlow) {
+        flow.clearModelIdsError();
+        return;
+      }
       flow.changeModelIds(
         uniqueIds([...normalizeModelIds(custom), ...keys]).join(', '),
       );
     },
-    [flow],
+    [flow, syncChangesToFlow],
   );
 
   const updateCustom = useCallback(
@@ -805,6 +887,27 @@ function ModelsStep({
   // The row's radio box owns four columns of the content width.
   const modelLabelWidth = Math.max(1, contentWidth - 4);
   const modelIdsError = flow.state.modelIdsError;
+  const heading =
+    recommendationSource === 'provider'
+      ? t('Models · from the provider · {{count}} checked', {
+          count: String(checked.size),
+        })
+      : MODELS_RECOMMENDED +
+        (recommendationSource === 'fallback'
+          ? t(' · provider list unavailable, showing built-ins')
+          : '');
+  const checkedNote =
+    recommendationSource === 'provider'
+      ? t('Checked models are applied on submit but not copied into the input.')
+      : MODELS_CHECKED_NOTE;
+  const emptyText =
+    recommendationSource === 'provider' ? t('No models match.') : MODELS_EMPTY;
+  const modelsHint =
+    recommendationSource === 'provider'
+      ? t(
+          'Enter to submit, ↑↓/Tab to switch input, search, and models, Space to toggle models, Esc to go back',
+        )
+      : MODELS_HINT;
   // Every run the step paints besides the list rows, measured at the content
   // width so a wrapped run is charged the rows it occupies: the step's own
   // margin, the intro, the custom-ID input line, the checked-note, the
@@ -818,16 +921,16 @@ function ModelsStep({
     (1 + wrappedRows(MODELS_INTRO, contentWidth)) +
     // the custom-ID input line and its margin row
     2 +
-    wrappedRows(MODELS_CHECKED_NOTE, contentWidth) +
-    (1 + wrappedRows(MODELS_RECOMMENDED, contentWidth)) +
+    wrappedRows(checkedNote, contentWidth) +
+    (1 + wrappedRows(heading, contentWidth)) +
     // the search label, and its input line, which carries no margin
     wrappedRows(MODELS_SEARCH, contentWidth) +
     1 +
     // the list's own margin row
     1 +
     (modelIdsError ? 1 + wrappedRows(modelIdsError, contentWidth) : 0) +
-    (1 + wrappedRows(MODELS_HINT, contentWidth)) +
-    (filtered.length === 0 ? wrappedRows(MODELS_EMPTY, contentWidth) : 0);
+    (1 + wrappedRows(modelsHint, contentWidth)) +
+    (filtered.length === 0 ? wrappedRows(emptyText, contentWidth) : 0);
   // ink's cap stays the ceiling; the region budget can only lower it. A row
   // is one physical row here — the list paints no margin between rows — so
   // the stride charges one, and the list's own margin row is chrome above.
@@ -989,10 +1092,10 @@ function ModelsStep({
         active={focus === MODEL_CUSTOM_INPUT_FOCUS_INDEX}
       />
       <box>
-        <text fg={C.dim}>{MODELS_CHECKED_NOTE}</text>
+        <text fg={C.dim}>{checkedNote}</text>
       </box>
       <box marginTop={1}>
-        <text fg={C.dim}>{MODELS_RECOMMENDED}</text>
+        <text fg={C.dim}>{heading}</text>
       </box>
       <box flexDirection="column">
         <text fg={C.dim}>{MODELS_SEARCH}</text>
@@ -1006,7 +1109,7 @@ function ModelsStep({
       </box>
       <box flexDirection="column" marginTop={1}>
         {filtered.length === 0 ? (
-          <text fg={C.dim}>{MODELS_EMPTY}</text>
+          <text fg={C.dim}>{emptyText}</text>
         ) : (
           visible.map((item, visibleIndex) => {
             const modelIndex = scrollOffset + visibleIndex;
@@ -1038,7 +1141,7 @@ function ModelsStep({
         </box>
       )}
       <box marginTop={1}>
-        <text fg={C.dim}>{MODELS_HINT}</text>
+        <text fg={C.dim}>{modelsHint}</text>
       </box>
     </box>
   );
@@ -1245,6 +1348,22 @@ function SetupSteps({
     case 'apiKey':
       return <ApiKeyStep provider={provider} flow={flow} retrySeq={retrySeq} />;
     case 'models':
+      if (
+        provider.supportsModelDiscovery ||
+        (provider.uiGroup === 'custom' &&
+          [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC].includes(
+            flow.state.protocol,
+          ))
+      ) {
+        return (
+          <DiscoveringModelsStep
+            provider={provider}
+            flow={flow}
+            retrySeq={retrySeq}
+            window={window}
+          />
+        );
+      }
       return (
         <ModelsStep
           provider={provider}

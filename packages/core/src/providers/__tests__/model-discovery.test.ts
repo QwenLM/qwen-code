@@ -51,6 +51,72 @@ describe('discoverProviderModels', () => {
     fetchWithPolicyMock.mockReset();
   });
 
+  it.each([
+    ['openai', 'https://example.com/prefix/models', 'Authorization'],
+    [
+      'openai-responses',
+      'https://example.com/prefix/v1/models',
+      'Authorization',
+    ],
+    [
+      'anthropic',
+      'https://example.com/prefix/v1/models?limit=1000',
+      'x-api-key',
+    ],
+  ] as const)(
+    'uses %s listing conventions and accepts gateway maps',
+    async (protocol, url, authHeader) => {
+      fetchWithPolicyMock.mockResolvedValue(
+        response({ models: { 'gateway-model': {} } }),
+      );
+      await expect(
+        discoverProviderModels({
+          ...options,
+          baseUrl: 'https://example.com/prefix',
+          protocol,
+        }),
+      ).resolves.toEqual([{ id: 'gateway-model' }]);
+      expect(fetchWithPolicyMock).toHaveBeenCalledWith(
+        url,
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            [authHeader]:
+              protocol === 'anthropic' ? 'secret-key' : 'Bearer secret-key',
+          }),
+        }),
+      );
+    },
+  );
+
+  it('ignores malformed gateway map entries instead of offering their keys', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        models: { valid: {}, nil: null, list: [], scalar: 'invalid' },
+      }),
+    );
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'valid' },
+    ]);
+    fetchWithPolicyMock.mockResolvedValue(
+      response({ models: { nil: null, scalar: true } }),
+    );
+    await expect(discoverProviderModels(options)).resolves.toBeNull();
+  });
+
+  it('can disable redirects without changing the preset default', async () => {
+    fetchWithPolicyMock.mockResolvedValue(response({ data: ids('model') }));
+    await discoverProviderModels({ ...options, maxRedirects: 0 });
+    expect(fetchWithPolicyMock).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.objectContaining({ maxRedirects: 0 }),
+    );
+    await discoverProviderModels(options);
+    expect(fetchWithPolicyMock).toHaveBeenLastCalledWith(
+      expect.any(String),
+      expect.objectContaining({ maxRedirects: 2 }),
+    );
+  });
+
   it('returns every served id uncurated and preserves provider order without dates', async () => {
     await expect(
       discoverFrom([
