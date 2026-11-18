@@ -586,10 +586,10 @@ export class Query implements AsyncIterable<SDKMessage> {
       return { behavior: 'deny', message: 'Denied' };
     }
 
+    let timeoutId: NodeJS.Timeout | undefined;
     try {
       const canUseToolTimeout =
         this.options.timeout?.canUseTool ?? DEFAULT_CAN_USE_TOOL_TIMEOUT;
-      let timeoutId: NodeJS.Timeout | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(
           () => reject(new Error('Permission callback timeout')),
@@ -606,10 +606,6 @@ export class Query implements AsyncIterable<SDKMessage> {
         ),
         timeoutPromise,
       ]);
-
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
 
       if (result.behavior === 'allow') {
         return {
@@ -641,6 +637,10 @@ export class Query implements AsyncIterable<SDKMessage> {
         behavior: 'deny',
         message: `Permission check failed: ${errorMessage}`,
       };
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     }
   }
 
