@@ -227,6 +227,10 @@ import {
   deliveredUserPromptSubmitContexts,
 } from '../hooks/user-prompt-submit-context.js';
 import {
+  appendAsyncHookContextPart,
+  drainAsyncHookContextPart,
+} from '../hooks/async-hook-context.js';
+import {
   TrustedUserAnswers,
   type TrustedUserAnswerQuestion,
   type TrustedUserAnswerSnapshot,
@@ -298,6 +302,12 @@ function hostContinuationOptions(
     }),
     ...(options?.skipMemoryExtraction && { skipMemoryExtraction: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
+    // A side query's client-initiated continuation (Stop-hook / stop-policy)
+    // must keep the flag: it is a Hook send, so without it the async-drain gate
+    // would not recognise it as a side query and it would drain the owning
+    // turn's pending block. The owning turn's own continuations carry no flag
+    // and keep draining.
+    ...(options?.isConcurrentSideQuery && { isConcurrentSideQuery: true }),
     // A Goal turn's continuation runs under the same permit.
     ...(options?.goalPermit && {
       goalPermit: options.goalPermit,
@@ -749,6 +759,13 @@ export class LlmClient {
   // is bound to its owning interaction: every budget entrypoint below is a
   // no-op for an invocation that does not own it.
   private toolExplorationBudgetPromptId: string | undefined;
+  // Prompt ids introduced by a flagged concurrent side query. Their tool-result
+  // continuations arrive unflagged, so the recorded id — not the flag — is what
+  // keeps them from draining the owning turn's pending async hook block. Kept
+  // for the client's lifetime: a side query still awaiting its continuation must
+  // stay refused even after a new main turn starts, and prompt ids are per-turn
+  // unique, so a recorded id is never legitimately reused.
+  private readonly concurrentSideQueryPromptIds = new Set<string>();
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -4400,6 +4417,8 @@ export class LlmClient {
         this.toolExplorationBudget.reset();
         this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
+      } else {
+        this.concurrentSideQueryPromptIds.add(prompt_id);
       }
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
@@ -5224,6 +5243,38 @@ export class LlmClient {
             appendedHookContext,
             appendedHookContexts,
           );
+      }
+      // Background (async) hooks may have produced output since the last
+      // turn. Drain it (get-and-clear) and deliver it to the model on this
+      // request, before the send and its auto-compaction so the threshold
+      // sees the same tail the provider will (capability ledger L11). Splice
+      // it ahead of the trailing UserPromptSubmit receipt so that block stays
+      // last for the resume/projection/title strips that recognize it only in
+      // last position. getHookSystem is read defensively: a config double
+      // without it (or a hook system without pending output) delivers nothing.
+      // A concurrent `/btw` side query must not consume the running turn's
+      // pending block: its first send carries isConcurrentSideQuery, but its
+      // tool-result continuation arrives unflagged, so the prompt id recorded
+      // at that flagged first send is what refuses the continuation. Every
+      // other ToolResult drains — the owning turn's continuation and a
+      // continue-interrupted turn that sends ToolResult first under an id no
+      // side query claimed. The exploration-budget prompt id cannot serve as
+      // that discriminator: it is only claimed on startsInteraction, so a
+      // ToolResult-first turn (fresh or stale budget id) would be refused and
+      // silently lose the block.
+      const skipAsyncHookDrain =
+        options?.isConcurrentSideQuery === true ||
+        (messageType === SendMessageType.ToolResult &&
+          this.concurrentSideQueryPromptIds.has(prompt_id));
+      const asyncHookContextPart = skipAsyncHookDrain
+        ? null
+        : drainAsyncHookContextPart(this.config.getHookSystem?.());
+      if (asyncHookContextPart) {
+        requestToSend = appendAsyncHookContextPart(
+          requestToSend,
+          asyncHookContextPart,
+          Boolean(appendedHookContext),
+        );
       }
       if (ideContextText) {
         const firstText = requestToSend.find(

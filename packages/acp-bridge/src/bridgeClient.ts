@@ -3085,6 +3085,24 @@ export class BridgeClient implements Client {
       this.onSessionCatalogChanged?.();
       return;
     }
+    if (method === 'qwen/notify/session/goal-changed') {
+      // The child persists the goal sidecar itself; this notification is a
+      // pure catalog-clock mark so version-watching clients refetch the
+      // marker — the same propagation pr-binding uses. No projection values
+      // travel here: the sidecar on disk is the catalog's single source.
+      const sessionId = params['sessionId'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      this.onSessionCatalogChanged?.();
+      return;
+    }
     if (method === 'qwen/notify/session/recording-degraded') {
       const sessionId = params['sessionId'];
       if (
