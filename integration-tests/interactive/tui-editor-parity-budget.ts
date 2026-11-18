@@ -24,11 +24,12 @@ export const until = createUntil(WAIT_LOCAL_MS);
 // retry: 0 because a wedged dialog repeats in a fresh worker, so the suite's
 // two retries would only triple the cost.
 //
-// Read at call time, like readyPromptBudgetMs, so every runner tier is pinned
-// with a plain object (scripts/tests/tui-editor-parity-wait-budget.test.ts).
+// Every input comes from env, like readyPromptBudgetMs, so every runner tier
+// is pinned with a plain object (scripts/tests/tui-editor-parity-wait-budget.test.ts).
 export function permissionsCaseOptions(env: NodeJS.ProcessEnv) {
   return {
-    timeout: readyPromptBudgetMs(env) + 3 * scaledWait(WAIT_LOCAL_MS) + 60_000,
+    timeout:
+      readyPromptBudgetMs(env) + 3 * scaledWait(WAIT_LOCAL_MS, env) + 60_000,
     retry: 0,
   };
 }

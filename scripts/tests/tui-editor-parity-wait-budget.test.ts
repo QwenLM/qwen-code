@@ -32,10 +32,12 @@ import {
 // The budgets are imported and executed, not matched against the suite's
 // text: a source pin greens on a commented-out copy and reds on a
 // behaviour-identical reformat. Same shape as ready-prompt-budget.test.ts.
-const SELF_HOSTED = { RUNNER_ENVIRONMENT: 'self-hosted' };
+//
+// Whole runner environments, like the process.env the suite passes: a CI tier
+// carries Actions' CI=true beside the runner marker.
+const SELF_HOSTED = { CI: 'true', RUNNER_ENVIRONMENT: 'self-hosted' };
 const SELF_HOSTED_DOCKER = { ...SELF_HOSTED, QWEN_SANDBOX: 'docker' };
 
-// CI_MULTIPLIER binds when wait.ts loads, so the stub precedes a fresh import.
 async function budgetsIn(ci: boolean) {
   vi.stubEnv('CI', ci ? 'true' : '');
   vi.resetModules();
@@ -136,19 +138,21 @@ describe('tui-editor-parity wait ceiling (#17544)', () => {
   it('keeps every per-case ceiling at the documented tier, enabled and unretried', async () => {
     // The figures both design versions advertise, matched as whole objects:
     // an undocumented cut of the repaint multiplier, a dropped retry: 0 or a
-    // skip key in any position reds here.
-    const local = await budgetsIn(false);
-    expect(local.permissionsCaseOptions({})).toEqual({
-      timeout: 180_000,
-      retry: 0,
-    });
-    const ci = await budgetsIn(true);
+    // skip key in any position reds here. The CI tiers lead so a multiplier
+    // cut reports a documented figure, and each tier runs with the ambient CI
+    // stubbed the other way, so a process.env read reds here too.
+    const ci = await budgetsIn(false);
     expect(ci.permissionsCaseOptions(SELF_HOSTED)).toEqual({
       timeout: 420_000,
       retry: 0,
     });
     expect(ci.permissionsCaseOptions(SELF_HOSTED_DOCKER)).toEqual({
       timeout: 510_000,
+      retry: 0,
+    });
+    const local = await budgetsIn(true);
+    expect(local.permissionsCaseOptions({})).toEqual({
+      timeout: 180_000,
       retry: 0,
     });
 
