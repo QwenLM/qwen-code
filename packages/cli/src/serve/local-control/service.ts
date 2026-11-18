@@ -15,6 +15,7 @@ import type { MutableOriginAllowlist } from '../auth.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { CredentialStore } from './credentials.js';
 import { tagListener } from './listener-identity.js';
+import { enableSocketKeepalive } from '../socket-keepalive.js';
 import {
   isLanIpv4,
   isSoftwareNetwork,
@@ -243,6 +244,9 @@ export class LocalControlService {
         )
       : createServer(this.#deps.app);
     server.maxConnections = MAX_CONNECTIONS;
+    // Same keepalive policy as the primary listener: pairing clients sit
+    // behind NATs that silently drop idle flows.
+    enableSocketKeepalive(server);
     server.headersTimeout = HEADERS_TIMEOUT_MS;
     // Whole-request budget. A trickling body holds its connection slot for as
     // long as `requestTimeout` allows, and slots are consumed pre-auth: with

@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-event-prompt-language.md) | [简体中文](2026-11-09-bound-event-prompt-language.zh-CN.md)
 
-Status: implemented as #16773 (proposed 2026-11-09). The body below describes the change as designed. Two things have moved since: the daemon drain's language is still not threaded (decision 7), and PR B (#17214) removed the channel's state detection, so the watch summaries named below belong to the daemon now.
+Status: implemented as #16773 (proposed 2026-11-09). The body below describes the change as designed. Two things have moved since: the daemon drain's language is now threaded (decision 7), and PR B (#17214) removed the channel's state detection, so the watch summaries named below belong to the daemon now.
 
 ## Problem statement
 
@@ -22,14 +22,14 @@ language, but the product-authored event text itself does not follow the UI.
 
 ## Current state
 
-| Surface                                                                         | Location                                                                                                                                                      | Language today                           |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| Envelope prose (header, notices, workflow sentence, truncation marker)          | `packages/channels/base/src/bound-session-prompt.ts`, `buildBoundEventPrompt`                                                                                 | localized (`BOUND_ENVELOPE_COPY`)        |
-| Built-in role guidance                                                          | same file, `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE`                                                                                                          | localized (per role)                     |
-| Provenance, instruction source, aggregate-comment header                        | `packages/channels/github/src/GithubAdapter.ts`, `buildBoundSessionPrompt`                                                                                    | localized (`BOUND_DELIVERY_COPY`)        |
-| Watch summaries (`head_change`, `ci_failure`, `merge_conflict`, `state_change`) | `packages/cli/src/serve/server/pr-watch-observation.ts` (four `summary:` literals); rendered by `buildDrainPrompt` in `pr-watch-drain.ts`                     | hardcoded English                        |
-| Daemon drain prompt                                                             | `packages/cli/src/serve/server/pr-watch-drain.ts`, `buildDrainPrompt`                                                                                         | hardcoded English; language not threaded |
-| Locale wiring                                                                   | `packages/cli/src/commands/channel/daemon-worker.ts` and `start.ts` → `resolveChannelLocale(settings.merged.general?.language)` → `ChannelBaseOptions.locale` | consumed by `GithubAdapter`              |
+| Surface                                                                         | Location                                                                                                                                                                                                                                                                                  | Language today                                                   |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Envelope prose (header, notices, workflow sentence, truncation marker)          | `packages/channels/base/src/bound-session-prompt.ts`, `buildBoundEventPrompt`                                                                                                                                                                                                             | localized (`BOUND_ENVELOPE_COPY`)                                |
+| Built-in role guidance                                                          | same file, `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE`                                                                                                                                                                                                                                      | localized (per role)                                             |
+| Provenance, instruction source, aggregate-comment header                        | `packages/channels/github/src/GithubAdapter.ts`, `buildBoundSessionPrompt`                                                                                                                                                                                                                | localized (`BOUND_DELIVERY_COPY`)                                |
+| Watch summaries (`head_change`, `ci_failure`, `merge_conflict`, `state_change`) | `packages/cli/src/serve/server/pr-watch-observation.ts` (`PR_WATCH_SUMMARY_COPY`); persisted, then passed through by `buildDrainPrompt` in `pr-watch-drain.ts`                                                                                                                            | localized at detection; the persisted summary keeps its language |
+| Daemon drain prompt                                                             | `packages/cli/src/serve/server/pr-watch-drain.ts`, `buildDrainPrompt`                                                                                                                                                                                                                     | localized; `language` threaded from the watch and drain deps     |
+| Locale wiring                                                                   | `packages/cli/src/utils/channel-locale.ts`, `resolveChannelLocale`; channel: `daemon-worker.ts` / `start.ts` read `settings.merged.general?.language` → `ChannelBaseOptions.locale`; daemon: `run-qwen-serve.ts` boot reads `bootSettings?.general?.language` → `prWatchSources.language` | consumed by `GithubAdapter` and by both PR-watch seams           |
 
 Constraints established by the existing contracts
 (`2026-11-02-github-channel-bound-session-events.md`,
@@ -96,7 +96,7 @@ lane the daemon is now a producer of bound event prompts too.
 - **No live language switching**: the locale is read at channel worker startup,
   exactly like the existing permission-copy locale. Changing `general.language`
   takes effect on the next channel start. Watch summaries are rendered at
-  detection time and persisted in the pending envelope, so a pending event
+  detection time and persisted in the pending envelope, so a pending summary
   keeps the language of its detection. Accepted aggregate and comment-watch
   tasks likewise retain their producer-composed `boundText` across recovery;
   markers are not later re-derived from untrusted text under a new locale.
@@ -235,12 +235,12 @@ Check names keep their `, ` join in both languages; they are platform data.
    than the English one; both stay ≤ 64 code points, so `sanitizePromptText`
    peels copies of them exactly like the English tags. The copy tests are
    extended to run against the zh envelope as well.
-7. **The daemon producer's language is not wired.** Adding a language field
-   to `PrWatchDrainDeps` that no production caller sets would be a dead switch.
-   The drain keeps the English default. The enablement increment has since
-   landed (#17032) without threading it — `PrWatchDrainDeps` still declares no
-   language field — so the threading is still owed rather than scheduled
-   elsewhere. The shared builder already supports it.
+7. **The daemon producer's language was not wired in #16773.** Adding a
+   language field to `PrWatchDrainDeps` that no production caller sets would be
+   a dead switch. The drain kept the English default. The enablement increment
+   landed (#17032) without threading it; [Daemon PR watch: prompt language](2026-11-15-daemon-pr-watch-drain-language.md)
+   has since threaded it, so the drain follows `general.language` while a
+   pending entry's persisted summary keeps the language of its detection.
 
 ## Files affected
 
@@ -328,9 +328,10 @@ Check names keep their `, ` join in both languages; they are platform data.
   `'en' | 'zh'` at that point (the channel `locale` type and
   `resolveChannelLocale` would extend together). Deferred per the operator's
   instruction: Chinese first, other languages later as needed.
-- Whether the daemon watch producer should reuse the shared zh strings verbatim
-  or supply platform-neutral variants when it is enabled (same open question as
-  the role-guidance design).
+- Resolved by [Daemon PR watch: prompt language](2026-11-15-daemon-pr-watch-drain-language.md):
+  the daemon reuses the shared zh envelope and role guidance verbatim, and
+  authors its own per-language, platform-neutral transition summaries and
+  provenance line (`PR_WATCH_SUMMARY_COPY`, `DRAIN_PROVENANCE`).
 - Whether field labels should ever be localized. Deliberately out of scope; a
   future change would need a structured metadata representation instead of
   re-parsing rendered lines.

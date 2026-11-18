@@ -693,9 +693,10 @@ export function getDisplayValue(
 export function nextBooleanSettingValue(
   currentValue: unknown,
   defaultValue?: unknown,
+  unsetToggleValue = false,
 ): boolean {
   if (currentValue !== undefined) return !currentValue;
-  return defaultValue === undefined ? false : !defaultValue;
+  return defaultValue === undefined ? unsetToggleValue : !defaultValue;
 }
 
 /**

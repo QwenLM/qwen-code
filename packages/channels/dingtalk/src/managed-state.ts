@@ -19,6 +19,8 @@ import { join } from 'node:path';
 import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
+  MANAGED_OUTBOUND_LIMIT,
+  validManagedReceipt,
 } from '@qwen-code/channel-base';
 import type {
   ManagedReceipt,
@@ -37,8 +39,8 @@ export type { ManagedReceipt };
 // docs/design/2026-11-13-managed-channel-dingtalk-adapter.md.
 
 export const MANAGED_DINGTALK_PENDING_LIMIT = 32;
-const RECENT_LIMIT = 256;
-const WEBHOOK_LIMIT = 256;
+export const RECENT_LIMIT = 256;
+export const WEBHOOK_LIMIT = 256;
 
 export interface ManagedDingtalkPendingEvent {
   eventId: string;
@@ -69,24 +71,6 @@ export interface ManagedDingtalkState {
   webhooks: Record<string, string>;
 }
 
-function validManagedReceipt(value: unknown): boolean {
-  if (value === undefined) return true;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const receipt = value as Partial<ManagedReceipt>;
-  if (receipt.outcome === 'unknown' || receipt.outcome === 'rejected')
-    return Object.keys(receipt).length === 1;
-  return (
-    receipt.outcome === 'accepted' &&
-    Number.isSafeInteger(receipt.ordinal) &&
-    (receipt.ordinal as number) >= 0 &&
-    typeof receipt.providerMessageId === 'string' &&
-    receipt.providerMessageId.length > 0 &&
-    receipt.providerMessageId.length <= 512 &&
-    Number.isSafeInteger(receipt.acceptedAt) &&
-    (receipt.acceptedAt as number) >= 0
-  );
-}
-
 export function validManagedDingtalkState(
   value: unknown,
 ): value is ManagedDingtalkState {
@@ -113,7 +97,7 @@ export function validManagedDingtalkState(
         (entry.inputId === undefined || typeof entry.inputId === 'string'),
     ) &&
     Array.isArray(state.outbound) &&
-    state.outbound.length <= 64 &&
+    state.outbound.length <= MANAGED_OUTBOUND_LIMIT &&
     state.outbound.every(
       (entry) =>
         entry &&
@@ -189,9 +173,13 @@ export class ManagedDingtalkStateStore {
         closeSync(fd);
       }
       renameSync(temporary, this.file);
-    } catch {
+    } catch (error) {
+      // Keep the message (a cross-channel convention shared with the email
+      // store) but preserve the fs error on cause, so the adapter's logs can
+      // distinguish ENOSPC from EACCES from a read-only mount (#17432 R1-3).
       throw new Error(
         'Managed DingTalk state could not be saved; admission stopped.',
+        { cause: error },
       );
     } finally {
       rmSync(temporary, { force: true });

@@ -18,8 +18,6 @@ final class JdbcToolExecutionObservations {
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, expected.getBindingId());
                     ToolExecutionRecord current =
                             selectByExecutionId(connection, expected.getExecutionCallId(), true);
                     if (current == null
@@ -46,8 +44,6 @@ final class JdbcToolExecutionObservations {
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, expected.getBindingId());
                     ToolExecutionRecord current =
                             selectByExecutionId(connection, expected.getExecutionCallId(), true);
                     if (current == null

@@ -38,29 +38,17 @@ public class JdbcWorkspaceExecutionStore
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final WorkspaceStorageGuard storageGuard;
-    private final ResidentWorkspaces residents;
     private final WorkspaceAttachmentAuthorizer authorizer;
 
     com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles() { return worktreeFiles; }
 
     @Autowired
     public JdbcWorkspaceExecutionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
-            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard,
-            com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties) {
+            @Qualifier("managedAgentTransactionManager") PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(transactionManager);
         this.storageGuard = storageGuard;
-        this.residents = new ResidentWorkspaces(properties.getRuntimeBroker().getResidentWorkspaces());
-        this.authorizer = new WorkspaceAttachmentAuthorizer(this, jdbc, this.residents);
-    }
-
-    public JdbcWorkspaceExecutionStore(JdbcTemplate jdbc,
-            PlatformTransactionManager transactionManager, WorkspaceStorageGuard storageGuard) {
-        this.jdbc = jdbc;
-        this.transaction = new TransactionTemplate(transactionManager);
-        this.storageGuard = storageGuard;
-        this.residents = new ResidentWorkspaces(List.of());
-        this.authorizer = new WorkspaceAttachmentAuthorizer(this, jdbc, this.residents);
+        this.authorizer = new WorkspaceAttachmentAuthorizer(this, jdbc);
     }
 
     public JdbcWorkspaceExecutionStore(JdbcTemplate jdbc,
@@ -69,8 +57,7 @@ public class JdbcWorkspaceExecutionStore
         this.transaction = new TransactionTemplate(transactionManager);
         // Offline saved-owner cleanup must not require the current mount.
         this.storageGuard = null;
-        this.residents = new ResidentWorkspaces(List.of());
-        this.authorizer = new WorkspaceAttachmentAuthorizer(this, jdbc, this.residents);
+        this.authorizer = new WorkspaceAttachmentAuthorizer(this, jdbc);
     }
 
     public java.nio.file.Path createdStorageRoot(String tenantId, String storageId) {
@@ -94,7 +81,7 @@ public class JdbcWorkspaceExecutionStore
     public void authorize(SessionRecord session) {
         requireExternalExecution(session.workspace());
         authorizePassiveAttachment(session);
-        if (storageGuard != null && residents.find(session.workspace()) == null
+        if (storageGuard != null
                 && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
@@ -107,7 +94,7 @@ public class JdbcWorkspaceExecutionStore
             throw lifecycleFailure(error);
         }
         authorizePassiveAttachment(session, authority);
-        if (storageGuard != null && residents.find(session.workspace()) == null
+        if (storageGuard != null
                 && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
@@ -118,7 +105,7 @@ public class JdbcWorkspaceExecutionStore
             throw WorkspaceExecutionStore.unavailable();
         }
         authorizePassiveAttachment(session, null, true);
-        if (storageGuard != null && residents.find(session.workspace()) == null
+        if (storageGuard != null
                 && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
@@ -328,12 +315,6 @@ public class JdbcWorkspaceExecutionStore
 
     public void claim(ContextBinding binding, RuntimeSessionRecord session) {
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        if (residents.find(binding) != null) {
-            // Read-only check with no tenant guard: it writes nothing a concurrent transition could
-            // observe, so it orders before any transition that commits after its snapshot.
-            transaction.executeWithoutResult(status -> WorkspaceResidentHolds.requireResidentHeld(jdbc, residents, binding, session, false));
-            return;
-        }
         WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         String key = storageKey(binding);
         List<Long> revisions = jdbc.query("SELECT mount_revision FROM ma_storage_owner WHERE storage_key = ?"
@@ -460,10 +441,6 @@ public class JdbcWorkspaceExecutionStore
     }
 
     public void assertHeld(ContextBinding binding, RuntimeSessionRecord session) {
-        if (residents.find(binding) != null) {
-            WorkspaceResidentHolds.requireResidentHeld(jdbc, residents, binding, session, false);
-            return;
-        }
         if (storageGuard != null) {
             storageGuard.verify(binding);
         }
@@ -477,10 +454,6 @@ public class JdbcWorkspaceExecutionStore
     }
 
     public boolean isHeld(ContextBinding binding, RuntimeSessionRecord session) {
-        if (residents.find(binding) != null) {
-            WorkspaceResidentHolds.requireResidentHeld(jdbc, residents, binding, session, true);
-            return session.getState() != RuntimeSessionRecord.State.RELEASED;
-        }
         WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         String key = storageKey(binding);
         if (!StorageOwnerMembership.membersAllowed(jdbc, key)) {
@@ -501,17 +474,6 @@ public class JdbcWorkspaceExecutionStore
     }
 
     private void release(ContextBinding binding, RuntimeSessionRecord session, boolean stopped) {
-        if (residents.find(binding) != null) {
-            // Read-only like the resident claim: no tenant guard.
-            transaction.executeWithoutResult(status -> {
-                WorkspaceResidentHolds.requireResidentHeld(jdbc, residents, binding, session, true);
-                if (session.getState() != RuntimeSessionRecord.State.RELEASING
-                        && session.getState() != RuntimeSessionRecord.State.RELEASED) {
-                    throw WorkspaceExecutionStore.unavailable();
-                }
-            });
-            return;
-        }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
             String key = storageKey(binding);

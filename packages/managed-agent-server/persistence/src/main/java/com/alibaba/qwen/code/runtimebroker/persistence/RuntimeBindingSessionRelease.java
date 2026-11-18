@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -48,10 +47,6 @@ final class RuntimeBindingSessionRelease {
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    if (JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, expected)
-                            != null) {
-                        throw CsiFilesRetirementProfile.releaseUnavailable();
-                    }
                     RuntimeBindingRecord binding =
                             repository.selectById(connection, expected.getBindingId(), true);
                     RuntimeAdmission.requireRelease(binding, expected);
@@ -174,10 +169,6 @@ final class RuntimeBindingSessionRelease {
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
-                    if (JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, expected)
-                            != null) {
-                        throw CsiFilesRetirementProfile.releaseUnavailable();
-                    }
                     // Statement order is load-bearing under InnoDB REPEATABLE READ:
                     // this locking read must stay first, and the plain execution read
                     // below must stay the transaction's first consistent read, so its

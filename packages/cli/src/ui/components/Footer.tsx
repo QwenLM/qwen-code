@@ -279,7 +279,7 @@ export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce && (
             <Text dimColor wrap="truncate">
-              {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
+              {`⎇ ${uiState.activeWorktree.branch || 'detached HEAD'} (${uiState.activeWorktree.slug})`}
             </Text>
           )}
         {workflowMode?.requested &&

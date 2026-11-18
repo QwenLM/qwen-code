@@ -1013,59 +1013,6 @@ public class ManagedAgentPropertiesTest {
     }
 
     @Test
-    public void springBindsResidentMappingsAndRequiresTheExplicitResidentDeploymentShape() {
-        String prefix = "qwen.managed-agent.runtime-broker.";
-        String entry = prefix + "resident-workspaces[0].";
-        var values = new java.util.ArrayList<String>(List.of(
-                "qwen.managed-agent.harness.enabled=true", "qwen.managed-agent.harness.workspace-files-enabled=true",
-                "qwen.managed-agent.session-store.enabled=true", prefix + "enabled=true",
-                prefix + "provisioner=kubernetes-workspace", prefix + "isolation-class=workspace",
-                TRUSTED_KEY + "=false", prefix + "resident-kubernetes-api-url=https://cluster.example",
-                prefix + "resident-kubernetes-token-file=/reviewed/token", prefix + "resident-kubernetes-ca-file=/reviewed/ca",
-                entry + "workspace-id=workspace", entry + "workspace-generation=1",
-                entry + "image=worker@sha256:" + "a".repeat(64), entry + "command[0]=node", entry + "command[1]=/worker/cli.js"));
-        var registration = java.util.Map.ofEntries(java.util.Map.entry("tenant-id", "tenant"),
-                java.util.Map.entry("storage-id", "storage"), java.util.Map.entry("cluster-domain", "cluster"),
-                java.util.Map.entry("namespace", "resident"), java.util.Map.entry("pvc-name", "claim"),
-                java.util.Map.entry("pvc-uid", "pvc-uid"), java.util.Map.entry("pv-name", "volume"),
-                java.util.Map.entry("pv-uid", "pv-uid"), java.util.Map.entry("driver", "diskplugin.csi.alibabacloud.com"),
-                java.util.Map.entry("volume-handle", "handle"), java.util.Map.entry("backend-domain", "backend"),
-                java.util.Map.entry("disk-serial", "serial"), java.util.Map.entry("mount-root", "/workspace"),
-                java.util.Map.entry("revision", "1"));
-        registration.forEach((key, value) -> values.add(entry + "registration." + key + "=" + value));
-        java.util.Map.of("namespace-uid", "namespace", "policy-name", "policy", "policy-uid", "policy-uid",
-                "policy-generation", "1", "binding-name", "binding", "binding-uid", "binding-uid", "binding-generation", "1")
-                .forEach((key, value) -> values.add(entry + "protection." + key + "=" + value));
-        // Empty lists bind from YAML; a constructor receiving no artifacts must do the same.
-        values.add(entry + "artifacts=");
-        var context = new ApplicationContextRunner().withUserConfiguration(PropertiesConfiguration.class)
-                .withPropertyValues(values.toArray(String[]::new));
-        context.run(started -> {
-            assertThat(started).hasNotFailed();
-            var selected = started.getBean(ManagedAgentProperties.class).getRuntimeBroker().getResidentWorkspaces().getFirst();
-            assertThat(selected.workspaceId()).isEqualTo("workspace");
-            assertThat(selected.registration().storageId()).isEqualTo("storage");
-            assertThat(selected.command()).containsExactly("node", "/worker/cli.js");
-        });
-        context.withPropertyValues(TRUSTED_KEY + "=true").run(started -> assertThat(started).hasFailed());
-        context.withPropertyValues(prefix + "workspace-creation-root=/local-workspaces")
-                .run(started -> assertThat(started).hasFailed());
-        context.withPropertyValues("qwen.managed-agent.harness.workspace-shell-enabled=true")
-                .run(started -> assertThat(started).hasFailed());
-        context.withPropertyValues(prefix + "ssh.nodes[0].node-id=remote",
-                        prefix + "ssh.nodes[0].display-name=Remote",
-                        prefix + "ssh.nodes[0].ssh-host=remote",
-                        prefix + "ssh.nodes[0].node-executable=/node",
-                        prefix + "ssh.nodes[0].qwen-entry=/cli.js",
-                        prefix + "ssh.nodes[0].state-directory=/state",
-                        prefix + "ssh.nodes[0].allowed-roots[0]=/work",
-                        prefix + "ssh.nodes[0].publication-port=41270",
-                        prefix + "ssh.nodes[0].qwen-version=0.25.1")
-                .run(started -> assertThat(started).hasFailed().getFailure()
-                        .hasRootCauseMessage("Resident Workspaces require exclusive CSI/files configuration"));
-    }
-
-    @Test
     public void publicChildrenDefaultOnWithoutEnablingUnsupportedRuntimeProfiles() {
         var properties = new ManagedAgentProperties();
         assertThat(properties.getHarness().isWorkspaceChildAgentsEnabled()).isTrue();
@@ -1082,7 +1029,7 @@ public class ManagedAgentPropertiesTest {
         properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
         assertThat(properties.admitsPublicChildAgents()).isFalse();
         properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
-        properties.getRuntimeBroker().setProvisioner("kubernetes-workspace");
+        properties.getRuntimeBroker().setProvisioner("static");
         assertThat(properties.admitsPublicChildAgents()).isFalse();
     }
 
@@ -1142,7 +1089,7 @@ public class ManagedAgentPropertiesTest {
         }
         for (String invalid : List.of("harness.workspace-files-enabled=false", "harness.enabled=false",
                 "session-store.enabled=false", "runtime-broker.enabled=false",
-                "runtime-broker.isolation-class=workspace", "runtime-broker.provisioner=kubernetes")) {
+                "runtime-broker.isolation-class=workspace", "runtime-broker.provisioner=static")) {
             supported.withPropertyValues("qwen.managed-agent." + invalid)
                     .run(started -> assertThat(started).hasFailed());
         }
@@ -1284,7 +1231,7 @@ public class ManagedAgentPropertiesTest {
                 p -> p.getHarness().setEnabled(false),
                 p -> p.getSessionStore().setEnabled(false),
                 p -> p.getRuntimeBroker().setEnabled(false),
-                p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
+                p -> p.getRuntimeBroker().setProvisioner("static"),
                 p -> p.getRuntimeBroker().setIsolationClass("workspace"),
                 p -> p.getRuntimeBroker().setWorkspaceMounts(List.of()),
                 p -> p.getHarness().setApprovalMode("plan"),
@@ -1433,7 +1380,7 @@ public class ManagedAgentPropertiesTest {
                 .isEqualTo(java.time.Duration.ofMinutes(2));
         List<Consumer<ManagedAgentProperties>> invalid = List.of(
                 p -> p.getRuntimeBroker().setEnabled(false),
-                p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
+                p -> p.getRuntimeBroker().setProvisioner("static"),
                 p -> p.getRuntimeBroker().setIsolationClass("workspace"),
                 // A merge waits for the child's close, which only a durable Broker runs.
                 p -> p.getRuntimeBroker().setDurableLocalProcess(false),

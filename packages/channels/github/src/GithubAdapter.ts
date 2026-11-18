@@ -794,10 +794,12 @@ function normalizeBoundSessionActions(
 }
 
 /**
- * Whether the channel still uses the deprecated state-watch surface:
- * `prWatchEvents` itself, or a `watch:*` key in `boundSessionActions`.
- * These keys are accepted for one minor release; the daemon reads them as a
- * per-host alias when `serve.sessionPrWatch` is unset.
+ * Whether the channel still uses any of the four deprecated state-watch keys:
+ * `prWatchEvents`, a `watch:*` key in `boundSessionActions`, `prWatchLimit`
+ * or `prWatchBudgetReserve`. The first two are accepted for one minor release
+ * and read by the daemon as a per-host alias while `serve.sessionPrWatch` and
+ * its events environment override are both unset; the two limit knobs are
+ * ignored, and the pass uses its built-in budget.
  */
 function usesDeprecatedPrWatchSurface(
   config: BoundSessionConfigFields,
