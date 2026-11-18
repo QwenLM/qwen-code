@@ -206,15 +206,18 @@ function resolveBoolean(
  * accounting. Binary parts get a fixed budget (in chars) derived from
  * the configured token estimate; this keeps base64 payloads from
  * skewing compression size estimation or token-budget math.
+ * `onText` visits the counted text, excluding media and wrapper reserves.
  */
 export function estimatePartChars(
   part: Part,
   imageTokenEstimate: number,
+  onText?: (text: string) => void,
 ): number {
   if (part.inlineData || part.fileData) {
     return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
+    onText?.(part.text);
     return part.text.length;
   }
   // Tool results in qwen-code carry media on `functionResponse.parts`
@@ -227,21 +230,25 @@ export function estimatePartChars(
     const output = part.functionResponse.response?.['output'];
     const error = part.functionResponse.response?.['error'];
     if (typeof output === 'string') {
+      onText?.(output);
       total += output.length;
     } else if (typeof error === 'string') {
+      onText?.(error);
       total += error.length;
     }
     const nested = getFunctionResponseParts(part);
     if (nested) {
       for (const inner of nested) {
-        total += estimatePartChars(inner, imageTokenEstimate);
+        total += estimatePartChars(inner, imageTokenEstimate, onText);
       }
     }
     // Add a small fixed floor for the wrapper metadata (id, name) so a
     // pure media-only response isn't reported as just the image budget.
     return total + 64;
   }
-  return JSON.stringify(part ?? {}).length;
+  const text = JSON.stringify(part ?? {});
+  onText?.(text);
+  return text.length;
 }
 
 /**

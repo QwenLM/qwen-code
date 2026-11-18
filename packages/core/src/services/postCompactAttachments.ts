@@ -19,8 +19,11 @@ import type { Content, Part } from '@google/genai';
 import { readFile, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
-import { CHARS_PER_TOKEN } from './tokenEstimation.js';
-import { getFunctionResponseParts } from './compactionInputSlimming.js';
+import { CHARS_PER_TOKEN, estimateCjkTextTokens } from './tokenEstimation.js';
+import {
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  getFunctionResponseParts,
+} from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -378,19 +381,20 @@ export async function readFileSizeAdaptive(
  *  - One embed block per small file with full content.
  *  - Nothing for missing/binary files.
  *
- * Total embedded chars are capped at POST_COMPACT_TOKEN_BUDGET ×
- * CHARS_PER_TOKEN. Files that would push over the budget are downgraded
- * to references.
+ * Files that would exceed the CJK-aware token budget (50K by default) are
+ * downgraded to references. The per-file reader first applies its existing
+ * character-size cap to bound disk reads.
  */
 export async function buildFileRestorationBlocks(
   filePaths: string[],
   signal?: AbortSignal,
+  tokenBudget = POST_COMPACT_TOKEN_BUDGET,
+  onEmbeddedFiles?: (count: number) => void,
 ): Promise<Content[]> {
   const references: string[] = [];
   const embeds: Array<{ path: string; content: string }> = [];
 
-  let usedChars = 0;
-  const budgetChars = POST_COMPACT_TOKEN_BUDGET * CHARS_PER_TOKEN;
+  let usedTokens = 0;
 
   for (const filePath of filePaths) {
     if (signal?.aborted) break;
@@ -405,19 +409,20 @@ export async function buildFileRestorationBlocks(
       continue;
     }
     // embed — check global budget; downgrade to reference if over.
-    if (usedChars + result.content.length > budgetChars) {
+    const fileTokens = estimateCjkTextTokens(result.content);
+    if (usedTokens + fileTokens > tokenBudget) {
       references.push(filePath);
       continue;
     }
     embeds.push({ path: filePath, content: result.content });
-    usedChars += result.content.length;
+    usedTokens += fileTokens;
   }
 
   const blocks: Content[] = [];
 
   if (references.length > 0) {
     const lines = [
-      'The following files were recently accessed before context was compacted. They are listed as reference only because they are large. Use `read_file` to view current content for any file you need:',
+      'The following files were recently accessed before context was compacted. They are listed as reference only due to file size or the restoration budget. Use `read_file` to view current content for any file you need:',
       '',
       ...references.map((p) => `- ${sanitizePathForDisplay(p)}`),
     ];
@@ -451,6 +456,7 @@ export async function buildFileRestorationBlocks(
     });
   }
 
+  onEmbeddedFiles?.(embeds.length);
   return blocks;
 }
 
@@ -608,6 +614,12 @@ export interface ComposePostCompactOptions {
    * `QWEN_COMPACT_MAX_RECENT_FILES`).
    */
   maxFiles?: number;
+  /** Maximum file-content budget, shared with restored images. */
+  fileTokenBudget?: number;
+  /** Per-image cost shared with compression token accounting. */
+  imageTokenEstimate?: number;
+  /** Reports all restoration blocks and the subset containing file bodies or images. */
+  onRestoredBlocks?: (count: number, embeddedCount: number) => void;
   /**
    * Max recent images to restore. Defaults to
    * `POST_COMPACT_MAX_IMAGES_TO_RESTORE`. Configurable via
@@ -806,6 +818,8 @@ export async function composePostCompactHistory(
     workspaceRoot,
     signal,
     maxFiles = POST_COMPACT_MAX_FILES_TO_RESTORE,
+    fileTokenBudget = POST_COMPACT_TOKEN_BUDGET,
+    imageTokenEstimate = DEFAULT_IMAGE_TOKEN_ESTIMATE,
     maxImages = POST_COMPACT_MAX_IMAGES_TO_RESTORE,
     planModeActive,
     runningSubagents,
@@ -815,9 +829,17 @@ export async function composePostCompactHistory(
   const filePaths = extractRecentFilePaths(history, maxFiles).filter((p) =>
     isInsideWorkspace(p, workspaceRoot),
   );
-  const fileBlocks = await buildFileRestorationBlocks(filePaths, signal);
-
   const images = extractRecentImages(history, maxImages);
+  let embeddedFileCount = 0;
+  const fileBlocks = await buildFileRestorationBlocks(
+    filePaths,
+    signal,
+    Math.max(0, fileTokenBudget - images.length * imageTokenEstimate),
+    (count) => {
+      embeddedFileCount = count;
+    },
+  );
+
   const imageBlock = buildImageRestorationBlock(images);
 
   // Merge every file restoration block AND the image block into a
@@ -878,5 +900,9 @@ export async function composePostCompactHistory(
     out.push({ role: 'model', parts: ackParts });
   }
 
+  options.onRestoredBlocks?.(
+    fileBlocks.length + (imageBlock ? 1 : 0),
+    embeddedFileCount + (imageBlock ? 1 : 0),
+  );
   return out;
 }

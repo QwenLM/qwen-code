@@ -25,6 +25,19 @@ import {
  */
 export const CHARS_PER_TOKEN = TOKEN_TO_CHAR_RATIO;
 
+const CJK_CHAR_TOKEN_MULTIPLIER = 1.5;
+const CJK_CHAR_PATTERN =
+  /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/g;
+
+/** Estimate summary and restored text using the compaction CJK heuristic. */
+export function estimateCjkTextTokens(text: string): number {
+  const cjkCharCount = text.match(CJK_CHAR_PATTERN)?.length ?? 0;
+  return (
+    Math.ceil((text.length - cjkCharCount) / CHARS_PER_TOKEN) +
+    Math.ceil(cjkCharCount * CJK_CHAR_TOKEN_MULTIPLIER)
+  );
+}
+
 /**
  * Estimate text tokens for context-usage reporting. This intentionally keeps
  * the CJK-aware `/context` heuristic separate from the conservative
