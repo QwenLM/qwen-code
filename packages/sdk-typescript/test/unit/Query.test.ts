@@ -1015,7 +1015,10 @@ describe('Query', () => {
     ])('clears the permission deadline on $label', async ({ result }) => {
       const query = new Query(transport, {
         cwd: '/test',
-        canUseTool: () => result,
+        canUseTool: async () => {
+          expect(vi.getTimerCount()).toBe(1);
+          return result;
+        },
       });
       await respondToInitialize(transport, query);
       vi.useFakeTimers();
