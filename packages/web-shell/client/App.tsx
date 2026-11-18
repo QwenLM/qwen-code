@@ -116,6 +116,7 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionSubSessionTaskStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionArtifact,
   DaemonSessionSummary,
@@ -150,6 +151,7 @@ import {
   SESSION_LIVE_STATE_FEATURE,
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_SIDE_TASK_FEATURE,
+  SESSION_SUB_SESSION_SEND_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
   WEB_SHELL_SESSION_SOURCE_TYPE,
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
@@ -177,6 +179,7 @@ import {
   buildTaskExplainQuestion,
   explainDisplayLabel,
   isComposerTask,
+  type ComposerChipTask,
 } from './utils/composerTasks';
 import {
   getTaskActivityKey,
@@ -194,11 +197,13 @@ import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings'
 import {
   useSessionCatalogController,
   useDaemonSessionActivityBridge,
+  useSessionCatalogQuery,
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
   peekSessionCatalogDisplayName,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
+  type SessionCatalogQuery,
 } from './session-catalog/session-catalog-store';
 import {
   useContextUsageControls,
@@ -474,6 +479,15 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
+import { useSubSessionTasks } from './hooks/useSubSessionTasks';
+import { extractErrorDetail } from './utils/errorDetail';
+import {
+  getSendWorkspace,
+  parseSendCommand,
+  resolveSendWorkspace,
+  type SendCommand,
+} from './utils/sendCommand';
+import { createSendArgumentCompleter } from './completions/sendCompletion';
 import {
   getSubagentDetailsUnavailableReason,
   toolContainsCallId,
@@ -2677,6 +2691,9 @@ function serializeArtifactPanelTabs(
             sessionId: tab.sessionId,
           },
         ];
+      case 'session':
+        // A live view of another session; nothing to restore.
+        return [];
       case 'side_task':
         return tab.sessionId
           ? [
@@ -5907,6 +5924,11 @@ export function App({
     Boolean(connection.sessionId && connection.workspaceCwd) &&
     connection.capabilities?.features.includes(SESSION_SIDE_TASK_FEATURE) ===
       true;
+  const sendCommandAvailable =
+    workspaceContextActive &&
+    connection.capabilities?.features.includes(
+      SESSION_SUB_SESSION_SEND_FEATURE,
+    ) === true;
   const sideTaskRestoreAvailable =
     sideTasksAvailable &&
     connection.capabilities?.features.includes('session_archive') === true;
@@ -6845,6 +6867,35 @@ export function App({
       setArtifactPanelOpen(true);
     },
     [getDefaultReviewPanelWidth],
+  );
+  const openSessionPanel = useCallback(
+    (
+      task: Pick<
+        DaemonSessionSubSessionTaskStatus,
+        'sessionId' | 'workspaceCwd' | 'label'
+      >,
+    ) => {
+      if (lockedWorkspaceCwd && task.workspaceCwd !== lockedWorkspaceCwd) {
+        pushToast('error', t('send.workspaceLocked'));
+        return;
+      }
+      const tab: ArtifactPanelTab = {
+        id: `session:${task.sessionId}`,
+        kind: 'session',
+        title: task.label || task.sessionId.slice(0, 8),
+        sessionId: task.sessionId,
+        workspaceCwd: task.workspaceCwd,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, lockedWorkspaceCwd, pushToast, t],
   );
   const openImagePanel = useCallback(
     (src: string, alt?: string, source?: ImageTabSource) => {
@@ -9277,6 +9328,24 @@ export function App({
     backgroundTasksRefreshTrigger,
     workflowsEnabled,
   );
+  // Bumped after a `/send` so its chip shows without waiting for the event.
+  const [subSessionTasksRefresh, setSubSessionTasksRefresh] = useState(0);
+  const subSessionTasks = useSubSessionTasks(
+    connection.sessionId,
+    connection.status === 'connected' &&
+      connection.capabilities?.features.includes(
+        SESSION_SUB_SESSION_SEND_FEATURE,
+      ) === true,
+    subSessionTasksRefresh,
+  );
+  const composerChipTasks = useMemo<ComposerChipTask[]>(() => {
+    const visible = lockedWorkspaceCwd
+      ? subSessionTasks.filter(
+          (task) => task.workspaceCwd === lockedWorkspaceCwd,
+        )
+      : subSessionTasks;
+    return visible.length > 0 ? [...sessionTasks, ...visible] : sessionTasks;
+  }, [lockedWorkspaceCwd, sessionTasks, subSessionTasks]);
   const [sessionAgentInventory, setSessionAgentInventory] = useState<{
     sessionKey: string;
     tasks: DaemonSessionAgentTaskStatus[];
@@ -11842,6 +11911,207 @@ export function App({
       splitSessionIds,
     ],
   );
+  // `/send` targets: trusted workspaces, which are the ones that can run.
+  // Kept by content so an equivalent list refresh keeps the composer props.
+  const sendWorkspacesRef = useRef<DaemonWorkspaceCapability[]>([]);
+  const nextSendWorkspaces = ordinaryWorkspaces.filter(
+    (entry) => entry.trusted,
+  );
+  if (
+    nextSendWorkspaces.length !== sendWorkspacesRef.current.length ||
+    nextSendWorkspaces.some((next, index) => {
+      const current = sendWorkspacesRef.current[index]!;
+      return (
+        current.id !== next.id ||
+        current.cwd !== next.cwd ||
+        workspaceLabel(current) !== workspaceLabel(next)
+      );
+    })
+  ) {
+    sendWorkspacesRef.current = nextSendWorkspaces;
+  }
+  const sendWorkspaces = sendWorkspacesRef.current;
+  // The workspace a `/send` being typed targets, so its sessions can be
+  // offered for `--session-id`.
+  const [sendCompletionCwd, setSendCompletionCwd] = useState<string>();
+  const sendSessionsQuery = useMemo<SessionCatalogQuery | undefined>(
+    () =>
+      sendCompletionCwd
+        ? {
+            routeKind: 'qualified',
+            workspaceCwd: sendCompletionCwd,
+            options: { archiveState: 'active' },
+          }
+        : undefined,
+    [sendCompletionCwd],
+  );
+  const { page: sendCompletionPage } = useSessionCatalogQuery(
+    workspace.client,
+    sendSessionsQuery,
+    { autoLoad: true },
+  );
+  const sendCompletionSessions = sendCompletionPage?.sessions;
+  const sendArgumentCompleter = useMemo(() => {
+    const callerCwd = connection.workspaceCwd;
+    if (!sendCommandAvailable || !callerCwd) return undefined;
+    const visible = lockedWorkspaceCwd
+      ? sendWorkspaces.filter((entry) => entry.cwd === lockedWorkspaceCwd)
+      : sendWorkspaces;
+    const workspaces = disambiguateWorkspaceLabels(
+      visible.map((entry) => ({
+        cwd: entry.cwd,
+        label: workspaceLabel(entry),
+      })),
+    ).map((entry, index) => {
+      const workspace = visible[index]!;
+      const name = workspaceLabel(workspace);
+      return {
+        cwd: entry.cwd,
+        label: entry.label,
+        detail: entry.cwd,
+        value:
+          !/["']/.test(name) &&
+          resolveSendWorkspace(sendWorkspaces, name) === entry.cwd
+            ? name
+            : workspace.id,
+      };
+    });
+    const callerSessionId = connection.sessionId;
+    return createSendArgumentCompleter({
+      workspaces,
+      currentWorkspaceCwd: callerCwd,
+      resolveWorkspace: (value) => resolveSendWorkspace(sendWorkspaces, value),
+      sessionsFor: (cwd) =>
+        cwd === sendCompletionCwd
+          ? sendCompletionSessions
+              ?.filter((session) => session.sessionId !== callerSessionId)
+              .map((session) => ({
+                value: session.sessionId,
+                label:
+                  session.displayName?.trim() || session.sessionId.slice(0, 8),
+                detail: session.sessionId.slice(0, 8),
+              }))
+          : undefined,
+      optionDetail: (option) =>
+        t(
+          option === '--workspace'
+            ? 'send.option.workspace'
+            : 'send.option.sessionId',
+        ),
+    });
+  }, [
+    connection.sessionId,
+    connection.workspaceCwd,
+    lockedWorkspaceCwd,
+    sendCommandAvailable,
+    sendCompletionCwd,
+    sendCompletionSessions,
+    sendWorkspaces,
+    t,
+  ]);
+  const trackSendCompletionTarget = useCallback(
+    (text: string) => {
+      let next: string | undefined;
+      if (sendCommandAvailable && /^\/send\s/.test(text)) {
+        const named = getSendWorkspace(text.slice('/send'.length));
+        const cwd = named
+          ? resolveSendWorkspace(sendWorkspaces, named)
+          : connection.workspaceCwd;
+        // Only a workspace it knows; a half-typed name lists nothing.
+        next =
+          (!lockedWorkspaceCwd || cwd === lockedWorkspaceCwd) &&
+          (cwd === connection.workspaceCwd ||
+            sendWorkspaces.some((entry) => entry.cwd === cwd))
+            ? (cwd ?? undefined)
+            : undefined;
+      }
+      setSendCompletionCwd((current) => (current === next ? current : next));
+    },
+    [
+      connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      sendCommandAvailable,
+      sendWorkspaces,
+    ],
+  );
+  const sendsInFlight = useRef(new Set<string>());
+  const runSendCommand = useCallback(
+    async (
+      command: SendCommand,
+      commitAccepted?: ComposerSubmitCommit,
+      isCurrentDraft?: ComposerSubmitMetadata['isCurrentDraft'],
+    ) => {
+      const callerSessionId = connection.sessionId;
+      const callerCwd = connection.workspaceCwd;
+      if (!callerSessionId || !callerCwd) return;
+      const workspaceCwd =
+        command.workspace === undefined
+          ? callerCwd
+          : resolveSendWorkspace(sendWorkspaces, command.workspace);
+      if (lockedWorkspaceCwd && workspaceCwd !== lockedWorkspaceCwd) {
+        pushToast('error', t('send.workspaceLocked'));
+        return;
+      }
+      const owner = sessionOwnerGuard.capture();
+      const key = JSON.stringify([callerCwd, callerSessionId]);
+      if (sendsInFlight.current.has(key)) return;
+      sendsInFlight.current.add(key);
+      try {
+        if (onSubmitBefore) {
+          await onSubmitBefore({
+            sessionId: callerSessionId,
+            prompt: command.message,
+          });
+          const currentLock = lockedWorkspaceCwdRef.current;
+          if (
+            !appMountedRef.current ||
+            !owner.isCurrent() ||
+            sessionWriteBlockedRef.current ||
+            isCurrentDraft?.() === false ||
+            (currentLock && workspaceCwd !== currentLock)
+          )
+            return;
+        }
+        const result = await workspace.client.sendToSubSession(
+          callerSessionId,
+          {
+            prompt: command.message,
+            ...(workspaceCwd !== callerCwd ? { workspace: workspaceCwd } : {}),
+            ...(command.sessionId
+              ? { targetSessionId: command.sessionId }
+              : {}),
+          },
+          connection.clientId,
+        );
+        commitAccepted?.();
+        sessionCatalogController.sessionCreated(
+          result.workspaceCwd ?? callerCwd,
+          result.sessionId,
+        );
+        if (owner.isCurrent()) {
+          setSubSessionTasksRefresh((value) => value + 1);
+        }
+      } catch (error) {
+        if (appMountedRef.current)
+          pushToast('error', extractErrorDetail(error));
+      } finally {
+        sendsInFlight.current.delete(key);
+      }
+    },
+    [
+      connection.clientId,
+      connection.sessionId,
+      connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      onSubmitBefore,
+      pushToast,
+      sendWorkspaces,
+      sessionCatalogController,
+      sessionOwnerGuard,
+      t,
+      workspace.client,
+    ],
+  );
   const notifyControlledSplitClose = useCallback(() => {
     if (externalSplitControlled) {
       onSplitSessionIdsChangeRef.current?.([]);
@@ -12163,7 +12433,6 @@ export function App({
   useEffect(() => {
     if (!modelManagementPolicy.allowAdd) setShowAuthDialog(false);
   }, [modelManagementPolicy.allowAdd, showAuthDialog]);
-  const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
     useState(0);
@@ -17718,8 +17987,9 @@ export function App({
     (text: string) => {
       composerTextRef.current = text;
       updateNewSessionSuggestionInput(text);
+      trackSendCompletionTarget(text);
     },
-    [updateNewSessionSuggestionInput],
+    [trackSendCompletionTarget, updateNewSessionSuggestionInput],
   );
 
   const flushPendingNewSessionSuggestionSubmit = useCallback(
@@ -18974,8 +19244,11 @@ export function App({
     [messages, openTasksPanel, toolRevealStore],
   );
   const openComposerTask = useCallback(
-    (task: DaemonSessionTaskWithWorkflowStatus) => {
+    (task: ComposerChipTask) => {
       switch (task.kind) {
+        case 'session':
+          openSessionPanel(task);
+          return;
         case 'workflow':
           locateWorkflowTask(task);
           return;
@@ -19006,6 +19279,7 @@ export function App({
       handleOpenShellDetails,
       locateWorkflowTask,
       messages,
+      openSessionPanel,
       openSubagentPanelForSession,
     ],
   );
@@ -19224,7 +19498,10 @@ export function App({
       }));
       if (!trimmed && !images?.length && !files?.length) return false;
       const inputAnnotations = mapRestoredInputAnnotationsAfterTextChange(
-        original.meta?.inputAnnotations ?? [],
+        // Only reference chips follow the text; who sent it does not.
+        (original.meta?.inputAnnotations ?? []).filter(
+          (annotation) => annotation?.type === 'reference',
+        ),
         original.text,
         trimmed,
       );
@@ -20410,9 +20687,7 @@ export function App({
           }
           if (cmd === 'memory') {
             const memoryArg = text.slice(match[0].length).trim().toLowerCase();
-            if (memoryArg === 'refresh') {
-              setMemoryRefreshSignal((signal) => signal + 1);
-            } else if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
+            if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
               const addTarget = memoryArg.slice('add'.length).trim();
               setMemoryAddScope(
                 addTarget === 'user' || addTarget === 'global'
@@ -20674,6 +20949,33 @@ export function App({
           if (cmd === 'recap') {
             runVisibleRecap();
             return true;
+          }
+          if (cmd === 'send' && sendCommandAvailable) {
+            if (!requireActiveSessionForLocalCommand()) return false;
+            if (images?.length || files?.length) {
+              pushToast('error', t('send.noAttachments'));
+              return false;
+            }
+            const parsed = parseSendCommand(text.slice(match[0].length));
+            if (!parsed.ok) {
+              pushToast(
+                'error',
+                parsed.error === 'missing-message'
+                  ? t('send.missingMessage')
+                  : parsed.error === 'missing-value'
+                    ? t('send.missingValue', { option: parsed.option ?? '' })
+                    : t('send.duplicateOption', {
+                        option: parsed.option ?? '',
+                      }),
+              );
+              return false;
+            }
+            void runSendCommand(
+              parsed,
+              commitComposerAccepted,
+              metadata?.isCurrentDraft,
+            );
+            return false;
           }
           if (cmd === 'btw') {
             const rawQuestion = text.slice(match[0].length).trim();
@@ -21059,6 +21361,8 @@ export function App({
       reportError,
       runVisibleRecap,
       runVisibleBtw,
+      runSendCommand,
+      sendCommandAvailable,
       reconcileCatalogRename,
       requireActiveSessionForLocalCommand,
       selectedLanguage,
@@ -22675,6 +22979,7 @@ export function App({
         getLocalCommands(t, {
           sideTaskAvailable: sideTasksAvailable,
           subscriptionAvailable,
+          sendAvailable: sendCommandAvailable,
         }),
         [...additionalSlashCommands],
       ),
@@ -22721,6 +23026,7 @@ export function App({
     hiddenCommands,
     loadedSkills,
     pendingSessionContext,
+    sendCommandAvailable,
     sideTasksAvailable,
     t,
     useWorkspaceSkillSnapshot,
@@ -22938,6 +23244,24 @@ export function App({
       openPanel('agents');
     },
   });
+  const submitAgentChat = agentChatEntry.submit;
+  const submitComposerInput = useCallback(
+    (...args: Parameters<typeof handleEditorSubmit>) => {
+      if (
+        !collaborationAvailable ||
+        (sendCommandAvailable && /^\/send(?:\s|$)/i.test(args[0]))
+      ) {
+        return handleEditorSubmit(...args);
+      }
+      return submitAgentChat(...args);
+    },
+    [
+      collaborationAvailable,
+      handleEditorSubmit,
+      sendCommandAvailable,
+      submitAgentChat,
+    ],
+  );
   const sessionAgentTail = useMemo(
     () =>
       sessionAgentRuns.runs.length > 0 ||
@@ -23557,7 +23881,12 @@ export function App({
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
     onOpenArtifact: openArtifactPanel,
-    tabs: artifactPanelTabs,
+    tabs: lockedWorkspaceCwd
+      ? artifactPanelTabs.filter(
+          (tab) =>
+            tab.kind !== 'session' || tab.workspaceCwd === lockedWorkspaceCwd,
+        )
+      : artifactPanelTabs,
     contextUsageControls,
     activeTabId: activeArtifactPanelTabId,
     reviewChanges,
@@ -23915,7 +24244,6 @@ export function App({
               onClose={() => setShowMemoryDialog(false)}
             >
               <MemoryMessage
-                refreshSignal={memoryRefreshSignal}
                 addSignal={memoryAddSignal}
                 addScope={memoryAddScope}
                 onMessage={(text, type = 'status') => {
@@ -26071,6 +26399,19 @@ export function App({
                                     workspaceCwd: connection.workspaceCwd,
                                   });
                                 }}
+                                onOpenSession={(request) => {
+                                  // Without a workspace in the link, the
+                                  // session runs beside this one.
+                                  const workspaceCwd =
+                                    request.workspaceCwd ??
+                                    connection.workspaceCwd;
+                                  if (!workspaceCwd) return;
+                                  openSessionPanel({
+                                    sessionId: request.sessionId,
+                                    workspaceCwd,
+                                    label: request.title,
+                                  });
+                                }}
                               >
                                 {messageListWithWorkflowDetails}
                               </SubagentDetailsProvider>
@@ -26538,7 +26879,7 @@ export function App({
                         {!CustomFooter && (
                           <ComposerTaskChips
                             ref={composerTaskChipsRef}
-                            tasks={sessionTasks}
+                            tasks={composerChipTasks}
                             // Headerless embeds have no environment panel to
                             // list background agents, and keep them out of
                             // their task surfaces.
@@ -26633,12 +26974,9 @@ export function App({
                             liveVoiceSlot ?? liveVoicePageSlot
                           }
                           compactOverlays={compactComposerOverlays}
-                          onSubmit={
-                            collaborationAvailable
-                              ? agentChatEntry.submit
-                              : handleEditorSubmit
-                          }
+                          onSubmit={submitComposerInput}
                           onInputTextChange={handleComposerTextChange}
+                          slashArgumentCompleter={sendArgumentCompleter}
                           onAttachmentsChange={
                             handleComposerAttachmentsChange
                           }

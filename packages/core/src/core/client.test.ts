@@ -768,6 +768,7 @@ describe('Gemini Client (client.ts)', () => {
     const chat = {
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      peekLastHistoryEntry: vi.fn().mockReturnValue(undefined),
       findLastHistoryEntry: vi.fn().mockReturnValue(undefined),
       ...overrides,
     };
@@ -2658,6 +2659,56 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(entryAfterCall('call_auq_resume')).toBeUndefined();
       expect(hasFunctionResponse('call_auq_resume')).toBe(false);
+    });
+
+    it('keeps a restorable question last when refreshing its working directory', async () => {
+      vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
+      await resumeDanglingQuestion();
+      const before = client.getChat().peekLastHistoryEntry();
+      const call = before?.parts?.find(
+        (part) => part.functionCall,
+      )?.functionCall;
+
+      await client.addWorkingDirectoryChangedContext('/old', '/new');
+
+      const history = client.getChat().getHistoryShallow();
+      expect(
+        history.at(-1)?.parts?.find((part) => part.functionCall)?.functionCall,
+      ).toBe(call);
+      expect(entryAfterCall('call_auq_resume')).toBeUndefined();
+      expect(history.at(-3)?.parts?.[0]?.text).toContain(
+        'changed from /old to /new',
+      );
+      expect(hasFunctionResponse('call_auq_resume')).toBe(false);
+    });
+
+    it('does not move a question that was answered during the directory refresh', async () => {
+      vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
+      await resumeDanglingQuestion();
+      vi.mocked(getDirectoryContextString).mockImplementationOnce(async () => {
+        client.getChat().addHistory({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_auq_resume',
+                name: 'ask_user_question',
+                response: { answer: 'Polling' },
+              },
+            },
+          ],
+        });
+        return 'Updated directory context';
+      });
+
+      await client.addWorkingDirectoryChangedContext('/old', '/new');
+
+      expect(
+        entryAfterCall('call_auq_resume')?.parts?.[0]?.functionResponse?.id,
+      ).toBe('call_auq_resume');
+      expect(client.getChat().peekLastHistoryEntry()?.parts?.[0]?.text).toBe(
+        'Updated directory context',
+      );
     });
 
     it('repairs a restorable ask_user_question when restore preservation is suppressed', async () => {
