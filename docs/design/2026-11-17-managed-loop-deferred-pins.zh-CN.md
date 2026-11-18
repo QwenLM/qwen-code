@@ -46,6 +46,8 @@
 - scripts 元套件绿（183 测试），含 fake createdId 钉、可执行分类器收窄、可执行 minted-id 提取与被执行的分类器接线扫描器。
 - 变异见证：additive-fallback 分类器变异使非 block 方向红；deny-list 哨兵回退使新哨兵方向红；伪造 fake createdId 使其钉红；删除 Parsing 规则使库存钉红；门后 sibling fallback（第二绑定、换 call id 或手搭 tool call）使分类器接线钉红；`let` 决策在门后重赋值为内联 allow 使构造点集合红；对决策的 `??=` 改写使重赋值集合红；伪造 schema-properties 初始化式使来源集合红；caveat 上界改 N ≤ 45 使派生断言红，调低 Managed 编译器日域上界同样红；删 Java `SHELL_V3` 路由分支使路由目标集合红。含绑定名、allow 字面量与工具名的注释保持绿。各字节级还原复绿。
 - 真实打包栈 `--loop-skill` 与 `--loop-fire` 臂以重生 sidecar 绿（jar 重建）。
+- 这些 sidecar 的 Java 消费方 `ManagedLoopSkillTest` 以重生 body 绿（19 测试），sibling SDK 从被测源码安装。
+- 提到每个 fake 回调之外的 sibling——内联伪造自己的 schema 并以对外来 call id 返回整个响应——使 file-wide 伪造集合红。把 `schemaTool` 查找伪造在上一层已实测存活，随执行接缝残留留在后续。
 
 ## Round-1 评审精化
 
@@ -143,6 +145,30 @@
 - **记录：缺一个轮次。** 记录从合并的 Round-5/6 小节直接跳到 Round-8，没有 Round-7。已在上文补出，并逐条给出其实测处置。
 
 三条守卫修复的见证（各字节级还原）：向真实 fire 回调注入**两参**计算名 `fakeToolCall` 使计算名库存红（1 失败 / 87 通过）；追加一个点名已匹配 profile 的**死 Java 分支**使 core 套件保持 **33/33 绿**（first-match 将其化解，last-wins 则会红），而对调两个路由 key 仍红；被执行控制用例的无关回调现复用 helper、绑定名与工具名，file-wide 库存显示其贡献（2 definitions、2 declarations、2 gates、3 helper calls、4 answer 站点、6 工具名站点），而每个 loop 域内库存不变。此前十八种变异形态全部仍红，注释形态保持绿。
+
+## 合并后审计：提到回调外的 sibling 与 main 的继承红
+
+第二次合入 main（head `383bdc690c`）。incoming 提交未触碰本 PR 的十一个文件，且本 diff 在 `packages/managed-agent-server`、`packages/sdk-java`、`packages/web-shell` 与 `packages/web-templates` 上与 main 逐字节相同。main 也未触碰 `packages/core/src/managed-runtime`、`packages/core/src/skills`、`WorkspaceToolProfiles`、`CronSlots`、`cronParser` 与共享槽 fixtures，故这些守卫读取的每个 oracle 都未变；loop 注入路径上的 Java 变化是 #17703 的 `mergeInto`/`sessionSkills` 签名及其调用方，由两条真实臂覆盖。
+
+**三条继承红，各以实测归属，均非本 diff 所致。**
+
+- `ClassSizeRatchetTest` —— `AgentSessionPolicies` 在 merge base 与本 head 都是 779 行，在 main 的 `3d75b8ee60`（#17703）处是 795 行；`class-size-ratchet.properties` 的上限是 791，自 #17466 以来未被触碰。
+- `ManagedStoreDecompositionTest.facadesKeepTheExistingEntryAndTransactionPopulation` —— 唯一的多余元素是 `creationToolProfile/5::REQUIRED:DEFAULT:false`，即 #17703 新增却未更新期望清单的 facade 入口。两者均在 #16346 跟踪，该处一位维护者的诊断点名同一提交与同两条修复。两者都不是必需检查。
+- `web-templates` 导出体积预算 —— 本地构建逐字节复现 main 的 CI（`2146529 > 2146100`）。该常量最后由 #17515 设定，#17421 的繁中 locale 把 transcript 图推过线；无环境变量 override。已在 #17741 跟踪。这一条落在必需检查链上（`Build unit-test tree` → `Test (ubuntu-latest, Node 22.x)`），故推合并会把它带进来。这是刻意选择：保持分支最新并等上游修复，而不是守着陈旧 base。因此本地全量构建在该门处中止，尚未到达 `packages/cli`：core、acp-bridge、network-policy、web-shell 与 sdk-typescript 在其中重建绿，随后单独重建 cli、重建 bundle 并重跑两条臂，故此处没有任何证据依赖合并前的 cli。`web-templates` 不是 core 或 scripts 面的输入；cli 确实链接它的 dist，而其公开类型未被 main 改动（incoming 对它的唯一改动就是预算脚本本身），其生成资产来自上一次构建——它们供文档导出，不在 loop 路径上。
+
+**评审无法运行的 Java 半边现已运行。** 在重装 sibling SDK（main 的 #17688 改过它）之后，`ManagedLoopSkillTest` 在合并后的树上以重生 sidecar 跑出 19/19 绿。真实打包臂在本 head 复绿：`--loop-skill` session `eabc028a-072f-452d-a7df-f199c760ba32`、modelRounds 6；`--loop-fire` session `335c0de1-bf37-4f6f-b45a-a0e14980b571`、schedule `asch_6346026ceb71bcc77c18db7723bd73f5`、occurrenceKey `schedule:2026-11-18T15:21:00Z`、`fireTrigger=scheduled`、`fireOutcome=fired`、`fireState=completed`、modelRounds 5。
+
+**一个新的对抗形态，先实测再在此关闭。** 第一个假设——sibling 提到模块级函数但仍答 loop call id——被实测推翻：域由 loop call id 派生，故这样的答案会把回调外的位置拉进域并使回调计数红，而把它作为 `toolCalls` 元素调用也会被记为手搭。真正存活的变体答**外来** call id 并返回**整个响应**，于是 loop 回调里根本没有 `toolCalls` 数组：它伪造自己的 schema、经 helper 推导 allow，而每个 loop 域内库存都保持干净。这是 round-8 域限定引入的——它所替换的 file-wide helper 调用与来源库存本会抓住它，同一探针在 hoisted 答案点名 loop call id 时即显示这一点。
+
+以两条 file-wide **集合**断言关闭：每次 `classifierBlockAnswer` 调用的实参都是那个被查找的绑定，且每个 `blockProperties` 初始化式都是该查找。用集合而非计数，故遵循同一查找的合法新臂不新增成员，round-8 的收益得以保留。被执行控制用例现携带该 hoisted 形态并证明两个方向——伪造到达 file-wide 库存，而 loop 域内库存不变。因此它的 file-wide 计数是 5 个 answer 站点、7 个工具名站点、4 次 helper 调用（round 8 在此次新增之前记的是 4、6、3）。真实 runner 上的见证：hoisted sibling 使集合断言红并点名 `props`（1 失败 / 87 通过）；字节级还原回到 88/88。
+
+这里关闭的是**直接**伪造路线，其限度是实测而非假设：若 hoisted 函数把 `schemaTool` 查找本身伪造在上一层，实参与初始化式仍都拼写为规范形，同一探针报告钉子对它**绿**。该变体属同一拼写家族——再往上伪造一层，任何拼写库存都会被满足——故记为 #17673 执行接缝的残留，不在此再加一份库存去追。
+
+Java 侧见证是在合并后的 Java 文本上**重测**的，而非引用早先 head 的结论：对调两个路由 key 使映射红，删 `SHELL_V3` 分支使映射红，点名已匹配 profile 的死分支保持 **33/33 绿**（first-match），拼写 `key = "wakeup";` 的注释保持绿。每次还原都字节相等。
+
+一条本地假红属环境而非回归：`serve-ab-workflow` 的 `worktreeConfig` split-config 用例失败，因为本机设了系统级 `core.hooksPath`；以 `GIT_CONFIG_SYSTEM=/dev/null` 跑该文件是 24/24，且测试与 wipe 脚本都未改动。
+
+残留在种类上不变。本轮在全文件范围关闭了直接伪造路线；它并未终结拼写 evasion 家族，后者的持久修复——每臂执行整个分类器判定——与其余四项一并留在 #17673。
 
 ## 开放问题
 

@@ -3844,6 +3844,23 @@ describe('managed-agent-server e2e runner', () => {
     // in-place Object.assign / Reflect.set — each would smuggle an allow past
     // the gate while every identifier stayed intact.
     expect(scope.reassignments).toEqual([]);
+    // The direct-fabrication route is closed file-wide too. A sibling hoisted
+    // into a module-level function and returned as a whole response answers a
+    // foreign side-query call id from outside every loop callback, so no
+    // loop-scoped inventory sees it. Anywhere in the runner the helper takes
+    // the looked-up properties and every `blockProperties` binding is that
+    // lookup; a schema fabricated inline in a hoisted function reddens here
+    // whatever its binding is named. Sets, not counts: a legitimate new arm
+    // following the same lookup adds no member. Fabricating the `schemaTool`
+    // lookup one level up still spells both canonically and is measured to
+    // survive — the same unbounded spelling family, whose durable fix is the
+    // executed seam tracked in #17673, not another inventory.
+    expect([...new Set(wiring.helperCalls.map((call) => call.text))]).toEqual([
+      'blockProperties',
+    ]);
+    expect([
+      ...new Set(wiring.definitions.map((definition) => definition.text)),
+    ]).toEqual(['schemaTool?.function?.parameters?.properties']);
     // The create -> list lifecycle claim: cron_list must echo the created
     // prompt; a mere tool result must not pass.
     expect(source).toMatch(/includes\('\/loop check the deploy'\)/);
@@ -3962,7 +3979,19 @@ describe('managed-agent-server e2e runner', () => {
       "return { toolCalls: [fakeToolCall(['respond', 'in', 'schema'].join('_'), blockAnswer)] };",
       "return { toolCalls: [{ id: 'hb', type: 'function', function: { name: ['respond', 'in', 'schema'].join('_'), arguments: '{}' } }] };",
       "return { toolCalls: [fakeToolCall(`respond_in_schema`, classifierBlockAnswer({ shouldBlock: { type: 'boolean' } }), 'loop-fire-sibling')] };",
+      'if (body.sideQuery === true) return sideQueryResponse();',
     ]);
+    // A sibling hoisted out of every callback: it fabricates its own schema,
+    // derives the allow through the helper and returns a WHOLE response under
+    // a foreign call id, so the loop callback holds no toolCalls array and no
+    // loop-scoped inventory sees any of it.
+    const hoistedResponse = [
+      'function sideQueryResponse() {',
+      "  const props = { shouldBlock: { type: 'boolean' } };",
+      '  const answer = classifierBlockAnswer(props);',
+      "  return { toolCalls: [fakeToolCall('respond_in_schema', answer, 'title')] };",
+      '}',
+    ].join('\n');
     // An unrelated arm that reuses the helper, the same binding names and the
     // same tool name: none of it may reach a loop-scoped inventory.
     const unrelatedFake = fakeCallback([
@@ -3974,7 +4003,9 @@ describe('managed-agent-server e2e runner', () => {
       '}',
       "return { toolCalls: [fakeToolCall('respond_in_schema', { title: 'x' }, 'other-arm')] };",
     ]);
-    const wiring = loopClassifierWiring([loopFake, unrelatedFake].join('\n'));
+    const wiring = loopClassifierWiring(
+      [hoistedResponse, loopFake, unrelatedFake].join('\n'),
+    );
     const scope = loopClassifierScope(wiring);
     // The comment names both bindings and spells the allow literal and the
     // tool name; none of it reaches an inventory.
@@ -4001,23 +4032,29 @@ describe('managed-agent-server e2e runner', () => {
       'blockProperties',
       "{ shouldBlock: { type: 'boolean' } }",
     ]);
-    // Four answer sites exist, but only the loop callback is in scope: the
+    // Five answer sites exist, but only the loop callback is in scope: the
     // unrelated arm reuses the helper, the binding names and the tool name,
     // and none of it may redden a loop pin.
-    expect(wiring.answers).toHaveLength(4);
+    expect(wiring.answers).toHaveLength(5);
     expect(scope.callbacks).toHaveLength(1);
     expect(scope.answers).toHaveLength(2);
     expect(wiring.definitions).toHaveLength(2);
     expect(wiring.declarations).toHaveLength(2);
     expect(wiring.gates).toHaveLength(2);
-    expect(wiring.helperCalls).toHaveLength(3);
+    expect(wiring.helperCalls).toHaveLength(4);
+    // The hoisted sibling is provably outside the loop scope — its fabricated
+    // argument reaches the file-wide inventory only, which is why the pin
+    // asserts the fabrication sets file-wide and not per callback.
+    expect(wiring.helperCalls.map((call) => call.text)).toContain('props');
+    expect(scope.helperCalls).not.toContain('props');
+    expect(scope.answers.map((site) => site.callId)).not.toContain('title');
     expect(scope.answers[0].isGatedBinding).toBe(true);
     // The template-literal sibling is detected: it is neither the gated
     // binding nor an allowed call id, and its tool name still counts.
     expect(scope.answers[1].callId).toBe('loop-fire-sibling');
     expect(scope.answers[1].isGatedBinding).toBe(false);
     expect(scope.schemaNameSites).toHaveLength(3);
-    expect(wiring.schemaNameSites).toHaveLength(6);
+    expect(wiring.schemaNameSites).toHaveLength(7);
     // A computed tool name hides the answer from every name-based inventory,
     // so it is recorded on its own and the loop pin requires none — at three
     // arguments and at two, since arity does not make the name any less hidden.
