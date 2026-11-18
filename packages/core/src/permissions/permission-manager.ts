@@ -602,7 +602,7 @@ export class PermissionManager {
 
       if (
         op.pathUnknown &&
-        !op.pathGlobOnly &&
+        (!op.pathGlobOnly || this.hasDenyRuleForTool(op.virtualTool)) &&
         DECISION_PRIORITY[opDecision] < DECISION_PRIORITY.ask
       ) {
         debugLogger.info(
@@ -630,6 +630,13 @@ export class PermissionManager {
     }
 
     return worst;
+  }
+
+  private hasDenyRuleForTool(toolName: string): boolean {
+    return [...this.sessionRules.deny, ...this.persistentRules.deny].some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
   }
 
   private hasDenyOrAskRuleForTool(toolName: string): boolean {

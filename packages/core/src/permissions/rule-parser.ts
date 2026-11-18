@@ -1068,6 +1068,129 @@ interface OperatorBoundary {
 
 type BackslashReading = 'bash' | 'escape-everywhere';
 
+type CommandParen = 'command' | 'subshell' | 'arithmetic';
+
+/** Return the closing parenthesis of a command/process substitution, or -1. */
+export function commandSubstitutionEnd(
+  command: string,
+  openParen: number,
+): number {
+  const parens: CommandParen[] = ['command'];
+  const caseDepths = [0];
+  let commandStart = true;
+  let inSingle = false;
+  let inDouble = false;
+  let inAnsiC = false;
+  let inBacktick = false;
+  let escaped = false;
+  let dollarPending = false;
+  const keywordBoundary = (end: number) =>
+    end >= command.length || /[\s;|&()]/.test(command[end]!);
+
+  for (let i = openParen + 1; i < command.length; i++) {
+    const ch = command[i]!;
+    const ansiCIntroducer: boolean = dollarPending;
+    dollarPending = false;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inBacktick) {
+      if (ch === '\\') i++;
+      else if (ch === '`') inBacktick = false;
+      continue;
+    }
+    if (ch === '\\' && (!inSingle || inAnsiC)) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inAnsiC = inSingle ? false : ansiCIntroducer;
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle) continue;
+    if (ch === '`') {
+      inBacktick = true;
+      continue;
+    }
+    if (ch === '$') dollarPending = !ansiCIntroducer;
+
+    const top = parens[parens.length - 1];
+    if (top === 'arithmetic') {
+      if (ch === ')' && command[i + 1] === ')') {
+        parens.pop();
+        caseDepths.pop();
+        commandStart = false;
+        i++;
+      }
+      continue;
+    }
+    if (commandStart && !inDouble && !/\s/.test(ch)) {
+      if (ch === '!') continue;
+      if (command.startsWith('time', i) && keywordBoundary(i + 4)) {
+        i += 3;
+        continue;
+      }
+      if (command.startsWith('case', i) && keywordBoundary(i + 4)) {
+        caseDepths[caseDepths.length - 1]++;
+        commandStart = false;
+        i += 3;
+        continue;
+      }
+      if (
+        caseDepths[caseDepths.length - 1] > 0 &&
+        command.startsWith('esac', i) &&
+        keywordBoundary(i + 4)
+      ) {
+        caseDepths[caseDepths.length - 1]--;
+        commandStart = false;
+        i += 3;
+        continue;
+      }
+      if (ch !== '$' && ch !== '\\') commandStart = false;
+    }
+    if (ch === '$' && command[i + 1] === '(') {
+      if (command[i + 2] === '(') {
+        parens.push('arithmetic');
+        caseDepths.push(0);
+        commandStart = true;
+        i += 2;
+      } else {
+        parens.push('command');
+        caseDepths.push(0);
+        commandStart = true;
+        i++;
+      }
+      continue;
+    }
+    if (ch === '(' && !inDouble) {
+      parens.push('subshell');
+      caseDepths.push(0);
+      commandStart = true;
+      continue;
+    }
+    if (ch === ')' && !inDouble) {
+      if (caseDepths[caseDepths.length - 1] > 0) {
+        commandStart = true;
+        continue;
+      }
+      parens.pop();
+      caseDepths.pop();
+      commandStart = false;
+      if (parens.length === 0) return i;
+    }
+    if ((ch === ';' || ch === '|' || ch === '&') && !inDouble) {
+      commandStart = true;
+    }
+  }
+  return -1;
+}
+
 function findOperatorBoundaries(
   command: string,
   reading: BackslashReading,
@@ -1131,6 +1254,19 @@ function findOperatorBoundaries(
       inBacktick = true;
       continue;
     }
+    if (
+      includeGroups &&
+      arithmeticDepth === 0 &&
+      ((ch === '$' && command[i + 1] === '(') ||
+        (!inDouble && (ch === '<' || ch === '>') && command[i + 1] === '('))
+    ) {
+      const end = commandSubstitutionEnd(command, i + 1);
+      if (end >= 0) {
+        lastWordParenClose = end;
+        i = end;
+        continue;
+      }
+    }
     if (inDouble) {
       continue;
     }
@@ -1142,9 +1278,17 @@ function findOperatorBoundaries(
 
     if (
       includeGroups &&
-      (parameterDepth > 0 || (ch === '{' && command[i - 1] === '$'))
+      (parameterDepth > 0 ||
+        (ch === '{' &&
+          command[i - 1] === '$' &&
+          precedingBackslashCount(command, i - 1) % 2 === 0))
     ) {
-      if (ch === '{' && command[i - 1] === '$') parameterDepth++;
+      if (
+        ch === '{' &&
+        command[i - 1] === '$' &&
+        precedingBackslashCount(command, i - 1) % 2 === 0
+      )
+        parameterDepth++;
       else if (ch === '}') parameterDepth--;
       continue;
     }

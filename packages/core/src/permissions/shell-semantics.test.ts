@@ -1691,6 +1691,9 @@ describe('prefixed directory changes', () => {
   it.each([
     'time -- cd .qwen',
     'time -p -- cd .qwen',
+    '! time -- cd .qwen',
+    '! ! time -- cd .qwen',
+    '! time -p -- cd .qwen',
     'time time cd .qwen',
     'time -p time cd .qwen',
   ])('does not certify a version-dependent time cwd: %s', (command) => {
@@ -2176,5 +2179,81 @@ describe('unquoted pathname globbing is an expansion', () => {
 
   it('leaves an ordinary redirect known', () => {
     expect(across('echo hi > log.txt')).toEqual([write('/repo/log.txt')]);
+  });
+});
+
+describe('R17 shell structure regressions', () => {
+  it.each<[string, ShellOperation]>([
+    ['echo "$(true ")"; echo hi > .qwen/settings.json)"', write(REPO_SETTINGS)],
+    ['echo $(cat "/tmp/a)")', read('/tmp/a)')],
+    [
+      'echo $(case x in x) cat /etc/shadow;; esac)',
+      {
+        ...read('/etc/shadow'),
+        cwdUnknown: true,
+        pathMayDependOnCwd: false,
+      },
+    ],
+    ['printf x 2>& 2> .qwen/settings.json', write(REPO_SETTINGS)],
+    ["echo hi '>'>& out.txt", write('/repo/out.txt')],
+    ["bash -lc 'echo hi' > .qwen/settings.json", write(REPO_SETTINGS)],
+    ['cd <(true); echo x > .qwen/settings.json', uncertainWrite(REPO_SETTINGS)],
+    ['cp -t /tmp/x <(echo hi)', write('/tmp/x/63')],
+    [
+      String.raw`( true ) \| cd /tmp ; printf '{}' > .qwen/settings.json`,
+      uncertainWrite(REPO_SETTINGS),
+    ],
+    [
+      'cd() { :; }; cd /tmp; echo x > .qwen/settings.json',
+      uncertainWrite(REPO_SETTINGS),
+    ],
+    ['!"" cd tmp; echo x > .qwen/settings.json', write(REPO_SETTINGS)],
+    [
+      String.raw`cd .qwen \|\| cd /tmp; echo x > settings.json`,
+      uncertainWrite('/repo/.qwen/settings.json'),
+    ],
+    [
+      String.raw`echo \${x; cd .qwen; printf '{}' > settings.json`,
+      write('/repo/.qwen/settings.json'),
+    ],
+    ['f() { cd .qwen; }; f; printf x > outer', uncertainWrite('/repo/outer')],
+  ])(
+    'preserves the real path or explicit uncertainty: %s',
+    (command, expected) => {
+      expect(across(command)).toEqual([expected]);
+    },
+  );
+
+  it.each([
+    'eval "HOME=/etc"; cd /tmp; cat > ~/passwd',
+    "HOME=/repo bash -c 'echo x > ~/.qwen/settings.json'",
+  ])(
+    'marks HOME changes unknown instead of using the process home: %s',
+    (command) => {
+      const writes = across(command);
+      expect(writes).toHaveLength(1);
+      expect(writes[0]!.pathUnknown).toBe(true);
+    },
+  );
+
+  it('does not leak a self-contained conditional test into cwd uncertainty', () => {
+    expect(across('[[ -f a ]] && printf x > outer')).toEqual([
+      write('/repo/outer'),
+    ]);
+  });
+
+  it('does not charge substitutions to the wrapper uncertainty depth', () => {
+    let command = 'cat /etc/passwd';
+    for (let index = 0; index < 5; index++) {
+      command = `$(${command})`;
+    }
+    expect(across(command)).toEqual([read('/etc/passwd')]);
+  });
+
+  it('fails closed on an unclosed substitution', () => {
+    expect(across('echo "$(cat /etc/passwd"')).toContainEqual({
+      virtualTool: 'edit',
+      pathUnknown: true,
+    });
   });
 });

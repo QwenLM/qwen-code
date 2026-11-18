@@ -41,7 +41,10 @@ import {
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { splitCompoundCommandSegments } from './rule-parser.js';
+import {
+  commandSubstitutionEnd,
+  splitCompoundCommandSegments,
+} from './rule-parser.js';
 
 const shellSemanticsDebugLogger = createDebugLogger('SHELL_SEMANTICS');
 
@@ -257,7 +260,7 @@ function tokenize(
         if (
           prefixQuoted &&
           (current.startsWith('~') ||
-            ['time', 'case', '-p', '--'].includes(current))
+            ['time', 'case', '-p', '--', '!'].includes(current))
         ) {
           bare = '0' + bare.slice(1);
         }
@@ -290,7 +293,8 @@ function tokenize(
   flushAnsiC();
   if (
     prefixQuoted &&
-    (current.startsWith('~') || ['time', 'case', '-p', '--'].includes(current))
+    (current.startsWith('~') ||
+      ['time', 'case', '-p', '--', '!'].includes(current))
   ) {
     bare = '0' + bare.slice(1);
   }
@@ -841,9 +845,14 @@ function extractRedirects(
       // `2`), so the whole word also stays a file operation, as it was
       // before `-` was split off.
       const separateTarget = tok === fdOp ? tokens[i + 1] : undefined;
-      const file = fdCloses.has(i)
-        ? `&${tok.slice(fdOp.length)}`
-        : fdRedirectFile(separateTarget ?? tok.slice(fdOp.length));
+      const splitTarget = separateTarget
+        ? /^(\d+)(>>?|<)$/.exec(separateTarget)
+        : undefined;
+      const file = splitTarget
+        ? fdRedirectFile(splitTarget[1]!)
+        : fdCloses.has(i)
+          ? `&${tok.slice(fdOp.length)}`
+          : fdRedirectFile(separateTarget ?? tok.slice(fdOp.length));
       if (file !== undefined) {
         pushRedirect(
           fdOp === '<&' ? 'read_file' : 'write_file',
@@ -853,7 +862,12 @@ function extractRedirects(
             : targetBare(i + 1),
         );
       }
-      if (separateTarget !== undefined) {
+      if (splitTarget) {
+        tokens[i + 1] = splitTarget[2]!;
+        if (bares !== undefined) {
+          bares[i + 1] = bares[i + 1]!.slice(splitTarget[1]!.length);
+        }
+      } else if (separateTarget !== undefined) {
         toRemove.add(i + 1);
         i++;
       }
@@ -930,13 +944,22 @@ function extractRedirects(
       const redirectBare = split > 0 ? tokBare?.slice(split) : tokBare;
       const fdOp = split > 0 ? /^(?:[12]?>&|<&)/.exec(redirectText)?.[0] : null;
       if (fdOp) {
-        const file = fdRedirectFile(redirectText.slice(fdOp.length));
+        const attachedTarget = redirectText.slice(fdOp.length);
+        const separateTarget =
+          attachedTarget === '' ? tokens[i + 1] : undefined;
+        const file = fdRedirectFile(separateTarget ?? attachedTarget);
         if (file !== undefined) {
           pushRedirect(
             fdOp === '<&' ? 'read_file' : 'write_file',
             file,
-            redirectBare?.slice(fdOp.length),
+            separateTarget === undefined
+              ? redirectBare?.slice(fdOp.length)
+              : targetBare(i + 1),
           );
+        }
+        if (separateTarget !== undefined) {
+          toRemove.add(i + 1);
+          i++;
         }
         tokens[i] = tok.slice(0, split);
         if (bares !== undefined) bares[i] = tokBare!.slice(0, split);
@@ -2662,6 +2685,7 @@ function resolveCdTargetCwd(
   cwdUnknown: boolean,
   homeUnknown = false,
   cdPathUnknown = false,
+  dynamicCommands: ReadonlySet<string> = new Set(),
 ): CdResolution {
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
@@ -2675,16 +2699,24 @@ function resolveCdTargetCwd(
   // extractRedirects compacts `words` and `bares` together, so the target and
   // its marking are read from the filtered arrays.
   const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
+  let timePrefixStart = 0;
+  while (words[timePrefixStart] === '!' && bares[timePrefixStart] === '1') {
+    timePrefixStart++;
+  }
   const timeOptionTerminator =
-    words[0] === 'time' &&
-    bares[0] === '1111' &&
-    ((words[1] === '--' && bares[1] === '11') ||
-      (words[1] === '-p' &&
-        bares[1] === '11' &&
-        words[2] === '--' &&
-        bares[2] === '11'));
+    words[timePrefixStart] === 'time' &&
+    bares[timePrefixStart] === '1111' &&
+    ((words[timePrefixStart + 1] === '--' &&
+      bares[timePrefixStart + 1] === '11') ||
+      (words[timePrefixStart + 1] === '-p' &&
+        bares[timePrefixStart + 1] === '11' &&
+        words[timePrefixStart + 2] === '--' &&
+        bares[timePrefixStart + 2] === '11'));
   const prefixes = stripCommandPrefixes(words, bares);
 
+  if (words[0] && dynamicCommands.has(words[0])) {
+    return { kind: 'dynamic', redirects };
+  }
   if (['eval', 'source', '.'].includes(words[0]!)) {
     return { kind: 'dynamic', redirects };
   }
@@ -2722,7 +2754,12 @@ function resolveCdTargetCwd(
 
   const target = words[targetIndex] ?? process.env['HOME'];
   const targetBare = bares[targetIndex];
-  if (!target || target === '-' || isDynamicShellPath(target)) {
+  if (
+    !target ||
+    target === '-' ||
+    target.includes(PROCESS_SUBSTITUTION_PLACEHOLDER) ||
+    isDynamicShellPath(target)
+  ) {
     return { kind: 'dynamic', redirects };
   }
   const homeTarget =
@@ -2933,80 +2970,6 @@ function getHeredocDelimiters(line: string): string[] {
   return delimiters;
 }
 
-type CommandParen = 'command' | 'subshell' | 'arithmetic';
-
-function commandSubstitutionEnd(command: string, openParen: number): number {
-  const parens: CommandParen[] = ['command'];
-  let inSingle = false;
-  let inDouble = false;
-  let inAnsiC = false;
-  let inBacktick = false;
-  let escaped = false;
-  let dollarPending = false;
-
-  for (let i = openParen + 1; i < command.length; i++) {
-    const ch = command[i]!;
-    const ansiCIntroducer: boolean = dollarPending;
-    dollarPending = false;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (inBacktick) {
-      if (ch === '\\') i++;
-      else if (ch === '`') inBacktick = false;
-      continue;
-    }
-    if (ch === '\\' && (!inSingle || inAnsiC)) {
-      escaped = true;
-      continue;
-    }
-    if (ch === "'" && !inDouble) {
-      inAnsiC = inSingle ? false : ansiCIntroducer;
-      inSingle = !inSingle;
-      continue;
-    }
-    if (ch === '"' && !inSingle) {
-      inDouble = !inDouble;
-      continue;
-    }
-    if (inSingle) continue;
-    if (ch === '`') {
-      inBacktick = true;
-      continue;
-    }
-    if (ch === '$') dollarPending = !ansiCIntroducer;
-
-    const top = parens[parens.length - 1];
-    if (top === 'arithmetic') {
-      if (ch === ')' && command[i + 1] === ')') {
-        parens.pop();
-        i++;
-      }
-      continue;
-    }
-    if (ch === '$' && command[i + 1] === '(') {
-      if (command[i + 2] === '(') {
-        parens.push('arithmetic');
-        i += 2;
-      } else {
-        parens.push('command');
-        i++;
-      }
-      continue;
-    }
-    if (ch === '(' && !inDouble) {
-      parens.push('subshell');
-      continue;
-    }
-    if (ch === ')' && (top === 'command' || !inDouble)) {
-      parens.pop();
-      if (parens.length === 0) return i;
-    }
-  }
-  return -1;
-}
-
 function backtickEnd(command: string, start: number): number {
   for (let i = start + 1; i < command.length; i++) {
     if (command[i] === '\\') i++;
@@ -3015,8 +2978,12 @@ function backtickEnd(command: string, start: number): number {
   return -1;
 }
 
-function commandSubstitutionPayloads(command: string): string[] {
+function commandSubstitutionPayloads(command: string): {
+  payloads: string[];
+  unresolved: boolean;
+} {
   const payloads: string[] = [];
+  let unresolved = false;
   let inSingle = false;
   let inDouble = false;
   let inAnsiC = false;
@@ -3052,6 +3019,7 @@ function commandSubstitutionPayloads(command: string): string[] {
         i = end;
         continue;
       }
+      unresolved = true;
     }
     if (!inDouble && (ch === '<' || ch === '>') && command[i + 1] === '(') {
       const end = commandSubstitutionEnd(command, i + 1);
@@ -3060,6 +3028,7 @@ function commandSubstitutionPayloads(command: string): string[] {
         i = end;
         continue;
       }
+      unresolved = true;
     }
     if (ch === '`') {
       const end = backtickEnd(command, i);
@@ -3068,13 +3037,14 @@ function commandSubstitutionPayloads(command: string): string[] {
         i = end;
         continue;
       }
+      unresolved = true;
     }
     if (ch === '$') dollarPending = !ansiCIntroducer;
   }
-  return payloads;
+  return { payloads, unresolved };
 }
 
-const PROCESS_SUBSTITUTION_PLACEHOLDER = '/dev/fd/qwen-process-substitution';
+const PROCESS_SUBSTITUTION_PLACEHOLDER = '/dev/fd/63';
 
 function maskProcessSubstitutions(command: string): string {
   let result = '';
@@ -3167,6 +3137,26 @@ function hasComplexParameterExpansion(command: string): boolean {
   return false;
 }
 
+function hasUnquotedEscapedPipe(command: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  for (const ch of command) {
+    if (escaped) {
+      if (ch === '|' && !inSingle && !inDouble) return true;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    if (ch === '"' && !inSingle) inDouble = !inDouble;
+  }
+  return false;
+}
+
 function unmodeledShellSegments(
   segments: ReadonlyArray<{ command: string; terminator: string }>,
 ): ReadonlySet<number> {
@@ -3184,9 +3174,19 @@ function unmodeledShellSegments(
   const blocks: string[] = [];
   for (let i = 0; i < segments.length; i++) {
     const command = segments[i]!.command;
+    if (
+      hasUnquotedEscapedPipe(command) ||
+      (command.endsWith('\\') &&
+        ['|', '||', '&&', '&', ';'].includes(segments[i]!.terminator))
+    ) {
+      marked.add(i);
+    }
     const { first } = structuralPrefix(command);
     const opener = first ? openers[first] : undefined;
     if (opener) {
+      if (first === '[[' && /\]\]$/.test(command.trim())) {
+        continue;
+      }
       marked.add(i);
       blocks.push(opener);
       continue;
@@ -3214,6 +3214,7 @@ function walkCompoundCommand(
   initialCwdUnknown: boolean,
   initialHomeUnknown = false,
   initialCdPathUnknown = false,
+  wrapperDepth = 0,
 ): ShellOperation[] {
   const subCommands = splitCompoundCommandSegments(
     stripHeredocBodies(command),
@@ -3229,6 +3230,7 @@ function walkCompoundCommand(
   };
   const unmodeledSegments = unmodeledShellSegments(subCommands);
   const groupEnds = new Map<number, number>();
+  const definedFunctions = new Set<string>();
   const groups: Array<{ index: number; caseDepth: number }> = [];
   let caseDepth = 0;
   for (let i = 0; i < subCommands.length; i++) {
@@ -3273,14 +3275,18 @@ function walkCompoundCommand(
       const unwrapped = stripShellWrapper(sub, expansions);
       const nestedPayloadCounts = new Map<string, number>();
       if (depth < MAX_SHELL_SUBSTITUTION_DEPTH && unwrapped !== sub) {
-        for (const payload of commandSubstitutionPayloads(unwrapped)) {
+        for (const payload of commandSubstitutionPayloads(unwrapped).payloads) {
           nestedPayloadCounts.set(
             payload,
             (nestedPayloadCounts.get(payload) ?? 0) + 1,
           );
         }
       }
-      for (const payload of commandSubstitutionPayloads(sub)) {
+      const { payloads, unresolved } = commandSubstitutionPayloads(sub);
+      if (unresolved) {
+        ops.push({ virtualTool: 'edit', pathUnknown: true });
+      }
+      for (const payload of payloads) {
         const nestedCount = nestedPayloadCounts.get(payload) ?? 0;
         if (nestedCount > 0) {
           nestedPayloadCounts.set(payload, nestedCount - 1);
@@ -3296,6 +3302,7 @@ function walkCompoundCommand(
               scope.unknown,
               scope.homeUnknown,
               scope.cdPathUnknown,
+              wrapperDepth,
             ),
           );
         } else {
@@ -3304,11 +3311,27 @@ function walkCompoundCommand(
             ...(scope.unknown ? markCwdUnknownOps(payloadOps) : payloadOps),
           );
         }
-        if (depth >= MAX_SHELL_UNWRAP_DEPTH) {
+        if (
+          wrapperDepth >= MAX_SHELL_UNWRAP_DEPTH ||
+          depth >= MAX_SHELL_SUBSTITUTION_DEPTH
+        ) {
           for (let i = before; i < ops.length; i++) {
             if (ops[i]!.filePath) ops[i] = { ...ops[i]!, pathUnknown: true };
           }
         }
+      }
+
+      const commandMarks: string[] = [];
+      const commandWords = tokenize(
+        maskProcessSubstitutions(sub),
+        undefined,
+        undefined,
+        commandMarks,
+      );
+      const commandPrefixes = stripCommandPrefixes(commandWords, commandMarks);
+      if (['eval', 'source', '.'].includes(commandWords[0]!)) {
+        scope.homeUnknown = true;
+        scope.cdPathUnknown = true;
       }
 
       const cdTarget = resolveCdTargetCwd(
@@ -3317,6 +3340,7 @@ function walkCompoundCommand(
         scope.unknown,
         scope.homeUnknown,
         scope.cdPathUnknown,
+        definedFunctions,
       );
       if (cdTarget.kind !== 'not-cd') {
         const redirects = toRedirectOperations(cdTarget.redirects);
@@ -3382,19 +3406,28 @@ function walkCompoundCommand(
               scope.cwd,
               depth + 1,
               scope.unknown,
-              scope.homeUnknown,
-              scope.cdPathUnknown,
+              scope.homeUnknown ||
+                commandPrefixes.some(
+                  (prefix) => envAssignmentName(prefix) === 'HOME',
+                ),
+              scope.cdPathUnknown ||
+                commandPrefixes.some(
+                  (prefix) => envAssignmentName(prefix) === 'CDPATH',
+                ),
+              wrapperDepth + 1,
             ),
           );
         } finally {
           wrapperExpansions = outer;
         }
-        if (depth >= MAX_SHELL_UNWRAP_DEPTH) {
+        if (
+          wrapperDepth >= MAX_SHELL_UNWRAP_DEPTH ||
+          depth >= MAX_SHELL_SUBSTITUTION_DEPTH
+        ) {
           for (let i = before; i < ops.length; i++) {
             if (ops[i]!.filePath) ops[i] = { ...ops[i]!, pathUnknown: true };
           }
         }
-        return;
       }
       if (unwrapped !== sub) {
         shellSemanticsDebugLogger.warn(
@@ -3477,13 +3510,29 @@ function walkCompoundCommand(
         listScope.unknown = true;
         listScope.stickyUnknown = true;
       }
-      const current = isolated || unmodeled ? { ...listScope } : listScope;
-      if (functionDefinition) current.unknown = true;
+      const isolateUnmodeled =
+        unmodeled && !hasUnquotedEscapedPipe(segment.command);
+      const current =
+        isolated || isolateUnmodeled ? { ...listScope } : listScope;
+      if (functionDefinition) {
+        const name =
+          headerWords[0] === 'function' ? headerWords[1] : headerWords[0];
+        if (name) definedFunctions.add(name);
+        current.unknown = true;
+      }
       visitSimple(segment.command, current);
       const close = groupEnds.get(i);
       if (close !== undefined) {
         // Group redirects open before its body changes directory.
-        if (last > close) visitSimple(subCommands[last]!.command, current);
+        if (last > close) {
+          if (unmodeledSegments.has(last)) {
+            current.unknown = true;
+            current.stickyUnknown = true;
+            listScope.unknown = true;
+            listScope.stickyUnknown = true;
+          }
+          visitSimple(subCommands[last]!.command, current);
+        }
         visit(i + 1, close + 1, current, level + 1);
       }
       // Some shells (and bash with lastpipe) run the final pipeline element

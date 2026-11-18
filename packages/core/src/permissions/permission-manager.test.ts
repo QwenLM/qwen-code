@@ -4001,6 +4001,16 @@ describe('PermissionManager — compound shell write attribution', () => {
     );
   });
 
+  it('does not waive a deny-protected brace read as an ordinary glob', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ReadFileTool(*)'],
+      permissionsDeny: ['ReadFileTool(.qwen/settings.json)'],
+    });
+    expect(
+      await pm.evaluate(sh('cat .qwen/setting{s..s}.json', '/repo')),
+    ).not.toBe('allow');
+  });
+
   it('does not make path uncertainty relevant without permission rules', () => {
     const pm = repoPm({});
     expect(pm.hasRelevantRules(sh('cat ./src/*', '/repo'))).toBe(false);
