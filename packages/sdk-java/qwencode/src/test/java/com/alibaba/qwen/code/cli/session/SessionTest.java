@@ -540,6 +540,15 @@ class SessionTest {
     }
 
     @Test
+    void completeCallbacksKeepBlockIdWhenEnvelopeUuidIsMissing() throws Exception {
+        assertAssistantContentCallbackUuids(false,
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\","
+                        + "\"text\":\"alpha\",\"messageId\":\"frame-a\"}]}}",
+                "{\"type\":\"assistant\",\"uuid\":\"frame-b\",\"message\":{\"content\":[{\"type\":\"text\","
+                        + "\"text\":\"beta\",\"messageId\":\"other-id\"}]}}");
+    }
+
+    @Test
     void completeAssistantContentCallbacksPreserveEnvelopeUuid() throws Exception {
         assertAssistantContentCallbackUuids(false,
                 "{\"type\":\"assistant\",\"uuid\":\"frame-a\",\"message\":{\"id\":\"message-a\","
