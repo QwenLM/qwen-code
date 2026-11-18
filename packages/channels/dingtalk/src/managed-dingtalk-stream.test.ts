@@ -354,7 +354,7 @@ describe('managed DingTalk stream reconnect lifecycle (R4-2 / R4-3)', () => {
 });
 
 describe('managed DingTalk stream SDK wiring pins (#17173 R12)', () => {
-  it('passes clientId, clientSecret and keepAlive to the SDK constructor', () => {
+  it('passes clientId, clientSecret and keepAlive, and turns SDK autoReconnect off', () => {
     const { createStreamClient } = createManagedDingtalkDeps();
     createStreamClient(SETTINGS, () => true);
     expect(mockState.constructorOptions).toEqual({
@@ -362,6 +362,13 @@ describe('managed DingTalk stream SDK wiring pins (#17173 R12)', () => {
       clientSecret: 'secret',
       keepAlive: true,
     });
+    // Reconnect is owned by the wrapper; the SDK's own close-triggered
+    // reconnect would run a second chain alongside it (#17173 R11). The
+    // published config type omits the field, so it is set through internals.
+    expect(
+      (mockState.instance as unknown as { config: { autoReconnect: boolean } })
+        .config.autoReconnect,
+    ).toBe(false);
   });
 
   it('suppresses the SDK getEndpoint credential log during connect', async () => {
