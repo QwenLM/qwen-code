@@ -2,6 +2,10 @@
 
 This guide covers setting up a Qwen Code channel on DingTalk (钉钉).
 
+To send notifications or scheduled results to a custom group robot without an
+application bot, use [DingTalk Webhook Sending](./dingtalk-webhook). The setup
+below is for the application bot's conversational integration.
+
 ## Prerequisites
 
 - A DingTalk organization account

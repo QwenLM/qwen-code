@@ -18,6 +18,7 @@ import type {
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { retryContext } from '../utils/retryContext.js';
 
 /**
  * Qwen Content Generator that uses Qwen OAuth tokens with automatic refresh
@@ -137,7 +138,7 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
     try {
       return await attemptOperation();
     } catch (error) {
-      if (this.isAuthError(error)) {
+      if (!retryContext.getStore()?.singleAttempt && this.isAuthError(error)) {
         // Use SharedTokenManager to properly refresh and persist the token
         // This ensures the refreshed token is saved to oauth_creds.json
         await this.sharedManager.getValidCredentials(this.qwenClient, true);

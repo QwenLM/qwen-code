@@ -2,7 +2,9 @@ package com.alibaba.qwen.code.managedagent.catalog;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellSkill;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ExtensionPackageRepository;
 import com.alibaba.qwen.code.managedagent.repository.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
@@ -95,6 +97,61 @@ class ManagedSessionResourcesServiceTest {
     }
 
     @Test
+    void firstPreparingBundleKeepsTheInitialSkillSelectionVisible() throws Exception {
+        when(session.tenantId()).thenReturn("tenant");
+        when(session.sessionId()).thenReturn("session");
+        latest(config(1, 1, "preparing", null, null, resource("managed-extension-config-bundle", bundle(0))));
+        assertThat(service.installedSkills(session)).isEmpty();
+    }
+
+    @Test
+    void activeBundleCommandsAreNotSessionSkills() throws Exception {
+        when(session.tenantId()).thenReturn("tenant");
+        when(session.sessionId()).thenReturn("session");
+        var data = JSON.createObjectNode();
+        data.putArray("skills").addObject().put("name", "package-skill").put("description", "Package")
+                .put("user_invocable", true);
+        data.putArray("commands").addObject().put("name", "build").put("description", "Command")
+                .put("modelInvocable", true);
+        var bundle = bundle(1);
+        var member = bundle.withArray("packages").addObject();
+        member.putObject("pin").put("extensionId", "package");
+        member.set("contributionsRef", contributions(data));
+        latest(config(1, 1, "active", null, resource("managed-extension-config-bundle", bundle), null));
+        assertThat(service.installedSkills(session)).hasValue(List.of(new WebShellSkill("package-skill", "Package")));
+        var packages = mock(ExtensionPackageRepository.class);
+        var catalog = new ManagedSkillCatalogService(sessions, skills, service, packages, JSON);
+        assertThat(catalog.get("tenant", "actor", "session").skills())
+                .containsExactly(new WebShellSkill("package-skill", "Package"));
+    }
+
+    @Test
+    void activeBundlesReplaceInitialPinsInTheSlashCatalogEvenWhenEmpty() throws Exception {
+        when(session.tenantId()).thenReturn("tenant");
+        when(session.sessionId()).thenReturn("session");
+        var packages = mock(ExtensionPackageRepository.class);
+        var catalog = new ManagedSkillCatalogService(sessions, skills, service, packages, JSON);
+        var data = JSON.createObjectNode();
+        var contents = data.putArray("skills");
+        contents.addObject().put("name", "suite:review").put("description", "New review").put("user_invocable", true);
+        contents.addObject().put("name", "suite:private").put("description", "Internal").put("user_invocable", false);
+        data.putArray("commands");
+        var bundle = bundle(1);
+        var member = bundle.withArray("packages").addObject();
+        member.putObject("pin").put("extensionId", "suite");
+        member.set("contributionsRef", contributions(data));
+        var active = resource("managed-extension-config-bundle", bundle);
+        var first = config(1, 1, "active", null, active, null);
+        latest(first);
+        assertThat(catalog.get("tenant", "actor", "session").skills()).containsExactly(new WebShellSkill("suite:review", "New review"));
+
+        latest(config(2, 2, "active", resource("managed-config_install", first), resource("managed-extension-config-bundle", bundle(2)), active));
+        assertThat(catalog.get("tenant", "actor", "session").skills()).isEmpty();
+        verify(skills, never()).initialSelection(any(), any());
+        verifyNoInteractions(packages);
+    }
+
+    @Test
     void usesTheLastActiveBundleInsteadOfANewerFailedOperationsPreviousBundle() throws Exception {
         ObjectNode active = bundle(1);
         active.withArray("independentMcpSelections").add(pin("active").put("state", "disabled"));
@@ -109,6 +166,23 @@ class ManagedSessionResourcesServiceTest {
         assertThat(result.at("/servers/0/serverId").asText()).isEqualTo("active");
         assertThat(result.at("/servers/0/selectionState").asText()).isEqualTo("disabled");
         assertThat(result.toString()).doesNotContain("wrong");
+    }
+
+    @Test
+    void boundsRetainedTombstonesInIndependentSelections() throws Exception {
+        ObjectNode active = bundle(1);
+        addSelections(active, 32, 64);
+        ObjectNode activeRef = resource("managed-extension-config-bundle", active);
+        latest(config(1, 1, "active", null, activeRef, null));
+        assertThat(get().path("configCoverage").asText()).isEqualTo("complete");
+
+        ObjectNode overfilled = bundle(1);
+        addSelections(overfilled, 32, 65);
+        ObjectNode overfilledRef = resource("managed-extension-config-bundle", overfilled);
+        latest(config(1, 1, "active", null, overfilledRef, null));
+        JsonNode rejected = get();
+        assertThat(rejected.path("configCoverage").asText()).isEqualTo("partial");
+        assertThat(rejected.path("coverageReasons").toString()).contains("invalid_resource");
     }
 
     @Test
@@ -160,6 +234,28 @@ class ManagedSessionResourcesServiceTest {
         assertThat(get().at("/servers/0/discovery/tools").asText()).isEqualTo("stale");
         selection(pin("server").put("state", "removed"));
         assertThat(get().at("/servers/0/selectionState").asText()).isEqualTo("removed");
+    }
+
+    @Test
+    void readsThirtyTwoLiveSelectionsPlusRetainedTombstonesAndRejectsAnOverfilledLiveCount() throws Exception {
+        ObjectNode settings = JSON.createObjectNode().put("kind", "hosted-mcp-settings");
+        ArrayNode servers = settings.putArray("servers");
+        for (int index = 0; index < 32; index++) {
+            servers.add(pin("live-" + index).put("state", "disabled"));
+        }
+        servers.add(pin("tombstone").put("state", "removed"));
+        latest(settings);
+        var accepted = get();
+        assertThat(accepted.path("availability").asText()).isEqualTo("available");
+        assertThat(accepted.path("servers")).hasSize(33);
+
+        servers.add(pin("live-32").put("state", "disabled"));
+        latest(settings);
+        var rejected = get();
+        assertThat(rejected.path("availability").asText()).isEqualTo("partial");
+        assertThat(rejected.path("configCoverage").asText()).isEqualTo("partial");
+        assertThat(rejected.path("coverageReasons").toString()).contains("invalid_resource");
+        assertThat(rejected.path("servers")).isEmpty();
     }
 
     @Test
@@ -288,6 +384,13 @@ class ManagedSessionResourcesServiceTest {
         bundle.putArray("mcpServers");
         bundle.putArray("independentMcpSelections");
         return bundle;
+    }
+
+    private static void addSelections(ObjectNode bundle, int live, int removed) {
+        for (int index = 0; index < live + removed; index++) {
+            bundle.withArray("independentMcpSelections").add(pin((index < live ? "live-" : "removed-") + index)
+                    .put("state", index == 0 ? "enabled" : index < live ? "disabled" : "removed"));
+        }
     }
 
     private ObjectNode config(int recordRevision, int configRevision, String phase, JsonNode previous, JsonNode bundle, JsonNode baseline) throws Exception {

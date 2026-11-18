@@ -745,6 +745,65 @@ describe('BridgeClient — managed external tool guard', () => {
   });
 });
 
+describe('BridgeClient — Mod log lines', () => {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+  const client = (owns: boolean) => {
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId: 'session-1', events: { publish } };
+    return {
+      publish,
+      client: new BridgeClient(
+        ((id: string) => (id === 'session-1' ? entry : undefined)) as never,
+        (() => undefined) as never,
+        { request: noPermissionFlow } as never,
+        0,
+        Infinity,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => owns,
+      ),
+    };
+  };
+
+  it("forwards a Mod's log line to the session's stream", async () => {
+    const { client: bridge, publish } = client(true);
+    await bridge.extNotification('qwen/notify/session/mod-log', {
+      sessionId: 'session-1',
+      plugin: 'zh-display',
+      text: 'translated 3 blocks',
+    });
+    expect(publish).toHaveBeenCalledOnce();
+    expect(publish.mock.calls[0][0]).toMatchObject({
+      type: 'mod_log',
+      data: {
+        sessionId: 'session-1',
+        plugin: 'zh-display',
+        text: 'translated 3 blocks',
+      },
+    });
+  });
+
+  it('drops a malformed line and one for a session it does not own', async () => {
+    const owned = client(true);
+    await owned.client.extNotification('qwen/notify/session/mod-log', {
+      sessionId: 'session-1',
+      plugin: 'zh-display',
+    });
+    expect(owned.publish).not.toHaveBeenCalled();
+    const foreign = client(false);
+    await foreign.client.extNotification('qwen/notify/session/mod-log', {
+      sessionId: 'session-1',
+      plugin: 'zh-display',
+      text: 'hi',
+    });
+    expect(foreign.publish).not.toHaveBeenCalled();
+  });
+});
+
 describe('BridgeClient — recording degradation ownership', () => {
   it('keeps session-level recording degradation prompt-neutral', async () => {
     const sessionId = 'session-with-active-prompt';
@@ -1324,7 +1383,12 @@ describe('BridgeClient — mode promotion fallback', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
+        },
         0,
         Infinity,
       );
@@ -1361,7 +1425,12 @@ describe('BridgeClient — turn progress notifications (#12020)', () => {
     new BridgeClient(
       (() => entry) as never,
       vi.fn(),
-      { request: vi.fn(), cancelForPrompt: vi.fn() },
+      {
+        request: vi.fn(),
+        cancelForPrompt: vi.fn(),
+        cancelWorkflowApproval: vi.fn(),
+        policy: 'first-responder',
+      },
       0,
       Infinity,
     );
@@ -1475,7 +1544,12 @@ describe('BridgeClient — turn progress notifications (#12020)', () => {
     const client = new BridgeClient(
       (() => undefined) as never,
       vi.fn(),
-      { request: vi.fn(), cancelForPrompt: vi.fn() },
+      {
+        request: vi.fn(),
+        cancelForPrompt: vi.fn(),
+        cancelWorkflowApproval: vi.fn(),
+        policy: 'first-responder',
+      },
       0,
       Infinity,
     );
@@ -1865,6 +1939,97 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       result: 'done',
       stopReason: 'end_turn',
     });
+  });
+
+  it('forwards a target workspace and rejects an unusable one', async () => {
+    const onCreate = vi.fn(async () => ({
+      sessionId: 'sub-11',
+      workspaceCwd: '/repos/b',
+    }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const workspaceGeneration = '5103aa8c-9a6e-4ad6-9b3b-7c765cdcbee5';
+    await expect(
+      client.extMethod(METHOD, {
+        prompt: 'go',
+        completion: 'sent',
+        workspace: 'workspace-id',
+        workspaceGeneration,
+        callerSessionId: 'caller-1',
+      }),
+    ).resolves.toEqual({ sessionId: 'sub-11', workspaceCwd: '/repos/b' });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'sent',
+      workspace: 'workspace-id',
+      workspaceGeneration,
+      callerSessionId: 'caller-1',
+    });
+    for (const extra of [
+      { workspace: 'workspace-id' },
+      { workspaceGeneration },
+      { workspace: 'workspace-id', workspaceGeneration: '' },
+      { workspace: '' },
+      { workspace: 7 },
+      { workspace: 'a\u0000b' },
+      { workspace: 'x'.repeat(4097) },
+      {
+        workspace: '/repos/b',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'go',
+          completion: 'sent',
+          callerSessionId: 'caller-1',
+          ...extra,
+        }),
+      ).rejects.toThrow(/workspace/);
+    }
+    expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('forwards a follow-up session id and returns the completion task id', async () => {
+    const onCreate = vi.fn(async () => ({
+      sessionId: 'kid',
+      taskId: 'kid:prompt-1',
+    }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const res = await client.extMethod(METHOD, {
+      prompt: 'go',
+      completion: 'sent',
+      sessionId: 'kid',
+      callerSessionId: 'caller-1',
+    });
+    expect(onCreate).toHaveBeenCalledWith({
+      prompt: 'go',
+      completion: 'sent',
+      sessionId: 'kid',
+      callerSessionId: 'caller-1',
+    });
+    expect(res).toEqual({ sessionId: 'kid', taskId: 'kid:prompt-1' });
+    for (const extra of [
+      { sessionId: '' },
+      { sessionId: 'a\u0000b' },
+      { sessionId: 'kid', model: 'm1' },
+      { sessionId: 'kid', name: 'n' },
+      {
+        sessionId: 'kid',
+        sourceType: 'default',
+        sourceId: 'scheduled_task_run:task-1',
+      },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'go',
+          completion: 'sent',
+          callerSessionId: 'caller-1',
+          ...extra,
+        }),
+      ).rejects.toThrow(/sessionId/);
+    }
+    expect(onCreate).toHaveBeenCalledTimes(1);
   });
 
   it('omits result/stopReason when the handler does not return them (sent mode)', async () => {
@@ -3303,6 +3468,38 @@ describe('BridgeClient — artifact ingress', () => {
     } finally {
       now.mockRestore();
     }
+  });
+
+  it('forwards a generation reset event', async () => {
+    const sessionId = 'sess:generation-reset';
+    const onGenerationEvent = vi.fn();
+    const client = new BridgeClient(
+      (() => ({ events: { publish: vi.fn() } })) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => true,
+      undefined,
+      undefined,
+      onGenerationEvent,
+    );
+
+    await client.extNotification('qwen/notify/session/generation/event', {
+      v: 1,
+      sessionId,
+      requestId: 'btw-request',
+      event: { type: 'reset' },
+    });
+
+    expect(onGenerationEvent).toHaveBeenCalledWith(sessionId, {
+      type: 'reset',
+      requestId: 'btw-request',
+    });
   });
 
   it('allows artifact events during an in-flight restore on this channel', async () => {
@@ -5589,7 +5786,12 @@ describe('background execution ownership', () => {
       const client = new BridgeClient(
         (() => entry) as never,
         vi.fn(),
-        { request: vi.fn(), cancelForPrompt: vi.fn() },
+        {
+          request: vi.fn(),
+          cancelForPrompt: vi.fn(),
+          cancelWorkflowApproval: vi.fn(),
+          policy: 'first-responder',
+        },
         0,
         Infinity,
       );
@@ -5663,6 +5865,22 @@ describe('background execution ownership', () => {
     );
     expect(prepared.frames[0]).toMatchObject({ promptId: 'notification-1' });
     expect(prepared.frames[0].originatorClientId).toBeUndefined();
+    const deferredTool = client.prepareSessionUpdateFrames(
+      {
+        sessionId: 'session',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'old-tool',
+          status: 'completed',
+          _meta: { promptId: 'old-user', originatorClientId: 'old-client' },
+        },
+      },
+      entry as never,
+    );
+    expect(deferredTool.frames[0]).toMatchObject({
+      promptId: 'old-user',
+      originatorClientId: 'old-client',
+    });
     const completed = client.prepareSessionUpdateFrames(
       {
         sessionId: 'session',
@@ -5825,7 +6043,12 @@ describe('persisted last user prompt metadata', () => {
     const args: ConstructorParameters<typeof BridgeClient> = [
       (id) => (id === sessionId ? entry : undefined),
       () => undefined,
-      { request: vi.fn(), cancelForPrompt: vi.fn() },
+      {
+        request: vi.fn(),
+        cancelForPrompt: vi.fn(),
+        cancelWorkflowApproval: vi.fn(),
+        policy: 'first-responder',
+      },
       0,
       Infinity,
     ];

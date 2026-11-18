@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { preflightManagedExtensionPackage } from './managed-extension-preflight.js';
 import { managedExtensionEnvironment } from './managed-extension-environment.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import { isCsiFilesCapability } from './managed-csi-file-profile.js';
 import {
   compileManagedExtensionPackage,
   type ManagedPackageContributions,
@@ -72,6 +72,7 @@ import type { ManagedShellPublisherRegistry } from './managed-shell-publisher.js
 import { ManagedRuntimeLedger } from './managed-runtime-ledger.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
 import { registerManagedRuntimeToolV3Routes } from './managed-runtime-tool-v3-routes.js';
+import { registerManagedRuntimeToolV4Routes } from './managed-runtime-tool-v4-routes.js';
 import {
   MANAGED_RUNTIME_PROVIDER_ROUTE,
   ManagedRuntimeProviderProtocolError,
@@ -80,9 +81,8 @@ import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-
 import {
   WorkspaceActivations,
   WORKSPACE_ACTIVATION_ROUTE,
-  WORKSPACE_CAPABILITY_DIGEST,
   WORKSPACE_CONTEXT_CONFIG_REF,
-  RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  resolveManagedShellPublisherMode,
 } from './managed-workspace-activation.js';
 import {
   ManagedHookRuntime,
@@ -327,7 +327,7 @@ export function registerManagedContextRoutes(
   sshForegroundOnly = false,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
-  if (boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
+  if (isCsiFilesCapability(boot.capabilityDigest))
     throw new Error('Private CSI file profile requires its dedicated worker.');
   const installations = new ManagedContextInstallations(boot);
   let extensionRuntime: ManagedExtensionRuntime | undefined;
@@ -380,19 +380,20 @@ export function registerManagedContextRoutes(
     : undefined;
   const foregroundOnly = sshForegroundOnly && !extensionConfiguration;
   const activations = new WorkspaceActivations();
-  const resident =
-    boot.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
+  const publisherMode = resolveManagedShellPublisherMode({
+    capabilityDigest: boot.capabilityDigest,
+    managedExtensions: extensionConfiguration !== undefined,
+    capturePublisher: capturePublisher !== undefined,
+    remotePublishers: remotePublishers !== undefined,
+  });
+  const resident = publisherMode.resident;
   if (resident && boot.isolationClass !== 'workspace')
     throw new Error('Resident Workspace requires Workspace isolation.');
-  const requiresActivation =
-    boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST ||
-    resident ||
-    extensionConfiguration !== undefined;
+  const requiresActivation = publisherMode.requiresActivation;
   const admissionOpen = (): boolean => executor.isAdmissionOpen;
-  const remotePublisher =
-    !capturePublisher && requiresActivation && !resident
-      ? new RemoteShellResultPublisher()
-      : undefined;
+  const remotePublisher = publisherMode.remotePublisher
+    ? new RemoteShellResultPublisher()
+    : undefined;
   const publisher: ManagedShellCapturePublisher | undefined =
     capturePublisher ??
     (remotePublishers && remotePublisher
@@ -744,6 +745,29 @@ export function registerManagedContextRoutes(
         executor.isSessionConfigurationIdle(
           extensionRuntime?.runtimeSessionId(sessionId) ?? sessionId,
         ),
+      skillSource: async (sessionId) => {
+        const binding = contexts.get(sessionId);
+        const directory = binding && (await mount.resolve(binding.cwdRelative));
+        if (!binding || !directory || !admissionOpen())
+          throw new Error('skill_source_unavailable');
+        const real = await fs.realpath(directory);
+        return {
+          directory: real,
+          origin: {
+            workspaceId: boot.workspaceId,
+            workspaceGeneration: boot.workspaceGeneration,
+            cwdRelative: binding.cwdRelative,
+          },
+          admits: async (file) =>
+            admissionOpen() &&
+            (await mount.resolve(binding.cwdRelative)) === directory &&
+            executor.admitsProjectSkillPath(
+              extensionRuntime?.runtimeSessionId(sessionId) ?? sessionId,
+              file,
+              real,
+            ),
+        };
+      },
       compile: async (
         directory,
         _pin,
@@ -871,6 +895,7 @@ export function registerManagedContextRoutes(
         const receipts = await extensionProcesses.stopAll();
         if (receipts.some((entry) => entry.state !== 'stopped'))
           throw new Error('Original extension owners are not stopped.');
+        await extensionRuntime?.closeSkillSnapshots();
       },
     });
     app.post(
@@ -1074,6 +1099,7 @@ export function registerManagedContextRoutes(
 
   activations.register(app, boot, installations, executor);
   registerManagedRuntimeToolRoutes(app, boot, executor);
+  registerManagedRuntimeToolV4Routes(app, boot, executor);
   if (publisher) {
     registerManagedRuntimeToolV3Routes(app, boot, executor);
   }

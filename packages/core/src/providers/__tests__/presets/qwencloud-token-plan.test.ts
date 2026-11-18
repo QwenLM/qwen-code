@@ -54,6 +54,7 @@ describe('qwencloudTokenPlanProvider', () => {
       (qwencloudTokenPlanProvider.models ?? []).map((model) => model.id),
     ).toEqual([
       'qwen3.8-max',
+      'qwen4-max',
       'qwen3.7-plus',
       'qwen3.8-flash',
       'deepseek-v4-pro-0813',

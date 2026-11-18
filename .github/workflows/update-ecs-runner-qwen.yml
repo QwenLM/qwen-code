@@ -81,8 +81,9 @@ jobs:
         # the hz legs carry dedicated ecs-update-hz-N labels too (added to
         # each host's first runner via the labels API — no re-registration,
         # pool labels intact). The static array keeps every label visible
-        # to actionlint. hz4 has only ephemeral container runners whose
-        # image carries the CLI — nothing persistent to update there.
+        # to actionlint. hz4 and hz5 have only ephemeral container runners
+        # whose image carries the CLI — nothing persistent to update there,
+        # and no runner to hang the per-host label on.
         runner:
           - 'ecs-update-hk-1'
           - 'ecs-update-hk-2'
@@ -92,7 +93,6 @@ jobs:
           - 'ecs-update-hz-1'
           - 'ecs-update-hz-2'
           - 'ecs-update-hz-3'
-          - 'ecs-update-hz-5'
           - 'ecs-update-hz-6'
       fail-fast: false
     # No arch label: hk hosts are x64, hz hosts are arm64; the dedicated

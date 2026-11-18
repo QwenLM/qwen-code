@@ -33,6 +33,8 @@ it('provides a stable unavailable snapshot without a live provider or runtime', 
       status: 'unavailable',
       requests: { entries: new Map() },
       tools: { entries: new Map() },
+      hooks: { entries: new Map() },
+      hookPromptIds: new Map(),
       incomplete: false,
       truncated: false,
     });

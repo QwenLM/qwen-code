@@ -77,6 +77,101 @@ describe('copyFromLastAssistantMessage', () => {
     });
   });
 
+  it.each([
+    ['```', '```not-a-close'],
+    ['~~~', '~~~~ still-code'],
+    ['```', '```\u00a0'],
+  ])(
+    'keeps %s fence-looking content in the copied block',
+    async (fence, contentLine) => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const content = [
+        `${fence}text`,
+        'alpha',
+        contentLine,
+        'beta',
+        fence,
+      ].join('\n');
+
+      await copyFromLastAssistantMessage(
+        [assistant(content)],
+        'code',
+        writeText,
+      );
+
+      expect(writeText).toHaveBeenCalledExactlyOnceWith(
+        `alpha\n${contentLine}\nbeta`,
+      );
+    },
+  );
+
+  it.each(['```', '~~~'])(
+    'accepts a longer %s closing fence followed by spaces and tabs',
+    async (fence) => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const content = [`${fence}text`, 'alpha', `${fence}${fence[0]} \t`].join(
+        '\r\n',
+      );
+
+      await copyFromLastAssistantMessage(
+        [assistant(content)],
+        'code',
+        writeText,
+      );
+
+      expect(writeText).toHaveBeenCalledExactlyOnceWith('alpha');
+    },
+  );
+
+  it.each(['```', '~~~'])(
+    'keeps LaTeX inside %s code until a valid closing fence',
+    async (fence) => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      const content = [
+        `${fence}text`,
+        `${fence}not-a-close`,
+        '$$',
+        'hidden',
+        '$$',
+        '$hidden_inline$',
+        fence,
+        '$$',
+        'visible',
+        '$$',
+        '$visible_inline$',
+      ].join('\n');
+
+      await copyFromLastAssistantMessage(
+        [assistant(content)],
+        'latex 1',
+        writeText,
+      );
+      expect(writeText).toHaveBeenLastCalledWith('visible');
+      await copyFromLastAssistantMessage(
+        [assistant(content)],
+        'inline-latex 1',
+        writeText,
+      );
+      expect(writeText).toHaveBeenLastCalledWith('visible_inline');
+    },
+  );
+
+  it('does not copy an unfinished block closed only by a fence with text', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const content = '```text\nalpha\n```still-code';
+
+    const result = await copyFromLastAssistantMessage(
+      [assistant(content)],
+      'code',
+      writeText,
+    );
+
+    expect(writeText).not.toHaveBeenCalled();
+    expect(result.message).toBe(
+      'No matching code block found in the last AI output.',
+    );
+  });
+
   it('copies a numbered fenced code block with /copy code 2', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const content = [

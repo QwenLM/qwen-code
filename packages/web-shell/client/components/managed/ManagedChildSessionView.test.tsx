@@ -6,7 +6,9 @@ import { I18nProvider } from '../../i18n';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { createJavaManagedAgentProvider } from './java-managed-agent-provider';
 import {
+  diagnosticContext,
   diagnosticResources,
+  diagnosticStats,
   diagnosticTrace,
 } from './managed-diagnostics.test-fixtures';
 
@@ -45,11 +47,11 @@ describe('ManagedChildSessionView diagnostics', () => {
   });
 
   it.each(['turn', 'context'])(
-    'refreshes child resources after the %s revision changes',
+    'refreshes child context after the %s revision changes',
     async (change) => {
       state.summary.activeTurnId = 'turn-1';
       state.summary.workspace.contextRevision = 1;
-      const getResources = vi.fn().mockResolvedValue(diagnosticResources);
+      const getContextUsage = vi.fn().mockResolvedValue(diagnosticContext);
       const provider = {
         ...createJavaManagedAgentProvider({
           baseUrl: 'https://product.example',
@@ -57,7 +59,9 @@ describe('ManagedChildSessionView diagnostics', () => {
           fetch: vi.fn(),
         }),
         diagnostics: {
-          getResources,
+          getContextUsage,
+          getStatistics: vi.fn().mockResolvedValue(diagnosticStats),
+          getResources: vi.fn().mockResolvedValue(diagnosticResources),
           listAgentTrace: vi.fn().mockResolvedValue(diagnosticTrace),
         },
       };
@@ -80,11 +84,11 @@ describe('ManagedChildSessionView diagnostics', () => {
         ...document.querySelectorAll<HTMLButtonElement>('button'),
       ].find((button) => button.textContent === 'Session diagnostics')!;
       await act(async () => trigger.click());
-      expect(getResources).toHaveBeenCalledTimes(1);
+      expect(getContextUsage).toHaveBeenCalledTimes(1);
       if (change === 'turn') state.summary.activeTurnId = 'turn-2';
       else state.summary.workspace.contextRevision = 2;
       await render();
-      expect(getResources).toHaveBeenCalledTimes(2);
+      expect(getContextUsage).toHaveBeenCalledTimes(2);
     },
   );
 });

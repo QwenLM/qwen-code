@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -297,7 +298,7 @@ class HostedChannelGateSupport {
                         + " ma_resource WHERE session_scope_key = ?"
                         + " AND resource_id = ? AND tenant_id = ?"
                         + " AND session_id = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
                 projection.get("record_resource_id"), tenant, sessionId);
         assertThat(resources).hasSize(1);
         return JSON.readTree(resources.getFirst().get("body").toString());

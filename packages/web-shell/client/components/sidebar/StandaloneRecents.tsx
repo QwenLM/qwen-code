@@ -21,7 +21,10 @@ import {
   useStreamingState,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '../../constants/sessions';
+import {
+  SIDEBAR_SESSION_EXPAND_STEP,
+  SIDEBAR_SESSION_PREVIEW_LIMIT,
+} from '../../constants/sessions';
 import {
   getDaemonErrorCode,
   isSessionWriterBlockedCode,
@@ -153,7 +156,11 @@ export function StandaloneRecents({
   const [expanded, setExpanded] = useState(() =>
     readWorkspaceExpanded(expansionId),
   );
-  const [showAll, setShowAll] = useState(false);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const [visibleCount, setVisibleCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<{ cursor?: string }>();
@@ -242,7 +249,7 @@ export function StandaloneRecents({
     previousRefreshKeyRef.current = refreshKey;
     const sortChanged = previousSortRef.current !== sortBy;
     previousSortRef.current = sortBy;
-    if (sortChanged) setShowAll(false);
+    if (sortChanged) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
     if (!loadedRef.current || refreshRequested || sortChanged)
       void load(!sortChanged);
   }, [load, refreshKey, sortBy]);
@@ -265,7 +272,7 @@ export function StandaloneRecents({
   }, [loadError, loading, onStatusChange, sessions.length]);
 
   useEffect(() => {
-    if (!expanded) setShowAll(false);
+    if (!expanded) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [expanded]);
 
   const loadMore = useCallback(async () => {
@@ -280,9 +287,20 @@ export function StandaloneRecents({
         pageSize: PAGE_SIZE,
       });
       if (loadGenerationRef.current !== generation) return;
-      setSessions((current) =>
-        appendUnique(current, withoutChildren(page.sessions)),
-      );
+      const appended = withoutChildren(page.sessions);
+      setSessions((current) => appendUnique(current, appended));
+      // A fetched page must stay visible in full: reveal the already-loaded
+      // catalog plus the appended page, rather than adding the page length to
+      // a count that may still trail the catalog (e.g. the five-row preview).
+      // Skip the reveal if the group collapsed while the page was in flight —
+      // the collapse reset already returned it to the preview, and writing a
+      // reveal here would re-expand it on the next open. The data is kept.
+      if (expandedRef.current) {
+        setVisibleCount(
+          (count) =>
+            Math.max(count, sessionsRef.current.length) + appended.length,
+        );
+      }
       setCursor(page.nextCursor);
       setLoadError(undefined);
     } catch (error) {
@@ -475,12 +493,9 @@ export function StandaloneRecents({
           session.sessionId.toLowerCase().includes(query),
       )
     : sessions;
-  const sessionsLimited =
-    !query &&
-    !showAll &&
-    visibleSessions.length > SIDEBAR_SESSION_PREVIEW_LIMIT;
+  const sessionsLimited = !query && visibleSessions.length > visibleCount;
   const displayedSessions = sessionsLimited
-    ? visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT)
+    ? visibleSessions.slice(0, visibleCount)
     : visibleSessions;
 
   return (
@@ -641,12 +656,21 @@ export function StandaloneRecents({
               <button
                 type="button"
                 className={sidebarStyles.showAllSessions}
-                onClick={() => setShowAll(true)}
+                onClick={() =>
+                  setVisibleCount(
+                    (count) => count + SIDEBAR_SESSION_EXPAND_STEP,
+                  )
+                }
               >
-                {t('sidebar.showAllSessions')}
+                {t('sidebar.showMoreSessions', {
+                  count: Math.min(
+                    SIDEBAR_SESSION_EXPAND_STEP,
+                    visibleSessions.length - visibleCount,
+                  ),
+                })}
               </button>
             )}
-            {cursor && !sessionsLimited && (
+            {cursor && (
               <Button
                 type="button"
                 variant="ghost"

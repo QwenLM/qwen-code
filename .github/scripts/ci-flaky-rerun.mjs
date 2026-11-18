@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
+import { promisify, stripVTControlCharacters } from 'node:util';
 
 const execFile = promisify(execFileCallback);
 const TARGET_WORKFLOW = 'Qwen Code CI';
@@ -779,7 +779,21 @@ export class GhClient {
   }
 
   async jobLog(jobId) {
-    return this.gh(['api', `repos/${this.repo}/actions/jobs/${jobId}/logs`]);
+    const path = `repos/${this.repo}/actions/jobs/${jobId}/logs`;
+    let log;
+    try {
+      // Current gh refuses to print a response containing terminal escape
+      // sequences without this flag, and Actions job logs essentially always
+      // contain them; older gh has neither the check nor the flag, so fall
+      // back to the bare call only when stderr says `unknown flag`. Strip VT
+      // control characters either way so raw ANSI never reaches skillLog's
+      // callers. Same three-part shape as autofix-pr/ci-log.ts's jobLog.
+      log = await this.gh(['api', '--allow-escape-sequences', path]);
+    } catch (error) {
+      if (!String(error?.stderr).includes('unknown flag')) throw error;
+      log = await this.gh(['api', path]);
+    }
+    return stripVTControlCharacters(log);
   }
 
   async hasOpenIssueWithMarker(marker) {

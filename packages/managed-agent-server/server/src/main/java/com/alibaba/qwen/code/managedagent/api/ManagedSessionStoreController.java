@@ -17,9 +17,9 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedUserMessageStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedNativeJournalSnapshots;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import jakarta.validation.Valid;
@@ -46,17 +46,20 @@ import org.springframework.web.bind.annotation.RestController;
         name = "enabled", havingValue = "true")
 @RequestMapping("/internal/managed-session-store/v1/sessions/{sessionId}")
 public class ManagedSessionStoreController {
-    private final ManagedSessionStore store;
-    private final ManagedUserMessageStore userMessages;
+    private final JdbcManagedSessionStore store;
+    private final JdbcManagedUserMessageStore userMessages;
     private final ManagedNativeJournalSnapshots snapshots;
+    private final com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects resourceObjects;
     @org.springframework.beans.factory.annotation.Autowired
     private com.alibaba.qwen.code.managedagent.persistence.ManagedSessionModelConfigs modelConfigs;
 
-    public ManagedSessionStoreController(ManagedSessionStore store, ManagedUserMessageStore userMessages,
-            ManagedNativeJournalSnapshots snapshots) {
+    public ManagedSessionStoreController(JdbcManagedSessionStore store, JdbcManagedUserMessageStore userMessages,
+            ManagedNativeJournalSnapshots snapshots,
+            com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects resourceObjects) {
         this.store = store;
         this.userMessages = userMessages;
         this.snapshots = snapshots;
+        this.resourceObjects = resourceObjects;
     }
 
     public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
@@ -309,5 +312,75 @@ public class ManagedSessionStoreController {
                         Integer.toString(resource.schemaVersion()))
                 .header("X-Qwen-Resource-Digest", resource.digest())
                 .body(resource.bytes());
+    }
+
+    @PostMapping("/resources:allocate")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<Object> allocateResource(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody com.alibaba.qwen.code.managedagent.persistence
+                    .JdbcSessionResourceObjects.AllocateRequest request) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(request.workspaceId(),
+                        request.writerId(), request.writerGeneration()));
+        return ResponseEntity.ok(resourceObjects.allocate(tenant.tenantId(), sessionId, request));
+    }
+
+    @PostMapping(value = "/resources/{resourceId}:upload",
+            consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<Object> uploadResource(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String resourceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam String writerId,
+            @RequestParam long writerGeneration, @RequestBody byte[] bytes) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
+                        writerGeneration));
+        resourceObjects.upload(tenant.tenantId(), sessionId, resourceId, bytes);
+        return ResponseEntity.ok(java.util.Map.of("resourceId", resourceId));
+    }
+
+    @PostMapping(value = "/resources/{resourceId}:upload",
+            consumes = MediaType.APPLICATION_JSON_VALUE)
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<Object> uploadResourceJson(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String resourceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam String writerId,
+            @RequestParam long writerGeneration,
+            @RequestBody java.util.Map<String, String> body) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
+                        writerGeneration));
+        String encoded = body == null ? null : body.get("bytesBase64");
+        if (encoded == null || encoded.isBlank()) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(400,
+                    "invalid_request", "bytesBase64 is required.");
+        }
+        byte[] bytes;
+        try {
+            bytes = java.util.Base64.getDecoder().decode(encoded);
+        } catch (IllegalArgumentException error) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(400,
+                    "invalid_request", "bytesBase64 is not valid base64.");
+        }
+        resourceObjects.upload(tenant.tenantId(), sessionId, resourceId, bytes);
+        return ResponseEntity.ok(java.util.Map.of("resourceId", resourceId));
+    }
+
+    @PostMapping("/resources/{resourceId}:finalize")
+    @org.springframework.transaction.annotation.Transactional
+    public ResponseEntity<Object> finalizeResource(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String resourceId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam String writerId,
+            @RequestParam long writerGeneration) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(workspaceId, writerId,
+                        writerGeneration));
+        resourceObjects.finalize(tenant.tenantId(), sessionId, resourceId);
+        return ResponseEntity.ok(java.util.Map.of("resourceId", resourceId, "state", "PUBLISHED"));
     }
 }

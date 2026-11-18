@@ -35,6 +35,46 @@ import { validateHostedHarnessProfile } from '../../packages/cli/src/serve/hoste
 const read = (file) =>
   readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
 
+// The contract COPY lines must sit in the jar-building stage (the first FROM)
+// AND before the RUN that builds the jar: a COPY placed after the build reaches
+// the image too late to land on the classpath, so the packaged jar silently
+// lacks the asset. Returns the includes whose COPY is missing from that
+// pre-build slice. Dockerfile instructions are case-insensitive and may span
+// backslash continuations, so logical lines are joined before scanning; if the
+// jar build cannot be located the ordering is unverifiable and every include is
+// reported missing (fail closed) rather than blessing the whole stage.
+const contractCopiesMissingBeforeBuild = (dockerfile, includes) => {
+  const buildStage = dockerfile.split(/^FROM\s/im)[1] ?? '';
+  const logical = [];
+  for (const raw of buildStage.split('\n')) {
+    const line = raw.trim();
+    const prev = logical[logical.length - 1];
+    if (prev !== undefined && prev.endsWith('\\')) {
+      logical[logical.length - 1] = `${prev.slice(0, -1).trimEnd()} ${line}`;
+    } else {
+      logical.push(line);
+    }
+  }
+  const lines = logical.filter((line) => line && !line.startsWith('#'));
+  const buildRun = lines.findIndex(
+    (line) => /^RUN\b/i.test(line) && /\bmvn\b/i.test(line),
+  );
+  if (buildRun < 0) {
+    return [...includes];
+  }
+  const beforeBuild = lines.slice(0, buildRun);
+  return includes.filter(
+    (include) =>
+      !beforeBuild.some(
+        (line) =>
+          /^COPY\b/i.test(line) &&
+          line.includes(
+            `packages/core/src/managed-runtime/contracts/${include} packages/core/src/managed-runtime/contracts/`,
+          ),
+      ),
+  );
+};
+
 // Repo-root script mentions, bare or ./-prefixed. A package-relative tail such
 // as packages/foo/scripts/bar.js is not a root mention, so the lookbehind
 // still rejects a `scripts/` preceded by a path character.
@@ -423,6 +463,40 @@ describe('managed-agent-server e2e runner', () => {
     expect(commitCarriesTurnSettled(commit('message.committed'))).toBe(false);
     expect(commitCarriesTurnSettled(Buffer.from('{}'))).toBe(false);
     expect(commitCarriesTurnSettled(Buffer.from('not json'))).toBe(false);
+  });
+
+  it('requires the promoted storage version before an approval crash', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    const barrier = source.indexOf(
+      "'Approval snapshot was not committed before the crash barrier'",
+    );
+    expect(barrier).toBeGreaterThan(-1);
+    const condition = source.slice(
+      source.lastIndexOf('if (', barrier) + 4,
+      source.lastIndexOf(') {', barrier),
+    );
+    const rejects = new Function(
+      'privateHead',
+      'checkpoint',
+      'originalApprovalId',
+      `return (${condition});`,
+    );
+    const checkpoint = {
+      continuation: { phase: 'await_action' },
+      approval: { requestId: 'approval' },
+    };
+    expect(rejects(['4'], checkpoint, 'approval')).toBe(false);
+    for (const version of ['1', '2', '3', '5']) {
+      expect(rejects([version], checkpoint, 'approval')).toBe(true);
+    }
+    expect(
+      rejects(
+        ['4'],
+        { ...checkpoint, continuation: { phase: 'done' } },
+        'approval',
+      ),
+    ).toBe(true);
+    expect(rejects(['4'], checkpoint, 'other-approval')).toBe(true);
   });
 
   it('builds the rewritten-command package with a rewriting, fsyncing command Hook', async () => {
@@ -1675,6 +1749,16 @@ describe('managed-agent-server e2e runner', () => {
         budget: budgetSnapshot,
         models: { m: { tokens: { candidates: 600 } } },
       },
+      usageDiagnostic: {
+        version: 2,
+        budget: budgetSnapshot,
+        statistics: {
+          rawOutputTokensTotal: 600.25,
+          models: [
+            { key: 'model-key', metrics: { tokens: { candidates: 600 } } },
+          ],
+        },
+      },
     };
     const run = (events) =>
       load(
@@ -1741,6 +1825,27 @@ describe('managed-agent-server e2e runner', () => {
       round: 2,
       budget: budgetSnapshot,
       models: { m: { tokens: { candidates: 600 } } },
+    });
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usageOld' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          usageRef: { resourceId: 'usageDiagnostic' },
+        }),
+        attempt(30, {
+          recoveryRef: { resourceId: 'req_round2' },
+          routeRef: { resourceId: 'route2' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { 'model-key': { tokens: { candidates: 600 } } },
+      rawOutputTokensTotal: 600.25,
     });
     // No attempt at all.
     expect(() => run([])).toThrow(/no model attempt/);
@@ -1812,6 +1917,37 @@ describe('managed-agent-server e2e runner', () => {
       assertCost(before, { round: 2, budget: snapshot, models: ledger(100) }),
     ).toThrow(
       /wiped the per-model token ledger: model=fake-model before=600 after=100/,
+    );
+  });
+
+  it('keeps the B3 raw budget ledger separate from normalized model totals', () => {
+    const assertCost = load(
+      ['assertB3CostContinuity'],
+      'assertB3CostContinuity',
+      'isDeepStrictEqual',
+    )(isDeepStrictEqual).assertB3CostContinuity;
+    const before = {
+      round: 2,
+      budget: { budget: 500000, outputTokensAtTurnStart: 0 },
+      models: { 'model-key': { tokens: { candidates: 600 } } },
+      rawOutputTokensTotal: 600.25,
+    };
+    expect(() =>
+      assertCost(before, { ...before, rawOutputTokensTotal: 600.75 }),
+    ).not.toThrow();
+    for (const rawOutputTokensTotal of [undefined, 0, 600, NaN, Infinity]) {
+      expect(() =>
+        assertCost(before, { ...before, rawOutputTokensTotal }),
+      ).toThrow(/recovery wiped the raw output ledger/);
+    }
+    expect(() =>
+      assertCost(
+        { ...before, rawOutputTokensTotal: 0 },
+        { ...before, rawOutputTokensTotal: 0 },
+      ),
+    ).toThrow(/crash-boundary raw output ledger was not exercised/);
+    expect(() => assertCost(before, { ...before, models: {} })).toThrow(
+      /wiped the per-model token ledger/,
     );
   });
 
@@ -2417,24 +2553,17 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain("lastEventId: '0',");
   });
 
-  // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
-  // but the ordering assertion was gated at 20 s, so a --runtime-delay-ms 15000
-  // run silently skipped it. Pin the threshold to the criterion's delay and
-  // the README's statement of the arming delay to the threshold.
-  it('arms the model-before-Runtime assertion at the criterion delay', () => {
+  it('requires Runtime readiness before model output regardless of the delay', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
-    expect(source).toContain('modelBeforeRuntimeAssertionDelayMs = 15_000');
     expect(source).toContain(
-      'runtimeDelayMs >= modelBeforeRuntimeAssertionDelayMs',
+      'if (runtimeReady.event.sequence >= firstModel.event.sequence) {',
     );
-    const delaySeconds =
-      Number(
-        source
-          .match(/modelBeforeRuntimeAssertionDelayMs = (\d[\d_]*)/)[1]
-          .replace(/_/g, ''),
-      ) / 1000;
+    expect(source).not.toContain('modelBeforeRuntimeAssertionDelayMs');
+    expect(source).toContain(
+      'Runtime readiness did not precede the first model event',
+    );
     expect(read('packages/managed-agent-server/README.md')).toContain(
-      `the ${delaySeconds} seconds the acceptance criterion`,
+      'Runtime readiness before the first model event',
     );
   });
 
@@ -3214,7 +3343,7 @@ describe('managed-agent-server e2e runner', () => {
     // payload is printed eagerly. The freeze arm's wake record reads as a
     // pass line on stdout too, so it defers the same way — no eager
     // console.log of a JSON payload remains inside the try at all.
-    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(5);
+    expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(7);
     // Native approvals share one summary; the rewritten-command arm has its
     // own receipt/stage summary instead of forging native execution fields.
     expect(
@@ -3274,6 +3403,278 @@ describe('managed-agent-server e2e runner', () => {
       wakePrint,
       'the freeze wake record must print only after the main result',
     ).toBeGreaterThan(print);
+  });
+
+  // The loop-skill arm attests a managed model-turn lifecycle; its guards
+  // must stay load-bearing: a turn.failed terminal, a body that only shows
+  // up in a later round, a union body served to a cron profile, a call id
+  // witnessed by substring, a create body without the caller import, or a
+  // clear leg that never retires the minted automation would each forge a
+  // pass.
+  it('pins the loop-skill arm terminal, body-scope, and call-id contracts', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    // Every /loop turn settles as exactly one turn.completed; the check
+    // lives at the call site because waitForTerminal returns on any terminal.
+    expect(source).toMatch(
+      /terminals\.length !== 1\s*\|\|\s*terminals\[0\]\.type !== 'turn\.completed'/,
+    );
+    // The condition is only as good as the table it is applied to: dropping
+    // a row would leave that turn's terminal unchecked while these pins stay
+    // green.
+    expect(source).toMatch(
+      /\['create', created\],\s*\['list', listed\],\s*\['clear', cleared\],/,
+    );
+    // The Session-create body carries a caller loop import whose body is the
+    // verbatim bundled reference (readSidecar('bundled-body')), so admission's
+    // replace path runs; swapping that argument to another sidecar would take
+    // the preserve branch. A second non-loop probe skill carries a marker the
+    // server keeps, so the loop marker's absence attests replacement rather than
+    // caller skills never arriving. assertCallerImportReplaced checks both and
+    // is exercised below as executable code, not just pinned as text.
+    expect(source).toMatch(/skills: \[/);
+    expect(source).toMatch(/readSidecar\('bundled-body'\)/);
+    expect(source).toMatch(/body: bundledLoopImport\.body/);
+    expect(source).toMatch(
+      /const callerImportMarker = 'CALLER-LOOP-IMPORT-MARKER';/,
+    );
+    expect(source).toMatch(
+      /const callerProbeMarker = 'CALLER-PROBE-SKILL-MARKER';/,
+    );
+    expect(source).toMatch(/description: callerImportMarker/);
+    expect(source).toMatch(/name: 'loopprobe'/);
+    expect(source).toMatch(/description: callerProbeMarker/);
+    expect(source).toMatch(/function assertCallerImportReplaced\(/);
+    expect(source).toMatch(
+      /assertCallerImportReplaced\(\s*firstRoundMessages,\s*callerImportMarker,\s*callerProbeMarker,?\s*\)/,
+    );
+    expect(source).toMatch(
+      /Caller loop import survived admission; the replace path did not run\. firstRound=/,
+    );
+    expect(source).toMatch(
+      /Caller skills never reached admission; the probe skill marker is absent\. firstRound=/,
+    );
+    // Execute the guard: a severed guard (false &&, or a never-called closure)
+    // leaves the text pins green but these executable assertions red.
+    const { assertCallerImportReplaced } = load(
+      ['assertCallerImportReplaced'],
+      'assertCallerImportReplaced',
+    )();
+    const removed = 'CALLER-LOOP-IMPORT-MARKER';
+    const preserved = 'CALLER-PROBE-SKILL-MARKER';
+    expect(() =>
+      assertCallerImportReplaced([{ content: removed }], removed, preserved),
+    ).toThrow(/survived admission/);
+    expect(() =>
+      assertCallerImportReplaced(
+        [{ content: 'cron variant' }],
+        removed,
+        preserved,
+      ),
+    ).toThrow(/never reached admission/);
+    expect(() =>
+      assertCallerImportReplaced([{ content: preserved }], removed, preserved),
+    ).not.toThrow();
+    // The body checks read the first streamed round, and the positive
+    // requires the Skill tool result (role 'tool'), not the session prelude.
+    expect(source).toMatch(/loopRequests\[0\]\?\.body\['messages'\]/);
+    expect(source).toMatch(
+      /message\.role === 'tool' &&\s*JSON\.stringify\(message\)\.includes\(cronOnlyPhrase\)/,
+    );
+    // Cron-only positive plus union negative, verified against the committed
+    // sidecars so asset drift fails closed instead of silently drifting.
+    expect(source).toMatch(
+      /const cronOnlyPhrase = 'requires a fixed interval';/,
+    );
+    expect(source).toMatch(/const unionMarker = 'LoopWakeup';/);
+    expect(source).toMatch(/managed-loop-skill-\$\{variant\}\.json/);
+    expect(source).toMatch(/Loop sidecar discriminators drifted/);
+    // The classifier answer matches the block schema, not the tool name, so
+    // other structured side queries are not mis-answered with an invalid allow.
+    expect(source).toMatch(/'shouldBlock' in blockProperties/);
+    // The create -> list lifecycle claim: cron_list must echo the created
+    // prompt; a mere tool result must not pass.
+    expect(source).toMatch(/includes\('\/loop check the deploy'\)/);
+    expect(source).toMatch(/cron_list did not echo the created schedule/);
+    // The clear leg retires the id the store minted and the result must state
+    // that retirement; a mere tool result is satisfied by a 404 error result.
+    expect(source).toMatch(
+      /const createdScheduleId = \/asch_\[0-9a-f\]\{32\}\//,
+    );
+    expect(source).toMatch(/Retired cron schedule \$\{createdScheduleId\}\./);
+    expect(source).toMatch(/cron_create printed no automation id/);
+    // The reported count is the witnessed calls, not the cumulative flattened
+    // tool-message length (every chat-completions body repeats prior results).
+    expect(source).toMatch(/cronToolResults: cronCallIds\.filter\(/);
+    // Call ids match structured fields on both the fake-model confirmation
+    // and the scenario assertions, never serialized substrings.
+    expect(source).toMatch(
+      /entry\.role === 'tool' && entry\.tool_call_id === callId/,
+    );
+    expect(source).toMatch(
+      /\(message as \{ tool_call_id\?: string \}\)\.tool_call_id === callId/,
+    );
+    expect(source).not.toMatch(/\.includes\(callId\)/);
+    expect(source).not.toMatch(/serialized\.includes\('loop-cron-/);
+  });
+
+  // The loop-fire arm attests a real scheduled fire: the scanner's fired
+  // ledger row and the wake turn's model round must name one occurrence. A
+  // manual trigger, a skipped slot, a framing that names a different
+  // occurrence or schedule, a create round that already carries the framing,
+  // or a clear leg that never retires the minted automation would each forge
+  // a pass.
+  it('pins the loop-fire arm scheduled-trigger, occurrence-tie, and retirement contracts', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    // The mode exists, is exclusive, and is named in the usage line.
+    expect(source).toMatch(/argument === '--loop-fire'/);
+    expect(source).toMatch(/loopSkill,\s*loopFire,\s*\]\.filter\(Boolean\)/);
+    expect(source).toMatch(/\|--loop-fire\]/);
+    // The default real-model scenario must stay off for the fire arm: the
+    // fire scenario is its own earlier branch, and dropping !loopFire here
+    // would run the default scenario under --loop-fire (R1-2).
+    expect(source).toMatch(/\} else if \(!loopSkill && !loopFire\) \{/);
+    // The fire arm shares the files/4 profile but alone sets the 1s scan
+    // delay; the cadence stays the cron minimum (no clock shortcut). The
+    // profile pin names the assignment itself — the bare ternary matches
+    // four other sites and would not see the profile entry dropped (R1-3).
+    expect(source).toMatch(
+      /loopSkill \|\| loopFire\s*\?\s*\{\s*QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:\s*'hosted-workspace-files\/4'/,
+    );
+    expect(source).toMatch(
+      /\.\.\.\(loopFire\s*\?\s*\{ QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY: '1s' \}/,
+    );
+    expect(source).toMatch(/cron: '\*\/1 \* \* \* \*'/);
+    expect(source).toMatch(
+      /const loopFirePrompt = 'LOOP-FIRE-PROMPT check the deploy';/,
+    );
+    expect(source).toMatch(
+      /const loopFireWakeResponse = 'LOOP_FIRE_OBSERVED';/,
+    );
+    // The fake model answers the framing round terminally and the scenario
+    // finds it by the framing header; the scheduled-trigger discrimination
+    // lives in the guard alone, so a relayed trigger drift reddens the guard
+    // while the wake turn still runs. Create/clear cron calls match by
+    // structured call id.
+    expect(source).toMatch(
+      /if \(text\.includes\('Scheduled automation:'\)\) \{/,
+    );
+    expect(source).toMatch(
+      /latestUserText\(request\)\.includes\('Scheduled automation:'\)/,
+    );
+    expect(source).toMatch(/return \{ content: loopFireWakeResponse \};/);
+    expect(source).toMatch(/'loop-fire-create'/);
+    expect(source).toMatch(/'loop-fire-delete'/);
+    // The scenario sends the /loop 1m input and no caller skills, extracts
+    // the minted id structurally, and waits for the fire with the
+    // minute-boundary budget.
+    expect(source).toMatch(/text: `\/loop 1m \$\{loopFirePrompt\}`/);
+    expect(source).toMatch(/const fireScheduleId = \/asch_\[0-9a-f\]\{32\}\//);
+    // The wake is witnessed on the runs route, not the public turn event
+    // stream: a harness-driven wake turn does not ride that stream, and the
+    // run mirror's completed state settles from the turn's own committed
+    // result. The poll carries the minute-boundary budget.
+    expect(source).toMatch(/await waitUntil\(\s*'Scheduled fire ledger row',/);
+    expect(source).toMatch(/150_000,\s*harness,\s*\);/);
+    // The client turns (create, clear) settle as exactly one turn.completed
+    // each; the clear leg queues from the create cursor because the wake turn
+    // added no public events.
+    expect(source).toMatch(
+      /\['create', fireCreated\],\s*\['clear', fireCleared\],/,
+    );
+    expect(source).toMatch(
+      /sendFireInput\(\s*'\/loop clear',\s*fireCreated\.lastSequence,?\s*\)/,
+    );
+    // The negative is race-free: create rounds are selected by their latest
+    // user text (the /loop input), which the wake round's framing never is.
+    expect(source).toMatch(
+      /latestUserText\(request\)\.includes\('\/loop 1m'\)/,
+    );
+    expect(source).toMatch(
+      /A create-turn round already carried the automation framing/,
+    );
+    expect(source).toMatch(/The fire's prompt never reached the model/);
+    // The ledger witness polls the public runs route for a scheduled, fired,
+    // completed occurrence, then the guard ties it to the wake framing.
+    expect(source).toMatch(/v1\/agent-automations\/\$\{fireScheduleId\}\/runs/);
+    expect(source).toMatch(
+      /row\['trigger'\] === 'scheduled' &&\s*row\['outcome'\] === 'fired' &&\s*row\['state'\] === 'completed'/,
+    );
+    expect(source).toMatch(/function assertScheduledFireWitness\(/);
+    expect(source).toMatch(
+      /assertScheduledFireWitness\(\s*fireRuns,\s*wakeFraming,\s*fireScheduleId,?\s*\)/,
+    );
+    expect(source).toMatch(/No scheduled occurrence settled fired/);
+    expect(source).toMatch(/ledger and model round are not the same fire/);
+    expect(source).toMatch(/it is not the fire's turn/);
+    // The clear leg retires the minted id and the result must state it.
+    expect(source).toMatch(/Retired cron schedule \$\{fireScheduleId\}\./);
+    expect(source).toMatch(/mode: 'loop-fire'/);
+    expect(source).toMatch(/fireTrigger: firedRun\?\.\['trigger'\]/);
+    // Execute the guard: a severed guard (false &&, or a never-called
+    // closure) leaves the text pins green but these assertions red.
+    const { assertScheduledFireWitness } = load(
+      ['assertScheduledFireWitness'],
+      'assertScheduledFireWitness',
+    )();
+    const scheduleId = `asch_${'a'.repeat(32)}`;
+    const occurrenceKey = '2026-11-17T00:00:00Z';
+    const framing = [
+      'Scheduled automation: LOOP-FIRE-PROMPT check the deploy',
+      `Automation ID: ${scheduleId}`,
+      `Occurrence: ${occurrenceKey}`,
+      'Trigger: scheduled',
+    ].join('\n');
+    const firedRow = {
+      trigger: 'scheduled',
+      outcome: 'fired',
+      occurrence_key: occurrenceKey,
+    };
+    expect(assertScheduledFireWitness([firedRow], framing, scheduleId)).toEqual(
+      { occurrenceKey },
+    );
+    expect(() => assertScheduledFireWitness([], framing, scheduleId)).toThrow(
+      /No scheduled occurrence settled fired/,
+    );
+    expect(() =>
+      assertScheduledFireWitness(
+        [{ ...firedRow, outcome: 'skipped' }],
+        framing,
+        scheduleId,
+      ),
+    ).toThrow(/No scheduled occurrence settled fired/);
+    expect(() =>
+      assertScheduledFireWitness(
+        [{ ...firedRow, trigger: 'manual' }],
+        framing,
+        scheduleId,
+      ),
+    ).toThrow(/No scheduled occurrence settled fired/);
+    expect(() =>
+      assertScheduledFireWitness(
+        [firedRow],
+        framing.replace(occurrenceKey, 'another-slot'),
+        scheduleId,
+      ),
+    ).toThrow(/not the same fire/);
+    expect(() =>
+      assertScheduledFireWitness(
+        [firedRow],
+        framing.replace(scheduleId, `asch_${'b'.repeat(32)}`),
+        scheduleId,
+      ),
+    ).toThrow(/not the fire's turn/);
+    // The trigger clause has its own direction: the minted-id case above
+    // throws through the Automation ID disjunct with the same message, so
+    // without this case deleting !wakeText.includes('Trigger: scheduled')
+    // would leave every direction green (R1-1). The framing spells the line
+    // verbatim as `Trigger: ${trigger}`.
+    expect(() =>
+      assertScheduledFireWitness(
+        [firedRow],
+        framing.replace('Trigger: scheduled', 'Trigger: manual'),
+        scheduleId,
+      ),
+    ).toThrow(/not the fire's turn/);
   });
 
   // A timed-out spawn sets error and leaves status null with empty stderr,
@@ -3428,6 +3829,113 @@ describe('managed-agent-server e2e runner', () => {
   it('unrefs the waitUntil stall timer so a fast success does not idle the runner', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toMatch(/stallTimer\.unref\(\)/);
+  });
+
+  it('copies every core contract asset the pom pulls into the image', () => {
+    // The contracts module copies a set of core/src/managed-runtime/contracts
+    // assets onto the classpath; the image build must COPY each one or the
+    // packaged jar silently lacks it (Maven does not fail on a missing include)
+    // and runtime resource reads throw. Pin the Dockerfile COPY set against the
+    // pom includes so adding an include without a COPY reddens here.
+    const pom = read('packages/managed-agent-server/contracts/pom.xml');
+    const block = pom.match(
+      /<resource>\s*<directory>\$\{managed\.module\.root\}\/\.\.\/core\/src\/managed-runtime\/contracts<\/directory>[\s\S]*?<\/resource>/,
+    )?.[0];
+    expect(block).toBeTruthy();
+    const includes = [...block.matchAll(/<include>([^<]+)<\/include>/g)].map(
+      (m) => m[1],
+    );
+    expect(includes.length).toBeGreaterThan(0);
+    const dockerfile = read('packages/managed-agent-server/Dockerfile');
+    // The COPY must precede the RUN that builds the jar, not merely exist in the
+    // build stage: a COPY moved below the build still ships a jar without the
+    // asset. A commented-out instruction or a COPY appended to the runtime stage
+    // cannot satisfy the pin either.
+    expect(contractCopiesMissingBeforeBuild(dockerfile, includes)).toEqual([]);
+  });
+
+  it('rejects a contract COPY moved below the jar build', () => {
+    const pom = read('packages/managed-agent-server/contracts/pom.xml');
+    const block = pom.match(
+      /<resource>\s*<directory>\$\{managed\.module\.root\}\/\.\.\/core\/src\/managed-runtime\/contracts<\/directory>[\s\S]*?<\/resource>/,
+    )?.[0];
+    const includes = [...block.matchAll(/<include>([^<]+)<\/include>/g)].map(
+      (m) => m[1],
+    );
+    const dockerfile = read('packages/managed-agent-server/Dockerfile');
+    const loopCopy =
+      'COPY packages/core/src/managed-runtime/contracts/managed-loop-skill-*.json packages/core/src/managed-runtime/contracts/';
+    expect(dockerfile).toContain(loopCopy);
+    // Move the loop COPY out of the pre-build slice to just before the runtime
+    // stage: the image would ship a jar without the sidecars (the round-1
+    // Critical), so the pin must report the include as missing.
+    const moved = dockerfile
+      .replace(`${loopCopy}\n`, '')
+      .replace(/^FROM eclipse-temurin/im, `${loopCopy}\nFROM eclipse-temurin`);
+    expect(moved).not.toBe(dockerfile);
+    // Self-verifying relocation: the COPY must actually land AFTER the jar build,
+    // not merely be deleted. A renamed runtime base makes the insert a no-op and
+    // leaves copyIdx at -1, reddening this control instead of passing on deletion.
+    const movedLines = moved.split('\n').map((line) => line.trim());
+    const copyIdx = movedLines.indexOf(loopCopy);
+    const runIdx = movedLines.findIndex(
+      (line) => /^RUN\b/i.test(line) && /\bmvn\b/i.test(line),
+    );
+    expect(runIdx).toBeGreaterThanOrEqual(0);
+    expect(copyIdx).toBeGreaterThan(runIdx);
+    expect(contractCopiesMissingBeforeBuild(moved, includes)).toContain(
+      'managed-loop-skill-*.json',
+    );
+  });
+
+  it('the COPY pin scans case-insensitively, joins continuations, and fails closed', () => {
+    const pom = read('packages/managed-agent-server/contracts/pom.xml');
+    const block = pom.match(
+      /<resource>\s*<directory>\$\{managed\.module\.root\}\/\.\.\/core\/src\/managed-runtime\/contracts<\/directory>[\s\S]*?<\/resource>/,
+    )?.[0];
+    const includes = [...block.matchAll(/<include>([^<]+)<\/include>/g)].map(
+      (m) => m[1],
+    );
+    const dockerfile = read('packages/managed-agent-server/Dockerfile');
+    const loopCopy =
+      'COPY packages/core/src/managed-runtime/contracts/managed-loop-skill-*.json packages/core/src/managed-runtime/contracts/';
+    const moveBelowBuild = (text) =>
+      text
+        .replace(`${loopCopy}\n`, '')
+        .replace(
+          /^FROM eclipse-temurin/im,
+          `${loopCopy}\nFROM eclipse-temurin`,
+        );
+    // Lowercase build instruction: Dockerfile instructions are case-insensitive,
+    // so the pin must still locate the build and catch a COPY moved below it.
+    const lower = moveBelowBuild(dockerfile.replace(/^RUN mvn/im, 'run mvn'));
+    expect(lower).not.toBe(dockerfile);
+    expect(contractCopiesMissingBeforeBuild(lower, includes)).toContain(
+      'managed-loop-skill-*.json',
+    );
+    // A continuation-wrapped build (RUN \ then mvn) is one logical instruction;
+    // the pin must still catch a COPY moved below it.
+    const wrappedRun = moveBelowBuild(
+      dockerfile.replace(/^RUN mvn/im, 'RUN \\\n  mvn'),
+    );
+    expect(wrappedRun).not.toBe(dockerfile);
+    expect(contractCopiesMissingBeforeBuild(wrappedRun, includes)).toContain(
+      'managed-loop-skill-*.json',
+    );
+    // A continuation-wrapped COPY before the build is still recognized (no false red).
+    const wrappedCopy = dockerfile.replace(
+      loopCopy,
+      'COPY \\\n  packages/core/src/managed-runtime/contracts/managed-loop-skill-*.json packages/core/src/managed-runtime/contracts/',
+    );
+    expect(wrappedCopy).not.toBe(dockerfile);
+    expect(contractCopiesMissingBeforeBuild(wrappedCopy, includes)).toEqual([]);
+    // No locatable jar build: the ordering is unverifiable, so fail closed and
+    // report every include missing rather than blessing the whole stage.
+    const noBuild = dockerfile.replace(/^RUN mvn[\s\S]*?(?=^FROM )/im, '');
+    expect(noBuild).not.toBe(dockerfile);
+    expect(contractCopiesMissingBeforeBuild(noBuild, includes)).toEqual(
+      includes,
+    );
   });
 
   it('resolves the project version from the real pom', () => {

@@ -446,6 +446,19 @@ describe('daemon event schema', () => {
     expect(isDaemonEventType(event, 'trust_change_requested')).toBe(true);
   });
 
+  it('recognizes sub_session_task_changed only with the caller id', () => {
+    const event: DaemonEvent = {
+      id: 4,
+      v: 1,
+      type: 'sub_session_task_changed',
+      data: { sessionId: 'caller-1' },
+    };
+    expect(asKnownDaemonEvent(event)).toBe(event);
+    expect(
+      asKnownDaemonEvent({ ...event, data: { sessionId: '' } }),
+    ).toBeUndefined();
+  });
+
   it('recognizes artifact_changed as a known daemon event', () => {
     const event: DaemonEvent = {
       id: 3,

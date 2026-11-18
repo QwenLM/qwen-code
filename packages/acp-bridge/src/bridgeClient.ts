@@ -79,6 +79,7 @@ import type {
   LiveScreenContextCaptureHandler,
   LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
+  ResolveSubSessionWorkspaceHandler,
 } from './bridgeOptions.js';
 
 import {
@@ -87,6 +88,7 @@ import {
   MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS,
   MAX_LIVE_SPEAK_TO_USER_MESSAGE_CHARS,
   MAX_SUB_SESSION_NAME_CHARS,
+  MAX_SUB_SESSION_WORKSPACE_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
@@ -262,6 +264,16 @@ function isExistingSessionScheduledTaskCreateErrorShape(
     Number.isFinite(status) &&
     typeof code === 'string' &&
     code.length > 0
+  );
+}
+
+function isSubSessionWorkspaceSelector(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= MAX_SUB_SESSION_WORKSPACE_CHARS &&
+    // eslint-disable-next-line no-control-regex -- rejecting C0 control chars
+    !/[\x00-\x1f\x7f]/.test(value)
   );
 }
 
@@ -692,7 +704,8 @@ function sliceLineRange(
  *
  * Only the fields declared on this narrowed interface cross the boundary:
  * `sessionId`, `events`,
- * `pendingPermissionIds`, `pendingInteractions`, `activePromptId`,
+ * `clientIds`, `suspendedWorkflowApprovalRefs`, `pendingPermissionIds`,
+ * `pendingInteractions`, `activePromptId`,
  * `activePromptOriginatorClientId`. New fields
  * BridgeClient grows must be added here too (and the factory's
  * `SessionEntry` is required to provide them — TS enforces the
@@ -715,6 +728,8 @@ export interface BridgeClientSessionEntry {
   deferredArtifactInputCount: number;
   attachments: SessionAttachmentStore;
   recordingDegraded: boolean;
+  clientIds: ReadonlyMap<string, number>;
+  suspendedWorkflowApprovalRefs?: ReadonlyMap<string, ReadonlySet<symbol>>;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
   pendingInteractions: Map<string, BridgePendingInteraction>;
@@ -773,6 +788,19 @@ export interface BridgeClientDeferredArtifactBatch {
   artifacts: SessionArtifactInput[];
   options?: Parameters<SessionArtifactStore['upsertMany']>[1];
   turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
+}
+
+export function hasAvailableWorkflowApprovalClient(
+  entry: Pick<
+    BridgeClientSessionEntry,
+    'clientIds' | 'suspendedWorkflowApprovalRefs'
+  >,
+  clientId: string,
+): boolean {
+  return (
+    (entry.clientIds.get(clientId) ?? 0) >
+    (entry.suspendedWorkflowApprovalRefs?.get(clientId)?.size ?? 0)
+  );
 }
 
 interface PreparedSessionUpdateFrames {
@@ -887,7 +915,7 @@ export class BridgeClient implements Client {
      */
     private readonly mediator: Pick<
       PermissionMediator,
-      'request' | 'cancelForPrompt'
+      'policy' | 'request' | 'cancelForPrompt' | 'cancelWorkflowApproval'
     >,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
@@ -1033,6 +1061,7 @@ export class BridgeClient implements Client {
       entry: BridgeClientSessionEntry,
       timestamp: string | undefined,
     ) => Promise<void>,
+    private readonly onResolveSubSessionWorkspace?: ResolveSubSessionWorkspaceHandler,
   ) {}
 
   async requestPermission(
@@ -1043,15 +1072,6 @@ export class BridgeClient implements Client {
       return { outcome: { outcome: 'cancelled' } };
     }
 
-    const explicitBackgroundTurn = parseBackgroundNotificationTurn(
-      params._meta?.['backgroundTurn'],
-    );
-    if (
-      explicitBackgroundTurn &&
-      entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
-    ) {
-      return { outcome: { outcome: 'cancelled' } };
-    }
     const appCallId =
       typeof params._meta?.['mcpAppCallId'] === 'string'
         ? params._meta['mcpAppCallId']
@@ -1061,20 +1081,62 @@ export class BridgeClient implements Client {
       : undefined;
     if (
       appCallId &&
-      (!appClientId || appCallId !== params.toolCall.toolCallId)
+      (!appClientId || appCallId !== params.toolCall?.toolCallId)
     ) {
       return { outcome: { outcome: 'cancelled' } };
     }
-    const backgroundTurn = appClientId
+    const backgroundWorkflowApproval =
+      !appClientId &&
+      params.toolCall?._meta?.['workflowApproval'] === true &&
+      params.toolCall._meta?.['backgroundWorkflowApproval'] === true;
+    const explicitBackgroundTurn = backgroundWorkflowApproval
       ? undefined
-      : (explicitBackgroundTurn ??
-        (entry.promptActive ? undefined : entry.backgroundTurn));
-    const permissionPromptId = appClientId
-      ? undefined
-      : (backgroundTurn?.turnId ?? entry.activePromptId);
-    const permissionOriginator =
+      : parseBackgroundNotificationTurn(params._meta?.['backgroundTurn']);
+    if (
+      explicitBackgroundTurn &&
+      entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    const usesPrompt = !appClientId && !backgroundWorkflowApproval;
+    const backgroundTurn = usesPrompt
+      ? (explicitBackgroundTurn ??
+        (entry.promptActive ? undefined : entry.backgroundTurn))
+      : undefined;
+    const permissionPromptId = usesPrompt
+      ? (backgroundTurn?.turnId ?? entry.activePromptId)
+      : undefined;
+    let permissionOriginator =
       appClientId ??
-      (backgroundTurn ? undefined : entry.activePromptOriginatorClientId);
+      (usesPrompt && !backgroundTurn
+        ? entry.activePromptOriginatorClientId
+        : undefined);
+    const workflowOriginatorClientId =
+      params._meta?.['workflowOriginatorClientId'];
+    if (
+      backgroundWorkflowApproval &&
+      typeof workflowOriginatorClientId === 'string'
+    ) {
+      if (
+        this.mediator.policy === 'designated' &&
+        !hasAvailableWorkflowApprovalClient(entry, workflowOriginatorClientId)
+      ) {
+        // No permission_request is published for this one, so leave a line
+        // that tells it apart from an agent-side cancel. The client id comes
+        // from request meta: quote it rather than print it raw.
+        writeStderrLine(
+          `qwen serve: session ${entry.sessionId} cancelled a background ` +
+            `workflow approval: its launching client ` +
+            `${JSON.stringify(workflowOriginatorClientId.slice(0, 64))} ` +
+            `is not connected.`,
+        );
+        return resolutionToAcpResponse({
+          kind: 'cancelled',
+          reason: 'agent_cancelled',
+        });
+      }
+      permissionOriginator = workflowOriginatorClientId;
+    }
     // Reserve model permission capacity within the existing session cap.
     if (
       appClientId &&
@@ -1139,10 +1201,7 @@ export class BridgeClient implements Client {
     });
     if (!published) return { outcome: { outcome: 'cancelled' } };
 
-    // Cap-index add happens AFTER publish-success so a publish-fail
-    // path doesn't need to roll back. The mediator's
-    // `forgetSession` is the only thing that drains this index (via
-    // the bridge's `cancelPendingForSession`).
+    // Index only published requests and remove them when the mediator settles.
     let interaction: BridgePendingInteraction | undefined;
     try {
       interaction = pendingInteractionFromRequest(requestId, {
@@ -1164,6 +1223,9 @@ export class BridgeClient implements Client {
         requestId,
         sessionId: entry.sessionId,
         promptId: appClientId ? appCallId : permissionPromptId,
+        ...(backgroundWorkflowApproval
+          ? { workflowApprovalToolCallId: params.toolCall.toolCallId }
+          : {}),
         originatorClientId: permissionOriginator,
         allowedOptionIds,
         issuedAtMs: Date.now(),
@@ -1202,6 +1264,15 @@ export class BridgeClient implements Client {
     ) {
       entry.restoreState.configOptions = params.update.configOptions;
     }
+    const update = params.update;
+    if (
+      entry &&
+      update.sessionUpdate === 'tool_call_update' &&
+      update._meta?.['backgroundWorkflowApproval'] === true &&
+      (update.status === 'completed' || update.status === 'failed')
+    ) {
+      this.mediator.cancelWorkflowApproval(entry.sessionId, update.toolCallId);
+    }
     const prepared = this.prepareSessionUpdateFrames(params, entry);
     for (const frame of prepared.frames) {
       events.publish(frame);
@@ -1233,22 +1304,43 @@ export class BridgeClient implements Client {
     entry?: BridgeClientSessionEntry,
   ): PreparedSessionUpdateFrames {
     const executionMeta = params.update._meta;
-    const taskCompleted =
-      executionMeta?.['source'] === 'background_task_completed';
-    const backgroundTurn = parseBackgroundNotificationTurn(
-      executionMeta?.['backgroundTurn'],
-    );
-    const promptId = taskCompleted
+    const backgroundWorkflowApproval =
+      executionMeta?.['backgroundWorkflowApproval'] === true;
+    const outsideTurn =
+      executionMeta?.['source'] === 'background_task_completed' ||
+      backgroundWorkflowApproval;
+    const backgroundTurn = backgroundWorkflowApproval
       ? undefined
-      : (backgroundTurn?.turnId ?? entry?.activePromptId);
-    const turn = {
-      ...(promptId ? { promptId } : {}),
-      ...(!taskCompleted &&
-      !backgroundTurn &&
+      : parseBackgroundNotificationTurn(executionMeta?.['backgroundTurn']);
+    const toolPromptId = executionMeta?.['promptId'];
+    const explicitToolPromptId =
+      params.update.sessionUpdate === 'tool_call_update' &&
+      typeof toolPromptId === 'string' &&
+      toolPromptId.length > 0
+        ? toolPromptId
+        : undefined;
+    const promptId = outsideTurn
+      ? undefined
+      : (backgroundTurn?.turnId ??
+        explicitToolPromptId ??
+        entry?.activePromptId);
+    const toolOriginator = executionMeta?.['originatorClientId'];
+    const activeOriginator =
       (entry?.promptActive || !entry?.backgroundTurn) &&
       entry?.activePromptOriginatorClientId
-        ? { originatorClientId: entry.activePromptOriginatorClientId }
-        : {}),
+        ? entry.activePromptOriginatorClientId
+        : undefined;
+    const toolOriginatorClientId =
+      typeof toolOriginator === 'string' ? toolOriginator : undefined;
+    const originatorClientId =
+      outsideTurn || backgroundTurn
+        ? undefined
+        : explicitToolPromptId
+          ? toolOriginatorClientId
+          : activeOriginator;
+    const turn = {
+      ...(promptId ? { promptId } : {}),
+      ...(originatorClientId ? { originatorClientId } : {}),
     };
     const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
     // A2UI-over-MCP: tool_call_update results from an A2UI UI server carry
@@ -1601,6 +1693,20 @@ export class BridgeClient implements Client {
     // extension and returns the correlated response.
     if (method === SERVE_CONTROL_EXT_METHODS.clientMcpMessage) {
       return this.handleClientMcpMessage(params);
+    }
+    if (method === SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace) {
+      const resolve = this.onResolveSubSessionWorkspace;
+      if (!resolve) throw RequestError.methodNotFound(method);
+
+      const callerSessionId = this.requireSubSessionCaller(params);
+      const workspace = params['workspace'];
+      if (!isSubSessionWorkspaceSelector(workspace)) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid workspace selector',
+        );
+      }
+      return { ...resolve(callerSessionId, workspace) };
     }
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);
@@ -2276,22 +2382,41 @@ export class BridgeClient implements Client {
         `\`name\` exceeds the ${MAX_SUB_SESSION_NAME_CHARS}-character limit`,
       );
     }
-    // `callerSessionId` keys the launcher's per-caller concurrency bucket AND
-    // its depth-1 nesting gate. A child that names a session it does not own
-    // could evade its own cap (a fabricated id starts every bucket at zero) or
-    // exhaust a victim session's; a child that OMITS the field would get an
-    // anonymous per-call bucket and skip the nesting gate entirely. Neither is
-    // acceptable, so it is required and authenticated. Every real caller has
-    // one — the tool runs inside a session's turn.
-    const callerSessionId = params['callerSessionId'];
+    const callerSessionId = this.requireSubSessionCaller(params);
+    const workspace = params['workspace'];
+    const workspaceGeneration = params['workspaceGeneration'];
     if (
-      typeof callerSessionId !== 'string' ||
-      callerSessionId.length === 0 ||
-      !this.ownsSession(callerSessionId)
+      workspace !== undefined &&
+      (!isSubSessionWorkspaceSelector(workspace) ||
+        isScheduledTaskRunSource(source))
     ) {
       throw RequestError.invalidParams(
         undefined,
-        '`callerSessionId` is required and must name a session owned by this connection',
+        `\`workspace\` must be a non-empty string of at most ${MAX_SUB_SESSION_WORKSPACE_CHARS} characters without control characters, and is not supported for scheduled-task runs`,
+      );
+    }
+    if (
+      workspace === undefined
+        ? workspaceGeneration !== undefined
+        : typeof workspaceGeneration !== 'string' ||
+          workspaceGeneration.length !== 36
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Named sub-sessions require a workspace generation from approval',
+      );
+    }
+    const sessionId = params['sessionId'];
+    if (
+      sessionId !== undefined &&
+      (!isValidCronTaskRoutingId(sessionId) ||
+        isScheduledTaskRunSource(source) ||
+        params['model'] !== undefined ||
+        params['name'] !== undefined)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`sessionId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters, and cannot be combined with \`model\`, \`name\` or a scheduled-task run`,
       );
     }
     const model = params['model'];
@@ -2317,11 +2442,19 @@ export class BridgeClient implements Client {
       ...(typeof model === 'string' ? { model } : {}),
       ...(typeof groupId === 'string' ? { groupId } : {}),
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
+      ...(typeof workspace === 'string' &&
+      typeof workspaceGeneration === 'string'
+        ? { workspace, workspaceGeneration }
+        : {}),
+      ...(typeof sessionId === 'string' ? { sessionId } : {}),
       ...source,
       callerSessionId,
     });
     return {
       sessionId: result.sessionId,
+      ...(result.workspaceCwd !== undefined
+        ? { workspaceCwd: result.workspaceCwd }
+        : {}),
       ...(result.result !== undefined ? { result: result.result } : {}),
       ...(result.stopReason !== undefined
         ? { stopReason: result.stopReason }
@@ -2329,7 +2462,23 @@ export class BridgeClient implements Client {
       ...(result.parentSessionPersisted !== undefined
         ? { parentSessionPersisted: result.parentSessionPersisted }
         : {}),
+      ...(result.taskId !== undefined ? { taskId: result.taskId } : {}),
     };
+  }
+
+  private requireSubSessionCaller(params: Record<string, unknown>): string {
+    const callerSessionId = params['callerSessionId'];
+    if (
+      typeof callerSessionId !== 'string' ||
+      callerSessionId.length === 0 ||
+      !this.ownsSession(callerSessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`callerSessionId` is required and must name a session owned by this connection',
+      );
+    }
+    return callerSessionId;
   }
 
   private async handleCreateCurrentSessionScheduledTask(
@@ -2580,7 +2729,8 @@ export class BridgeClient implements Client {
    * (mid-turn provider recovery progress), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-changed`,
-   * `qwen/notify/session/mcp-budget-event` — each translated into a
+   * `qwen/notify/session/mcp-budget-event`,
+   * `qwen/notify/session/mod-log` (a Mod's log line) — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
    */
@@ -2659,11 +2809,18 @@ export class BridgeClient implements Client {
     }
     if (method === '_qwencode/end_turn') {
       const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string' || sessionId.length === 0) return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
       const reason = params['reason'];
       const source = params['source'];
+      // A malformed Goal terminal must not pin future loads to live replay
+      // or strand the queue when its turn_complete cannot be published.
+      if (source === 'goal') {
+        entry.goalTurnActive = false;
+        this.onAutomaticTurnEnded?.(sessionId);
+      }
       if (
-        typeof sessionId !== 'string' ||
-        sessionId.length === 0 ||
         typeof reason !== 'string' ||
         reason.length === 0 ||
         reason.length > 128 ||
@@ -2671,13 +2828,7 @@ export class BridgeClient implements Client {
       ) {
         return;
       }
-      const entry = this.resolveEntry(sessionId);
-      if (!entry || !this.ownsSession(sessionId)) return;
       if (source === 'goal') {
-        entry.goalTurnActive = false;
-        // Before the promptId validation below: a malformed id costs the
-        // session its `turn_complete`, but the queue must still be settled.
-        this.onAutomaticTurnEnded?.(sessionId);
         const promptId = params['promptId'];
         if (
           typeof promptId !== 'string' ||
@@ -2747,6 +2898,10 @@ export class BridgeClient implements Client {
           type: 'thinking',
           requestId,
         });
+        return;
+      }
+      if (record['type'] === 'reset') {
+        this.onGenerationEvent?.(sessionId, { type: 'reset', requestId });
         return;
       }
       if (record['type'] === 'delta') {
@@ -2944,6 +3099,24 @@ export class BridgeClient implements Client {
       this.onSessionCatalogChanged?.();
       return;
     }
+    if (method === 'qwen/notify/session/goal-changed') {
+      // The child persists the goal sidecar itself; this notification is a
+      // pure catalog-clock mark so version-watching clients refetch the
+      // marker — the same propagation pr-binding uses. No projection values
+      // travel here: the sidecar on disk is the catalog's single source.
+      const sessionId = params['sessionId'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      this.onSessionCatalogChanged?.();
+      return;
+    }
     if (method === 'qwen/notify/session/recording-degraded') {
       const sessionId = params['sessionId'];
       if (
@@ -2968,6 +3141,22 @@ export class BridgeClient implements Client {
       this.publishExtNotification(sessionId, 'session_recording_degraded', {
         sessionId,
         reason: 'write_failed',
+      });
+      return;
+    }
+    if (method === 'qwen/notify/session/mod-log') {
+      const { sessionId, plugin, text } = params;
+      if (
+        typeof sessionId !== 'string' ||
+        typeof plugin !== 'string' ||
+        typeof text !== 'string' ||
+        !this.ownsSession(sessionId)
+      )
+        return;
+      this.publishExtNotification(sessionId, 'mod_log', {
+        sessionId,
+        plugin,
+        text,
       });
       return;
     }

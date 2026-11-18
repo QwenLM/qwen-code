@@ -1,0 +1,30 @@
+{
+  "stale": {
+    "id": "case-048",
+    "kind": "stale",
+    "coverage": "full",
+    "evidence": "read",
+    "recoveryEligible": false,
+    "retryRelation": "unconfirmed",
+    "content": "n_dctufobasd n_raasntszjl n_ymeapjybwm n_caezjfvwzr n_ejatjayusm n_rmvrnnxhbb.n_keujypyblj (\n  n_odutilrice n_ylvdqafrnk\n, n_pjjyylwqut n_lqmftxsxnm\n, n_jacpazikti n_lqmftxsxnm\n, n_zofdcevhky n_lqmftxsxnm\n, n_ampcrgaxaa n_lqmftxsxnm\n, n_ovrssyvlzi n_lqmftxsxnm\n, n_sddiwiuecm n_lqmftxsxnm\n, n_qrsyhrrhdz n_lqmftxsxnm\n, n_riwobeyutr n_ylvdqafrnk\n, n_weuewbekjf n_lqmftxsxnm\n, n_hllvdgnhzy n_lqmftxsxnm\n, n_elukuqsubx n_lqmftxsxnm\n)\nn_nyuhmvjsfm n_ldldizjnkg (n_opgnrjqxad n_lqmftxsxnm)\nn_xbqhqglzbn v_xcerpsvsho\n;",
+    "oldString": "n_dctufobasd n_raasntszjl n_ymeapjybwm n_caezjfvwzr n_ejatjayusm n_rmvrnnxhbb.n_keujypyblj (",
+    "newString": "n_dctufobasd n_raasntszjl n_ymeapjybwm n_caezjfvwzr n_ejatjayusm n_rmvrnnxhbxb.n_keujypyblj (",
+    "expectedCandidate": null,
+    "previousContent": "n_dctufobasd n_raasntszjl n_ymeapjybwm n_caezjfvwzr n_ejatjayusm n_rmvrnnxhbb.n_keujypyblj (\n  n_odutilrice n_ylvdqafrnk\n, n_pjjyylwqut n_lqmftxsxnm\n, n_jacpazikti n_lqmftxsxnm\n, n_zofdcevhky n_lqmftxsxnm\n, n_ampcrgaxaa n_lqmftxsxnm\n, n_ovrssyvlzi n_lqmftxsxnm\n, n_sddiwiuecm n_lqmftxsxnm\n, n_qrsyhrrhdz n_lqmftxsxnm\n, n_riwobeyutr n_ylvdqafrnk\n, n_weuewbekjf n_lqmftxsxnm\n, n_hllvdgnhzy n_lqmftxsxnm\n, n_elukuqsubx n_lqmftxsxnm\n)\nn_nyuhmvjsfm n_ldldizjnkg (n_opgnrjqxad n_lqmftxsxnm)\nn_xbqhqglzbn v_xcerpsvsho\n;\n",
+    "currentContent": "n_dctufobasd n_raasntszjl n_ymeapjybwm n_caezjfvwzr n_ejatjayusm n_rmvrnnxhbb.n_keujypyblj (\n  n_odutilrice n_ylvdqafrnk\n, n_pjjyylwqut n_lqmftxsxnm\n, n_jacpazikti n_lqmftxsxnm\n, n_zofdcevhky n_lqmftxsxnm\n, n_ampcrgaxaa n_lqmftxsxnm\n, n_ovrssyvlzi n_lqmftxsxnm\n, n_sddiwiuecm n_lqmftxsxnm\n, n_qrsyhrrhdz n_lqmftxsxnm\n, n_riwobeyutr n_ylvdqafrnk\n, n_weuewbekjf n_lqmftxsxnm\n, n_hllvdgnhzy n_lqmftxsxnm\n, n_elukuqsubx n_lqmftxsxnm\n)\nn_nyuhmvjsfm n_ldldizjnkg (n_opgnrjqxad n_lqmftxsxnm)\nn_xbqhqglzbn v_xcerpsvsho\n;",
+    "contentChanged": true,
+    "oldMatchedPrevious": true
+  },
+  "noMatch": {
+    "id": "case-021",
+    "kind": "no-match",
+    "coverage": "excerpt",
+    "evidence": "read",
+    "recoveryEligible": false,
+    "retryRelation": "different-target-or-unconfirmed",
+    "content": "            ,n_ztzturgdes\n            ,n_lcthwiinnm(n_etnbsvoclj n_psppwphfud n_utghmmzyli) n_psppwphfud n_bmlhdihgtp\n            ,n_lcthwiinnm(n_etnbsvoclj n_psppwphfud n_utghmmzyli) n_psppwphfud n_ctebyauksg\n            ,n_njmlywtxve(','\n                ,n_gqsdavknza(n_cukypeycuq(n_nbnnvnxqyj,'$.n_besckwpnmp'),'')\n                ,n_gqsdavknza(n_cukypeycuq(n_nbnnvnxqyj,'$.n_cixrvmeafm'),'')\n                ,n_gqsdavknza(n_cukypeycuq(n_nbnnvnxqyj,'$.n_seiyyshzll'),'')\n             ) n_psppwphfud n_vjvsvwlkao\n            ,`n_vdtplkhmpd` n_psppwphfud n_hoxdvstnvd\n            ,n_stliyrkmjv\n            ,n_lcthwiinnm(n_etnbsvoclj n_psppwphfud n_utghmmzyli) n_psppwphfud n_wylbvykanv\n            ,n_lcthwiinnm(n_etnbsvoclj n_psppwphfud n_agvlmbhpcw) n_psppwphfud n_repqdcayqe",
+    "oldString": ",n_njmlywtxve(','\n                ,n_knijdbvaam(n_gqsdavknza(n_cukypeycuq(n_nbnnvnxqyj,'$.n_besckwpnmp'),''),'')\n                ,n_knijdbvaam(n_gqsdavknza(n_cukypeycuq(n_nbnnvnxqyj,'$.n_cixrvmeafm'),''),'')\n                ,n_knijdbvaam(n_gqsdavknza(n_cukypeycuq(n_nbnnvnxqyj,'$.n_seiyyshzll'),''),'')\n             ) n_psppwphfud n_vjvsvwlkao",
+    "newString": ",n_htapwekuvl(n_njmlywtxve(','\n                ,n_knijdbvaam(n_gqsdavknza(n_cukypeycuq(n_nbnnvnxqyj,'$.n_besckwpnmp'),''),'')\n                ,n_knijdbvaam(n_gqsdavknza(n_cukypeycuq(n_nbnnvnxqyj,'$.n_cixrvmeafm'),''),'')\n                ,n_knijdbvaam(n_gqsdavknza(n_cukypeycuq(n_nbnnvnxqyj,'$.n_seiyyshzll'),''),'')\n             ), '^,+|,+$', '') n_psppwphfud n_vjvsvwlkao",
+    "expectedCandidate": null
+  }
+}

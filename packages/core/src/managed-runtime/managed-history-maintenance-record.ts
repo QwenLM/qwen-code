@@ -17,8 +17,7 @@ import {
   type ManagedSessionJsonValue,
 } from './managed-session-records.js';
 
-export interface HistoryMaintenance {
-  readonly schemaVersion: 1;
+export type HistoryMaintenance = {
   readonly kind: 'context_compression';
   readonly operationId: string;
   readonly expectedCompactionRevision: number;
@@ -31,7 +30,13 @@ export interface HistoryMaintenance {
   readonly failureCode: string | null;
   readonly compactionRevision: number | null;
   readonly run: ExtensionRun;
-}
+} & (
+  | { readonly schemaVersion: 1 }
+  | {
+      readonly schemaVersion: 2;
+      readonly modelStatsRef: ManagedSessionDurableRef | null;
+    }
+);
 
 const KEYS = [
   'schemaVersion',
@@ -60,19 +65,36 @@ function sequence(value: unknown, label: string): number {
 }
 
 export function parseHistoryMaintenance(value: unknown): HistoryMaintenance {
+  const version =
+    value && typeof value === 'object'
+      ? (value as Record<string, unknown>)['schemaVersion']
+      : undefined;
+  const keys: readonly string[] =
+    version === 2 ? [...KEYS, 'modelStatsRef'] : KEYS;
   if (
     !value ||
     typeof value !== 'object' ||
     Array.isArray(value) ||
-    Object.keys(value).length !== KEYS.length ||
-    Object.keys(value).some(
-      (key) => !KEYS.includes(key as (typeof KEYS)[number]),
-    )
+    Object.keys(value).length !== keys.length ||
+    Object.keys(value).some((key) => !keys.includes(key))
   )
     fail(`must have exactly the keys ${KEYS.join(', ')}.`);
   const body = value as Record<string, ManagedSessionJsonValue>;
-  if (body['schemaVersion'] !== 1 || body['kind'] !== 'context_compression')
-    fail('must be a schema version 1 context_compression.');
+  if (
+    (version !== 1 && version !== 2) ||
+    body['kind'] !== 'context_compression'
+  )
+    fail('must be a supported context_compression.');
+  const modelStatsRef =
+    version === 2 && body['modelStatsRef'] !== null
+      ? assertManagedSessionDurableRef(body['modelStatsRef'], 'modelStatsRef')
+      : null;
+  if (
+    modelStatsRef &&
+    (modelStatsRef.kind !== 'managed-session-model-stats' ||
+      modelStatsRef.schemaVersion !== 1)
+  )
+    fail('has an invalid modelStatsRef.');
   const phase = body['phase'];
   if (
     !['admitted', 'generating', 'candidate', 'settled'].includes(String(phase))
@@ -123,7 +145,10 @@ export function parseHistoryMaintenance(value: unknown): HistoryMaintenance {
     fail('history cut must not precede its compaction revision.');
   if (
     phase === 'admitted' &&
-    (attempt !== 0 || candidateRef !== null || run.state !== 'admitted')
+    (attempt !== 0 ||
+      candidateRef !== null ||
+      modelStatsRef !== null ||
+      run.state !== 'admitted')
   )
     fail('admission must have no attempt or candidate.');
   if (
@@ -158,7 +183,9 @@ export function parseHistoryMaintenance(value: unknown): HistoryMaintenance {
       fail('only a compressed outcome carries its new compaction revision.');
   }
   return Object.freeze({
-    schemaVersion: 1,
+    ...(version === 2
+      ? { schemaVersion: 2 as const, modelStatsRef }
+      : { schemaVersion: 1 as const }),
     kind: 'context_compression',
     operationId: assertManagedSessionStableId(
       body['operationId'],

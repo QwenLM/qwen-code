@@ -12,7 +12,11 @@ import { SessionFileHistoryAccumulator } from '../services/session-file-history-
 import { CompressionStatus } from '../core/turn.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import { buildApiHistoryFromConversation } from '../services/session-api-history.js';
-import { prepareTranscriptRecords } from './transcript-records.js';
+import {
+  prepareTranscriptRecords,
+  selectActiveGeneratedUiStateRecordUuids,
+  selectActiveSideArtifactRecordUuids,
+} from './transcript-records.js';
 import {
   deleteTranscriptMessageGroups,
   getTranscriptMessageGroups,
@@ -134,6 +138,49 @@ describe('message group deletion', () => {
     );
     expect(kept).toEqual([anchor]);
     expect(getTranscriptMessageGroups(kept)).toEqual([]);
+  });
+
+  it('preserves workspace ownership and active artifacts when saved state needs a new root', () => {
+    const artifact = (id: string, parent: string | null) =>
+      record(id, parent, 'system', {
+        subtype: 'session_artifact_event',
+        gitBranch: 'original-branch',
+      });
+    const records = [
+      artifact('abandoned-artifact', null),
+      user('abandoned', null),
+      record('abandoned-reply', 'abandoned', 'assistant'),
+      artifact('before-turn', null),
+      user('u1', null),
+      record('a1', 'u1', 'assistant'),
+      artifact('after-turn', 'a1'),
+      artifact('artifact-child', 'after-turn'),
+      record('card-save', 'a1', 'system', { subtype: 'generated_ui_state' }),
+      user('u2', 'a1'),
+      record('a2', 'u2', 'assistant'),
+    ];
+    const { records: kept } = deleteTranscriptMessageGroups(records, ['u1'], {
+      ...anchor,
+      cwd: '/project/subdirectory',
+      gitBranch: 'nested-branch',
+    });
+    const root = kept[0]!;
+    const active = prepareTranscriptRecords(kept).records.map(
+      ({ uuid }) => uuid,
+    );
+    expect(root).toMatchObject({
+      cwd: '/project',
+      gitBranch: 'original-branch',
+    });
+    expect(active).toEqual([root.uuid, 'u2', 'a2', anchor.uuid]);
+    expect(selectActiveGeneratedUiStateRecordUuids(kept, active)).toEqual([
+      'card-save',
+    ]);
+    expect(selectActiveSideArtifactRecordUuids(kept, active)).toEqual([
+      'before-turn',
+      'after-turn',
+      'artifact-child',
+    ]);
   });
 
   it('remaps directory context identities across a deleted checkpoint turn', () => {

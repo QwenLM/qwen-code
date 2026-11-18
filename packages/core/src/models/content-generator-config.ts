@@ -18,10 +18,15 @@ import {
   resolveReasoningCapabilities,
 } from '../core/reasoning-overrides.js';
 import {
+  AuthType,
   createContentGenerator,
-  type AuthType,
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import {
+  DEFAULT_DASHSCOPE_BASE_URL,
+  DEFAULT_OPENAI_BASE_URL,
+  normalizeOpenAiWireBaseUrl,
+} from '../core/openaiContentGenerator/constants.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   AUTH_ENV_MAPPINGS,
@@ -42,6 +47,7 @@ const debugLogger = createDebugLogger('AGENT_CONTENT_GENERATOR');
 
 export interface AuthOverrides {
   registryBaseUrl?: string | null;
+  isolatedRoute?: boolean;
   authType: string;
   apiKey?: string;
   baseUrl?: string;
@@ -242,6 +248,7 @@ function buildInheritedAgentContentGeneratorConfig(
 
   const nextConfig: ContentGeneratorConfig = {
     ...parentConfig,
+    ...(authOverrides.isolatedRoute && { isolatedRoute: true }),
     model: modelId ?? parentConfig.model,
     authType: authOverrides.authType as AuthType,
   };
@@ -334,6 +341,58 @@ export async function createRuntimeContentGeneratorView(
   return { contentGenerator, contentGeneratorConfig };
 }
 
+function openAiApiPrefix(
+  authType: AuthType,
+  baseUrl: string | undefined,
+): string | undefined {
+  if (authType === AuthType.USE_OPENAI) {
+    // DashScope supplies a URL when the setting is absent. An explicit empty
+    // string goes to the OpenAI SDK, which uses its native default instead.
+    const sdkBaseUrl =
+      baseUrl === undefined ? DEFAULT_DASHSCOPE_BASE_URL : baseUrl;
+    return (sdkBaseUrl || DEFAULT_OPENAI_BASE_URL).replace(/\/$/, '');
+  }
+  if (authType === AuthType.USE_OPENAI_RESPONSES) {
+    // Responses appends /v1 even when the configured URL has another prefix.
+    return `${normalizeOpenAiWireBaseUrl(baseUrl)}/v1`;
+  }
+  return undefined;
+}
+
+function matchesIsolatedEndpoint(
+  parent: ContentGeneratorConfig,
+  targetAuthType: AuthType,
+  targetBaseUrl: string | undefined,
+): boolean {
+  const { authType, baseUrl } = parent;
+  if (
+    authType === AuthType.USE_OPENAI ||
+    authType === AuthType.USE_OPENAI_RESPONSES
+  ) {
+    const prefix = openAiApiPrefix(authType, baseUrl);
+    return (
+      prefix !== undefined &&
+      prefix === openAiApiPrefix(targetAuthType, targetBaseUrl)
+    );
+  }
+  if (authType !== targetAuthType) return false;
+  if (authType === AuthType.USE_GEMINI || authType === AuthType.USE_VERTEX_AI) {
+    const useVertex = authType === AuthType.USE_VERTEX_AI;
+    // The isolated transport fixes the protocol and rejects ambient URLs.
+    const ambientMode =
+      process.env['GOOGLE_GENAI_USE_ENTERPRISE'] ??
+      process.env['GOOGLE_GENAI_USE_VERTEXAI'];
+    const parentUsesVertex =
+      parent.vertexai ??
+      (useVertex || ambientMode?.trim().toLowerCase() === 'true');
+    return (
+      parentUsesVertex === useVertex &&
+      (baseUrl || undefined) === (targetBaseUrl || undefined)
+    );
+  }
+  return baseUrl === targetBaseUrl;
+}
+
 function applyResolvedModelConfig(
   targetConfig: ContentGeneratorConfig,
   resolvedModel: ResolvedModelConfig,
@@ -341,19 +400,31 @@ function applyResolvedModelConfig(
   authOverrides: AuthOverrides,
 ): void {
   const sameProvider = authOverrides.authType === parentConfig.authType;
+  const targetBaseUrl = authOverrides.baseUrl ?? resolvedModel.baseUrl;
+  const sameEndpoint = authOverrides.isolatedRoute
+    ? matchesIsolatedEndpoint(
+        parentConfig,
+        resolvedModel.authType,
+        targetBaseUrl,
+      )
+    : sameProvider && resolvedModel.baseUrl === parentConfig.baseUrl;
   const inheritCredentials =
-    sameProvider &&
-    (authOverrides.registryBaseUrl === undefined ||
-      (resolvedModel.baseUrl === parentConfig.baseUrl &&
-        resolvedModel.envKey === parentConfig.apiKeyEnvKey));
-  if (!inheritCredentials) targetConfig.customHeaders = undefined;
+    !authOverrides.isolatedRoute && authOverrides.registryBaseUrl === undefined
+      ? sameProvider
+      : sameEndpoint &&
+        resolvedModel.envKey === parentConfig.apiKeyEnvKey &&
+        (sameProvider || !!resolvedModel.envKey);
+  if (authOverrides.isolatedRoute || !inheritCredentials) {
+    targetConfig.customHeaders = undefined;
+  }
   targetConfig.reasoningRouteBaseUrl = resolvedModel.registryBaseUrl ?? null;
   targetConfig.model = resolvedModel.id;
   targetConfig.authType = resolvedModel.authType;
   targetConfig.baseUrl =
-    authOverrides.baseUrl ??
-    resolvedModel.baseUrl ??
-    (sameProvider ? parentConfig.baseUrl : undefined);
+    targetBaseUrl ??
+    (sameProvider && !authOverrides.isolatedRoute
+      ? parentConfig.baseUrl
+      : undefined);
 
   if (resolvedModel.envKey) {
     targetConfig.apiKey =
@@ -362,12 +433,32 @@ function applyResolvedModelConfig(
       (inheritCredentials ? parentConfig.apiKey : undefined);
     targetConfig.apiKeyEnvKey = resolvedModel.envKey;
   } else {
+    let apiKey = authOverrides.apiKey;
+    if (authOverrides.isolatedRoute && apiKey === undefined) {
+      apiKey = resolveCredentialField(
+        undefined,
+        undefined,
+        authOverrides.authType,
+        'apiKey',
+      );
+      // Block implicit credential reuse across endpoints before validation can
+      // choose a different principal (e.g. Vertex ADC).
+      if (
+        apiKey !== undefined &&
+        apiKey.trim() === parentConfig.apiKey?.trim() &&
+        !sameEndpoint
+      ) {
+        throw new Error(
+          `Model '${resolvedModel.id}' cannot use the primary model's implicit API key. Configure an envKey for this model.`,
+        );
+      }
+    }
     targetConfig.apiKey =
       authOverrides.registryBaseUrl !== undefined && !inheritCredentials
-        ? authOverrides.apiKey
+        ? apiKey
         : resolveCredentialField(
-            authOverrides.apiKey,
-            sameProvider ? parentConfig.apiKey : undefined,
+            apiKey,
+            inheritCredentials ? parentConfig.apiKey : undefined,
             authOverrides.authType,
             'apiKey',
           );
@@ -376,14 +467,24 @@ function applyResolvedModelConfig(
       : undefined;
   }
 
-  // Cross-provider fields are cleared by buildAgentContentGeneratorConfig.
-  // Same-provider fields inherit unless the registry overrides them, except
+  // Two rows for the same model can share a URL and API key but use different
+  // custom auth headers or request fields.
+  const differentRowForSameModel =
+    resolvedModel.id === parentConfig.model &&
+    targetConfig.reasoningRouteBaseUrl !== parentConfig.reasoningRouteBaseUrl;
+  const isolateGenerationConfig =
+    authOverrides.isolatedRoute &&
+    (differentRowForSameModel ||
+      !inheritCredentials ||
+      targetConfig.apiKey !== parentConfig.apiKey);
+  // Other same-provider fields inherit unless the registry overrides them, except
   // model capabilities such as thinkingMandatory, which must not leak, and
   // enableRequestMetadata, which is a per-model decision: an inherited true
   // would ship the DashScope tracing object to a vendor-forwarded side model.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
     if (
+      isolateGenerationConfig ||
       registryValue !== undefined ||
       field === 'thinkingMandatory' ||
       field === 'enableRequestMetadata'

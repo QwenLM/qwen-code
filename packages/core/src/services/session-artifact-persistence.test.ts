@@ -8,6 +8,8 @@ import { describe, expect, it } from 'vitest';
 import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   getWebPreviewSnapshotId,
+  hasDisqualifyingArtifactJournalWarning,
+  isRestorablePersistedArtifact,
   normalizeEventPayload,
   normalizeSnapshotPayload,
   rebuildSessionArtifactSnapshot,
@@ -750,5 +752,166 @@ describe('session artifact persistence records', () => {
     expect(normalized?.artifacts).toHaveLength(1);
     expect(normalized?.artifacts[0]?.metadata).toEqual({ keep: true });
     expect(warnings).toContain('skipped artifact without id/title');
+  });
+});
+
+describe('event payload artifact count (summary sidecar hint)', () => {
+  it('preserves a valid restorable count without warnings', () => {
+    const warnings: string[] = [];
+    const normalized = normalizeEventPayload(
+      { ...hdr(1, 0, 'session-A'), changes: [], artifactCount: 3 },
+      warnings,
+    );
+    expect(normalized?.artifactCount).toBe(3);
+    expect(warnings).toEqual([]);
+  });
+
+  it('preserves a zero count (all artifacts removed)', () => {
+    const normalized = normalizeEventPayload(
+      { ...hdr(1, 0, 'session-A'), changes: [], artifactCount: 0 },
+      [],
+    );
+    expect(normalized?.artifactCount).toBe(0);
+  });
+
+  it('omits the count when absent (older records)', () => {
+    const normalized = normalizeEventPayload(
+      { ...hdr(1, 0, 'session-A'), changes: [] },
+      [],
+    );
+    expect(normalized).toBeDefined();
+    expect(normalized?.artifactCount).toBeUndefined();
+  });
+
+  it.each([-1, 1.5, '3', null, Number.NaN, Number.POSITIVE_INFINITY])(
+    'silently drops malformed count %p without invalidating the record',
+    (bad) => {
+      const warnings: string[] = [];
+      const normalized = normalizeEventPayload(
+        { ...hdr(1, 0, 'session-A'), changes: [], artifactCount: bad },
+        warnings,
+      );
+      expect(normalized).toBeDefined();
+      expect(normalized?.artifactCount).toBeUndefined();
+      expect(warnings).toEqual([]);
+    },
+  );
+
+  it('strips the source count when remapping an event for fork', () => {
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        ...hdr(1, 0, 'source-session'),
+        changes: [created(src('counted'))],
+        artifactCount: 5,
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactEventRecordPayload;
+    expect(remapped.sessionId).toBe('forked-session');
+    expect(remapped.changes).toHaveLength(1);
+    expect(remapped.artifactCount).toBeUndefined();
+  });
+});
+
+describe('journal authority and restorable-set predicates', () => {
+  it('classifies change-level damage as disqualifying, per-artifact skips as tolerated', () => {
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped malformed artifact change',
+      ]),
+    ).toBe(true);
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped artifact change with invalid action',
+      ]),
+    ).toBe(true);
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped malformed artifact abc123',
+      ]),
+    ).toBe(false);
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped oversized metadata for artifact abc123',
+      ]),
+    ).toBe(false);
+    expect(
+      hasDisqualifyingArtifactJournalWarning([
+        'skipped artifact without id/title',
+      ]),
+    ).toBe(false);
+    expect(hasDisqualifyingArtifactJournalWarning([])).toBe(false);
+  });
+
+  it('drops non-snapshot published file locators but keeps real preview snapshots', () => {
+    const sessionId = 'predicate-session';
+    const base = {
+      retention: 'restorable',
+      status: 'available',
+      clientRetained: true,
+      createdAt: T0,
+      updatedAt: T0,
+    } as const;
+    const legacyUrl = 'file:///tmp/legacy/index.html';
+    const legacy: PersistedSessionArtifact = {
+      ...base,
+      id: stableSessionArtifactId(sessionId, `url:${legacyUrl}`),
+      kind: 'html',
+      storage: 'published',
+      source: 'client',
+      title: 'Legacy',
+      url: legacyUrl,
+    };
+    expect(isRestorablePersistedArtifact(legacy)).toBe(false);
+    // The bridge refuses EVERY non-snapshot published file locator on
+    // restore, whatever its kind or id — a narrower seed rule would flip
+    // the row's count between the seed and the next durable event stamp.
+    expect(
+      isRestorablePersistedArtifact({
+        ...legacy,
+        kind: 'link',
+        title: 'Legacy link',
+        url: 'file:///tmp/legacy/report.pdf',
+      }),
+    ).toBe(false);
+    expect(
+      isRestorablePersistedArtifact({
+        ...legacy,
+        id: 'pre-stable-id-scheme',
+      }),
+    ).toBe(false);
+    const previewId = '8c5e8dc7-4d9c-4a52-a703-7391e9b42dad';
+    const preview: PersistedSessionArtifact = {
+      ...base,
+      id: stableSessionArtifactId(sessionId, `managed:preview-${previewId}`),
+      kind: 'html',
+      storage: 'published',
+      source: 'tool',
+      toolName: 'artifact',
+      title: 'Preview',
+      managedId: `preview-${previewId}`,
+      url: `file:///tmp/p/artifacts/snapshots/${previewId}/index.html`,
+      metadata: {
+        artifactType: 'web_preview_snapshot',
+        'qwen.published.sha256': 'a'.repeat(64),
+      },
+    };
+    expect(isRestorablePersistedArtifact(preview)).toBe(true);
+    const link: PersistedSessionArtifact = {
+      ...base,
+      id: stableSessionArtifactId(sessionId, 'url:https://example.com/x'),
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      title: 'Link',
+      url: 'https://example.com/x',
+    };
+    expect(isRestorablePersistedArtifact(link)).toBe(true);
+    expect(
+      isRestorablePersistedArtifact({
+        ...link,
+        retention: 'ephemeral',
+      }),
+    ).toBe(false);
   });
 });

@@ -6,7 +6,7 @@
 
 import express from 'express';
 import request from 'supertest';
-import { beforeEach, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -21,25 +21,32 @@ import {
   registerAgentHostTransportRoutes,
 } from './agent-hosts.js';
 
-const { heartbeat, authenticate, orchestrator, getOrchestrator, ensure } =
-  vi.hoisted(() => {
-    const orchestrator = {
-      pickupForHost: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
-      renewLease: vi.fn<(...args: unknown[]) => { ok: boolean }>(),
-      acceptHostEvents: vi.fn<(...args: unknown[]) => unknown>(),
-      completeHostTurn: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
-      decisionsForHost: vi.fn<(...args: unknown[]) => unknown[]>(),
-      releaseHostAssignment: vi.fn<(...args: unknown[]) => boolean>(),
-      ready: vi.fn(async () => {}),
-    };
-    return {
-      heartbeat: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
-      authenticate: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
-      orchestrator,
-      getOrchestrator: vi.fn<() => typeof orchestrator | undefined>(),
-      ensure: vi.fn<(...args: unknown[]) => Promise<unknown[]>>(),
-    };
-  });
+const {
+  heartbeat,
+  authenticate,
+  enroll,
+  orchestrator,
+  getOrchestrator,
+  ensure,
+} = vi.hoisted(() => {
+  const orchestrator = {
+    pickupForHost: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+    renewLease: vi.fn<(...args: unknown[]) => { ok: boolean }>(),
+    acceptHostEvents: vi.fn<(...args: unknown[]) => unknown>(),
+    completeHostTurn: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+    decisionsForHost: vi.fn<(...args: unknown[]) => unknown[]>(),
+    releaseHostAssignment: vi.fn<(...args: unknown[]) => boolean>(),
+    ready: vi.fn(async () => {}),
+  };
+  return {
+    heartbeat: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+    authenticate: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+    enroll: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+    orchestrator,
+    getOrchestrator: vi.fn<() => typeof orchestrator | undefined>(),
+    ensure: vi.fn<(...args: unknown[]) => Promise<unknown[]>>(),
+  };
+});
 
 vi.mock(
   '@qwen-code/qwen-code-core/agents/workspace-agents/store.js',
@@ -49,6 +56,7 @@ vi.mock(
     >()),
     authenticateAgentHost: authenticate,
     heartbeatAgentHost: heartbeat,
+    enrollAgentHost: enroll,
   }),
 );
 vi.mock('../session-agents/orchestrator.js', () => ({
@@ -152,6 +160,87 @@ const LEASE = {
   attempt: 1,
   leaseId: 'lease-1',
 };
+
+describe('enrollment', () => {
+  const ENROLLMENT = {
+    workspaceId: 'workspace',
+    token: 'join-token',
+    name: 'mac',
+    workspaceCwd: '/remote',
+    providers: ['qwen'],
+  };
+
+  it.each([
+    ['the secret the Host saved', { secret: 'p'.repeat(43) }],
+    ['no secret, from an older Host', {}],
+  ])('passes on %s', async (_label, extra) => {
+    enroll.mockResolvedValue({ host: { id: 'host' }, secret: 'p'.repeat(43) });
+
+    const response = await request(setup().app)
+      .post('/agent-hosts/enroll')
+      .send({ ...ENROLLMENT, ...extra });
+
+    expect(response.status).toBe(201);
+    expect(enroll).toHaveBeenCalledWith('/work/selected', {
+      token: 'join-token',
+      name: 'mac',
+      workspaceCwd: '/remote',
+      providers: ['qwen'],
+      ...extra,
+    });
+  });
+
+  it.each([
+    [
+      'a Replace whose secret is enrolled, so the Host can make a new one',
+      new Error('This Agent Host secret is already enrolled.'),
+      409,
+      'This Agent Host secret is already enrolled.',
+    ],
+    [
+      'an enrollment the store refused',
+      Object.assign(
+        new Error('Invalid or expired Agent Host enrollment token.'),
+        { enrollmentRefused: true },
+      ),
+      401,
+      'Agent Host enrollment refused.',
+    ],
+    [
+      'a busy store, so the Host keeps its secret',
+      Object.assign(new Error('Lock file is already being held'), {
+        code: 'ELOCKED',
+      }),
+      503,
+      'Agent Host enrollment did not complete; retry.',
+    ],
+    [
+      'a failing store, without naming it',
+      new Error('ENOENT: /secret/path'),
+      503,
+      'Agent Host enrollment did not complete; retry.',
+    ],
+  ])('says so for %s', async (_label, failure, status, error) => {
+    enroll.mockRejectedValue(failure);
+
+    const response = await request(setup().app)
+      .post('/agent-hosts/enroll')
+      .send({ ...ENROLLMENT, secret: 'p'.repeat(43) });
+
+    expect(response.status).toBe(status);
+    expect(response.body).toEqual({ error });
+  });
+
+  it('refuses a secret that is not a string before reaching the store', async () => {
+    const response = await request(setup().app)
+      .post('/agent-hosts/enroll')
+      .send({ ...ENROLLMENT, secret: 42 });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: 'Invalid Agent Host enrollment.' });
+    expect(enroll).not.toHaveBeenCalled();
+  });
+});
 
 it('stores the probe, renews the listed leases and returns decisions on heartbeat', async () => {
   heartbeat.mockResolvedValue(V2_HOST);

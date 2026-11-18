@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import { parseJoinLink } from '../serve/agent-host-join.js';
 import { listExplicitCandidates } from '../serve/local-control/lan-interfaces.js';
 import type { Argv, CommandModule } from 'yargs';
@@ -282,6 +283,7 @@ interface ServeArgs {
   'max-total-sessions'?: number;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
+  'max-sse-connections'?: number;
   'event-ring-size': number;
   'event-ring-max-bytes': number;
   'compacted-replay-max-bytes': number;
@@ -353,9 +355,7 @@ function primaryWorkspaceArg(
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
-  command: 'serve',
-  describe:
-    'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
+  ...commandMetadata.serve,
   builder: (yargs: Argv) =>
     yargs
       .option('port', {
@@ -397,7 +397,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         requiresArg: true,
         description:
-          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires an independent browser token of at least 32 bytes via QWEN_SERVER_TOKEN or --token.',
+          'Run only the authenticated Managed Web gateway using a JSON file with apiUrl, tenantId, actorId and signingKeyFile. Requires a non-empty independent browser token via QWEN_SERVER_TOKEN or --token.',
       })
       .option('token', {
         type: 'string',
@@ -456,6 +456,19 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Listener-level TCP connection cap (server.maxConnections). Bounds raw ' +
           'sockets — slow/phantom SSE clients get rejected at accept time once full. ' +
           'Set to 0 to disable.',
+      })
+      .option('max-sse-connections', {
+        type: 'number',
+        description:
+          'Admission cap on concurrent long-lived streams: every SSE surface ' +
+          '(session events, agent session-events, generation, artifact-library, ' +
+          'hosted-harness events) plus ACP SSE/WebSocket. ' +
+          'Defaults to 80% of --max-connections so short requests (/health, static ' +
+          'assets) keep listener headroom; streams at the cap get 503 + Retry-After ' +
+          'instead of a silent socket close. Pairing listeners (local-control / ' +
+          'remote-access) additionally clamp at 80% of their own 64-socket budget. ' +
+          'Explicit values floor to at least one ' +
+          'stream and clamp to that headroom ceiling. Set to 0 to disable.',
       })
       .option('require-auth', {
         type: 'boolean',
@@ -831,8 +844,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('writer-idle-timeout-ms', {
         type: 'number',
         description:
-          'Per-SSE-connection idle deadline (ms). ' +
-          'Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
+          'Per-SSE-connection writer stall budget (ms): evict a stream whose ' +
+          'write is stuck waiting for drain (consumer stopped reading) longer ' +
+          'than this. Default 60000 when unset; healthy idle streams are never ' +
+          'evicted. Falls back to QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS. Positive integer.',
       })
       .option('channel-idle-timeout-ms', {
         type: 'number',
@@ -1230,6 +1245,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
+        ...(argv['max-sse-connections'] !== undefined
+          ? { maxSseConnections: argv['max-sse-connections'] }
+          : {}),
         eventRingSize: argv['event-ring-size'],
         eventRingMaxBytes: argv['event-ring-max-bytes'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],

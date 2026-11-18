@@ -8,12 +8,12 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
-import com.alibaba.qwen.code.managedagent.persistence.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceOperatorRecoveryStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract.Fixture;
@@ -24,7 +24,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -62,7 +62,7 @@ class WorkspaceExecutionMembershipMySqlIT {
     private DataSource source;
     private ManagedSchemaJdbcTemplate jdbc;
     private ManagedAgentStore store;
-    private WorkspaceExecutionStore authority;
+    private JdbcWorkspaceExecutionStore authority;
     private String schema;
     @TempDir
     private Path temp;
@@ -74,7 +74,7 @@ class WorkspaceExecutionMembershipMySqlIT {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         store = VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new SdkHarnessRules());
         authority = authority(new DataSourceTransactionManager(source));
         schema = jdbc.queryForObject("SELECT DATABASE()", String.class);
     }
@@ -214,7 +214,7 @@ class WorkspaceExecutionMembershipMySqlIT {
         guard.register(tenant, "storage", UUID.randomUUID().toString());
         var fixture = new Fixture(source, jdbc, store, tenant, "workspace", "storage");
         var runtime = fixture.runtime("physical");
-        var children = new ChildWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
+        var children = new JdbcChildWorkspaceStore(jdbc, new DataSourceTransactionManager(source));
         var child = children.claim(children.admit(tenant, fixture.session.sessionId(), UUID.randomUUID().toString(),
                 fixture.session.workspace(), System.currentTimeMillis()), "maintenance", System.currentTimeMillis(), 60_000);
         java.util.concurrent.Callable<String> physical = () -> {
@@ -365,8 +365,8 @@ class WorkspaceExecutionMembershipMySqlIT {
                         .selection(new WorkspaceSelection("workspace", ".")).build()).sessionId());
     }
 
-    private WorkspaceExecutionStore authority(DataSourceTransactionManager manager) {
-        return VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, manager));
+    private JdbcWorkspaceExecutionStore authority(DataSourceTransactionManager manager) {
+        return VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, manager));
     }
 
     private Connection lock(String sql, String value) throws Exception {
@@ -388,7 +388,7 @@ class WorkspaceExecutionMembershipMySqlIT {
 
     private void checkMembers(Fixture fixture) {
         String key = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ?", String.class,
-                JdbcRuntimeBindingRepository.storageAliasKey(fixture.tenant, fixture.session.workspace().getStorageId()));
+                RuntimeAdmissionFences.storageAliasKey(fixture.tenant, fixture.session.workspace().getStorageId()));
         long members = jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE execution_storage_key = ?", Long.class, key);
         assertThat(jdbc.queryForObject("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?", Long.class, key))
                 .isEqualTo(members);

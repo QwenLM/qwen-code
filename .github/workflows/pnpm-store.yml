@@ -44,6 +44,23 @@ jobs:
         with:
           fetch-depth: 1
 
+      # COREPACK_HOME defaults to $HOME/.cache/node/corepack, which is the
+      # HOST runner's home bind-mounted into every container job on this pool
+      # and therefore survives across jobs and workflows. corepack does not
+      # re-verify an existing pinned entry: once one is left with its
+      # pnpm.mjs missing (a cancelled download, a concurrent writer), every
+      # later `corepack pnpm` dies instantly with MODULE_NOT_FOUND instead of
+      # re-fetching — run 43016357930 failed here in 21s on exactly
+      # .../pnpm/11.24.0/bin/pnpm.mjs. Point corepack at a job-owned directory
+      # so each producer run resolves the pinned pnpm from an empty cache.
+      # ci.yml already isolates its lanes the same way.
+      - name: 'Isolate the corepack cache'
+        run: |-
+          corepack_home="$RUNNER_TEMP/qwen-corepack"
+          rm -rf -- "$corepack_home"
+          mkdir -p "$corepack_home"
+          echo "COREPACK_HOME=$corepack_home" >> "$GITHUB_ENV"
+
       # --ignore-scripts: only the store is saved, and no lifecycle script
       # writes to it.
       - name: 'Populate pnpm store'

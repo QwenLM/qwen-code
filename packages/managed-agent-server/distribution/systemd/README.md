@@ -134,8 +134,8 @@ cannot check what it reads:
 
 - a named file that does not exist;
 - a file the service account cannot read;
-- a file only the account running `--check` cannot read; the fix is then to
-  run it as the service account;
+- a file only the account running `--check` cannot read, or cannot reach past
+  a directory on its path; the fix is then to run it as the service account;
 - a YAML error, with its line, and with its file unless an import inside
   another file named it.
 

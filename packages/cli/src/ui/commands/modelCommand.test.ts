@@ -276,7 +276,7 @@ describe('modelCommand', () => {
       expect(switchModel).toHaveBeenCalledWith(
         AuthType.USE_OPENAI,
         'qwen3.6-plus',
-        undefined,
+        { initializeIfNeeded: true },
       );
     },
   );
@@ -296,6 +296,7 @@ describe('modelCommand', () => {
       AuthType.QWEN_OAUTH,
       'coder-model',
       {
+        initializeIfNeeded: true,
         requireCachedCredentials: true,
       },
     );
@@ -331,11 +332,9 @@ describe('modelCommand', () => {
 
     const result = await modelCommand.action!(mockContext, 'qwen-max');
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
-      'qwen-max',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.QWEN_OAUTH, 'qwen-max', {
+      initializeIfNeeded: true,
+    });
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'model.name',
@@ -436,11 +435,9 @@ describe('modelCommand', () => {
 
     await modelCommand.action!(mockContext, 'qwen-max');
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
-      'qwen-max',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.QWEN_OAUTH, 'qwen-max', {
+      initializeIfNeeded: true,
+    });
     expect(setValue).not.toHaveBeenCalled();
   });
 
@@ -770,11 +767,9 @@ describe('modelCommand', () => {
       'Refresh failed',
     );
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.QWEN_OAUTH,
-      'qwen-max',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.QWEN_OAUTH, 'qwen-max', {
+      initializeIfNeeded: true,
+    });
     expect(setValue).not.toHaveBeenCalled();
   });
 
@@ -888,11 +883,9 @@ describe('modelCommand', () => {
       `gpt-4(${AuthType.USE_OPENAI})`,
     );
 
-    expect(switchModel).toHaveBeenCalledWith(
-      AuthType.USE_OPENAI,
-      'gpt-4',
-      undefined,
-    );
+    expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
+      initializeIfNeeded: true,
+    });
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'security.auth.selectedType',
@@ -2296,7 +2289,7 @@ describe('modelCommand', () => {
     expect(switchModel).toHaveBeenCalledWith(
       AuthType.USE_OPENAI,
       '--fast-model',
-      undefined,
+      { initializeIfNeeded: true },
     );
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),

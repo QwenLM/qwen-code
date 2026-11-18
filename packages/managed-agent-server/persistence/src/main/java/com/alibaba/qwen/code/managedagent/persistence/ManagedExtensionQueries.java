@@ -5,8 +5,9 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHookRecor
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskPage;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskRow;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskTarget;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -19,30 +20,30 @@ import java.util.Optional;
 final class ManagedExtensionQueries {
     private ManagedExtensionQueries() { }
 
-    static List<JsonNode> records(JdbcTemplate jdbc, ManagedExtensionRecordStore store, String tenant, String session, String domain) {
+    static List<JsonNode> records(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore store, String tenant, String session, String domain) {
         var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
-        ManagedExtensionRecordStore.require(body != null, "Unknown extension record domain.");
+        JdbcManagedExtensionRecordStore.require(body != null, "Unknown extension record domain.");
         List<String> ids = jdbc.query("SELECT record_resource_id FROM"
                         + " ma_session_record WHERE record_kind = 'DOMAIN' AND"
                         + " session_scope_key = ? AND tenant_id = ?"
                         + " AND session_id = ? AND domain = ? ORDER BY gmt_create, record_key",
                 (result, row) -> result.getString("record_resource_id"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, domain);
+                ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session, domain);
         return ids.stream().map(id -> {
-            JsonNode record = ManagedExtensionRecordStore.readBody(store.readResource(tenant, session, id));
+            JsonNode record = JdbcManagedExtensionRecordStore.readBody(store.readResource(tenant, session, id));
             body.require().accept(record);
             return record;
         }).toList();
     }
 
-    static Optional<JsonNode> latestHook(JdbcTemplate jdbc, ManagedExtensionRecordStore store, String tenant, String session) {
+    static Optional<JsonNode> latestHook(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore store, String tenant, String session) {
         return jdbc.query("SELECT record_resource_id FROM ma_session_record WHERE record_kind ="
                         + " 'DOMAIN' AND session_scope_key = ? AND tenant_id = ? AND session_id"
                         + " = ? AND domain = 'hook_registration' AND settled_at IS NOT NULL ORDER BY first_sequence DESC",
                 (result, row) -> result.getString("record_resource_id"),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session)
+                ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session)
                 .stream().map(id -> {
-                    JsonNode record = ManagedExtensionRecordStore.readBody(store.readResource(tenant, session, id));
+                    JsonNode record = JdbcManagedExtensionRecordStore.readBody(store.readResource(tenant, session, id));
                     ManagedHookRecords.requireRegistration(record);
                     return record;
                 }).filter(record -> "settled".equals(record.path("run").path("state").textValue())).findFirst();
@@ -51,8 +52,8 @@ final class ManagedExtensionQueries {
     static String readRevision(JdbcTemplate jdbc, String tenant, String session) {
         return jdbc.query("SELECT journal_revision FROM ma_session_head WHERE tenant_key = ?"
                         + " AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
-                (row, index) -> row.getString("journal_revision"), JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                JdbcRuntimeBindingRepository.harnessDrainKey(session), tenant, session).stream().findFirst().orElse(null);
+                (row, index) -> row.getString("journal_revision"), RuntimeAdmissionFences.harnessDrainKey(tenant),
+                RuntimeAdmissionFences.harnessDrainKey(session), tenant, session).stream().findFirst().orElse(null);
     }
 
     static Optional<JsonNode> configRef(JdbcTemplate jdbc, String tenant, String session) {
@@ -72,7 +73,7 @@ final class ManagedExtensionQueries {
 
     private static List<JsonNode> refs(JdbcTemplate jdbc, String tenant, String session, String suffix, List<?> extra) {
         List<Object> arguments = new ArrayList<>();
-        arguments.add(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session));
+        arguments.add(ManagedSessionStore.sessionScopeKey(tenant, session));
         arguments.add(tenant);
         arguments.add(session);
         arguments.addAll(extra);
@@ -89,7 +90,7 @@ final class ManagedExtensionQueries {
     static TaskPage tasks(JdbcTemplate jdbc, String tenant, String session, Long beforeCreatedAt,
             String beforeRecordKey, int limit, boolean childrenOnly, RowMapper<TaskRow> mapper) {
         List<Object> arguments = new ArrayList<>();
-        arguments.add(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session));
+        arguments.add(ManagedSessionStore.sessionScopeKey(tenant, session));
         String cursor = "";
         if (beforeCreatedAt != null) {
             cursor = " AND (gmt_create < ? OR gmt_create = ? AND record_key < ?)";
@@ -112,11 +113,11 @@ final class ManagedExtensionQueries {
         }
         return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns()
                         + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ? AND task_kind IS NOT NULL",
-                mapper, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), recordKey)
+                mapper, ManagedSessionStore.sessionScopeKey(tenant, session), recordKey)
                 .stream().findFirst();
     }
 
-    static Optional<TaskTarget> target(JdbcTemplate jdbc, ManagedExtensionRecordStore store,
+    static Optional<TaskTarget> target(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore store,
             String tenant, String session, String recordKey, RowMapper<TaskRow> mapper) {
         if (recordKey == null) {
             return Optional.empty();
@@ -128,9 +129,9 @@ final class ManagedExtensionQueries {
                     return new String[] {result.getString("domain"), result.getString("record_id"),
                             result.getString("task_kind"), result.getString("task_state"),
                             Long.toString(result.getLong("revision")), result.getString("record_resource_id")};
-                }, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), recordKey)
+                }, ManagedSessionStore.sessionScopeKey(tenant, session), recordKey)
                 .stream().findFirst().map(row -> {
-                    JsonNode body = ManagedExtensionRecordStore.readBody(store.readResource(tenant, session, row[5]));
+                    JsonNode body = JdbcManagedExtensionRecordStore.readBody(store.readResource(tenant, session, row[5]));
                     ManagedExtensionProjection.RECORD_BODIES.get(row[0]).require().accept(body);
                     return new TaskTarget(row[0], row[1], row[2], row[3], Long.parseLong(row[4]), body);
                 });

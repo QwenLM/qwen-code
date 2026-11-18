@@ -917,15 +917,6 @@ function mountWorkspaceMemoryRememberRoutesAt(
 
     const originatorClientId = validateOriginatorClientId(deps, req, res);
     if (originatorClientId === null) return;
-    if (
-      !(await validateManagedMemoryAvailable(
-        deps,
-        res,
-        'forget',
-        assertGenerationOpen,
-      ))
-    )
-      return;
     if (!requireOpenGeneration(assertGenerationOpen, res)) return;
 
     try {

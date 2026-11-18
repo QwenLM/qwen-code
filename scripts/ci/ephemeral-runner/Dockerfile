@@ -6,11 +6,30 @@ ARG RUNNER_VERSION=2.338.2
 ARG RUNNER_RELEASE_URL=https://github.com/actions/runner/releases/download
 ARG DEBIAN_MIRROR=deb.debian.org
 ARG PIP_INDEX_URL=https://pypi.org/simple
+# The default CDN 307-redirects to playwright.download.prss.microsoft.com,
+# measured from the hz4/hz5 hosts at 61 KB/s for revision 1228 — a ~110 MB
+# headless shell was still at 70% after six minutes when two visuals jobs were
+# cancelled on 2026-11-11. The npmmirror binary mirror served the same object
+# at 8.9 MB/s from the same host. Overridable for a host that can reach the
+# upstream CDN faster, or that mirrors it internally.
+#
+# The mirror is incomplete: its `builds/cft/` starts at 148.0.7778.96, so it
+# holds 1.61.1's 149.0.7827.55 and 1.62.1's 151.0.7922.34 but 404s 1.58.2's
+# 145.0.7632.6 (and 1.58.2's non-CFT `builds/chromium/1208/`). The install loop
+# therefore falls back to playwright's own CDN list per version, rather than
+# pinning a version-to-host map that a dependency bump would silently outrun.
+# A failed fallback exits the build explicitly: inside the `&&` chain below a
+# loop body is exempt from `set -e`, so without the `exit` the loop could
+# finish clean after a version failed.
+ARG PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
 
+# fonts-dejavu-core supplies the DejaVu faces: verify-capture resolves bold
+# through the host font stack, and the unit suite asserts a bold capture
+# differs from plain; without a bold face the two rasterise identically.
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get update -o Acquire::http::Timeout=30 \
     && apt-get install -y --no-install-recommends \
-      build-essential ca-certificates curl file gh git git-lfs jq libicu72 \
+      build-essential ca-certificates curl ffmpeg file fonts-dejavu-core gh git git-lfs jq libicu72 \
       libkrb5-3 libssl3 libunwind8 procps python3 python3-pip python3-venv \
       sudo tmux unzip zip zlib1g \
     && rm -rf /var/lib/apt/lists/* \
@@ -19,6 +38,119 @@ RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.
     && echo 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
 
 ENV PATH="/opt/ci-tools/bin:${PATH}"
+
+# Chromium and its system libraries, baked in so no job downloads them. A
+# disposable container has no cache to reuse, so every visuals job paid a
+# browser fetch at the CDN speed above. The install steps in ci.yml, e2e.yml
+# and web-shell-visuals.yml skip themselves when PLAYWRIGHT_BROWSERS_PATH is
+# set (below), so a job on this image needs no browser egress and no apt round
+# trip: this image grants the runner user sudo but not root, so `--with-deps`
+# in a job would fail on apt anyway. Baking the libraries here removes both.
+#
+# EVERY playwright in the tree resolves its own browser revision, and this tree
+# carries three: 1.61.1 at the root and in web-shell, 1.62.1 under browser-use,
+# and 1.58.2 pulled in transitively by mobilewright. Baking only the version the
+# visuals job invokes would leave the others downloading at job time, which is
+# the cost this layer exists to remove — the integration lane's own
+# `install chromium webkit` reaches browser-use's.
+#
+# The versions are listed here rather than read from the lockfile because this
+# image's build context is its own directory, not the repository root, so the
+# lockfile is not available to it. The revisions are NOT listed: each is read
+# from that version's own browsers.json at build time, so the mapping cannot go
+# stale. scripts/tests/verify-capture.test.js compares this list against the
+# lockfile, so a dependency bump fails a test instead of silently leaving a
+# revision behind.
+#
+# `install chromium` pulls chromium-headless-shell too, and both are needed.
+# ffmpeg comes from apt above rather than from playwright: it is the same
+# binary revision for all three, and the archive is reachable where the
+# browser CDN is not.
+#
+# The tree stays root-owned and world-readable: jobs run as `node` and must not
+# be able to rewrite a browser the next job trusts. A job's own
+# `playwright install` cannot run here regardless: it writes a lock and a
+# `.links` entry into the registry before it checks what is present, and this
+# tree is not writable. PLAYWRIGHT_BROWSERS_PATH is what a job's playwright
+# resolves its browser from and what those install steps key their skip on, so
+# it has to be an ENV, not a build-arg.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+ARG PLAYWRIGHT_VERSIONS="1.58.2 1.61.1 1.62.1"
+RUN set -eu \
+    && mkdir -p /opt/ci-playwright \
+    && printf '%s\n' ${PLAYWRIGHT_VERSIONS} > /opt/ci-playwright/versions \
+    && while read -r version; do \
+         if ! PLAYWRIGHT_DOWNLOAD_HOST="${PLAYWRIGHT_DOWNLOAD_HOST}" \
+              npx --yes "playwright@${version}" install --with-deps chromium; then \
+           echo "PLAYWRIGHT_DOWNLOAD_HOST does not serve ${version}; retrying on the upstream CDN"; \
+           PLAYWRIGHT_DOWNLOAD_HOST= \
+             npx --yes "playwright@${version}" install --with-deps chromium || exit 1; \
+         fi; \
+       done < /opt/ci-playwright/versions \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /root/.npm
+
+# The two interpreter archives the standalone regression runs under, for the
+# same reason as the browsers above: a disposable container starts with an
+# empty cache, and the job's own `Configure persistent standalone runtime
+# cache` step points at $HOME inside that container, so nothing is ever reused.
+# On hz4 the host's persistent runner has both archives on disk while the
+# container's directory does not exist at all.
+#
+# The cost is not just time. `fetchVerifiedArchive` gives each archive three
+# attempts at 300 s each, then rethrows, and the side lane's standalone step
+# exits 1 — after every workspace suite and the whole scripts suite have
+# already passed. Job 131062149608 (#16895) reads exactly that: both archives
+# were downloaded and then written back to the cache — `runtime archive cached:`
+# is logged after the fetch, while a hit logs `runtime archive reused from
+# cache:` — so the job paid ~110 MB with nothing reused, and Bun then timed out
+# three times on registry.npmjs.org. The lane reported `Side lane exited with 1`
+# under 2786 passing script tests. A transport timeout there reddens a required
+# check with no test failing, which no retry of a suite can fix because the
+# failure is not in a suite.
+#
+# Seeded, not baked over the env var: the cache directory must stay writable,
+# because `markUsed` refreshes each archive's mtime and `sweepRuntimeCache`
+# removes what no run has used for a week. A root-owned read-only directory
+# would make both fail silently (each is wrapped in a catch), so the seed is
+# copied into the job's own cache directory by the entrypoint instead.
+#
+# The digests are the published ones the script already verifies against, so a
+# mirror that serves different bytes fails the build here rather than in a job.
+# They are written here rather than read from scripts/lib/standalone-runtime-pins.js
+# because this image's build context is its own directory; the suite compares
+# the two, so a version bump fails a test instead of quietly seeding an archive
+# nothing pins.
+ARG NODE_RUNTIME_VERSION=24.19.0
+ARG BUN_RUNTIME_VERSION=1.4.4
+ARG NODE_RUNTIME_MIRROR=https://nodejs.org/dist
+ARG BUN_RUNTIME_MIRROR=https://registry.npmjs.org
+ENV QWEN_CI_BAKED_RUNTIME_CACHE=/opt/ci-runtimes
+RUN set -eu \
+    && case "${TARGETARCH}" in \
+         amd64) node_arch=x64; bun_arch=x64; \
+           node_sha=f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4; \
+           bun_sha512=CHbbkmHVM28T1GFq+6GL4Ao4ujwwYwj1CxFFwEFzLanPfNsId9AhbIP0Q4reWuWBkGimUkoQygrK7Rgjtj3vog== ;; \
+         arm64) node_arch=arm64; bun_arch=aarch64; \
+           node_sha=d28c8a5bf0a808f0ed434a1dce8c54ae98f0371c0bd86ac58abc613f73e6643f; \
+           bun_sha512=ZTVtpf9zmHSBVPX1sBwe5agGb/rN34yPGg/Hby8e2Ax2uCUA2URZKlZH7qLntK7qaFJCMXh9v0GWNYN2zINz1w== ;; \
+         *) echo "Unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+       esac \
+    && mkdir -p "${QWEN_CI_BAKED_RUNTIME_CACHE}" \
+    && node_file="node-v${NODE_RUNTIME_VERSION}-linux-${node_arch}.tar.gz" \
+    && bun_file="bun-linux-${bun_arch}-${BUN_RUNTIME_VERSION}.tgz" \
+    && curl -fsSL --retry 3 --connect-timeout 15 --max-time 600 \
+         -o "${QWEN_CI_BAKED_RUNTIME_CACHE}/${node_file}" \
+         "${NODE_RUNTIME_MIRROR}/v${NODE_RUNTIME_VERSION}/${node_file}" \
+    && echo "${node_sha}  ${QWEN_CI_BAKED_RUNTIME_CACHE}/${node_file}" | sha256sum -c - \
+    && curl -fsSL --retry 3 --connect-timeout 15 --max-time 600 \
+         -o "${QWEN_CI_BAKED_RUNTIME_CACHE}/${bun_file}" \
+         "${BUN_RUNTIME_MIRROR}/@oven/bun-linux-${bun_arch}/-/${bun_file}" \
+    && echo "${bun_sha512}  ${QWEN_CI_BAKED_RUNTIME_CACHE}/${bun_file}" \
+         | awk '{ print "sha512-" $1 "  " $2 }' > /tmp/bun.sha512 \
+    && node -e 'const fs=require("node:fs");const {createHash}=require("node:crypto");const [want,file]=fs.readFileSync("/tmp/bun.sha512","utf8").trim().split(/\s+/);const got="sha512-"+createHash("sha512").update(fs.readFileSync(file)).digest("base64");if(got!==want){console.error(`bun archive digest mismatch: ${got} != ${want}`);process.exit(1);}console.log(`${file}: OK`);' \
+    && rm /tmp/bun.sha512 \
+    && chmod -R a+rX "${QWEN_CI_BAKED_RUNTIME_CACHE}"
 
 WORKDIR /home/node/actions-runner
 RUN case "${TARGETARCH}" in \
@@ -35,5 +167,32 @@ RUN case "${TARGETARCH}" in \
 
 COPY entrypoint.sh /usr/local/bin/ephemeral-runner
 RUN chmod 755 /usr/local/bin/ephemeral-runner
+
+# Assert the final image, not the install list: a purge or font removal in
+# an earlier layer must fail the build here, not the fork-PR unit shard. One
+# RUN, kept last, so every layer that can change any of it is behind it.
+#
+# The browser check counts revision directories against the playwrights the
+# image declared: `install chromium` creates chromium-<rev> and
+# chromium_headless_shell-<rev>, so at least two per version. A partial download
+# leaves files inside a directory rather than a missing one, and the install
+# above already fails the build on that; a revision quietly missing here is the
+# download this image exists to prevent, paid at job time instead. The launch
+# proves the executable and its shared libraries, which is what
+# `--with-deps` is for.
+RUN set -eu \
+    && test -f /usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf \
+    && command -v ffmpeg > /dev/null \
+    && test -s /opt/ci-playwright/versions \
+    && browsers="$(find /opt/ms-playwright -mindepth 1 -maxdepth 1 -type d -name 'chromium*' | wc -l)" \
+    && expected="$(( $(wc -l < /opt/ci-playwright/versions) * 2 ))" \
+    && echo "Chromium directories: ${browsers}, expected at least ${expected}" \
+    && test "${browsers}" -ge "${expected}" \
+    && chrome="$(find /opt/ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)" \
+    && test -n "${chrome}" \
+    && "${chrome}" --version \
+    && test "$(find "${QWEN_CI_BAKED_RUNTIME_CACHE}" -maxdepth 1 -type f \( -name '*.tgz' -o -name '*.tar.gz' \) | wc -l)" -eq 2 \
+    && tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/node-v*.tar.gz > /dev/null \
+    && tar -tzf "${QWEN_CI_BAKED_RUNTIME_CACHE}"/bun-linux-*.tgz > /dev/null
 USER node
 ENTRYPOINT ["/usr/local/bin/ephemeral-runner"]

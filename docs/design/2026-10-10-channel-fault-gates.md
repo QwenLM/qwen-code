@@ -81,13 +81,14 @@ decision 2).
    targeted at the surface that actually exists. It is deliberately not
    filed under an SSE name.
 
-2. **FG7f gates the `unknown` family; `partial` has no v1 producer.** The
-   email plan is one segment (`planChannelSegments` returns exactly one,
-   `managed-channel-operations.ts:556`), and `partial` requires
-   `settled > 0 && settled < segments.length` — unreachable with one
-   segment. The successor-rule witness for `partial` exists at contract
-   level (`managed-channel-record.ts:458`); a multi-process `partial` gate
-   needs H5d's multi-segment plans and belongs to that slice. What this
+2. **FG7f gates the `unknown` family; the multi-process `partial` gate moves
+   to the adapter/transport slice.** The multi-segment producer has since
+   landed (multi-segment producer design, 2026-11-12), so `planChannelSegments`
+   now returns ordered segments and `partial` (`settled > 0 && settled <
+segments.length`) is reachable. The successor-rule witness for `partial`
+   exists at contract level (`managed-channel-record.ts:458`); a multi-process
+   `partial` gate needs a live multi-segment adapter send and belongs to the
+   adapter/transport slice, not the producer. What this
    gate proves at full stack is the honest half of the delivery line that
    v1 can reach: ambiguous provider answer → `unknown`, a receipt that
    never arrives → lease-settled `unknown` (never auto-resent), an
@@ -202,11 +203,11 @@ SQL, and one reconcile pass is driven explicitly (the bean in-JVM; the
 
 ### FG7f — partial and unknown delivery (decision 2)
 
-| Case                    | Injection                                                                                                  | Expect                                                                                                                                                                                                              |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provider-ambiguous`    | Fake SMTP accepts the bytes, then fails the answer without a 5xx code (timeout)                            | The adapter classifies `unknown` and posts it; one send, no retry of the send; the record and ledger settle `unknown`                                                                                               |
-| `receipt-never-arrived` | Fake SMTP accepts; the driver process is killed, its receipt never re-posted                               | The lease sweep settles `unknown`; a later adapter (fresh cold start) does not auto-re-send; explicit resend carries only the unsent segment and delivers                                                           |
-| `out-of-plan-ordinal`   | The driver posts a receipt for ordinal 1 on the one-segment delivery, while the claiming adapter is parked | Refused deterministically: the funnel's `has no segment` lands as 409 `channel_operation_conflict`; the delivery neither advances nor is re-sent; the correct ordinal 0 receipt then settles `delivered` — one send |
+| Case                    | Injection                                                                                                              | Expect                                                                                                                                                                                                              |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provider-ambiguous`    | Fake SMTP accepts the bytes, then fails the answer without a 5xx code (timeout)                                        | The adapter classifies `unknown` and posts it; one send, no retry of the send; the record and ledger settle `unknown`                                                                                               |
+| `receipt-never-arrived` | Fake SMTP accepts; the driver process is killed, its receipt never re-posted                                           | The lease sweep settles `unknown`; a later adapter (fresh cold start) does not auto-re-send; explicit resend carries only the unsent segment and delivers                                                           |
+| `out-of-plan-ordinal`   | The driver posts a receipt for ordinal 1 on a one-segment (short-reply) delivery, while the claiming adapter is parked | Refused deterministically: the funnel's `has no segment` lands as 409 `channel_operation_conflict`; the delivery neither advances nor is re-sent; the correct ordinal 0 receipt then settles `delivered` — one send |
 
 ## Fixture design
 
@@ -353,14 +354,18 @@ the FG6 documented manual procedure:
     `provider-ambiguous` red (the record claims `delivered` without a
     proven receipt; the record/ledger stay `unknown` in the sane shape).
 
-Two designed mutations are provably indistinguishable in v1 and are
-**not** executed: making the funnel `claim` refuse `sending` (the
-duplicate claim answer is invisible to an adapter whose first answer
-died, because it only ever holds one copy), and making `resend` carry
-all segments instead of the unsent-only set (the v1 email plan is one
-segment, so the filtered and unfiltered resends are identical). Both
-need the multi-segment plans of H5d, the same witness `partial` waits
-for (decision 2).
+Two designed mutations are **not** executed. Making the funnel `claim`
+refuse `sending` is invisible to an adapter whose first answer died (it
+only ever holds one copy), so it stays indistinguishable. Making
+`resend` carry all segments instead of the unsent-only set was
+indistinguishable while the email plan was one segment; the
+multi-segment producer has since landed, so a multi-segment resend
+fixture would now distinguish them — but this gate's
+`receipt-never-arrived` fixture is a short (one-segment) reply, where
+the filtered and unfiltered resends are still identical. Executing that
+mutation needs a multi-segment adapter-send fixture, which belongs to
+the adapter/transport slice (decision 2), the same witness `partial`
+waits for.
 
 ## Validation and acceptance
 
