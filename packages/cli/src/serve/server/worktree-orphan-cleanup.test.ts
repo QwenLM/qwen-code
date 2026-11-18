@@ -15,6 +15,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -41,6 +42,28 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
   // any siblings wholesale.
   let repoParent: string;
   let repoRoot: string;
+
+  function archives(sessionId: string): string[] {
+    return fs
+      .readdirSync(repoParent)
+      .filter(
+        (n) =>
+          n.startsWith(`${sessionId}.`) &&
+          n.endsWith('.worktree-snapshot.tar.gz'),
+      )
+      .map((n) => path.join(repoParent, n));
+  }
+
+  function archiveMetas(sessionId: string): string[] {
+    return fs
+      .readdirSync(repoParent)
+      .filter(
+        (n) =>
+          n.startsWith(`${sessionId}.`) &&
+          n.endsWith('.worktree-snapshot.json'),
+      )
+      .map((n) => path.join(repoParent, n));
+  }
 
   beforeEach(() => {
     repoParent = fs.realpathSync(
@@ -114,19 +137,18 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
       logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
       stderrSpy.mockRestore();
     }
-    const snapBase = path.join(repoParent, `session-${slug}.worktree-snapshot`);
     expect(logged).toContain(
       `worktree cleanup snapshotted checkout action=delete`,
     );
     expect(logged).toContain(
-      `snapshot=${JSON.stringify(`${snapBase}.tar.gz`)}`,
+      `snapshot=${JSON.stringify(archives(plan.sessionId)[0])}`,
     );
 
     // P6: the ignored work is preserved in a snapshot, then the checkout is
     // deleted (snapshot-then-delete replaces the old permanent preserve).
     expect(fs.existsSync(plan.lockKey)).toBe(false);
-    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
-    expect(fs.existsSync(`${snapBase}.json`)).toBe(true);
+    expect(archives(plan.sessionId).length > 0).toBe(true);
+    expect(archiveMetas(plan.sessionId).length > 0).toBe(true);
   });
 
   it('still removes a checkout holding only disposable build output', async () => {
@@ -241,14 +263,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     // A pristine carried overlay is collected WITHOUT a snapshot — the source
     // checkout still holds it. Dropping the gate's carriedEntries argument
     // would read the overlay as work and write an archive instead.
-    expect(
-      fs.existsSync(
-        path.join(
-          repoParent,
-          'session-carried-collect.worktree-snapshot.tar.gz',
-        ),
-      ),
-    ).toBe(false);
+    expect(archives('session-carried-collect').length > 0).toBe(false);
   });
 
   it('snapshots then deletes a carried-only checkout with no recorded overlay (R9-6 legacy + P6 U3)', async () => {
@@ -260,11 +275,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     await executeWorktreeCleanup(plan);
 
     expect(fs.existsSync(plan.lockKey)).toBe(false);
-    const snapBase = path.join(
-      repoParent,
-      'session-carried-legacy.worktree-snapshot',
-    );
-    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+    expect(archives(plan.sessionId).length > 0).toBe(true);
   });
 
   it('preserves a dirty checkout when the snapshot capture fails (P6 U3 fail-closed)', async () => {
@@ -286,11 +297,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(fs.existsSync(path.join(plan.lockKey, 'work.txt'))).toBe(true);
     // The preserve must come from the capture refusal itself, not from a
     // later removal failure: no archive may have been written.
-    expect(
-      fs.existsSync(
-        path.join(repoParent, 'session-snapfail.worktree-snapshot.tar.gz'),
-      ),
-    ).toBe(false);
+    expect(archives('session-snapfail').length > 0).toBe(false);
   });
 
   it('preserves a no-carry checkout whose edit is hidden under assume-unchanged (F6 default path)', async () => {
@@ -306,14 +313,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
 
     expect(fs.existsSync(plan.lockKey)).toBe(true);
     expect(fs.existsSync(path.join(plan.lockKey, '.gitignore'))).toBe(true);
-    expect(
-      fs.existsSync(
-        path.join(
-          repoParent,
-          'session-hidden-nocarry.worktree-snapshot.tar.gz',
-        ),
-      ),
-    ).toBe(false);
+    expect(archives('session-hidden-nocarry').length > 0).toBe(false);
   });
 
   it('snapshots a session edit to a carried path instead of deleting it bare (F1)', async () => {
@@ -326,15 +326,13 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     await executeWorktreeCleanup(plan);
 
     expect(fs.existsSync(plan.lockKey)).toBe(false);
-    const snapBase = path.join(
-      repoParent,
-      'session-carried-reedit.worktree-snapshot',
-    );
-    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+    expect(archives(plan.sessionId).length > 0).toBe(true);
     const restored = path.join(repoParent, 'restored-reedit');
     git(repoRoot, 'worktree', 'add', '--detach', restored, 'HEAD');
-    const meta = await readWorktreeSnapshotMeta(`${snapBase}.json`);
-    await restoreWorktreeSnapshot(`${snapBase}.tar.gz`, restored, meta);
+    const meta = await readWorktreeSnapshotMeta(
+      archiveMetas(plan.sessionId)[0],
+    );
+    await restoreWorktreeSnapshot(archives(plan.sessionId)[0], restored, meta);
     expect(fs.readFileSync(path.join(restored, 'carry.txt'), 'utf8')).toBe(
       'session-edit\n',
     );
@@ -353,11 +351,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
 
     expect(fs.existsSync(plan.lockKey)).toBe(true);
     expect(fs.existsSync(path.join(plan.lockKey, 'file.txt'))).toBe(true);
-    expect(
-      fs.existsSync(
-        path.join(repoParent, 'session-mm-preserve.worktree-snapshot.tar.gz'),
-      ),
-    ).toBe(false);
+    expect(archives('session-mm-preserve').length > 0).toBe(false);
   });
 
   it('preserves a checkout with an initialized submodule (P1)', async () => {
@@ -385,14 +379,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(fs.existsSync(path.join(plan.lockKey, 'lib', 'file.txt'))).toBe(
       true,
     );
-    expect(
-      fs.existsSync(
-        path.join(
-          repoParent,
-          'session-submodule-preserve.worktree-snapshot.tar.gz',
-        ),
-      ),
-    ).toBe(false);
+    expect(archives('session-submodule-preserve').length > 0).toBe(false);
   });
 
   it('snapshots a pristine carried-only checkout when the source moved on (R5-2)', async () => {
@@ -405,15 +392,13 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     await executeWorktreeCleanup(plan);
 
     expect(fs.existsSync(plan.lockKey)).toBe(false);
-    const snapBase = path.join(
-      repoParent,
-      'session-carried-source-gone.worktree-snapshot',
-    );
-    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+    expect(archives(plan.sessionId).length > 0).toBe(true);
     const restored = path.join(repoParent, 'restored-source-gone');
     git(repoRoot, 'worktree', 'add', '--detach', restored, 'HEAD');
-    const meta = await readWorktreeSnapshotMeta(`${snapBase}.json`);
-    await restoreWorktreeSnapshot(`${snapBase}.tar.gz`, restored, meta);
+    const meta = await readWorktreeSnapshotMeta(
+      archiveMetas(plan.sessionId)[0],
+    );
+    await restoreWorktreeSnapshot(archives(plan.sessionId)[0], restored, meta);
     expect(fs.readFileSync(path.join(restored, 'carry.txt'), 'utf8')).toBe(
       'carried-untracked\n',
     );
@@ -466,15 +451,13 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     await executeWorktreeCleanup(plan);
 
     expect(fs.existsSync(plan.lockKey)).toBe(false);
-    const snapBase = path.join(
-      repoParent,
-      'session-carried-divergent.worktree-snapshot',
-    );
-    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+    expect(archives(plan.sessionId).length > 0).toBe(true);
     const restored = path.join(repoParent, 'restored-divergent');
     git(repoRoot, 'worktree', 'add', '--detach', restored, 'HEAD');
-    const meta = await readWorktreeSnapshotMeta(`${snapBase}.json`);
-    await restoreWorktreeSnapshot(`${snapBase}.tar.gz`, restored, meta);
+    const meta = await readWorktreeSnapshotMeta(
+      archiveMetas(plan.sessionId)[0],
+    );
+    await restoreWorktreeSnapshot(archives(plan.sessionId)[0], restored, meta);
     expect(fs.readFileSync(path.join(restored, 'carry.txt'), 'utf8')).toBe(
       'carried-untracked\n',
     );
@@ -490,11 +473,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     await executeWorktreeCleanup(plan);
 
     expect(fs.existsSync(plan.lockKey)).toBe(false);
-    const snapBase = path.join(
-      repoParent,
-      'session-carried-del-untracked.worktree-snapshot',
-    );
-    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+    expect(archives(plan.sessionId).length > 0).toBe(true);
   });
 
   it('preserves a checkout whose submodule was initialized then deinited (R5-3)', async () => {
@@ -543,13 +522,112 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     await executeWorktreeCleanup(plan);
 
     expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(archives('session-deinit-preserve').length > 0).toBe(false);
+  });
+
+  it('preserves a checkout with a paused merge and a clean status (P1)', async () => {
+    git(repoRoot, 'checkout', '-q', '-b', 'topic');
+    git(repoRoot, 'commit', '-qm', 'empty', '--allow-empty', '--no-verify');
+    git(repoRoot, 'checkout', '-q', 'main');
+    const slug = 'merge-autostash';
+    const plan = await planFor(slug);
+    // --no-commit pauses with MERGE_HEAD and no working-tree changes: only
+    // the pending-operation gate can preserve this checkout.
+    execFileSync('git', ['merge', '--no-commit', '--no-ff', 'topic'], {
+      cwd: plan.lockKey,
+      stdio: 'pipe',
+    });
     expect(
-      fs.existsSync(
-        path.join(
-          repoParent,
-          'session-deinit-preserve.worktree-snapshot.tar.gz',
-        ),
-      ),
-    ).toBe(false);
+      execFileSync('git', ['status', '--porcelain'], {
+        cwd: plan.lockKey,
+        encoding: 'utf8',
+      }),
+    ).toBe('');
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(
+      execFileSync('git', ['rev-parse', 'MERGE_HEAD'], {
+        cwd: plan.lockKey,
+        encoding: 'utf8',
+      }).trim(),
+    ).not.toBe('');
+    expect(archives(plan.sessionId).length).toBe(0);
+  });
+
+  it('preserves edits saved while the archive is being written (P1)', async () => {
+    const plan = await planFor('late-save');
+    // Incompressible payload keeps the tar window open long enough for an
+    // editor autosave to land mid-capture.
+    fs.writeFileSync(
+      path.join(plan.lockKey, 'payload.bin'),
+      randomBytes(256 * 1024 * 1024),
+    );
+    const timer = setTimeout(() => {
+      fs.writeFileSync(path.join(plan.lockKey, 'late.txt'), 'late-content\n');
+    }, 1000);
+    try {
+      await executeWorktreeCleanup(plan);
+    } finally {
+      clearTimeout(timer);
+    }
+    // Removal is conditional on the checkout still matching the capture:
+    // the late autosave must force preservation, not be covered by luck.
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.readFileSync(path.join(plan.lockKey, 'late.txt'), 'utf8')).toBe(
+      'late-content\n',
+    );
+  });
+
+  it('snapshots rather than deleting when the source is an unrelated repository (S6-1)', async () => {
+    fs.writeFileSync(path.join(repoRoot, 'carry.txt'), 'carried-untracked\n');
+    fs.appendFileSync(path.join(repoRoot, '.gitignore'), 'extra-rule\n');
+    const outer = path.join(repoParent, 'outer');
+    fs.mkdirSync(outer);
+    git(outer, 'init', '-q');
+    git(outer, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+    git(outer, 'config', 'user.email', 't@e.com');
+    git(outer, 'config', 'user.name', 't');
+    git(outer, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(outer, 'README.md'), 'readme-base\n');
+    git(outer, 'add', '.');
+    git(outer, 'commit', '-qm', 'init', '--no-verify');
+    const checkout = path.join(outer, 'sub');
+    git(outer, 'worktree', 'add', '--detach', checkout, 'HEAD');
+    // The decoy source carries the overlay content byte-for-byte, so without
+    // the same-repository check the waiver would be wrongly granted.
+    fs.writeFileSync(path.join(checkout, 'carry.txt'), 'carried-untracked\n');
+    fs.writeFileSync(
+      path.join(checkout, '.gitignore'),
+      'secret.env\nnode_modules/\nextra-rule\n',
+    );
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('unrelated-decoy', 'main', {
+      detached: true,
+      carryDirtyState: true,
+      dirtyStateSource: checkout,
+    });
+    expect(result.success).toBe(true);
+    const worktreePath = fs.realpathSync(result.worktree!.path);
+    const sessionId = 'session-unrelated-decoy';
+    await writeWorktreeSessionMarker(worktreePath, sessionId);
+    const plan: WorktreeCleanupPlan = {
+      sessionId,
+      sidecar: {
+        slug: 'unrelated-decoy',
+        worktreePath,
+        worktreeBranch: '',
+        originalCwd: repoRoot,
+        originalBranch: 'main',
+        originalHeadCommit: '',
+        carriedFrom: checkout,
+        carriedEntries: result.carriedEntries!,
+      },
+      sidecarPath: path.join(repoParent, `${sessionId}.worktree.json`),
+      lockKey: worktreePath,
+    };
+    await executeWorktreeCleanup(plan);
+    expect(fs.existsSync(plan.lockKey)).toBe(false);
+    expect(archives(sessionId).length).toBeGreaterThan(0);
   });
 });

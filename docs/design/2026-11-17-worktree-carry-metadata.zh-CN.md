@@ -138,7 +138,10 @@ sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sp
 - 对搬运路径的会话改动被快照而非裸删：暂存搬运编辑、删除搬运文件、对搬运 tracked 或
   untracked 文件的进一步未暂存编辑、仅模式变更，各读作工作（F1 单元）。
 - 原始搬运删除读作干净；恢复或暂存它读作工作。
-- 隐藏在 assume-unchanged 或 skip-worktree 下的会话编辑读作工作。
+- 隐藏在 assume-unchanged 或 skip-worktree 下的会话编辑读作工作；skip-worktree 路径上的
+  暂存编辑进一步拒绝快照捕获（稀疏工作树无法表示它），暂停的 merge/rebase 操作整体保留
+  checkout（autostash 是归档无法携带的私有状态）。移除以检出仍与捕获内容一致为条件——
+  捕获期间的编辑触发保留而非删除。
 - 含任何非搬运工作（迟到的 ignored 文件、搬运文件之外填充的目录）的 checkout 读作工作，
   被先快照再删除（P6 U3）——绝不裸删。快照无法忠实表示的状态（暂存内容与工作树不同、
   隐藏索引位）拒绝捕获并改为保留 checkout；子模块对象库则即使 deinit 或 `git rm` 把

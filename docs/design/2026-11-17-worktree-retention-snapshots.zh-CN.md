@@ -77,10 +77,14 @@ untracked 往返；未暂存/暂存删除与 rename 源在重建 HEAD 上重新�
 `removeUserWorktree`，它拒绝携带无 ref 可达 commit 的检出（缺省托管 worktree 是
 detached）：此时快照已写但检出被保留（`unmerged commits`），故「无论 dirty 状态都移除」
 对 dirty 内容成立，对未合并 commit 不成立。捕获失败同样回退保留（fail-closed：未获持久
-快照绝不删除）；快照无法忠实表示的状态——暂存内容与工作树不同、非 UTF-8 删除路径——
-同样拒绝捕获并保留。归档按 `sessionId` 键存于 sidecar 旁（chats 目录，归档会话为其
-`archive/` 子目录——回收器写入 sidecar 自身所在目录）并在清理日志中点名；
-重开恢复入口（U5）按该键读回。
+快照绝不删除）；快照无法忠实表示的状态——暂存内容与工作树不同、非 UTF-8 删除路径、
+skip-worktree 路径上的暂存编辑、暂停的 merge/rebase（autostash）——同样拒绝捕获并保留。
+移除还以检出仍与捕获内容一致为条件：捕获前取 `status -z` + `diff HEAD` 摘要，移除前
+重算比对，编辑器在 tar 写入期间的自动保存触发漂移即保留而非删除归档覆盖不到的工作。
+每对归档按捕获时刻唯一命名（`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`，
+头部同规则），复用同一 session UUID 不再覆盖早先快照；读取方按 `<sessionId>.*.worktree-snapshot.*`
+前缀于 sidecar 旁解析（chats 目录，归档会话为其 `archive/` 子目录——回收器写入 sidecar
+自身所在目录），清理日志给出完整路径；重开恢复入口（U5）按该键读回。
 
 ### U4 — 保留清扫
 

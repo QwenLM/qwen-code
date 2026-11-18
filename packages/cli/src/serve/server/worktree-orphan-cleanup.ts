@@ -20,6 +20,8 @@ import {
   type SessionService,
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
+import { runGit } from '@qwen-code/qwen-code-core/utils/git-branches.js';
+import { NO_EXEC_CONFIG } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 import { acquireWorktreeOwnershipOp } from './worktree-ownership-op.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
@@ -443,6 +445,50 @@ async function checkoutStillPopulated(worktreePath: string): Promise<boolean> {
 }
 
 /**
+ * Identity of everything the archive can lose: the status record set plus the
+ * patch text against HEAD. Used to prove the checkout still matches the
+ * captured contents immediately before removal (P1 edits during capture).
+ * Returns null on read failure so the caller preserves (fail-closed).
+ */
+async function checkoutChangeDigest(worktreePath: string): Promise<{
+  status: string;
+  diff: string;
+} | null> {
+  try {
+    const [status, diff] = await Promise.all([
+      runGit(
+        worktreePath,
+        [
+          ...NO_EXEC_CONFIG,
+          '--no-optional-locks',
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+          '-z',
+        ],
+        undefined,
+        64 * 1024 * 1024,
+      ),
+      runGit(
+        worktreePath,
+        [
+          ...NO_EXEC_CONFIG,
+          '--no-optional-locks',
+          'diff',
+          'HEAD',
+          '--no-ext-diff',
+        ],
+        undefined,
+        64 * 1024 * 1024,
+      ),
+    ]);
+    return { status, diff };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Execute a verified cleanup after the record deletion was confirmed
  * (`kind === 'removed'`), still under the cleanup lock. The marker is
  * re-verified (nothing may have flipped it since classification). A checkout
@@ -504,6 +550,7 @@ export async function executeWorktreeCleanup(
   ) {
     needsSnapshot = true;
   }
+  const beforeDigest = await checkoutChangeDigest(plan.lockKey);
   if (needsSnapshot) {
     // P6 U3: a managed session worktree with genuine work is snapshotted then
     // deleted instead of preserved forever — the archive preserves the work
@@ -534,6 +581,24 @@ export async function executeWorktreeCleanup(
       );
       return;
     }
+  }
+  // An editor autosave can land between the has-work gate and the end of the
+  // tar stream (P1 edits during capture). Removal is conditional on the
+  // checkout still matching the captured contents: any drift — a late file,
+  // a new edit, a staged change — preserves rather than deleting what the
+  // archive could not cover (fail-closed on a read failure too).
+  const afterDigest = await checkoutChangeDigest(plan.lockKey);
+  if (
+    beforeDigest === null ||
+    afterDigest === null ||
+    beforeDigest.status !== afterDigest.status ||
+    beforeDigest.diff !== afterDigest.diff
+  ) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'checkout changed during snapshot capture',
+    );
+    return;
   }
   // originalCwd is the root the creating worktree service used; the
   // sidecar contract reserves it for exactly this resolution, and the

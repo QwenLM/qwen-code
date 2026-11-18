@@ -24,6 +24,7 @@ import {
   WORKTREE_SESSION_FILE,
   hasHiddenIndexBit,
   isDisposableIgnoredEntry,
+  worktreeHasPendingGitOperation,
 } from './gitWorktreeService.js';
 import { runGit } from '../utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
@@ -195,6 +196,15 @@ export async function buildWorktreeSnapshotMeta(
       'Worktree snapshot meta: an index flag hides a file version; the capture cannot be faithful',
     );
   }
+  // A paused merge/rebase/cherry-pick (MERGE_AUTOSTASH) is private operation
+  // state the tar cannot represent at all: the draft would vanish with the
+  // admin dir even if the working files are archived. Refuse the capture;
+  // the caller preserves the checkout (P1).
+  if (await worktreeHasPendingGitOperation(worktreePath)) {
+    throw new Error(
+      'Worktree snapshot meta: a merge/rebase is in progress; the operation state cannot be represented',
+    );
+  }
   const headCommit = (
     await runGit(worktreePath, [
       ...NO_EXEC_CONFIG,
@@ -226,6 +236,24 @@ export async function buildWorktreeSnapshotMeta(
   let tracked = 0;
   let untracked = 0;
   const deleted: string[] = [];
+  // skip-worktree paths hide the worktree/index difference from `git status`:
+  // a staged edit on such a path exists ONLY in the index (the sparse
+  // worktree keeps the HEAD content), and Y=' ' cannot prove otherwise.
+  // `ls-files -v` marks those entries with `S` whether or not sparse-checkout
+  // is enabled (P1 sparse-cone).
+  const skipWorktree = new Set<string>();
+  const lsV = await runGit(worktreePath, [
+    ...NO_EXEC_CONFIG,
+    '--no-optional-locks',
+    'ls-files',
+    '-v',
+    '-z',
+  ]);
+  for (const row of lsV.split('\0')) {
+    // `ls-files -v` emits `<tag> <path>` (no mode/sha columns): S marks the
+    // skip-worktree bit. Collect exactly those paths.
+    if (row.startsWith('S ')) skipWorktree.add(row.slice(2));
+  }
   const records = status.split('\0');
   for (let i = 0; i < records.length; i++) {
     const record = records[i];
@@ -245,9 +273,21 @@ export async function buildWorktreeSnapshotMeta(
         `Worktree snapshot meta: staged content differs from the worktree at ${entry}; the index cannot be represented faithfully`,
       );
     }
+    // Same loss even with Y=' ': on a skip-worktree path the index may hold
+    // a staged blob the sparse working tree never materialized (P1). The
+    // stage-vs-worktree check above cannot see it, so refuse explicitly.
+    if (
+      (xy[0] === 'M' || xy[0] === 'R' || xy[0] === 'C' || xy[0] === 'T') &&
+      skipWorktree.has(entry)
+    ) {
+      throw new Error(
+        `Worktree snapshot meta: staged content on a skip-worktree path at ${entry}; the sparse worktree cannot represent it`,
+      );
+    }
     // A rename/copy record is followed by a second NUL-separated record
-    // naming the source path. A rename deletes the source; a copy keeps it.
-    if (xy[0] === 'R' || xy[0] === 'C') {
+    // naming the source path — for staged (X) AND worktree-side (Y)
+    // renames. A rename deletes the source; a copy keeps it.
+    if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') {
       const source = records[i + 1] ?? '';
       i += 1;
       if (entry === WORKTREE_SESSION_FILE) continue;
@@ -257,7 +297,7 @@ export async function buildWorktreeSnapshotMeta(
       // the reader refuses protected deletions, so recording one would make
       // the whole archive unreadable (round-6).
       if (
-        xy[0] === 'R' &&
+        (xy[0] === 'R' || xy[1] === 'R') &&
         source.length > 0 &&
         !isProtectedRel(normalizeRel(source))
       ) {
@@ -356,7 +396,19 @@ export async function captureWorktreeSnapshot(
     ),
   };
   await fs.mkdir(snapshotDir, { recursive: true });
-  const base = path.join(snapshotDir, `${meta.sessionId}.worktree-snapshot`);
+  const fullMeta: WorktreeSnapshotMeta = {
+    version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+    createdAt: Date.now(),
+    ...meta,
+  };
+  // A session UUID may be reused (superseded records, caller-supplied id):
+  // never let a later capture overwrite an earlier archive pair of the same
+  // sessionId. Suffix by capture time and pid; readers glob on the
+  // `<sessionId>.*.worktree-snapshot.*` prefix (D7) (P1 collision).
+  const base = path.join(
+    snapshotDir,
+    `${meta.sessionId}.${fullMeta.createdAt}.${process.pid}.worktree-snapshot`,
+  );
   const snapshotPath = `${base}.tar.gz`;
   const metaPath = `${base}.json`;
 
@@ -374,11 +426,6 @@ export async function captureWorktreeSnapshot(
     ),
   );
 
-  const fullMeta: WorktreeSnapshotMeta = {
-    version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
-    createdAt: Date.now(),
-    ...meta,
-  };
   await atomicWriteFile(metaPath, async (tmp) => {
     await fs.writeFile(tmp, `${JSON.stringify(fullMeta, null, 2)}\n`, 'utf8');
   });

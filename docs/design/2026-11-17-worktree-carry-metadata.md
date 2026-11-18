@@ -188,7 +188,12 @@ unchanged in this deliverable.
   carried edit, deleting a carried file, a further unstaged edit of a carried
   tracked or untracked file, and a mode-only change each read as work (F1 cells).
 - A pristine carried deletion reads clean; restoring or staging it reads as work.
-- A session edit hidden under assume-unchanged or skip-worktree reads as work.
+- A session edit hidden under assume-unchanged or skip-worktree reads as work;
+  a staged edit on a skip-worktree path additionally refuses snapshot capture
+  (the sparse worktree cannot represent it), and a paused merge/rebase
+  operation preserves the checkout whole (its autostash is private state no
+  archive carries). Removal is conditional on the checkout still matching the
+  captured contents — an edit saved mid-capture preserves instead of deleting.
 - A checkout with any non-carried work (a late-arriving ignored file, a populated
   directory beyond the carried files) reads as work and is snapshotted then
   deleted (P6 U3) — never deleted bare. States the snapshot cannot represent

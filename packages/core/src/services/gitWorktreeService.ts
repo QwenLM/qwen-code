@@ -381,6 +381,50 @@ export async function hasHiddenIndexBit(
 }
 
 /**
+ * Whether a merge/rebase/cherry-pick is paused in this worktree. The paused
+ * operation's private state (MERGE_AUTOSTASH, MERGE_HEAD, REBASE_HEAD,
+ * CHERRY_PICK_HEAD) lives in the per-worktree gitdir and is NOT representable
+ * by a worktree tar + status header: cleanup must preserve, never delete and
+ * hope a restore recreates it (P1 merge autostash). Uses `rev-parse
+ * --git-path` so linked-worktree paths resolve to their real admin dir.
+ * Fail-closed: a read error counts as pending.
+ */
+export async function worktreeHasPendingGitOperation(
+  worktreePath: string,
+): Promise<boolean> {
+  const markers = [
+    'MERGE_AUTOSTASH',
+    'MERGE_HEAD',
+    'REBASE_HEAD',
+    'CHERRY_PICK_HEAD',
+  ];
+  try {
+    for (const marker of markers) {
+      const rel = (
+        await runGit(worktreePath, [
+          ...NO_EXEC_CONFIG,
+          'rev-parse',
+          '--git-path',
+          marker,
+        ])
+      ).trim();
+      const markerPath = path.resolve(worktreePath, rel);
+      const present = await fs
+        .access(markerPath)
+        .then(() => true)
+        .catch(() => false);
+      if (present) return true;
+    }
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasPendingGitOperation: probe at ${worktreePath} failed, treating as pending: ${error}`,
+    );
+    return true;
+  }
+}
+
+/**
  * Whether the worktree holds an initialized submodule's state: a populated
  * gitlink in the index, or a persisting submodule object store. A submodule
  * has its own object database, which can hold unpushed commits that live
@@ -510,6 +554,10 @@ export async function worktreeHasWork(
   // either probe — carried or not — mirroring the prepared-worktree gate's
   // `ls-files -v` check. Fail-closed: a probe error counts as work.
   if (await hasHiddenIndexBit(worktreePath)) return true;
+  // A paused merge/rebase/cherry-pick holds private operation state
+  // (MERGE_AUTOSTASH) that neither the archive nor a fresh checkout can
+  // recreate — never let a sink collect a checkout in that state (P1).
+  if (await worktreeHasPendingGitOperation(worktreePath)) return true;
   // An initialized submodule holds its own object database (possibly unpushed
   // commits) that neither the worktree tar nor `git worktree remove` preserves,
   // and submodule.<name>.ignore=dirty can hide its dirt from status. Count it

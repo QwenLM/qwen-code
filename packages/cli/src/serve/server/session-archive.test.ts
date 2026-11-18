@@ -2231,11 +2231,14 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     worktreePath: string,
   ): boolean {
     if (fs.existsSync(worktreePath)) return true;
-    const snap = path.join(
-      path.dirname(service.getWorktreeSessionPath(sessionId)),
-      `${sessionId}.worktree-snapshot.tar.gz`,
-    );
-    return fs.existsSync(snap);
+    const dir = path.dirname(service.getWorktreeSessionPath(sessionId));
+    return fs
+      .readdirSync(dir)
+      .some(
+        (name) =>
+          name.startsWith(`${sessionId}.`) &&
+          name.endsWith('.worktree-snapshot.tar.gz'),
+      );
   }
 
   it('removes the owned checkout and branch on a confirmed delete', async () => {

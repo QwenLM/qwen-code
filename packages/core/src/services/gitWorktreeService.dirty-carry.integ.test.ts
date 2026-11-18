@@ -1953,6 +1953,24 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     );
   });
 
+  it('a paused merge with a clean status still reads as work (P1)', async () => {
+    // An empty merge commit pauses with MERGE_HEAD and NO working-tree
+    // changes: status alone reads clean, so only the pending-operation gate
+    // can preserve the checkout. (An autostash-backed draft would read as
+    // work through status anyway and could not witness the gate.)
+    git(repoRoot, 'checkout', '-q', '-b', 'topic');
+    git(repoRoot, 'commit', '-qm', 'empty', '--allow-empty', '--no-verify');
+    git(repoRoot, 'checkout', '-q', 'main');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r96-merge', 'main');
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    git(wt, 'merge', '--no-commit', '--no-ff', 'topic');
+    expect(git(wt, 'status', '--porcelain')).toBe('');
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
+    expect(git(wt, 'rev-parse', 'MERGE_HEAD')).not.toBe('');
+  });
+
   it('a staged marker temp sibling is waived by the base gate too (round-7)', async () => {
     // The carried ladder waives the atomic-write temp siblings; the base
     // ladder must agree, or a no-carry checkout with a leftover temp reads

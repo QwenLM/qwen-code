@@ -113,11 +113,19 @@ snapshot is written but the checkout is preserved (`unmerged commits`), so
 commits. A capture failure also falls back to preserve (fail-closed: never
 delete without a durable snapshot); a state the snapshot cannot represent
 faithfully — staged content differing from the worktree, a non-UTF-8 deleted
-path — likewise refuses capture and preserves. The archive is keyed by
-`sessionId` beside the sidecar (the chats dir, or its `archive/` subdir for
-archived sessions — the reaper writes to the sidecar's own directory) and named
-in a cleanup log line; the reopen-restore affordance (U5) reads it back by that
-key.
+path, a staged edit on a skip-worktree path, or a paused merge/rebase
+(autostash) — likewise refuses capture and preserves. Removal is additionally
+conditional on the checkout still matching the captured contents: a `status -z`
+
+- `diff HEAD` digest is taken before capture and recomputed before removal, so
+  an editor autosave landing mid-tar preserves instead of deleting work the
+  archive could not cover. Each archive pair is uniquely named per capture
+  (`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`, header likewise) so
+  a reused session UUID can never overwrite an earlier snapshot; readers resolve
+  by the `<sessionId>.*.worktree-snapshot.*` prefix beside the sidecar (the chats
+  dir, or its `archive/` subdir for archived sessions — the reaper writes to the
+  sidecar's own directory), and a cleanup log line names the full path. The
+  reopen-restore affordance (U5) reads it back by that key.
 
 ### U4 — Retention sweep
 

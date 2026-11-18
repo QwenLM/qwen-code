@@ -833,6 +833,114 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     await expect(readWorktreeSnapshotMeta(metaPath)).resolves.toBeTruthy();
   });
 
+  it('refuses a staged edit hidden on a skip-worktree path (P1 sparse cone)', async () => {
+    await fs.mkdir(path.join(worktree, 'one'));
+    await fs.mkdir(path.join(worktree, 'two'));
+    await fs.writeFile(path.join(worktree, 'one', 'note'), 'original\n');
+    await fs.writeFile(path.join(worktree, 'two', 'b.txt'), 'two\n');
+    git(worktree, 'add', '.');
+    git(worktree, 'commit', '-qm', 'span', '--no-verify');
+    await fs.writeFile(path.join(worktree, 'one', 'note'), 'staged design\n');
+    git(worktree, 'add', 'one/note');
+    git(worktree, 'sparse-checkout', 'init', '--cone');
+    git(worktree, 'sparse-checkout', 'set', 'two');
+    // The sparse worktree never materialized the edit: Y=' ' cannot prove
+    // the index matches the disk, so the capture must refuse (P1).
+    expect(git(worktree, 'status', '--porcelain')).toContain('M  one/note');
+    await expect(
+      buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-sparse',
+        slug: 'sparse',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      }),
+    ).rejects.toThrow(/skip-worktree/);
+    // A clean sparse worktree with nothing staged stays collectible.
+    git(worktree, 'reset', '--hard', 'HEAD');
+    git(worktree, 'clean', '-fdx');
+    await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: {
+        sessionId: 'session-sparse-clean',
+        slug: 'sparse-clean',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+        headCommit: git(worktree, 'rev-parse', 'HEAD'),
+        branch: 'main',
+        dirty: { tracked: 0, untracked: 0, deleted: [] },
+      },
+    });
+  });
+
+  it('keeps both archives when a session UUID is reused (P1 collision)', async () => {
+    await fs.writeFile(path.join(worktree, 'first.txt'), 'first\n');
+    const m1 = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-reused',
+      slug: 'reused',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    await fs.writeFile(path.join(worktree, 'second.txt'), 'second\n');
+    const m2 = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-reused',
+      slug: 'reused',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m2,
+    });
+    const archives = (await fs.readdir(snapshotDir)).filter(
+      (n) => n.startsWith('session-reused.') && n.endsWith('.tar.gz'),
+    );
+    // Never overwrite an earlier archive pair of the same sessionId.
+    expect(archives.length).toBe(2);
+    const firstContents: string[] = [];
+    for (const name of archives) {
+      const restored = await restoreOverHead(
+        path.join(snapshotDir, name),
+        path.join(snapshotDir, name.replace(/\.tar\.gz$/, '.json')),
+        name.replace(/\.tar\.gz$/, ''),
+      );
+      firstContents.push(...(await fs.readdir(restored)));
+    }
+    expect(firstContents).toContain('first.txt');
+    expect(firstContents).toContain('second.txt');
+  });
+
+  it('records a worktree-side rename source so restore does not resurrect it', async () => {
+    // `mv` + `git add -N` yields Y='R' with a source record, not X='R': the
+    // parser must consume both forms or the old name is resurrected (P1).
+    await fs.rename(
+      path.join(worktree, 'committed.txt'),
+      path.join(worktree, 'renamed.txt'),
+    );
+    git(worktree, 'add', '-N', 'renamed.txt');
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-rename-wt',
+      slug: 'rename-wt',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(m.dirty.deleted).toContain('committed.txt');
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-rename-wt',
+    );
+    expect(await fs.readdir(restored)).toContain('renamed.txt');
+    expect(await fs.readdir(restored)).not.toContain('committed.txt');
+  });
+
   it('refuses capture when the worktree .git is gone (F4 direct)', async () => {
     // Without its own .git, git's upward discovery would answer about the
     // enclosing repository; the capture must refuse rather than archive a
