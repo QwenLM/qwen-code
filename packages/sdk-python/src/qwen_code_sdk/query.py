@@ -390,6 +390,8 @@ class Query:
 
         if subtype != "initialize":
             await self._wait_initialized()
+            if self._closed:
+                raise RuntimeError("Query is closed")
 
         request_id = str(uuid4())
 

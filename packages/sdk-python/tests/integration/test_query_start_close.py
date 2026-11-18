@@ -24,8 +24,9 @@ async def test_close_waits_for_pending_process_start(
         await asyncio.wait_for(
             asyncio.gather(*(result.close() for _ in range(closers))), timeout=10
         )
-        with pytest.raises(RuntimeError, match="is closed"):
-            await starter
+        with pytest.raises(RuntimeError, match=r"^Query is closed$"):
+            await asyncio.wait_for(starter, timeout=1)
+        assert result._pending_control_requests == {}
 
         child = result._transport._process
         assert child is not None
