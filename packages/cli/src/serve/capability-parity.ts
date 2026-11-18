@@ -154,7 +154,7 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     evidence: 'surface:WORKSPACE_ARTIFACT_LIST',
   },
   workspace_artifact_library_stream: NO_MANAGED_EQUIVALENT(
-    'Managed workspace artifact reads are JSON cursor pages, not progressive streams',
+    'Managed workspace artifact reads are JSON cursor pages without progressive streaming or session-summary updates',
   ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
   generated_ui_state: NO_MANAGED_EQUIVALENT(

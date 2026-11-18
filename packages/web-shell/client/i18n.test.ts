@@ -964,6 +964,7 @@ describe('web-shell zh-TW locale', () => {
       'managed.artifactLibrary.description',
       'managed.artifactLibrary.empty',
       'managed.artifactLibrary.unavailable',
+      'managed.artifactLibrary.workspaceGone',
       'managed.artifactLibrary.loadFailed',
       'managed.artifactLibrary.unavailableBadge',
       'managed.artifactLibrary.sessionFallback',

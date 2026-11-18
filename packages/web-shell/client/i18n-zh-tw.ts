@@ -6077,6 +6077,7 @@ export const ZH_TW: Record<string, MessageValue> = {
     '此工作區各會話產出的產物，按最新優先排列。',
   'managed.artifactLibrary.empty': '此工作區還沒有產出產物。',
   'managed.artifactLibrary.unavailable': '此伺服器不支援產物庫。',
+  'managed.artifactLibrary.workspaceGone': '此工作區已不再對你的帳戶可用。',
   'managed.artifactLibrary.loadFailed': '無法載入產物庫：',
   'managed.artifactLibrary.unavailableBadge': '不可用',
   'managed.artifactLibrary.sessionFallback': '會話',

@@ -206,6 +206,11 @@ export function ManagedArtifactLibraryPage({
 function LibraryError({ error }: { error: unknown }) {
   const { t } = useI18n();
   if (error instanceof JavaManagedAgentHttpError && error.status === 404) {
+    // A revoked workspace grant answers workspace_not_found; only the
+    // deployment gate's artifact_not_found means the feature is absent.
+    if (error.code === 'workspace_not_found') {
+      return <p role="alert">{t('managed.artifactLibrary.workspaceGone')}</p>;
+    }
     return <p role="alert">{t('managed.artifactLibrary.unavailable')}</p>;
   }
   return (

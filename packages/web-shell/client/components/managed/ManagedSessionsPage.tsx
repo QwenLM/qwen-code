@@ -3430,7 +3430,7 @@ function ManagedSessionsContent({
                 workspaceId={artifactLibraryWorkspace.workspaceId}
                 workspaceLabel={artifactLibraryWorkspace.label}
                 clientId={clientId}
-                sessions={sessions}
+                sessions={lifecycleSummaries}
                 onClose={() => setArtifactLibraryWorkspace(undefined)}
               />
             )}

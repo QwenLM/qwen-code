@@ -247,13 +247,32 @@ describe('ManagedArtifactLibraryPage', () => {
     );
   });
 
-  it('answers a 404 with the unavailable message instead of an empty list', async () => {
+  it('answers a revoked workspace grant with the workspace-gone message', async () => {
     vi.mocked(library.listArtifacts).mockRejectedValue(
       new JavaManagedAgentHttpError(404, 'workspace_not_found', 'gone'),
     );
     await render();
     expect(document.body.textContent).toContain(
+      'This workspace is no longer available to your account.',
+    );
+    expect(document.body.textContent).not.toContain(
       'The artifact library is not available on this server.',
+    );
+    expect(document.body.textContent).not.toContain(
+      'No artifacts have been produced',
+    );
+  });
+
+  it('answers the deployment gate 404 with the unavailable message', async () => {
+    vi.mocked(library.listArtifacts).mockRejectedValue(
+      new JavaManagedAgentHttpError(404, 'artifact_not_found', 'off'),
+    );
+    await render();
+    expect(document.body.textContent).toContain(
+      'The artifact library is not available on this server.',
+    );
+    expect(document.body.textContent).not.toContain(
+      'This workspace is no longer available to your account.',
     );
     expect(document.body.textContent).not.toContain(
       'No artifacts have been produced',

@@ -12,6 +12,8 @@ export const ARTIFACT_LIBRARY_MESSAGES_EN: Record<string, string> = {
     'No artifacts have been produced in this workspace yet.',
   'managed.artifactLibrary.unavailable':
     'The artifact library is not available on this server.',
+  'managed.artifactLibrary.workspaceGone':
+    'This workspace is no longer available to your account.',
   'managed.artifactLibrary.loadFailed': 'Could not load the artifact library:',
   'managed.artifactLibrary.unavailableBadge': 'Unavailable',
   'managed.artifactLibrary.sessionFallback': 'Session',
@@ -25,6 +27,7 @@ export const ARTIFACT_LIBRARY_MESSAGES_ZH: Record<string, string> = {
     '此工作区各会话产出的产物，按最新优先排列。',
   'managed.artifactLibrary.empty': '此工作区还没有产出产物。',
   'managed.artifactLibrary.unavailable': '此服务器不支持产物库。',
+  'managed.artifactLibrary.workspaceGone': '此工作区已不再对你的账户可用。',
   'managed.artifactLibrary.loadFailed': '无法加载产物库：',
   'managed.artifactLibrary.unavailableBadge': '不可用',
   'managed.artifactLibrary.sessionFallback': '会话',
@@ -39,6 +42,8 @@ export const ARTIFACT_LIBRARY_MESSAGES_RU: Record<string, string> = {
   'managed.artifactLibrary.empty': 'В этом Workspace ещё нет артефактов.',
   'managed.artifactLibrary.unavailable':
     'Библиотека артефактов недоступна на этом сервере.',
+  'managed.artifactLibrary.workspaceGone':
+    'Этот Workspace больше недоступен вашей учётной записи.',
   'managed.artifactLibrary.loadFailed':
     'Не удалось загрузить библиотеку артефактов:',
   'managed.artifactLibrary.unavailableBadge': 'Недоступно',

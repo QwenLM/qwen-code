@@ -5285,6 +5285,78 @@ describe('ManagedSessionsPage', () => {
     );
   });
 
+  it('resolves library row titles beyond the loaded session list', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    // The artifact fixture belongs to session-1, which only the archived
+    // list knows: the active list is empty and no session is open, so the
+    // page list alone would fall back to the shortened id.
+    const archived = summary('session-1', {
+      lifecycleStatus: 'archived',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    mocks.client.listSessions.mockImplementation(
+      async (options: { archiveState?: string }) => ({
+        sessions: options.archiveState === 'archived' ? [archived] : [],
+      }),
+    );
+    provider = {
+      ...provider,
+      lifecycle: { submit: vi.fn(), unarchive: vi.fn(), query: vi.fn() },
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    const archiveSlot = document.createElement('aside');
+    container.appendChild(archiveSlot);
+    await render(undefined, 'en', provider, slot, true, {
+      archivedNavigationTarget: archiveSlot,
+    });
+    expect(archiveSlot.textContent).toContain('Task session-1');
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Artifact library · Project');
+    const row = dialog?.querySelector('button[aria-pressed]');
+    expect(row?.textContent).toContain('Task session-1');
+    expect(row?.textContent).not.toContain('Session session-');
+  });
+
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {
     const listSessions = vi.fn().mockResolvedValue({
       sessions: [summary('java-session')],

@@ -54,8 +54,9 @@ workspace 列；工作区归属在 JOIN 的 `ma_operation` 行
   读取，JSON 游标分页即可。`workspace_artifact_library_stream` 保持缺席。
 - 公开孪生路由。只有 Web UI 消费此面；WebShell-only 的 workspace-files
   族是先例。
-- 响应信封中的会话元数据、富 MIME 预览。会话标题在客户端用页面已加载的会话
-  列表解析；产物字节仍是投影发布的原始 stdout/stderr 流。唯一的 schema 变更
+- 响应信封中的会话元数据、富 MIME 预览。会话标题在客户端从生命周期
+  summaries（已加载列表、当前打开会话的 summary、归档列表）解析，不进信封；
+  产物字节仍是投影发布的原始 stdout/stderr 流。唯一的 schema 变更
   是 V1 基线上的工作区访问路径索引（见「存储与服务」）。
 
 ## 协议
@@ -107,7 +108,8 @@ tenant/actor/workspace 与请求不符、数值字段不能转为 long、`waterm
 
 ### 准入与行可见性
 
-准入先于校验，遵循产物族的顺序：
+服务准入先于 limit/cursor 校验，遵循产物族的顺序（body 约束——必填
+`workspaceId` 与封闭字段集——由框架在服务调用之前强制执行）：
 
 1. 可信 actor：缺失回 `401 actor_required`。
 2. 工作区读授权：`registry.accessOf(tenant, actor, workspaceId)` 低于
@@ -243,21 +245,25 @@ options)` 经共享 JSON RPC 路径 POST `/workspaces/artifacts/query`，body
   `artifactLibrary: boolean`（缺失为 false）。
 - `ManagedWorkspaceNavigation`：工作区分组头在既有 new-task 按钮旁增加产物库
   按钮，当工作区页声明 `artifactLibrary` 且 provider 暴露 `workspaceArtifacts`
-  与 `toolResults` 时显示，调用新 prop `onOpenArtifactLibrary(workspaceId)`。
+  与 `toolResults` 时显示，调用新 prop
+  `onOpenArtifactLibrary(workspaceId, workspaceLabel)`。
 - `ManagedSessionsPage`：新增状态 `artifactLibraryWorkspace`，随 provider
   身份变化清空。与会话级的 `outputTarget` 不同，它刻意跨会话选择保留——
   产物库属于工作区而非打开的会话；导航回调设置它，面板区在其置位期间渲染
   产物库对话框。Managed-only shell 与混合 App 都经共享页面到达，无需改
   `App.tsx` 面板联合。
 - `ManagedArtifactLibraryPage.tsx`：shadcn 对话框，列出工作区产物。每行显示
-  流角色、字节长度、投影时间、可用性徽标、来源会话标题（从页面已持有的会话
-  summary 解析；回退为缩短的会话 id——已删除或子会话可能不在列表中）。选中
+  流角色、字节长度、投影时间、可用性徽标、来源会话标题（从生命周期
+  summaries——已加载列表、当前打开会话的 summary、归档列表——解析；回退为
+  缩短的会话 id——已删除或子会话可能不在其中）。选中
   行渲染既有 `ManagedArtifactContent`（`reader = provider.toolResults`），
   它按 `artifact.session_id` 重取产物元数据，用既有 64 KiB 读取器分页字节，
   预览与下载门控（`reader.canDownload`）不变。加载更多追加下一游标页；
-  空、加载、错误状态显式，`404` 回产物库不可用消息而非空列表。文案在新
+  空、加载、错误状态显式，`404` 按错误码回不同消息而非空列表：
+  `workspace_not_found`（授权被收回）读作此工作区对该账户已不可用，部署门
+  的 `artifact_not_found` 读作此服务器不支持产物库。文案在新
   `managed-artifact-library-messages.ts`（EN/ZH/RU），注册进 `i18n.tsx`；
-  手工维护的 `i18n-zh-tw.ts` 目录以繁体字形承载这九个键，`i18n.test.ts`
+  手工维护的 `i18n-zh-tw.ts` 目录以繁体字形承载这十个键，`i18n.test.ts`
   钉住其在场（不回退英文）与无简体专用字形。产物库仅交互态可达，故
   transcript 构建用
   `managed-artifact-library-messages.transcript-stub.ts`（三个空对象）替换
@@ -329,10 +335,13 @@ TypeScript：
 
 ## 决策与限制
 
-- 只读切片：删除与 SSE 仍是 daemon 独有；parity 矩阵报告缺口而非关闭它。
+- 只读切片：删除与 SSE 仍是 daemon 独有。parity 矩阵将此记为库标签的只读
+  `managed` 立场（daemon 标签还覆盖批量删除，本面不实现），以及缺席的
+  stream 行——其理由点名两个缺失半区：渐进流式与会话 summary 更新。
 - `a.id` 序是投影序，不是工具执行序；投影滞后于 receipt 时两者可能不同。
   watermark 按查询冻结窗口，不跨查询。
-- 会话标题客户端解析；不在已加载列表中的会话以缩短 id 标注其行。信封保持
+- 会话标题客户端从生命周期 summaries 解析；三者皆不含的会话以缩短 id
+  标注其行。信封保持
   既有 `WebShellArtifactPage`，会话路由不受响应 schema 漂移影响。
 - 结果是查询时过滤的逐页快照；分页中途的授权或绑定变化由游标的
   tenant/actor/workspace 绑定与不可用行授权重检捕获，而非事务性工作区快照。

@@ -66,7 +66,8 @@ Out of scope:
 - A public twin route. Only the Web UI consumes this surface; the WebShell-only
   workspace-files family is the precedent.
 - Session metadata in the response envelope and rich MIME previews. Session
-  titles resolve client-side from the session list the page already loads;
+  titles resolve client-side from the lifecycle summaries (the loaded list,
+  the open session's summary, and the archived list), not the envelope;
   artifact bytes remain the raw stdout/stderr streams the projection
   publishes. The one schema change is the workspace access-path index on the
   V1 baseline (see Store and service).
@@ -129,7 +130,9 @@ store fetched `limit + 1` rows.
 
 ### Admission and row visibility
 
-Admission runs before validation, following the artifact family's order:
+Service admission runs before limit/cursor validation, following the artifact
+family's order (body constraints — the required `workspaceId` and the closed
+field set — are enforced by the framework before the service is invoked):
 
 1. Trusted actor: `401 actor_required` without one.
 2. Workspace read grant: `registry.accessOf(tenant, actor, workspaceId)`
@@ -296,7 +299,8 @@ options)` posts `/workspaces/artifacts/query` with
 - `ManagedWorkspaceNavigation`: the workspace group header gains a library
   button beside the existing new-task button, shown when the workspace page
   declares `artifactLibrary` and the provider exposes `workspaceArtifacts`
-  and `toolResults`. It calls a new `onOpenArtifactLibrary(workspaceId)` prop.
+  and `toolResults`. It calls a new
+  `onOpenArtifactLibrary(workspaceId, workspaceLabel)` prop.
 - `ManagedSessionsPage`: one new state `artifactLibraryWorkspace`, cleared on
   provider identity change. Unlike the session-scoped `outputTarget`, it
   deliberately survives session selection because the library belongs to the
@@ -314,10 +318,13 @@ options)` posts `/workspaces/artifacts/query` with
   `artifact.session_id` and pages the bytes with the existing 64 KiB reader,
   preview, and download gating (`reader.canDownload`). Load-more appends the
   next cursor page; empty, loading, and error states are explicit, and a
-  `404` answers with the library-unavailable message rather than an empty
-  list. Strings live in a new `managed-artifact-library-messages.ts`
+  `404` answers with a code-specific message rather than an empty list:
+  `workspace_not_found` (a revoked grant) reads as the workspace being gone
+  for this account, while the deployment gate's `artifact_not_found` reads
+  as the library being unavailable on this server. Strings live in a new
+  `managed-artifact-library-messages.ts`
   (EN/ZH/RU) registered in `i18n.tsx`; the hand-maintained `i18n-zh-tw.ts`
-  catalog carries the nine keys in Traditional glyphs, and `i18n.test.ts`
+  catalog carries the ten keys in Traditional glyphs, and `i18n.test.ts`
   pins both their presence (no English fallback) and the absence of
   Simplified-only glyphs. The library is interactive-only, so a
   `managed-artifact-library-messages.transcript-stub.ts` of three empty
@@ -398,13 +405,17 @@ Docs: this design pair and the E2E plan
 
 ## Decisions and limitations
 
-- Read-only slice: removal and SSE remain daemon-only; the parity matrix
-  reports the gap instead of closing it.
+- Read-only slice: removal and SSE remain daemon-only. The parity matrix
+  records this as a read-only `managed` standing for the library tag (the
+  daemon tag also covers batch removal, which this surface does not
+  implement) and an absent stream row whose reason names both missing
+  halves — progressive streaming and session-summary updates.
 - `a.id` ordering is projection order, not tool-execution order; the two can
   differ when projection lags the receipt. The watermark freezes the window
   per query, not across queries.
-- Session titles resolve client-side; a session absent from the loaded list
-  labels its rows with the shortened id. The envelope stays the existing
+- Session titles resolve client-side from the lifecycle summaries; a session
+  absent from all of them labels its rows with the shortened id. The envelope
+  stays the existing
   `WebShellArtifactPage`, so no response-schema drift reaches the session
   routes.
 - Results are per-page snapshots filtered at query time; a grant or binding

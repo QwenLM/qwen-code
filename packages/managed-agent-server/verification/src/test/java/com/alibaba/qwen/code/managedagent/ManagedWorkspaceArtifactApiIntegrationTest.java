@@ -133,7 +133,9 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
     private JsonNode page(String actor, String body) throws Exception {
         var response = mvc.perform(query(actor, body)).andExpect(status().isOk())
                 .andReturn().getResponse();
-        assertThat(response.getHeader("Cache-Control")).isEqualTo("no-store");
+        // The filter pre-sets no-store and the controller's noStore() replaces
+        // it (setHeader semantics on both sides): exactly one value.
+        assertThat(response.getHeaders("Cache-Control")).containsExactly("no-store");
         return JSON.readTree(response.getContentAsString());
     }
 
@@ -380,6 +382,23 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 JSON.createObjectNode().put("v", 2).put("tenant", TENANT).put("actor", "reader")
                         .put("workspace", WORKSPACE).put("watermark", 10).put("before", 5)
                         .put("extra", 1).toString().getBytes(StandardCharsets.UTF_8)));
+        // Isolated guards: a six-field v=2 cursor reaches the version check
+        // (the extra-field case above is rejected by the size check first);
+        // a non-numeric watermark reaches canConvertToLong (before=0 keeps
+        // the range disjuncts satisfied if the type guard were dropped);
+        // a negative before with a valid watermark reaches before < 0.
+        invalid.add(Base64.getUrlEncoder().withoutPadding().encodeToString(
+                JSON.createObjectNode().put("v", 2).put("tenant", TENANT).put("actor", "reader")
+                        .put("workspace", WORKSPACE).put("watermark", 10).put("before", 5)
+                        .toString().getBytes(StandardCharsets.UTF_8)));
+        invalid.add(Base64.getUrlEncoder().withoutPadding().encodeToString(
+                JSON.createObjectNode().put("v", 1).put("tenant", TENANT).put("actor", "reader")
+                        .put("workspace", WORKSPACE).put("watermark", true).put("before", 0)
+                        .toString().getBytes(StandardCharsets.UTF_8)));
+        invalid.add(Base64.getUrlEncoder().withoutPadding().encodeToString(
+                JSON.createObjectNode().put("v", 1).put("tenant", TENANT).put("actor", "reader")
+                        .put("workspace", WORKSPACE).put("watermark", 10).put("before", -1)
+                        .toString().getBytes(StandardCharsets.UTF_8)));
         invalid.add("a".repeat(2049));
         for (String cursor : invalid) {
             mvc.perform(query("reader", body(cursor, null)))
@@ -389,8 +408,13 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
         mvc.perform(query("reader", body(valid, null))).andExpect(status().isOk());
         mvc.perform(query("reader", "{\"workspaceId\":\"" + WORKSPACE + "\",\"extra\":1}"))
                 .andExpect(status().isBadRequest());
+        // The bare body is rejected by the workspace constraint before
+        // cursor parsing; a null cursor with a valid workspace is the first
+        // page, not an error.
         mvc.perform(query("reader", "{\"cursor\":null}"))
                 .andExpect(status().isBadRequest());
+        mvc.perform(query("reader", "{\"workspaceId\":\"" + WORKSPACE + "\",\"cursor\":null}"))
+                .andExpect(status().isOk());
     }
 
     @Test
