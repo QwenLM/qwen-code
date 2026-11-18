@@ -81,6 +81,25 @@ async function fixture() {
 }
 
 describe('recorded message deletion', () => {
+  it('invalidates the last user prompt timestamp when the latest turn is deleted', async () => {
+    const { recorder } = await fixture();
+    recorder.recordAssistantTurn({
+      model: 'model',
+      message: [{ text: 'reply' }],
+    });
+    recorder.recordUserMessage('second question');
+    await recorder.flush();
+
+    const { groups, snapshot } = await recorder.getMessageGroups();
+    expect(groups).toHaveLength(2);
+    const notify = vi.fn();
+    recorder.setLastUserPromptRecordedCallback(notify);
+    await recorder.deleteMessageGroups({ snapshot, groupIds: [groups[1]!.id] });
+
+    expect(notify).toHaveBeenCalledExactlyOnceWith(undefined, 'session');
+    expect((await recorder.getMessageGroups()).groups).toEqual([groups[0]]);
+  });
+
   it('upgrades a default legacy recorder to a writer lease, deletes, appends and releases ownership', async () => {
     const root = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-delete-default-'),
