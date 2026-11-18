@@ -384,8 +384,9 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                         .put("extra", 1).toString().getBytes(StandardCharsets.UTF_8)));
         // Isolated guards: a six-field v=2 cursor reaches the version check
         // (the extra-field case above is rejected by the size check first);
-        // a non-numeric watermark reaches canConvertToLong (before=0 keeps
-        // the range disjuncts satisfied if the type guard were dropped);
+        // non-numeric watermark AND before each reach their canConvertToLong
+        // guard (the sibling field stays in range so dropping either guard
+        // would answer 200 with an empty page, not trip a range disjunct);
         // a negative before with a valid watermark reaches before < 0.
         invalid.add(Base64.getUrlEncoder().withoutPadding().encodeToString(
                 JSON.createObjectNode().put("v", 2).put("tenant", TENANT).put("actor", "reader")
@@ -394,6 +395,10 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
         invalid.add(Base64.getUrlEncoder().withoutPadding().encodeToString(
                 JSON.createObjectNode().put("v", 1).put("tenant", TENANT).put("actor", "reader")
                         .put("workspace", WORKSPACE).put("watermark", true).put("before", 0)
+                        .toString().getBytes(StandardCharsets.UTF_8)));
+        invalid.add(Base64.getUrlEncoder().withoutPadding().encodeToString(
+                JSON.createObjectNode().put("v", 1).put("tenant", TENANT).put("actor", "reader")
+                        .put("workspace", WORKSPACE).put("watermark", 10).put("before", true)
                         .toString().getBytes(StandardCharsets.UTF_8)));
         invalid.add(Base64.getUrlEncoder().withoutPadding().encodeToString(
                 JSON.createObjectNode().put("v", 1).put("tenant", TENANT).put("actor", "reader")
