@@ -27,9 +27,10 @@ import {
 } from '../../integration-tests/ready-prompt-budget.js';
 
 // A wait ceiling is invisible on a green run: the editor-parity repaints land
-// in well under a second, so only the non-deterministic pool stall of #17544
-// surfaces a revert to the old literal. Pinned here, where test:scripts
-// collects it on every PR.
+// in well under a second locally, so nothing here observes #17544's CI expiry,
+// and whether that expiry is a pool stall or an ink-leg render defect is still
+// open on the issue. This pins the executed budget, not that verdict, where
+// test:scripts collects it on every PR.
 //
 // The budgets are imported and executed, not matched against the suite's
 // text: a source pin greens on a commented-out copy and reds on a
