@@ -605,7 +605,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             throw new ManagedAgentException(409, "unsupported_feature",
                     "The Hosted Harness does not support Session Skills.");
         }
-        if (extensionPins == null && additions.isEmpty() && extensionPackages != null && extensionPackages.hasSkillCatalog()) {
+        // Defaults are a bonus for extension-capable creations only: when the
+        // resolved profile, lifecycle negotiation or import readiness cannot
+        // admit pins, skip discovery and keep the legacy creation behavior
+        // instead of importing packages a later gate would refuse.
+        if (extensionPins == null && additions.isEmpty() && extensionPackages != null && extensionPackages.hasSkillCatalog()
+                && harness.supportsSessionExtensions()
+                && (input.isEmpty() || harness.isWorkspaceFilesAvailable())
+                && (worktree == null || sessionWorktrees != null)) {
             var workspace = selection == null ? workspaces.readableDefault(tenantId, actorId)
                     : workspaces.findReadable(tenantId, actorId, selection.workspaceId());
             if (workspace == null) {
@@ -617,10 +624,21 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             if (!workspace.canCreateSession()) {
                 throw new ManagedAgentException(403, "workspace_forbidden", "Workspace cannot be used.");
             }
-            var pins = extensionPackages.defaultSkillPins(tenantId, actorId, workspace.workspaceId(), idempotencyKey);
-            extensionPins = pins.isEmpty() ? null : pins;
-            if (selection == null) {
-                selection = new WorkspaceSelection(workspace.workspaceId(), ".");
+            String profile = store.creationToolProfile(tenantId, actorId, agentId, agentRevision, workspace.workspaceId());
+            if (profile != null
+                    && (WorkspaceToolProfiles.isPublicShell(profile) || WorkspaceToolProfiles.MCP.equals(profile))
+                    && harness.supportsLifecycle(profile)
+                    && extensionPackages.defaultImportsSupported(tenantId, actorId, workspace.workspaceId())) {
+                var pins = extensionPackages.defaultSkillPins(tenantId, actorId, workspace.workspaceId(), idempotencyKey);
+                if (!pins.isEmpty()) {
+                    extensionPins = pins;
+                    // Admitted defaults bind the resolved Workspace explicitly;
+                    // an empty catalog keeps the omitted selection and its
+                    // default tenant-scan lock order (see the lock inventory).
+                    if (selection == null) {
+                        selection = new WorkspaceSelection(workspace.workspaceId(), ".");
+                    }
+                }
             }
         }
         if (extensionPins != null && !harness.supportsSessionExtensions()) {

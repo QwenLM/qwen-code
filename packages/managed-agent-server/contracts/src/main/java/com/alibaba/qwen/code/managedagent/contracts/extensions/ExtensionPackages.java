@@ -13,6 +13,8 @@ public interface ExtensionPackages {
         default List<ManagedExtensionPackages.StandaloneSkill> standaloneSkills() { return List.of(); }
     }
     default boolean hasSkillCatalog() { return false; }
+    /** Whether a default Skill import can succeed for this actor and Workspace. */
+    default boolean defaultImportsSupported(String tenant, String actor, String workspace) { return false; }
     default List<Pin> defaultSkillPins(String tenant, String actor, String workspace, String requestId) { return List.of(); }
     public Selection authorizeSelection(String tenant, String actor, String workspace, List<Pin> pins);
     public void requireSelection(String tenant, String actor, String workspace, List<Pin> pins);

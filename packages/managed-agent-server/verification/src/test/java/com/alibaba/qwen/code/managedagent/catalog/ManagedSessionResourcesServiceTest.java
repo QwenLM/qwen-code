@@ -105,6 +105,27 @@ class ManagedSessionResourcesServiceTest {
     }
 
     @Test
+    void activeBundleCommandsAreNotSessionSkills() throws Exception {
+        when(session.tenantId()).thenReturn("tenant");
+        when(session.sessionId()).thenReturn("session");
+        var data = JSON.createObjectNode();
+        data.putArray("skills").addObject().put("name", "package-skill").put("description", "Package")
+                .put("user_invocable", true);
+        data.putArray("commands").addObject().put("name", "build").put("description", "Command")
+                .put("modelInvocable", true);
+        var bundle = bundle(1);
+        var member = bundle.withArray("packages").addObject();
+        member.putObject("pin").put("extensionId", "package");
+        member.set("contributionsRef", contributions(data));
+        latest(config(1, 1, "active", null, resource("managed-extension-config-bundle", bundle), null));
+        assertThat(service.installedSkills(session)).hasValue(List.of(new WebShellSkill("package-skill", "Package")));
+        var packages = mock(ExtensionPackageRepository.class);
+        var catalog = new ManagedSkillCatalogService(sessions, skills, service, packages, JSON);
+        assertThat(catalog.get("tenant", "actor", "session").skills())
+                .containsExactly(new WebShellSkill("package-skill", "Package"));
+    }
+
+    @Test
     void activeBundlesReplaceInitialPinsInTheSlashCatalogEvenWhenEmpty() throws Exception {
         when(session.tenantId()).thenReturn("tenant");
         when(session.sessionId()).thenReturn("session");

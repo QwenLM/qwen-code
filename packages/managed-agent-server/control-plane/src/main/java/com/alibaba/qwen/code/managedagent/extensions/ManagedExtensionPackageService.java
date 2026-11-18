@@ -70,6 +70,17 @@ public class ManagedExtensionPackageService implements ExtensionPackages {
     @Override
     public boolean hasSkillCatalog() { return !skillSources.isEmpty(); }
 
+    @Override
+    public boolean defaultImportsSupported(String tenant, String actor, String workspace) {
+        if (!supported() || !selfServiceSupported()) {
+            return false;
+        }
+        WorkspaceAccess access = workspaces.accessOf(tenant, actor, workspace);
+        return access.atLeast(WorkspaceAccess.OPERATOR)
+                && (properties.getExtensions().getAllowedActors().contains(actor)
+                        || properties.getExtensions().getAllowedActors().contains("*"));
+    }
+
     public List<ManagedSkillCatalogSource.Entry> skillCatalog(String tenant, String actor, String workspace, String requestId) {
         return skillCatalog(context(tenant, actor, workspace, requestId));
     }

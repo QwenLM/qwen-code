@@ -71,7 +71,10 @@ public class ManagedSessionResourcesService {
         }
         var visible = new java.util.ArrayList<WebShellSkill>();
         for (JsonNode skill : query.skillItems) {
-            if (skill.path("userInvocable").asBoolean()) {
+            // Bundle commands share the skill item list but are not Skills;
+            // admitting them here would show them as Skills and count them
+            // against the Session Skill catalog limit.
+            if ("skill".equals(skill.path("kind").asText()) && skill.path("userInvocable").asBoolean()) {
                 visible.add(new WebShellSkill(skill.get("name").textValue(), skill.get("description").textValue()));
             }
         }

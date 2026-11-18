@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -59,6 +60,7 @@ class ManagedSessionCreationSkillsTest {
     @Autowired private com.alibaba.qwen.code.managedagent.persistence.JdbcChildWorkspaceStore childWorkspaces;
     @Autowired private ManagedAgentProperties properties;
     @Autowired private ManagedExtensionPackageService extensionPackages;
+    @Autowired private ManagedAgentService sessions;
     @Qualifier("managedAgentTransactionManager")
     @Autowired private org.springframework.transaction.PlatformTransactionManager transactionManager;
     @TempDir private Path archiveDirectory;
@@ -302,6 +304,45 @@ class ManagedSessionCreationSkillsTest {
         assertThat(sessionSkillCatalog(id).get(0).required("name").textValue()).isEqualTo("review:review");
     }
 
+    @Test
+    void filesProfileSkipsDefaultDiscoveryWithoutPackageWrites() throws Exception {
+        configureSkillCatalog(false);
+        org.mockito.Mockito.doThrow(new AssertionError("FILES creations must skip discovery")).when(catalogSource).catalog(any());
+        var body = request("qwen-code", List.of());
+        body.remove("skills");
+        String id = create(body, "files-default", true).required("sessionId").asText();
+        assertThat(store.requireSession(tenant, id).toolProfile()).isEqualTo("hosted-workspace-files/1");
+        assertThat(snapshots.initialSelection(tenant, id)).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package WHERE tenant_id=?", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_source_import WHERE tenant_id=?", Integer.class, tenant)).isZero();
+    }
+
+    @Test
+    void disabledSelfServiceSkipsDefaultDiscovery() throws Exception {
+        configureSkillCatalog();
+        properties.getExtensions().setSelfServiceEnabled(false);
+        org.mockito.Mockito.doThrow(new AssertionError("unsupported imports must skip discovery")).when(catalogSource).catalog(any());
+        var body = request("qwen-code", List.of());
+        body.remove("skills");
+        String id = create(body, "self-service-off", true).required("sessionId").asText();
+        assertThat(snapshots.initialSelection(tenant, id)).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package WHERE tenant_id=?", Integer.class, tenant)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_source_import WHERE tenant_id=?", Integer.class, tenant)).isZero();
+    }
+
+    @Test
+    void emptyDefaultsKeepTheOmittedWorkspaceSelection() throws Exception {
+        configureSkillCatalog();
+        jdbc.update("UPDATE ma_workspace SET is_default = TRUE WHERE tenant_id = ? AND workspace_id = ?",
+                tenant.getBytes(StandardCharsets.UTF_8), "ws".getBytes(StandardCharsets.UTF_8));
+        when(catalogSource.catalog(any())).thenReturn(List.of(catalogEntry("optional", false)));
+        var admitted = sessions.createWorkspaceSession(tenant, "actor", "empty-defaults",
+                "qwen-code", null, null, null, List.of(), null, null);
+        assertThat(store.requireSession(tenant, admitted.sessionId()).workspace().getWorkspaceId()).isEqualTo("ws");
+        assertThat(snapshots.initialSelection(tenant, admitted.sessionId())).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_extension_package WHERE tenant_id=?", Integer.class, tenant)).isZero();
+    }
+
     private ManagedSkillCatalogSource.Entry catalogEntry(String revision, boolean preinstall) {
         var reference = new ManagedExtensionSource.Reference("business", "skill",
                 preinstall ? "review" : "optional", revision);
@@ -318,7 +359,13 @@ class ManagedSessionCreationSkillsTest {
     }
 
     private HarnessConnector configureSkillCatalog() throws Exception {
-        enableBuiltinShell();
+        return configureSkillCatalog(true);
+    }
+
+    private HarnessConnector configureSkillCatalog(boolean shell) throws Exception {
+        if (shell) {
+            enableBuiltinShell();
+        }
         properties.getExtensions().setEnabled(true);
         properties.getExtensions().setSelfServiceEnabled(true);
         properties.getExtensions().setArtifactDirectory(archiveDirectory.toString());
