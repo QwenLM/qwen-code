@@ -95,6 +95,7 @@ export default {
   Auth: 'Autenticação',
   Model: 'Modelo',
   'Fast Model': 'Modelo Rápido',
+  'Agent Loop': 'Loop do agente',
   Sandbox: 'Sandbox',
   'Session ID': 'ID da Sessão',
   'Base URL': 'Base URL',

@@ -48,6 +48,7 @@ import {
 } from './managed-extension-profile.js';
 import { MANAGED_SHELL_PUBLISHER_ROUTE } from './managed-shell-publisher.js';
 import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import { EXTERNAL_PUBLICATION_ROUTES } from './managed-external-publication.js';
 import { MANAGED_TOOL_RESULT_PROTOCOL } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 
 const boot = Object.freeze({
@@ -378,6 +379,28 @@ describe('Managed Runtime attestation worker', () => {
     const unknown = await fetch(`${worker.ready.url}/health`);
     expect(unknown.status).toBe(404);
     expect(unknown.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('keeps publication routes unowned without an external publication', async () => {
+    const worker = await startManagedRuntimeAttestationWorker({
+      ...contextFixtures.boot,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    openWorkers.add(worker);
+    expect(worker.ready.publication).toBeUndefined();
+    for (const route of EXTERNAL_PUBLICATION_ROUTES) {
+      const response = await fetch(worker.ready.url + route.path, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${contextFixtures.boot.token}`,
+          'content-type': 'application/json',
+          'x-qwen-managed-lease-id': contextFixtures.boot.leaseId,
+          'x-qwen-managed-lease-epoch': String(contextFixtures.boot.epoch),
+        },
+        body: JSON.stringify({ protocolVersion: 2, channel: 'all' }),
+      });
+      expect(response.status).toBe(404);
+    }
   });
 
   it.each([boot, contextFixtures.boot])(

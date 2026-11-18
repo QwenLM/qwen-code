@@ -33,15 +33,24 @@ const EN_COPY: FallbackCopy = {
 
 const COPY: Record<WebShellLanguage, FallbackCopy> = {
   en: EN_COPY,
+  'zh-TW': {
+    title: '出了點問題',
+    body: '發生意外錯誤，無法顯示此內容。',
+    retry: '重試',
+    reload: '重新載入',
+  },
   'zh-CN': {
     title: '出了点问题',
     body: '发生意外错误，无法显示此内容。',
     retry: '重试',
     reload: '重新加载',
   },
-  // Not translated yet — same partial-catalog policy as the ru table in
-  // i18n.tsx (#13391): ru reuses the EN copy.
-  ru: EN_COPY,
+  ru: {
+    title: 'Что-то пошло не так',
+    body: 'Произошла непредвиденная ошибка, и это содержимое не удалось отобразить.',
+    retry: 'Повторить',
+    reload: 'Перезагрузить страницу',
+  },
 };
 
 // The boundary wraps the whole App, so this surface renders when the themed
