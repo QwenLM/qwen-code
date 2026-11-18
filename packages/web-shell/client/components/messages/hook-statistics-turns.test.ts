@@ -1,4 +1,6 @@
 import { expect, it } from 'vitest';
+import type { DaemonTextTranscriptBlock } from '@qwen-code/sdk/daemon';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import type { Message } from '../../adapters/types';
 import { collectHookStatisticsTurns } from './hook-statistics-turns';
 
@@ -89,3 +91,56 @@ it('does not take a message sent to another session as a turn', () => {
     ...collectHookStatisticsTurns([user, answer, sent], 'session').keys(),
   ]).toEqual(['answer']);
 });
+
+it.each([false, true])(
+  'keeps hook statistics on the prompt answer after a cross-session relay (sent before answer: %s)',
+  (sentBeforeAnswer) => {
+    const textBlock = (
+      id: string,
+      kind: 'user' | 'assistant',
+      promptId: string,
+    ): DaemonTextTranscriptBlock => ({
+      id,
+      kind,
+      text: id,
+      promptId,
+      streaming: false,
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const sent: DaemonTextTranscriptBlock = {
+      ...textBlock('sent', 'user', 'send-record'),
+      meta: {
+        source: 'agent_mention',
+        qwenAgentMessage: {
+          kind: 'agent_mention',
+          sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+        },
+      },
+    };
+    const promptAnswer = textBlock('prompt-answer', 'assistant', 'admission');
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('prompt', 'user', 'admission'),
+      ...(sentBeforeAnswer ? [sent, promptAnswer] : [promptAnswer, sent]),
+      {
+        ...textBlock('relay', 'assistant', 'notification'),
+        backgroundTurn: {
+          turnId: 'notification',
+          taskId: 'send-task',
+          kind: 'agent',
+          startedAt: 2,
+        },
+      },
+    ]);
+    expect([...collectHookStatisticsTurns(messages, 'session')]).toEqual([
+      [
+        'prompt-answer',
+        expect.objectContaining({
+          promptId: 'admission',
+          sessionId: 'session',
+        }),
+      ],
+    ]);
+  },
+);

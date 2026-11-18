@@ -28,7 +28,11 @@ export function collectHookStatisticsTurns(
       head = message;
       target = message.id;
       hasAssistant = false;
-    } else if (message.role === 'user_shell') {
+    } else if (
+      message.role === 'user_shell' ||
+      (message.role === 'system' &&
+        message.source === 'background_notification_turn_started')
+    ) {
       finish();
       head = undefined;
       target = undefined;
