@@ -244,8 +244,51 @@ describe('runAgentLoop', () => {
       callId: 'call-1',
       status: 'success',
     });
-    expect(raw.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {});
+    expect(raw.recordCompletedToolCall).toHaveBeenCalledWith(
+      'read_file',
+      {},
+      { ...okResponse(read), status: 'success' },
+    );
   });
+
+  it.each([
+    ['success', 'success'],
+    ['error', 'error'],
+    ['cancelled', 'success'],
+    ['cancelled', 'cancelled'],
+  ] as const)(
+    'records the settled %s status with its own %s execution outcome',
+    async (status, executionStatus) => {
+      const request = toolRequest('write', 'write_file', {
+        file_path: '/project/.qwen/skills/example/SKILL.md',
+      });
+      const response = okResponse(request, {
+        executionStatus,
+        error:
+          executionStatus === 'error' ? new Error('write failed') : undefined,
+      });
+      const { client, raw } = fakeClient([[requestEvent(request)], [content]]);
+      const executor: AgentLoopToolExecutor = {
+        async run(_requests, _signal, hooks) {
+          return hooks.beforeLaunch(request, [])
+            ? [{ request, response, status }]
+            : [];
+        },
+      };
+
+      await runAgentLoop({
+        client,
+        config: fakeConfig().config,
+        signal: new AbortController().signal,
+        first: first(),
+        executor,
+      });
+
+      expect(raw.recordCompletedToolCall.mock.calls).toEqual([
+        [request.name, request.args, { ...response, status }],
+      ]);
+    },
+  );
 
   it.each([
     ['a retry', { type: LlmEventType.Retry }],
@@ -622,7 +665,7 @@ describe('runAgentLoop', () => {
     });
 
     expect(raw.recordCompletedToolCall.mock.calls).toEqual([
-      ['enter_plan_mode', {}],
+      ['enter_plan_mode', {}, { ...okResponse(enter), status: 'success' }],
     ]);
   });
 
@@ -655,7 +698,11 @@ describe('runAgentLoop', () => {
     });
 
     expect(raw.recordCompletedToolCall).toHaveBeenCalledOnce();
-    expect(raw.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {});
+    expect(raw.recordCompletedToolCall).toHaveBeenCalledWith(
+      'read_file',
+      {},
+      { ...okResponse(plain), status: 'success' },
+    );
   });
 
   it('stops on terminateTurn unless the surface keeps going', async () => {

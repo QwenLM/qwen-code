@@ -18,11 +18,15 @@ export async function observeInteractiveModTool(
 ): Promise<void> {
   if (call.request.isClientInitiated) return;
   const succeeded = call.response.executionStatus === 'success';
-  if (call.status !== 'cancelled' || succeeded) {
-    config
-      .getLlmClient()
-      ?.recordCompletedToolCall(call.request.name, call.request.args);
-  }
+  // Native attempts can be retried or withheld by the Mod. Only the final
+  // submitted result may contribute experience; local skill writes still protect.
+  config
+    .getLlmClient()
+    ?.recordCompletedToolCall(call.request.name, call.request.args, {
+      ...call.response,
+      status: call.status,
+      modelFacing: false,
+    });
   const candidates = [
     {
       toolName: call.request.name,

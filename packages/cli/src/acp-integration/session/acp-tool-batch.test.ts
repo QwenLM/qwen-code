@@ -431,6 +431,7 @@ describe('runAcpToolBatch', () => {
         expect(recordCompletedToolCall).toHaveBeenCalledExactlyOnceWith(
           read.name,
           read.args,
+          { ...completed.response, status: completed.status },
         );
         pendingUpdate.resolve();
         stalled.resolve([]);

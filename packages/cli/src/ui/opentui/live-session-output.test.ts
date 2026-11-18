@@ -169,6 +169,7 @@ function setup(
   };
   const client = {
     sendMessageStream: vi.fn(send),
+    recordCompletedToolCall: vi.fn(),
     isInitialized: () => true,
     getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
     addHistory: vi.fn(async () => {}),
