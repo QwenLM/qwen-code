@@ -105,6 +105,7 @@ class ManagedStoreDecompositionTest {
                 beginSessionMutation/6::REQUIRED:DEFAULT:false
                 beginSessionMutation/7::REQUIRED:DEFAULT:false completeSessionMutation/7::REQUIRED:DEFAULT:false abandonSessionMutation/4::REQUIRED:DEFAULT:false
                 beginOperation/6::REQUIRED:DEFAULT:false workspaceFilesEnabled/0:- workspaceShellEnabled/0:-
+                creationToolProfile/5::REQUIRED:DEFAULT:false
                 beginWorkspaceClose/7::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/8::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/9::REQUIRED:DEFAULT:false
                 hasCompletedWorkspaceClose/2:- completedWorkspaceCloses/2:- unarchiveWorkspaceSession/5::REQUIRED:DEFAULT:false
                 beginChildClose/8::REQUIRED:DEFAULT:false beginContextCompression/8::REQUIRED:DEFAULT:false contextCompressionState/2:-
