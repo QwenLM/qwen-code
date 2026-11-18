@@ -45,6 +45,20 @@ describe('meetsMinimumSessionRequirements', () => {
     ).toBe(true);
   });
 
+  it('pins the user-message threshold boundary (5 excluded, 6 admitted) (R16)', () => {
+    // The gate is userPromptCount > 5: exactly 5 stays below, 6 crosses.
+    expect(
+      meetsMinimumSessionRequirements(
+        statsWith({ userPromptCount: 5, promptCount: 5 }),
+      ),
+    ).toBe(false);
+    expect(
+      meetsMinimumSessionRequirements(
+        statsWith({ userPromptCount: 6, promptCount: 6 }),
+      ),
+    ).toBe(true);
+  });
+
   it('still admits a session on tool calls alone', () => {
     expect(
       meetsMinimumSessionRequirements(

@@ -337,11 +337,21 @@ describe('useBranchCommand', () => {
     // must land AFTER the stats reset.
     loadSession.mockImplementation(async (id: string) => ({
       conversation: {
-        messages: [0, 1].map((turn) => ({
-          ...userRecord(`turn ${turn}`),
-          sessionId: id,
-          promptId: `${id}########${turn}`,
-        })),
+        messages: [
+          ...[0, 1].map((turn) => ({
+            ...userRecord(`turn ${turn}`),
+            sessionId: id,
+            promptId: `${id}########${turn}`,
+          })),
+          // A background notification claims a higher id but is not a user
+          // turn, so the mint seed (6) and the user-turn seed (2) diverge and
+          // the assertion can tell them apart (R16).
+          {
+            ...userRecord('background', 'notification'),
+            sessionId: id,
+            promptId: `${id}########5`,
+          },
+        ],
       },
       filePath: '/tmp/new.jsonl',
       lastCompletedUuid: 'u2',
@@ -352,9 +362,9 @@ describe('useBranchCommand', () => {
       await result.current.handleBranch('seeded');
     });
 
-    // Mint seed 2 (highest claimed id + 1); the visible Prompts statistic seeds
-    // from the user-turn count (2 here), not the mint seed (S1).
-    expect(seedPromptCount).toHaveBeenCalledWith(2, 2);
+    // Mint seed 6 (highest claimed id 5 + 1); the visible Prompts statistic
+    // seeds from the user-turn count (2), not the mint seed (S1).
+    expect(seedPromptCount).toHaveBeenCalledWith(6, 2);
     expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
       seedPromptCount.mock.invocationCallOrder[0]!,
     );

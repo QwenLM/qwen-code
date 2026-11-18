@@ -317,6 +317,11 @@ function hostContinuationOptions(
       getInterruptedGoalPauseReason: options.getInterruptedGoalPauseReason,
       getQueuedGoalTurnKey: options.getQueuedGoalTurnKey,
     }),
+    // A client-initiated Stop-hook/stop-policy continuation keeps the turn's
+    // ledger key: its prompt id carries a continuation suffix, so without the
+    // base key beginTurn would read it as a new turn and reset the consumed
+    // marks mid-turn (R16).
+    ...(options?.ledgerTurnKey && { ledgerTurnKey: options.ledgerTurnKey }),
   };
 }
 
@@ -775,10 +780,12 @@ export class LlmClient {
   // counter for each, so their ids are unique (R6-1/R7-1 root fix). Their
   // ToolResult/Hook/Steer continuations are resubmitted without the background
   // flag, so model-availability ledger membership must exclude the whole
-  // interaction by prompt id, not just the first send's messageType. Entries are
-  // inert once the interaction ends (the id is never reused by a foreground
-  // turn). The set is bounded FIFO like stopHookChains, evicting by insertion
-  // order (R8-F11); this is safe because a background interaction's
+  // interaction by prompt id, not just the first send's messageType. Within a
+  // session the id is never reused by a foreground turn (the mint counter
+  // advances); a rewind/resume can re-mint a transcript id, but startNewSession
+  // clears this set at the session boundary, so a reused id never hits a stale
+  // registration. The set is bounded FIFO like stopHookChains, evicting by
+  // insertion order (R8-F11); this is safe because a background interaction's
   // continuations drain within its turn, long before 32 newer interactions
   // would evict its id — the bound is not a drain check.
   private readonly backgroundInteractionPromptIds = new Set<string>();

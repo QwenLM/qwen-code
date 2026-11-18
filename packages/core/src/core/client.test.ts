@@ -13260,6 +13260,22 @@ Other open files:
         }
       });
 
+      it('passes ledgerTurnKey through to the Turn constructor (R16)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+        // The client-to-Turn hop of the ledger-key chain: the sender's
+        // ledgerTurnKey must reach the Turn constructor's ledgerTurnKey slot.
+        await run([{ text: 'goal run' }], 'session########7', {
+          type: SendMessageType.UserQuery,
+          ledgerTurnKey: 'session########7/goal/goal-runtime:t1',
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[11]).toBe(
+          'session########7/goal/goal-runtime:t1',
+        );
+      });
+
       it('excludes a concurrent side query and its unflagged continuation', async () => {
         retryChat({
           stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),

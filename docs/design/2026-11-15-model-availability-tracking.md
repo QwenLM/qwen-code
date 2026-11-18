@@ -107,7 +107,10 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     like `stopHookChains`, evicting by insertion order (R8-F11); this is safe
     because a background interaction's continuations drain within its turn, long
     before 32 newer interactions would evict its id — the bound is not a drain
-    check. In the headless CLI a teammate turn mints its own id and a
+    check. The residual is a still-running interaction evicted after 32 newer
+    registrations: its late continuations would then rejoin the ledger, which is
+    fail-open (they re-probe rather than skip, no wrong result) and confined to
+    that pathological overlap. In the headless CLI a teammate turn mints its own id and a
     later foreground turn restores the base id once the teammate turn ends, so
     the registered teammate id cannot drop later foreground sends (R8-F2). A
     `Goal` turn is a ledger member (not registered), but its minted id is
@@ -171,8 +174,9 @@ no zod / no external deps, so no zod-4 migration is needed for it:
   across the swap would skip a recovered fallback or exclude a new foreground
   turn (P2 rewound-session).
 - Turn-key limitation: `lastTurnKey` is a single scalar on the session-scoped
-  service, and marks are keyed by model alone with no attribution to the turn
-  that wrote them. Internal background sends are excluded (above), so the
+  service, and marks are keyed by resolved route identity (model id plus an
+  auth/endpoint digest) with no attribution to the turn that wrote them.
+  Internal background sends are excluded (above), so the
   residual case is two genuine user turns sharing one `Config` concurrently.
   That concurrency cuts both ways. Fail-open: a new turn's `beginTurn` resets
   the other turn's consumed marks, so models are re-probed (pre-PR behaviour)
@@ -240,6 +244,13 @@ reversible; a later PR can flip the default once nightly evidence is in.
   (`userPromptCount`) advances for user queries, cron and teammate turns (the
   historical prompt set) and feeds `/stats` (`statsCommand.ts`), the feedback
   threshold (`useFeedbackDialog.ts`) and the tip cadence (`AppContainer.tsx`).
+- `packages/cli/src/ui/utils/resumeHistoryUtils.ts` +
+  `packages/cli/src/ui/hooks/useResumeCommand.ts` +
+  `packages/cli/src/ui/hooks/useBranchCommand.ts` — on resume/branch the mint
+  counter seeds past the transcript's claimed ids while `userPromptCount` seeds
+  from `computeResumedUserTurnCount` (genuine user turns, excluding background
+  notification/goal_runtime/agent records), so the visible statistic does not
+  inflate (S1/R15-1).
 - `packages/core/src/core/agent-loop.ts` — `turnModelRound` builds its `Turn`
   without `isSessionTurn`: every production caller is a background round
   (subagent shared loop, unified-loop speculation) sharing the session `Config`.
@@ -254,8 +265,8 @@ reversible; a later PR can flip the default once nightly evidence is in.
   — `experimental.modelAvailabilityTracking` (default false) + propagation, with
   CLI wiring tests mirroring the `unifiedAgentLoop` opt-in/opt-out/unset shape.
 - `docs/users/configuration/settings.md` + `packages/web-shell/client/settings.ts`
-  / `settings/messages.ts` — settings reference row, Web Shell alias and zh-CN
-  label/description.
+  / `settings/messages.ts` / `i18n-zh-tw.ts` — settings reference row, Web Shell
+  alias and zh-CN / zh-TW label/description.
 
 ## Acceptance criteria
 
