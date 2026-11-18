@@ -52,15 +52,14 @@ import {
 } from './useIsTouchComposer';
 import type { CommandInfo } from '../adapters/types';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
-import {
-  useOptionalWorkspace,
-  type UseDaemonFollowupSuggestionReturn,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalComposerWorkspace } from './useComposerWorkspace.js';
 import {
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
   getSlashCommandCompletionResult,
   type SkillInfo,
+  type SlashArgumentCompleter,
   type SlashCommandCompletionResult,
 } from '../completions/slashCompletion';
 import {
@@ -1186,6 +1185,15 @@ export interface UseComposerCoreOptions {
     commitAccepted?: ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  /**
+   * Awaited before a user-initiated submit (Send button or Enter) reads the
+   * draft, so the host can finalize pending input first — e.g. stop voice
+   * dictation and insert its final transcript. Submits stay synchronous when
+   * it is absent. While it runs, further user submits are ignored and
+   * `submitPreparing` is true; a session switch, unmount, or a rejecting
+   * finalizer cancels the submit.
+   */
+  prepareSubmit?: () => Promise<void>;
   onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
   cycleModeOnTab?: boolean;
@@ -1203,6 +1211,8 @@ export interface UseComposerCoreOptions {
   commands: CommandInfo[];
   skills?: SkillInfo[];
   allowEmptySlashMenu?: boolean;
+  /** Completes arguments the static subcommand trees cannot (`/send`). */
+  slashArgumentCompleter?: SlashArgumentCompleter;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
@@ -1563,6 +1573,15 @@ export interface UseComposerCoreReturn {
   hasAttachments: boolean;
   hasContent: boolean;
   canSubmit: boolean;
+  /**
+   * The content-independent submit guards (disabled, submitDisabled, draft
+   * restore, pending attachment batches, workspace upload). `canSubmit` is
+   * `!submitBlocked && hasContent`; render sites that relax the content term
+   * must keep these guards.
+   */
+  submitBlocked: boolean;
+  /** True while `prepareSubmit` is running ahead of a user-initiated submit. */
+  submitPreparing: boolean;
   pendingImageBatchCount: number;
   imageDragActive: boolean;
   clearImageDragState: () => void;
@@ -1618,6 +1637,7 @@ export function useComposerCore(
 ): UseComposerCoreReturn {
   const {
     onSubmit,
+    prepareSubmit,
     onInputTextChange,
     onCycleMode,
     cycleModeOnTab = false,
@@ -1629,6 +1649,7 @@ export function useComposerCore(
     commands,
     skills = [],
     allowEmptySlashMenu = false,
+    slashArgumentCompleter,
     slashCommandCategoryOrder,
     autoSubmitSlashCommands = false,
     queuedMessages = [],
@@ -1667,7 +1688,7 @@ export function useComposerCore(
 
   const persistFileReferencesRef = useRef(persistFileReferences);
   persistFileReferencesRef.current = persistFileReferences;
-  const workspace = useOptionalWorkspace();
+  const workspace = useOptionalComposerWorkspace();
   const { language, t } = useI18n();
   const portalRoot = useWebShellPortalRoot();
   const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
@@ -1787,6 +1808,8 @@ export function useComposerCore(
   commandsRef.current = commands;
   const allowEmptySlashMenuRef = useRef(allowEmptySlashMenu);
   allowEmptySlashMenuRef.current = allowEmptySlashMenu;
+  const slashArgumentCompleterRef = useRef(slashArgumentCompleter);
+  slashArgumentCompleterRef.current = slashArgumentCompleter;
   const skillsRef = useRef(skills);
   skillsRef.current = skills;
   const slashCommandCategoryOrderRef = useRef(slashCommandCategoryOrder);
@@ -2247,6 +2270,7 @@ export function useComposerCore(
               lane.activeReaders.add(reader),
             onReaderSettled: (reader: FileReader) =>
               lane.activeReaders.delete(reader),
+            isCancelled: () => imageIngestionLaneRef.current !== lane,
           };
           const imageResult = await readImageTransfer(
             transfer.imageCandidates,
@@ -2726,9 +2750,61 @@ export function useComposerCore(
       suppressFollowupCompletion?: boolean,
     ) => boolean
   >(() => true);
+  const prepareSubmitRef = useRef(prepareSubmit);
+  prepareSubmitRef.current = prepareSubmit;
+  const submitPreparingRef = useRef(false);
+  const [submitPreparing, setSubmitPreparing] = useState(false);
+  // Runs the host's pre-submit finalization once at a time; a second user
+  // submit while it is in flight is dropped, not queued.
+  const prepareForSubmit = useCallback(async (): Promise<boolean> => {
+    if (submitPreparingRef.current) return false;
+    const prepare = prepareSubmitRef.current;
+    if (!prepare) return true;
+    submitPreparingRef.current = true;
+    setSubmitPreparing(true);
+    try {
+      await prepare();
+    } catch {
+      // A failed finalization cancels the submit, like a session switch or
+      // unmount would; the fire-and-forget callers must not see a rejection.
+      return false;
+    } finally {
+      submitPreparingRef.current = false;
+      setSubmitPreparing(false);
+    }
+    return true;
+  }, []);
+  // The draft read after the await must still belong to the composer the
+  // user submitted from: a session switch during finalization swaps the doc.
+  const submitIdentityMatches = useCallback(
+    (identity: typeof composerIdentityRef.current) => {
+      const current = composerIdentityRef.current;
+      return (
+        current.sessionId === identity.sessionId &&
+        current.draftStorageKey === identity.draftStorageKey &&
+        current.promptHistoryStorageKey === identity.promptHistoryStorageKey
+      );
+    },
+    [],
+  );
+  // The same predicate submitComposerText enforces, exposed so the submit
+  // entrances can refuse BEFORE arming the finalizer — a refused submit must
+  // not tear down a live capture — and so render sites can relax only the
+  // content term of canSubmit without discarding these guards.
+  const submitGuardsBlock = useCallback(
+    () =>
+      disabledRef.current ||
+      submitDisabledRef.current ||
+      activeDraftAttachmentRestoreRef.current !== null ||
+      (sharedDraftRef.current?.session.pendingBatches ??
+        imageIngestionLaneRef.current.pendingBatches) > 0 ||
+      workspaceUploadBusyRef.current,
+    [],
+  );
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
   const [slashMenu, setSlashMenuState] = useState<SlashMenuState | null>(null);
   const slashMenuRef = useRef<SlashMenuState | null>(null);
+  const dismissedSlashMenuRef = useRef<EditorState['doc'] | null>(null);
 
   // True while the user is paging through input history with the arrow keys
   // and has not typed since. Unlike history.isNavigating() (which stays set
@@ -2874,8 +2950,10 @@ export function useComposerCore(
       tRef.current,
       slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
       allowEmptySlashMenuRef.current,
+      slashArgumentCompleterRef.current,
     );
     if (!result) return false;
+    dismissedSlashMenuRef.current = null;
     setSlashMenu({
       ...result,
       selectedIndex: 0,
@@ -2926,6 +3004,7 @@ export function useComposerCore(
         (key) => tRef.current(key),
         slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
         allowEmptySlashMenuRef.current,
+        slashArgumentCompleterRef.current,
       );
       if (!relativeResult) {
         setSlashMenu(null);
@@ -2948,7 +3027,25 @@ export function useComposerCore(
     [closeAtMenu, setSlashMenu],
   );
 
+  // New argument data (a workspace's sessions arrived): recompute the menu
+  // for a command being typed.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (
+      !view?.hasFocus ||
+      !slashArgumentCompleter ||
+      dismissedSlashMenuRef.current === view.state.doc
+    )
+      return;
+    const { head } = view.state.selection.main;
+    const line = view.state.doc.lineAt(head);
+    if (slashArgumentCompleter(line.text.slice(0, head - line.from))) {
+      refreshSlashMenuForView(view);
+    }
+  }, [refreshSlashMenuForView, slashArgumentCompleter]);
+
   const closeSlashMenu = useCallback(() => {
+    dismissedSlashMenuRef.current = viewRef.current?.state.doc ?? null;
     setSlashMenu(null);
   }, [setSlashMenu]);
 
@@ -3270,14 +3367,13 @@ export function useComposerCore(
     tagsOverride?: readonly WebShellComposerTag[],
     suppressFollowupCompletion = false,
   ) => {
-    if (
-      disabledRef.current ||
-      submitDisabledRef.current ||
-      activeDraftAttachmentRestoreRef.current !== null ||
-      (sharedDraftRef.current?.session.pendingBatches ??
-        imageIngestionLaneRef.current.pendingBatches) > 0 ||
-      workspaceUploadBusyRef.current
-    ) {
+    // A programmatic submit landing inside the finalization window is
+    // dropped like any other reentrant submit; otherwise the flush
+    // continuation would submit a second time after it.
+    if (submitPreparingRef.current) {
+      return true;
+    }
+    if (submitGuardsBlock()) {
       return true;
     }
     const inlineTags =
@@ -3747,19 +3843,45 @@ export function useComposerCore(
             });
             return true;
           }
-          const followup = followupStateRef.current;
-          const hasInlineTags = hasInlineComposerTags(view);
-          const followupCompletion = hasInlineTags
-            ? null
-            : getFollowupCompletion(
-                view.state.doc.toString(),
-                followup?.suggestion,
-              );
-          if (followup?.isVisible && followupCompletion) {
-            onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
-            return submitText(view, followupCompletion);
+          const submitDraft = (target: EditorView) => {
+            const followup = followupStateRef.current;
+            const hasInlineTags = hasInlineComposerTags(target);
+            const followupCompletion = hasInlineTags
+              ? null
+              : getFollowupCompletion(
+                  target.state.doc.toString(),
+                  followup?.suggestion,
+                );
+            if (followup?.isVisible && followupCompletion) {
+              onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+              return submitText(target, followupCompletion);
+            }
+            return submitText(target);
+          };
+          // Refuse before arming the finalizer: a submit the guards would
+          // reject must leave a live capture recording, as it did before
+          // finalization existed.
+          if (!prepareSubmitRef.current || submitGuardsBlock()) {
+            return submitDraft(view);
           }
-          return submitText(view);
+          const identity = composerIdentityRef.current;
+          // CodeMirror commands are synchronous; the finalization runs in the
+          // background and the key is consumed so no newline is inserted.
+          void (async () => {
+            if (!(await prepareForSubmit())) return;
+            const currentView = viewRef.current;
+            if (
+              !composerMountedRef.current ||
+              !currentView ||
+              !submitIdentityMatches(identity)
+            ) {
+              return;
+            }
+            // Finalization may have inserted text (e.g. a voice transcript),
+            // so the follow-up completion is recomputed from the new draft.
+            submitDraft(currentView);
+          })();
+          return true;
         },
       },
       {
@@ -5458,13 +5580,17 @@ export function useComposerCore(
 
   // ---- Computed ----
 
-  const canSubmit =
-    !disabled &&
-    !submitDisabled &&
-    !draftAttachmentsRestoring &&
-    pendingImageBatchCount === 0 &&
-    !workspaceUploadBusy &&
-    hasContent;
+  // The content-independent submit guards, mirroring submitGuardsBlock (the
+  // ref-based predicate the submit path enforces). Render sites use this to
+  // relax only the content term of canSubmit — e.g. an active dictation —
+  // without discarding the guards themselves.
+  const submitBlocked =
+    disabled ||
+    submitDisabled ||
+    draftAttachmentsRestoring ||
+    pendingImageBatchCount > 0 ||
+    workspaceUploadBusy;
+  const canSubmit = !submitBlocked && hasContent;
   const showShortcutHints =
     !shellMode &&
     !searchMode &&
@@ -5576,8 +5702,29 @@ export function useComposerCore(
     submitText: useCallback(() => {
       const view = viewRef.current;
       if (!view && !isTouchComposer) return;
-      submitTextRef.current(view);
-    }, [isTouchComposer]),
+      if (!prepareSubmitRef.current || submitGuardsBlock()) {
+        submitTextRef.current(view);
+        return;
+      }
+      const identity = composerIdentityRef.current;
+      void (async () => {
+        if (!(await prepareForSubmit())) return;
+        const currentView = viewRef.current;
+        if (
+          !composerMountedRef.current ||
+          !submitIdentityMatches(identity) ||
+          (!currentView && !isTouchComposer)
+        ) {
+          return;
+        }
+        submitTextRef.current(currentView);
+      })();
+    }, [
+      isTouchComposer,
+      prepareForSubmit,
+      submitGuardsBlock,
+      submitIdentityMatches,
+    ]),
     clearText,
     getText,
     hasInput,
@@ -5588,6 +5735,8 @@ export function useComposerCore(
       pastedFiles.length > 0,
     hasContent,
     canSubmit,
+    submitBlocked,
+    submitPreparing,
     pendingImageBatchCount,
     imageDragActive,
     clearImageDragState,

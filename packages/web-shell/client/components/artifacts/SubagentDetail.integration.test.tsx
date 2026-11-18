@@ -16,6 +16,9 @@ const {
   animationFrameBlocks,
   connection,
   messagesFromBlocks,
+  registrationActions,
+  registrationOwnerGuard,
+  sessionArtifactsState,
   workspaceActions,
   workspaceClient,
   latestMessageListProps,
@@ -39,8 +42,20 @@ const {
     workspaceCwd: '/work/project',
     loadingTranscript: false,
     catchingUp: true,
+    capabilities: undefined as { features: string[] } | undefined,
   },
   messagesFromBlocks: vi.fn(),
+  registrationActions: {
+    addArtifact: vi.fn(async () => ({})),
+  },
+  registrationOwnerGuard: {
+    capture: () => ({ isCurrent: () => true }),
+  },
+  sessionArtifactsState: {
+    artifacts: [] as unknown[],
+    hydrated: false,
+    refresh: async () => {},
+  },
   workspaceActions: {
     readFile: vi.fn(),
     stat: vi.fn().mockResolvedValue({ type: 'file' }),
@@ -80,6 +95,8 @@ const {
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({ children }: { children: ReactNode }) => children,
   useConnection: () => connection,
+  useActions: () => registrationActions,
+  useDaemonSessionOwnerGuard: () => registrationOwnerGuard,
   useWorkspace: () => ({
     client: workspaceClient,
     status: 'connected',
@@ -102,7 +119,7 @@ vi.mock('../../hooks/useAnimationFrameTranscriptBlocks', () => ({
 }));
 
 vi.mock('../../hooks/useSessionArtifacts', () => ({
-  useSessionArtifacts: () => ({ artifacts: [] }),
+  useSessionArtifacts: () => sessionArtifactsState,
 }));
 
 vi.mock('../../WebShellContexts', async () => {
@@ -172,6 +189,11 @@ afterEach(() => {
   workspaceClient.workspaceByCwd.mockReset();
   previewCapabilities.features = [];
   messages.splice(1);
+  connection.catchingUp = true;
+  connection.capabilities = undefined;
+  sessionArtifactsState.hydrated = false;
+  animationFrameBlocks.splice(1);
+  registrationActions.addArtifact.mockClear();
   vi.useRealTimers();
 });
 
@@ -698,3 +720,56 @@ it.each([true, false])(
     }
   },
 );
+
+it('registers reported artifacts for the subagent session (R6-1)', async () => {
+  // The detail view runs under its own DaemonSessionProvider for the
+  // subagent session; App's registration mount only covers the main session.
+  connection.catchingUp = false;
+  connection.capabilities = { features: ['session_artifacts'] };
+  sessionArtifactsState.hydrated = true;
+  animationFrameBlocks.push({
+    kind: 'assistant',
+    meta: {
+      source: 'slash_command',
+      sessionArtifacts: [
+        {
+          title: 'report',
+          workspacePath: 'report.html',
+          kind: 'html',
+          storage: 'workspace',
+        },
+      ],
+    },
+  });
+  workspaceClient.resolveSubagentSession.mockResolvedValue({
+    sessionId: 'subagent-session',
+    status: 'completed',
+  });
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => {
+    root!.render(
+      <I18nProvider language="en">
+        <SubagentDetail
+          sessionId="parent-session"
+          rootToolCallId="agent-1"
+          initialRootTool={
+            (messages[0] as Extract<Message, { role: 'tool_group' }>).tools[0]
+          }
+          workspaceCwd="/work/project"
+        />
+      </I18nProvider>,
+    );
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(registrationActions.addArtifact).toHaveBeenCalledTimes(1);
+  expect(registrationActions.addArtifact).toHaveBeenCalledWith({
+    title: 'report',
+    workspacePath: 'report.html',
+    kind: 'html',
+    storage: 'workspace',
+  });
+});

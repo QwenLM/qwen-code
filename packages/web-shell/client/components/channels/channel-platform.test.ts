@@ -32,9 +32,11 @@ describe('Channel platform availability', () => {
         descriptor('dws'),
         descriptor('weixin'),
         descriptor('wecom'),
+        descriptor('wecom-webhook'),
         descriptor('wecom-callback'),
         descriptor('feishu'),
         descriptor('feishu-webhook'),
+        descriptor('generic-webhook'),
         descriptor('github'),
         descriptor('gitlab'),
         descriptor('email'),
@@ -46,6 +48,8 @@ describe('Channel platform availability', () => {
         descriptor('gitlab', false),
         descriptor('email', false),
         descriptor('feishu-webhook', false),
+        descriptor('wecom-webhook', false),
+        descriptor('generic-webhook', false),
       ]
         .filter(isChannelPlatformAvailable)
         .map((item) => item.type),
@@ -55,9 +59,11 @@ describe('Channel platform availability', () => {
       'dws',
       'weixin',
       'wecom',
+      'wecom-webhook',
       'wecom-callback',
       'feishu',
       'feishu-webhook',
+      'generic-webhook',
       'github',
       'gitlab',
       'email',
@@ -70,9 +76,12 @@ describe('Channel platform availability', () => {
     expect(isSupportedChannelType('dws')).toBe(true);
     expect(isSupportedChannelType('weixin')).toBe(true);
     expect(isSupportedChannelType('wecom')).toBe(true);
+    expect(isSupportedChannelType('wecom-webhook')).toBe(true);
+    expect(PLATFORM_MARKS['wecom-webhook']).toBe(PLATFORM_MARKS['wecom']);
     expect(isSupportedChannelType('wecom-callback')).toBe(true);
     expect(isSupportedChannelType('feishu')).toBe(true);
     expect(isSupportedChannelType('feishu-webhook')).toBe(true);
+    expect(isSupportedChannelType('generic-webhook')).toBe(true);
     expect(PLATFORM_MARKS['feishu-webhook']).toBe(PLATFORM_MARKS['feishu']);
     expect(isSupportedChannelType('github')).toBe(true);
     expect(isSupportedChannelType('gitlab')).toBe(true);

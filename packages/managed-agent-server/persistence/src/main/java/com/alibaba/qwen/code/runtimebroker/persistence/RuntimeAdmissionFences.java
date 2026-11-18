@@ -1,8 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -223,32 +221,12 @@ public final class RuntimeAdmissionFences {
         if (fence.contains(HarnessFence.RUNTIME_SESSION_OWNER)) {
             BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         } else if (!"session".equals(scope.getIsolationClass())
-                && !(ResidentWorkspaceProfile.selects(scope) && harnessSessionId != null)
                 && !(WorkspaceExecutionProfile.isBoundWorkspaceScope(scope) && harnessSessionId != null
                         && authority != null)) {
             if (authority != null) {
                 throw admissionClosed();
             }
             return;
-        }
-        if (ResidentWorkspaceProfile.selects(scope)) {
-            try (PreparedStatement session = connection.prepareStatement(
-                    "SELECT status, workspace_id, workspace_generation, context_config_ref, tool_profile"
-                            + " FROM ma_session WHERE tenant_id = ? AND session_id = ?")) {
-                JdbcRepositorySupport.setIdentity(session, 1, scope.getTenantId());
-                JdbcRepositorySupport.setIdentity(session, 2, harnessSessionId);
-                try (ResultSet row = session.executeQuery()) {
-                    if (!row.next() || !scope.getWorkspaceId().equals(row.getString("workspace_id"))
-                            || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
-                            || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(row.getString("context_config_ref"))
-                            || !"hosted-workspace-files/1".equals(row.getString("tool_profile"))
-                            || !(authority == null && !cleanup && !retirement && !legacyHook
-                                    ? "ACTIVE".equals(row.getString("status"))
-                                    : List.of("CLOSING", "DELETING").contains(row.getString("status")))) {
-                        throw admissionClosed();
-                    }
-                }
-            }
         }
         String claimLock = "";
         if (authority != null) {
@@ -324,7 +302,7 @@ public final class RuntimeAdmissionFences {
     }
 
     public static String storageAliasKey(String tenantId, String storageId) {
-        return WorkspaceCsiRegistration.aliasKey(tenantId, storageId);
+        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("qwen-csi-alias/1", tenantId, storageId);
     }
 
     static String storageFence(Connection connection, String tenantId, String storageId) throws SQLException {
@@ -364,26 +342,5 @@ public final class RuntimeAdmissionFences {
             }
         }
         return false;
-    }
-
-    static void requireResidentWorkspaceAdmission(Connection connection,
-            RuntimeProvisionRequest request) throws SQLException {
-        if (!ResidentWorkspaceProfile.selects(request)) {
-            return;
-        }
-        var scope = request.getScope();
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT workspace_generation, storage_id, state FROM ma_workspace"
-                        + " WHERE tenant_id = ? AND workspace_id = ?")) {
-            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
-            JdbcRepositorySupport.setIdentity(statement, 2, scope.getWorkspaceId());
-            try (ResultSet row = statement.executeQuery()) {
-                if (!row.next() || !"ACTIVE".equals(row.getString("state"))
-                        || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
-                        || !request.getStorageId().equals(row.getString("storage_id"))) {
-                    throw admissionClosed();
-                }
-            }
-        }
     }
 }

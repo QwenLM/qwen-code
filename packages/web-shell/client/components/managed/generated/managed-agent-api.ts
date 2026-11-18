@@ -33,6 +33,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/sessions/terminal-ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description Mint the single-use, short-lived ticket a browser offers on the terminal WebSocket upgrade. The request travels the authenticated WebShell surface and runs the full terminal admission (readable, active, Shell capability and OPERATOR access) here, where the deployment authentication headers are available; the upgrade itself then only consumes the ticket. Mounted only with the Runtime Broker. The ticket is never carried in a URL and is consumed exactly once. */
+        post: operations["webShellTerminalTicket"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/sessions/rename": {
         parameters: {
             query?: never;
@@ -510,7 +527,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads. */
+        /** @description Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-files/4, hosted-workspace-shell/1, hosted-workspace-shell/3 or hosted-workspace-shell/4. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads. */
         post: operations["changeWebShellSessionApproval"];
         delete?: never;
         options?: never;
@@ -629,7 +646,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Read only names and descriptions from the Session's pinned static Skill catalog. Requires a trusted actor and Workspace read access. Never resolves the latest AgentDefinition or discovers host Skills. */
+        /** @description Returns names and descriptions of user-invocable Skills for a readable Session. Includes its pinned static Skills and standalone Skills from its initial package selection until the first configuration becomes active. Thereafter the active configuration supplies the package Skills. Requires a trusted actor and Workspace read access. */
         post: operations["queryWebShellSessionSkills"];
         delete?: never;
         options?: never;
@@ -1681,6 +1698,15 @@ export interface components {
             /** Format: uuid */
             sessionId: string;
         };
+        WebShellTerminalTicketRequest: {
+            sessionId: string;
+            terminalId: string;
+        };
+        WebShellTerminalTicket: {
+            ticket: string;
+            /** Format: int64 */
+            expiresInSeconds: number;
+        };
         WebShellTranscriptRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -1718,9 +1744,9 @@ export interface components {
             approvalMode?: "default" | "auto-edit" | "yolo";
             /** @description Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state. */
             planMode?: boolean;
-            /** @description Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency. */
+            /** @description Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON; a caller loop whose body is the verbatim bundled import is superseded by the definition's entry or the server variant rather than rejected; a user-authored caller loop that collides with a definition-authored loop is still rejected. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing only the bundled caller import (carrying over its invocation flags) when the combined static and package Skill catalog has room, even if this array is empty; a user-authored caller loop or a definition-authored loop skill is preserved and suppresses the variant, and on a creator-less profile only the bundled caller import is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency. */
             skills?: components["schemas"]["SessionCreationSkill"][];
-            /** @description Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime. */
+            /** @description Optional immutable initial extension selection for a Workspace Session. If omitted and the caller supplies no static Skills, MAS selects defaults from the configured Skill catalog providers. With no defaults, omission preserves the existing configuration. An explicit array selects exactly those pins and disables provider defaults. An empty array starts the unified configuration with no initial packages. Explicit selection is included in creation idempotency. Selected packages are applied before the first model request and require session-extension-packages/1 and an extension-capable original Runtime. */
             extensionPins?: components["schemas"]["ManagedExtensionPackagePin"][];
             /** @description Opt into a main Session worktree on supported LOCAL storage. Omission uses the current directory; an empty object freezes HEAD at first admission. Requires an explicit Workspace. Preparation is durable and gates Runtime execution; replay preserves the original commit, directory and branch. */
             worktree?: {
@@ -1872,7 +1898,7 @@ export interface components {
             foregroundShell?: boolean;
             /** @description The caller may change the Session model selection for later Turns using the server model catalog, including while a Turn or approval is active. Missing means unsupported; authorization, recovery and revision admission still apply. */
             modelChange?: boolean;
-            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
+            /** @description The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-files/4, hosted-workspace-shell/1, hosted-workspace-shell/3 or hosted-workspace-shell/4 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false. */
             approvalModeChange?: boolean;
             /** @description Optional deployment capability; missing means false. */
             inputAttachments?: boolean;
@@ -1900,6 +1926,8 @@ export interface components {
             btw?: boolean;
             /** @default false */
             recap?: boolean;
+            /** @description UI hint that this Session may open a Managed Web Terminal: the terminal deployment opt-in is enabled, the caller may submit (OPERATOR on the bound Workspace), and the Session is a Shell Session. The relay re-runs the full admission on the WebSocket attach; this field does not gate it. */
+            terminal?: boolean | null;
             /**
              * @description Browser local-files registration is available for this Session: the Session is bound to a Workspace, the caller holds current execution authority, the deployment enables the client-files relay and the Harness supports it. A Workspace-less Session never advertises this capability. Registration admission still checks the actor grant and idle state separately.
              * @default false
@@ -4127,6 +4155,37 @@ export interface operations {
             413: components["responses"]["PayloadTooLarge"];
         };
     };
+    webShellTerminalTicket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTerminalTicketRequest"];
+            };
+        };
+        responses: {
+            /** @description Single-use terminal upgrade ticket and its lifetime in seconds. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellTerminalTicket"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            413: components["responses"]["PayloadTooLarge"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     webShellRenameSession: {
         parameters: {
             query?: never;
@@ -5307,7 +5366,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Session static Skill metadata. */
+            /** @description User-visible Session Skill metadata. */
             200: {
                 headers: {
                     [name: string]: unknown;

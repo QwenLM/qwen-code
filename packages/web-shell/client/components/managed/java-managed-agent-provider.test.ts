@@ -2484,6 +2484,49 @@ describe('createJavaManagedAgentProvider', () => {
     ).toEqual({ canSend: true, canCancel: false });
   });
 
+  it('reports the terminal capability from the Session summary', async () => {
+    const session = {
+      sessionId: 'session-1',
+      status: 'ACTIVE',
+      createdAt: 1,
+      updatedAt: 1,
+      lastSequence: 0,
+    };
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...session,
+            capabilities: { terminal: true },
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...session,
+            capabilities: { terminal: null },
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ ...session, capabilities: {} })),
+    });
+    const load = () => provider.getSession('session-1', { clientId: 'c' });
+    expect((await load()).capabilities).toEqual({
+      canSend: true,
+      canCancel: false,
+      terminal: true,
+    });
+    expect((await load()).capabilities).toEqual({
+      canSend: true,
+      canCancel: false,
+      terminal: null,
+    });
+    expect((await load()).capabilities).toEqual({
+      canSend: true,
+      canCancel: false,
+    });
+  });
+
   it('lets a bound Session send only when the service allows its caller', async () => {
     const bound = {
       sessionId: 'bound-1',

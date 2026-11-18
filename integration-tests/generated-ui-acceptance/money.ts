@@ -24,6 +24,10 @@ function withoutPercentages(text: string): string {
   return text.replace(/-?\d+(?:\.\d+)?\s*[%\uFF05]/g, ' ');
 }
 
+const GROUP_SEPARATORS = /[,\uFF0C\u00A0\u202F\u2009]/g;
+const AMOUNT =
+  /-?(?:\d{1,3}(?:[,\uFF0C\u00A0\u202F\u2009]\d{3})+(?!\d)|\d+)(?:\.\d+)?/g;
+
 /**
  * Reads every money amount in a text, tolerating currency symbols and codes,
  * thousands separators and full-width digits. Returns integer cents.
@@ -33,13 +37,12 @@ function withoutPercentages(text: string): string {
  * is a label and an amount, not 1137.84. Percentages are not amounts.
  */
 export function parseAmounts(text: string): number[] {
-  const normalized = withoutPercentages(normalizeMoneyText(text)).replace(
-    /(\d)[,\uFF0C\u00A0\u202F\u2009](?=\d{3}(?:\D|$))/g,
-    '$1',
-  );
+  const normalized = withoutPercentages(normalizeMoneyText(text));
   const amounts: number[] = [];
-  for (const match of normalized.matchAll(/-?\d+(?:\.\d+)?/g)) {
-    const value = Number(match[0]);
+  // Read amounts left to right, so a comma after a fraction ends the amount:
+  // `91.20,156.00` is two amounts, not 91.20156.
+  for (const match of normalized.matchAll(AMOUNT)) {
+    const value = Number(match[0].replace(GROUP_SEPARATORS, ''));
     if (Number.isFinite(value)) amounts.push(Math.round(value * 100));
   }
   return amounts;

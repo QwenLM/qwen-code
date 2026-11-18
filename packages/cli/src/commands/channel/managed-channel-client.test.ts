@@ -159,4 +159,28 @@ describe('HttpManagedChannelControlPlane', () => {
       code: 'channel_generation_stale',
     });
   });
+
+  it('destinationKey binds the full registration identity, not just tenant/channel', () => {
+    const base = {
+      baseUrl: 'http://127.0.0.1:4181/',
+      tenantId: 'tenant-1',
+      channelId: 'chan-1',
+      actorId: 'owner',
+      workspaceId: 'ws-1',
+      cwdRelative: '.',
+    };
+    const key = (over: Record<string, string>) =>
+      new HttpManagedChannelControlPlane({ ...base, ...over }).destinationKey;
+    const original = key({});
+    // Stable for the same registration (trailing slash normalized).
+    expect(key({ baseUrl: 'http://127.0.0.1:4181' })).toBe(original);
+    // Every ownership field changes the key, so a pending ledger follows its
+    // registered owner/workspace/cwd rather than replaying into a new
+    // registration of the same tenant/channel.
+    expect(key({ actorId: 'other' })).not.toBe(original);
+    expect(key({ workspaceId: 'ws-2' })).not.toBe(original);
+    expect(key({ cwdRelative: 'sub' })).not.toBe(original);
+    expect(key({ tenantId: 'tenant-2' })).not.toBe(original);
+    expect(key({ channelId: 'chan-2' })).not.toBe(original);
+  });
 });
