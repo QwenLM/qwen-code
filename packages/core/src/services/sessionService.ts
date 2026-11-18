@@ -3425,15 +3425,7 @@ export class SessionService {
     const { messages, gaps } = this.reconstructHistory(records, {
       detectGaps: true,
     });
-    // Artifacts can be registered before the first prompt; these valid
-    // sessions have only side records and no conversation chain.
-    const sideRecordsOnly = records.every(
-      (record) =>
-        isSessionArtifactRecord(record) ||
-        (record.type === 'system' &&
-          (record.subtype === 'custom_title' ||
-            record.subtype === 'session_sources_snapshot')),
-    );
+    const sideRecordsOnly = isSideRecordsOnlyTranscript(records);
     if (gaps.length || (!messages.length && !sideRecordsOnly)) {
       throw new SessionArtifactLibraryError(
         sessionId,
@@ -3746,6 +3738,58 @@ export class SessionService {
     const { messages, gaps } = this.reconstructHistory(records, {
       detectGaps: true,
     });
+
+    // Seed the derived list cache so legacy sessions (journal records
+    // predating the sidecar) and forks gain a count on their first open.
+    // Runs before the empty-conversation early return: artifacts can be
+    // registered before the first prompt, and those side-records-only
+    // sessions are listable even though they have no conversation to load
+    // (the same transcript shape the library mutation guard accepts).
+    // Best-effort and only from an authoritative read: a partial transcript
+    // must not publish an undercount, a broken history chain can orphan
+    // artifact events off the active branch (same undercount), and a
+    // journal with record-level damage is one the library mutation guard
+    // refuses — the seed refuses it too rather than clobbering a correct
+    // sidecar. The journal stays authoritative. Skip the write when the
+    // sidecar already carries this count so a warm load adds no disk write
+    // to the restore path. A zero count heals an existing stale sidecar (a
+    // failed best-effort zero write must not leave a phantom count forever)
+    // but never creates one for an artifact-free session. An undefined
+    // snapshot with NO warnings (no artifact records on the active branch
+    // at all) is a zero count for healing purposes; an undefined snapshot
+    // whose records were all refused is damaged, and the gate below
+    // refuses it via the threaded warnings.
+    const artifactJournalWarnings: string[] = [];
+    const artifactSnapshot = rebuildSessionArtifactSnapshot(
+      isSideRecordsOnlyTranscript(records)
+        ? records
+        : includeActiveSideArtifactRecords(records, messages),
+      firstRecord.sessionId,
+      artifactJournalWarnings,
+    );
+    if (
+      sourceReadComplete &&
+      gaps.length === 0 &&
+      !hasDisqualifyingArtifactJournalWarning(artifactJournalWarnings)
+    ) {
+      // Count the set a cold open restores, not the raw rebuild: the
+      // bridge drops non-snapshot published file locators on restore
+      // (whatever their kind or id) and they must not inflate the row's
+      // count — the same shared predicate the bridge's own count uses.
+      const count =
+        artifactSnapshot?.artifacts.filter((artifact) =>
+          isRestorablePersistedArtifact(artifact),
+        ).length ?? 0;
+      const summaryPath = this.getArtifactSummaryPathForState(sessionId, state);
+      const existing = readSessionArtifactSummarySidecar(summaryPath);
+      if (
+        existing?.artifactCount !== count &&
+        (count > 0 || existing !== undefined)
+      ) {
+        writeSessionArtifactSummarySidecar(summaryPath, count);
+      }
+    }
+
     if (messages.length === 0) {
       return;
     }
@@ -3786,58 +3830,6 @@ export class SessionService {
       }
     }
     const fileHistorySnapshots = fileHistoryAccumulator.finish();
-    const activeBranchRecords = includeActiveSideArtifactRecords(
-      records,
-      messages,
-    );
-    // The warnings are threaded out separately: an all-refused journal
-    // yields an undefined snapshot but still carries its damage warnings,
-    // and the seed gate must see them (undefined-with-warnings is damaged,
-    // not artifact-free).
-    const artifactJournalWarnings: string[] = [];
-    const artifactSnapshot = rebuildSessionArtifactSnapshot(
-      activeBranchRecords,
-      firstRecord.sessionId,
-      artifactJournalWarnings,
-    );
-    // Seed the derived list cache so legacy sessions (journal records
-    // predating the sidecar) and forks gain a count on their first open.
-    // Best-effort and only from an authoritative read: a partial transcript
-    // must not publish an undercount, a broken history chain can orphan
-    // artifact events off the active branch (same undercount), and a
-    // journal with record-level damage is one the library mutation guard
-    // refuses — the seed refuses it too rather than clobbering a correct
-    // sidecar. The journal stays authoritative. Skip the write when the
-    // sidecar already carries this count so a warm load adds no disk write
-    // to the restore path. A zero count heals an existing stale sidecar (a
-    // failed best-effort zero write must not leave a phantom count forever)
-    // but never creates one for an artifact-free session. An undefined
-    // snapshot with NO warnings (no artifact records on the active branch
-    // at all) is a zero count for healing purposes; an undefined snapshot
-    // whose records were all refused is damaged, and the gate below
-    // refuses it via the threaded warnings.
-    if (
-      sourceReadComplete &&
-      gaps.length === 0 &&
-      !hasDisqualifyingArtifactJournalWarning(artifactJournalWarnings)
-    ) {
-      // Count the set a cold open restores, not the raw rebuild: the
-      // bridge drops non-snapshot published file locators on restore
-      // (whatever their kind or id) and they must not inflate the row's
-      // count — the same shared predicate the bridge's own count uses.
-      const count =
-        artifactSnapshot?.artifacts.filter((artifact) =>
-          isRestorablePersistedArtifact(artifact),
-        ).length ?? 0;
-      const summaryPath = this.getArtifactSummaryPathForState(sessionId, state);
-      const existing = readSessionArtifactSummarySidecar(summaryPath);
-      if (
-        existing?.artifactCount !== count &&
-        (count > 0 || existing !== undefined)
-      ) {
-        writeSessionArtifactSummarySidecar(summaryPath, count);
-      }
-    }
 
     return {
       conversation,
@@ -5665,6 +5657,22 @@ function remapSystemPayloadForFork(
  */
 function isForkSideRecord(record: ChatRecord): boolean {
   return isSessionArtifactRecord(record) || isGeneratedUiStateRecord(record);
+}
+
+/**
+ * Artifacts can be registered before the first prompt; these valid
+ * sessions have only side records and no conversation chain. Shared by
+ * the library mutation guard and the load-time sidecar seed so both
+ * accept the same transcript shape.
+ */
+function isSideRecordsOnlyTranscript(records: ChatRecord[]): boolean {
+  return records.every(
+    (record) =>
+      isSessionArtifactRecord(record) ||
+      (record.type === 'system' &&
+        (record.subtype === 'custom_title' ||
+          record.subtype === 'session_sources_snapshot')),
+  );
 }
 
 function includeActiveSideArtifactRecords(

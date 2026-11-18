@@ -331,6 +331,51 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
+  it('does not transfer the dropped count onto a kept side with no sidecar (archive)', async () => {
+    // The realistic legacy shape: the kept (archived) transcript predates
+    // the sidecar, so it has none. The dropped count must be discarded,
+    // not moved onto the kept side; the load-time seed regenerates it.
+    writeTranscript([userRecord()]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 3);
+    mkdirSync(path.dirname(archivedSidecarPath), { recursive: true });
+    writeFileSync(
+      path.join(path.dirname(archivedSidecarPath), `${SESSION_ID}.jsonl`),
+      `${JSON.stringify(userRecord())}\n`,
+      'utf8',
+    );
+
+    const result = await service.archiveSessions([SESSION_ID], {
+      resolveConflicts: true,
+    });
+
+    expect(result.resolvedConflicts).toEqual([SESSION_ID]);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+    expect(
+      readSessionArtifactSummarySidecar(archivedSidecarPath),
+    ).toBeUndefined();
+  });
+
+  it('does not transfer the dropped count onto a kept side with no sidecar (unarchive)', async () => {
+    writeTranscript([userRecord()]);
+    mkdirSync(path.dirname(archivedSidecarPath), { recursive: true });
+    writeFileSync(
+      path.join(path.dirname(archivedSidecarPath), `${SESSION_ID}.jsonl`),
+      `${JSON.stringify(userRecord())}\n`,
+      'utf8',
+    );
+    writeSessionArtifactSummarySidecar(archivedSidecarPath, 3);
+
+    const result = await service.unarchiveSessions([SESSION_ID], {
+      resolveConflicts: true,
+    });
+
+    expect(result.resolvedConflicts).toEqual([SESSION_ID]);
+    expect(
+      readSessionArtifactSummarySidecar(archivedSidecarPath),
+    ).toBeUndefined();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+  });
+
   it('keeps the sidecar in step with a cold library removal', async () => {
     // Three artifacts with one removed: the expected 2 is the REMAINING
     // count, not the removed batch's size (which a 2/1 fixture cannot
@@ -378,11 +423,42 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
+  it('recounts restorable survivors without non-snapshot published file locators on removal', async () => {
+    // The widened shared predicate governs the removal recount too: the
+    // published file: locator is not restorable, so removing one of the
+    // two restorable links leaves 1, not 2.
+    const a = persistedArtifact('https://example.com/rm-keep-a');
+    const b = persistedArtifact('https://example.com/rm-keep-b');
+    const locator: PersistedSessionArtifact = {
+      ...persistedArtifact('file:///tmp/legacy/rm.pdf'),
+      storage: 'published',
+    };
+    writeTranscript([userRecord(), artifactEventRecord([a, b, locator])]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 2);
+
+    const removed = await service.removeSessionArtifactsForLibrary(
+      SESSION_ID,
+      [b.id],
+      {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      },
+    );
+
+    expect(removed).toEqual([b.id]);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
+
   it('does not clobber a correct sidecar from a journal with a history gap', async () => {
-    // The orphaned second user breaks the history chain; the artifact
-    // event attached to it falls off the active branch, so the rebuilt
-    // snapshot undercounts (2 of 3). A complete PARSE is not an
-    // authoritative read — the seed must leave the correct sidecar alone.
+    // The orphaned second user breaks the history chain and blocks
+    // active-branch attribution of the side events, so the rebuild sees
+    // no artifacts at all (0 of 3 — verified against
+    // selectActiveSideArtifactRecordUuids: the orphan conversation record
+    // blocks the preceding event, and the orphan event's parent is not
+    // active). A complete PARSE is not an authoritative read — the seed
+    // must leave the correct sidecar alone.
     const a = persistedArtifact('https://example.com/gap-a');
     const b = persistedArtifact('https://example.com/gap-b');
     const c = persistedArtifact('https://example.com/gap-c');
@@ -535,6 +611,47 @@ describe('SessionService - artifact summary sidecar', () => {
       storage: 'published',
     };
     writeTranscript([userRecord(), artifactEventRecord([kept, dropped])]);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
+
+  it('seeds a side-records-only session on load', async () => {
+    // Artifacts registered before the first prompt: the transcript holds
+    // only side records, so loadSession returns no conversation — but the
+    // session is listable and the seed must still run (the same shape the
+    // library mutation guard accepts).
+    const a = persistedArtifact('https://example.com/side-only-a');
+    const b = persistedArtifact('https://example.com/side-only-b');
+    writeTranscript([{ ...artifactEventRecord([a, b]), parentUuid: null }]);
+
+    const loaded = await service.loadSession(SESSION_ID);
+
+    expect(loaded).toBeUndefined();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  it('seeds a side-records-only session that also carries a custom title', async () => {
+    const a = persistedArtifact('https://example.com/side-title-a');
+    const title: ChatRecord = {
+      uuid: 'title-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'custom_title',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        title: 'Pre-prompt session',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([title, { ...artifactEventRecord([a]), parentUuid: null }]);
 
     await service.loadSession(SESSION_ID);
 
