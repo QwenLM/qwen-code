@@ -139,6 +139,8 @@ import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { usePreferredEditor } from './hooks/usePreferredEditor.js';
+import { useDeferredUserStartupWarnings } from './hooks/use-deferred-user-startup-warnings.js';
+import type { DeferredUserStartupWarnings } from '../utils/userStartupWarnings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import {
   isInteractiveTerminal,
@@ -837,6 +839,7 @@ interface AppContainerProps {
   config: Config;
   settings: LoadedSettings;
   startupWarnings?: string[];
+  deferredUserStartupWarnings?: DeferredUserStartupWarnings;
   version: string;
   initializationResult: InitializationResult;
   initialUseVirtualViewport?: boolean;
@@ -1143,6 +1146,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const lastTitleRef = useRef<string | null>(null);
   const [startupWarnings, setStartupWarnings] = useState(
     () => props.startupWarnings || [],
+  );
+  const deferredWarnings = useDeferredUserStartupWarnings(
+    config,
+    props.deferredUserStartupWarnings,
+  );
+  const visibleStartupWarnings = mergeStartupWarnings(
+    startupWarnings,
+    deferredWarnings,
   );
 
   // Prefetch the lowlight chunk on mount so the dynamic import is already
@@ -5951,7 +5962,7 @@ export const AppContainer = (props: AppContainerProps) => {
             <AppContext.Provider
               value={{
                 version: props.version,
-                startupWarnings,
+                startupWarnings: visibleStartupWarnings,
               }}
             >
               <ThoughtExpandedProvider value={thoughtExpandedValue}>

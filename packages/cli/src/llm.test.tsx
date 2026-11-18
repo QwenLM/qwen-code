@@ -3285,6 +3285,79 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     },
   );
 
+  it('reaches UI bootstrap before noncritical user warnings settle', async () => {
+    await interactiveMainSetup();
+    const { loadSettings } = await import('./config/settings.js');
+    const settings = loadSettings();
+    settings.merged.ui = { ...settings.merged.ui, theme: 'Qwen Dark' };
+    const fileWarnings = await import('./utils/startupWarnings.js');
+    const userWarnings = await import('./utils/userStartupWarnings.js');
+    const workflowNotice = await import('./utils/interrupted-workflow-runs.js');
+    vi.spyOn(fileWarnings, 'getStartupWarnings').mockResolvedValue([
+      'critical file warning',
+    ]);
+    vi.spyOn(
+      workflowNotice,
+      'getInterruptedWorkflowRunsNotice',
+    ).mockResolvedValue(undefined);
+    let releaseWarnings!: (warnings: string[]) => void;
+    const pending = new Promise<string[]>((resolve) => {
+      releaseWarnings = resolve;
+    });
+    const cleanupModule = await import('./utils/cleanup.js');
+    const cleanupStart = vi.mocked(cleanupModule.registerCleanup).mock.calls
+      .length;
+    const userCheck = vi
+      .spyOn(userWarnings, 'getUserStartupWarnings')
+      .mockReturnValue(pending);
+    mockStartOpenTuiUI.mockClear();
+    mockStartOpenTuiUI.mockResolvedValue(true);
+    selectOpentui(true);
+    let bootstrapError: unknown;
+    const bootstrap = main().catch((error: unknown) => {
+      bootstrapError = error;
+    });
+    try {
+      await vi.waitFor(() => expect(userCheck).toHaveBeenCalledOnce());
+      await vi.waitFor(() => {
+        if (bootstrapError) throw bootstrapError;
+        expect(mockStartOpenTuiUI).toHaveBeenCalledOnce();
+      });
+      expect(mockStartOpenTuiUI.mock.calls[0]?.[2]).toContain(
+        'critical file warning',
+      );
+      const deferred =
+        mockStartOpenTuiUI.mock.calls[0]?.[5]?.deferredUserStartupWarnings;
+      expect(deferred?.promise).toBe(pending);
+      expect(deferred?.workspaceRoot).toBe(process.cwd());
+      expect(userCheck).toHaveBeenCalledWith(
+        expect.objectContaining({
+          signal: deferred?.signal,
+        }),
+      );
+      const cleanup = vi
+        .mocked(cleanupModule.registerCleanup)
+        .mock.calls.slice(cleanupStart)
+        .filter((call) => call[1]?.first === true)
+        .at(-1);
+      expect(cleanup).toBeDefined();
+      let cleaned = false;
+      const closing = Promise.resolve(cleanup![0]()).then(() => {
+        cleaned = true;
+      });
+      expect(deferred?.signal.aborted).toBe(true);
+      await Promise.resolve();
+      expect(cleaned).toBe(false);
+      releaseWarnings([]);
+      await closing;
+      expect(cleaned).toBe(true);
+    } finally {
+      releaseWarnings([]);
+      await bootstrap;
+    }
+    expect(bootstrapError).toBeUndefined();
+  });
+
   it('strict mode fails loudly when the OpenTUI entry declines to start', async () => {
     await interactiveMainSetup();
     selectOpentui(true);

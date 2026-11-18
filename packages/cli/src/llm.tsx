@@ -111,7 +111,10 @@ import {
 } from './utils/relaunch.js';
 import { start_sandbox } from './serve/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
-import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
+import {
+  getUserStartupWarnings,
+  type DeferredUserStartupWarnings,
+} from './utils/userStartupWarnings.js';
 import { getInterruptedWorkflowRunsNotice } from './utils/interrupted-workflow-runs.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
@@ -1409,19 +1412,48 @@ export async function main() {
       process.exit(0);
     }
 
+    const safeModeWarnings = config.isSafeMode()
+      ? [
+          '⚠ SAFE MODE — all customizations disabled (hooks, extensions, skills, MCP servers, QWEN.md). Restart without --safe-mode to resume normal operation.',
+        ]
+      : [];
+    const fileStartupWarnings = await getStartupWarnings();
+    const userWarningOptions = {
+      workspaceRoot: process.cwd(),
+      useRipgrep: settings.merged.tools?.useRipgrep ?? true,
+      useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
+    };
+    let deferredUserStartupWarnings: DeferredUserStartupWarnings | undefined;
+    let userStartupWarnings: string[];
+    if (config.isInteractive() && !config.getExperimentalZedIntegration()) {
+      const controller = new AbortController();
+      const promise = getUserStartupWarnings({
+        ...userWarningOptions,
+        signal: controller.signal,
+      });
+      void promise.catch(() => undefined);
+      registerCleanup(
+        async () => {
+          controller.abort();
+          await promise.catch(() => undefined);
+        },
+        { first: true },
+      );
+      deferredUserStartupWarnings = {
+        config,
+        workspaceRoot: userWarningOptions.workspaceRoot,
+        signal: controller.signal,
+        promise,
+      };
+      userStartupWarnings = [];
+    } else {
+      userStartupWarnings = await getUserStartupWarnings(userWarningOptions);
+    }
     const startupWarnings = [
       ...new Set([
-        ...(config.isSafeMode()
-          ? [
-              '⚠ SAFE MODE — all customizations disabled (hooks, extensions, skills, MCP servers, QWEN.md). Restart without --safe-mode to resume normal operation.',
-            ]
-          : []),
-        ...(await getStartupWarnings()),
-        ...(await getUserStartupWarnings({
-          workspaceRoot: process.cwd(),
-          useRipgrep: settings.merged.tools?.useRipgrep ?? true,
-          useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
-        })),
+        ...safeModeWarnings,
+        ...fileStartupWarnings,
+        ...userStartupWarnings,
         ...getSettingsWarnings(settings),
         ...config.getWarnings(),
         ...(config.getModelsConfig().getCurrentAuthType() ===
@@ -1527,6 +1559,7 @@ export async function main() {
             {
               postRenderConnectIde: deferIdeConnection,
               extensionRefreshState,
+              deferredUserStartupWarnings,
             },
           );
           if (started) {
@@ -1567,6 +1600,7 @@ export async function main() {
         {
           postRenderConnectIde: deferIdeConnection,
           extensionRefreshState,
+          deferredUserStartupWarnings,
         },
       );
       // Clean up corruption env vars so subsequent relaunch children

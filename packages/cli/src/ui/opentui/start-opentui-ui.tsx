@@ -86,6 +86,8 @@ import {
   type HistoryItemWithoutId,
 } from '../types.js';
 import { useUpdateNoticeFlush } from './use-update-notice-flush.js';
+import { useDeferredUserStartupWarnings } from '../hooks/use-deferred-user-startup-warnings.js';
+import type { DeferredUserStartupWarnings } from '../../utils/userStartupWarnings.js';
 import { applyOpenTuiTheme } from './theme.js';
 import { getActiveOpenTuiTheme } from './theme-parity.js';
 import { useLogger } from '../hooks/useLogger.js';
@@ -127,6 +129,7 @@ import {
 const debugLogger = createDebugLogger('OPEN_TUI_START');
 
 export interface StartOpenTuiUIOptions {
+  deferredUserStartupWarnings?: DeferredUserStartupWarnings;
   postRenderConnectIde?: boolean;
   postRenderInitializeTelemetry?: boolean;
   extensionRefreshState?: ExtensionRefreshState;
@@ -137,6 +140,7 @@ interface OpenTuiEntryAppProps {
   settings: LoadedSettings;
   runtime: OpenTuiRuntime;
   startupWarnings: readonly string[];
+  deferredUserStartupWarnings?: DeferredUserStartupWarnings;
   startupHistory: HistoryItem[];
   extensionRefreshState?: ExtensionRefreshState;
   /** Decoded early-captured keystrokes; injected into the composer once. */
@@ -150,6 +154,7 @@ function OpenTuiEntryApp({
   settings,
   runtime,
   startupWarnings,
+  deferredUserStartupWarnings,
   startupHistory,
   extensionRefreshState,
   capturedText,
@@ -167,6 +172,18 @@ function OpenTuiEntryApp({
   }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
+  const deferredWarnings = useDeferredUserStartupWarnings(
+    config,
+    deferredUserStartupWarnings,
+  );
+  const allStartupWarnings = useMemo(
+    () => [...new Set([...startupWarnings, ...deferredWarnings])],
+    [startupWarnings, deferredWarnings],
+  );
+  const startupWarningsRef = useRef(allStartupWarnings);
+  startupWarningsRef.current = allStartupWarnings;
+  const shownStartupWarnings = useRef(new Set<string>());
+  const startupTranscriptInitialized = useRef(false);
   // A prompt handed back while a dialog has the composer unmounted waits in
   // the slot's `returned`.
   const composerHandle: OpenTuiComposerSlot =
@@ -192,7 +209,19 @@ function OpenTuiEntryApp({
   );
   const resetTranscript = useCallback(
     (events: OpenTuiStreamEvent[]) => {
-      resetLiveTranscript(events);
+      const existing = new Set(
+        events.flatMap((event) =>
+          event.type === 'warning' ? [event.text] : [],
+        ),
+      );
+      const warnings = startupWarningsRef.current;
+      resetLiveTranscript([
+        ...events,
+        ...warnings
+          .filter((text) => !existing.has(text))
+          .map((text) => ({ type: 'warning' as const, text })),
+      ]);
+      shownStartupWarnings.current = new Set(warnings);
       setTranscriptSessionId(config.getSessionId());
     },
     [config, resetLiveTranscript],
@@ -301,17 +330,28 @@ function OpenTuiEntryApp({
 
   // --- startup warnings + resume replay --------------------------------------
   useEffect(() => {
-    if (startupHistory.length) {
+    if (startupHistory.length || startupTranscriptInitialized.current) {
       resetTranscript(projectHistoryToStreamEvents(startupHistory, { config }));
+    } else {
+      for (const warning of startupWarningsRef.current) {
+        applyEvent({ type: 'warning', text: warning });
+        shownStartupWarnings.current.add(warning);
+      }
     }
-    for (const warning of startupWarnings) {
-      applyEvent({ type: 'warning', text: warning });
-    }
+    startupTranscriptInitialized.current = true;
     return getInteractiveModSession(config)?.subscribe((text) => {
       applyEvent({ type: 'info', text });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [config]);
+  useEffect(() => {
+    for (const warning of allStartupWarnings) {
+      if (!shownStartupWarnings.current.has(warning)) {
+        applyEvent({ type: 'warning', text: warning });
+        shownStartupWarnings.current.add(warning);
+      }
+    }
+  }, [allStartupWarnings, applyEvent]);
 
   // --- update-notification wiring (ink AppContainer parity) -----------------
   const [updateNotice, setUpdateNotice] = useState<string | null>(null);
@@ -681,6 +721,7 @@ export async function startOpenTuiUI(
               settings={settings}
               runtime={runtime}
               startupWarnings={startupWarnings}
+              deferredUserStartupWarnings={options.deferredUserStartupWarnings}
               startupHistory={startupHistory}
               extensionRefreshState={options.extensionRefreshState}
               capturedText={capturedText}

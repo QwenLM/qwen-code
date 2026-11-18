@@ -179,6 +179,7 @@ import { STATIC_EXTRA_HEIGHT } from './utils/layoutUtils.js';
 import { ICON } from './constants.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
+import { Notifications } from './components/Notifications.js';
 import type { Content } from '@google/genai';
 
 // Mock useStdout to capture terminal title writes
@@ -200,6 +201,8 @@ vi.mock('ink', async (importOriginal) => {
 
 // Helper component will read the context values provided by AppContainer
 // so we can assert against them in our tests.
+let showWarningNotifications = false;
+let contextConsumerMounted = false;
 let capturedUIState: UIState;
 let capturedUIActions: UIActions;
 let capturedRenderMode: RenderMode;
@@ -209,7 +212,17 @@ function TestContextConsumer() {
   capturedUIActions = useContext(UIActionsContext)!;
   capturedRenderMode = useRenderMode().renderMode;
   capturedThoughtExpanded = useThoughtExpanded();
-  return <Box ref={capturedUIState.mainControlsRef} />;
+  useEffect(() => {
+    contextConsumerMounted = true;
+    return () => {
+      contextConsumerMounted = false;
+    };
+  }, []);
+  return (
+    <Box ref={capturedUIState.mainControlsRef}>
+      {showWarningNotifications ? <Notifications /> : null}
+    </Box>
+  );
 }
 
 // Records what AppContainer hands `useDeleteCommand` without changing what the hook
@@ -485,6 +498,8 @@ describe('AppContainer State Management', () => {
       );
 
   beforeEach(() => {
+    showWarningNotifications = false;
+    contextConsumerMounted = false;
     vi.clearAllMocks();
     mockIsCommandCancellationBlocked.mockReturnValue(false);
     mockIsCommandCommitting.mockReturnValue(false);
@@ -1797,6 +1812,90 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('displays late warnings through Notifications and retains them after clear', async () => {
+      showWarningNotifications = true;
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      let resolve!: (warnings: string[]) => void;
+      const promise = new Promise<string[]>((yes) => {
+        resolve = yes;
+      });
+      const controller = new AbortController();
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          startupWarnings={['critical warning']}
+          deferredUserStartupWarnings={{
+            config: mockConfig,
+            workspaceRoot: process.cwd(),
+            signal: controller.signal,
+            promise,
+          }}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushConfigInitialization();
+      expect(contextConsumerMounted).toBe(true);
+      expect(view.lastFrame()).toContain('critical warning');
+      expect(view.lastFrame()).not.toContain('late warning');
+      await act(async () => resolve(['late warning', 'late warning']));
+      await vi.waitFor(() => {
+        expect(contextConsumerMounted).toBe(true);
+        expect(view.lastFrame()?.match(/late warning/g)).toHaveLength(1);
+      });
+      await act(async () => capturedUIActions.handleClearScreen());
+      await vi.waitFor(() => {
+        expect(contextConsumerMounted).toBe(true);
+        expect(view.lastFrame()?.match(/late warning/g)).toHaveLength(1);
+      });
+      expect(controller.signal.aborted).toBe(false);
+      view.unmount();
+    });
+
+    it('displays a rejected deferred check through Notifications', async () => {
+      showWarningNotifications = true;
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      let reject!: (error: Error) => void;
+      const promise = new Promise<string[]>((_yes, no) => {
+        reject = no;
+      });
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          deferredUserStartupWarnings={{
+            config: mockConfig,
+            workspaceRoot: process.cwd(),
+            signal: new AbortController().signal,
+            promise,
+          }}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushConfigInitialization();
+      expect(contextConsumerMounted).toBe(true);
+      await act(async () => reject(new Error('fixture failed')));
+      await vi.waitFor(() => {
+        expect(contextConsumerMounted).toBe(true);
+        expect(view.lastFrame()).toContain(
+          'Could not check startup warnings: fixture failed',
+        );
+      });
+      view.unmount();
     });
 
     it('announces active scheduled tasks after startup', async () => {

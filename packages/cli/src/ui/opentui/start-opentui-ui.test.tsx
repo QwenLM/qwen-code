@@ -85,6 +85,7 @@ const mocks = vi.hoisted(() => {
       isCurrentHistory?: (snapshot: readonly LiveHistoryItem[]) => boolean;
       renderMain?: () => unknown;
       onQuit?: (messages: readonly HistoryItem[]) => void;
+      onTranscriptReset?: (events: OpenTuiStreamEvent[]) => void;
       slashGateway?: OpenTuiSlashGateway;
       onToggleVim?: () => Promise<boolean>;
       vimMode?: string;
@@ -266,7 +267,7 @@ vi.mock('./early-input.js', () => ({
 
 import type { ReactElement } from 'react';
 import { render, renderHook, screen } from '@testing-library/react';
-import { act, cloneElement } from 'react';
+import { act, cloneElement, StrictMode } from 'react';
 import { exitSession } from './exit-lifecycle.js';
 import * as sessionSwitch from './session-switch.js';
 import { startOpenTuiUI } from './start-opentui-ui.js';
@@ -1231,6 +1232,138 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(createCliRenderer).toHaveBeenLastCalledWith(
       expect.objectContaining({ useMouse: false }),
     );
+  });
+
+  it('shows deferred warnings once in StrictMode and rebuilds them after clear', async () => {
+    const config = buildConfig();
+    const controller = new AbortController();
+    let resolve!: (warnings: string[]) => void;
+    const promise = new Promise<string[]>((yes) => {
+      resolve = yes;
+    });
+    await startOpenTuiUI(
+      config,
+      settings,
+      ['critical warning'],
+      '/tmp/project',
+      {} as InitializationResult,
+      {
+        deferredUserStartupWarnings: {
+          config,
+          workspaceRoot: process.cwd(),
+          signal: controller.signal,
+          promise,
+        },
+      },
+    );
+    const tree = mocks.state.root.render.mock.calls.at(-1)![0] as ReactElement;
+    const view = render(<StrictMode>{tree}</StrictMode>);
+    expect(mocks.state.transcript).toEqual([
+      { type: 'done' },
+      { type: 'warning', text: 'critical warning' },
+    ]);
+    await act(async () => resolve(['late warning', 'late warning']));
+    expect(mocks.state.transcript).toEqual([
+      { type: 'done' },
+      { type: 'warning', text: 'critical warning' },
+      { type: 'warning', text: 'late warning' },
+    ]);
+    for (let reset = 0; reset < 2; reset++) {
+      act(() => mocks.state.appProps!.onTranscriptReset!([]));
+      expect(mocks.state.transcript).toEqual([
+        { type: 'warning', text: 'critical warning' },
+        { type: 'warning', text: 'late warning' },
+      ]);
+    }
+    view.unmount();
+    expect(controller.signal.aborted).toBe(false);
+  });
+
+  it('removes delivered warnings when the same Entry changes Config owner', async () => {
+    const first = buildConfig();
+    const second = buildConfig();
+    const controller = new AbortController();
+    let resolve!: (warnings: string[]) => void;
+    const promise = new Promise<string[]>((yes) => {
+      resolve = yes;
+    });
+    await startOpenTuiUI(
+      first,
+      settings,
+      [],
+      '/tmp/project',
+      {} as InitializationResult,
+      {
+        deferredUserStartupWarnings: {
+          config: first,
+          workspaceRoot: process.cwd(),
+          signal: controller.signal,
+          promise,
+        },
+      },
+    );
+    const firstTree = mocks.state.root.render.mock.calls.at(
+      -1,
+    )![0] as ReactElement;
+    const view = render(firstTree);
+    await act(async () => resolve(['first owner warning']));
+    expect(mocks.state.transcript).toContainEqual({
+      type: 'warning',
+      text: 'first owner warning',
+    });
+    // Keep the Entry instance, replacing the actual Config prop through its
+    // existing context-provider tree rather than remounting the whole UI.
+    const tree = firstTree as ReactElement<{
+      children: ReactElement<{ children: ReactElement<{ config: Config }> }>;
+    }>;
+    const vim = tree.props.children;
+    view.rerender(
+      cloneElement(
+        tree,
+        {},
+        cloneElement(
+          vim,
+          {},
+          cloneElement(vim.props.children, { config: second }),
+        ),
+      ),
+    );
+    expect(mocks.state.transcript).toEqual([{ type: 'done' }]);
+    view.unmount();
+  });
+
+  it('projects a rejected deferred check into the Native warning transcript', async () => {
+    const config = buildConfig();
+    let reject!: (error: Error) => void;
+    const promise = new Promise<string[]>((_resolve, no) => {
+      reject = no;
+    });
+    await startOpenTuiUI(
+      config,
+      settings,
+      [],
+      '/tmp/project',
+      {} as InitializationResult,
+      {
+        deferredUserStartupWarnings: {
+          config,
+          workspaceRoot: process.cwd(),
+          signal: new AbortController().signal,
+          promise,
+        },
+      },
+    );
+    const view = render(
+      mocks.state.root.render.mock.calls.at(-1)![0] as ReactElement,
+    );
+    await act(async () => reject(new Error('fixture failed')));
+    expect(mocks.state.transcript).toEqual([
+      {
+        type: 'warning',
+        text: 'Could not check startup warnings: fixture failed',
+      },
+    ]);
+    view.unmount();
   });
 
   it('retains pre-paint Mod warnings after restoring history and detaches on unmount', async () => {
