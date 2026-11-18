@@ -885,75 +885,44 @@ describe('useChangeOverview', () => {
     expect(output.units.map((unit) => unit.id)).toContain('uncommitted');
   });
 
-  it('re-runs without base-branch exclusions when they empty the window (R7-2)', async () => {
-    // The recorded base is the session's own pushed feature branch: the
-    // worktree meta's baseBranch is feature-x, so the exclusion set holds
-    // origin/feature-x / upstream/feature-x, which reach HEAD and empty the
-    // excluded walk. An empty excluded result with base-branch exclusions is
-    // untrustworthy — re-run dropping ONLY the base-branch entries (no PR heads
-    // here) so the session's own commits render instead of a false "no work".
+  it('keeps a legitimately empty excluded window empty (no over-retry, R8-1)', async () => {
+    // A worktree session created at the origin/main tip authors nothing and the
+    // user pulls: the excluded walk startS..HEAD --not origin/main is legitimately
+    // empty (the pulled commits are foreign upstream, not this session's work).
+    // Emptiness must NOT trigger a retry that drops the base-branch exclusion —
+    // that would re-list the foreign commits as this session's commit units and
+    // invert the upstream-integration guarantee. One call, no commit unit.
     mock.sessionStatus.mockResolvedValue({
       prs: [],
       worktree: {
         path: '/work/wt',
         baseCommit: 'startS',
-        baseBranch: 'feature-x',
+        baseBranch: 'main',
       },
     });
     const ws = {
       workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
       workspaceGitHubPullRequestFiles: vi.fn(),
-      workspaceGitLog: vi
-        .fn()
-        .mockResolvedValueOnce({
-          v: 1,
-          available: true,
-          entries: [],
-          hasMore: false,
-        })
-        .mockResolvedValueOnce({
-          v: 1,
-          workspaceCwd: '/work',
-          available: true,
-          entries: [
-            { sha: 'c9', shortSha: 'c9', subject: 'loose', parents: ['head2'] },
-          ],
-          hasMore: false,
-        }),
-      workspaceGitCommitDetail: vi.fn().mockResolvedValue({
+      workspaceGitLog: vi.fn().mockResolvedValue({
         v: 1,
-        workspaceCwd: '/work',
         available: true,
-        files: [{ path: 'loose.ts', added: 1, removed: 0, isBinary: false }],
-        filesCount: 1,
-        linesAdded: 1,
-        linesRemoved: 0,
+        entries: [],
+        hasMore: false,
       }),
+      workspaceGitCommitDetail: vi.fn(),
     };
     mock.workspaceByCwd.mockReturnValue(ws);
     await renderAndSettle();
-    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(2);
-    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
-      1,
+    expect(ws.workspaceGitLog).toHaveBeenCalledTimes(1);
+    expect(ws.workspaceGitLog).toHaveBeenCalledWith(
       20,
       0,
       '/work/wt',
       'startS..HEAD',
-      {
-        sessionId: 's1',
-        excludeRefs: ['origin/feature-x', 'upstream/feature-x'],
-      },
-    );
-    expect(ws.workspaceGitLog).toHaveBeenNthCalledWith(
-      2,
-      20,
-      0,
-      '/work/wt',
-      'startS..HEAD',
-      { sessionId: 's1' },
+      { sessionId: 's1', excludeRefs: ['origin/main', 'upstream/main'] },
     );
     expect(output.loadFailed).toBe(false);
-    expect(output.units.map((unit) => unit.id)).toContain('commit:c9');
+    expect(output.units.map((unit) => unit.kind)).toEqual(['uncommitted']);
   });
 
   it('suppresses the fallback when bound PR heads cannot be excluded (capability skew)', async () => {

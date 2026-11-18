@@ -217,18 +217,22 @@ worktree.baseCommit` (the session's own creation start wins over a derived
   retries once on the **same boundary window without `excludeRefs`** so the
   overview degrades to the loose window instead of blanking every unit. Only a
   log still unavailable after that retry surfaces `loadFailed`.
-- Over-subtraction backstop (R7-2): a base-branch remote-tracking ref can reach
-  the session's **own** pushed commits — the recorded base is the session's own
-  branch (a worktree handed off from a pushed feature branch), or the base
-  absorbed and pushed the work — so `git log <range> --not <base>` returns
-  empty while the panel would otherwise report a complete overview with no
-  committed work. An excluded log that is `available:true` with **zero entries**
-  and base-branch exclusions applied is therefore treated as untrustworthy: the
-  hook re-runs once dropping **only the base-branch entries**, keeping the
-  PR-head exclusions that the fallback guard relies on. This is distinct from
-  the missing-head backstop (`available:false` drops all exclusions); the
-  accepted residual is that a legitimately empty window may re-list upstream
-  integration commits once the base-branch narrowing is dropped.
+- Over-subtraction residual (R7-2 / R8-1): a base-branch remote-tracking ref can
+  reach the session's **own** pushed commits — the recorded base is the session's
+  own branch (a worktree handed off from a pushed feature branch), or the base
+  absorbed and pushed the work — so `git log <range> --not <base>` can empty the
+  window and report no committed work. This is a known residual, **not** retried:
+  an empty excluded window cannot be distinguished from a legitimately empty one
+  (a pull-only worktree session whose pulled commits are foreign upstream), so an
+  emptiness-triggered retry that drops the base-branch exclusion would re-list
+  foreign upstream commits as the session's work and invert the
+  upstream-integration guarantee above (R8-1 over-retry); it would also miss the
+  partial-push case where the excluded walk is non-empty (R8-1 under-retry). A
+  correct fix needs commit provenance (which commits the session authored vs
+  merged), not an emptiness heuristic; the ancestry-of-start gate alone is
+  insufficient because an integrated `origin/main` is a descendant of the start,
+  not an ancestor. The common cases (upstream integration, pull-only empty) stay
+  correct; the narrow own-pushed-branch case is carried as residual.
 - Retire the now-redundant ancestry heuristic: remove the `headIsAncestor`
   probe from the files route, the SDK field, and the hook's ancestor-head
   selection. Remove `isGitAncestorOfHead` and its tests if no consumer remains
