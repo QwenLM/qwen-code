@@ -22,17 +22,17 @@ fn host_can_notify(bundle_identifier: Option<&str>) -> bool {
     bundle_identifier.is_some()
 }
 
-fn main_bundle_identifier() -> Option<&'static str> {
+fn main_bundle_identifier() -> Option<String> {
     NSBundle::mainBundle()
         .bundleIdentifier()
-        .map(AsRef::as_ref)
+        .map(|identifier| identifier.to_string())
 }
 
 /// Request system notification authorization. Called when the user turns
 /// task notifications on; shows the OS prompt once and is ignored when the
 /// user already decided.
 pub fn request_authorization() {
-    if !host_can_notify(main_bundle_identifier()) {
+    if !host_can_notify(main_bundle_identifier().as_deref()) {
         return;
     }
     let center = UNUserNotificationCenter::currentNotificationCenter();
@@ -47,7 +47,7 @@ pub fn request_authorization() {
 /// Post a single system notification. Fire-and-forget: failures are not
 /// surfaced to the web shell.
 pub fn show(title: &str, body: &str) {
-    if !host_can_notify(main_bundle_identifier()) {
+    if !host_can_notify(main_bundle_identifier().as_deref()) {
         return;
     }
     let center = UNUserNotificationCenter::currentNotificationCenter();
@@ -73,5 +73,14 @@ mod tests {
     fn rejects_unbundled_processes() {
         assert!(!host_can_notify(None));
         assert!(host_can_notify(Some("org.qwencode.desktop")));
+    }
+
+    // The test binary is itself unbundled: with the guard in place both entry
+    // points return before touching UNUserNotificationCenter; without it the
+    // process aborts on the raised NSInternalInconsistencyException.
+    #[test]
+    fn unbundled_process_does_not_post() {
+        super::request_authorization();
+        super::show("title", "body");
     }
 }
