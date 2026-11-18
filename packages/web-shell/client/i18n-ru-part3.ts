@@ -877,6 +877,8 @@ export const RU_PART3: Record<
   'sidebar.scheduledTasks': 'Задачи по расписанию',
   'sidebar.workflows': 'Воркфлоу',
   'sidebar.goals': 'Цели',
+  'sidebar.sessionGoal': (v) =>
+    `Цель: ${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.prWatches': 'Наблюдение за PR',
   'sidebar.themeLight': 'Переключить на светлую тему',
   'sidebar.themeDark': 'Переключить на тёмную тему',
