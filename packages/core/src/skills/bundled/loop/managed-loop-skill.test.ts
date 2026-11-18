@@ -56,6 +56,42 @@ function asset(profile: ManagedLoopProfile): {
   return JSON.parse(readFileSync(join(contractsDir, ASSETS[profile]), 'utf8'));
 }
 
+/** The profiles that declare the fixed-interval creator, derived from the
+ * shipped bodies rather than a hand-kept pair: the Nd caveat and substitution
+ * reach exactly the bodies that teach CronCreate, so a profile added or removed
+ * upstream cannot leave these pins iterating a stale list. */
+const FIXED_INTERVAL_PROFILES = MANAGED_LOOP_PROFILES.filter((profile) =>
+  asset(profile).body.includes('CronCreate'),
+);
+
+/** Scrape forProfile()'s routing chain and resolve it the way Java does.
+ * Each branch contributes its profile constants paired with the key it
+ * assigns (a branch may serve several profiles, so the mapping is
+ * many-to-one). forProfile is an if / else-if chain: the FIRST matching
+ * branch wins and a later branch naming the same profile is dead code, so
+ * Object.fromEntries would certify a mapping Java never produces. Kept a
+ * top-level pure declaration so a synthetic chain can witness the resolution
+ * rather than only a local mutation of the real Java file. */
+function resolveJavaRouting(javaCode: string): Map<string, string> {
+  const code = javaCode
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/[^\n]*/g, '');
+  const routing = [
+    ...code.matchAll(
+      /((?:WorkspaceToolProfiles\.\w+\.equals\(profile\)[\s|)]*)+)\{\s*key = "(\w+)";/g,
+    ),
+  ].flatMap((match) =>
+    [...match[1]!.matchAll(/WorkspaceToolProfiles\.(\w+)\.equals/g)].map(
+      (profile) => [profile[1]!, match[2]!] as const,
+    ),
+  );
+  const routed = new Map<string, string>();
+  for (const [profile, key] of routing) {
+    if (!routed.has(profile)) routed.set(profile, key);
+  }
+  return routed;
+}
+
 /** The loop.md section of a body, up to the next top-level heading. */
 function loopMdSection(body: string): string {
   const start = body.indexOf('## loop.md task-file mode');
@@ -427,26 +463,7 @@ describe('managed loop skill parity', () => {
       .filter((key) => key !== 'bundled')
       .sort();
     expect(javaKeys).toEqual([...MANAGED_LOOP_PROFILES].sort());
-    // Each routing branch: the profile constants in its condition, then the
-    // key it assigns. A branch may serve several profiles (FILES_V4 and
-    // INTERNAL_TEAM_LEAD_V2 share cron), so the mapping is many-to-one.
-    const routing = [
-      ...javaCode.matchAll(
-        /((?:WorkspaceToolProfiles\.\w+\.equals\(profile\)[\s|)]*)+)\{\s*key = "(\w+)";/g,
-      ),
-    ].flatMap((match) =>
-      [...match[1]!.matchAll(/WorkspaceToolProfiles\.(\w+)\.equals/g)].map(
-        (profile) => [profile[1]!, match[2]!] as const,
-      ),
-    );
-    // forProfile is an if / else-if chain, so the FIRST matching branch wins
-    // and a later branch naming the same profile is dead code. Resolve the
-    // same way: Object.fromEntries would let the last duplicate win and so
-    // would certify a mapping Java never produces.
-    const routed = new Map<string, string>();
-    for (const [profile, key] of routing) {
-      if (!routed.has(profile)) routed.set(profile, key);
-    }
+    const routed = resolveJavaRouting(javaCode);
     expect(Object.fromEntries(routed)).toEqual({
       SHELL_V4: 'union',
       FILES_V4: 'cron',
@@ -456,6 +473,46 @@ describe('managed loop skill parity', () => {
     expect([...new Set(routed.values())].sort()).toEqual(
       [...MANAGED_LOOP_PROFILES].sort(),
     );
+  });
+
+  it('the routing resolution is first-match and comment-blind, witnessed on a synthetic chain', () => {
+    // A committed witness for the resolution itself: the real Java file has no
+    // duplicate branch, so only a synthetic chain can exercise the dead-branch
+    // direction without mutating production source.
+    const chain = [
+      'if (WorkspaceToolProfiles.SHELL_V4.equals(profile)) {',
+      '    key = "union";',
+      '} else if (WorkspaceToolProfiles.FILES_V4.equals(profile)',
+      '        || WorkspaceToolProfiles.INTERNAL_TEAM_LEAD_V2.equals(profile)) {',
+      '    key = "cron";',
+      '} else if (WorkspaceToolProfiles.SHELL_V3.equals(profile)) {',
+      '    key = "wakeup";',
+      '} else if (WorkspaceToolProfiles.SHELL_V4.equals(profile)) {',
+      '    key = "cron";',
+      '} else {',
+      '    return null;',
+      '}',
+    ].join('\n');
+    const expected = {
+      SHELL_V4: 'union',
+      FILES_V4: 'cron',
+      INTERNAL_TEAM_LEAD_V2: 'cron',
+      SHELL_V3: 'wakeup',
+    };
+    // The trailing duplicate names an already-matched profile: first-match
+    // keeps union, where last-wins would hand SHELL_V4 the cron body.
+    expect(Object.fromEntries(resolveJavaRouting(chain))).toEqual(expected);
+    // Prose spelling an assignment is not a branch.
+    expect(
+      Object.fromEntries(
+        resolveJavaRouting(
+          chain.replace('key = "union";', 'key = "union"; // key = "cron";'),
+        ),
+      ),
+    ).toEqual(expected);
+    expect(
+      Object.fromEntries(resolveJavaRouting(`/* key = "wakeup"; */\n${chain}`)),
+    ).toEqual(expected);
   });
 
   it('the Nd month-boundary caveat matches the Managed slot compiler', () => {
@@ -496,7 +553,7 @@ describe('managed loop skill parity', () => {
         [...daySet(step)].sort(),
       );
     }
-    for (const profile of ['cron', 'union'] as const) {
+    for (const profile of FIXED_INTERVAL_PROFILES) {
       const text = asset(profile).body;
       expect(text).toContain('day-of-month step, not a rolling N-day cadence');
       expect(text).toContain('at most N days');
@@ -518,7 +575,11 @@ describe('managed loop skill parity', () => {
     // table row; reverting its replacement string and regenerating would
     // otherwise teach "every N days" again with every gate green. Pin the
     // substituted cell and forbid the pre-fix wording.
-    for (const profile of ['cron', 'union'] as const) {
+    // The derivation itself is pinned: a body that stopped teaching CronCreate
+    // would silently shrink the set and leave these pins iterating fewer
+    // profiles, so the expected membership is asserted, not assumed.
+    expect([...FIXED_INTERVAL_PROFILES].sort()).toEqual(['cron', 'union']);
+    for (const profile of FIXED_INTERVAL_PROFILES) {
       const text = asset(profile).body;
       expect(text).toContain('midnight UTC on days 1, 1+N, … of each month');
       expect(text).not.toContain('every N days');

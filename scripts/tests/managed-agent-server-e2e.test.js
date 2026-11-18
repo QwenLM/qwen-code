@@ -35,6 +35,7 @@ import {
   isObjectLiteralExpression,
   isPropertyAccessExpression,
   isPropertyAssignment,
+  isShorthandPropertyAssignment,
   isStringLiteral,
   isVariableDeclaration,
   isVariableStatement,
@@ -190,6 +191,34 @@ const loopClassifierWiring = (text) => {
     }
     return undefined;
   };
+  // A destructuring assignment rebinds the input without any identifier the
+  // direct resolver recognises on the left: `[blockProperties] = [fabricated]`
+  // or `({ x: blockProperties.shouldBlock } = …)`. Walk the pattern's leaves.
+  // Kept separate from writtenBinding so an in-place writer's first argument
+  // (a value, not a target) is never read as a pattern.
+  const assignmentTarget = (node) => {
+    const direct = writtenBinding(node);
+    if (direct !== undefined) return direct;
+    if (isArrayLiteralExpression(node)) {
+      for (const element of node.elements) {
+        const hit = assignmentTarget(element);
+        if (hit !== undefined) return hit;
+      }
+    }
+    if (isObjectLiteralExpression(node)) {
+      for (const property of node.properties) {
+        const target = isShorthandPropertyAssignment(property)
+          ? property.name
+          : isPropertyAssignment(property)
+            ? property.initializer
+            : undefined;
+        if (target === undefined) continue;
+        const hit = assignmentTarget(target);
+        if (hit !== undefined) return hit;
+      }
+    }
+    return undefined;
+  };
   const visit = (node) => {
     if (literalText(node) === 'respond_in_schema') {
       schemaNameSites.push({ callback: fakeCallback(node) });
@@ -239,7 +268,7 @@ const loopClassifierWiring = (text) => {
       isBinaryExpression(node) &&
       node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
       node.operatorToken.kind <= SyntaxKind.LastAssignment &&
-      writtenBinding(node.left) !== undefined
+      assignmentTarget(node.left) !== undefined
     ) {
       reassignments.push({
         callback: fakeCallback(node),
@@ -272,21 +301,27 @@ const loopClassifierWiring = (text) => {
     }
     // A tool call assembled without fakeToolCall is invisible to the answer
     // and tool-name inventories, so record every such element of a toolCalls
-    // array; the loop pin requires none.
+    // array; the loop pin requires none. A source that is not an inline array
+    // literal cannot be enumerated at all — `const calls = [ …hand-built… ];
+    // return { toolCalls: calls }` hid every element — so the site itself is
+    // recorded and the pin requires an inline array.
     if (
       isPropertyAssignment(node) &&
       isIdentifier(node.name) &&
-      node.name.text === 'toolCalls' &&
-      isArrayLiteralExpression(node.initializer)
+      node.name.text === 'toolCalls'
     ) {
       const callback = fakeCallback(node);
-      for (const element of node.initializer.elements) {
-        const isFakeCall =
-          isCallExpression(element) &&
-          isIdentifier(element.expression) &&
-          element.expression.text === 'fakeToolCall';
-        if (!isFakeCall) {
-          handBuiltToolCalls.push({ callback, text: element.getText(file) });
+      if (!isArrayLiteralExpression(node.initializer)) {
+        handBuiltToolCalls.push({ callback, text: node.getText(file) });
+      } else {
+        for (const element of node.initializer.elements) {
+          const isFakeCall =
+            isCallExpression(element) &&
+            isIdentifier(element.expression) &&
+            element.expression.text === 'fakeToolCall';
+          if (!isFakeCall) {
+            handBuiltToolCalls.push({ callback, text: element.getText(file) });
+          }
         }
       }
     }
@@ -294,8 +329,12 @@ const loopClassifierWiring = (text) => {
       for (const property of node.properties) {
         if (
           isPropertyAssignment(property) &&
-          isIdentifier(property.name) &&
-          property.name.text === 'shouldBlock' &&
+          // A quoted key is the same property: `{ 'shouldBlock': false }` was
+          // invisible to an identifier-only match, so an inline allow could be
+          // built outside the helper without moving this inventory.
+          (isIdentifier(property.name)
+            ? property.name.text
+            : literalText(property.name)) === 'shouldBlock' &&
           property.initializer.kind === SyntaxKind.FalseKeyword
         ) {
           allowSites.push(enclosingFunction(node));
@@ -388,6 +427,50 @@ const loopClassifierScope = (wiring) => {
     handBuiltToolCalls: wiring.handBuiltToolCalls.filter(inScope),
     allowSites: wiring.allowSites,
   };
+};
+
+// The minted-id call sites and their loud-failure fallbacks, as structure: a
+// raw-text match over the whole runner is satisfied by a commented-out copy or
+// a duplicate in another arm, neither of which wires anything. The parser
+// cannot see comments, and each site carries the binding it initializes and
+// the create-call id it filters by.
+const mintedIdWiring = (text) => {
+  const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
+  const literal = (node) =>
+    node !== undefined &&
+    (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node))
+      ? node.text
+      : undefined;
+  const calls = [];
+  const fallbacks = [];
+  const visit = (node) => {
+    if (
+      isCallExpression(node) &&
+      isIdentifier(node.expression) &&
+      node.expression.text === 'mintedScheduleId'
+    ) {
+      const parent = node.parent;
+      calls.push({
+        boundTo:
+          isVariableDeclaration(parent) && isIdentifier(parent.name)
+            ? parent.name.text
+            : undefined,
+        createCallId: literal(node.arguments[1]),
+      });
+    }
+    if (
+      isBinaryExpression(node) &&
+      node.operatorToken.kind === SyntaxKind.QuestionQuestionToken &&
+      isIdentifier(node.left) &&
+      node.left.text === 'createdId' &&
+      literal(node.right) === 'missing-schedule-id'
+    ) {
+      fallbacks.push(node.getText(file));
+    }
+    forEachChild(node, visit);
+  };
+  visit(file);
+  return { calls, fallbacks };
 };
 
 describe('managed-agent-server e2e runner', () => {
@@ -3823,6 +3906,12 @@ describe('managed-agent-server e2e runner', () => {
       const sites = scope.answers.filter((site) => site.callback === callback);
       expect(sites).toHaveLength(1);
       expect(sites[0].isGatedBinding, sites[0].answer).toBe(true);
+      // One gate per callback, not two somewhere: a total count let one arm
+      // carry both gates while the other answered ungated. scope.gates is
+      // already mapped to text, so the per-callback count reads the inventory.
+      expect(
+        wiring.gates.filter((gate) => gate.callback === callback),
+      ).toHaveLength(1);
       // The tool name appears twice per loop callback: the schema-tool lookup
       // and the answer. A hand-built tool call, or a template-literal name,
       // adds a site; a computed name is recorded separately and must be absent.
@@ -3878,15 +3967,12 @@ describe('managed-agent-server e2e runner', () => {
     // and the loud-failure fallback so neither arm can fabricate an id the
     // store never minted; a source-spelling count alone would miss a forged
     // `?? 'asch_' + '0'.repeat(32)` fallback.
-    expect(source).toMatch(
-      /const createdId = mintedScheduleId\(messages, 'loop-cron-create'\);/,
-    );
-    expect(source).toMatch(
-      /const createdId = mintedScheduleId\(messages, 'loop-fire-create'\);/,
-    );
-    expect(source.match(/createdId \?\? 'missing-schedule-id'/g)).toHaveLength(
-      2,
-    );
+    const minted = mintedIdWiring(source);
+    expect(minted.calls).toEqual([
+      { boundTo: 'createdId', createCallId: 'loop-cron-create' },
+      { boundTo: 'createdId', createCallId: 'loop-fire-create' },
+    ]);
+    expect(minted.fallbacks).toHaveLength(2);
     // The reported count is the witnessed calls, not the cumulative flattened
     // tool-message length (every chat-completions body repeats prior results).
     expect(source).toMatch(/cronToolResults: cronCallIds\.filter\(/);
@@ -3937,6 +4023,21 @@ describe('managed-agent-server e2e runner', () => {
     expect(
       classifierBlockAnswer({ nextSpeaker: { type: 'string' } }),
     ).toBeUndefined();
+    // A block-stage field without shouldBlock is still not the block schema:
+    // an additive narrowing on thinking/reason would answer these with an
+    // allow, and no fixture above carries either field on its own.
+    expect(
+      classifierBlockAnswer({ thinking: { type: 'string' } }),
+    ).toBeUndefined();
+    expect(
+      classifierBlockAnswer({ reason: { type: 'string' } }),
+    ).toBeUndefined();
+    expect(
+      classifierBlockAnswer({
+        thinking: { type: 'string' },
+        reason: { type: 'string' },
+      }),
+    ).toBeUndefined();
     expect(classifierBlockAnswer(undefined)).toBeUndefined();
     expect(classifierBlockAnswer({})).toBeUndefined();
   });
@@ -3967,6 +4068,12 @@ describe('managed-agent-server e2e runner', () => {
       "Object.defineProperties(blockProperties, { shouldBlock: { value: { type: 'boolean' } } });",
       'const propsAlias = blockProperties;',
       "propsAlias['shouldBlock'] = { type: 'boolean' };",
+      // A destructuring assignment rebinds the input with no identifier on the
+      // left, and the defineProperty pair writes it in place without an
+      // assignment operator at all.
+      "[blockProperties] = [{ shouldBlock: { type: 'boolean' } }];",
+      "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
+      "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
       // A receiver that resolves to a prototype function must not crash the
       // writer lookup, and is not a writer of the decision input.
       'toString.assign(blockProperties, {});',
@@ -3979,6 +4086,11 @@ describe('managed-agent-server e2e runner', () => {
       "return { toolCalls: [fakeToolCall(['respond', 'in', 'schema'].join('_'), blockAnswer)] };",
       "return { toolCalls: [{ id: 'hb', type: 'function', function: { name: ['respond', 'in', 'schema'].join('_'), arguments: '{}' } }] };",
       "return { toolCalls: [fakeToolCall(`respond_in_schema`, classifierBlockAnswer({ shouldBlock: { type: 'boolean' } }), 'loop-fire-sibling')] };",
+      // A quoted allow key is the same property as an identifier one.
+      "return { toolCalls: [fakeToolCall('respond_in_schema', { 'shouldBlock': false }, 'loop-fire-quoted')] };",
+      // A toolCalls source that is not an inline array cannot be enumerated.
+      "const hoistedCalls = [{ id: 'hb2', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }];",
+      'return { toolCalls: hoistedCalls };',
       'if (body.sideQuery === true) return sideQueryResponse();',
     ]);
     // A sibling hoisted out of every callback: it fabricates its own schema,
@@ -4002,6 +4114,13 @@ describe('managed-agent-server e2e runner', () => {
       "  return { toolCalls: [fakeToolCall('respond_in_schema', blockAnswer, 'other-arm')] };",
       '}',
       "return { toolCalls: [fakeToolCall('respond_in_schema', { title: 'x' }, 'other-arm')] };",
+      // The same three shapes the loop pin forbids, in an arm that is out of
+      // scope: a write to the input, a computed tool name and a hand-built
+      // element. Each must reach the file-wide inventory and none the scoped
+      // one, which is what witnesses the scoping of these three inventories.
+      "blockProperties['shouldBlock'] = { type: 'boolean' };",
+      "return { toolCalls: [fakeToolCall(['respond', 'in', 'schema'].join('_'), blockAnswer, 'other-arm')] };",
+      "return { toolCalls: [{ id: 'hb3', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }] };",
     ]);
     const wiring = loopClassifierWiring(
       [hoistedResponse, loopFake, unrelatedFake].join('\n'),
@@ -4014,9 +4133,12 @@ describe('managed-agent-server e2e runner', () => {
     ]);
     expect(scope.declarations).toEqual(['blockProperties']);
     expect(scope.gates).toHaveLength(1);
-    expect(scope.allowSites).toEqual(['(anonymous)']);
-    // Every write form is recorded: the member write, the in-place call, the
-    // delete and the nullish assignment — none rebinds an identifier.
+    // Two inline allows: the `??=` rewrite and the quoted-key one. A quoted
+    // key is the same property, so it is attributed to the same function.
+    expect(scope.allowSites).toEqual(['(anonymous)', '(anonymous)']);
+    // Every write form is recorded: the member write, the in-place calls, the
+    // delete, the alias write, the destructuring rebind and the nullish
+    // assignment — none of them rebinds an identifier the direct way.
     expect(scope.reassignments).toEqual([
       "blockProperties['shouldBlock'] = { type: 'boolean' }",
       "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } })",
@@ -4024,6 +4146,9 @@ describe('managed-agent-server e2e runner', () => {
       "Reflect.set(blockProperties, 'shouldBlock', { type: 'boolean' })",
       "Object.defineProperties(blockProperties, { shouldBlock: { value: { type: 'boolean' } } })",
       "propsAlias['shouldBlock'] = { type: 'boolean' }",
+      "[blockProperties] = [{ shouldBlock: { type: 'boolean' } }]",
+      "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
+      "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
       'blockAnswer ??= { shouldBlock: false }',
     ]);
     // The sibling's fabricated schema is a second helper call, visible even
@@ -4032,12 +4157,12 @@ describe('managed-agent-server e2e runner', () => {
       'blockProperties',
       "{ shouldBlock: { type: 'boolean' } }",
     ]);
-    // Five answer sites exist, but only the loop callback is in scope: the
+    // Six answer sites exist, but only the loop callback is in scope: the
     // unrelated arm reuses the helper, the binding names and the tool name,
     // and none of it may redden a loop pin.
-    expect(wiring.answers).toHaveLength(5);
+    expect(wiring.answers).toHaveLength(6);
     expect(scope.callbacks).toHaveLength(1);
-    expect(scope.answers).toHaveLength(2);
+    expect(scope.answers).toHaveLength(3);
     expect(wiring.definitions).toHaveLength(2);
     expect(wiring.declarations).toHaveLength(2);
     expect(wiring.gates).toHaveLength(2);
@@ -4053,16 +4178,36 @@ describe('managed-agent-server e2e runner', () => {
     // binding nor an allowed call id, and its tool name still counts.
     expect(scope.answers[1].callId).toBe('loop-fire-sibling');
     expect(scope.answers[1].isGatedBinding).toBe(false);
-    expect(scope.schemaNameSites).toHaveLength(3);
-    expect(wiring.schemaNameSites).toHaveLength(7);
+    // The quoted-key allow answers under its own call id and is not the gated
+    // binding, so it is visible as an answer as well as a construction site.
+    expect(scope.answers[2].callId).toBe('loop-fire-quoted');
+    expect(scope.answers[2].isGatedBinding).toBe(false);
+    expect(scope.schemaNameSites).toHaveLength(5);
+    expect(wiring.schemaNameSites).toHaveLength(10);
     // A computed tool name hides the answer from every name-based inventory,
     // so it is recorded on its own and the loop pin requires none — at three
     // arguments and at two, since arity does not make the name any less hidden.
     expect(scope.dynamicToolNames).toHaveLength(2);
     // A tool call assembled without fakeToolCall is recorded whatever its
-    // name spells, including a computed one.
-    expect(scope.handBuiltToolCalls).toHaveLength(1);
-    expect(wiring.handBuiltToolCalls).toHaveLength(1);
+    // name spells, including a computed one, and so is a toolCalls source that
+    // is not an inline array (its elements cannot be enumerated at all).
+    expect(scope.handBuiltToolCalls).toHaveLength(2);
+    expect(wiring.handBuiltToolCalls).toHaveLength(3);
+    // The scoping of these three inventories is witnessed, not assumed: the
+    // unrelated arm carries a write, a computed name and a hand-built element,
+    // each of which reaches the file-wide inventory and none the loop scope.
+    expect(wiring.reassignments.length).toBe(scope.reassignments.length + 1);
+    expect(wiring.dynamicToolNames.length).toBe(
+      scope.dynamicToolNames.length + 1,
+    );
+    expect(wiring.handBuiltToolCalls.length).toBe(
+      scope.handBuiltToolCalls.length + 1,
+    );
+    expect(
+      wiring.reassignments.filter(
+        (entry) => !scope.callbacks.includes(entry.callback),
+      ),
+    ).toHaveLength(1);
   });
 
   // The fake-side minted-id extraction is executed, not counted as source

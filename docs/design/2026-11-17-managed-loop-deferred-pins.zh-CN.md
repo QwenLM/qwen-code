@@ -23,18 +23,19 @@
 - **可执行守卫优于文本钉。** 修复 2、3 遵循既有模式（assertCallerImportReplaced、assertScheduledFireWitness）：顶层纯声明，元测试加载并执行，剪断或漂移守卫使断言红而非仅文本匹配失败。
 - **allow-list 而非 deny-list。** 修复 3 对任何未知哨兵失败关闭；两个展开形是 Managed body 可教的封闭集合。
 - **内容修复经生成器流转。** 修复 4 同时改 bundled source 与生成器替换并重生已提交 sidecar，使逐字节 parity 测试仍是 oracle；不手改 sidecar。
-- **无运行时*代码*改动；模型面向的 skill 内容确有改动。** 没有运行时模块 import managed-loop-skill.ts——其消费方只有 regenerator 与它自己的测试——分类器 helper 住在 E2E runner 的假模型，不在 shipped 代码里。但 `Nd` 修复改了 bundled `SKILL.md`，该文件随构建发布并由 `readBundledReference` 在运行时读取，故模型看到的本地 `/loop` 指引确实变了（这正是预期的正确性修复），Managed sidecar JSON（构建时拷贝到 Java classpath）亦然。本 PR 给 managed-loop-skill.ts 新增的两个 import（`LOOP_SENTINEL_DYNAMIC`、`AUTONOMOUS_SENTINEL_DYNAMIC`）是 allow-list 取源的哨兵常量，并不使生成器成为运行时模块。
+- **无运行时*代码*改动；模型面向的 skill 内容确有改动。** 没有运行时模块 import managed-loop-skill.ts——其消费方只有 regenerator 与它自己的测试——分类器 helper 住在 E2E runner 的假模型，不在 shipped 代码里。但 `Nd` 修复改了 bundled `SKILL.md`，该文件随构建发布并由 `SkillManager` 的 bundled 层在运行时发现并解析（`dist/bundled/loop/SKILL.md`，由 `copy_bundle_assets.js` 填充），故模型看到的本地 `/loop` 指引确实变了（这正是预期的正确性修复），Managed sidecar JSON（构建时拷贝到 Java classpath）亦然。本 PR 给 managed-loop-skill.ts 新增的两个 import（`LOOP_SENTINEL_DYNAMIC`、`AUTONOMOUS_SENTINEL_DYNAMIC`）是 allow-list 取源的哨兵常量，并不使生成器成为运行时模块。
 
 ## 涉及文件
 
-| 文件                                                                                            | 变更                                                                                        |
-| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `packages/core/src/skills/bundled/loop/managed-loop-skill.ts`                                   | MANAGED_LOOP_PROFILES + 派生类型；Nd 替换；assertSentinelsExpanded allow-list               |
-| `packages/core/src/skills/bundled/loop/managed-loop-skill.test.ts`                              | profile 单一来源；Parsing 库存；allow-list 测试；槽编译器派生 Nd caveat；Java 提供+路由集合 |
-| `packages/core/src/skills/bundled/loop/SKILL.md`                                                | Nd 表行 + 月界 caveat                                                                       |
-| `packages/core/src/managed-runtime/contracts/managed-loop-skill-{cron,union,bundled-body}.json` | 重生                                                                                        |
-| `scripts/run-managed-agent-server-e2e.ts`                                                       | classifierBlockAnswer + mintedScheduleId helper；两个 fake 都用它们                         |
-| `scripts/tests/managed-agent-server-e2e.test.js`                                                | fake createdId 钉；分类器 + minted-id 可执行测试；AST 分类器接线钉                          |
+| 文件                                                                                            | 变更                                                                                                                     |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `packages/core/src/skills/bundled/loop/managed-loop-skill.ts`                                   | MANAGED_LOOP_PROFILES + 派生类型；Nd 替换；assertSentinelsExpanded allow-list                                            |
+| `packages/core/src/skills/bundled/loop/managed-loop-skill.test.ts`                              | profile 单一来源；Parsing 库存；allow-list 测试；槽编译器派生 Nd caveat；Java 提供集合＋first-match profile→key 路由映射 |
+| `packages/core/src/skills/bundled/loop/regenerate-managed-loop-assets.ts`                       | 目标从 MANAGED_LOOP_PROFILES 派生，替代手工 tuple                                                                        |
+| `packages/core/src/skills/bundled/loop/SKILL.md`                                                | Nd 表行 + 月界 caveat                                                                                                    |
+| `packages/core/src/managed-runtime/contracts/managed-loop-skill-{cron,union,bundled-body}.json` | 重生                                                                                                                     |
+| `scripts/run-managed-agent-server-e2e.ts`                                                       | classifierBlockAnswer + mintedScheduleId helper；两个 fake 都用它们                                                      |
+| `scripts/tests/managed-agent-server-e2e.test.js`                                                | fake createdId 钉；分类器 + minted-id 可执行测试；AST 分类器接线钉                                                       |
 
 ## 范围边界
 
@@ -87,11 +88,11 @@
 
 ## Round-4 评审精化
 
-第四轮发了三条建议，其中两条是 round-3 替换自身引入的。三条都在修本 PR 新增的守卫、而非扩大其范围，故在本 PR 落地；round-3 摘要声明的边界仍然有效——若再有一轮在这两个测试文件再生兄弟发现，转后续 issue。
+第四轮发了三条建议，其中两条是 round-3 替换自身引入的。三条都在修本 PR 新增的守卫、而非扩大其范围，故在本 PR 落地；round-3 摘要声明的边界此后被取代：第 5–9 轮按维护者「评审意见在本 PR 一次解决、不拆 follow-up PR」的常设要求，把每条兄弟发现都落在本 PR。该后续边界现在只适用于 #17673 跟踪的结构重构，绝不适用于本 PR 所交付守卫自身的缺陷。
 
 - **构造点与重赋值（R2-3，修复引入）。** 替换成分计数时丢掉了唯一断言「allow 在*何处*构造」的检查，而 AST 库存既不查对象字面量也不查重赋值：`let blockAnswer = …; if (blockAnswer === undefined) blockAnswer = { shouldBlock: false };` 使 round-3 全部断言保持绿，而非 block 侧查询又被答以非法 allow。扫描器现收集每个 `{ shouldBlock: false }` 构造点及其所在函数（恰一个，位于 `classifierBlockAnswer` 内），以及决策或其输入在任意赋值运算符下的每次重赋值（零次——`??=` 与 `||=` 恰在决策为 undefined 即非 block 情形时赋值，只查 `=` 会漏）。仍是结构化的，故恢复的保证不依赖原始文本计数、对注释免疫。见证：报告的 `let` + 重赋值变异使构造点集合红；`??=` 重赋值为经 helper 推导的 allow（不新增字面量、不新增 answer 站点）使重赋值集合红；round-3 的第二绑定 sibling 仍使 answer 站点集合红（连续性）。
 - **schema properties 的来源（R4-1）。** declarations 库存只记录实参 token `blockProperties`，故伪造初始化式（`schemaTool ? { shouldBlock: { type: 'boolean' } } : undefined`）能通过，同时让每个侧查询看起来都是 block schema。扫描器现记录每个 `blockProperties` 初始化式文本，要求两臂都读 `schemaTool?.function?.parameters?.properties`。见证：伪造任一臂初始化式使来源集合红，其余库存仍绿。
-- **Managed caveat 的正确 oracle（R3-1，修复引入）。** round-3 从 `utils/cronParser` 派生上界与间隔，而它服务本地 CLI 调度器；Managed body 由 Java `CronSlots` 扫描器触发，其 TS 镜像是 `managed-automation-slots.ts` 的 `compileCron`。用错解析器会让一次 Managed 槽语义改动之后，caveat 继续教一个 Managed 调度器已不再遵守的上界。测试改从 `compileCron` 派生（日域与 `CronSlots.java` 同为 `[1, 31]`）。见证：把 Managed 编译器日域上界调到 30 使派生断言红（`Keep N ≤ 29`）——旧 oracle 对该变异盲；模块字节级还原后回到 32/32。
+- **Managed caveat 的正确 oracle（R3-1，修复引入）。** round-3 从 `utils/cronParser` 派生上界与间隔，而它服务本地 CLI 调度器；Managed body 由 Java `CronSlots` 扫描器触发，其 TS 镜像是 `managed-automation-slots.ts` 的 `compileCron`。用错解析器会让一次 Managed 槽语义改动之后，caveat 继续教一个 Managed 调度器已不再遵守的上界。测试改从 `compileCron` 派生（日域与 `CronSlots.java` 同为 `[1, 31]`）。见证：把 Managed 编译器日域上界调到 30 使派生断言红（`Keep N ≤ 29`）——旧 oracle 对该变异盲；模块字节级还原后套件复绿（该轮为 32/32；套件此后增至 34）。
 
 被执行的扫描器正向控制一次覆盖以上全部形态（伪造来源、`let` 重赋值为内联 allow、对输入的 `??=` 改写、第二绑定 sibling），而提到绑定名、allow 字面量与工具名的散文不动任何库存。
 
@@ -106,7 +107,7 @@
 - **绑定两个求值器。** caveat 同时到达两个调度器，故测试现要求 `parseCron`（本地 `CronCreate` 用它校验）与 `compileCron` 对 1..31 每个步长展开出相同的日集合。
 - **Java 路由按映射、且只刮代码（H19）。** 比较 target 集合看不到两个 profile 家族互换 body。测试现把每个 `forProfile` 分支解析为 profile→key 对并断言映射（`SHELL_V4→union`、`FILES_V4`/`INTERNAL_TEAM_LEAD_V2→cron`、`SHELL_V3→wakeup`），外加可达 key 集合。两处刮取都先剥离 Java 注释，故仅改注释不再红。
 - **各 shell 的 Parsing 库存。** bundled 库存看不到 cron 与 wakeup shell 自写的 managed-only 规则。现以 `Record<ManagedLoopProfile, …>` 钉住每个 shell 的规则名，删 cron 的 `No interval` 或改 wakeup 的 `Interval requested` 即红。
-- **记录纠正。** 设计记录与 PR Risk 段原称「无生产运行时改动 / 无运行时 import」。对代码核实：没有运行时模块 import 生成器，但 bundled `SKILL.md` 随构建发布并由 `readBundledReference` 在运行时读取，故模型面向内容确有改动。两版文档与 PR 正文改为「无运行时*代码*改动；发布的 skill 内容有改动」。修复 #1 的描述仍指 round-2 之前的内联正则与过滤，现改为描述 `mintedScheduleId`。
+- **记录纠正。** 设计记录与 PR Risk 段原称「无生产运行时改动 / 无运行时 import」。对代码核实：没有运行时模块 import 生成器，但 bundled `SKILL.md` 随构建发布并由 `SkillManager` 的 bundled 层在运行时发现并解析（`dist/bundled/loop/SKILL.md`，由 `copy_bundle_assets.js` 填充），故模型面向内容确有改动。两版文档与 PR 正文改为「无运行时*代码*改动；发布的 skill 内容有改动」。修复 #1 的描述仍指 round-2 之前的内联正则与过滤，现改为描述 `mintedScheduleId`。
 - **转 #17673：把 caveat 的 oracle 绑定到 `CronSlots.java`。** 共享 `managed-automation-slots-v1` fixtures（30 案例）无月内日期步进案例，故 Java 求值器在 `*/N` 上未与 TS 镜像绑定。关闭它需新增同时被 `managed-automation-slots.test.ts` 与 `CronSlotsTest.java` 消费的 fixture 案例并跑 Java verification 套件——属跨语言契约改动，留在本 PR 之外。上文双求值器一致性只覆盖 JavaScript 侧。
 
 见证（各字节级还原）：成员写入、`Object.assign`、计算工具名、模板字面量 sibling、gap 对调、路由 key 对调、删 cron 的 `No interval` 规则、令 `parseCron` 分歧，各使对应断言红；拼写 `key = "wakeup";` 的 Java 注释保持绿；此前形态（第二绑定、换 call id、手搭 tool call、`let` + 内联 allow、`??=`、伪造来源、usage 行 `??`、门改宽为 `blockProperties !== undefined`）全部仍红，提到绑定名的注释保持绿。扫描器返回的每份库存都至少有一条自己的见证。被执行的扫描器正向控制携带全部**扫描器侧**形态——伪造来源、成员写入、`Object.assign`、`delete`、`??=` 改写、内联 allow、计算工具名与模板字面量 sibling，故无库存空转——外加一个无关回调，其 `respond_in_schema` 回答被证明在域外。core 侧形态（gap 对调、路由 key 对调、shell 规则删除、解析器分歧）则如上所列，通过变异真实源并重生来见证。core 33/33、scripts 元 183/183、eslint/prettier/core typecheck 净。
@@ -171,6 +172,37 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 一条本地假红属环境而非回归：`serve-ab-workflow` 的 `worktreeConfig` split-config 用例失败，因为本机设了系统级 `core.hooksPath`；以 `GIT_CONFIG_SYSTEM=/dev/null` 跑该文件是 24/24，且测试与 wipe 脚本都未改动。
 
 残留在种类上不变。本轮在全文件范围关闭了直接伪造路线；它并未终结拼写 evasion 家族，后者的持久修复——每臂执行整个分类器判定——与其余四项一并留在 #17673。
+
+## 第 9 轮评审：十六条延后项，逐条先实测再处置
+
+第 9 轮无 inline 发现、十六条延后项，并因两条继承的 Java 红把自己的 Approve 降级为 Comment——同时独立确认了归属（本 diff 无 Java 文件；`AgentSessionPolicies` 在 merge base 与 head 都是 779 行）。下面每条都先实测再处置，十六条全部在此关闭，不再延后。
+
+**记录纠正（五条）。**
+
+- 涉及文件表仍把 Java 守卫描述为路由*目标集合*，即 round 5 已替换掉的形态。现改为 first-match profile→key 映射。
+- 表里漏了一个被改动的生产文件 `regenerate-managed-loop-assets.ts`。已补行。
+- R3-1 见证把还原后的套件记为 `32/32` 而未加限定。现写明那是该轮的规模；套件现为 34。
+- **记录把 `readBundledReference` 说成 loop `SKILL.md` 的运行时读取者，而没有任何调用点这样做。** 实测：它的调用方只有 agent-delegation 与 workflow-authoring 两个 skill（以及泛型的 surface 解析器）。真实路径是 `SkillManager` 的 bundled 层，锚在 `dist/bundled/`、由 `copy_bundle_assets.js` 填充；已确认本轮 bundle 里 `dist/bundled/loop/SKILL.md` 在位且携带修正后的 `Nd` 措辞。两版文档与 PR 正文现改为点名该机制。结论——发布的模型面向内容有改动——是对的；点名的机制是错的。
+- 记录对后续兄弟轮次保留了两条互不相容的范围政策（round 3 的「再有一条转后续 issue」对 round 4 的「这些落在本 PR」）。现记录适用哪条：第 5–9 轮按维护者常设要求把每条兄弟发现落在本 PR，后续边界只覆盖 #17673 的结构重构，绝不覆盖本 PR 所交付守卫自身的缺陷。
+
+**守卫缺口关闭（九条），各带自己在真实 runner 或已提交夹具上的见证。**
+
+- **解构写入。** `writtenBinding` 只解析标识符与成员访问，故 `[blockProperties] = [伪造]` 会隐形地重绑输入。另设 `assignmentTarget` 行走数组与对象模式（与 `writtenBinding` 分开，使原地写入者的首参永不被当作模式读）。见证：重赋值库存红。
+- **非内联数组的 `toolCalls` 源。** `const calls = [ …手搭… ]; return { toolCalls: calls }` 藏住了每个元素。任何非内联源现按站点记录。见证用计算名，使工具名计数不动、只有这份库存触发。
+- **引号 allow 键。** `{ 'shouldBlock': false }` 对只匹配标识符的写法不可见。键匹配现接受字符串或模板字面量。见证把 allow 提到每个回调之外并答外来 call id，故只有 `allowSites` 触发。
+- **门只证明了总数。** 两个门可以都在一个回调里，而另一个无门作答。钉子现要求每回调一个门。见证用 2/0 分布，使总数仍为 2。
+- **minted-id 钉原是对整个 runner 的原文本匹配**，注释掉的或重复的副本即可满足。现改为 AST 库存：每个 `mintedScheduleId` 调用点连同它初始化的绑定与它过滤的 create-call id，外加 `?? 'missing-schedule-id'` fallback。见证注释掉一个真实调用点并替换为伪造 id。
+- **没有负向夹具携带「有 block 阶段字段但无 shouldBlock」**，故对 `thinking`/`reason` 的 additive 收窄会存活。已补 thinking-only、reason-only 与两者兼具三个夹具，各断言 `undefined`。
+- **`Object.defineProperty` 与 `Reflect.defineProperty` 在写入者集合里但不在敌意控制里。** 两者均已补入，故两个分支都不空转。
+- **`reassignments`、`dynamicToolNames` 与 `handBuiltToolCalls` 的域限定未被见证。** 无关臂现携带这三种形态，断言证明每种都到达 file-wide 库存而无一到达 loop 域。
+- **非 loop 回调里的伪造 schema** 实测已被本轮的 file-wide 伪造集合杀掉——记为已闭，不重复修。
+
+**core 钉（两条）。**
+
+- first-match 解析此前没有已提交的见证（只有对真实 Java 文件的本地变异）。现为顶层纯函数 `resolveJavaRouting`，由一个已提交的合成链测试执行，链上带死重复分支与两种注释形态。见证：把解析改回 last-wins 即红。
+- 两个 `Nd` 钉原迭代硬编码的 `['cron','union']`。现迭代 `FIXED_INTERVAL_PROFILES`，由携带 `CronCreate` 的已发布 body 派生，且成员本身被断言，故某个 body 失去其 creator 不会静默缩小集合。见证：把派生谓词换成 `LoopWakeup` 即红。
+
+套件规模现为 core 34、scripts 元 183（改动文件 88）。残留在种类上不变：拼写 evasion 家族仍无界——把 `schemaTool` 查找伪造在上一层仍存活——其持久修复留在 #17673。
 
 ## 开放问题
 
