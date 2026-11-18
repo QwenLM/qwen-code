@@ -5500,6 +5500,10 @@ export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
   key.startsWith('localFiles.'),
 );
 
+export const RESTART_RECOVERY_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('restartRecovery.'),
+);
+
 /**
  * zh-CN descriptions for the GitHub boundSessionActions keys. The 20 base
  * event descriptions are written once; the 60 role-qualified spellings

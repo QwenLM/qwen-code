@@ -3,6 +3,7 @@ import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/
 import {
   WEB_SHELL_LANGUAGES,
   LOCAL_FILES_MESSAGE_KEYS,
+  RESTART_RECOVERY_MESSAGE_KEYS,
   getTranslator,
   languageLabel,
   languageSettingToWebShellLanguage,
@@ -35,28 +36,6 @@ const FOLLOWUP_SETTING_KEYS = [
 // translator lookup the component performs, so a missing zh entry falls back
 // to EN on both sides and they stay green. Parity has to be asserted here,
 // key by key, including the strings no panel case renders.
-const RESTART_RECOVERY_MESSAGE_KEYS = [
-  'title',
-  'review',
-  'hide',
-  'continue',
-  'continueAll',
-  'confirmToolTurn',
-  'toolTurnHint',
-  'inFlight',
-  'daemonShutdown',
-  'interrupted',
-  'cancellationNeedsConversation',
-  'notContinuable',
-  'failed',
-  'batchStopped',
-  'loadFailed',
-  'retry',
-  'scanFailedWorkspaces',
-]
-  .map((suffix) => `restartRecovery.${suffix}`)
-  .sort();
-
 const WEIXIN_LOGIN_KEYS = [
   'title',
   'description',
@@ -970,7 +949,7 @@ describe('web-shell zh-TW locale', () => {
       Object.keys(ZH_TW)
         .filter((key) => key.startsWith('restartRecovery.'))
         .sort(),
-    ).toEqual(RESTART_RECOVERY_MESSAGE_KEYS);
+    ).toEqual([...RESTART_RECOVERY_MESSAGE_KEYS].sort());
     for (const key of RESTART_RECOVERY_MESSAGE_KEYS) {
       expect(getTranslator('en')(key)).not.toBe(key);
       expect(getTranslator('zh-TW')(key)).not.toBe(key);
