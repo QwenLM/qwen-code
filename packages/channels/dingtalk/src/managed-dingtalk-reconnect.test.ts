@@ -7,13 +7,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // #17173 R11: the SDK arms setTimeout(this.connect, 1000) from EVERY socket's
-// close event without reading its own `reconnecting` flag, and `this.connect`
-// is this wrapper's guardedConnect, which arms its own retry on failure. One
-// drop whose replacement also fails therefore left TWO independent reconnect
-// chains, compounding on every further close. Reconnect is centralized in the
-// wrapper with SDK autoReconnect off. Only the network boundary (ws, axios) is
-// fake; the SDK and the production wrapper run for real, and the witness counts
-// ACTIVE TIMERS, not socket state.
+// close event without reading its own `reconnecting` flag, and before this
+// change `this.connect` was this wrapper's guardedConnect, which arms its own
+// retry on failure. One drop whose replacement also fails therefore left TWO
+// independent reconnect chains, compounding on every further close. Reconnect
+// is centralized in the wrapper with SDK autoReconnect off. Only the network
+// boundary (ws, axios) is fake; the SDK and the production wrapper run for
+// real, and the witnesses count ACTIVE TIMERS and sockets, not socket state
+// alone.
 
 const wsState = vi.hoisted(() => ({ instances: [] as unknown[] }));
 
