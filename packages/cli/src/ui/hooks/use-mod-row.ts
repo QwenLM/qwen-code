@@ -20,13 +20,15 @@ const noSessions = () => unsubscribed;
 
 /**
  * The props the Mods' hooks draw a transcript row with, while it is shown:
- * undefined until they answer, and when they leave it as it is. Pass no
- * input for a row they do not draw, such as one still streaming.
+ * undefined until they answer, and when they leave it as it is. Offscreen rows
+ * can read a cached answer without asking the Mods to render it again. Pass
+ * no input for a row they do not draw, such as one still streaming.
  */
 export function useModRow<T extends ModRenderInput>(
   config: Config | undefined,
   sessionId: string | undefined,
   input: T | undefined,
+  visible = true,
 ): T['props'] | undefined {
   const session =
     config && input ? getInteractiveModSession(config) : undefined;
@@ -60,13 +62,14 @@ export function useModRow<T extends ModRenderInput>(
   const stable = useMemo(() => input, [key]);
   const subscribe = useCallback(
     (listener: () => void) =>
-      (ready &&
+      (visible &&
+        ready &&
         stable &&
         sessionId !== undefined &&
         sessionId === rowSession &&
         session?.watchRow(sessionId, stable, listener)) ||
       unsubscribed,
-    [session, sessionId, rowSession, ready, stable],
+    [session, sessionId, rowSession, visible, ready, stable],
   );
   const snapshot = useCallback(
     () =>

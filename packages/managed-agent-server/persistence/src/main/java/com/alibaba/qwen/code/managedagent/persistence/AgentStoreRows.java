@@ -143,11 +143,6 @@ final class AgentStoreRows {
 
     final RowMapper<TurnRecord> turnMapper;
 
-    static String renameTarget(String tenant, String session) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                "SESSION", tenant, session);
-    }
-
     static final String SESSION_OPERATION_KINDS =
             "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL', 'CONTEXT_COMPRESSION')";
 
@@ -201,11 +196,10 @@ final class AgentStoreRows {
     }
 
     void requireLegacyMutation(String tenantId, String sessionId) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
     }
 
     SessionRecord requireLegacySessionForUpdate(String tenantId, String sessionId) {
-        return requireSessionForUpdate(tenantId, sessionId, true);
+        return requireSessionForUpdate(tenantId, sessionId);
     }
 
     SessionRecord requireSessionForUpdate(String tenantId,
@@ -221,9 +215,6 @@ final class AgentStoreRows {
                             + " FROM ma_session WHERE ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id ="
                             + " ? AND ma_session.session_id = ? FOR UPDATE",
                     (rows, rowNumber) -> {
-                        if (legacyMutation) {
-                            ManagedLegacySessionGuard.requireLegacyMutation(rows.getBoolean("is_csi_guard"));
-                        }
                         // H2 can retain pre-wait outer-join values after locking the Session.
                         // Read its stream only after acquiring that lock.
                         List<StreamCounters> streams = jdbc.query(

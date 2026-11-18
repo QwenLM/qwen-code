@@ -83,6 +83,8 @@ import type {
   InputModalities,
   PromptCacheSharingParameters,
 } from './contentGenerator.js';
+import { getSystemPromptModel } from './request-model.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   clampOutputTokensToWindow,
   defaultOutputCeiling,
@@ -102,6 +104,7 @@ import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
   appendAutoMemoryContext,
   appendAutoMemorySnapshot,
+  findLatestAutoMemorySnapshot,
   getAutoMemorySnapshot,
   withoutAutoMemorySnapshots,
 } from '../memory/request-context.js';
@@ -702,6 +705,7 @@ export function llmPreparedProviderPin(
     'thinkingMandatory',
     'extra_body',
     'modalities',
+    'imageDetail',
     'schemaCompliance',
     'contextWindowSize',
     'splitToolMedia',
@@ -753,6 +757,12 @@ export interface LlmChatSendOptions {
    * so it is re-appended when the send compacts.
    */
   suppressedHookContext?: string;
+}
+
+export interface DispatchedLlmRequest {
+  readonly model: string;
+  readonly generationConfig: GenerateContentConfig;
+  readonly runtimeView?: RuntimeContentGeneratorView;
 }
 
 export type ChatCompressionObserver = (
@@ -1715,6 +1725,73 @@ function isDegradedPlaceholderTurn(content: Content): boolean {
   );
 }
 
+async function abortableProviderStream(
+  pending: Promise<AsyncGenerator<GenerateContentResponse>>,
+  signal?: AbortSignal,
+): Promise<AsyncGenerator<GenerateContentResponse>> {
+  if (!signal) return pending;
+
+  const wait = async <T>(operation: Promise<T>): Promise<T> => {
+    let onAbort!: () => void;
+    let abortImmediate: ReturnType<typeof setImmediate> | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        // Let a cooperative provider report its original error this turn.
+        abortImmediate = setImmediate(() => reject(signal.reason));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+    try {
+      const result = await Promise.race([operation, aborted]);
+      signal.throwIfAborted();
+      return result;
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+      clearImmediate(abortImmediate);
+    }
+  };
+
+  let stream: AsyncGenerator<GenerateContentResponse>;
+  try {
+    stream = await wait(pending);
+  } catch (error) {
+    if (signal.aborted) {
+      void pending.then((late) => late.return(undefined)).catch(() => {});
+    }
+    throw error;
+  }
+
+  return (async function* () {
+    let finished = false;
+    try {
+      for (;;) {
+        let next: IteratorResult<GenerateContentResponse>;
+        try {
+          next = await wait(stream.next());
+        } catch (error) {
+          // Iterator failures already own their cleanup; preserve their error.
+          finished = !signal.aborted;
+          throw error;
+        }
+        if (next.done) {
+          finished = true;
+          return;
+        }
+        yield next.value;
+      }
+    } finally {
+      if (!finished) {
+        // A provider's return can queue behind the next() that ignored abort.
+        // Let the chat unwind and release its send lock without waiting for it.
+        const closing = Promise.resolve().then(() => stream.return(undefined));
+        if (signal.aborted) void closing.catch(() => {});
+        else await wait(closing);
+      }
+    }
+  })();
+}
+
 async function* rejectDegradedPlaceholderResponse(
   stream: AsyncGenerator<GenerateContentResponse>,
 ): AsyncGenerator<GenerateContentResponse> {
@@ -2444,6 +2521,10 @@ export class LlmChat {
     history: Content[];
   };
   private toolBudgetFixedInputVersion = 0;
+  private systemInstructionResolver?: (model: string) => string;
+  private sessionStartContext?: string;
+  private requestSystemInstruction?: GenerateContentConfig['systemInstruction'];
+  private dispatchedRequest?: DispatchedLlmRequest;
   /** Provenances already reported at dispatch, so a retry is not recounted. */
   private readonly injectedToolResults = new WeakSet<ToolOutputProvenance>();
 
@@ -2708,6 +2789,14 @@ export class LlmChat {
     return this.config.getModelRouteIdentity?.() ?? '';
   }
 
+  private memorySnapshotsBecameVisible(visible: boolean): boolean {
+    return (
+      this.memorySnapshotsVisible !== true &&
+      visible &&
+      findLatestAutoMemorySnapshot(this.history) !== undefined
+    );
+  }
+
   /**
    * Make the single-slot token counters describe the route identified by
    * `targetRouteKey` (default: the active route). Counts recorded for a
@@ -2743,15 +2832,7 @@ export class LlmChat {
     const memorySnapshotsVisible = Boolean(
       this.config.getAutoMemoryContext?.(),
     );
-    if (
-      this.memorySnapshotsVisible !== true &&
-      memorySnapshotsVisible &&
-      this.history.some((entry) =>
-        entry.parts?.some(
-          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
-        ),
-      )
-    ) {
+    if (this.memorySnapshotsBecameVisible(memorySnapshotsVisible)) {
       // A suppressed request cannot account for catalogs that are visible
       // again. Invalidate every route before adoption. The opposite flip
       // (visible -> suppressed) deliberately keeps the authoritative count:
@@ -2863,6 +2944,23 @@ export class LlmChat {
   getLastPromptTokenCount(targetRouteKey?: string): number {
     this.adoptTokenCountsForRoute(targetRouteKey);
     return this.lastPromptTokenCount;
+  }
+
+  /** Reads the active route's prompt count without mutating chat or telemetry state. */
+  peekLastPromptTokenCount(): number {
+    if (
+      (this.lastPromptTokenCount === 0 &&
+        this.tokenCountsByRouteKey.size === 0) ||
+      this.memorySnapshotsBecameVisible(
+        Boolean(this.config.getAutoMemoryContext?.()),
+      )
+    ) {
+      return 0;
+    }
+    const routeKey = this.currentRouteKey();
+    return routeKey === this.tokenCountsRouteKey
+      ? this.lastPromptTokenCount
+      : (this.tokenCountsByRouteKey.get(routeKey)?.promptTokenCount ?? 0);
   }
 
   /** Previous model-response tokens used by the next prompt estimate. */
@@ -3109,6 +3207,11 @@ export class LlmChat {
       config: this.config,
       consecutiveFailures: this.consecutiveFailures,
       originalTokenCount,
+      unaccountedOutputTokens:
+        !originalTokenCountIsEstimated &&
+        originalTokenCountOverride === undefined
+          ? this.lastOutputTokenCount
+          : 0,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       observedServerCeiling: options?.observedServerCeiling,
@@ -3148,7 +3251,7 @@ export class LlmChat {
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
             : newHistory,
-          summaryPrefixLength: newHistory.length,
+          summaryPrefixLength: info.summaryPrefixLength ?? newHistory.length,
           completedToolCallIds: this.completedToolCallIds,
         });
       }
@@ -3291,6 +3394,9 @@ export class LlmChat {
     this.chatRecordingService?.recordChatCompression({
       info,
       compressedHistory: newHistory,
+      summaryPrefixLength:
+        getStartupContextLength(newHistory, { includeCompressed: true }) ||
+        undefined,
       completedToolCallIds: this.completedToolCallIds,
     });
     logChatCompression(
@@ -3324,11 +3430,61 @@ export class LlmChat {
     this.generationConfig.systemInstruction = sysInstr;
   }
 
+  setSystemInstructionResolver(resolver: (model: string) => string): void {
+    this.systemInstructionResolver = resolver;
+  }
+
+  private resolveSystemInstruction(model: string): string {
+    const instruction = this.systemInstructionResolver!(model);
+    return this.sessionStartContext
+      ? stripTrailingSessionStartContextBlock(instruction) +
+          buildSessionStartContextBlock(this.sessionStartContext)
+      : instruction;
+  }
+
+  private prepareRequestParams(
+    model: string,
+    params: SendMessageParameters,
+    generation: ContentGeneratorConfig | undefined,
+    hasExplicitInstruction = Object.hasOwn(
+      params.config ?? {},
+      'systemInstruction',
+    ),
+  ): SendMessageParameters {
+    if (!this.systemInstructionResolver || hasExplicitInstruction) {
+      return params;
+    }
+    try {
+      return {
+        ...params,
+        config: {
+          ...params.config,
+          systemInstruction: this.resolveSystemInstruction(
+            getSystemPromptModel(generation ?? {}, model),
+          ),
+        },
+      };
+    } catch (cause) {
+      throw new LlmRequestPreparationError(cause);
+    }
+  }
+
+  private trackRequestSystemInstruction(
+    instruction: GenerateContentConfig['systemInstruction'],
+  ): void {
+    if (!isDeepStrictEqual(this.requestSystemInstruction, instruction)) {
+      this.toolBudgetUsageAnchor = undefined;
+      this.toolBudgetFixedInputVersion++;
+      this.requestSystemInstruction = structuredClone(instruction);
+    }
+  }
+
   setSessionStartContext(extraInstruction: string) {
     const trimmed = extraInstruction.trim();
     if (!trimmed) {
       return;
     }
+    this.sessionStartContext = trimmed;
 
     const current = this.generationConfig.systemInstruction;
     let baseInstruction = '';
@@ -3513,6 +3669,7 @@ export class LlmChat {
       ? this.generationConfig
       : undefined;
     let currentUserContent: Content | undefined;
+    const callerParams = params;
     try {
       if (options?.preparedRequest) {
         const saved = options.preparedRequest;
@@ -3538,6 +3695,14 @@ export class LlmChat {
           compressionStatus: CompressionStatus.NOOP,
         };
       } else {
+        params = this.prepareRequestParams(
+          model,
+          callerParams,
+          cgConfigForThresholds,
+        );
+        this.trackRequestSystemInstruction(
+          { ...this.generationConfig, ...params.config }.systemInstruction,
+        );
         // The send-lock above is held but the generator's `finally` (which
         // resolves it) has not run yet. Any setup error before returning the
         // generator must release the lock or subsequent sends will block forever
@@ -4049,7 +4214,9 @@ export class LlmChat {
           await this.recordCompression({
             info: compressionInfo,
             compressedHistory: [...this.getHistoryShallow(), userContent],
-            summaryPrefixLength: this.getHistoryShallow().length,
+            summaryPrefixLength:
+              compressionInfo.summaryPrefixLength ??
+              this.getHistoryShallow().length,
             completedToolCallIds: this.completedToolCallIds,
           });
         }
@@ -5791,7 +5958,15 @@ export class LlmChat {
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
                     fallbackRequestContents,
-                    params,
+                    self.prepareRequestParams(
+                      resolvedFallbackModel,
+                      params,
+                      fallbackConfig,
+                      Object.hasOwn(
+                        callerParams.config ?? {},
+                        'systemInstruction',
+                      ),
+                    ),
                     prompt_id,
                     fallbackGenerator,
                     fallbackRetryAuthType,
@@ -6018,7 +6193,6 @@ export class LlmChat {
     // Bound to the `request.config` snapshot below: `request` is built once and
     // every retry re-sends it, so re-reading this per dispatch would let a
     // setter that fires during backoff relabel stale usage as current.
-    const fixedInputVersion = this.toolBudgetFixedInputVersion;
     const request: PromptCacheSharingParameters = {
       model,
       contents: requestContents,
@@ -6027,6 +6201,8 @@ export class LlmChat {
         continuationInFlight: true,
       }),
     };
+    this.trackRequestSystemInstruction(request.config?.systemInstruction);
+    const fixedInputVersion = this.toolBudgetFixedInputVersion;
     const actualConfig =
       overrides?.contentGeneratorConfig ??
       this.config.getContentGeneratorConfig();
@@ -6108,6 +6284,22 @@ export class LlmChat {
           /* Telemetry is observational. */
         }
       }
+      const {
+        abortSignal: _signal,
+        httpOptions: _http,
+        ...dispatchedConfig
+      } = request.config ?? {};
+      const dispatchedModel = getSystemPromptModel(actualConfig ?? {}, model);
+      this.dispatchedRequest = {
+        model: dispatchedModel,
+        generationConfig: structuredClone(dispatchedConfig),
+        ...(actualConfig && {
+          runtimeView: {
+            contentGenerator: generator,
+            contentGeneratorConfig: { ...actualConfig, model: dispatchedModel },
+          },
+        }),
+      };
       onModelRequestDispatched?.();
       return generator.generateContentStream(request, prompt_id);
     };
@@ -6119,7 +6311,7 @@ export class LlmChat {
     // is the caller's explicit opt-in for the primary model only.
     const persistentMode =
       (overrides?.allowPersistentRetry ?? !overrides) && isUnattendedMode();
-    const streamResponse = await retryWithBackoff(apiCall, {
+    const pendingStream = retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof ResponsesHttpError) {
           return error.shouldRetry(extraRetryErrorCodes);
@@ -6179,6 +6371,10 @@ export class LlmChat {
       },
     });
 
+    const streamResponse = await abortableProviderStream(
+      pendingStream,
+      params.config?.abortSignal,
+    );
     return this.processStreamResponse(
       model,
       rejectDegradedPlaceholderResponse(streamResponse),
@@ -6967,7 +7163,32 @@ export class LlmChat {
 
   /** Returns a shallow copy of the current generation config (for cache param snapshots). */
   getGenerationConfig(): GenerateContentConfig {
-    return { ...this.generationConfig };
+    return {
+      ...this.generationConfig,
+      ...(this.systemInstructionResolver && {
+        systemInstruction: this.resolveSystemInstruction(
+          getSystemPromptModel(
+            this.config.getContentGeneratorConfig() ?? {},
+            this.config.getModel(),
+          ),
+        ),
+      }),
+    };
+  }
+
+  getDispatchedGenerationConfig(): GenerateContentConfig {
+    return structuredClone(
+      this.dispatchedRequest?.generationConfig ?? this.getGenerationConfig(),
+    );
+  }
+
+  getDispatchedRequest(): DispatchedLlmRequest | undefined {
+    return this.dispatchedRequest
+      ? {
+          ...this.dispatchedRequest,
+          generationConfig: this.getDispatchedGenerationConfig(),
+        }
+      : undefined;
   }
 
   async maybeIncludeSchemaDepthContext(error: StructuredError): Promise<void> {

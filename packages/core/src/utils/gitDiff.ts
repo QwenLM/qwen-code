@@ -9,7 +9,7 @@ import { access, lstat, open, readFile, stat } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
-import type { Hunk } from 'diff';
+import type { StructuredPatchHunk as Hunk } from 'diff';
 import {
   findGitRoot,
   NO_EXEC_CONFIG,
@@ -1194,6 +1194,8 @@ export interface GitWorkingTreeStatus {
   branch: string | null;
   /** `true` for a detached HEAD (branch holds no name). */
   detached: boolean;
+  /** `false` for an unborn HEAD (no commits yet): no worktree base exists. */
+  hasHead: boolean;
   /** `true` when the branch tracks an upstream. */
   hasUpstream: boolean;
   /** Commits ahead of upstream (0 without an upstream). */
@@ -1266,6 +1268,8 @@ export async function getGitWorkingTreeStatus(
 interface StatusBranchLine {
   branch: string | null;
   detached: boolean;
+  /** false for an unborn HEAD (no commits yet): no worktree base exists. */
+  hasHead: boolean;
   hasUpstream: boolean;
   ahead: number;
   behind: number;
@@ -1274,6 +1278,7 @@ interface StatusBranchLine {
 const NO_BRANCH: StatusBranchLine = {
   branch: null,
   detached: false,
+  hasHead: false,
   hasUpstream: false,
   ahead: 0,
   behind: 0,
@@ -1290,11 +1295,11 @@ export function parseStatusBranchLine(line: string): StatusBranchLine {
   let desc = line.slice(3);
 
   if (desc.startsWith('HEAD (no branch)')) {
-    return { ...NO_BRANCH, detached: true };
+    return { ...NO_BRANCH, detached: true, hasHead: true };
   }
   const unborn = desc.match(/^(?:No commits yet|Initial commit) on (.+)$/);
   if (unborn) {
-    return { ...NO_BRANCH, branch: unborn[1] ?? null };
+    return { ...NO_BRANCH, branch: unborn[1] ?? null, hasHead: false };
   }
 
   let ahead = 0;
@@ -1318,6 +1323,7 @@ export function parseStatusBranchLine(line: string): StatusBranchLine {
   return {
     branch: branch || null,
     detached: false,
+    hasHead: true,
     hasUpstream,
     ahead,
     behind,
@@ -1544,6 +1550,13 @@ export interface GitLogOptions {
    * of at least four characters also resolves as a commit hash prefix.
    */
   search?: string;
+  /**
+   * Single refs whose reachable commits are excluded from the window
+   * (`git log <range> --not <refs>`). Used to drop commits already covered by
+   * a bound PR. Every ref must pass the single-ref whitelist; an unsafe ref
+   * refuses the whole fetch (`null`) rather than silently running unscoped.
+   */
+  excludeRefs?: string[];
 }
 
 const LOG_ALL_REVISIONS = ['HEAD', '--branches', '--tags', '--remotes'];
@@ -1553,6 +1566,22 @@ function isSafeLogRange(range: string): boolean {
     !range.startsWith('-') &&
     !range.startsWith('..') &&
     /^[A-Za-z0-9_./~^-]+$/.test(range)
+  );
+}
+
+/**
+ * A single ref (no range): the log-range whitelist minus any `..`, so an
+ * excluded ref can never smuggle a second revision or a flag into argv. A
+ * leading `^` is also refused: it is git's negation operator, and `--not ^ref`
+ * XORs the two negations into an inclusion, widening the window instead of
+ * narrowing it (a trailing `^`/`~` revision suffix stays allowed).
+ */
+function isSafeSingleRef(ref: string): boolean {
+  return (
+    !ref.startsWith('-') &&
+    !ref.startsWith('^') &&
+    !ref.includes('..') &&
+    /^[A-Za-z0-9_./~^-]+$/.test(ref)
   );
 }
 
@@ -1588,10 +1617,41 @@ export async function fetchGitLog(
   );
   const skip = Math.max(options?.skip ?? 0, 0);
   const revisions = options?.all
-    ? LOG_ALL_REVISIONS
+    ? [...LOG_ALL_REVISIONS]
     : options?.range && isSafeLogRange(options.range)
       ? [options.range]
       : [];
+  const excludeRefs = options?.excludeRefs ?? [];
+  if (excludeRefs.length > 0) {
+    // Fail closed: an unsafe excluded ref must not degrade into an unscoped
+    // walk that re-lists the very commits the exclusion exists to drop.
+    if (!excludeRefs.every(isSafeSingleRef)) return null;
+    // Drop safe-but-absent refs instead of failing the whole walk. A bound PR
+    // head can be missing from the local object database (a refreshed
+    // headRefOid, a gc'd head), and a base branch's remote-tracking ref may
+    // not exist (a fork whose integration remote is `upstream`, a clone with
+    // no remote). `git log --not <missing>` dies with `bad object`, which
+    // would otherwise refuse the entire window and — via the caller's
+    // no-exclusion retry — drop the *present* exclusions too, re-listing the
+    // covered commits. Probing each ref keeps the exclusion surgical: only
+    // the absent ref's commits may reappear, the rest stay excluded.
+    const present: string[] = [];
+    for (const ref of excludeRefs) {
+      const sha = await runGit(
+        [
+          'rev-parse',
+          '--verify',
+          '--quiet',
+          '--end-of-options',
+          `${ref}^{commit}`,
+        ],
+        gitRoot,
+      );
+      if (sha !== null) present.push(ref);
+    }
+    if (revisions.length === 0) revisions.push('HEAD');
+    if (present.length > 0) revisions.push('--not', ...present);
+  }
   const search = options?.search?.trim();
   if (search) {
     return searchGitLog(gitRoot, revisions, search, limit, skip);
@@ -1639,6 +1699,11 @@ async function searchGitLog(
   skip: number,
 ): Promise<GitLogResult> {
   const window = String(skip + limit + 1);
+  // The hash-prefix arm below shows a single named commit with --no-walk, so
+  // it cannot take the positive revisions (a range would re-walk); it still
+  // must honour the exclusion, so carry just the `--not <refs>` tail.
+  const notAt = revisions.indexOf('--not');
+  const negation = notAt === -1 ? [] : revisions.slice(notAt);
   const walk = (filter: string) =>
     runGit(
       [
@@ -1679,6 +1744,7 @@ async function searchGitLog(
                 `--format=${LOG_FORMAT}`,
                 '--no-walk',
                 sha.trim(),
+                ...negation,
                 '--',
               ],
               gitRoot,

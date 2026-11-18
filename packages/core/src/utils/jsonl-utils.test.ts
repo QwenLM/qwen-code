@@ -18,6 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import {
+  _getFileLockCountForTest,
   _recoverObjectsFromLine,
   _resetEnsuredDirsCacheForTest,
   countLines,
@@ -52,6 +53,88 @@ afterEach(() => {
 
 const tmpPath = (prefix: string) =>
   path.join(tmpRoot, `${prefix}-${Math.random().toString(36).slice(2)}.jsonl`);
+
+describe('append lock lifetime', () => {
+  it('releases locks after writing distinct files', async () => {
+    await Promise.all(
+      Array.from({ length: 64 }, (_, index) =>
+        writeLine(tmpPath('lock-lifetime'), { index }),
+      ),
+    );
+    expect(_getFileLockCountForTest()).toBe(0);
+  });
+
+  it('releases locks after serialization and filesystem failures', async () => {
+    await expect(writeLine(tmpPath('serialize-failure'), 1n)).rejects.toThrow();
+    const parent = tmpPath('not-directory');
+    fs.writeFileSync(parent, 'file');
+    await expect(
+      writeLine(path.join(parent, 'child.jsonl'), {}),
+    ).rejects.toThrow();
+    expect(_getFileLockCountForTest()).toBe(0);
+  });
+
+  it('keeps queued and newly arriving writers serialized', async () => {
+    const file = tmpPath('queued-writers');
+    let releaseFirst!: () => void;
+    let firstStarted!: () => void;
+    const held = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const appendFile = fs.promises.appendFile.bind(fs.promises);
+    let active = 0;
+    let maximumActive = 0;
+    const spy = vi
+      .spyOn(fs.promises, 'appendFile')
+      .mockImplementation(async (...args) => {
+        active++;
+        maximumActive = Math.max(maximumActive, active);
+        try {
+          if (String(args[1]).includes('"index":0')) {
+            firstStarted();
+            await held;
+          }
+          return await appendFile(...args);
+        } finally {
+          active--;
+        }
+      });
+    try {
+      const first = writeLine(file, { index: 0 });
+      await started;
+      const second = writeLine(file, { index: 1 });
+      const third = writeLine(file, { index: 2 });
+      const arriving = first.then(() => writeLine(file, { index: 3 }));
+      expect(_getFileLockCountForTest()).toBe(1);
+      releaseFirst();
+      await Promise.all([first, second, third, arriving]);
+      expect(maximumActive).toBe(1);
+      expect(await read(file)).toEqual([
+        { index: 0 },
+        { index: 1 },
+        { index: 2 },
+        { index: 3 },
+      ]);
+      expect(_getFileLockCountForTest()).toBe(0);
+    } finally {
+      releaseFirst();
+      spy.mockRestore();
+    }
+  });
+
+  it('allows a queued write to complete after its predecessor fails', async () => {
+    const file = tmpPath('failed-predecessor');
+    const failed = writeLine(file, 1n);
+    const queued = writeLine(file, { ok: true });
+    await expect(failed).rejects.toThrow();
+    await queued;
+    expect(await read(file)).toEqual([{ ok: true }]);
+    expect(_getFileLockCountForTest()).toBe(0);
+  });
+});
 
 function tmpFile(content: string): string {
   const p = tmpPath('t');

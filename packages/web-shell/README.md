@@ -115,8 +115,8 @@ Pierre 目录树，点击文件后左侧显示内容、右侧保留目录树。M
 
 新建会话页的内置 `header` 只提供工作区级入口：右侧面板开关、启用时的
 Local Control，以及多主机位置。面板开关遵循 `header.items`，并在工作区确定后
-才显示；`rightPanel.items` 此时仅保留 `files`、`terminal` 和 `webPreview`，
-`review`、`sideTask`、`trajectory` 要等首条消息创建会话后才出现。
+才显示；`rightPanel.items` 此时仅保留 `files`、`terminal`、`webPreview` 和
+`changeOverview`，`review`、`sideTask`、`trajectory` 要等首条消息创建会话后才出现。
 自定义 `renderChatHeader` 的宿主在新建会话页仍不调用该渲染器。
 输入框没有显示工作区选择器时，精简 header 保留只读工作区图标。
 面板跟随输入框选择的工作区；各工作区草稿独立保存，刷新和会话切换后可恢复，
@@ -727,7 +727,7 @@ daemon 参数的完整含义和配置方式见
 | `theme`                        | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                                                                                                         |
 | `onThemeChange`                | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                                                                                                                  |
 | `onThemeResolved`              | `(theme: WebShellTheme) => void`                                                                                                      | 未提供 `theme` 且 shell 从 daemon 设置解析出主题时触发；仅供宿主同步文档外观，不应持久化为宿主偏好                                                                           |
-| `language`                     | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn' \| 'ru' \| 'ru-ru'`                                                                               | UI 语言；`ru` 目前只覆盖 `goal.*`/`goals.*`（部分目录），未覆盖的键按键回退英文                                                                                              |
+| `language`                     | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn' \| 'zh-TW' \| 'zh-tw' \| 'zh-HK' \| 'zh-Hant' \| 'zh-MO' \| 'ru' \| 'ru-ru'`                      | UI 语言；`zh-HK`/`zh-Hant`/`zh-MO` 及大小写变体共用 `zh-TW` 繁体目录；`ru` 只覆盖 `goal.*`/`goals.*`。未覆盖的键回退英文                                                     |
 | `onLanguageChange`             | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                                                                                                            |
 | `onLanguageResolved`           | `(language: WebShellLanguage) => void`                                                                                                | 未提供 `language` 时，有效 UI 语言在未成为宿主偏好时触发，包括设置解析、乐观切换与回滚；仅供同步文档外观                                                                     |
 | `brand`                        | `WebShellBrand`                                                                                                                       | 产品品牌（名称与 Logo，`logo` 为 React 节点）；提供时整体取代 daemon 解析出的品牌，见下方「品牌（白标）」                                                                    |
@@ -938,10 +938,37 @@ daemon 不净化它读到的文件。该配置只从 User / System / SystemDefau
 侧栏采用自动布局，不需要配置 `layout`。宿主不传 `sidebar`、传 `true` 或空配置时，
 默认仅首页：展示 300px 二级栏，不展示一级图标栏。显式配置其他可用导航项后，
 自动展示首页及这些一级入口。`sidebar: false` 或 `enabled: false` 仍完全隐藏侧栏。
+底部设置、主题、状态等工具不触发一级栏；仅首页时直接显示在会话列表底部，
+右下角保留展开／收起，也不会出现「更多」。
+单栏底部工具在窄宽度下自动换行，不覆盖会话列表；收起栏高度不足时工具可滚动，
+展开按钮仍保持可见。
 `primaryNav.items` 默认仅 `['newTask']`，`footer.items` 默认仅 `['collapse']`；
 独立 Web Shell 显式开启现有完整入口。宿主例如配置
 `sidebar={{ primaryNav: { items: ['newTask', 'plugins'] } }}` 即显示首页和插件的一级栏。
 未配置列表不再默认开放所有功能；宿主原有显式列表及 renderer 继续生效。
+
+仅需会话与聊天的宿主可以按需开启底部工具，并复用现有开关隐藏工作区相关控件：
+
+```tsx
+<WebShellWithProviders
+  sidebar={{
+    primaryNav: { items: ['newTask'] },
+    footer: { items: ['settings', 'collapse'] },
+    hideProjectHeader: true,
+    showSessionSourceSwitch: false,
+  }}
+  composerToolbarActions={['approvalMode', 'model']}
+/>
+```
+
+`hideProjectHeader` 隐藏工作区管理标题，输入框工具列表不含 `workspace` 时隐藏
+工作区选择器（包括「无工作区」行）。这两个选项只控制展示，不改变会话工作区，
+也不会隐藏已有工作区的会话分组。需要分组但没有工作区可选时，可按宿主实际能力
+设置这些开关，保留独立 Web Shell 的添加工作区入口。
+没有可用项目工作区时，侧栏不再显示合成的空「工作区」文件夹。
+主题可通过 `footer.items` 中的 `theme` 显示为底部按钮；若宿主希望把主题放入自己的
+设置，省略该项，在宿主设置中更新受控的 `theme` 属性，并通过 `onThemeChange`
+接收 WebShell 内的主题切换。
 
 双栏模式下，桌面端左侧包含常驻图标栏和可收起的首页栏。
 首页保留新建会话、置顶和工作区会话；
