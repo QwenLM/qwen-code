@@ -46013,6 +46013,36 @@ describe('idle suspension', () => {
     );
   });
 
+  it('a resident-reuse load resets the idle clock', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 300 });
+    const clientId = await createIdleSession(server);
+    await sleep(200);
+    // The load route is registered before the session middleware, so a
+    // resident-reuse reply never reaches the middleware's noteActivity;
+    // sendAttachment must reset the clock itself (qqqys R1-2).
+    const reuse = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+      });
+    expect(reuse.status).toBe(200);
+    expect(reuse.body.clientId).toBe(clientId);
+    // Past the original deadline (~300ms from create) but before the
+    // re-armed one (~200 + 300ms): the reuse reset the clock, so the
+    // Session is still resident.
+    await sleep(200);
+    expect((await statusOf(server, clientId)).status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  });
+
   it('a parked input keeps the session resident', async () => {
     const server = await app(true, undefined, true, { idleSuspendMs: 150 });
     const clientId = await createIdleSession(server);

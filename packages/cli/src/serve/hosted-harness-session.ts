@@ -5194,6 +5194,12 @@ export function registerHostedHarnessSessionRoutes(
       res.destroy();
       return;
     }
+    // A completed load is activity even when it reuses a resident: the load
+    // route is registered before the session middleware, so resident-reuse
+    // replies never reach the middleware's noteActivity. Reset the idle
+    // clock here so every attachment response (create, cold load, resident
+    // reuse) earns a full residency period.
+    noteActivity(sessionId);
     res.status(200).json({
       sessionId,
       clientId: session.clientId,
