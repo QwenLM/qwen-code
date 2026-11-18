@@ -65,7 +65,9 @@ vi.mock(
       ...actual,
       createHttpManagedSessionStores: (
         options: Parameters<typeof actual.createHttpManagedSessionStores>[0],
-      ): ReturnType<typeof actual.createHttpManagedSessionStores> => {
+      ): ReturnType<typeof actual.createHttpManagedSessionStores> & {
+        stopWriterRenewal(): void;
+      } => {
         const resources = LocalManagedSessionResourceStore.create({
           runtimeBaseDir: state.root,
           sessionKey: options.sessionKey,
@@ -83,6 +85,7 @@ vi.mock(
           toolResultResources: resources,
           assertWritable: async () => undefined,
           stopLocal: async () => undefined,
+          stopWriterRenewal: () => undefined,
           quiesceOwnership: unexpectedStoreOperation,
           releaseOwnership: unexpectedStoreOperation,
           close: async () => undefined,
