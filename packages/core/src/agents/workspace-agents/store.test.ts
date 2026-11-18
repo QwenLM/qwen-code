@@ -564,6 +564,39 @@ describe('removing and replacing an Agent Host', () => {
     );
   });
 
+  it('leaves both agents bound to the old Host when only one pin is compatible', async () => {
+    const old = await enroll('old', undefined, ['claude', 'qwen']);
+    await updateWorkspaceAgents(PROJECT_ROOT, () =>
+      [BOB, ALICE].map((agent) => ({
+        ...agent,
+        execution: {
+          mode: 'managed-host',
+          hostIds: [old.host.id],
+          provider: agent.id === ALICE.id ? 'claude' : 'qwen',
+        },
+      })),
+    );
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.host.id);
+    const hostsBefore = await fs.readFile(getAgentHostsFilePath(PROJECT_ROOT));
+    const agentsBefore = await fs.readFile(getAgentsFilePath(PROJECT_ROOT));
+
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token,
+        name: 'new',
+        workspaceCwd: '/worker',
+        providers: ['qwen'],
+      }),
+    ).rejects.toThrow(`programs unavailable for agents: ${ALICE.id}.`);
+
+    expect(await fs.readFile(getAgentHostsFilePath(PROJECT_ROOT))).toEqual(
+      hostsBefore,
+    );
+    expect(await fs.readFile(getAgentsFilePath(PROJECT_ROOT))).toEqual(
+      agentsBefore,
+    );
+  });
+
   it.each(['claude', 'Claude Code ACP'])(
     'refuses all incompatible pins before either file changes, then retries with %s',
     async (provider) => {
